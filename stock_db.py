@@ -3,11 +3,11 @@ import pandas as pd
 from datetime import datetime
 import os
 
-DB_PATH = "stock_data.db"
+DEFAULT_DB_PATH = "stock_data.db"
 
-def init_db():
+def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
     """Initialize the database with required tables if they don't exist."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
     # Create tables for daily and hourly data
@@ -40,9 +40,9 @@ def init_db():
     conn.commit()
     conn.close()
 
-def save_stock_data(df, ticker, interval='daily'):
+def save_stock_data(df: pd.DataFrame, ticker: str, interval: str = 'daily', db_path: str = DEFAULT_DB_PATH) -> None:
     """Save stock data to the database."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db_path)
     
     # Reset index to make date/datetime a column
     df = df.reset_index()
@@ -83,9 +83,10 @@ def save_stock_data(df, ticker, interval='daily'):
     df.to_sql(table, conn, if_exists='append', index=False)
     conn.close()
 
-def get_stock_data(ticker, start_date=None, end_date=None, interval='daily'):
+def get_stock_data(ticker: str, start_date: str | None = None, end_date: str | None = None, 
+                   interval: str = 'daily', db_path: str = DEFAULT_DB_PATH) -> pd.DataFrame:
     """Retrieve stock data from the database."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db_path)
     
     table = 'daily_prices' if interval == 'daily' else 'hourly_prices'
     date_col = 'date' if interval == 'daily' else 'datetime'
@@ -106,13 +107,15 @@ def get_stock_data(ticker, start_date=None, end_date=None, interval='daily'):
     conn.close()
     
     if not df.empty:
+        # Convert the date/datetime column to datetime index using ISO8601 format
+        df[date_col] = pd.to_datetime(df[date_col], format='ISO8601')
         df.set_index(date_col, inplace=True)
     
     return df
 
-def get_latest_price(ticker):
+def get_latest_price(ticker: str, db_path: str = DEFAULT_DB_PATH) -> float | None:
     """Get the most recent price for a ticker."""
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
     # Try hourly first, then daily

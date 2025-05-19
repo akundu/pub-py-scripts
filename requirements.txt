@@ -1,1 +1,9 @@
 yfinance
+backtrader
+pandas 
+aiohttp 
+asyncio 
+alpaca-trade-api 
+beautifulsoup4 
+lxml
+pyyaml
