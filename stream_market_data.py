@@ -65,7 +65,7 @@ def setup_and_run_stream(args):
         print("Stream stopped or an error occurred.")
 
 
-def main(): # main is now synchronous
+async def main():
     parser = argparse.ArgumentParser(description="Stream real-time market data for one or more stock/crypto symbols.")
     parser.add_argument("symbols", nargs='+', 
                         help="One or more stock or crypto symbols (e.g., SPY AAPL, or BTC/USD ETH/USD). Crypto symbols should be in XXX/YYY format.")
@@ -78,10 +78,11 @@ def main(): # main is now synchronous
     # Since setup_and_run_stream now calls the blocking wss_client.run(),
     # and wss_client.run() handles its own async loop, we call setup_and_run_stream directly.
     # The handlers (quote_data_handler, trade_data_handler) are async and will be scheduled by the SDK's loop.
-    setup_and_run_stream(args)
+    #setup_and_run_stream(args)
+    await asyncio.to_thread(setup_and_run_stream, args)
 
 if __name__ == "__main__":
     try:
-        main()
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("Stream interrupted by user.") 
