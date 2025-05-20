@@ -24,18 +24,28 @@ class StockDBBase(metaclass=ABCMeta):
 
     @abstractmethod
     def save_stock_data(self, df: pd.DataFrame, ticker: str, interval: str = 'daily') -> None:
-        """Save stock data to the database."""
+        """Save aggregated (daily/hourly) stock data to the database."""
         pass
 
     @abstractmethod
     def get_stock_data(self, ticker: str, start_date: str | None = None, end_date: str | None = None, 
                        interval: str = 'daily') -> pd.DataFrame:
-        """Retrieve stock data from the database."""
+        """Retrieve aggregated (daily/hourly) stock data from the database."""
+        pass
+    
+    @abstractmethod
+    def save_realtime_data(self, df: pd.DataFrame, ticker: str) -> None:
+        """Save realtime (tick) stock data to the database."""
+        pass
+
+    @abstractmethod
+    def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None) -> pd.DataFrame:
+        """Retrieve realtime (tick) stock data from the database."""
         pass
 
     @abstractmethod
     def get_latest_price(self, ticker: str) -> float | None:
-        """Get the most recent price for a ticker."""
+        """Get the most recent price for a ticker from any available data (realtime, hourly, daily)."""
         pass
 
 class StockDBSQLite(StockDBBase):
@@ -66,7 +76,7 @@ class StockDBSQLite(StockDBBase):
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS hourly_prices (
                     ticker TEXT,
-                    datetime DATETIME,
+                    datetime DATETIME, -- Stored as YYYY-MM-DD HH:MM:SS
                     open REAL,
                     high REAL,
                     low REAL,
@@ -75,12 +85,25 @@ class StockDBSQLite(StockDBBase):
                     PRIMARY KEY (ticker, datetime)
                 )
             ''')
+
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS realtime_prices (
+                    ticker TEXT,
+                    timestamp DATETIME, -- Stored as YYYY-MM-DD HH:MM:SS.ffffff
+                    price REAL,
+                    volume INTEGER, -- Trade volume for this tick
+                    PRIMARY KEY (ticker, timestamp)
+                )
+            ''')
             conn.commit()
 
     def save_stock_data(self, df: pd.DataFrame, ticker: str, interval: str = 'daily') -> None:
-        """Save stock data to the SQLite database."""
+        """Save aggregated (daily/hourly) stock data to the SQLite database."""
         with sqlite3.connect(self.db_path) as conn:
             df_copy = df.copy()
+            if df_copy.empty:
+                # print(f"Empty DataFrame provided for {ticker} ({interval}). Skipping DB save.")
+                return
             df_copy.reset_index(inplace=True)
             
             df_copy.columns = [col.lower() for col in df_copy.columns]
@@ -89,25 +112,23 @@ class StockDBSQLite(StockDBBase):
             if interval == 'daily':
                 table = 'daily_prices'
                 date_col = 'date'
-                # Ensure 'date' is the name of the index after reset_index if it was the original index name
-                if 'index' in df_copy.columns and date_col not in df_copy.columns: # Common if index was unnamed
+                if 'index' in df_copy.columns and date_col not in df_copy.columns:
                      df_copy.rename(columns={'index': date_col}, inplace=True)
                 required_cols = ['ticker', 'date', 'open', 'high', 'low', 'close', 'volume']
-                # Filter only for columns that exist in df_copy to avoid KeyErrors
-                df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
             else:  # hourly
                 table = 'hourly_prices'
                 date_col = 'datetime'
                 if 'index' in df_copy.columns and date_col not in df_copy.columns:
                      df_copy.rename(columns={'index': date_col}, inplace=True)
                 required_cols = ['ticker', 'datetime', 'open', 'high', 'low', 'close', 'volume']
-                df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
+            
+            # Filter only for columns that exist in df_copy to avoid KeyErrors
+            df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
 
             if date_col not in df_copy.columns:
                 print(f"Warning: Date column '{date_col}' not found in DataFrame for {ticker} ({interval}). Skipping DB save.")
                 return
 
-            # Convert to datetime objects first for min/max, then to string for SQL
             df_copy[date_col] = pd.to_datetime(df_copy[date_col])
             min_date_val = df_copy[date_col].min()
             max_date_val = df_copy[date_col].max()
@@ -116,12 +137,9 @@ class StockDBSQLite(StockDBBase):
                 print(f"Warning: Min/max date is NaT for {ticker} ({interval}). Skipping DB save for this batch.")
                 return
 
-            if interval == 'daily':
-                min_date_str = min_date_val.strftime('%Y-%m-%d')
-                max_date_str = max_date_val.strftime('%Y-%m-%d')
-            else: # hourly
-                min_date_str = min_date_val.strftime('%Y-%m-%d %H:%M:%S')
-                max_date_str = max_date_val.strftime('%Y-%m-%d %H:%M:%S')
+            date_format_str = '%Y-%m-%d' if interval == 'daily' else '%Y-%m-%d %H:%M:%S'
+            min_date_str = min_date_val.strftime(date_format_str)
+            max_date_str = max_date_val.strftime(date_format_str)
             
             cursor = conn.cursor()
             cursor.execute(f'''
@@ -130,74 +148,133 @@ class StockDBSQLite(StockDBBase):
                 AND {date_col} BETWEEN ? AND ?
             ''', (ticker, min_date_str, max_date_str))
 
-            if interval == 'daily':
-                df_copy[date_col] = df_copy[date_col].dt.strftime('%Y-%m-%d')
-            else: # hourly
-                df_copy[date_col] = df_copy[date_col].dt.strftime('%Y-%m-%d %H:%M:%S')
-            
+            df_copy[date_col] = df_copy[date_col].dt.strftime(date_format_str)
             df_copy.to_sql(table, conn, if_exists='append', index=False)
 
     def get_stock_data(self, ticker: str, start_date: str | None = None, end_date: str | None = None, 
                        interval: str = 'daily') -> pd.DataFrame:
         with sqlite3.connect(self.db_path) as conn:
             table = 'daily_prices' if interval == 'daily' else 'hourly_prices'
-            date_col = 'date' if interval == 'daily' else 'datetime'
+            date_col_name = 'date' if interval == 'daily' else 'datetime' # Name of column in DB
             
             query = f"SELECT * FROM {table} WHERE ticker = ?"
             params: list[str | None] = [ticker]
             
             if start_date:
-                query += f" AND {date_col} >= ?"
+                query += f" AND {date_col_name} >= ?"
                 params.append(start_date)
             if end_date:
-                query += f" AND {date_col} <= ?"
+                query += f" AND {date_col_name} <= ?"
                 params.append(end_date)
             
-            query += f" ORDER BY {date_col}"
+            query += f" ORDER BY {date_col_name}"
             
             df = pd.read_sql_query(query, conn, params=params) # type: ignore
         
         if not df.empty:
-            # Convert the date/datetime column to datetime objects and set as index
-            # The format might not be strictly necessary if ISO 8601 is used by SQLite,
-            # but explicit is often safer.
-            if interval == 'daily':
-                df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
-            else: # hourly
-                df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+            df[date_col_name] = pd.to_datetime(df[date_col_name], errors='coerce')
+            df.set_index(date_col_name, inplace=True)
+            df = df[df.index.notna()]
+        return df
+
+    def save_realtime_data(self, df: pd.DataFrame, ticker: str) -> None:
+        """Save realtime (tick) stock data to the SQLite database."""
+        with sqlite3.connect(self.db_path) as conn:
+            df_copy = df.copy()
+            if df_copy.empty:
+                # print(f"Empty DataFrame provided for realtime data of {ticker}. Skipping DB save.")
+                return
+            df_copy.reset_index(inplace=True)
+            df_copy.columns = [col.lower() for col in df_copy.columns]
+            df_copy['ticker'] = ticker
+
+            # Standardize column names; expecting 'timestamp', 'price', 'volume' from input df index or columns
+            # If index was named, it's now a column. If unnamed, it was 'index'.
+            if 'timestamp' not in df_copy.columns and 'index' in df_copy.columns:
+                df_copy.rename(columns={'index': 'timestamp'}, inplace=True)
             
-            df.set_index(date_col, inplace=True)
-            df = df[df.index.notna()] # Remove rows where index conversion (to NaT) failed
+            required_cols = ['ticker', 'timestamp', 'price', 'volume']
+            df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
+
+            if 'timestamp' not in df_copy.columns or 'price' not in df_copy.columns or 'volume' not in df_copy.columns:
+                print(f"Warning: Missing required columns (timestamp, price, volume) for realtime data of {ticker}. Skipping DB save.")
+                return
+
+            df_copy['timestamp'] = pd.to_datetime(df_copy['timestamp'])
+            min_ts_val = df_copy['timestamp'].min()
+            max_ts_val = df_copy['timestamp'].max()
+
+            if pd.isna(min_ts_val) or pd.isna(max_ts_val):
+                print(f"Warning: Min/max timestamp is NaT for realtime data of {ticker}. Skipping DB save.")
+                return
+            
+            # SQLite DATETIME stores up to milliseconds if string is formatted that way
+            ts_format_str = '%Y-%m-%d %H:%M:%S.%f' 
+            min_ts_str = min_ts_val.strftime(ts_format_str)
+            max_ts_str = max_ts_val.strftime(ts_format_str)
+
+            cursor = conn.cursor()
+            cursor.execute('''
+                DELETE FROM realtime_prices 
+                WHERE ticker = ? 
+                AND timestamp BETWEEN ? AND ?
+            ''', (ticker, min_ts_str, max_ts_str))
+
+            df_copy['timestamp'] = df_copy['timestamp'].dt.strftime(ts_format_str)
+            df_copy.to_sql('realtime_prices', conn, if_exists='append', index=False)
+
+    def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None) -> pd.DataFrame:
+        """Retrieve realtime (tick) stock data from the SQLite database."""
+        with sqlite3.connect(self.db_path) as conn:
+            query = "SELECT * FROM realtime_prices WHERE ticker = ?"
+            params: list[str | None] = [ticker]
+
+            if start_datetime:
+                query += " AND timestamp >= ?"
+                params.append(start_datetime) # Expects 'YYYY-MM-DD HH:MM:SS.ffffff'
+            if end_datetime:
+                query += " AND timestamp <= ?"
+                params.append(end_datetime) # Expects 'YYYY-MM-DD HH:MM:SS.ffffff'
+            
+            query += " ORDER BY timestamp"
+            df = pd.read_sql_query(query, conn, params=params) # type: ignore
         
+        if not df.empty:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+            df.set_index('timestamp', inplace=True)
+            df = df[df.index.notna()]
         return df
 
     def get_latest_price(self, ticker: str) -> float | None:
+        """Get the most recent price for a ticker (realtime -> hourly -> daily)."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            result = None
-            
-            try:
-                cursor.execute('''
-                    SELECT close FROM hourly_prices 
-                    WHERE ticker = ? 
-                    ORDER BY datetime DESC LIMIT 1
-                ''', (ticker,))
-                result = cursor.fetchone()
-            except sqlite3.Error as e:
-                print(f"SQLite error querying hourly_prices for {ticker}: {e}")
+            latest_price = None
 
-            if not result:
+            # 1. Try realtime_prices
+            try:
+                cursor.execute("SELECT price FROM realtime_prices WHERE ticker = ? ORDER BY timestamp DESC LIMIT 1", (ticker,))
+                row = cursor.fetchone()
+                if row: latest_price = row[0]
+            except sqlite3.Error as e: print(f"SQLite error (realtime_prices for {ticker}): {e}")
+
+            # 2. Try hourly_prices if no realtime found
+            if latest_price is None:
                 try:
-                    cursor.execute('''
-                        SELECT close FROM daily_prices 
-                        WHERE ticker = ? 
-                        ORDER BY date DESC LIMIT 1
-                    ''', (ticker,))
-                    result = cursor.fetchone()
-                except sqlite3.Error as e:
-                    print(f"SQLite error querying daily_prices for {ticker}: {e}")
+                    cursor.execute("SELECT close FROM hourly_prices WHERE ticker = ? ORDER BY datetime DESC LIMIT 1", (ticker,))
+                    row = cursor.fetchone()
+                    if row: latest_price = row[0]
+                except sqlite3.Error as e: print(f"SQLite error (hourly_prices for {ticker}): {e}")
+
+            # 3. Try daily_prices if no hourly found
+            if latest_price is None:
+                try:
+                    cursor.execute("SELECT close FROM daily_prices WHERE ticker = ? ORDER BY date DESC LIMIT 1", (ticker,))
+                    row = cursor.fetchone()
+                    if row: latest_price = row[0]
+                except sqlite3.Error as e: print(f"SQLite error (daily_prices for {ticker}): {e}")
             
-        return result[0] if result else None
+        return latest_price
 
 class StockDBDuckDB(StockDBBase):
     """
@@ -234,132 +311,167 @@ class StockDBDuckDB(StockDBBase):
                     PRIMARY KEY (ticker, datetime)
                 )
             ''')
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS realtime_prices (
+                    ticker VARCHAR,
+                    timestamp TIMESTAMP, -- DuckDB TIMESTAMP has microsecond precision
+                    price DOUBLE,
+                    volume BIGINT,
+                    PRIMARY KEY (ticker, timestamp)
+                )
+            ''')
 
     def save_stock_data(self, df: pd.DataFrame, ticker: str, interval: str = 'daily') -> None:
-        """Save stock data to the DuckDB database."""
+        """Save aggregated (daily/hourly) stock data to the DuckDB database."""
         with duckdb.connect(database=self.db_path, read_only=False) as conn:
             df_copy = df.copy()
+            if df_copy.empty:
+                # print(f"Empty DataFrame provided for {ticker} ({interval}). Skipping DB save.")
+                return
             df_copy.reset_index(inplace=True)
-            
             df_copy.columns = [col.lower() for col in df_copy.columns]
             df_copy['ticker'] = ticker
             
-            if interval == 'daily':
-                table = 'daily_prices'
-                date_col = 'date'
-                if 'index' in df_copy.columns and date_col not in df_copy.columns:
-                     df_copy.rename(columns={'index': date_col}, inplace=True)
-                required_cols = ['ticker', 'date', 'open', 'high', 'low', 'close', 'volume']
-                df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
-            else:  # hourly
-                table = 'hourly_prices'
-                date_col = 'datetime'
-                if 'index' in df_copy.columns and date_col not in df_copy.columns:
-                     df_copy.rename(columns={'index': date_col}, inplace=True)
-                required_cols = ['ticker', 'datetime', 'open', 'high', 'low', 'close', 'volume']
-                df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
+            date_col = 'date' if interval == 'daily' else 'datetime'
+            table = 'daily_prices' if interval == 'daily' else 'hourly_prices'
+
+            if 'index' in df_copy.columns and date_col not in df_copy.columns:
+                 df_copy.rename(columns={'index': date_col}, inplace=True)
+            
+            required_cols = ['ticker', date_col, 'open', 'high', 'low', 'close', 'volume']
+            df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
 
             if date_col not in df_copy.columns:
-                print(f"Warning: Date column '{date_col}' not found in DataFrame for {ticker} ({interval}). Skipping DB save.")
+                print(f"Warning: Date column '{date_col}' not found in DataFrame for {ticker} ({interval}). Skipping.")
                 return
 
-            # Ensure date_col is datetime for min/max operations
             df_copy[date_col] = pd.to_datetime(df_copy[date_col])
-
             min_date_val = df_copy[date_col].min()
             max_date_val = df_copy[date_col].max()
 
             if pd.isna(min_date_val) or pd.isna(max_date_val):
-                print(f"Warning: Min/max date is NaT for {ticker} ({interval}). Skipping DB save for this batch.")
+                print(f"Warning: Min/max date is NaT for {ticker} ({interval}). Skipping DB save.")
                 return
             
-            # DuckDB can often handle datetime objects directly in comparisons
-            # No need to convert to string for the DELETE query if types are compatible
-            # For DuckDB, DATE and TIMESTAMP types are used.
-            
-            conn.execute(f'''
-                DELETE FROM {table} 
-                WHERE ticker = ? 
-                AND {date_col} BETWEEN ? AND ?
-            ''', (ticker, min_date_val, max_date_val))
-
-            # DuckDB can directly ingest pandas DataFrame with appropriate types
-            # including datetime64[ns] for TIMESTAMP and DATE columns
-            # No explicit string conversion of date_col needed before insert if it's already datetime
+            conn.execute(f"DELETE FROM {table} WHERE ticker = ? AND {date_col} BETWEEN ? AND ?", 
+                         (ticker, min_date_val, max_date_val))
             try:
-                # Ensure columns in df_copy match table schema if using direct insert from DataFrame object
-                # For hourly, df_copy['datetime'] must be datetime64[ns]
-                # For daily, df_copy['date'] must be datetime64[ns] (DuckDB will handle date part)
                 conn.register('df_to_insert', df_copy)
-                # Explicitly list columns to ensure order and match
-                cols_str = ", ".join(df_copy.columns)
+                cols_str = ", ".join([f'\"{col}\"'.lower() for col in df_copy.columns]) # Ensure quoting for safety
                 conn.execute(f"INSERT INTO {table} ({cols_str}) SELECT {cols_str} FROM df_to_insert")
             except Exception as e:
-                print(f"Error saving to DuckDB for {ticker} ({interval}): {e}")
-                print("DataFrame columns:", df_copy.columns)
-                print("DataFrame dtypes:", df_copy.dtypes)
-
+                print(f"Error saving aggregated to DuckDB for {ticker} ({interval}): {e}")
 
     def get_stock_data(self, ticker: str, start_date: str | None = None, end_date: str | None = None, 
                        interval: str = 'daily') -> pd.DataFrame:
         with duckdb.connect(database=self.db_path, read_only=True) as conn:
             table = 'daily_prices' if interval == 'daily' else 'hourly_prices'
-            date_col = 'date' if interval == 'daily' else 'datetime'
+            date_col_name = 'date' if interval == 'daily' else 'datetime'
             
             query = f"SELECT * FROM {table} WHERE ticker = ?"
             params: list[str | pd.Timestamp | None] = [ticker]
             
-            # Convert string dates to datetime objects for DuckDB query if needed, or pass as strings
-            # DuckDB is good at casting standard date/timestamp strings
             if start_date:
-                query += f" AND {date_col} >= ?"
+                query += f" AND {date_col_name} >= ?"
                 params.append(pd.to_datetime(start_date).strftime('%Y-%m-%d' if interval == 'daily' else '%Y-%m-%d %H:%M:%S'))
             if end_date:
-                query += f" AND {date_col} <= ?"
+                query += f" AND {date_col_name} <= ?"
                 params.append(pd.to_datetime(end_date).strftime('%Y-%m-%d' if interval == 'daily' else '%Y-%m-%d %H:%M:%S'))
             
-            query += f" ORDER BY {date_col}"
-            
+            query += f" ORDER BY {date_col_name}"
             df = conn.execute(query, parameters=params).fetchdf() # type: ignore
         
         if not df.empty:
-            # DuckDB usually returns datetime types correctly for DATE and TIMESTAMP
-            # but ensure it's set as index
-            df[date_col] = pd.to_datetime(df[date_col], errors='coerce') # Ensure it's datetime
-            df.set_index(date_col, inplace=True)
+            df[date_col_name] = pd.to_datetime(df[date_col_name], errors='coerce')
+            df.set_index(date_col_name, inplace=True)
             df = df[df.index.notna()]
-        
+        return df
+
+    def save_realtime_data(self, df: pd.DataFrame, ticker: str) -> None:
+        """Save realtime (tick) stock data to the DuckDB database."""
+        with duckdb.connect(database=self.db_path, read_only=False) as conn:
+            df_copy = df.copy()
+            if df_copy.empty:
+                # print(f"Empty DataFrame for realtime data of {ticker}. Skipping DuckDB save.")
+                return
+            df_copy.reset_index(inplace=True)
+            df_copy.columns = [col.lower() for col in df_copy.columns]
+            df_copy['ticker'] = ticker
+
+            if 'timestamp' not in df_copy.columns and 'index' in df_copy.columns:
+                df_copy.rename(columns={'index': 'timestamp'}, inplace=True)
+            
+            required_cols = ['ticker', 'timestamp', 'price', 'volume']
+            df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
+
+            if 'timestamp' not in df_copy.columns or 'price' not in df_copy.columns or 'volume' not in df_copy.columns:
+                print(f"Warning: Missing required columns for realtime data (DuckDB) of {ticker}. Skipping.")
+                return
+
+            df_copy['timestamp'] = pd.to_datetime(df_copy['timestamp']) # Ensure it's datetime64[ns]
+            min_ts_val = df_copy['timestamp'].min()
+            max_ts_val = df_copy['timestamp'].max()
+
+            if pd.isna(min_ts_val) or pd.isna(max_ts_val):
+                print(f"Warning: Min/max timestamp is NaT for realtime data (DuckDB) of {ticker}. Skipping.")
+                return
+            
+            conn.execute("DELETE FROM realtime_prices WHERE ticker = ? AND timestamp BETWEEN ? AND ?",
+                         (ticker, min_ts_val, max_ts_val))
+            try:
+                conn.register('df_rt_to_insert', df_copy)
+                cols_str = ", ".join([f'\"{col}\"'.lower() for col in df_copy.columns])
+                conn.execute(f"INSERT INTO realtime_prices ({cols_str}) SELECT {cols_str} FROM df_rt_to_insert")
+            except Exception as e:
+                print(f"Error saving realtime data to DuckDB for {ticker}: {e}")
+
+    def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None) -> pd.DataFrame:
+        """Retrieve realtime (tick) stock data from the DuckDB database."""
+        with duckdb.connect(database=self.db_path, read_only=True) as conn:
+            query = "SELECT * FROM realtime_prices WHERE ticker = ?"
+            params: list[str | pd.Timestamp | None] = [ticker]
+
+            if start_datetime:
+                query += " AND timestamp >= ?"
+                params.append(pd.to_datetime(start_datetime)) # DuckDB handles datetime objects
+            if end_datetime:
+                query += " AND timestamp <= ?"
+                params.append(pd.to_datetime(end_datetime))
+            
+            query += " ORDER BY timestamp"
+            df = conn.execute(query, parameters=params).fetchdf() # type: ignore
+
+        if not df.empty:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+            df.set_index('timestamp', inplace=True)
+            df = df[df.index.notna()]
         return df
 
     def get_latest_price(self, ticker: str) -> float | None:
+        """Get the most recent price for a ticker (realtime -> hourly -> daily) from DuckDB."""
         with duckdb.connect(database=self.db_path, read_only=True) as conn:
-            result = None
-            
+            latest_price = None
+            # 1. Try realtime_prices
             try:
-                res_hourly = conn.execute('''
-                    SELECT close FROM hourly_prices 
-                    WHERE ticker = ? 
-                    ORDER BY datetime DESC LIMIT 1
-                ''', (ticker,)).fetchone()
-                if res_hourly:
-                    result = res_hourly[0]
-            except duckdb.Error as e:
-                 print(f"DuckDB error querying hourly_prices for {ticker}: {e}")
+                res_rt = conn.execute("SELECT price FROM realtime_prices WHERE ticker = ? ORDER BY timestamp DESC LIMIT 1", (ticker,)).fetchone()
+                if res_rt: latest_price = res_rt[0]
+            except duckdb.Error as e: print(f"DuckDB error (realtime_prices for {ticker}): {e}")
 
-
-            if result is None: # Check if result is still None, not just if res_hourly was None
+            # 2. Try hourly_prices
+            if latest_price is None:
                 try:
-                    res_daily = conn.execute('''
-                        SELECT close FROM daily_prices 
-                        WHERE ticker = ? 
-                        ORDER BY date DESC LIMIT 1
-                    ''', (ticker,)).fetchone()
-                    if res_daily:
-                        result = res_daily[0]
-                except duckdb.Error as e:
-                    print(f"DuckDB error querying daily_prices for {ticker}: {e}")
+                    res_h = conn.execute("SELECT close FROM hourly_prices WHERE ticker = ? ORDER BY datetime DESC LIMIT 1", (ticker,)).fetchone()
+                    if res_h: latest_price = res_h[0]
+                except duckdb.Error as e: print(f"DuckDB error (hourly_prices for {ticker}): {e}")
 
-        return result if result is not None else None
+            # 3. Try daily_prices
+            if latest_price is None:
+                try:
+                    res_d = conn.execute("SELECT close FROM daily_prices WHERE ticker = ? ORDER BY date DESC LIMIT 1", (ticker,)).fetchone()
+                    if res_d: latest_price = res_d[0]
+                except duckdb.Error as e: print(f"DuckDB error (daily_prices for {ticker}): {e}")
+            
+        return latest_price
 
 
 def get_stock_db(db_type: str, db_path: str | None = None) -> StockDBBase:
@@ -370,7 +482,6 @@ def get_stock_db(db_type: str, db_path: str | None = None) -> StockDBBase:
         db_type: The type of database ('sqlite' or 'duckdb').
         db_path: The path to the database file. 
                  If None, uses default for the chosen db_type.
-                 For DuckDB, can be ":memory:" for an in-memory database.
 
     Returns:
         An instance of StockDBBase.
@@ -378,10 +489,14 @@ def get_stock_db(db_type: str, db_path: str | None = None) -> StockDBBase:
     Raises:
         ValueError: If an unsupported db_type is provided.
     """
+    actual_db_path = db_path
+    if actual_db_path is None:
+        actual_db_path = get_default_db_path("duckdb" if db_type.lower() == "duckdb" else "db")
+    
     if db_type.lower() == "sqlite":
-        return StockDBSQLite(db_path or get_default_db_path("db"))
+        return StockDBSQLite(actual_db_path)
     elif db_type.lower() == "duckdb":
-        return StockDBDuckDB(db_path or get_default_db_path("duckdb"))
+        return StockDBDuckDB(actual_db_path)
     else:
         raise ValueError(f"Unsupported database type: {db_type}. Choose 'sqlite' or 'duckdb'.")
 

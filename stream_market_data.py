@@ -1,88 +1,172 @@
 import argparse
 import asyncio
 import os
-
+import pandas as pd
 from alpaca.data.live import StockDataStream, CryptoDataStream
-
-async def quote_data_handler(data):
-    """Asynchronous handler to process incoming quote data."""
-    print(f"Quote for {data.symbol}: Bid - {data.bid_price}, Ask - {data.ask_price} at {data.timestamp}")
+from stock_db import get_stock_db, StockDBBase, get_default_db_path
+import sys
 
 async def trade_data_handler(data):
     """Asynchronous handler to process incoming trade data."""
     print(f"Trade for {data.symbol}: Price - {data.price}, Size - {data.size} at {data.timestamp}")
 
-def setup_and_run_stream(args):
-    """Sets up and runs the WebSocket stream."""
+def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[str], feed: str, symbol_type: str):
+    """Sets up and runs the WebSocket stream for a given list of symbols and type."""
     api_key = os.getenv("ALPACA_API_KEY")
     secret_key = os.getenv("ALPACA_API_SECRET")
     wss_client = None
 
-    if args.type == "stock" and (not api_key or not secret_key):
-        print("Error: ALPACA_API_KEY and ALPACA_API_SECRET environment variables must be set for stock data.")
-        return
+    if not symbols:
+        raise ValueError("No symbols provided.")
     
-    if args.type == "crypto" and (not api_key or not secret_key):
-        print("Warning: API keys not found. Crypto data can be streamed without keys, but with lower rate limits.")
+    first_symbol = symbols[0]
+    # Infer type: crypto if ends with /USD, otherwise stock.
+    symbol_type = "crypto" if "/" in first_symbol else "stock" # Adjusted to contains '/' for broader crypto pair matching based on common patterns. User specified /USD but '/' is more general. If strict /USD is needed, this can be changed back.
 
-    symbols_str = ", ".join(args.symbols)
-    print(f"Attempting to stream {args.feed} for {args.type} symbols: {symbols_str}")
+
+    print(f"Inferred symbol type as: {symbol_type} (based on '{first_symbol}')")
+
+    # Define quote_data_handler as a closure here
+    async def quote_data_handler_closure(data):
+        """Asynchronous handler to process and save incoming quote data."""
+        print(f"Quote for {data.symbol} ({symbol_type}): Bid - {data.bid_price} (Size: {data.bid_size}), Ask - {data.ask_price} (Size: {data.ask_size}) at {data.timestamp}")
+        if stock_db_instance:
+            try:
+                df_data = {
+                    'timestamp': [pd.to_datetime(data.timestamp)],
+                    'price': [data.bid_price],
+                    'volume': [data.bid_size]
+                }
+                quote_df = pd.DataFrame(df_data).set_index('timestamp')
+                await asyncio.to_thread(stock_db_instance.save_realtime_data, quote_df, data.symbol)
+            except Exception as e:
+                print(f"Error saving quote data for {data.symbol} to DB: {e}")
+
+    # API Key checks based on inferred_symbol_type
+    if symbol_type == "stock":
+        if not api_key or not secret_key:
+            print("Error: ALPACA_API_KEY and ALPACA_API_SECRET environment variables must be set for stock data.")
+            return
+    elif symbol_type == "crypto":
+        if not api_key or not secret_key: # This was a warning for crypto
+            print("Warning: API keys not found. Crypto data can be streamed without keys, but with lower rate limits.")
+
+    symbols_str = ", ".join(symbols)
+    print(f"Attempting to stream {feed} for {symbol_type} symbols: {symbols_str}")
 
     try:
-        if args.type == "stock":
+        if symbol_type == "stock":
             wss_client = StockDataStream(api_key, secret_key)
-            if args.feed == "quotes":
-                print(f"Subscribing to quotes for: {symbols_str}")
-                wss_client.subscribe_quotes(quote_data_handler, *args.symbols)
-            elif args.feed == "trades":
-                print(f"Subscribing to trades for: {symbols_str}")
-                wss_client.subscribe_trades(trade_data_handler, *args.symbols)
-        elif args.type == "crypto":
+            if feed == "quotes":
+                print(f"Subscribing to stock quotes for: {symbols_str}")
+                wss_client.subscribe_quotes(quote_data_handler_closure, *symbols)
+            elif feed == "trades":
+                print(f"Subscribing to stock trades for: {symbols_str}")
+                wss_client.subscribe_trades(trade_data_handler, *symbols)
+        elif symbol_type == "crypto":
             wss_client = CryptoDataStream(api_key, secret_key) if api_key and secret_key else CryptoDataStream()
-            if args.feed == "quotes":
+            if feed == "quotes":
                 print(f"Subscribing to crypto quotes for: {symbols_str}")
-                wss_client.subscribe_quotes(quote_data_handler, *args.symbols)
-            elif args.feed == "trades":
+                wss_client.subscribe_quotes(quote_data_handler_closure, *symbols)
+            elif feed == "trades":
                 print(f"Subscribing to crypto trades for: {symbols_str}")
-                wss_client.subscribe_trades(trade_data_handler, *args.symbols)
+                wss_client.subscribe_trades(trade_data_handler, *symbols)
         else:
-            print(f"Internal error: Unsupported symbol type: {args.type}")
+            # This case should ideally not be reached if inferred_symbol_type is always "stock" or "crypto"
+            print(f"Internal error: Unsupported inferred symbol type: {inferred_symbol_type}")
             return
 
         if wss_client:
-            # The .run() method of DataStream is blocking and manages its own event loop activity.
-            # It should not be awaited from an already running asyncio event loop.
-            # It is called from a synchronous context, or from an async context as if it were synchronous.
-            wss_client.run() # Removed await
+            print(f"Starting WebSocket client for {symbol_type} symbols...", file=sys.stderr)
+            wss_client.run()
         else:
-            print("Error: WebSocket client was not initialized.")
+            print(f"WebSocket client for {symbol_type} was not initialized. This might be due to missing API keys for stock data or an internal error.", file=sys.stderr)
+            if symbol_type == "stock" and (not api_key or not secret_key):
+                pass # Already handled by the check above
+            else:
+                raise RuntimeError("WebSocket client for {symbol_type} was not initialized for an unexpected reason.")
 
+
+    except KeyboardInterrupt:
+        print(f"KeyboardInterrupt caught in {symbol_type} stream. Stopping stream...")
     except Exception as e:
-        print(f"An error occurred during stream operation: {e}")
+        print(f"An error occurred during {symbol_type} stream operation: {e}")
         import traceback
         traceback.print_exc()
     finally:
-        print("Stream stopped or an error occurred.")
-
+        print(f"Stream processing for {symbol_type} ended. Cleaning up WebSocket client...")
+        if wss_client:
+            try:
+                print(f"Attempting to close WebSocket client for {symbol_type}...")
+                wss_client.close()
+                print(f"WebSocket client for {symbol_type} closed.")
+            except Exception as e_close:
+                print(f"Error during WebSocket client close for {symbol_type}: {e_close}")
+        else:
+            print(f"WebSocket client for {symbol_type} was not initialized, no close needed.")
+        print(f"Cleanup complete for {symbol_type} stream.")
 
 async def main():
-    parser = argparse.ArgumentParser(description="Stream real-time market data for one or more stock/crypto symbols.")
-    parser.add_argument("symbols", nargs='+', 
-                        help="One or more stock or crypto symbols (e.g., SPY AAPL, or BTC/USD ETH/USD). Crypto symbols should be in XXX/YYY format.")
-    parser.add_argument("--type", choices=["stock", "crypto"], default="stock", 
-                        help="The type of symbols (stock or crypto). Default is stock. All symbols must be of this type.")
+    parser = argparse.ArgumentParser(description="Stream real-time market data and optionally save it to a database.")
+    parser.add_argument("symbols", nargs='+',
+                        help="One or more stock or crypto symbols (e.g., SPY AAPL, or BTC/USD ETH/USD). Crypto symbols should contain /.")
     parser.add_argument("--feed", choices=["quotes", "trades"], default="quotes",
                         help="The type of data feed to subscribe to (quotes or trades). Default is quotes.")
+    parser.add_argument("--db-type", choices=["sqlite", "duckdb"], default="duckdb",
+                        help="Database type to use for saving realtime data (default: duckdb). Only used if saving.")
+    parser.add_argument("--db-path", type=str, default=None,
+                        help="Path to the database file. If not provided, uses default path for the selected db-type.")
     args = parser.parse_args()
+
+    if not args.symbols:
+        print("No symbols provided. Exiting.")
+        return
+
+    # Initialize DB instance (once)
+    stock_db_instance: StockDBBase | None = None
+    try:
+        actual_db_path = args.db_path
+        if actual_db_path is None:
+            actual_db_path = get_default_db_path(args.db_type)
+        print(f"Initializing database: type='{args.db_type}', path='{actual_db_path}'")
+        stock_db_instance = get_stock_db(db_type=args.db_type, db_path=actual_db_path)
+        print(f"Database '{actual_db_path}' initialized successfully.")
+    except Exception as e:
+        print(f"Error initializing database: {e}. Quote data will not be saved.")
+        # stock_db_instance remains None
+
+    stock_symbols = []
+    crypto_symbols = []
+
+    for symbol in args.symbols:
+        if "/" in symbol:
+            crypto_symbols.append(symbol)
+        else:
+            stock_symbols.append(symbol)
+
+    tasks_to_run = []
+    if stock_symbols:
+        print(f"Preparing to stream stocks: {', '.join(stock_symbols)}")
+        tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, stock_symbols, args.feed, "stock"))
     
-    # Since setup_and_run_stream now calls the blocking wss_client.run(),
-    # and wss_client.run() handles its own async loop, we call setup_and_run_stream directly.
-    # The handlers (quote_data_handler, trade_data_handler) are async and will be scheduled by the SDK's loop.
-    #setup_and_run_stream(args)
-    await asyncio.to_thread(setup_and_run_stream, args)
+    if crypto_symbols:
+        print(f"Preparing to stream cryptos: {', '.join(crypto_symbols)}")
+        tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, crypto_symbols, args.feed, "crypto"))
+
+    if not tasks_to_run:
+        print("No valid stock or crypto symbols to stream based on input. Exiting.")
+        return
+
+    print(f"Starting {len(tasks_to_run)} stream(s) concurrently...")
+    await asyncio.gather(*tasks_to_run)
+    print("All stream tasks have completed.")
 
 if __name__ == "__main__":
     try:
+        print("Starting stream application...", file=sys.stderr)
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Stream interrupted by user.") 
+        print("\nKeyboardInterrupt caught in __main__. Application is shutting down...", file=sys.stderr)
+    finally:
+        print("Application shutdown complete.", file=sys.stderr)
+        sys.exit(0) # Removed to allow natural exit after asyncio.run completes or is interrupted.
