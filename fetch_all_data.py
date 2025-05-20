@@ -1,6 +1,6 @@
 from fetch_lists_data import ALL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
 from fetch_symbol_data import fetch_and_save_data
-from stock_db import StockDB, DEFAULT_DB_PATH
+from stock_db import get_stock_db, StockDBBase, DEFAULT_SQLITE_PATH, DEFAULT_DUCKDB_PATH
 
 import asyncio
 from datetime import datetime, timedelta
@@ -24,14 +24,20 @@ async def main():
                       help='Fetch historical market data for selected symbols. Disabled by default.')
     parser.add_argument('--fetch-online', action='store_true', default=False,
                         help='Force fetch symbol lists from network. Default loads from disk.')
-    parser.add_argument("--db-path", default=DEFAULT_DB_PATH, 
-                        help=f"Path to SQLite DB (default: {DEFAULT_DB_PATH})")
+    parser.add_argument("--db-type", type=str, default='sqlite', choices=['sqlite', 'duckdb'], 
+                        help="Type of database to use (default: sqlite).")
+    parser.add_argument("--db-path", type=str, default=None,
+                        help=f"Path to the database file. If not provided, uses default for selected db-type.")
     
     args = parser.parse_args()
 
-    # Create a single StockDB instance
-    # The constructor handles DB initialization.
-    stock_db_instance = StockDB(db_path=args.db_path)
+    # Determine the actual database path to use
+    actual_db_path = args.db_path
+    if actual_db_path is None:
+        actual_db_path = DEFAULT_DUCKDB_PATH if args.db_type == 'duckdb' else DEFAULT_SQLITE_PATH
+
+    # Create a single StockDBBase instance using the factory
+    stock_db_instance: StockDBBase = get_stock_db(args.db_type, actual_db_path)
 
     # Create base data directories if any action is to be taken
     if args.types or args.fetch_market_data:
