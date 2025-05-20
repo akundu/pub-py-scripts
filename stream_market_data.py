@@ -36,13 +36,11 @@ def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[st
         prices_have_changed = False
         if data.bid_price != last_prices['bid_price'] or data.ask_price != last_prices['ask_price']:
             prices_have_changed = True
-        last_prices['bid_price'] = data.bid_price
-        last_prices['ask_price'] = data.ask_price
 
         if not only_log_updates or prices_have_changed:
             # Proceed to log/save if only_log_updates is False OR if prices have changed
             print(f"Quote for {data.symbol} ({symbol_type}): Bid - {data.bid_price} (Size: {data.bid_size}), Ask - {data.ask_price} (Size: {data.ask_size}) at {data.timestamp}")
-            print(f"for {data.symbol} Prices have changed: {prices_have_changed} {last_prices} current: bid:{data.bid_price} ask:{data.ask_price}", file=sys.stderr)
+            #print(f"for {data.symbol} Prices have changed: {prices_have_changed} {last_prices} current: bid:{data.bid_price} ask:{data.ask_price}", file=sys.stderr)
             if stock_db_instance:
                 try:
                     df_data = {
@@ -54,9 +52,10 @@ def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[st
                     await asyncio.to_thread(stock_db_instance.save_realtime_data, quote_df, data.symbol)
                 except Exception as e:
                     print(f"Error saving quote data for {data.symbol} to DB: {e}")
-        else:
-            # only_log_updates is True AND prices have NOT changed, so skip
-            return
+
+        last_prices['bid_price'] = data.bid_price
+        last_prices['ask_price'] = data.ask_price
+        return
 
     # API Key checks based on inferred_symbol_type
     if symbol_type == "stock":
