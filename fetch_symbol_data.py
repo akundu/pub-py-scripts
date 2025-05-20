@@ -4,7 +4,7 @@ import pandas as pd
 import os
 import asyncio
 import argparse
-from stock_db import StockDB, DEFAULT_DB_PATH # Import DB functions
+from stock_db import get_stock_db, StockDBBase, DEFAULT_SQLITE_PATH, DEFAULT_DUCKDB_PATH # Import DB functions
 import aiohttp # Added for fully async HTTP calls
 
 DEFAULT_DATA_DIR = './data'
@@ -167,7 +167,7 @@ def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: s
     return final_df
 
 # Function to fetch and save data for a single symbol
-async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: StockDB) -> bool:
+async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: StockDBBase) -> bool:
     # API_KEY and API_SECRET are fetched here, as this function makes direct API calls
     API_KEY = os.getenv('ALPACA_API_KEY')
     API_SECRET = os.getenv('ALPACA_API_SECRET')
@@ -222,13 +222,20 @@ async def process_symbol_data(symbol: str,
                               start_date: str | None = None, 
                               end_date: str | None = None, 
                               data_dir: str = DEFAULT_DATA_DIR,
-                              stock_db_instance: StockDB | None = None, # Pass instance or None to create one
+                              stock_db_instance: StockDBBase | None = None, # Pass instance or None to create one
                               force_fetch: bool = False, 
                               query_only: bool = False,
-                              db_path: str = DEFAULT_DB_PATH) -> pd.DataFrame: # Keep db_path for standalone creation
+                              db_type: str = 'sqlite', # Added db_type
+                              db_path: str | None = None) -> pd.DataFrame: # db_path defaults to None
     """Processes symbol data: queries DB, fetches if needed, and returns DataFrame."""
     
-    current_db_instance = stock_db_instance if stock_db_instance else StockDB(db_path)
+    current_db_instance = stock_db_instance
+    if current_db_instance is None:
+        # Determine actual db_path if not provided
+        actual_db_path = db_path
+        if actual_db_path is None:
+            actual_db_path = DEFAULT_DUCKDB_PATH if db_type == 'duckdb' else DEFAULT_SQLITE_PATH
+        current_db_instance = get_stock_db(db_type, actual_db_path)
 
     if start_date is None:
         if timeframe == 'hourly':
@@ -298,9 +305,17 @@ async def main() -> None:
         help=f"Base directory for CSV data storage (default: {DEFAULT_DATA_DIR})."
     )
     parser.add_argument(
+        "--db-type",
+        type=str,
+        default='sqlite',
+        choices=['sqlite', 'duckdb'],
+        help="Type of database to use (default: sqlite)."
+    )
+    parser.add_argument(
         "--db-path",
-        default=DEFAULT_DB_PATH, # Imported from stock_db
-        help=f"Path to the SQLite database file (default: {DEFAULT_DB_PATH})."
+        type=str,
+        default=None,
+        help="Path to the database file. If not provided, uses default for selected db-type."
     )
     parser.add_argument(
         "--timeframe",
@@ -338,34 +353,26 @@ async def main() -> None:
             args.start_date = (datetime.now() - timedelta(days=2*365)).strftime('%Y-%m-%d') 
             print(f"--start-date not specified, defaulting to {args.start_date} for hourly timeframe.")
 
-    # Create a single StockDB instance for the duration of main
-    # The constructor now handles DB initialization (_init_db)
-    stock_db_instance = StockDB(db_path=args.db_path)
+    # Ensure data directories exist
+    os.makedirs(f"{args.data_dir}/daily", exist_ok=True)
+    os.makedirs(f"{args.data_dir}/hourly", exist_ok=True)
 
-    try:
-        if args.start_date:
-            datetime.strptime(args.start_date, '%Y-%m-%d')
-        if args.end_date: 
-            datetime.strptime(args.end_date, '%Y-%m-%d')
-    except ValueError:
-        print("Error: Invalid date format. Please use YYYY-MM-DD.")
-        return
-
-    data_df = await process_symbol_data(
-        symbol=args.symbol,
-        timeframe=args.timeframe,
-        start_date=args.start_date,
-        end_date=args.end_date,
+    # Call process_symbol_data which now handles DB initialization internally if no instance is passed.
+    final_df = await process_symbol_data(
+        symbol=args.symbol, 
+        timeframe=args.timeframe, 
+        start_date=args.start_date, 
+        end_date=args.end_date, 
         data_dir=args.data_dir,
-        stock_db_instance=stock_db_instance, # Pass the instance
-        force_fetch=args.force_fetch,
+        force_fetch=args.force_fetch, 
         query_only=args.query_only,
-        db_path=args.db_path # Still pass db_path in case process_symbol_data needs to create its own if None is passed
+        db_type=args.db_type,      # Pass db_type
+        db_path=args.db_path       # Pass db_path (can be None)
     )
 
-    if not data_df.empty:
+    if not final_df.empty:
         print(f"\n--- {args.symbol} ({args.timeframe.capitalize()}) Data ({args.start_date or 'Earliest'} to {args.end_date}) ---")
-        print(data_df)
+        print(final_df)
         print(f"--- End of Data ---")
     elif not args.query_only: 
         print(f"No data to display for {args.symbol} ({args.timeframe}) with the given parameters after all operations.")

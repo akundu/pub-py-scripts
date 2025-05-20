@@ -4,24 +4,32 @@ from datetime import datetime, timedelta
 import os
 import tempfile
 import sqlite3
-from stock_db import StockDB, DEFAULT_DB_PATH
+import duckdb
+from stock_db import get_stock_db, StockDBBase, DEFAULT_SQLITE_PATH, DEFAULT_DUCKDB_PATH
+
+
+@pytest.fixture(params=["sqlite", "duckdb"])
+def db_type_fixture(request):
+    """Fixture to provide database types (sqlite, duckdb)."""
+    return request.param
 
 
 @pytest.fixture
-def db_path_fixture():
+def db_path_fixture(db_type_fixture):
     """Create a temporary test database file path and clean it up afterwards."""
-    # Use a more robust way to create a temporary file name
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd) # Close the file descriptor, we only need the path
+    suffix = ".db" if db_type_fixture == "sqlite" else ".duckdb"
+    # For DuckDB, ":memory:" could be an option, but using a file path for consistency in testing init_db
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
     yield path
-    os.unlink(path) # Ensure cleanup
+    if os.path.exists(path):
+        os.unlink(path)
 
 
 @pytest.fixture
-def test_db(db_path_fixture: str) -> StockDB:
-    """Create a StockDB instance with a temporary test database."""
-    # The StockDB constructor now handles initialization
-    return StockDB(db_path=db_path_fixture)
+def test_db(db_type_fixture: str, db_path_fixture: str) -> StockDBBase:
+    """Create a StockDB instance (SQLite or DuckDB) with a temporary test database."""
+    return get_stock_db(db_type=db_type_fixture, db_path=db_path_fixture)
 
 
 @pytest.fixture
@@ -56,18 +64,26 @@ def sample_hourly_df() -> pd.DataFrame:
     return df
 
 
-def test_db_initialization(test_db: StockDB):
-    """Test that StockDB initialization creates tables."""
-    # Connect directly to check schema, as _init_db is now part of __init__
-    with sqlite3.connect(test_db.db_path) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='daily_prices'")
-        assert cursor.fetchone() is not None, "daily_prices table should exist."
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='hourly_prices'")
-        assert cursor.fetchone() is not None, "hourly_prices table should exist."
+def test_db_initialization(test_db: StockDBBase, db_type_fixture: str):
+    """Test that StockDB initialization creates tables for both SQLite and DuckDB."""
+    if db_type_fixture == "sqlite":
+        with sqlite3.connect(test_db.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='daily_prices'")
+            assert cursor.fetchone() is not None, "daily_prices table should exist for SQLite."
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='hourly_prices'")
+            assert cursor.fetchone() is not None, "hourly_prices table should exist for SQLite."
+    elif db_type_fixture == "duckdb":
+        with duckdb.connect(database=test_db.db_path, read_only=True) as conn:
+            daily_tables = conn.execute("SELECT table_name FROM information_schema.tables WHERE table_name = 'daily_prices'").fetchall()
+            assert len(daily_tables) > 0, "daily_prices table should exist for DuckDB."
+            hourly_tables = conn.execute("SELECT table_name FROM information_schema.tables WHERE table_name = 'hourly_prices'").fetchall()
+            assert len(hourly_tables) > 0, "hourly_prices table should exist for DuckDB."
+    else:
+        pytest.fail(f"Unsupported db_type_fixture: {db_type_fixture}")
 
 
-def test_save_and_get_daily_data(test_db: StockDB, sample_daily_df: pd.DataFrame):
+def test_save_and_get_daily_data(test_db: StockDBBase, sample_daily_df: pd.DataFrame):
     ticker = "TEST_DAILY"
     test_db.save_stock_data(sample_daily_df, ticker, interval="daily")
     retrieved_data = test_db.get_stock_data(ticker, interval="daily")
@@ -76,7 +92,7 @@ def test_save_and_get_daily_data(test_db: StockDB, sample_daily_df: pd.DataFrame
     pd.testing.assert_frame_equal(retrieved_data, sample_daily_df, check_dtype=False)
 
 
-def test_save_and_get_hourly_data(test_db: StockDB, sample_hourly_df: pd.DataFrame):
+def test_save_and_get_hourly_data(test_db: StockDBBase, sample_hourly_df: pd.DataFrame):
     ticker = "TEST_HOURLY"
     test_db.save_stock_data(sample_hourly_df, ticker, interval="hourly")
     retrieved_data = test_db.get_stock_data(ticker, interval="hourly")
@@ -84,12 +100,12 @@ def test_save_and_get_hourly_data(test_db: StockDB, sample_hourly_df: pd.DataFra
     pd.testing.assert_frame_equal(retrieved_data, sample_hourly_df, check_dtype=False)
 
 
-def test_get_data_non_existent_ticker(test_db: StockDB):
+def test_get_data_non_existent_ticker(test_db: StockDBBase):
     retrieved_data = test_db.get_stock_data("NONEXISTENT", interval="daily")
     assert retrieved_data.empty
 
 
-def test_save_empty_dataframe(test_db: StockDB):
+def test_save_empty_dataframe(test_db: StockDBBase):
     ticker = "TEST_EMPTY_SAVE"
     # Create an empty DataFrame with expected columns to avoid issues in save_stock_data internal logic
     empty_df = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
@@ -105,7 +121,7 @@ def test_save_empty_dataframe(test_db: StockDB):
     assert retrieved_data.empty, "Database should be empty for this ticker after saving empty DataFrame."
 
 
-def test_date_filtering_all_types(test_db: StockDB, sample_daily_df: pd.DataFrame):
+def test_date_filtering_all_types(test_db: StockDBBase, sample_daily_df: pd.DataFrame):
     ticker = "TEST_FILTER"
     test_db.save_stock_data(sample_daily_df, ticker, interval="daily")
 
@@ -122,7 +138,7 @@ def test_date_filtering_all_types(test_db: StockDB, sample_daily_df: pd.DataFram
     pd.testing.assert_frame_equal(retrieved_both, expected_both_df, check_dtype=False)
 
 
-def test_get_latest_price_scenarios(test_db: StockDB, sample_daily_df: pd.DataFrame, sample_hourly_df: pd.DataFrame):
+def test_get_latest_price_scenarios(test_db: StockDBBase, sample_daily_df: pd.DataFrame, sample_hourly_df: pd.DataFrame):
     ticker_hourly = "LATEST_H"
     ticker_daily_only = "LATEST_D"
     ticker_none = "LATEST_NONE"
@@ -140,7 +156,7 @@ def test_get_latest_price_scenarios(test_db: StockDB, sample_daily_df: pd.DataFr
     assert latest_price_n is None
 
 
-def test_data_overwrite_behavior(test_db: StockDB, sample_daily_df: pd.DataFrame):
+def test_data_overwrite_behavior(test_db: StockDBBase, sample_daily_df: pd.DataFrame):
     ticker = "OVERWRITE_TEST"
     original_save_df = sample_daily_df.copy()
     test_db.save_stock_data(original_save_df, ticker, interval="daily")
