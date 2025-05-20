@@ -8,10 +8,86 @@ from stock_db import get_stock_db, StockDBBase, get_default_db_path
 import sys
 import traceback
 from pathlib import Path
+import threading
 
 # Global variable to hold the DB client session, to be closed on exit
 # This is a simple way; for more complex apps, pass it around or use a context manager.
 _db_client_instance_for_cleanup: StockDBBase | None = None
+
+# --- Static Display Manager ---
+class StaticDisplayManager:
+    def __init__(self, all_symbols: list[str], output_handle=sys.stdout):
+        self.lock = threading.Lock() # Ensures atomic updates to the display
+        self.symbols = sorted(list(set(all_symbols))) # Unique, sorted list for consistent ordering
+        self.symbol_to_row_offset: dict[str, int] = {symbol: i for i, symbol in enumerate(self.symbols)}
+        self.num_display_lines = len(self.symbols)
+        self.display_prepared = False
+        self.output_handle = output_handle
+        # Define counts for header and footer lines for cursor math
+        self.header_lines = 1 
+        self.footer_lines = 1
+
+    def _print(self, *args, **kwargs):
+        # Helper to ensure all prints from this manager use the correct output and flush immediately
+        print(*args, **kwargs, file=self.output_handle, flush=True)
+
+    def prepare_display(self):
+        with self.lock:
+            if self.display_prepared or self.num_display_lines == 0:
+                return
+
+            self._print("--- Real-time Market Updates (Static) ---")
+            for symbol in self.symbols:
+                self._print(f"{symbol:<15}: Waiting for data...") # Initial placeholder line for each symbol
+            self._print("-" * 40) # Footer line for the static block
+            
+            # Move cursor up to position it at the start of the first symbol's line.
+            # This is (number of symbol lines + footer lines) up from the current position.
+            if self.num_display_lines > 0:
+                self._print(f"\x1b[{self.num_display_lines + self.footer_lines}A", end="")
+            self.display_prepared = True
+
+    def update_symbol(self, symbol: str, data_str: str):
+        with self.lock:
+            if not self.display_prepared or self.num_display_lines == 0:
+                return
+
+            row_offset = self.symbol_to_row_offset.get(symbol)
+            if row_offset is None:
+                return # Symbol not managed by this display
+
+            # Assume cursor is at the start of the first symbol's line (our reference point)
+            # 1. Move cursor down to the target symbol's line if necessary
+            if row_offset > 0:
+                self._print(f"\x1b[{row_offset}B", end="") 
+
+            # 2. Go to beginning of current line, clear it, and print new data
+            self._print("\r\x1b[2K", end="") # Carriage return, then erase entire line
+            
+            max_line_len = 100 # Prevent overly long lines from breaking display
+            full_line = f"{symbol:<15}: {data_str}"
+            self._print(full_line[:max_line_len], end="") # CRITICAL: end="" to stay on the same line
+
+            # 3. Move cursor back up to the start of the first symbol's line (reference point)
+            if row_offset > 0:
+                self._print(f"\x1b[{row_offset}A", end="")
+            
+            self._print("\r", end="") # Ensure cursor is at the beginning of the reference line
+
+    def cleanup_display(self):
+        with self.lock:
+            if not self.display_prepared or self.num_display_lines == 0:
+                return
+            
+            # Assume cursor is at the start of the first symbol's line
+            # Move cursor down past all managed symbol lines and the footer line
+            self._print(f"\x1b[{self.num_display_lines + self.footer_lines}B", end="")
+            # Clear that line and print a final message below the block
+            self._print("\r\x1b[2K" + "-" * 40 + "\nStatic display ended.", end="")
+            self._print() # Ensure a final newline so subsequent terminal prompt is clean
+            self.display_prepared = False
+
+# --- End Static Display Manager ---
 
 # --- CSV Saving Logic ---
 def _save_df_to_csv_sync(df: pd.DataFrame, file_path: Path):
@@ -45,9 +121,15 @@ async def save_df_to_daily_csv(df: pd.DataFrame, symbol: str, feed_type: str, cs
 
 # --- End CSV Saving Logic ---
 
-async def trade_data_handler(data, stock_db_instance: StockDBBase | None, symbol_type: str, only_log_updates: bool, csv_data_dir: str | None):
+async def trade_data_handler(data, stock_db_instance: StockDBBase | None, symbol_type: str, only_log_updates: bool, csv_data_dir: str | None, display_manager: StaticDisplayManager | None):
     """Asynchronous handler to process and optionally save incoming trade data."""
-    print(f"Trade for {data.symbol} ({symbol_type}): Price - {data.price}, Size - {data.size} at {data.timestamp}")
+    time_str = pd.to_datetime(data.timestamp, utc=True).strftime('%H:%M:%S.%f')[:-3]
+    if display_manager:
+        data_str = f"Trade  : Price: {data.price:<8.2f} (Sz: {data.size:<5}) @ {time_str}"
+        display_manager.update_symbol(data.symbol, data_str)
+    else:
+        # Default to printing to stdout if static display is not active
+        print(f"Trade for {data.symbol} ({symbol_type}): Price - {data.price}, Size - {data.size} at {data.timestamp}")
     
     df_data = {
         'timestamp': [pd.to_datetime(data.timestamp, utc=True)],
@@ -68,7 +150,7 @@ async def trade_data_handler(data, stock_db_instance: StockDBBase | None, symbol
 # Closure for quote data handler to manage last_prices
 _last_quote_prices = {} # Dictionary to store last prices per symbol {symbol: {bid_price: X, ask_price: Y}}
 
-async def quote_data_handler(data, stock_db_instance: StockDBBase | None, symbol_type: str, only_log_updates: bool, csv_data_dir: str | None):
+async def quote_data_handler(data, stock_db_instance: StockDBBase | None, symbol_type: str, only_log_updates: bool, csv_data_dir: str | None, display_manager: StaticDisplayManager | None):
     """Asynchronous handler to process and optionally save incoming quote data."""
     global _last_quote_prices
     symbol = data.symbol
@@ -85,7 +167,13 @@ async def quote_data_handler(data, stock_db_instance: StockDBBase | None, symbol
         prices_have_changed = True
 
     if not only_log_updates or prices_have_changed:
-        print(f"Quote for {symbol} ({symbol_type}): Bid - {data.bid_price} (Size: {data.bid_size}), Ask - {data.ask_price} (Size: {data.ask_size}) at {data.timestamp}")
+        time_str = pd.to_datetime(data.timestamp, utc=True).strftime('%H:%M:%S.%f')[:-3]
+        if display_manager:
+            data_str = f"Quote  : Bid: {data.bid_price:<8.2f} (Sz: {data.bid_size:<5}) Ask: {data.ask_price:<8.2f} (Sz: {data.ask_size:<5}) @ {time_str}"
+            display_manager.update_symbol(symbol, data_str)
+        else:
+            # Default to printing to stdout if static display is not active
+            print(f"Quote for {symbol} ({symbol_type}): Bid - {data.bid_price} (Size: {data.bid_size}), Ask - {data.ask_price} (Size: {data.ask_size}) at {data.timestamp}")
         
         df_data = {
             'timestamp': [pd.to_datetime(data.timestamp, utc=True)],
@@ -107,7 +195,7 @@ async def quote_data_handler(data, stock_db_instance: StockDBBase | None, symbol
     
     _last_quote_prices[symbol] = current_prices
 
-def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[str], feed: str, inferred_symbol_type: str, only_log_updates: bool, csv_data_dir: str | None):
+def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[str], feed: str, inferred_symbol_type: str, only_log_updates: bool, csv_data_dir: str | None, display_manager: StaticDisplayManager | None):
     """Sets up and runs the WebSocket stream for a given list of symbols and type."""
     api_key = os.getenv("ALPACA_API_KEY")
     secret_key = os.getenv("ALPACA_API_SECRET")
@@ -133,10 +221,10 @@ def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[st
 
     # Define handlers within the scope where stock_db_instance etc. are available
     async def internal_quote_handler(data):
-        await quote_data_handler(data, stock_db_instance, inferred_symbol_type, only_log_updates, csv_data_dir)
+        await quote_data_handler(data, stock_db_instance, inferred_symbol_type, only_log_updates, csv_data_dir, display_manager)
 
     async def internal_trade_handler(data):
-        await trade_data_handler(data, stock_db_instance, inferred_symbol_type, only_log_updates, csv_data_dir)
+        await trade_data_handler(data, stock_db_instance, inferred_symbol_type, only_log_updates, csv_data_dir, display_manager)
 
     try:
         if inferred_symbol_type == "stock":
@@ -168,12 +256,17 @@ def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[st
             print(f"WebSocket client for {inferred_symbol_type} was not initialized. This might be due to missing API keys for stock data or an internal error.", file=sys.stderr)
 
     except KeyboardInterrupt:
-        print(f"KeyboardInterrupt caught in {inferred_symbol_type} stream for {symbols_str}. Stopping stream...", file=sys.stderr)
+        # Do not print here if static display is active, as it will mess it up.
+        # The main finally block will handle cleanup_display.
+        if not display_manager:
+            print(f"KeyboardInterrupt caught in {inferred_symbol_type} stream for {symbols_str}. Stopping stream...", file=sys.stderr)
     except Exception as e:
         print(f"An error occurred during {inferred_symbol_type} stream operation for {symbols_str}: {e}", file=sys.stderr)
         traceback.print_exc()
     finally:
-        print(f"Stream processing for {inferred_symbol_type} symbols ({symbols_str}) ended. Cleaning up WebSocket client...", file=sys.stderr)
+        # Avoid printing during cleanup if static display is active and might print its own messages.
+        if not display_manager:
+            print(f"Stream processing for {inferred_symbol_type} symbols ({symbols_str}) ended. Cleaning up WebSocket client...", file=sys.stderr)
         if wss_client:
             try:
                 # print(f"Attempting to close WebSocket client for {inferred_symbol_type} symbols: {symbols_str}...", file=sys.stderr)
@@ -183,7 +276,8 @@ def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[st
                 print(f"Error during WebSocket client close for {inferred_symbol_type} ({symbols_str}): {e_close}", file=sys.stderr)
         # else:
             # print(f"WebSocket client for {inferred_symbol_type} ({symbols_str}) was not initialized, no close needed.", file=sys.stderr)
-        print(f"Cleanup complete for {inferred_symbol_type} stream ({symbols_str}).", file=sys.stderr)
+        if not display_manager:
+            print(f"Cleanup complete for {inferred_symbol_type} stream ({symbols_str}).", file=sys.stderr)
 
 async def main():
     global _db_client_instance_for_cleanup
@@ -216,106 +310,150 @@ async def main():
     csv_group.add_argument("--csv-data-dir", type=str, default=None,
                         help="Base directory to save market data as CSV files. If provided, data is saved to CSV_DATA_DIR/SYMBOL/SYMBOL_YYYY-MM-DD_feedtype.csv.")
     
+    display_group = parser.add_argument_group(title="Display Options")
+    # Note: --only-log-updates and --log-all-data are actually setting the same dest.
+    # This is typical for creating a pair of opposing boolean flags.
+    display_group.add_argument('--static-display', action='store_true',
+                        help="Enable static, cursor-based display for real-time updates on stdout. Other logs go to stderr.")
+    parser.set_defaults(only_log_updates=True)
+
     args = parser.parse_args()
 
     if not args.symbols:
         print("No symbols provided. Exiting.", file=sys.stderr)
         return
 
-    stock_db_instance: StockDBBase | None = None
-    db_type_to_use: str
-    db_config_to_use: str | None = None
-
-    if args.remote_db_server:
-        if args.db_path or (args.db_type and args.db_type != "duckdb"): # duckdb is default, check if user tried to specify sqlite for remote
-             print("Warning: --db-path and --db-type are ignored when --remote-db-server is used.", file=sys.stderr)
-        db_type_to_use = "remote"
-        db_config_to_use = args.remote_db_server
-        print(f"Configuring to use remote database server at: {db_config_to_use}", file=sys.stderr)
-    elif args.db_path:
-        db_type_to_use = args.db_type
-        db_config_to_use = args.db_path
-        print(f"Configuring to use local database: type='{db_type_to_use}', path='{db_config_to_use}'")
-    else:
-        # Default local DB if no remote and no specific db-path provided
-        # Use args.db_type (defaults to duckdb) and its default path
-        db_type_to_use = args.db_type 
-        db_config_to_use = get_default_db_path(db_type_to_use)
-        print(f"No explicit DB target. Defaulting to local database: type='{db_type_to_use}', path='{db_config_to_use}'")
-        # One could choose to not initialize DB at all if no flags are set, by setting db_config_to_use = None here
-        # For now, we default to a local duckdb
-
-    if db_config_to_use: # Proceed with DB initialization only if a config is set
-        try:
-            print(f"Initializing database connection: type='{db_type_to_use}', config='{db_config_to_use}'", file=sys.stderr)
-            stock_db_instance = get_stock_db(db_type=db_type_to_use, db_config=db_config_to_use)
-            if db_type_to_use == "remote":
-                _db_client_instance_for_cleanup = stock_db_instance # Store for cleanup
-            print(f"Database connection '{db_config_to_use}' ({db_type_to_use}) initialized successfully.", file=sys.stderr)
-        except Exception as e:
-            print(f"Error initializing database (type: {db_type_to_use}, config: {db_config_to_use}): {e}. Data will not be saved.", file=sys.stderr)
-            traceback.print_exc()
-            stock_db_instance = None # Ensure it's None if init fails
-    else:
-        print("No database configured. Market data will be printed to console but not saved.", file=sys.stderr)
-
-    if args.csv_data_dir:
-        print(f"CSV data will be saved in: {Path(args.csv_data_dir).resolve()}", file=sys.stderr)
-        # Create the base directory if it doesn't exist
-        try:
-            Path(args.csv_data_dir).mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            print(f"Error creating base CSV directory {args.csv_data_dir}: {e}. CSV saving might fail.", file=sys.stderr)
-
-    stock_symbols = []
-    crypto_symbols = []
-
-    for symbol_arg in args.symbols:
-        # Infer type: crypto if contains '/', otherwise stock.
-        if "/" in symbol_arg:
-            crypto_symbols.append(symbol_arg)
+    display_manager: StaticDisplayManager | None = None
+    if args.static_display:
+        all_symbols_for_display = sorted(list(set(args.symbols)))
+        if not all_symbols_for_display:
+            print("Static display enabled, but no symbols to display.", file=sys.stderr)
         else:
-            stock_symbols.append(symbol_arg)
-
-    tasks_to_run = []
-    if stock_symbols:
-        print(f"Preparing to stream stocks: { ', '.join(stock_symbols) }", file=sys.stderr)
-        # setup_and_run_stream is blocking, so it needs to run in a thread
-        tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, stock_symbols, args.feed, "stock", args.only_log_updates, args.csv_data_dir))
-    
-    if crypto_symbols:
-        print(f"Preparing to stream cryptos: { ', '.join(crypto_symbols) }", file=sys.stderr)
-        tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, crypto_symbols, args.feed, "crypto", args.only_log_updates, args.csv_data_dir))
-
-    if not tasks_to_run:
-        print("No valid stock or crypto symbols to stream based on input. Exiting.", file=sys.stderr)
-        if _db_client_instance_for_cleanup and hasattr(_db_client_instance_for_cleanup, 'close_session'):
-            await _db_client_instance_for_cleanup.close_session() # type: ignore
-        return
-
-    print(f"Starting {len(tasks_to_run)} stream(s) concurrently...", file=sys.stderr)
+            display_manager = StaticDisplayManager(all_symbols_for_display, sys.stdout)
+            # display_manager.prepare_display() # Will be called within the main try block
+            
+    main_task_completed_normally = False
     try:
-        await asyncio.gather(*tasks_to_run)
+        if display_manager:
+            display_manager.prepare_display()
+
+        stock_db_instance: StockDBBase | None = None
+        db_type_to_use: str
+        db_config_to_use: str | None = None
+
+        if args.remote_db_server:
+            if args.db_path or (args.db_type and args.db_type != "duckdb"): # duckdb is default, check if user tried to specify sqlite for remote
+             print("Warning: --db-path and --db-type are ignored when --remote-db-server is used.", file=sys.stderr)
+            db_type_to_use = "remote"
+            db_config_to_use = args.remote_db_server
+            print(f"Configuring to use remote database server at: {db_config_to_use}", file=sys.stderr)
+        elif args.db_path:
+            db_type_to_use = args.db_type
+            db_config_to_use = args.db_path
+            print(f"Configuring to use local database: type='{db_type_to_use}', path='{db_config_to_use}'")
+        else:
+            # Default local DB if no remote and no specific db-path provided
+            # Use args.db_type (defaults to duckdb) and its default path
+            db_type_to_use = args.db_type 
+            db_config_to_use = get_default_db_path(db_type_to_use)
+            print(f"No explicit DB target. Defaulting to local database: type='{db_type_to_use}', path='{db_config_to_use}'")
+            # One could choose to not initialize DB at all if no flags are set, by setting db_config_to_use = None here
+            # For now, we default to a local duckdb
+
+        if db_config_to_use: # Proceed with DB initialization only if a config is set
+            try:
+                print(f"Initializing database connection: type='{db_type_to_use}', config='{db_config_to_use}'", file=sys.stderr)
+                stock_db_instance = get_stock_db(db_type=db_type_to_use, db_config=db_config_to_use)
+                if db_type_to_use == "remote":
+                    _db_client_instance_for_cleanup = stock_db_instance # Store for cleanup
+                print(f"Database connection '{db_config_to_use}' ({db_type_to_use}) initialized successfully.", file=sys.stderr)
+            except Exception as e:
+                print(f"Error initializing database (type: {db_type_to_use}, config: {db_config_to_use}): {e}. Data will not be saved.", file=sys.stderr)
+                traceback.print_exc()
+                stock_db_instance = None # Ensure it's None if init fails
+        else:
+            print("No database configured. Market data will be printed to console but not saved.", file=sys.stderr)
+
+        if args.csv_data_dir:
+            print(f"CSV data will be saved in: {Path(args.csv_data_dir).resolve()}", file=sys.stderr)
+            # Create the base directory if it doesn't exist
+            try:
+                Path(args.csv_data_dir).mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                print(f"Error creating base CSV directory {args.csv_data_dir}: {e}. CSV saving might fail.", file=sys.stderr)
+
+        stock_symbols = []
+        crypto_symbols = []
+
+        for symbol_arg in args.symbols:
+            # Infer type: crypto if contains '/', otherwise stock.
+            if "/" in symbol_arg:
+                crypto_symbols.append(symbol_arg)
+            else:
+                stock_symbols.append(symbol_arg)
+
+        tasks_to_run = []
+        if stock_symbols:
+            print(f"Preparing to stream stocks: { ', '.join(stock_symbols) }", file=sys.stderr)
+            # setup_and_run_stream is blocking, so it needs to run in a thread
+            tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, stock_symbols, args.feed, "stock", args.only_log_updates, args.csv_data_dir, display_manager))
+        
+        if crypto_symbols:
+            print(f"Preparing to stream cryptos: { ', '.join(crypto_symbols) }", file=sys.stderr)
+            tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, crypto_symbols, args.feed, "crypto", args.only_log_updates, args.csv_data_dir, display_manager))
+
+        if not tasks_to_run:
+            print("No valid stock or crypto symbols to stream based on input. Exiting.", file=sys.stderr)
+            if _db_client_instance_for_cleanup and hasattr(_db_client_instance_for_cleanup, 'close_session'):
+                await _db_client_instance_for_cleanup.close_session() # type: ignore
+            return
+
+        print(f"Starting {len(tasks_to_run)} stream(s) concurrently...", file=sys.stderr)
+        try:
+            await asyncio.gather(*tasks_to_run)
+            main_task_completed_normally = True # Mark that gather completed
+        except Exception as e:
+            print(f"Error during asyncio.gather for streams: {e}", file=sys.stderr)
+            traceback.print_exc()
+        finally:
+            print("All stream tasks have completed or an error occurred.", file=sys.stderr)
+            if _db_client_instance_for_cleanup and hasattr(_db_client_instance_for_cleanup, 'close_session'):
+                print("Closing remote DB client session...", file=sys.stderr)
+                await _db_client_instance_for_cleanup.close_session() # type: ignore
+                print("Remote DB client session closed.", file=sys.stderr)
+
+    except KeyboardInterrupt: # Handle KeyboardInterrupt for the main async task
+        print("\nKeyboardInterrupt detected in main task. Initiating shutdown...", file=sys.stderr)
+        main_task_completed_normally = False # Or consider it a form of completion for cleanup
     except Exception as e:
-        print(f"Error during asyncio.gather for streams: {e}", file=sys.stderr)
+        print(f"An unhandled error occurred in main execution: {e}", file=sys.stderr)
         traceback.print_exc()
+        main_task_completed_normally = False
     finally:
-        print("All stream tasks have completed or an error occurred.", file=sys.stderr)
+        if display_manager:
+            display_manager.cleanup_display() # Ensures display is cleaned up
+        
+        if main_task_completed_normally:
+            print("All stream tasks have completed.", file=sys.stderr)
+        else:
+            print("Stream tasks exited due to error or interruption.", file=sys.stderr)
+
         if _db_client_instance_for_cleanup and hasattr(_db_client_instance_for_cleanup, 'close_session'):
             print("Closing remote DB client session...", file=sys.stderr)
             await _db_client_instance_for_cleanup.close_session() # type: ignore
             print("Remote DB client session closed.", file=sys.stderr)
+        print("Main application shutdown sequence finished.", file=sys.stderr)
 
 if __name__ == "__main__":
     try:
         print("Starting market data streaming application...", file=sys.stderr)
         asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nKeyboardInterrupt caught in __main__. Application is shutting down...", file=sys.stderr)
+    except KeyboardInterrupt: # This will catch Ctrl+C if it happens before/during asyncio.run() or if main() re-raises it.
+        print("\nApplication terminated by user (KeyboardInterrupt in __main__).", file=sys.stderr)
     except Exception as e:
-        print(f"Unhandled exception in main asyncio.run: {e}", file=sys.stderr)
+        print(f"Unhandled top-level exception: {e}", file=sys.stderr)
         traceback.print_exc()
     finally:
-        # Any final cleanup if needed, though client session should be handled in main()
-        print("Application shutdown sequence complete.", file=sys.stderr)
-        sys.exit(0)
+        # sys.exit(0) is not typically needed here as the script will exit naturally.
+        # If main() has sys.exit, this part might not be reached on normal exit.
+        print("Application has exited.", file=sys.stderr)
