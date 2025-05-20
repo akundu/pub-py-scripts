@@ -10,7 +10,7 @@ async def trade_data_handler(data):
     """Asynchronous handler to process incoming trade data."""
     print(f"Trade for {data.symbol}: Price - {data.price}, Size - {data.size} at {data.timestamp}")
 
-def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[str], feed: str, symbol_type: str):
+def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[str], feed: str, symbol_type: str, only_log_updates: bool):
     """Sets up and runs the WebSocket stream for a given list of symbols and type."""
     api_key = os.getenv("ALPACA_API_KEY")
     secret_key = os.getenv("ALPACA_API_SECRET")
@@ -26,21 +26,37 @@ def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[st
 
     print(f"Inferred symbol type as: {symbol_type} (based on '{first_symbol}')")
 
+    last_prices = {'bid_price': None, 'ask_price': None}
     # Define quote_data_handler as a closure here
     async def quote_data_handler_closure(data):
         """Asynchronous handler to process and save incoming quote data."""
-        print(f"Quote for {data.symbol} ({symbol_type}): Bid - {data.bid_price} (Size: {data.bid_size}), Ask - {data.ask_price} (Size: {data.ask_size}) at {data.timestamp}")
-        if stock_db_instance:
-            try:
-                df_data = {
-                    'timestamp': [pd.to_datetime(data.timestamp)],
-                    'price': [data.bid_price],
-                    'volume': [data.bid_size]
-                }
-                quote_df = pd.DataFrame(df_data).set_index('timestamp')
-                await asyncio.to_thread(stock_db_instance.save_realtime_data, quote_df, data.symbol)
-            except Exception as e:
-                print(f"Error saving quote data for {data.symbol} to DB: {e}")
+        #print(f"Quote for {data.symbol} ({symbol_type}): Bid - {data.bid_price} (Size: {data.bid_size}), Ask - {data.ask_price} (Size: {data.ask_size}) at {data.timestamp}", file=sys.stderr)
+
+        # Store last bid/ask prices in a closure variable to track changes
+        prices_have_changed = False
+        if data.bid_price != last_prices['bid_price'] or data.ask_price != last_prices['ask_price']:
+            prices_have_changed = True
+        last_prices['bid_price'] = data.bid_price
+        last_prices['ask_price'] = data.ask_price
+
+        if not only_log_updates or prices_have_changed:
+            # Proceed to log/save if only_log_updates is False OR if prices have changed
+            print(f"Quote for {data.symbol} ({symbol_type}): Bid - {data.bid_price} (Size: {data.bid_size}), Ask - {data.ask_price} (Size: {data.ask_size}) at {data.timestamp}")
+            print(f"for {data.symbol} Prices have changed: {prices_have_changed} {last_prices} current: bid:{data.bid_price} ask:{data.ask_price}", file=sys.stderr)
+            if stock_db_instance:
+                try:
+                    df_data = {
+                        'timestamp': [pd.to_datetime(data.timestamp)],
+                        'price': [data.bid_price],
+                        'volume': [data.bid_size]
+                    }
+                    quote_df = pd.DataFrame(df_data).set_index('timestamp')
+                    await asyncio.to_thread(stock_db_instance.save_realtime_data, quote_df, data.symbol)
+                except Exception as e:
+                    print(f"Error saving quote data for {data.symbol} to DB: {e}")
+        else:
+            # only_log_updates is True AND prices have NOT changed, so skip
+            return
 
     # API Key checks based on inferred_symbol_type
     if symbol_type == "stock":
@@ -116,6 +132,11 @@ async def main():
                         help="Database type to use for saving realtime data (default: duckdb). Only used if saving.")
     parser.add_argument("--db-path", type=str, default=None,
                         help="Path to the database file. If not provided, uses default path for the selected db-type.")
+    parser.add_argument('--only-log-updates', dest='only_log_updates', action='store_true',
+                        help="Log data only if bid/ask prices change (default behaviour).")
+    parser.add_argument('--log-all-data', dest='only_log_updates', action='store_false',
+                        help="Log all incoming quote data, regardless of price changes.")
+    parser.set_defaults(only_log_updates=True)
     args = parser.parse_args()
 
     if not args.symbols:
@@ -147,11 +168,11 @@ async def main():
     tasks_to_run = []
     if stock_symbols:
         print(f"Preparing to stream stocks: {', '.join(stock_symbols)}")
-        tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, stock_symbols, args.feed, "stock"))
+        tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, stock_symbols, args.feed, "stock", args.only_log_updates))
     
     if crypto_symbols:
         print(f"Preparing to stream cryptos: {', '.join(crypto_symbols)}")
-        tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, crypto_symbols, args.feed, "crypto"))
+        tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, crypto_symbols, args.feed, "crypto", args.only_log_updates))
 
     if not tasks_to_run:
         print("No valid stock or crypto symbols to stream based on input. Exiting.")
