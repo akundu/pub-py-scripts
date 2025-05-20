@@ -473,6 +473,247 @@ class StockDBDuckDB(StockDBBase):
             
         return latest_price
 
+# ---- New Code for Client-Server Architecture ----
+
+class StockDBServer:
+    """
+    A conceptual server class that wraps a StockDBBase instance and handles
+    requests to perform database operations.
+    """
+    def __init__(self, db_instance: StockDBBase):
+        if not isinstance(db_instance, StockDBBase):
+            raise ValueError("db_instance must be an instance of StockDBBase.")
+        self.db = db_instance
+        print(f"StockDBServer initialized with {type(db_instance).__name__} at {db_instance.db_path}")
+
+    def handle_save_stock_data(self, data: dict) -> dict:
+        """Handles request to save aggregated stock data."""
+        try:
+            df = pd.read_json(data['df_json'], orient='split')
+            ticker = data['ticker']
+            interval = data['interval']
+            self.db.save_stock_data(df, ticker, interval)
+            return {"status": "success", "message": f"Data saved for {ticker} ({interval})."}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def handle_get_stock_data(self, data: dict) -> dict:
+        """Handles request to retrieve aggregated stock data."""
+        try:
+            ticker = data['ticker']
+            start_date = data.get('start_date')
+            end_date = data.get('end_date')
+            interval = data.get('interval', 'daily')
+            df = self.db.get_stock_data(ticker, start_date, end_date, interval)
+            return {"status": "success", "df_json": df.to_json(orient='split', date_format='iso') if not df.empty else None}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def handle_save_realtime_data(self, data: dict) -> dict:
+        """Handles request to save realtime stock data."""
+        try:
+            df = pd.read_json(data['df_json'], orient='split')
+            ticker = data['ticker']
+            # Ensure the index is a DatetimeIndex after deserialization from JSON
+            if isinstance(df.index, pd.RangeIndex) and 'timestamp' in df.columns: # common if index was reset before to_json
+                 df['timestamp'] = pd.to_datetime(df['timestamp'])
+                 df = df.set_index('timestamp')
+            elif not isinstance(df.index, pd.DatetimeIndex):
+                 # If index is not DatetimeIndex and 'timestamp' col doesn't exist or didn't fix it,
+                 # this might indicate an issue or a different DataFrame structure than expected.
+                 # For now, we'll attempt to convert the existing index if it's not already a DatetimeIndex.
+                 df.index = pd.to_datetime(df.index)
+
+            self.db.save_realtime_data(df, ticker)
+            return {"status": "success", "message": f"Realtime data saved for {ticker}."}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def handle_get_realtime_data(self, data: dict) -> dict:
+        """Handles request to retrieve realtime stock data."""
+        try:
+            ticker = data['ticker']
+            start_datetime = data.get('start_datetime')
+            end_datetime = data.get('end_datetime')
+            df = self.db.get_realtime_data(ticker, start_datetime, end_datetime)
+            return {"status": "success", "df_json": df.to_json(orient='split', date_format='iso') if not df.empty else None}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def handle_get_latest_price(self, data: dict) -> dict:
+        """Handles request to get the latest price for a ticker."""
+        try:
+            ticker = data['ticker']
+            price = self.db.get_latest_price(ticker)
+            return {"status": "success", "price": price}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    # Note: _init_db is an internal method of StockDBBase instances and
+    # typically wouldn't be exposed or controlled via a server API directly.
+    # The server assumes the underlying DB is already initialized when the StockDBServer is created.
+
+class StockDBClient(StockDBBase):
+    """
+    A client class that implements the StockDBBase interface by sending
+    requests to a StockDBServer over a network.
+    """
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        # db_path is not directly used by client as it relies on server's DB,
+        # but we need to satisfy StockDBBase constructor.
+        super().__init__(db_path=f"remote_db_at_{host}:{port}")
+        print(f"StockDBClient initialized, configured to connect to server at {self.host}:{self.port}")
+
+    def _init_db(self) -> None:
+        """
+        Initialization is handled by the server-side database instance.
+        Client typically doesn't initialize the DB directly.
+        """
+        # print("Client-side _init_db called: DB initialization is managed by the server.")
+        pass # Server handles DB initialization
+
+    def _make_network_request(self, endpoint: str, payload: dict) -> dict:
+        """
+        Placeholder for making a network request to the StockDBServer.
+        In a real implementation, this would use libraries like 'requests' for HTTP
+        or 'socket' for direct TCP communication.
+
+        Args:
+            endpoint: The API endpoint path on the server (e.g., "/save_realtime_data").
+            payload: A dictionary containing the data to send to the server.
+
+        Returns:
+            A dictionary representing the server's JSON response.
+
+        Raises:
+            NotImplementedError: As this is a placeholder.
+            # In a real implementation, this would also handle network errors,
+            # connection issues, timeouts, and non-success HTTP status codes.
+        """
+        # Example structure if using 'requests' library:
+        # import requests
+        # import json
+        # url = f"http://{self.host}:{self.port}{endpoint}"
+        # try:
+        #     response = requests.post(url, json=payload, timeout=10) # 10-second timeout
+        #     response.raise_for_status() # Raises an HTTPError for bad responses (4XX or 5XX)
+        #     return response.json()
+        # except requests.exceptions.RequestException as e:
+        #     # Handle various network errors (ConnectionError, Timeout, TooManyRedirects, etc.)
+        #     print(f"Network request to {url} failed: {e}")
+        #     # Re-raise as a custom exception or return an error structure
+        #     raise ConnectionError(f"Failed to connect or communicate with server at {url}: {e}") from e
+        # except json.JSONDecodeError as e:
+        #     print(f"Failed to decode JSON response from {url}: {e}")
+        #     raise ValueError(f"Invalid JSON response from server: {e}") from e
+
+        raise NotImplementedError(
+            "_make_network_request is not implemented. "
+            "This method should handle the actual network communication (e.g., HTTP POST) "
+            "to the StockDBServer using a library like 'requests' or 'socket'."
+        )
+
+    def _handle_server_response_df(self, response: dict) -> pd.DataFrame:
+        """Helper to process server response for DataFrame-returning methods."""
+        if response["status"] == "success":
+            if response["df_json"]:
+                df = pd.read_json(response["df_json"], orient='split')
+                # Ensure DatetimeIndex for consistency, especially for time-series data
+                if 'date' in df.columns and df['date'].dtype == 'object': # For get_stock_data
+                    df['date'] = pd.to_datetime(df['date'])
+                    df = df.set_index('date')
+                elif 'datetime' in df.columns and df['datetime'].dtype == 'object': # For get_stock_data (hourly)
+                     df['datetime'] = pd.to_datetime(df['datetime'])
+                     df = df.set_index('datetime')
+                elif 'timestamp' in df.columns and df['timestamp'].dtype == 'object': # For get_realtime_data
+                     df['timestamp'] = pd.to_datetime(df['timestamp'])
+                     df = df.set_index('timestamp')
+                elif df.index.dtype == 'int64' and isinstance(df.index, pd.RangeIndex) : # Default from to_json if index was simple range
+                    # This case means the original df had a simple integer index.
+                    # If specific index handling is needed (like a named index that became a column),
+                    # it should be handled by ensuring 'orient' and 'date_format' in to_json/read_json
+                    # preserve it, or by specific logic here if it's standardized.
+                    # For now, we assume if it's a RangeIndex, it might not need to be a DatetimeIndex
+                    # unless columns like 'date', 'datetime', 'timestamp' are present (handled above).
+                    pass
+                elif not isinstance(df.index, pd.DatetimeIndex) and df.index.dtype != 'int64':
+                    # If it's not a DatetimeIndex and not a simple integer RangeIndex, try to convert.
+                    # This handles cases where the index was a date/time string.
+                    try:
+                        df.index = pd.to_datetime(df.index)
+                    except Exception:
+                        print(f"Client: Could not convert index to DatetimeIndex for df: {df.head()}")
+
+                return df
+            return pd.DataFrame() # Return empty DataFrame if df_json is None
+        else:
+            raise Exception(f"Server error: {response['message']}")
+
+    def _handle_server_response_generic(self, response: dict, success_key: str | None = None):
+        """Helper to process server response for non-DataFrame methods."""
+        if response["status"] == "success":
+            return response.get(success_key) if success_key else True
+        else:
+            raise Exception(f"Server error: {response['message']}")
+
+    def save_stock_data(self, df: pd.DataFrame, ticker: str, interval: str = 'daily') -> None:
+        request_data = {
+            "df_json": df.to_json(orient='split', date_format='iso'),
+            "ticker": ticker,
+            "interval": interval
+        }
+        # response = self.server.handle_save_stock_data(request_data)
+        response = self._make_network_request("/save_stock_data", request_data)
+        self._handle_server_response_generic(response)
+
+    def get_stock_data(self, ticker: str, start_date: str | None = None, end_date: str | None = None, 
+                       interval: str = 'daily') -> pd.DataFrame:
+        request_data = {
+            "ticker": ticker,
+            "start_date": start_date,
+            "end_date": end_date,
+            "interval": interval
+        }
+        # response = self.server.handle_get_stock_data(request_data)
+        response = self._make_network_request("/get_stock_data", request_data)
+        return self._handle_server_response_df(response)
+
+    def save_realtime_data(self, df: pd.DataFrame, ticker: str) -> None:
+        # For DataFrames with DatetimeIndex, to_json with orient='split' handles it well.
+        # Make sure the DataFrame is structured as expected by the server's handler.
+        # If df.index is DatetimeIndex, it should be fine.
+        # If it's in a column 'timestamp', that also needs to be handled.
+        # The server-side handler for save_realtime_data has logic to set_index if 'timestamp' column exists.
+        df_copy = df.copy()
+        if isinstance(df_copy.index, pd.DatetimeIndex) and df_copy.index.name == 'timestamp':
+            df_copy = df_copy.reset_index() # ensure 'timestamp' is a column for to_json if it was the index
+        
+        request_data = {
+            "df_json": df_copy.to_json(orient='split', date_format='iso'), # Sending index=True by default with split
+            "ticker": ticker
+        }
+        # response = self.server.handle_save_realtime_data(request_data)
+        response = self._make_network_request("/save_realtime_data", request_data)
+        self._handle_server_response_generic(response)
+
+    def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None) -> pd.DataFrame:
+        request_data = {
+            "ticker": ticker,
+            "start_datetime": start_datetime,
+            "end_datetime": end_datetime
+        }
+        # response = self.server.handle_get_realtime_data(request_data)
+        response = self._make_network_request("/get_realtime_data", request_data)
+        return self._handle_server_response_df(response)
+
+    def get_latest_price(self, ticker: str) -> float | None:
+        request_data = {"ticker": ticker}
+        # response = self.server.handle_get_latest_price(request_data)
+        response = self._make_network_request("/get_latest_price", request_data)
+        return self._handle_server_response_generic(response, success_key="price")
+
 
 def get_stock_db(db_type: str, db_path: str | None = None) -> StockDBBase:
     """
