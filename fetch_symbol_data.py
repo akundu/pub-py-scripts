@@ -191,7 +191,7 @@ async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: Sto
         final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, symbol, 'daily', data_dir)
         if not final_daily_bars.empty:
             # Use the passed stock_db_instance
-            await asyncio.to_thread(stock_db_instance.save_stock_data, final_daily_bars, symbol, interval='daily')
+            await stock_db_instance.save_stock_data(final_daily_bars, symbol, interval='daily')
             print(f"Daily data for {symbol} also updated in database.")
         elif new_daily_bars.empty:
              print(f"No new daily data fetched for {symbol} from API via aiohttp.")
@@ -204,7 +204,7 @@ async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: Sto
         final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, symbol, 'hourly', data_dir)
         if not final_hourly_bars.empty:
             # Use the passed stock_db_instance
-            await asyncio.to_thread(stock_db_instance.save_stock_data, final_hourly_bars, symbol, interval='hourly')
+            await stock_db_instance.save_stock_data(final_hourly_bars, symbol, interval='hourly')
             print(f"Hourly data for {symbol} also updated in database.")
         elif new_hourly_bars.empty:
              print(f"No new hourly data fetched for {symbol} from API via aiohttp.")
@@ -250,7 +250,7 @@ async def process_symbol_data(symbol: str,
     if not force_fetch:
         print(f"Attempting to retrieve {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})...")
         # Use the instance method
-        data_df = current_db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval=timeframe)
+        data_df = await current_db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval=timeframe)
         
         if not data_df.empty:
             action_taken = f"Data for {symbol} ({timeframe}) retrieved from database."
@@ -283,7 +283,7 @@ async def process_symbol_data(symbol: str,
         if fetch_success:
             print(f"Retrieving newly fetched/updated {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})...")
             # Use the instance method
-            data_df = current_db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval=timeframe)
+            data_df = await current_db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval=timeframe)
             if data_df.empty:
                 print(f"Warning: Data for {symbol} ({timeframe}) was fetched but not found in DB with current query parameters. Check fetch ranges and query.")
             else:

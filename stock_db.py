@@ -4,47 +4,51 @@ from datetime import datetime
 import os
 from abc import ABCMeta, abstractmethod
 import duckdb
+import asyncio
+import aiohttp
+import json
 
 DEFAULT_DATA_DIR = './data'
 def get_default_db_path(db_type: str) -> str:   
+    if db_type.lower() == "remote":
+        return "localhost:8080"
     return os.path.join(DEFAULT_DATA_DIR, f"stock_data.{db_type}")
 
 class StockDBBase(metaclass=ABCMeta):
     """
     Abstract base class for stock database operations.
     """
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self._init_db()
+    def __init__(self, db_config: str):
+        self.db_config = db_config
 
     @abstractmethod
     def _init_db(self) -> None:
-        """Initialize the database with required tables."""
+        """Initialize the database with required tables. (No-op for client)"""
         pass
 
     @abstractmethod
-    def save_stock_data(self, df: pd.DataFrame, ticker: str, interval: str = 'daily') -> None:
+    async def save_stock_data(self, df: pd.DataFrame, ticker: str, interval: str = 'daily') -> None:
         """Save aggregated (daily/hourly) stock data to the database."""
         pass
 
     @abstractmethod
-    def get_stock_data(self, ticker: str, start_date: str | None = None, end_date: str | None = None, 
+    async def get_stock_data(self, ticker: str, start_date: str | None = None, end_date: str | None = None, 
                        interval: str = 'daily') -> pd.DataFrame:
         """Retrieve aggregated (daily/hourly) stock data from the database."""
         pass
     
     @abstractmethod
-    def save_realtime_data(self, df: pd.DataFrame, ticker: str) -> None:
-        """Save realtime (tick) stock data to the database."""
+    async def save_realtime_data(self, df: pd.DataFrame, ticker: str, data_type: str = "quote") -> None:
+        """Save realtime (tick/quote/trade) stock data to the database."""
         pass
 
     @abstractmethod
-    def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None) -> pd.DataFrame:
-        """Retrieve realtime (tick) stock data from the database."""
+    async def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None, data_type: str = "quote") -> pd.DataFrame:
+        """Retrieve realtime (tick/quote/trade) stock data from the database."""
         pass
 
     @abstractmethod
-    def get_latest_price(self, ticker: str) -> float | None:
+    async def get_latest_price(self, ticker: str) -> float | None:
         """Get the most recent price for a ticker from any available data (realtime, hourly, daily)."""
         pass
 
@@ -54,12 +58,14 @@ class StockDBSQLite(StockDBBase):
     """
     def __init__(self, db_path: str = get_default_db_path("db")) -> None:
         super().__init__(db_path)
+        self.db_path = db_path
+        self._init_db()
 
     def _init_db(self) -> None:
         """Initialize the SQLite database with required tables if they don't exist."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            
+    
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS daily_prices (
                     ticker TEXT,
@@ -85,19 +91,22 @@ class StockDBSQLite(StockDBBase):
                     PRIMARY KEY (ticker, datetime)
                 )
             ''')
-
+            
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS realtime_prices (
+                CREATE TABLE IF NOT EXISTS realtime_data (
                     ticker TEXT,
                     timestamp DATETIME, -- Stored as YYYY-MM-DD HH:MM:SS.ffffff
-                    price REAL,
-                    volume INTEGER, -- Trade volume for this tick
-                    PRIMARY KEY (ticker, timestamp)
+                    type TEXT, -- 'quote' or 'trade'
+                    price REAL, 
+                    size INTEGER,
+                    ask_price REAL, -- Nullable, for quotes
+                    ask_size INTEGER, -- Nullable, for quotes
+                    PRIMARY KEY (ticker, timestamp, type)
                 )
             ''')
             conn.commit()
 
-    def save_stock_data(self, df: pd.DataFrame, ticker: str, interval: str = 'daily') -> None:
+    async def save_stock_data(self, df: pd.DataFrame, ticker: str, interval: str = 'daily') -> None:
         """Save aggregated (daily/hourly) stock data to the SQLite database."""
         with sqlite3.connect(self.db_path) as conn:
             df_copy = df.copy()
@@ -109,20 +118,11 @@ class StockDBSQLite(StockDBBase):
             df_copy.columns = [col.lower() for col in df_copy.columns]
             df_copy['ticker'] = ticker
             
-            if interval == 'daily':
-                table = 'daily_prices'
-                date_col = 'date'
-                if 'index' in df_copy.columns and date_col not in df_copy.columns:
-                     df_copy.rename(columns={'index': date_col}, inplace=True)
-                required_cols = ['ticker', 'date', 'open', 'high', 'low', 'close', 'volume']
-            else:  # hourly
-                table = 'hourly_prices'
-                date_col = 'datetime'
-                if 'index' in df_copy.columns and date_col not in df_copy.columns:
-                     df_copy.rename(columns={'index': date_col}, inplace=True)
-                required_cols = ['ticker', 'datetime', 'open', 'high', 'low', 'close', 'volume']
-            
-            # Filter only for columns that exist in df_copy to avoid KeyErrors
+            table = 'daily_prices' if interval == 'daily' else 'hourly_prices'
+            date_col = 'date' if interval == 'daily' else 'datetime'
+            if 'index' in df_copy.columns and date_col not in df_copy.columns:
+                df_copy.rename(columns={'index': date_col}, inplace=True)
+            required_cols = ['ticker', date_col, 'open', 'high', 'low', 'close', 'volume']
             df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
 
             if date_col not in df_copy.columns:
@@ -151,33 +151,33 @@ class StockDBSQLite(StockDBBase):
             df_copy[date_col] = df_copy[date_col].dt.strftime(date_format_str)
             df_copy.to_sql(table, conn, if_exists='append', index=False)
 
-    def get_stock_data(self, ticker: str, start_date: str | None = None, end_date: str | None = None, 
+    async def get_stock_data(self, ticker: str, start_date: str | None = None, end_date: str | None = None, 
                        interval: str = 'daily') -> pd.DataFrame:
         with sqlite3.connect(self.db_path) as conn:
             table = 'daily_prices' if interval == 'daily' else 'hourly_prices'
             date_col_name = 'date' if interval == 'daily' else 'datetime' # Name of column in DB
-            
+    
             query = f"SELECT * FROM {table} WHERE ticker = ?"
             params: list[str | None] = [ticker]
-            
+    
             if start_date:
                 query += f" AND {date_col_name} >= ?"
                 params.append(start_date)
             if end_date:
                 query += f" AND {date_col_name} <= ?"
                 params.append(end_date)
-            
+    
             query += f" ORDER BY {date_col_name}"
-            
+    
             df = pd.read_sql_query(query, conn, params=params) # type: ignore
-        
+    
         if not df.empty:
             df[date_col_name] = pd.to_datetime(df[date_col_name], errors='coerce')
             df.set_index(date_col_name, inplace=True)
             df = df[df.index.notna()]
         return df
 
-    def save_realtime_data(self, df: pd.DataFrame, ticker: str) -> None:
+    async def save_realtime_data(self, df: pd.DataFrame, ticker: str, data_type: str = "quote") -> None:
         """Save realtime (tick) stock data to the SQLite database."""
         with sqlite3.connect(self.db_path) as conn:
             df_copy = df.copy()
@@ -187,17 +187,18 @@ class StockDBSQLite(StockDBBase):
             df_copy.reset_index(inplace=True)
             df_copy.columns = [col.lower() for col in df_copy.columns]
             df_copy['ticker'] = ticker
+            df_copy['type'] = data_type
 
             # Standardize column names; expecting 'timestamp', 'price', 'volume' from input df index or columns
             # If index was named, it's now a column. If unnamed, it was 'index'.
             if 'timestamp' not in df_copy.columns and 'index' in df_copy.columns:
                 df_copy.rename(columns={'index': 'timestamp'}, inplace=True)
             
-            required_cols = ['ticker', 'timestamp', 'price', 'volume']
+            required_cols = ['ticker', 'timestamp', 'type', 'price', 'size']
             df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
 
-            if 'timestamp' not in df_copy.columns or 'price' not in df_copy.columns or 'volume' not in df_copy.columns:
-                print(f"Warning: Missing required columns (timestamp, price, volume) for realtime data of {ticker}. Skipping DB save.")
+            if 'timestamp' not in df_copy.columns or 'price' not in df_copy.columns or 'size' not in df_copy.columns:
+                print(f"Warning: Missing required columns (timestamp, price, size) for realtime data of {ticker}. Skipping DB save.")
                 return
 
             df_copy['timestamp'] = pd.to_datetime(df_copy['timestamp'])
@@ -215,19 +216,20 @@ class StockDBSQLite(StockDBBase):
 
             cursor = conn.cursor()
             cursor.execute('''
-                DELETE FROM realtime_prices 
+                DELETE FROM realtime_data 
                 WHERE ticker = ? 
+                AND type = ?
                 AND timestamp BETWEEN ? AND ?
-            ''', (ticker, min_ts_str, max_ts_str))
+            ''', (ticker, data_type, min_ts_str, max_ts_str))
 
             df_copy['timestamp'] = df_copy['timestamp'].dt.strftime(ts_format_str)
-            df_copy.to_sql('realtime_prices', conn, if_exists='append', index=False)
+            df_copy.to_sql('realtime_data', conn, if_exists='append', index=False)
 
-    def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None) -> pd.DataFrame:
+    async def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None, data_type: str = "quote") -> pd.DataFrame:
         """Retrieve realtime (tick) stock data from the SQLite database."""
         with sqlite3.connect(self.db_path) as conn:
-            query = "SELECT * FROM realtime_prices WHERE ticker = ?"
-            params: list[str | None] = [ticker]
+            query = "SELECT * FROM realtime_data WHERE ticker = ? AND type = ?"
+            params: list[str | None] = [ticker, data_type]
 
             if start_datetime:
                 query += " AND timestamp >= ?"
@@ -245,18 +247,18 @@ class StockDBSQLite(StockDBBase):
             df = df[df.index.notna()]
         return df
 
-    def get_latest_price(self, ticker: str) -> float | None:
+    async def get_latest_price(self, ticker: str) -> float | None:
         """Get the most recent price for a ticker (realtime -> hourly -> daily)."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             latest_price = None
 
-            # 1. Try realtime_prices
+            # 1. Try realtime_data
             try:
-                cursor.execute("SELECT price FROM realtime_prices WHERE ticker = ? ORDER BY timestamp DESC LIMIT 1", (ticker,))
+                cursor.execute("SELECT price FROM realtime_data WHERE ticker = ? AND type = 'quote' ORDER BY timestamp DESC LIMIT 1", (ticker,))
                 row = cursor.fetchone()
                 if row: latest_price = row[0]
-            except sqlite3.Error as e: print(f"SQLite error (realtime_prices for {ticker}): {e}")
+            except sqlite3.Error as e: print(f"SQLite error (realtime_data for {ticker}): {e}")
 
             # 2. Try hourly_prices if no realtime found
             if latest_price is None:
@@ -282,6 +284,8 @@ class StockDBDuckDB(StockDBBase):
     """
     def __init__(self, db_path: str = get_default_db_path("duckdb")) -> None:
         super().__init__(db_path)
+        self.db_path = db_path
+        self._init_db()
 
     def _init_db(self) -> None:
         """Initialize the DuckDB database with required tables if they don't exist."""
@@ -312,16 +316,14 @@ class StockDBDuckDB(StockDBBase):
                 )
             ''')
             conn.execute('''
-                CREATE TABLE IF NOT EXISTS realtime_prices (
-                    ticker VARCHAR,
-                    timestamp TIMESTAMP, -- DuckDB TIMESTAMP has microsecond precision
-                    price DOUBLE,
-                    volume BIGINT,
-                    PRIMARY KEY (ticker, timestamp)
+                CREATE TABLE IF NOT EXISTS realtime_data (
+                    ticker VARCHAR, timestamp TIMESTAMP, type VARCHAR, price DOUBLE, size BIGINT,
+                    ask_price DOUBLE, ask_size BIGINT,
+                    PRIMARY KEY (ticker, timestamp, type)
                 )
             ''')
 
-    def save_stock_data(self, df: pd.DataFrame, ticker: str, interval: str = 'daily') -> None:
+    async def save_stock_data(self, df: pd.DataFrame, ticker: str, interval: str = 'daily') -> None:
         """Save aggregated (daily/hourly) stock data to the DuckDB database."""
         with duckdb.connect(database=self.db_path, read_only=False) as conn:
             df_copy = df.copy()
@@ -357,12 +359,12 @@ class StockDBDuckDB(StockDBBase):
                          (ticker, min_date_val, max_date_val))
             try:
                 conn.register('df_to_insert', df_copy)
-                cols_str = ", ".join([f'\"{col}\"'.lower() for col in df_copy.columns]) # Ensure quoting for safety
+                cols_str = ", ".join([f'"{col}"' for col in df_copy.columns]) # Ensure quoting for safety
                 conn.execute(f"INSERT INTO {table} ({cols_str}) SELECT {cols_str} FROM df_to_insert")
             except Exception as e:
                 print(f"Error saving aggregated to DuckDB for {ticker} ({interval}): {e}")
 
-    def get_stock_data(self, ticker: str, start_date: str | None = None, end_date: str | None = None, 
+    async def get_stock_data(self, ticker: str, start_date: str | None = None, end_date: str | None = None, 
                        interval: str = 'daily') -> pd.DataFrame:
         with duckdb.connect(database=self.db_path, read_only=True) as conn:
             table = 'daily_prices' if interval == 'daily' else 'hourly_prices'
@@ -387,7 +389,7 @@ class StockDBDuckDB(StockDBBase):
             df = df[df.index.notna()]
         return df
 
-    def save_realtime_data(self, df: pd.DataFrame, ticker: str) -> None:
+    async def save_realtime_data(self, df: pd.DataFrame, ticker: str, data_type: str = "quote") -> None:
         """Save realtime (tick) stock data to the DuckDB database."""
         with duckdb.connect(database=self.db_path, read_only=False) as conn:
             df_copy = df.copy()
@@ -397,14 +399,15 @@ class StockDBDuckDB(StockDBBase):
             df_copy.reset_index(inplace=True)
             df_copy.columns = [col.lower() for col in df_copy.columns]
             df_copy['ticker'] = ticker
+            df_copy['type'] = data_type
 
             if 'timestamp' not in df_copy.columns and 'index' in df_copy.columns:
                 df_copy.rename(columns={'index': 'timestamp'}, inplace=True)
             
-            required_cols = ['ticker', 'timestamp', 'price', 'volume']
+            required_cols = ['ticker', 'timestamp', 'type', 'price', 'size']
             df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
 
-            if 'timestamp' not in df_copy.columns or 'price' not in df_copy.columns or 'volume' not in df_copy.columns:
+            if 'timestamp' not in df_copy.columns or 'price' not in df_copy.columns or 'size' not in df_copy.columns:
                 print(f"Warning: Missing required columns for realtime data (DuckDB) of {ticker}. Skipping.")
                 return
 
@@ -416,20 +419,20 @@ class StockDBDuckDB(StockDBBase):
                 print(f"Warning: Min/max timestamp is NaT for realtime data (DuckDB) of {ticker}. Skipping.")
                 return
             
-            conn.execute("DELETE FROM realtime_prices WHERE ticker = ? AND timestamp BETWEEN ? AND ?",
-                         (ticker, min_ts_val, max_ts_val))
+            conn.execute("DELETE FROM realtime_data WHERE ticker = ? AND type = ? AND timestamp BETWEEN ? AND ?",
+                         (ticker, data_type, min_ts_val, max_ts_val))
             try:
                 conn.register('df_rt_to_insert', df_copy)
-                cols_str = ", ".join([f'\"{col}\"'.lower() for col in df_copy.columns])
-                conn.execute(f"INSERT INTO realtime_prices ({cols_str}) SELECT {cols_str} FROM df_rt_to_insert")
+                cols_str = ", ".join([f'"{col}"' for col in df_copy.columns])
+                conn.execute(f"INSERT INTO realtime_data ({cols_str}) SELECT {cols_str} FROM df_rt_to_insert")
             except Exception as e:
                 print(f"Error saving realtime data to DuckDB for {ticker}: {e}")
 
-    def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None) -> pd.DataFrame:
+    async def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None, data_type: str = "quote") -> pd.DataFrame:
         """Retrieve realtime (tick) stock data from the DuckDB database."""
         with duckdb.connect(database=self.db_path, read_only=True) as conn:
-            query = "SELECT * FROM realtime_prices WHERE ticker = ?"
-            params: list[str | pd.Timestamp | None] = [ticker]
+            query = "SELECT * FROM realtime_data WHERE ticker = ? AND type = ?"
+            params: list[str | pd.Timestamp | None] = [ticker, data_type]
 
             if start_datetime:
                 query += " AND timestamp >= ?"
@@ -447,15 +450,15 @@ class StockDBDuckDB(StockDBBase):
             df = df[df.index.notna()]
         return df
 
-    def get_latest_price(self, ticker: str) -> float | None:
+    async def get_latest_price(self, ticker: str) -> float | None:
         """Get the most recent price for a ticker (realtime -> hourly -> daily) from DuckDB."""
         with duckdb.connect(database=self.db_path, read_only=True) as conn:
             latest_price = None
-            # 1. Try realtime_prices
+            # 1. Try realtime_data
             try:
-                res_rt = conn.execute("SELECT price FROM realtime_prices WHERE ticker = ? ORDER BY timestamp DESC LIMIT 1", (ticker,)).fetchone()
+                res_rt = conn.execute("SELECT price FROM realtime_data WHERE ticker = ? AND type = 'quote' ORDER BY timestamp DESC LIMIT 1", (ticker,)).fetchone()
                 if res_rt: latest_price = res_rt[0]
-            except duckdb.Error as e: print(f"DuckDB error (realtime_prices for {ticker}): {e}")
+            except duckdb.Error as e: print(f"DuckDB error (realtime_data for {ticker}): {e}")
 
             # 2. Try hourly_prices
             if latest_price is None:
@@ -473,272 +476,134 @@ class StockDBDuckDB(StockDBBase):
             
         return latest_price
 
-# ---- New Code for Client-Server Architecture ----
-
-class StockDBServer:
-    """
-    A conceptual server class that wraps a StockDBBase instance and handles
-    requests to perform database operations.
-    """
-    def __init__(self, db_instance: StockDBBase):
-        if not isinstance(db_instance, StockDBBase):
-            raise ValueError("db_instance must be an instance of StockDBBase.")
-        self.db = db_instance
-        print(f"StockDBServer initialized with {type(db_instance).__name__} at {db_instance.db_path}")
-
-    def handle_save_stock_data(self, data: dict) -> dict:
-        """Handles request to save aggregated stock data."""
-        try:
-            df = pd.read_json(data['df_json'], orient='split')
-            ticker = data['ticker']
-            interval = data['interval']
-            self.db.save_stock_data(df, ticker, interval)
-            return {"status": "success", "message": f"Data saved for {ticker} ({interval})."}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-
-    def handle_get_stock_data(self, data: dict) -> dict:
-        """Handles request to retrieve aggregated stock data."""
-        try:
-            ticker = data['ticker']
-            start_date = data.get('start_date')
-            end_date = data.get('end_date')
-            interval = data.get('interval', 'daily')
-            df = self.db.get_stock_data(ticker, start_date, end_date, interval)
-            return {"status": "success", "df_json": df.to_json(orient='split', date_format='iso') if not df.empty else None}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-
-    def handle_save_realtime_data(self, data: dict) -> dict:
-        """Handles request to save realtime stock data."""
-        try:
-            df = pd.read_json(data['df_json'], orient='split')
-            ticker = data['ticker']
-            # Ensure the index is a DatetimeIndex after deserialization from JSON
-            if isinstance(df.index, pd.RangeIndex) and 'timestamp' in df.columns: # common if index was reset before to_json
-                 df['timestamp'] = pd.to_datetime(df['timestamp'])
-                 df = df.set_index('timestamp')
-            elif not isinstance(df.index, pd.DatetimeIndex):
-                 # If index is not DatetimeIndex and 'timestamp' col doesn't exist or didn't fix it,
-                 # this might indicate an issue or a different DataFrame structure than expected.
-                 # For now, we'll attempt to convert the existing index if it's not already a DatetimeIndex.
-                 df.index = pd.to_datetime(df.index)
-
-            self.db.save_realtime_data(df, ticker)
-            return {"status": "success", "message": f"Realtime data saved for {ticker}."}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-
-    def handle_get_realtime_data(self, data: dict) -> dict:
-        """Handles request to retrieve realtime stock data."""
-        try:
-            ticker = data['ticker']
-            start_datetime = data.get('start_datetime')
-            end_datetime = data.get('end_datetime')
-            df = self.db.get_realtime_data(ticker, start_datetime, end_datetime)
-            return {"status": "success", "df_json": df.to_json(orient='split', date_format='iso') if not df.empty else None}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-
-    def handle_get_latest_price(self, data: dict) -> dict:
-        """Handles request to get the latest price for a ticker."""
-        try:
-            ticker = data['ticker']
-            price = self.db.get_latest_price(ticker)
-            return {"status": "success", "price": price}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-
-    # Note: _init_db is an internal method of StockDBBase instances and
-    # typically wouldn't be exposed or controlled via a server API directly.
-    # The server assumes the underlying DB is already initialized when the StockDBServer is created.
-
 class StockDBClient(StockDBBase):
     """
     A client class that implements the StockDBBase interface by sending
     requests to a StockDBServer over a network.
     """
-    def __init__(self, host: str, port: int):
-        self.host = host
-        self.port = port
-        # db_path is not directly used by client as it relies on server's DB,
-        # but we need to satisfy StockDBBase constructor.
-        super().__init__(db_path=f"remote_db_at_{host}:{port}")
-        print(f"StockDBClient initialized, configured to connect to server at {self.host}:{self.port}")
+    def __init__(self, server_address: str):
+        super().__init__(server_address)
+        self.server_url = f"http://{server_address}"
+        self._session: aiohttp.ClientSession | None = None
+        print(f"StockDBClient initialized, configured for server at {self.server_url}")
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+    
+    async def close_session(self):
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
 
     def _init_db(self) -> None:
-        """
-        Initialization is handled by the server-side database instance.
-        Client typically doesn't initialize the DB directly.
-        """
-        # print("Client-side _init_db called: DB initialization is managed by the server.")
-        pass # Server handles DB initialization
+        # Client does not initialize DB; server handles it.
+        pass
 
-    def _make_network_request(self, endpoint: str, payload: dict) -> dict:
-        """
-        Placeholder for making a network request to the StockDBServer.
-        In a real implementation, this would use libraries like 'requests' for HTTP
-        or 'socket' for direct TCP communication.
+    async def _make_request(self, command: str, params: dict) -> dict:
+        session = await self._get_session()
+        payload = {"command": command, "params": params}
+        try:
+            async with session.post(f"{self.server_url}/db_command", json=payload) as response:
+                response.raise_for_status()
+                return await response.json()
+        except aiohttp.ClientError as e:
+            print(f"StockDBClient network error for command '{command}': {e}")
+            raise ConnectionError(f"Failed to connect or communicate with server for command '{command}': {e}") from e
+        except json.JSONDecodeError as e:
+            print(f"StockDBClient JSON decode error for command '{command}': {e}")
+            raise ValueError(f"Invalid JSON response from server for command '{command}': {e}") from e
 
-        Args:
-            endpoint: The API endpoint path on the server (e.g., "/save_realtime_data").
-            payload: A dictionary containing the data to send to the server.
+    def _parse_df_from_response(self, response_data: list[dict], index_col: str) -> pd.DataFrame:
+        if not response_data:
+            return pd.DataFrame()
+        df = pd.DataFrame.from_records(response_data)
+        if index_col in df.columns:
+            df[index_col] = pd.to_datetime(df[index_col], errors='coerce')
+            df.set_index(index_col, inplace=True)
+            df = df[df.index.notna()]
+        return df
 
-        Returns:
-            A dictionary representing the server's JSON response.
-
-        Raises:
-            NotImplementedError: As this is a placeholder.
-            # In a real implementation, this would also handle network errors,
-            # connection issues, timeouts, and non-success HTTP status codes.
-        """
-        # Example structure if using 'requests' library:
-        # import requests
-        # import json
-        # url = f"http://{self.host}:{self.port}{endpoint}"
-        # try:
-        #     response = requests.post(url, json=payload, timeout=10) # 10-second timeout
-        #     response.raise_for_status() # Raises an HTTPError for bad responses (4XX or 5XX)
-        #     return response.json()
-        # except requests.exceptions.RequestException as e:
-        #     # Handle various network errors (ConnectionError, Timeout, TooManyRedirects, etc.)
-        #     print(f"Network request to {url} failed: {e}")
-        #     # Re-raise as a custom exception or return an error structure
-        #     raise ConnectionError(f"Failed to connect or communicate with server at {url}: {e}") from e
-        # except json.JSONDecodeError as e:
-        #     print(f"Failed to decode JSON response from {url}: {e}")
-        #     raise ValueError(f"Invalid JSON response from server: {e}") from e
-
-        raise NotImplementedError(
-            "_make_network_request is not implemented. "
-            "This method should handle the actual network communication (e.g., HTTP POST) "
-            "to the StockDBServer using a library like 'requests' or 'socket'."
-        )
-
-    def _handle_server_response_df(self, response: dict) -> pd.DataFrame:
-        """Helper to process server response for DataFrame-returning methods."""
-        if response["status"] == "success":
-            if response["df_json"]:
-                df = pd.read_json(response["df_json"], orient='split')
-                # Ensure DatetimeIndex for consistency, especially for time-series data
-                if 'date' in df.columns and df['date'].dtype == 'object': # For get_stock_data
-                    df['date'] = pd.to_datetime(df['date'])
-                    df = df.set_index('date')
-                elif 'datetime' in df.columns and df['datetime'].dtype == 'object': # For get_stock_data (hourly)
-                     df['datetime'] = pd.to_datetime(df['datetime'])
-                     df = df.set_index('datetime')
-                elif 'timestamp' in df.columns and df['timestamp'].dtype == 'object': # For get_realtime_data
-                     df['timestamp'] = pd.to_datetime(df['timestamp'])
-                     df = df.set_index('timestamp')
-                elif df.index.dtype == 'int64' and isinstance(df.index, pd.RangeIndex) : # Default from to_json if index was simple range
-                    # This case means the original df had a simple integer index.
-                    # If specific index handling is needed (like a named index that became a column),
-                    # it should be handled by ensuring 'orient' and 'date_format' in to_json/read_json
-                    # preserve it, or by specific logic here if it's standardized.
-                    # For now, we assume if it's a RangeIndex, it might not need to be a DatetimeIndex
-                    # unless columns like 'date', 'datetime', 'timestamp' are present (handled above).
-                    pass
-                elif not isinstance(df.index, pd.DatetimeIndex) and df.index.dtype != 'int64':
-                    # If it's not a DatetimeIndex and not a simple integer RangeIndex, try to convert.
-                    # This handles cases where the index was a date/time string.
-                    try:
-                        df.index = pd.to_datetime(df.index)
-                    except Exception:
-                        print(f"Client: Could not convert index to DatetimeIndex for df: {df.head()}")
-
-                return df
-            return pd.DataFrame() # Return empty DataFrame if df_json is None
-        else:
-            raise Exception(f"Server error: {response['message']}")
-
-    def _handle_server_response_generic(self, response: dict, success_key: str | None = None):
-        """Helper to process server response for non-DataFrame methods."""
-        if response["status"] == "success":
-            return response.get(success_key) if success_key else True
-        else:
-            raise Exception(f"Server error: {response['message']}")
-
-    def save_stock_data(self, df: pd.DataFrame, ticker: str, interval: str = 'daily') -> None:
-        request_data = {
-            "df_json": df.to_json(orient='split', date_format='iso'),
-            "ticker": ticker,
-            "interval": interval
-        }
-        # response = self.server.handle_save_stock_data(request_data)
-        response = self._make_network_request("/save_stock_data", request_data)
-        self._handle_server_response_generic(response)
-
-    def get_stock_data(self, ticker: str, start_date: str | None = None, end_date: str | None = None, 
-                       interval: str = 'daily') -> pd.DataFrame:
-        request_data = {
-            "ticker": ticker,
-            "start_date": start_date,
-            "end_date": end_date,
-            "interval": interval
-        }
-        # response = self.server.handle_get_stock_data(request_data)
-        response = self._make_network_request("/get_stock_data", request_data)
-        return self._handle_server_response_df(response)
-
-    def save_realtime_data(self, df: pd.DataFrame, ticker: str) -> None:
-        # For DataFrames with DatetimeIndex, to_json with orient='split' handles it well.
-        # Make sure the DataFrame is structured as expected by the server's handler.
-        # If df.index is DatetimeIndex, it should be fine.
-        # If it's in a column 'timestamp', that also needs to be handled.
-        # The server-side handler for save_realtime_data has logic to set_index if 'timestamp' column exists.
-        df_copy = df.copy()
-        if isinstance(df_copy.index, pd.DatetimeIndex) and df_copy.index.name == 'timestamp':
-            df_copy = df_copy.reset_index() # ensure 'timestamp' is a column for to_json if it was the index
+    async def save_stock_data(self, df: pd.DataFrame, ticker: str, interval: str = 'daily') -> None:
+        if df.empty: return
+        # Server expects list of records and index_col hint
+        df_reset = df.reset_index()
+        index_col_name = df.index.name or ('timestamp' if 'timestamp' in df.columns else 'date') # Default index name
         
-        request_data = {
-            "df_json": df_copy.to_json(orient='split', date_format='iso'), # Sending index=True by default with split
-            "ticker": ticker
-        }
-        # response = self.server.handle_save_realtime_data(request_data)
-        response = self._make_network_request("/save_realtime_data", request_data)
-        self._handle_server_response_generic(response)
+        # Ensure datetime columns are stringified in ISO format for JSON
+        for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
+            df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
-    def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None) -> pd.DataFrame:
-        request_data = {
+        params = {
             "ticker": ticker,
-            "start_datetime": start_datetime,
-            "end_datetime": end_datetime
+            "interval": interval,
+            "data": df_reset.to_dict(orient='records'),
+            "index_col": index_col_name 
         }
-        # response = self.server.handle_get_realtime_data(request_data)
-        response = self._make_network_request("/get_realtime_data", request_data)
-        return self._handle_server_response_df(response)
+        response = await self._make_request("save_stock_data", params)
+        if response.get("error"):
+            raise Exception(f"Server error saving stock data: {response['error']}")
 
-    def get_latest_price(self, ticker: str) -> float | None:
-        request_data = {"ticker": ticker}
-        # response = self.server.handle_get_latest_price(request_data)
-        response = self._make_network_request("/get_latest_price", request_data)
-        return self._handle_server_response_generic(response, success_key="price")
+    async def get_stock_data(self, ticker: str, start_date: str | None = None, end_date: str | None = None, 
+                       interval: str = 'daily') -> pd.DataFrame:
+        params = {"ticker": ticker, "start_date": start_date, "end_date": end_date, "interval": interval}
+        response = await self._make_request("get_stock_data", params)
+        if response.get("error"):
+            raise Exception(f"Server error getting stock data: {response['error']}")
+        
+        index_col = 'date' if interval == 'daily' else 'datetime'
+        return self._parse_df_from_response(response.get("data", []), index_col)
+
+    async def save_realtime_data(self, df: pd.DataFrame, ticker: str, data_type: str = "quote") -> None:
+        if df.empty: return
+        df_reset = df.reset_index()
+        index_col_name = df.index.name or 'timestamp'
+
+        for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
+            df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+        
+        # Add type to each record
+        records = df_reset.to_dict(orient='records')
+        # for record in records: # No, type is a top-level param for the command
+        #    record['type'] = data_type 
+
+        params = {
+            "ticker": ticker,
+            "data_type": data_type, # Pass data_type to server
+            "data": records,
+            "index_col": index_col_name
+        }
+        response = await self._make_request("save_realtime_data", params)
+        if response.get("error"):
+            raise Exception(f"Server error saving realtime data: {response['error']}")
+
+    async def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None, data_type: str = "quote") -> pd.DataFrame:
+        params = {"ticker": ticker, "start_datetime": start_datetime, "end_datetime": end_datetime, "data_type": data_type}
+        response = await self._make_request("get_realtime_data", params)
+        if response.get("error"):
+            raise Exception(f"Server error getting realtime data: {response['error']}")
+        return self._parse_df_from_response(response.get("data", []), 'timestamp')
+
+    async def get_latest_price(self, ticker: str) -> float | None:
+        params = {"ticker": ticker}
+        response = await self._make_request("get_latest_price", params)
+        if response.get("error"):
+            raise Exception(f"Server error getting latest price: {response['error']}")
+        return response.get("latest_price")
 
 
-def get_stock_db(db_type: str, db_path: str | None = None) -> StockDBBase:
-    """
-    Factory function to get an instance of a stock database.
-
-    Args:
-        db_type: The type of database ('sqlite' or 'duckdb').
-        db_path: The path to the database file. 
-                 If None, uses default for the chosen db_type.
-
-    Returns:
-        An instance of StockDBBase.
+def get_stock_db(db_type: str, db_config: str | None = None) -> StockDBBase:
+    actual_db_config = db_config
+    if actual_db_config is None:
+        actual_db_config = get_default_db_path(db_type)
     
-    Raises:
-        ValueError: If an unsupported db_type is provided.
-    """
-    actual_db_path = db_path
-    if actual_db_path is None:
-        actual_db_path = get_default_db_path("duckdb" if db_type.lower() == "duckdb" else "db")
-    
-    if db_type.lower() == "sqlite":
-        return StockDBSQLite(actual_db_path)
-    elif db_type.lower() == "duckdb":
-        return StockDBDuckDB(actual_db_path)
+    db_type_lower = db_type.lower()
+    if db_type_lower == "sqlite":
+        return StockDBSQLite(actual_db_config)
+    elif db_type_lower == "duckdb":
+        return StockDBDuckDB(actual_db_config)
+    elif db_type_lower == "remote":
+        return StockDBClient(actual_db_config)
     else:
-        raise ValueError(f"Unsupported database type: {db_type}. Choose 'sqlite' or 'duckdb'.")
-
-# Removed old standalone functions as all operations should go through class instances. 
+        raise ValueError(f"Unsupported database type: {db_type}. Choose 'sqlite', 'duckdb', or 'remote'.")
