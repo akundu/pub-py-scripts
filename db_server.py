@@ -242,6 +242,37 @@ async def handle_db_command(request: web.Request) -> web.Response:
             price = await db_instance.get_latest_price(ticker)
             return web.json_response({"ticker": ticker, "latest_price": price})
 
+        elif command == "execute_sql":
+            sql_query = params.get("sql_query")
+            query_type = params.get("query_type") # "select" or "raw"
+            query_params = params.get("query_params", []) # Default to empty list for params
+
+            if not sql_query or not query_type:
+                return web.json_response({"error": "Missing 'sql_query' or 'query_type' for execute_sql"}, status=400)
+            if query_type not in ["select", "raw"]:
+                return web.json_response({"error": "Invalid 'query_type'. Must be 'select' or 'raw'."}, status=400)
+            if not isinstance(query_params, (list, tuple)):
+                return web.json_response({"error": "'query_params' must be a list or tuple."}, status=400)
+
+            logger.warning(f"Executing SQL query (type: {query_type}): {sql_query} with params: {query_params if query_params else 'None'}. Ensure this is from a trusted source.")
+
+            if query_type == "select":
+                df_result = await db_instance.execute_select_sql(sql_query, tuple(query_params))
+                if df_result.empty:
+                    return web.json_response({"message": "Query executed, no data returned.", "data": []})
+                
+                # Convert datetime columns to ISO format string
+                df_reset = df_result.reset_index(drop=True) # Drop index if it was set by pandas from SQL
+                for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
+                    df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                
+                return web.json_response({"data": df_reset.to_dict(orient='records')})
+            
+            elif query_type == "raw":
+                # Assuming execute_raw_sql returns rowcount or similar int
+                affected_rows = await db_instance.execute_raw_sql(sql_query, tuple(query_params))
+                return web.json_response({"message": "Raw SQL query executed successfully.", "affected_rows": affected_rows})
+
         else:
             return web.json_response({"error": f"Unknown command: {command}"}, status=400)
 
