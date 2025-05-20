@@ -5,8 +5,9 @@ import os
 from abc import ABCMeta, abstractmethod
 import duckdb
 
-DEFAULT_SQLITE_PATH = "stock_data.db"
-DEFAULT_DUCKDB_PATH = "stock_data.duckdb" # Can also be ":memory:"
+DEFAULT_DATA_DIR = './data'
+def get_default_db_path(db_type: str) -> str:   
+    return os.path.join(DEFAULT_DATA_DIR, f"stock_data.{db_type}")
 
 class StockDBBase(metaclass=ABCMeta):
     """
@@ -41,7 +42,7 @@ class StockDBSQLite(StockDBBase):
     """
     A class to manage stock data storage and retrieval in an SQLite database.
     """
-    def __init__(self, db_path: str = DEFAULT_SQLITE_PATH) -> None:
+    def __init__(self, db_path: str = get_default_db_path("db")) -> None:
         super().__init__(db_path)
 
     def _init_db(self) -> None:
@@ -202,7 +203,7 @@ class StockDBDuckDB(StockDBBase):
     """
     A class to manage stock data storage and retrieval in a DuckDB database.
     """
-    def __init__(self, db_path: str = DEFAULT_DUCKDB_PATH) -> None:
+    def __init__(self, db_path: str = get_default_db_path("duckdb")) -> None:
         super().__init__(db_path)
 
     def _init_db(self) -> None:
@@ -378,9 +379,9 @@ def get_stock_db(db_type: str, db_path: str | None = None) -> StockDBBase:
         ValueError: If an unsupported db_type is provided.
     """
     if db_type.lower() == "sqlite":
-        return StockDBSQLite(db_path or DEFAULT_SQLITE_PATH)
+        return StockDBSQLite(db_path or get_default_db_path("db"))
     elif db_type.lower() == "duckdb":
-        return StockDBDuckDB(db_path or DEFAULT_DUCKDB_PATH)
+        return StockDBDuckDB(db_path or get_default_db_path("duckdb"))
     else:
         raise ValueError(f"Unsupported database type: {db_type}. Choose 'sqlite' or 'duckdb'.")
 

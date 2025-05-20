@@ -1,6 +1,6 @@
 from fetch_lists_data import ALL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
 from fetch_symbol_data import fetch_and_save_data
-from stock_db import get_stock_db, StockDBBase, DEFAULT_SQLITE_PATH, DEFAULT_DUCKDB_PATH
+from stock_db import get_stock_db, StockDBBase, get_default_db_path
 
 import asyncio
 from datetime import datetime, timedelta
@@ -34,7 +34,7 @@ async def main():
     # Determine the actual database path to use
     actual_db_path = args.db_path
     if actual_db_path is None:
-        actual_db_path = DEFAULT_DUCKDB_PATH if args.db_type == 'duckdb' else DEFAULT_SQLITE_PATH
+        actual_db_path = get_default_db_path("duckdb") if args.db_type == 'duckdb' else get_default_db_path("db")
 
     # Create a single StockDBBase instance using the factory
     stock_db_instance: StockDBBase = get_stock_db(args.db_type, actual_db_path)

@@ -11,7 +11,7 @@ import duckdb
 # Assuming fetch_symbol_data.py and stock_db.py are in a location Python can find them
 # e.g., same directory or in PYTHONPATH
 from fetch_symbol_data import process_symbol_data, fetch_and_save_data, fetch_bars_single_aiohttp_all_pages, TimeFrame
-from stock_db import get_stock_db, StockDBBase, DEFAULT_SQLITE_PATH, DEFAULT_DUCKDB_PATH
+from stock_db import get_stock_db, StockDBBase, get_default_db_path
 
 @pytest.fixture(params=["sqlite", "duckdb"])
 def db_type(request):

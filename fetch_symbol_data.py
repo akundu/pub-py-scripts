@@ -4,10 +4,9 @@ import pandas as pd
 import os
 import asyncio
 import argparse
-from stock_db import get_stock_db, StockDBBase, DEFAULT_SQLITE_PATH, DEFAULT_DUCKDB_PATH # Import DB functions
+from stock_db import get_stock_db, StockDBBase, get_default_db_path, DEFAULT_DATA_DIR # Import DB functions
 import aiohttp # Added for fully async HTTP calls
 
-DEFAULT_DATA_DIR = './data'
 
 # Alpaca Market Data API base URL
 MARKET_DATA_BASE_URL = "https://data.alpaca.markets/v2"
@@ -234,7 +233,7 @@ async def process_symbol_data(symbol: str,
         # Determine actual db_path if not provided
         actual_db_path = db_path
         if actual_db_path is None:
-            actual_db_path = DEFAULT_DUCKDB_PATH if db_type == 'duckdb' else DEFAULT_SQLITE_PATH
+            actual_db_path = get_default_db_path("duckdb") if db_type == 'duckdb' else get_default_db_path("db")
         current_db_instance = get_stock_db(db_type, actual_db_path)
 
     if start_date is None:
