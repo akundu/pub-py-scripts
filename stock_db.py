@@ -107,8 +107,9 @@ def get_stock_data(ticker: str, start_date: str | None = None, end_date: str | N
     conn.close()
     
     if not df.empty:
-        # Convert the date/datetime column to datetime index using ISO8601 format
-        df[date_col] = pd.to_datetime(df[date_col], format='ISO8601')
+        # Convert the date/datetime column to datetime index
+        # Let pandas infer the format, as it's saved as '%Y-%m-%d %H:%M:%S'
+        df[date_col] = pd.to_datetime(df[date_col])
         df.set_index(date_col, inplace=True)
     
     return df

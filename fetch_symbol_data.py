@@ -1,70 +1,221 @@
-from alpaca_trade_api.rest import REST, TimeFrame
-from datetime import datetime, timedelta
+from alpaca_trade_api.rest import REST, TimeFrame, APIError
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import os
 import asyncio
 import argparse
-from stock_db import init_db, save_stock_data, get_stock_data # Import DB functions
+from stock_db import init_db, save_stock_data, get_stock_data, DEFAULT_DB_PATH # Import DB functions
+import aiohttp # Added for fully async HTTP calls
 
 DEFAULT_DATA_DIR = './data'
-DEFAULT_DB_PATH = 'stock_data.db'
 
-async def fetch_bars(api: REST, symbol: str, timeframe: TimeFrame, start: str, end: str) -> pd.DataFrame:
-    """Asynchronously fetch bars from Alpaca API."""
-    bars = await asyncio.to_thread(
-        api.get_bars,
-        symbol,
-        timeframe,
-        start=start,
-        end=end
-    )
-    return bars.df if bars else pd.DataFrame()
+# Alpaca Market Data API base URL
+MARKET_DATA_BASE_URL = "https://data.alpaca.markets/v2"
+
+def _get_timeframe_string(timeframe: TimeFrame) -> str:
+    if timeframe == TimeFrame.Day:
+        return "1Day"
+    elif timeframe == TimeFrame.Hour:
+        return "1Hour"
+    elif timeframe == TimeFrame.Minute:
+        return "1Min"
+    # Add other mappings if needed, e.g., TimeFrame.Week, TimeFrame.Month
+    # Or handle specific minute intervals like "5Min", "15Min"
+    # For now, supporting what's used.
+    raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+async def fetch_bars_single_page_aiohttp(
+    session: aiohttp.ClientSession, # Pass session
+    symbol: str, 
+    timeframe_enum: TimeFrame, 
+    start_iso: str, 
+    end_iso: str, 
+    api_key: str, 
+    secret_key: str, 
+    limit: int | None = None, 
+    page_token: str | None = None
+) -> tuple[pd.DataFrame, str | None]:
+    """Asynchronously fetch a single page of bars using aiohttp."""
+    
+    timeframe_str = _get_timeframe_string(timeframe_enum)
+    endpoint = f"{MARKET_DATA_BASE_URL}/stocks/{symbol}/bars"
+    
+    headers = {
+        "APCA-API-KEY-ID": api_key,
+        "APCA-API-SECRET-KEY": secret_key,
+        "accept": "application/json"
+    }
+    
+    params = {
+        "start": start_iso,
+        "end": end_iso,
+        "timeframe": timeframe_str,
+        "adjustment": "raw"
+    }
+    if limit is not None:
+        params["limit"] = limit
+    if page_token is not None:
+        params["page_token"] = page_token
+
+    try:
+        async with session.get(endpoint, headers=headers, params=params) as response:
+            response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
+            response_json = await response.json()
+        
+        bars_data = response_json.get("bars", [])
+        next_page_token_resp = response_json.get("next_page_token")
+        
+        if not bars_data:
+            return pd.DataFrame(), next_page_token_resp
+            
+        df = pd.DataFrame(bars_data)
+        # Rename columns to match expected format: o, h, l, c, v -> open, high, low, close, volume
+        # t is the timestamp
+        df.rename(columns={'t': 'timestamp', 'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'}, inplace=True)
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df.set_index('timestamp', inplace=True)
+        
+        # Select only the columns we typically use, if desired
+        # df = df[['open', 'high', 'low', 'close', 'volume']] 
+        # Keeping extra columns like n (trade_count) and vw (vwap) if they exist might be useful
+        
+        return df, next_page_token_resp
+        
+    except aiohttp.ClientError as e:
+        print(f"aiohttp.ClientError fetching bars for {symbol} ({timeframe_str}): {e}")
+        return pd.DataFrame(), None
+    except Exception as e:
+        print(f"Unexpected error processing aiohttp response for {symbol} ({timeframe_str}): {e}")
+        return pd.DataFrame(), None
+
+async def fetch_bars_single_aiohttp_all_pages(
+    symbol: str, 
+    timeframe_enum: TimeFrame, 
+    start_iso: str, 
+    end_iso: str, 
+    api_key: str, 
+    secret_key: str,
+    limit_per_page: int | None = 10000 # Max Alpaca limit is 10000
+) -> pd.DataFrame:
+    """Fetches all pages of bars for a single symbol using aiohttp."""
+    all_bars_df = pd.DataFrame()
+    page_token = None
+    
+    async with aiohttp.ClientSession() as session: # Create session here
+        while True:
+            current_page_df, next_page_token = await fetch_bars_single_page_aiohttp(
+                session, symbol, timeframe_enum, start_iso, end_iso, api_key, secret_key, 
+                limit=limit_per_page, page_token=page_token
+            )
+            
+            if not current_page_df.empty:
+                all_bars_df = pd.concat([all_bars_df, current_page_df])
+            
+            if next_page_token:
+                page_token = next_page_token
+                print(f"Fetching next page for {symbol} ({_get_timeframe_string(timeframe_enum)}) with token: {page_token[:10]}...")
+                await asyncio.sleep(0.2) # Be respectful to the API
+            else:
+                break
+            
+    if not all_bars_df.empty:
+        # Ensure index is UTC DatetimeIndex and named appropriately
+        all_bars_df.index = pd.to_datetime(all_bars_df.index, utc=True)
+        if timeframe_enum == TimeFrame.Day:
+            all_bars_df.index.name = 'date'
+        else:
+            all_bars_df.index.name = 'datetime'
+            
+    return all_bars_df
+
+def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: str, data_dir: str) -> pd.DataFrame:
+    """Helper function to merge new data with existing CSV data and save."""
+    if new_data_df.empty:
+        # print(f"No new {interval_type} data provided for {symbol} to merge into CSV.") # Potentially verbose
+        # Check if CSV exists even if new data is empty, to return existing data if needed for DB save
+        idx_name = 'date' if interval_type == 'daily' else 'datetime'
+        csv_path = f'{data_dir}/{interval_type}/{symbol}_{interval_type}.csv'
+        if os.path.exists(csv_path):
+            try:
+                return pd.read_csv(csv_path, index_col=idx_name, parse_dates=True)
+            except Exception as e:
+                print(f"Error reading existing {interval_type} CSV for {symbol} when new data was empty: {e}")
+        return new_data_df # Return empty if no existing and no new
+
+    idx_name = 'date' if interval_type == 'daily' else 'datetime'
+    csv_path = f'{data_dir}/{interval_type}/{symbol}_{interval_type}.csv'
+    
+    final_df = new_data_df # Start with new data (guaranteed UTC index)
+
+    if os.path.exists(csv_path):
+        try:
+            existing_df = pd.read_csv(csv_path, index_col=idx_name, parse_dates=True)
+            # Ensure existing_df.index is UTC for consistent merging
+            existing_df.index = pd.to_datetime(existing_df.index, utc=True)
+            
+            final_df = pd.concat([existing_df, new_data_df])
+            # Remove duplicates, keeping the last entry (prioritizes new_data_df for overlaps)
+            final_df = final_df[~final_df.index.duplicated(keep='last')]
+        except Exception as e:
+            print(f"Error processing existing {interval_type} CSV for {symbol}: {e}. \
+                  CSV will be overwritten with new data or created if it doesn't exist.")
+            # final_df remains new_data_df if merging fails
+    
+    final_df.sort_index(inplace=True)
+    final_df.to_csv(csv_path)
+    print(f"{interval_type.capitalize()} data for {symbol} merged/saved to CSV. Total rows: {len(final_df)}")
+    return final_df
 
 # Function to fetch and save data for a single symbol
 async def fetch_and_save_data(symbol: str, data_dir: str, db_path: str = DEFAULT_DB_PATH) -> bool:
-    # Alpaca API credentials
     API_KEY = os.getenv('ALPACA_API_KEY')
     API_SECRET = os.getenv('ALPACA_API_SECRET')
     if not API_KEY or not API_SECRET:
         print("Error: ALPACA_API_KEY and ALPACA_API_SECRET environment variables must be set")
         raise ValueError("ALPACA_API_KEY and ALPACA_API_SECRET environment variables must be set")
 
-    BASE_URL = 'https://paper-api.alpaca.markets/v2'
-
-    # Initialize Alpaca REST API
-    alpaca_api = REST(API_KEY, API_SECRET, BASE_URL, api_version='v2')
+    # Note: alpaca_trade_api.REST object is not strictly needed anymore for bar fetching if using direct HTTP,
+    # but other parts of an application might use it.
+    # For this function, we'll pass API_KEY and API_SECRET to our HTTP fetchers.
 
     try:
-        end_date = datetime.now()
+        end_date = datetime.now(timezone.utc)
         start_date_daily = end_date - timedelta(days=5*365)
         start_date_hourly = end_date - timedelta(days=730)
 
-        # Format dates in YYYY-MM-DD format
-        end_date_str = end_date.strftime('%Y-%m-%d')
-        start_date_daily_str = start_date_daily.strftime('%Y-%m-%d')
-        start_date_hourly_str = start_date_hourly.strftime('%Y-%m-%d')
+        end_date_api_str = end_date.isoformat()
+        start_date_daily_api_str = start_date_daily.isoformat()
+        start_date_hourly_api_str = start_date_hourly.isoformat()
+        
+        print(f"Fetching daily data for {symbol} from {start_date_daily_api_str} to {end_date_api_str} via aiohttp...")
+        new_daily_bars = await fetch_bars_single_aiohttp_all_pages(
+            symbol, TimeFrame.Day, start_date_daily_api_str, end_date_api_str, API_KEY, API_SECRET
+        )
+        
+        final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, symbol, 'daily', data_dir)
+        if not final_daily_bars.empty:
+            await asyncio.to_thread(save_stock_data, final_daily_bars, symbol, interval='daily', db_path=db_path)
+            print(f"Daily data for {symbol} also updated in database.")
+        elif new_daily_bars.empty:
+             print(f"No new daily data fetched for {symbol} from API via aiohttp.")
 
-        # Fetch daily data
-        daily_bars = await fetch_bars(alpaca_api, symbol, TimeFrame.Day, start_date_daily_str, end_date_str)
-        if not daily_bars.empty:
-            # Ensure the index is named 'date' for daily data
-            daily_bars.index.name = 'date'
-            daily_bars.to_csv(f'{data_dir}/daily/{symbol}_daily.csv')
-            save_stock_data(daily_bars, symbol, interval='daily', db_path=db_path) # Save to DB
-            print(f"Daily data for {symbol} saved to CSV and database.")
-
-        # Fetch hourly data
-        hourly_bars = await fetch_bars(alpaca_api, symbol, TimeFrame.Hour, start_date_hourly_str, end_date_str)
-        if not hourly_bars.empty:
-            # Ensure the index is named 'datetime' for hourly data
-            hourly_bars.index.name = 'datetime'
-            hourly_bars.to_csv(f'{data_dir}/hourly/{symbol}_hourly.csv')
-            save_stock_data(hourly_bars, symbol, interval='hourly', db_path=db_path) # Save to DB
-            print(f"Hourly data for {symbol} saved to CSV and database.")
+        print(f"Fetching hourly data for {symbol} from {start_date_hourly_api_str} to {end_date_api_str} via aiohttp...")
+        new_hourly_bars = await fetch_bars_single_aiohttp_all_pages(
+            symbol, TimeFrame.Hour, start_date_hourly_api_str, end_date_api_str, API_KEY, API_SECRET
+        )
+        
+        final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, symbol, 'hourly', data_dir)
+        if not final_hourly_bars.empty:
+            await asyncio.to_thread(save_stock_data, final_hourly_bars, symbol, interval='hourly', db_path=db_path)
+            print(f"Hourly data for {symbol} also updated in database.")
+        elif new_hourly_bars.empty:
+             print(f"No new hourly data fetched for {symbol} from API via aiohttp.")
 
         return True
     except Exception as e:
-        print(f"Error fetching data for {symbol}: {e}")
+        print(f"Error in fetch_and_save_data for {symbol} (aiohttp method): {e}")
+        import traceback # For detailed error logging during transition
+        traceback.print_exc() # Print full traceback
         return False
 
 async def process_symbol_data(symbol: str, 

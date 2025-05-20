@@ -103,6 +103,7 @@ symbols:
 - CNC
 - CNP
 - COF
+- COIN
 - COO
 - COP
 - COR
@@ -132,7 +133,6 @@ symbols:
 - DE
 - DECK
 - DELL
-- DFS
 - DG
 - DGX
 - DHI
@@ -504,4 +504,4 @@ symbols:
 - ZBH
 - ZBRA
 - ZTS
-last_updated: '2025-05-18 22:20:40'
+last_updated: '2025-05-19 19:08:37'

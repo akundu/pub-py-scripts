@@ -66,6 +66,7 @@ symbols:
 - BMY
 - BN
 - BNS
+- BNT
 - BP
 - BR
 - BRK.A
@@ -214,7 +215,6 @@ symbols:
 - HEI.A
 - HES
 - HIG
-- HIMS
 - HLN
 - HLT
 - HMC
@@ -501,4 +501,4 @@ symbols:
 - ZBH
 - ZTO
 - ZTS
-last_updated: '2025-05-18 22:20:40'
+last_updated: '2025-05-19 19:08:37'
