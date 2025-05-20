@@ -7,3 +7,4 @@ alpaca-trade-api
 beautifulsoup4 
 lxml
 pyyaml
+alpaca-py
