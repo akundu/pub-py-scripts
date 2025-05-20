@@ -7,38 +7,68 @@ from alpaca.data.enums import DataFeed
 from stock_db import get_stock_db, StockDBBase, get_default_db_path
 import sys
 import traceback
+from pathlib import Path
 
 # Global variable to hold the DB client session, to be closed on exit
 # This is a simple way; for more complex apps, pass it around or use a context manager.
 _db_client_instance_for_cleanup: StockDBBase | None = None
 
-async def trade_data_handler(data, stock_db_instance: StockDBBase | None, symbol_type: str, only_log_updates: bool):
+# --- CSV Saving Logic ---
+def _save_df_to_csv_sync(df: pd.DataFrame, file_path: Path):
+    """Synchronously saves a DataFrame to a CSV file, appending if it exists."""
+    try:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_exists = file_path.exists()
+        df.to_csv(file_path, mode='a' if file_exists else 'w', header=not file_exists, index=True)
+        # print(f"Data {'appended' if file_exists else 'written'} to {file_path}")
+    except Exception as e:
+        print(f"Error saving data to CSV {file_path}: {e}", file=sys.stderr)
+        # traceback.print_exc()
+
+async def save_df_to_daily_csv(df: pd.DataFrame, symbol: str, feed_type: str, csv_data_dir: str):
+    """
+    Asynchronously saves a DataFrame to a daily CSV file for a given symbol and feed type.
+    File path: csv_data_dir/SYMBOL/SYMBOL_YYYY-MM-DD_feedtype.csv
+    """
+    if not df.empty and df.index.name == 'timestamp' and isinstance(df.index, pd.DatetimeIndex):
+        # Assuming all data in df is for the same day, take the date from the first timestamp
+        # Timestamps from Alpaca are UTC.
+        date_str = df.index[0].strftime('%Y-%m-%d')
+        
+        symbol_dir = Path(csv_data_dir) / symbol.upper() # Use uppercase for directory consistency
+        file_name = f"{symbol.upper()}_{date_str}_{feed_type}.csv"
+        file_path = symbol_dir / file_name
+        
+        await asyncio.to_thread(_save_df_to_csv_sync, df.copy(), file_path)
+    else:
+        print(f"DataFrame for {symbol} is empty or index is not a proper timestamp. Skipping CSV save.", file=sys.stderr)
+
+# --- End CSV Saving Logic ---
+
+async def trade_data_handler(data, stock_db_instance: StockDBBase | None, symbol_type: str, only_log_updates: bool, csv_data_dir: str | None):
     """Asynchronous handler to process and optionally save incoming trade data."""
-    # For trades, every trade is an update, so only_log_updates might not be as relevant
-    # unless we compare against a last trade price, but instructions are to save trades.
     print(f"Trade for {data.symbol} ({symbol_type}): Price - {data.price}, Size - {data.size} at {data.timestamp}")
+    
+    df_data = {
+        'timestamp': [pd.to_datetime(data.timestamp, utc=True)],
+        'price': [data.price],
+        'size': [data.size]
+    }
+    trade_df = pd.DataFrame(df_data).set_index('timestamp')
+
     if stock_db_instance:
         try:
-            df_data = {
-                'timestamp': [pd.to_datetime(data.timestamp, utc=True)],
-                'price': [data.price],
-                'size': [data.size]
-                # 'ask_price', 'ask_size' will be None for trades in DB schema
-            }
-            trade_df = pd.DataFrame(df_data).set_index('timestamp')
-            # Use asyncio.create_task if save_realtime_data is truly async and non-blocking
-            # If it involves significant CPU or sync I/O not handled by run_in_executor internally,
-            # consider asyncio.to_thread for the client call as well if it becomes a bottleneck.
-            # For now, assuming StockDBClient._make_request is efficiently async.
             await stock_db_instance.save_realtime_data(trade_df, data.symbol, data_type="trade")
         except Exception as e:
-            print(f"Error saving trade data for {data.symbol} to DB: {e}")
-            # traceback.print_exc()
+            print(f"Error saving trade data for {data.symbol} to DB: {e}", file=sys.stderr)
+
+    if csv_data_dir:
+        await save_df_to_daily_csv(trade_df, data.symbol, "trade", csv_data_dir)
 
 # Closure for quote data handler to manage last_prices
 _last_quote_prices = {} # Dictionary to store last prices per symbol {symbol: {bid_price: X, ask_price: Y}}
 
-async def quote_data_handler(data, stock_db_instance: StockDBBase | None, symbol_type: str, only_log_updates: bool):
+async def quote_data_handler(data, stock_db_instance: StockDBBase | None, symbol_type: str, only_log_updates: bool, csv_data_dir: str | None):
     """Asynchronous handler to process and optionally save incoming quote data."""
     global _last_quote_prices
     symbol = data.symbol
@@ -56,24 +86,28 @@ async def quote_data_handler(data, stock_db_instance: StockDBBase | None, symbol
 
     if not only_log_updates or prices_have_changed:
         print(f"Quote for {symbol} ({symbol_type}): Bid - {data.bid_price} (Size: {data.bid_size}), Ask - {data.ask_price} (Size: {data.ask_size}) at {data.timestamp}")
+        
+        df_data = {
+            'timestamp': [pd.to_datetime(data.timestamp, utc=True)],
+            'price': [data.bid_price], # Using bid_price as the primary 'price' for quotes
+            'size': [data.bid_size],
+            'ask_price': [data.ask_price],
+            'ask_size': [data.ask_size]
+        }
+        quote_df = pd.DataFrame(df_data).set_index('timestamp')
+
         if stock_db_instance:
             try:
-                df_data = {
-                    'timestamp': [pd.to_datetime(data.timestamp, utc=True)],
-                    'price': [data.bid_price], # Using bid_price as the primary 'price' for quotes
-                    'size': [data.bid_size],
-                    'ask_price': [data.ask_price],
-                    'ask_size': [data.ask_size]
-                }
-                quote_df = pd.DataFrame(df_data).set_index('timestamp')
                 await stock_db_instance.save_realtime_data(quote_df, symbol, data_type="quote")
             except Exception as e:
-                print(f"Error saving quote data for {symbol} to DB: {e}")
-                # traceback.print_exc()
+                print(f"Error saving quote data for {symbol} to DB: {e}", file=sys.stderr)
+        
+        if csv_data_dir:
+            await save_df_to_daily_csv(quote_df, symbol, "quote", csv_data_dir)
     
     _last_quote_prices[symbol] = current_prices
 
-def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[str], feed: str, inferred_symbol_type: str, only_log_updates: bool):
+def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[str], feed: str, inferred_symbol_type: str, only_log_updates: bool, csv_data_dir: str | None):
     """Sets up and runs the WebSocket stream for a given list of symbols and type."""
     api_key = os.getenv("ALPACA_API_KEY")
     secret_key = os.getenv("ALPACA_API_SECRET")
@@ -94,13 +128,15 @@ def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[st
 
     symbols_str = ", ".join(symbols)
     print(f"Attempting to stream {feed} for {inferred_symbol_type} symbols: {symbols_str}", file=sys.stderr)
+    if csv_data_dir:
+        print(f"Streaming data will also be saved to CSVs in: {Path(csv_data_dir).resolve()}", file=sys.stderr)
 
     # Define handlers within the scope where stock_db_instance etc. are available
     async def internal_quote_handler(data):
-        await quote_data_handler(data, stock_db_instance, inferred_symbol_type, only_log_updates)
+        await quote_data_handler(data, stock_db_instance, inferred_symbol_type, only_log_updates, csv_data_dir)
 
     async def internal_trade_handler(data):
-        await trade_data_handler(data, stock_db_instance, inferred_symbol_type, only_log_updates)
+        await trade_data_handler(data, stock_db_instance, inferred_symbol_type, only_log_updates, csv_data_dir)
 
     try:
         if inferred_symbol_type == "stock":
@@ -151,7 +187,7 @@ def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[st
 
 async def main():
     global _db_client_instance_for_cleanup
-    parser = argparse.ArgumentParser(description="Stream real-time market data and optionally save it to a database.")
+    parser = argparse.ArgumentParser(description="Stream real-time market data and optionally save it to a database and/or CSV files.")
     parser.add_argument("symbols", nargs='+',
                         help="One or more stock or crypto symbols (e.g., SPY AAPL, or BTC/USD ETH/USD). Crypto symbols should contain /.")
     parser.add_argument("--feed", choices=["quotes", "trades"], default="quotes",
@@ -174,6 +210,12 @@ async def main():
     parser.add_argument('--log-all-data', dest='only_log_updates', action='store_false',
                         help="Log/save all incoming quote data, regardless of price changes.")
     parser.set_defaults(only_log_updates=True)
+
+    # CSV arguments group
+    csv_group = parser.add_argument_group(title="CSV Options")
+    csv_group.add_argument("--csv-data-dir", type=str, default=None,
+                        help="Base directory to save market data as CSV files. If provided, data is saved to CSV_DATA_DIR/SYMBOL/SYMBOL_YYYY-MM-DD_feedtype.csv.")
+    
     args = parser.parse_args()
 
     if not args.symbols:
@@ -217,6 +259,14 @@ async def main():
     else:
         print("No database configured. Market data will be printed to console but not saved.", file=sys.stderr)
 
+    if args.csv_data_dir:
+        print(f"CSV data will be saved in: {Path(args.csv_data_dir).resolve()}", file=sys.stderr)
+        # Create the base directory if it doesn't exist
+        try:
+            Path(args.csv_data_dir).mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            print(f"Error creating base CSV directory {args.csv_data_dir}: {e}. CSV saving might fail.", file=sys.stderr)
+
     stock_symbols = []
     crypto_symbols = []
 
@@ -231,11 +281,11 @@ async def main():
     if stock_symbols:
         print(f"Preparing to stream stocks: { ', '.join(stock_symbols) }", file=sys.stderr)
         # setup_and_run_stream is blocking, so it needs to run in a thread
-        tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, stock_symbols, args.feed, "stock", args.only_log_updates))
+        tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, stock_symbols, args.feed, "stock", args.only_log_updates, args.csv_data_dir))
     
     if crypto_symbols:
         print(f"Preparing to stream cryptos: { ', '.join(crypto_symbols) }", file=sys.stderr)
-        tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, crypto_symbols, args.feed, "crypto", args.only_log_updates))
+        tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, crypto_symbols, args.feed, "crypto", args.only_log_updates, args.csv_data_dir))
 
     if not tasks_to_run:
         print("No valid stock or crypto symbols to stream based on input. Exiting.", file=sys.stderr)
