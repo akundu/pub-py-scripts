@@ -2,7 +2,7 @@ import yfinance as yf
 import pandas as pd
 import argparse
 from datetime import datetime, timedelta
-from stock_db import StockDB, DEFAULT_DB_PATH
+from stock_db import StockDB, get_default_db_path
 
 # from backtrading import fetch_data, run_backtest # Assuming this is from another local module
 
@@ -80,16 +80,16 @@ def main():
     parser.add_argument('--start', help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end', help='End date (YYYY-MM-DD)')
     parser.add_argument('--current', action='store_true', help='Get only current prices')
-    parser.add_argument("--db-path", default=DEFAULT_DB_PATH, help=f"Path to the SQLite database file (default: {DEFAULT_DB_PATH})")
+    parser.add_argument("--db-path", default=get_default_db_path("db"), help=f"Path to the SQLite database file (default: {get_default_db_path("db")})")
 
     args = parser.parse_args()
 
     # Update global stock_db_instance if a custom path is provided
     global stock_db_instance
-    if args.db_path != DEFAULT_DB_PATH:
+    if args.db_path != get_default_db_path("db"):
         print(f"Using custom database path: {args.db_path}")
         stock_db_instance = StockDB(db_path=args.db_path)
-    # If default, the global instance is already initialized with DEFAULT_DB_PATH
+    # If default, the global instance is already initialized with get_default_db_path("db")
     # The _init_db is called in StockDB constructor, so no explicit init_db() call needed here.
 
     for ticker_arg in args.tickers:

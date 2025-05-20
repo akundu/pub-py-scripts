@@ -82,6 +82,6 @@ def main(): # main is now synchronous
 
 if __name__ == "__main__":
     try:
-        main() # Call the synchronous main
+        main()
     except KeyboardInterrupt:
         print("Stream interrupted by user.") 
