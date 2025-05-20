@@ -85,8 +85,12 @@ class StockDB:
 
             # Convert timestamps to strings for BETWEEN clause and ensure they are datetime objects first
             df_copy[date_col] = pd.to_datetime(df_copy[date_col])
-            min_date_str = df_copy[date_col].min().strftime('%Y-%m-%d %H:%M:%S')
-            max_date_str = df_copy[date_col].max().strftime('%Y-%m-%d %H:%M:%S')
+            if interval == 'daily':
+                min_date_str = df_copy[date_col].min().strftime('%Y-%m-%d')
+                max_date_str = df_copy[date_col].max().strftime('%Y-%m-%d')
+            else: # hourly
+                min_date_str = df_copy[date_col].min().strftime('%Y-%m-%d %H:%M:%S')
+                max_date_str = df_copy[date_col].max().strftime('%Y-%m-%d %H:%M:%S')
             
             # Delete existing data for the date range
             cursor = conn.cursor()
@@ -98,7 +102,10 @@ class StockDB:
             # conn.commit() # Commit is handled by context manager upon exiting 'with' if no errors
 
             # Convert datetime column to string format before saving
-            df_copy[date_col] = df_copy[date_col].dt.strftime('%Y-%m-%d %H:%M:%S')
+            if interval == 'daily':
+                df_copy[date_col] = df_copy[date_col].dt.strftime('%Y-%m-%d')
+            else: # hourly
+                df_copy[date_col] = df_copy[date_col].dt.strftime('%Y-%m-%d %H:%M:%S')
             
             # Save to database
             df_copy.to_sql(table, conn, if_exists='append', index=False)
@@ -127,9 +134,13 @@ class StockDB:
         
         if not df.empty:
             # Convert the date/datetime column to datetime index
-            df[date_col] = pd.to_datetime(df[date_col], format='ISO8601', errors='coerce')
+            if interval == 'daily':
+                df[date_col] = pd.to_datetime(df[date_col], format='%Y-%m-%d', errors='coerce')
+            else: # hourly
+                df[date_col] = pd.to_datetime(df[date_col], format='%Y-%m-%d %H:%M:%S', errors='coerce')
             df.set_index(date_col, inplace=True)
-            df.dropna(subset=[df.index.name], inplace=True) # Remove rows where index conversion failed
+            # df.dropna(subset=[df.index.name], inplace=True) # Remove rows where index conversion failed
+            df = df[df.index.notna()] # Remove rows where index conversion (to NaT) failed
         
         return df
 

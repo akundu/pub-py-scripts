@@ -245,14 +245,15 @@ async def process_symbol_data(symbol: str,
         print(f"Attempting to retrieve {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})...")
         # Use the instance method
         data_df = current_db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval=timeframe)
+        
         if not data_df.empty:
-            min_date_str = data_df.index.min().strftime('%Y-%m-%d')
-            if start_date and min_date_str > start_date:
-                print(f"Data found in DB, but it does not cover the requested start date {start_date}. Min date found: {min_date_str}")
-                data_df = pd.DataFrame() 
-            else:
-                action_taken = f"Data for {symbol} ({timeframe}) retrieved from database."
-                print(action_taken)
+            action_taken = f"Data for {symbol} ({timeframe}) retrieved from database."
+            print(action_taken)
+            
+            # Informational: check if data starts later than requested, due to non-trading days for example
+            min_date_in_df = data_df.index.min().strftime('%Y-%m-%d')
+            if start_date and min_date_in_df > start_date:
+                print(f"Note: Data retrieved from DB starts at {min_date_in_df}, after the requested start date {start_date} (e.g., due to non-trading days).")
         else:
             print(f"No {timeframe} data found for {symbol} in the database for the specified range.")
             if query_only:
