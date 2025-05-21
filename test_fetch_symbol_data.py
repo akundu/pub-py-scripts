@@ -4,15 +4,14 @@ from datetime import datetime, timedelta, timezone
 import os
 import tempfile
 from unittest.mock import patch, MagicMock, AsyncMock
-import asyncio
-import sqlite3
-import duckdb
+from pathlib import Path
+from common.stock_db import get_stock_db, get_default_db_path 
 
 # Assuming fetch_symbol_data.py and stock_db.py are in a location Python can find them
 # e.g., same directory or in PYTHONPATH
 from fetch_symbol_data import process_symbol_data, fetch_and_save_data, fetch_bars_single_aiohttp_all_pages, TimeFrame
-from stock_db import get_stock_db, StockDBBase, get_default_db_path
 from alpaca_trade_api.rest import TimeFrame as AlpacaTimeFrame
+
 
 @pytest.fixture(params=["sqlite", "duckdb"])
 def db_type(request):

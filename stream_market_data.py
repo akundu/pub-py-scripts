@@ -4,7 +4,7 @@ import os
 import pandas as pd
 from alpaca.data.live import StockDataStream, CryptoDataStream
 from alpaca.data.enums import DataFeed
-from stock_db import get_stock_db, StockDBBase, get_default_db_path
+from common.stock_db import get_stock_db, StockDBBase, get_default_db_path
 import sys
 import traceback
 from pathlib import Path
@@ -13,6 +13,9 @@ import threading
 # Global variable to hold the DB client session, to be closed on exit
 # This is a simple way; for more complex apps, pass it around or use a context manager.
 _db_client_instance_for_cleanup: StockDBBase | None = None
+
+
+from data_fetchers import get_data_fetcher # Assuming data_fetchers.py is in the same directory or PYTHONPATH
 
 # --- Static Display Manager ---
 class StaticDisplayManager:

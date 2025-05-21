@@ -4,9 +4,8 @@ from pathlib import Path
 import pandas as pd
 import sys
 import asyncio
-from stock_db import get_stock_db
+from common.stock_db import get_stock_db
 
-# Removed Placeholder for SocketDBConnection
 
 async def main():
     parser = argparse.ArgumentParser(description="Load stock data from a given CSV file into a remote stock DB server in chunks.")

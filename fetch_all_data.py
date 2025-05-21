@@ -1,11 +1,12 @@
 from fetch_lists_data import ALL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
 from fetch_symbol_data import fetch_and_save_data
-from stock_db import get_stock_db, StockDBBase, get_default_db_path
-
+from common.stock_db import get_stock_db, StockDBBase, get_default_db_path
 import asyncio
 from datetime import datetime, timedelta
 import os
 import argparse
+import sys
+from pathlib import Path
 
 # Main function to orchestrate fetching
 async def main():

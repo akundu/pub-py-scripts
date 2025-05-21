@@ -3,10 +3,12 @@ import asyncio
 import os
 import pandas as pd
 from aiohttp import web
-from stock_db import get_stock_db, StockDBBase 
+from common.stock_db import get_stock_db, StockDBBase 
 import traceback
 import logging
 from logging.handlers import RotatingFileHandler
+import sys
+from pathlib import Path
 
 # Global logger instance
 logger = logging.getLogger("db_server_logger")
@@ -341,4 +343,27 @@ if __name__ == "__main__":
     except Exception as e:
         # Use a basic print here if logger isn't even set up yet or fails
         print(f"Unhandled exception in asyncio.run or during very early startup: {e}")
-        traceback.print_exc() 
+        traceback.print_exc()
+
+# --- BEGIN: Dynamic import of common.stock_db from parent's 'common' directory ---
+_script_path = Path(__file__).resolve()
+_project_root_path_str = str(_script_path.parent) # Assumes script is in 'stocks' directory
+
+sys.path.insert(0, _project_root_path_str)
+
+try:
+    from common.stock_db import get_stock_db, StockDBBase
+except ImportError as e:
+    print(f"Error: Could not import from 'common.stock_db' module.\n"
+          f"Attempted to add '{_project_root_path_str}' to sys.path.\n"
+          f"Please ensure 'common/stock_db.py' exists relative to that path.\nOriginal error: {e}", file=sys.stderr)
+    sys.exit(1)
+finally:
+    if sys.path[0] == _project_root_path_str:
+        sys.path.pop(0)
+    else:
+        try:
+            sys.path.remove(_project_root_path_str)
+        except ValueError:
+            pass
+# --- END: Dynamic import --- 

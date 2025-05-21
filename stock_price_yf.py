@@ -2,7 +2,10 @@ import yfinance as yf
 import pandas as pd
 import argparse
 from datetime import datetime, timedelta
-from stock_db import StockDB, get_default_db_path
+import sys
+from pathlib import Path
+from common.stock_db import StockDB, get_default_db_path # Assuming StockDB is an alias or class in stock_db you meant to use
+
 
 # from backtrading import fetch_data, run_backtest # Assuming this is from another local module
 

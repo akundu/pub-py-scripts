@@ -5,7 +5,11 @@ import os
 import tempfile
 import sqlite3
 import duckdb
-from stock_db import get_stock_db, StockDBBase, get_default_db_path
+import sys
+from pathlib import Path
+from common.stock_db import get_stock_db, StockDBBase, get_default_db_path
+
+import asyncio
 
 
 @pytest.fixture(params=["sqlite", "duckdb"])
