@@ -15,8 +15,6 @@ import threading
 _db_client_instance_for_cleanup: StockDBBase | None = None
 
 
-from data_fetchers import get_data_fetcher # Assuming data_fetchers.py is in the same directory or PYTHONPATH
-
 # --- Static Display Manager ---
 class StaticDisplayManager:
     def __init__(self, all_symbols: list[str], output_handle=sys.stdout):
