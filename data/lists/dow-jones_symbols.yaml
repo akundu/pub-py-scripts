@@ -1,0 +1,34 @@
+type: dow-jones
+count: 30
+symbols:
+- AAPL
+- AMGN
+- AMZN
+- AXP
+- BA
+- CAT
+- CRM
+- CSCO
+- CVX
+- DIS
+- GS
+- HD
+- HON
+- IBM
+- JNJ
+- JPM
+- KO
+- MCD
+- MMM
+- MRK
+- MSFT
+- NKE
+- NVDA
+- PG
+- SHW
+- TRV
+- UNH
+- V
+- VZ
+- WMT
+last_updated: '2025-05-19 19:08:37'
