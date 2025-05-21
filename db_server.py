@@ -269,9 +269,10 @@ async def handle_db_command(request: web.Request) -> web.Response:
                 return web.json_response({"data": df_reset.to_dict(orient='records')})
             
             elif query_type == "raw":
-                # Assuming execute_raw_sql returns rowcount or similar int
-                affected_rows = await db_instance.execute_raw_sql(sql_query, tuple(query_params))
-                return web.json_response({"message": "Raw SQL query executed successfully.", "affected_rows": affected_rows})
+                # Now expects a list of dicts (potentially empty)
+                # Binary data within this list of dicts should already be base64 encoded by the DB layer.
+                result_data = await db_instance.execute_raw_sql(sql_query, tuple(query_params))
+                return web.json_response({"message": "Raw SQL query executed.", "data": result_data})
 
         else:
             return web.json_response({"error": f"Unknown command: {command}"}, status=400)

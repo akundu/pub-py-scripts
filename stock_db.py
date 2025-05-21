@@ -7,6 +7,8 @@ import duckdb
 import asyncio
 import aiohttp
 import json
+import base64
+from typing import Any
 
 DEFAULT_DATA_DIR = './data'
 def get_default_db_path(db_type: str) -> str:   
@@ -50,6 +52,17 @@ class StockDBBase(metaclass=ABCMeta):
     @abstractmethod
     async def get_latest_price(self, ticker: str) -> float | None:
         """Get the most recent price for a ticker from any available data (realtime, hourly, daily)."""
+        pass
+
+    @abstractmethod
+    async def execute_select_sql(self, sql_query: str, params: tuple = ()) -> pd.DataFrame:
+        """Execute a direct SELECT SQL query and return results as a DataFrame."""
+        pass
+
+    @abstractmethod
+    async def execute_raw_sql(self, sql_query: str, params: tuple = ()) -> list[dict[str, Any]]:
+        """Execute a raw SQL query (INSERT, UPDATE, DELETE, DDL potentially with RETURNING) 
+           and return resulting rows if any, with binary data Base64 encoded."""
         pass
 
 class StockDBSQLite(StockDBBase):
@@ -278,6 +291,40 @@ class StockDBSQLite(StockDBBase):
             
         return latest_price
 
+    async def execute_select_sql(self, sql_query: str, params: tuple = ()) -> pd.DataFrame:
+        """Execute a direct SELECT SQL query on SQLite and return results as a DataFrame."""        
+        def _run_sync():
+            with sqlite3.connect(self.db_path) as conn:
+                df = pd.read_sql_query(sql_query, conn, params=params)
+            return df
+        return await asyncio.get_event_loop().run_in_executor(None, _run_sync)
+
+    async def execute_raw_sql(self, sql_query: str, params: tuple = ()) -> list[dict[str, Any]]:
+        """Execute a raw SQL query on SQLite. If it returns data (e.g., RETURNING clause),
+           that data is returned with binary fields Base64 encoded. Otherwise, an empty list is returned."""
+        def _run_sync() -> list[dict[str, Any]]:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(sql_query, params)
+                
+                results = []
+                if cursor.description: # Check if the query was meant to return data
+                    column_names = [desc[0] for desc in cursor.description]
+                    rows = cursor.fetchall()
+                    for row in rows:
+                        record = {}
+                        for i, value in enumerate(row):
+                            if isinstance(value, bytes):
+                                record[column_names[i]] = base64.b64encode(value).decode('utf-8')
+                            else:
+                                record[column_names[i]] = value
+                        results.append(record)
+                conn.commit() # Commit changes regardless of RETURNING clause
+                # Note: cursor.rowcount would give affected rows for DML without RETURNING.
+                # Current design returns data rows if available, otherwise empty list for this path.
+                return results
+        return await asyncio.get_event_loop().run_in_executor(None, _run_sync)
+
 class StockDBDuckDB(StockDBBase):
     """
     A class to manage stock data storage and retrieval in a DuckDB database.
@@ -476,6 +523,43 @@ class StockDBDuckDB(StockDBBase):
             
         return latest_price
 
+    async def execute_select_sql(self, sql_query: str, params: tuple = ()) -> pd.DataFrame:
+        """Execute a direct SELECT SQL query on DuckDB and return results as a DataFrame."""
+        def _run_sync():
+            with duckdb.connect(database=self.db_path, read_only=True) as conn:
+                df = conn.execute(sql_query, parameters=list(params) if params else []).fetchdf()
+            return df
+        return await asyncio.get_event_loop().run_in_executor(None, _run_sync)
+
+    async def execute_raw_sql(self, sql_query: str, params: tuple = ()) -> list[dict[str, Any]]:
+        """Execute a raw SQL query on DuckDB. If it returns data (e.g., RETURNING clause),
+           that data is returned with binary fields Base64 encoded. Otherwise, an empty list is returned."""
+        def _run_sync() -> list[dict[str, Any]]:
+            with duckdb.connect(database=self.db_path, read_only=False) as conn:
+                rel = conn.execute(sql_query, parameters=list(params) if params else [])
+                results = []
+                # DuckDB's relation object (rel) might not have a .description like sqlite cursor before fetching.
+                # We fetch data first, then check if any rows were returned.
+                try:
+                    data_rows = rel.fetchall() # Returns list of tuples
+                    if data_rows: # If there are rows, there must be columns
+                        column_names = [desc[0] for desc in rel.description] # Now description should be available
+                        for row in data_rows:
+                            record = {}
+                            for i, value in enumerate(row):
+                                if isinstance(value, bytes):
+                                    record[column_names[i]] = base64.b64encode(value).decode('utf-8')
+                                else:
+                                    record[column_names[i]] = value
+                            results.append(record)
+                except Exception as e:
+                    # This might happen if the query is pure DDL or doesn't produce a result set that can be fetched.
+                    # In such cases, we expect no data, so `results` remains empty.
+                    # print(f"DuckDB: Note during raw SQL execution for query '{sql_query[:50]}...': {e}")
+                    pass # `results` will be empty, which is the intended return for no data output
+                return results
+        return await asyncio.get_event_loop().run_in_executor(None, _run_sync)
+
 class StockDBClient(StockDBBase):
     """
     A client class that implements the StockDBBase interface by sending
@@ -591,6 +675,29 @@ class StockDBClient(StockDBBase):
         if response.get("error"):
             raise Exception(f"Server error getting latest price: {response['error']}")
         return response.get("latest_price")
+
+    async def execute_select_sql(self, sql_query: str, params: tuple = ()) -> pd.DataFrame:
+        server_params = {
+            "sql_query": sql_query,
+            "query_type": "select",
+            "query_params": list(params) # Server expects a list
+        }
+        response = await self._make_request("execute_sql", server_params)
+        if response.get("error"):
+            raise Exception(f"Server error executing select SQL: {response.get('details', response['error'])}")
+        return self._parse_df_from_response(response.get("data", []), 'timestamp') # Assuming timestamp or date will be handled by _parse
+
+    async def execute_raw_sql(self, sql_query: str, params: tuple = ()) -> list[dict[str, Any]]:
+        server_params = {
+            "sql_query": sql_query,
+            "query_type": "raw",
+            "query_params": list(params) # Server expects a list
+        }
+        response = await self._make_request("execute_sql", server_params)
+        if response.get("error"):
+            raise Exception(f"Server error executing raw SQL: {response.get('details', response['error'])}")
+        # Expects server to return a list of dicts under "data" key now
+        return response.get("data", []) 
 
 
 def get_stock_db(db_type: str, db_config: str | None = None) -> StockDBBase:
