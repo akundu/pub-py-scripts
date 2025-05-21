@@ -170,7 +170,7 @@ def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: s
     return final_df
 
 # Function to fetch and save data for a single symbol
-async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: StockDBBase) -> bool:
+async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: StockDBBase, all_time: bool = True, days_back: int | None = None) -> bool:
     # API_KEY and API_SECRET are fetched here, as this function makes direct API calls
     API_KEY = os.getenv('ALPACA_API_KEY')
     API_SECRET = os.getenv('ALPACA_API_SECRET')
@@ -180,8 +180,19 @@ async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: Sto
 
     try:
         end_date = datetime.now(timezone.utc)
-        start_date_daily = end_date - timedelta(days=5*365)
-        start_date_hourly = end_date - timedelta(days=730)
+        
+        if days_back is not None:
+            start_date_daily = end_date - timedelta(days=days_back)
+            start_date_hourly = end_date - timedelta(days=min(days_back, 730)) # Max 2 years for hourly for sensible data size
+        elif all_time:
+            # Default to existing behavior if all_time is True or no specific interval is given
+            start_date_daily = end_date - timedelta(days=5*365) # Default 5 years for daily
+            start_date_hourly = end_date - timedelta(days=730) # Default 2 years for hourly
+        else:
+            # This case should ideally not be reached if CLI args are mutually exclusive and one is always effectively set
+            print(f"Warning: No valid time interval specified for {symbol}. Defaulting to all_time behavior.")
+            start_date_daily = end_date - timedelta(days=5*365)
+            start_date_hourly = end_date - timedelta(days=730)
 
         end_date_api_str = end_date.isoformat()
         start_date_daily_api_str = start_date_daily.isoformat()

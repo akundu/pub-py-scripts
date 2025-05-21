@@ -30,6 +30,13 @@ async def main():
     parser.add_argument("--db-path", type=str, default=None,
                         help=f"Path to the database file. If not provided, uses default for selected db-type.")
     
+    # Time interval for fetching market data
+    time_group = parser.add_mutually_exclusive_group()
+    time_group.add_argument('--all-time', action='store_true', default=True,
+                            help='Fetch all available historical market data. Default behavior.')
+    time_group.add_argument('--days-back', type=int,
+                            help='Number of days back to fetch historical market data.')
+    
     args = parser.parse_args()
 
     # Determine the actual database path to use
@@ -68,7 +75,7 @@ async def main():
             
             async def fetch_with_semaphore(symbol: str) -> None:
                 # Pass the stock_db_instance to fetch_and_save_data
-                task_func = fetch_and_save_data(symbol, args.data_dir, stock_db_instance)
+                task_func = fetch_and_save_data(symbol, args.data_dir, stock_db_instance, args.all_time, args.days_back)
                 if semaphore:
                     async with semaphore:
                         await task_func
