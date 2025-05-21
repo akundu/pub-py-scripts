@@ -121,36 +121,61 @@ async def save_df_to_daily_csv(df: pd.DataFrame, symbol: str, feed_type: str, cs
 
 # --- End CSV Saving Logic ---
 
-async def trade_data_handler(data, stock_db_instance: StockDBBase | None, symbol_type: str, only_log_updates: bool, csv_data_dir: str | None, display_manager: StaticDisplayManager | None):
+async def trade_data_handler(
+    data, 
+    stock_db_instance: StockDBBase | None, 
+    symbol_type: str, 
+    only_log_updates: bool, 
+    csv_data_dir: str | None, 
+    display_manager: StaticDisplayManager | None,
+    save_max_retries: int,
+    save_retry_delay: float
+):
     """Asynchronous handler to process and optionally save incoming trade data."""
     time_str = pd.to_datetime(data.timestamp, utc=True).strftime('%H:%M:%S.%f')[:-3]
     if display_manager:
         data_str = f"Trade  : Price: {data.price:<8.2f} (Sz: {data.size:<5}) @ {time_str}"
         display_manager.update_symbol(data.symbol, data_str)
     else:
-        # Default to printing to stdout if static display is not active
         print(f"Trade for {data.symbol} ({symbol_type}): Price - {data.price}, Size - {data.size} at {data.timestamp}")
     
-    df_data = {
+    trade_df = pd.DataFrame({
         'timestamp': [pd.to_datetime(data.timestamp, utc=True)],
         'price': [data.price],
         'size': [data.size]
-    }
-    trade_df = pd.DataFrame(df_data).set_index('timestamp')
+    }).set_index('timestamp')
 
-    if stock_db_instance:
+    # Retry logic for saving trade data
+    retry_count = 0
+    save_successful = False
+    while retry_count < save_max_retries and not save_successful:
         try:
-            await stock_db_instance.save_realtime_data(trade_df, data.symbol, data_type="trade")
+            if stock_db_instance:
+                await stock_db_instance.save_realtime_data(trade_df, data.symbol, data_type="trade")
+            if csv_data_dir:
+                await save_df_to_daily_csv(trade_df, data.symbol, "trade", csv_data_dir)
+            save_successful = True # Mark as successful if both operations (if applicable) complete
         except Exception as e:
-            print(f"Error saving trade data for {data.symbol} to DB: {e}", file=sys.stderr)
+            retry_count += 1
+            if retry_count < save_max_retries:
+                print(f"Error saving trade data for {data.symbol} (attempt {retry_count}/{save_max_retries}): {e}. Retrying in {save_retry_delay}s...", file=sys.stderr)
+                await asyncio.sleep(save_retry_delay)
+            else:
+                print(f"Failed to save trade data for {data.symbol} after {save_max_retries} attempts: {e}", file=sys.stderr)
+                # Optionally, could raise an exception here or log to a persistent error log
 
-    if csv_data_dir:
-        await save_df_to_daily_csv(trade_df, data.symbol, "trade", csv_data_dir)
+_last_quote_prices = {}
 
-# Closure for quote data handler to manage last_prices
-_last_quote_prices = {} # Dictionary to store last prices per symbol {symbol: {bid_price: X, ask_price: Y}}
-
-async def quote_data_handler(data, stock_db_instance: StockDBBase | None, symbol_type: str, only_log_updates: bool, csv_data_dir: str | None, display_manager: StaticDisplayManager | None):
+async def quote_data_handler(
+    data, 
+    stock_db_instance: StockDBBase | None, 
+    symbol_type: str, 
+    only_log_updates: bool, 
+    csv_data_dir: str | None, 
+    display_manager: StaticDisplayManager | None,
+    save_max_retries: int,
+    save_retry_delay: float
+):
     """Asynchronous handler to process and optionally save incoming quote data."""
     global _last_quote_prices
     symbol = data.symbol
@@ -172,30 +197,48 @@ async def quote_data_handler(data, stock_db_instance: StockDBBase | None, symbol
             data_str = f"Quote  : Bid: {data.bid_price:<8.2f} (Sz: {data.bid_size:<5}) Ask: {data.ask_price:<8.2f} (Sz: {data.ask_size:<5}) @ {time_str}"
             display_manager.update_symbol(symbol, data_str)
         else:
-            # Default to printing to stdout if static display is not active
             print(f"Quote for {symbol} ({symbol_type}): Bid - {data.bid_price} (Size: {data.bid_size}), Ask - {data.ask_price} (Size: {data.ask_size}) at {data.timestamp}")
         
-        df_data = {
+        quote_df = pd.DataFrame({
             'timestamp': [pd.to_datetime(data.timestamp, utc=True)],
-            'price': [data.bid_price], # Using bid_price as the primary 'price' for quotes
+            'price': [data.bid_price],
             'size': [data.bid_size],
             'ask_price': [data.ask_price],
             'ask_size': [data.ask_size]
-        }
-        quote_df = pd.DataFrame(df_data).set_index('timestamp')
-
-        if stock_db_instance:
-            try:
-                await stock_db_instance.save_realtime_data(quote_df, symbol, data_type="quote")
-            except Exception as e:
-                print(f"Error saving quote data for {symbol} to DB: {e}", file=sys.stderr)
+        }).set_index('timestamp')
         
-        if csv_data_dir:
-            await save_df_to_daily_csv(quote_df, symbol, "quote", csv_data_dir)
+        # Retry logic for saving quote data
+        retry_count = 0
+        save_successful = False
+        while retry_count < save_max_retries and not save_successful:
+            try:
+                if stock_db_instance:
+                    await stock_db_instance.save_realtime_data(quote_df, symbol, data_type="quote")
+                if csv_data_dir:
+                    await save_df_to_daily_csv(quote_df, symbol, "quote", csv_data_dir)
+                save_successful = True # Mark as successful if both operations (if applicable) complete
+            except Exception as e:
+                retry_count += 1
+                if retry_count < save_max_retries:
+                    print(f"Error saving quote data for {symbol} (attempt {retry_count}/{save_max_retries}): {e}. Retrying in {save_retry_delay}s...", file=sys.stderr)
+                    await asyncio.sleep(save_retry_delay)
+                else:
+                    print(f"Failed to save quote data for {symbol} after {save_max_retries} attempts: {e}", file=sys.stderr)
+                    # Optionally, could raise an exception here or log to a persistent error log
     
     _last_quote_prices[symbol] = current_prices
 
-def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[str], feed: str, inferred_symbol_type: str, only_log_updates: bool, csv_data_dir: str | None, display_manager: StaticDisplayManager | None):
+def setup_and_run_stream(
+    stock_db_instance: StockDBBase | None, 
+    symbols: list[str], 
+    feed: str, 
+    inferred_symbol_type: str, 
+    only_log_updates: bool, 
+    csv_data_dir: str | None, 
+    display_manager: StaticDisplayManager | None,
+    save_max_retries: int,
+    save_retry_delay: float
+):
     """Sets up and runs the WebSocket stream for a given list of symbols and type."""
     api_key = os.getenv("ALPACA_API_KEY")
     secret_key = os.getenv("ALPACA_API_SECRET")
@@ -205,26 +248,24 @@ def setup_and_run_stream(stock_db_instance: StockDBBase | None, symbols: list[st
         print("No symbols provided to stream.", file=sys.stderr)
         return
 
-    # API Key checks based on inferred_symbol_type
     if inferred_symbol_type == "stock":
         if not api_key or not secret_key:
             print("Error: ALPACA_API_KEY and ALPACA_API_SECRET must be set for stock data.", file=sys.stderr)
-            return # Exit if keys missing for stocks
+            return
     elif inferred_symbol_type == "crypto":
         if not api_key or not secret_key:
-            print("Info: API keys not found or incomplete. Crypto data can be streamed without keys but with lower rate limits.", file=sys.stderr)
+            print("Info: API keys not found. Crypto data can be streamed without keys but with lower rate limits.", file=sys.stderr)
 
     symbols_str = ", ".join(symbols)
     print(f"Attempting to stream {feed} for {inferred_symbol_type} symbols: {symbols_str}", file=sys.stderr)
     if csv_data_dir:
         print(f"Streaming data will also be saved to CSVs in: {Path(csv_data_dir).resolve()}", file=sys.stderr)
 
-    # Define handlers within the scope where stock_db_instance etc. are available
     async def internal_quote_handler(data):
-        await quote_data_handler(data, stock_db_instance, inferred_symbol_type, only_log_updates, csv_data_dir, display_manager)
+        await quote_data_handler(data, stock_db_instance, inferred_symbol_type, only_log_updates, csv_data_dir, display_manager, save_max_retries, save_retry_delay)
 
     async def internal_trade_handler(data):
-        await trade_data_handler(data, stock_db_instance, inferred_symbol_type, only_log_updates, csv_data_dir, display_manager)
+        await trade_data_handler(data, stock_db_instance, inferred_symbol_type, only_log_updates, csv_data_dir, display_manager, save_max_retries, save_retry_delay)
 
     try:
         if inferred_symbol_type == "stock":
@@ -299,10 +340,13 @@ async def main():
                         help="Type of local database to use if --db-path is specified (default: duckdb). \
                              Ignored if --remote-db-server is used.")
     
-    parser.add_argument('--only-log-updates', dest='only_log_updates', action='store_true',
-                        help="Log/save data only if bid/ask prices change (for quotes). Trades always logged/saved if DB is active.")
-    parser.add_argument('--log-all-data', dest='only_log_updates', action='store_false',
-                        help="Log/save all incoming quote data, regardless of price changes.")
+    display_group = parser.add_argument_group(title="Display Options")
+    display_group.add_argument('--static-display', action='store_true',
+                        help="Enable static, cursor-based display for real-time updates on stdout. Other logs go to stderr.")
+    display_group.add_argument('--only-log-updates', dest='only_log_updates', action='store_true',
+                        help="Log/save data only if bid/ask prices change (for quotes). Trades always logged/saved. Affects static display too.")
+    display_group.add_argument('--log-all-data', dest='only_log_updates', action='store_false',
+                        help="Log/save all incoming quote data, regardless of price changes. Affects static display too.")
     parser.set_defaults(only_log_updates=True)
 
     # CSV arguments group
@@ -310,12 +354,11 @@ async def main():
     csv_group.add_argument("--csv-data-dir", type=str, default=None,
                         help="Base directory to save market data as CSV files. If provided, data is saved to CSV_DATA_DIR/SYMBOL/SYMBOL_YYYY-MM-DD_feedtype.csv.")
     
-    display_group = parser.add_argument_group(title="Display Options")
-    # Note: --only-log-updates and --log-all-data are actually setting the same dest.
-    # This is typical for creating a pair of opposing boolean flags.
-    display_group.add_argument('--static-display', action='store_true',
-                        help="Enable static, cursor-based display for real-time updates on stdout. Other logs go to stderr.")
-    parser.set_defaults(only_log_updates=True)
+    saving_group = parser.add_argument_group(title="Data Saving Options")
+    saving_group.add_argument("--save-max-retries", type=int, default=15,
+                        help="Maximum number of retries for saving data to DB or CSV (default: 15).")
+    saving_group.add_argument("--save-retry-delay", type=float, default=1.0,
+                        help="Delay in seconds between data saving retries (default: 1.0).")
 
     args = parser.parse_args()
 
@@ -396,11 +439,11 @@ async def main():
         if stock_symbols:
             print(f"Preparing to stream stocks: { ', '.join(stock_symbols) }", file=sys.stderr)
             # setup_and_run_stream is blocking, so it needs to run in a thread
-            tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, stock_symbols, args.feed, "stock", args.only_log_updates, args.csv_data_dir, display_manager))
+            tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, stock_symbols, args.feed, "stock", args.only_log_updates, args.csv_data_dir, display_manager, args.save_max_retries, args.save_retry_delay))
         
         if crypto_symbols:
             print(f"Preparing to stream cryptos: { ', '.join(crypto_symbols) }", file=sys.stderr)
-            tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, crypto_symbols, args.feed, "crypto", args.only_log_updates, args.csv_data_dir, display_manager))
+            tasks_to_run.append(asyncio.to_thread(setup_and_run_stream, stock_db_instance, crypto_symbols, args.feed, "crypto", args.only_log_updates, args.csv_data_dir, display_manager, args.save_max_retries, args.save_retry_delay))
 
         if not tasks_to_run:
             print("No valid stock or crypto symbols to stream based on input. Exiting.", file=sys.stderr)
