@@ -63,7 +63,6 @@ symbols:
 - BPMC
 - BPOP
 - BRKR
-- BRZE
 - BSY
 - BTSG
 - BULL
@@ -244,7 +243,6 @@ symbols:
 - KDP
 - KHC
 - KLAC
-- KRYS
 - KSPI
 - KTOS
 - LAMR
@@ -325,6 +323,7 @@ symbols:
 - NXPI
 - NXST
 - NXT
+- ODD
 - ODFL
 - OKTA
 - OLED
@@ -361,7 +360,6 @@ symbols:
 - POOL
 - PPC
 - PTC
-- PTCT
 - PYPL
 - QCOM
 - QFIN
@@ -375,6 +373,7 @@ symbols:
 - RGC
 - RGEN
 - RGLD
+- RGTI
 - RIVN
 - RKLB
 - RMBS
@@ -413,10 +412,10 @@ symbols:
 - SLNO
 - SMCI
 - SMMT
-- SMPL
 - SNDK
 - SNEX
 - SNPS
+- SNRE
 - SNY
 - SOFI
 - SOUN
@@ -426,6 +425,7 @@ symbols:
 - SSNC
 - STEP
 - STLD
+- STNE
 - STRL
 - STX
 - SWKS
@@ -501,4 +501,4 @@ symbols:
 - ZION
 - ZM
 - ZS
-last_updated: '2025-05-20 22:46:08'
+last_updated: '2025-05-22 11:24:11'

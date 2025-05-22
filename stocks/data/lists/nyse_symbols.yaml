@@ -88,6 +88,7 @@ symbols:
 - CCI
 - CCJ
 - CCL
+- CF
 - CFG
 - CHD
 - CHT
@@ -136,7 +137,6 @@ symbols:
 - DHI
 - DHR
 - DIS
-- DKS
 - DLR
 - DOV
 - DOW
@@ -254,7 +254,6 @@ symbols:
 - KEY
 - KEYS
 - KGC
-- KIM
 - KKR
 - KMB
 - KMI
@@ -363,6 +362,7 @@ symbols:
 - RBA
 - RBLX
 - RBRK
+- RCI
 - RCL
 - RDDT
 - RELX
@@ -393,6 +393,7 @@ symbols:
 - SLF
 - SMFG
 - SNA
+- SNAP
 - SNOW
 - SO
 - SONY
@@ -452,7 +453,6 @@ symbols:
 - ULS
 - UMC
 - UNH
-- UNM
 - UNP
 - UPS
 - URI
@@ -501,4 +501,4 @@ symbols:
 - YUMC
 - ZBH
 - ZTS
-last_updated: '2025-05-20 22:46:08'
+last_updated: '2025-05-22 11:24:11'
