@@ -240,7 +240,8 @@ async def process_symbol_data(symbol: str,
                               force_fetch: bool = False, 
                               query_only: bool = False,
                               db_type: str = 'sqlite', # Added db_type
-                              db_path: str | None = None) -> pd.DataFrame: # db_path defaults to None
+                              db_path: str | None = None, # db_path defaults to None
+                              days_back_fetch: int | None = None) -> pd.DataFrame: # Added days_back_fetch
     """Processes symbol data: queries DB, fetches if needed, and returns DataFrame."""
     
     current_db_instance = stock_db_instance
@@ -293,7 +294,7 @@ async def process_symbol_data(symbol: str,
         os.makedirs(hourly_dir, exist_ok=True)
 
         # Pass the current_db_instance to fetch_and_save_data
-        fetch_success = await fetch_and_save_data(symbol, data_dir, stock_db_instance=current_db_instance) 
+        fetch_success = await fetch_and_save_data(symbol, data_dir, stock_db_instance=current_db_instance, days_back=days_back_fetch) 
 
         if fetch_success:
             print(f"Retrieving newly fetched/updated {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})...")
@@ -357,6 +358,12 @@ async def main() -> None:
         action="store_true",
         help="Only query the database; do not fetch from network if data is missing."
     )
+    parser.add_argument(
+        "--days-back",
+        type=int,
+        default=None,
+        help="Number of days back to fetch historical data from the network. Overrides default fetch period. Used when --force-fetch or when data is missing (and not --query-only)."
+    )
     args = parser.parse_args()
 
     if args.start_date is None:
@@ -381,7 +388,8 @@ async def main() -> None:
         force_fetch=args.force_fetch, 
         query_only=args.query_only,
         db_type=args.db_type,      # Pass db_type
-        db_path=args.db_path       # Pass db_path (can be None)
+        db_path=args.db_path,       # Pass db_path (can be None)
+        days_back_fetch=args.days_back # Pass the new argument
     )
 
     if not final_df.empty:
