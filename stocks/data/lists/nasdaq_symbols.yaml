@@ -17,6 +17,7 @@ symbols:
 - AEP
 - AFRM
 - AGNC
+- AIFU
 - AKAM
 - AKRO
 - ALAB
@@ -120,7 +121,6 @@ symbols:
 - CVLT
 - CWST
 - CYBR
-- CYTK
 - CZR
 - DASH
 - DBX
@@ -243,6 +243,7 @@ symbols:
 - KDP
 - KHC
 - KLAC
+- KRYS
 - KSPI
 - KTOS
 - LAMR
@@ -296,6 +297,7 @@ symbols:
 - MPWR
 - MRNA
 - MRNO
+- MRUS
 - MRVL
 - MSFT
 - MSTR
@@ -425,7 +427,6 @@ symbols:
 - SSNC
 - STEP
 - STLD
-- STNE
 - STRL
 - STX
 - SWKS
@@ -436,7 +437,6 @@ symbols:
 - TEM
 - TENB
 - TER
-- TFSL
 - TGTX
 - TIGO
 - TLN
@@ -501,4 +501,3 @@ symbols:
 - ZION
 - ZM
 - ZS
-last_updated: '2025-05-22 11:24:11'

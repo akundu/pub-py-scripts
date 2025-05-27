@@ -34,7 +34,6 @@ symbols:
 - ATO
 - AU
 - AVB
-- AVY
 - AWK
 - AXP
 - AZO
@@ -42,7 +41,6 @@ symbols:
 - BA
 - BABA
 - BAC
-- BAH
 - BALL
 - BAM
 - BAP
@@ -95,6 +93,7 @@ symbols:
 - CHWY
 - CI
 - CL
+- CLS
 - CLX
 - CM
 - CMG
@@ -200,6 +199,7 @@ symbols:
 - GIS
 - GLW
 - GM
+- GME
 - GPC
 - GPN
 - GRMN
@@ -251,6 +251,7 @@ symbols:
 - JPM
 - K
 - KB
+- KEP
 - KEY
 - KEYS
 - KGC
@@ -345,6 +346,7 @@ symbols:
 - PHM
 - PINS
 - PKG
+- PKX
 - PLD
 - PM
 - PNC
@@ -393,7 +395,6 @@ symbols:
 - SLF
 - SMFG
 - SNA
-- SNAP
 - SNOW
 - SO
 - SONY
@@ -493,7 +494,6 @@ symbols:
 - WY
 - XOM
 - XPEV
-- XPO
 - XYL
 - XYZ
 - YPF
@@ -501,4 +501,3 @@ symbols:
 - YUMC
 - ZBH
 - ZTS
-last_updated: '2025-05-22 11:24:11'
