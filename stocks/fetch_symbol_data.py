@@ -180,7 +180,7 @@ async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: Sto
 
     try:
         end_date = datetime.now(timezone.utc)
-        
+
         if days_back is not None:
             start_date_daily = end_date - timedelta(days=days_back)
             start_date_hourly = end_date - timedelta(days=min(days_back, 730)) # Max 2 years for hourly for sensible data size
@@ -197,32 +197,32 @@ async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: Sto
         end_date_api_str = end_date.isoformat()
         start_date_daily_api_str = start_date_daily.isoformat()
         start_date_hourly_api_str = start_date_hourly.isoformat()
-        
+
         print(f"Fetching daily data for {symbol} from {start_date_daily_api_str} to {end_date_api_str} via aiohttp...")
         new_daily_bars = await fetch_bars_single_aiohttp_all_pages(
             symbol, TimeFrame.Day, start_date_daily_api_str, end_date_api_str, API_KEY, API_SECRET
         )
-        
+
         final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, symbol, 'daily', data_dir)
         if not final_daily_bars.empty:
             # Use the passed stock_db_instance
             await stock_db_instance.save_stock_data(final_daily_bars, symbol, interval='daily')
             print(f"Daily data for {symbol} also updated in database.")
         elif new_daily_bars.empty:
-             print(f"No new daily data fetched for {symbol} from API via aiohttp.")
+            print(f"No new daily data fetched for {symbol} from API via aiohttp.")
 
         print(f"Fetching hourly data for {symbol} from {start_date_hourly_api_str} to {end_date_api_str} via aiohttp...")
         new_hourly_bars = await fetch_bars_single_aiohttp_all_pages(
             symbol, TimeFrame.Hour, start_date_hourly_api_str, end_date_api_str, API_KEY, API_SECRET
         )
-        
+
         final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, symbol, 'hourly', data_dir)
         if not final_hourly_bars.empty:
             # Use the passed stock_db_instance
             await stock_db_instance.save_stock_data(final_hourly_bars, symbol, interval='hourly')
             print(f"Hourly data for {symbol} also updated in database.")
         elif new_hourly_bars.empty:
-             print(f"No new hourly data fetched for {symbol} from API via aiohttp.")
+            print(f"No new hourly data fetched for {symbol} from API via aiohttp.")
 
         return True
     except Exception as e:
@@ -231,28 +231,35 @@ async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: Sto
         traceback.print_exc()
         return False
 
-async def process_symbol_data(symbol: str, 
-                              timeframe: str = 'daily', 
-                              start_date: str | None = None, 
-                              end_date: str | None = None, 
-                              data_dir: str = DEFAULT_DATA_DIR,
-                              stock_db_instance: StockDBBase | None = None, # Pass instance or None to create one
-                              force_fetch: bool = False, 
-                              query_only: bool = False,
-                              db_type: str = 'sqlite', # Added db_type
-                              db_path: str | None = None, # db_path defaults to None
-                              days_back_fetch: int | None = None) -> pd.DataFrame: # Added days_back_fetch
+
+async def process_symbol_data(
+    symbol: str,
+    timeframe: str = "daily",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    data_dir: str = DEFAULT_DATA_DIR,
+    stock_db_instance: StockDBBase | None = None,
+    force_fetch: bool = False,
+    query_only: bool = False,
+    db_type: str = "sqlite",
+    db_path: str | None = None,
+    days_back_fetch: int | None = None,
+) -> pd.DataFrame:
     """Processes symbol data: queries DB, fetches if needed, and returns DataFrame."""
-    
+
     current_db_instance = stock_db_instance
     if current_db_instance is None:
-        # Determine actual db_path if not provided
         actual_db_path = db_path
         if actual_db_path is None:
             actual_db_path = get_default_db_path("duckdb") if db_type == 'duckdb' else get_default_db_path("db")
         current_db_instance = get_stock_db(db_type, actual_db_path)
 
-    if start_date is None:
+    # Calculate start_date based on days_back_fetch if provided
+    if days_back_fetch is not None:
+        start_date = (datetime.now() - timedelta(days=days_back_fetch)).strftime(
+            "%Y-%m-%d"
+        )
+    elif start_date is None:
         if timeframe == 'hourly':
             start_date = (datetime.now() - timedelta(days=2*365)).strftime('%Y-%m-%d')
         else: 
@@ -264,15 +271,15 @@ async def process_symbol_data(symbol: str,
     action_taken = "No action"
 
     if not force_fetch:
-        print(f"Attempting to retrieve {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})...")
-        # Use the instance method
+        print(
+            f"Attempting to retrieve {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})..."
+        )
         data_df = await current_db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval=timeframe)
-        
+
         if not data_df.empty:
             action_taken = f"Data for {symbol} ({timeframe}) retrieved from database."
             print(action_taken)
-            
-            # Informational: check if data starts later than requested, due to non-trading days for example
+
             min_date_in_df = data_df.index.min().strftime('%Y-%m-%d')
             if start_date and min_date_in_df > start_date:
                 print(f"Note: Data retrieved from DB starts at {min_date_in_df}, after the requested start date {start_date} (e.g., due to non-trading days).")
@@ -293,12 +300,12 @@ async def process_symbol_data(symbol: str,
         os.makedirs(daily_dir, exist_ok=True)
         os.makedirs(hourly_dir, exist_ok=True)
 
-        # Pass the current_db_instance to fetch_and_save_data
         fetch_success = await fetch_and_save_data(symbol, data_dir, stock_db_instance=current_db_instance, days_back=days_back_fetch) 
 
         if fetch_success:
-            print(f"Retrieving newly fetched/updated {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})...")
-            # Use the instance method
+            print(
+                f"Retrieving newly fetched/updated {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})..."
+            )
             data_df = await current_db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval=timeframe)
             if data_df.empty:
                 print(f"Warning: Data for {symbol} ({timeframe}) was fetched but not found in DB with current query parameters. Check fetch ranges and query.")
@@ -310,6 +317,7 @@ async def process_symbol_data(symbol: str,
             data_df = pd.DataFrame() 
 
     return data_df
+
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch, save, and query historical stock data for a specific symbol.")
