@@ -141,7 +141,7 @@ async def fetch_types(args):
                 'type': data_type,
                 'count': len(symbols),
                 'symbols': sorted(list(symbols)),
-                'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                #'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             
             yaml_file = f'{args.data_dir}/lists/{data_type}_symbols.yaml'
