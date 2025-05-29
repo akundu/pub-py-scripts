@@ -18,8 +18,10 @@ DEFAULT_DATA_DIR = './data'
 def get_default_db_path(db_type: str) -> str:   
     if db_type.lower() == "remote":
         return "localhost:8080"
+    elif db_type.lower() == "remote":
+        return f"stock_data.db"
     return os.path.join(
-        DEFAULT_DATA_DIR, f"stock_data.{"db" if db_type == "sqlite" else db_type}"
+        DEFAULT_DATA_DIR, f"stock_data.{db_type}"
     )
 
 class StockDBBase(metaclass=ABCMeta):
