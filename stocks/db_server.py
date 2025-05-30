@@ -9,9 +9,90 @@ import logging
 from logging.handlers import RotatingFileHandler
 import sys
 from pathlib import Path
+from typing import Dict, Set, Any
+import json
 
 # Global logger instance
 logger = logging.getLogger("db_server_logger")
+
+# Global WebSocket connection management
+class WebSocketManager:
+    def __init__(self, heartbeat_interval: float = 1.0):
+        self.connections: Dict[str, Set[web.WebSocketResponse]] = {}  # symbol -> set of websockets
+        self.lock = asyncio.Lock()
+        self.heartbeat_interval = heartbeat_interval
+        self.heartbeat_tasks: Dict[str, asyncio.Task] = {}  # symbol -> heartbeat task
+        self.running = True
+
+    async def add_subscriber(self, symbol: str, ws: web.WebSocketResponse) -> None:
+        """Add a WebSocket connection as a subscriber for a symbol."""
+        async with self.lock:
+            if symbol not in self.connections:
+                self.connections[symbol] = set()
+                # Start heartbeat task for this symbol if it doesn't exist
+                if symbol not in self.heartbeat_tasks:
+                    self.heartbeat_tasks[symbol] = asyncio.create_task(self._heartbeat_loop(symbol))
+            self.connections[symbol].add(ws)
+            logger.info(f"Added subscriber for {symbol}. Total subscribers: {len(self.connections[symbol])}")
+
+    async def remove_subscriber(self, symbol: str, ws: web.WebSocketResponse) -> None:
+        """Remove a WebSocket connection from a symbol's subscribers."""
+        async with self.lock:
+            if symbol in self.connections:
+                self.connections[symbol].discard(ws)
+                if not self.connections[symbol]:
+                    del self.connections[symbol]
+                    # Cancel heartbeat task if no more subscribers
+                    if symbol in self.heartbeat_tasks:
+                        self.heartbeat_tasks[symbol].cancel()
+                        del self.heartbeat_tasks[symbol]
+                logger.info(f"Removed subscriber for {symbol}")
+
+    async def _heartbeat_loop(self, symbol: str) -> None:
+        """Send periodic heartbeats for a symbol."""
+        while self.running:
+            try:
+                await self.broadcast(symbol, {"type": "heartbeat", "timestamp": pd.Timestamp.now().isoformat()})
+                await asyncio.sleep(self.heartbeat_interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in heartbeat loop for {symbol}: {e}")
+                await asyncio.sleep(self.heartbeat_interval)  # Still wait before retrying
+
+    async def broadcast(self, symbol: str, data: Any) -> None:
+        """Broadcast data to all subscribers of a symbol."""
+        if symbol not in self.connections:
+            return
+
+        message = json.dumps({
+            "symbol": symbol,
+            "data": data
+        })
+
+        async with self.lock:
+            # Create a copy of the set to avoid modification during iteration
+            subscribers = self.connections[symbol].copy()
+            
+        for ws in subscribers:
+            try:
+                if not ws.closed:
+                    await ws.send_str(message)
+            except Exception as e:
+                logger.error(f"Error broadcasting to subscriber for {symbol}: {e}")
+                # Remove failed connection
+                await self.remove_subscriber(symbol, ws)
+
+    async def shutdown(self) -> None:
+        """Shutdown the WebSocket manager and cancel all heartbeat tasks."""
+        self.running = False
+        for task in self.heartbeat_tasks.values():
+            task.cancel()
+        await asyncio.gather(*self.heartbeat_tasks.values(), return_exceptions=True)
+        self.heartbeat_tasks.clear()
+
+# Create global WebSocket manager instance
+ws_manager = None  # Will be initialized in main_server_runner
 
 # Custom Formatter to handle different log record types
 class RequestFormatter(logging.Formatter):
@@ -149,6 +230,45 @@ async def logging_middleware(request: web.Request, handler):
         # For now, let it propagate to be caught by the main error handler or aiohttp's default
         raise
 
+async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
+    """Handle WebSocket connections for real-time data streaming."""
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+
+    try:
+        # Get the symbol from query parameters
+        symbol = request.query.get('symbol')
+        if not symbol:
+            await ws.close(message=b"Symbol parameter is required")
+            return ws
+
+        # Add this connection as a subscriber
+        await ws_manager.add_subscriber(symbol, ws)
+
+        # Keep the connection alive and handle client messages
+        async for msg in ws:
+            if msg.type == web.WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                    if data.get('action') == 'unsubscribe':
+                        await ws_manager.remove_subscriber(symbol, ws)
+                        await ws.close()
+                        return ws
+                except json.JSONDecodeError:
+                    logger.warning(f"Invalid JSON received from WebSocket client: {msg.data}")
+            elif msg.type in (web.WSMsgType.CLOSE, web.WSMsgType.ERROR):
+                break
+
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+    finally:
+        # Clean up the connection
+        if symbol:
+            await ws_manager.remove_subscriber(symbol, ws)
+        if not ws.closed:
+            await ws.close()
+        return ws
+
 async def handle_db_command(request: web.Request) -> web.Response:
     """
     Handles POST requests to /db_command to execute database operations.
@@ -200,6 +320,10 @@ async def handle_db_command(request: web.Request) -> web.Response:
             df_to_save.index.name = 'date' if interval == 'daily' else 'datetime'
             
             await db_instance.save_stock_data(df_to_save, ticker, interval)
+            
+            # Broadcast the new data to WebSocket subscribers
+            await ws_manager.broadcast(ticker, data_records)
+            
             return web.json_response({"message": "Aggregated data saved successfully."})
         
         elif command == "save_realtime_data":
@@ -293,6 +417,8 @@ async def main_server_runner():
     parser.add_argument("--log-file", type=str, default=None, help="Path to a log file. If not provided, logs to stdout.")
     parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                         help="Logging level (default: INFO).")
+    parser.add_argument("--heartbeat-interval", type=float, default=1.0,
+                        help="Interval in seconds between WebSocket heartbeats (default: 1.0).")
     args = parser.parse_args()
 
     # Setup logging as the first step after parsing args
@@ -306,9 +432,15 @@ async def main_server_runner():
         logger.critical(f"Fatal Error: Could not initialize database from file '{args.db_file}': {e}", exc_info=True)
         return
 
+    # Initialize WebSocket manager with heartbeat interval
+    global ws_manager
+    ws_manager = WebSocketManager(heartbeat_interval=args.heartbeat_interval)
+    logger.info(f"WebSocket manager initialized with heartbeat interval: {args.heartbeat_interval}s")
+
     app = web.Application(middlewares=[logging_middleware])
     app['db_instance'] = app_db_instance
     app.router.add_post("/db_command", handle_db_command)
+    app.router.add_get("/ws", handle_websocket)  # Add WebSocket endpoint
     
     runner = web.AppRunner(app)
     await runner.setup()
@@ -317,6 +449,8 @@ async def main_server_runner():
     logger.info(f"Server starting on http://localhost:{args.port}")
     logger.info(f"Using database file: {os.path.abspath(args.db_file)}")
     logger.info("Listening for POST requests on /db_command")
+    logger.info(f"WebSocket endpoint available at ws://localhost:{args.port}/ws?symbol=SYMBOL")
+    logger.info(f"WebSocket heartbeat interval: {args.heartbeat_interval}s")
     logger.info("Press Ctrl+C to stop the server.")
     
     await site.start()
@@ -328,6 +462,8 @@ async def main_server_runner():
         logger.info("KeyboardInterrupt received, shutting down...")
     finally:
         logger.info("Cleaning up server resources...")
+        if ws_manager:
+            await ws_manager.shutdown()
         await runner.cleanup()
         # Close StockDBClient session if server was using one (not in this setup)
         if hasattr(app_db_instance, 'close_session') and callable(app_db_instance.close_session):
