@@ -5,10 +5,10 @@ import sys
 from pathlib import Path
 import yaml
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
-import heapq
 import threading
 import time
+import signal
+from typing import Dict, List, Optional
 
 # Determine the project root directory.
 # This script ('stream_market_data.py') is typically in a subdirectory (e.g., 'ux/').
@@ -35,100 +35,86 @@ import traceback
 # This is a simple way; for more complex apps, pass it around or use a context manager.
 _db_client_instance_for_cleanup: StockDBBase | None = None
 
+# Global CSV buffer manager
+class CSVBufferManager:
+    def __init__(self, buffer_size: int = 0, flush_interval: float = 60.0):
+        self.buffer_size = buffer_size
+        self.flush_interval = flush_interval
+        self.buffers: Dict[str, List[pd.DataFrame]] = defaultdict(list)
+        self.lock = threading.Lock()
+        self._setup_signal_handlers()
+        self._start_periodic_flush()
+
+    def _setup_signal_handlers(self):
+        """Setup signal handlers for graceful shutdown."""
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(sig, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        """Handle signals by flushing all buffers."""
+        print(f"\nReceived signal {signum}. Flushing CSV buffers...", file=sys.stderr)
+        self.flush_all_buffers()
+        sys.exit(0)
+
+    def _start_periodic_flush(self):
+        """Start the periodic flush thread."""
+        if self.flush_interval > 0:
+            self.stop_event = threading.Event()
+            self.flush_thread = threading.Thread(
+                target=self._periodic_flush_worker,
+                daemon=True
+            )
+            self.flush_thread.start()
+
+    def _periodic_flush_worker(self):
+        """Worker thread that periodically flushes all buffers."""
+        while not self.stop_event.is_set():
+            time.sleep(self.flush_interval)
+            if not self.stop_event.is_set():  # Check again after sleep
+                print(f"Performing periodic flush of CSV buffers...", file=sys.stderr)
+                self.flush_all_buffers()
+
+    def add_to_buffer(self, symbol: str, df: pd.DataFrame) -> None:
+        """Add a DataFrame to the buffer for a symbol."""
+        with self.lock:
+            self.buffers[symbol].append(df)
+            if self.buffer_size > 0 and len(self.buffers[symbol]) >= self.buffer_size:
+                self._flush_symbol_buffer(symbol)
+
+    def _flush_symbol_buffer(self, symbol: str) -> None:
+        """Flush the buffer for a specific symbol."""
+        if symbol in self.buffers and self.buffers[symbol]:
+            dfs = self.buffers[symbol]
+            self.buffers[symbol] = []
+            if dfs:
+                combined_df = pd.concat(dfs)
+                _save_df_to_csv_sync(combined_df, self._get_file_path(symbol, dfs[0]))
+
+    def _get_file_path(self, symbol: str, df: pd.DataFrame) -> Path:
+        """Get the file path for a symbol's data."""
+        date_str = df.index[0].strftime('%Y-%m-%d')
+        symbol_dir = Path("data/streaming/raw") / symbol.upper()
+        file_name = f"{symbol.upper()}_{date_str}_quote.csv"
+        return symbol_dir / file_name
+
+    def flush_all_buffers(self) -> None:
+        """Flush all symbol buffers."""
+        with self.lock:
+            for symbol in list(self.buffers.keys()):
+                self._flush_symbol_buffer(symbol)
+
+    def cleanup(self):
+        """Clean up resources and stop the periodic flush thread."""
+        if hasattr(self, 'stop_event'):
+            self.stop_event.set()
+            if hasattr(self, 'flush_thread'):
+                self.flush_thread.join(timeout=2.0)
+        self.flush_all_buffers()
+
+# Create global buffer manager instance
+_csv_buffer_manager: Optional[CSVBufferManager] = None
 
 # --- Static Display Manager ---
-class StaticDisplayManager:
-    def __init__(self, all_symbols: list[str], output_handle=sys.stdout, display_update_interval: float = 1.0):
-        self.lock = threading.Lock() # Ensures atomic updates to the display and buffer
-        self.symbols = sorted(list(set(all_symbols))) # Unique, sorted list for consistent ordering
-        self.symbol_to_row_offset: dict[str, int] = {symbol: i for i, symbol in enumerate(self.symbols)}
-        self.num_display_lines = len(self.symbols)
-        self.display_prepared = False
-        self.output_handle = output_handle
-        # Define counts for header and footer lines for cursor math
-        self.header_lines = 1 
-        self.footer_lines = 1
-        self.display_update_interval = display_update_interval
-        self.latest_data_buffer: dict[str, str] = {symbol: "Waiting for data..." for symbol in self.symbols}
-        self.updater_thread: threading.Thread | None = None
-        self.stop_event = threading.Event()
-
-    def _print(self, *args, **kwargs):
-        # Helper to ensure all prints from this manager use the correct output and flush immediately
-        print(*args, **kwargs, file=self.output_handle, flush=True)
-
-    def _updater_thread_target(self):
-        """Periodically updates the display with buffered data."""
-        while not self.stop_event.is_set():
-            time.sleep(self.display_update_interval)
-            with self.lock:
-                if not self.display_prepared or self.num_display_lines == 0:
-                    continue
-
-                # Assume cursor is at the start of the first symbol's line (our reference point)
-                for i, symbol in enumerate(self.symbols):
-                    data_str = self.latest_data_buffer.get(symbol, "Error: No data")
-                    
-                    # 1. Move cursor down to the target symbol's line if necessary
-                    if i > 0:
-                        self._print(f"\x1b[{i}B", end="")
-                    
-                    # 2. Go to beginning of current line, clear it, and print new data
-                    self._print("\r\x1b[2K", end="") # Carriage return, then erase entire line
-                    
-                    max_line_len = 120 # Prevent overly long lines from breaking display (increased from 100)
-                    full_line = f"{symbol:<15}: {data_str}"
-                    self._print(full_line[:max_line_len], end="")
-
-                    # 3. Move cursor back up to the start of the first symbol's line (reference point)
-                    if i > 0:
-                        self._print(f"\x1b[{i}A", end="")
-                
-                self._print("\r", end="") # Ensure cursor is at the beginning of the reference line
-
-
-    def prepare_display(self):
-        with self.lock:
-            if self.display_prepared or self.num_display_lines == 0:
-                return
-
-            self._print("--- Real-time Market Updates (Static) ---")
-            for symbol in self.symbols:
-                self._print(f"{symbol:<15}: {self.latest_data_buffer[symbol]}") # Initial placeholder line
-            self._print("-" * 40) # Footer line
-            
-            if self.num_display_lines > 0:
-                self._print(f"\x1b[{self.num_display_lines + self.footer_lines}A", end="")
-            self.display_prepared = True
-        
-        if self.num_display_lines > 0 and self.display_update_interval > 0:
-            self.stop_event.clear()
-            self.updater_thread = threading.Thread(target=self._updater_thread_target, daemon=True)
-            self.updater_thread.start()
-
-    def update_symbol(self, symbol: str, data_str: str):
-        with self.lock:
-            if symbol in self.latest_data_buffer:
-                self.latest_data_buffer[symbol] = data_str
-            # The actual printing is now handled by _updater_thread_target
-
-    def cleanup_display(self):
-        if self.updater_thread and self.updater_thread.is_alive():
-            self.stop_event.set()
-            self.updater_thread.join(timeout=self.display_update_interval * 2) # Wait for thread to finish
-
-        with self.lock:
-            if not self.display_prepared or self.num_display_lines == 0:
-                return
-            
-            # Move cursor down past all managed symbol lines and the footer line
-            self._print(f"\x1b[{self.num_display_lines + self.footer_lines}B", end="")
-            # Clear that line and print a final message below the block
-            self._print("\r\x1b[2K" + "-" * 40 + "\nStatic display ended.", end="")
-            self._print() 
-            self.display_prepared = False
-
-# --- End Static Display Manager ---
 
 # --- CSV Saving Logic ---
 def _save_df_to_csv_sync(df: pd.DataFrame, file_path: Path):
@@ -148,15 +134,15 @@ async def save_df_to_daily_csv(df: pd.DataFrame, symbol: str, feed_type: str, cs
     File path: csv_data_dir/SYMBOL/SYMBOL_YYYY-MM-DD_feedtype.csv
     """
     if not df.empty and df.index.name == 'timestamp' and isinstance(df.index, pd.DatetimeIndex):
-        # Assuming all data in df is for the same day, take the date from the first timestamp
-        # Timestamps from Alpaca are UTC.
-        date_str = df.index[0].strftime('%Y-%m-%d')
-        
-        symbol_dir = Path(csv_data_dir) / symbol.upper() # Use uppercase for directory consistency
-        file_name = f"{symbol.upper()}_{date_str}_{feed_type}.csv"
-        file_path = symbol_dir / file_name
-        
-        await asyncio.to_thread(_save_df_to_csv_sync, df.copy(), file_path)
+        if _csv_buffer_manager is not None:
+            _csv_buffer_manager.add_to_buffer(symbol, df.copy())
+        else:
+            # If no buffer manager, save immediately
+            date_str = df.index[0].strftime('%Y-%m-%d')
+            symbol_dir = Path(csv_data_dir) / symbol.upper()
+            file_name = f"{symbol.upper()}_{date_str}_{feed_type}.csv"
+            file_path = symbol_dir / file_name
+            await asyncio.to_thread(_save_df_to_csv_sync, df.copy(), file_path)
     else:
         print(f"DataFrame for {symbol} is empty or index is not a proper timestamp. Skipping CSV save.", file=sys.stderr)
 
@@ -168,7 +154,6 @@ async def trade_data_handler(
     symbol_type: str, 
     only_log_updates: bool, 
     csv_data_dir: str | None, 
-    display_manager: StaticDisplayManager | None,
     save_max_retries: int,
     save_retry_delay: float
 ):
@@ -177,11 +162,7 @@ async def trade_data_handler(
     local_timestamp = data.timestamp.astimezone() 
     time_str = local_timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
-    if display_manager:
-        data_str = f"Trade  : Price: {data.price:<8.2f} (Sz: {data.size:<5}) @ {time_str}"
-        display_manager.update_symbol(data.symbol, data_str)
-    else:
-        print(f"Trade for {data.symbol} ({symbol_type}): Price - {data.price}, Size - {data.size} at {time_str}")
+    print(f"Trade for {data.symbol} ({symbol_type}): Price - {data.price}, Size - {data.size} at {time_str}")
     
     trade_df = pd.DataFrame({
         'timestamp': [pd.to_datetime(data.timestamp, utc=True)],
@@ -211,112 +192,6 @@ async def trade_data_handler(
 _last_quote_prices = {}
 
 
-class ActivityTracker:
-    """Tracks stock activity over a time window."""
-
-    def __init__(self, window_seconds: int):
-        self.window_seconds = window_seconds
-        self.activity_data = defaultdict(
-            list
-        )  # symbol -> list of (timestamp, ask_size) tuples
-        self.lock = threading.Lock()
-        self.cleanup_thread = threading.Thread(
-            target=self._cleanup_old_data, daemon=True
-        )
-        self.cleanup_thread.start()
-
-    def add_activity(self, symbol: str, timestamp: datetime, ask_size: int):
-        """Add a new activity data point."""
-        with self.lock:
-            self.activity_data[symbol].append((timestamp, ask_size))
-
-    def _cleanup_old_data(self):
-        """Periodically remove old data points."""
-        while True:
-            time.sleep(1)  # Check every second
-            current_time = datetime.now(timezone.utc)
-            cutoff_time = current_time - timedelta(seconds=self.window_seconds)
-
-            with self.lock:
-                for symbol in list(self.activity_data.keys()):
-                    # Keep only data points within the window
-                    self.activity_data[symbol] = [
-                        (ts, size)
-                        for ts, size in self.activity_data[symbol]
-                        if ts > cutoff_time
-                    ]
-                    # Remove empty lists
-                    if not self.activity_data[symbol]:
-                        del self.activity_data[symbol]
-
-    def get_most_active_symbols(self, n: int) -> list[str]:
-        """Get the n most active symbols based on total ask size in the window."""
-        with self.lock:
-            # Calculate total ask size for each symbol
-            symbol_totals = {
-                symbol: sum(size for _, size in data)
-                for symbol, data in self.activity_data.items()
-            }
-
-            # Get top n symbols using a min heap
-            if len(symbol_totals) <= n:
-                return list(symbol_totals.keys())
-
-            # Use negative size for max heap behavior
-            heap = [(-size, symbol) for symbol, size in symbol_totals.items()]
-            heapq.heapify(heap)
-
-            # Get top n symbols
-            return [heapq.heappop(heap)[1] for _ in range(n)]
-
-
-class DynamicDisplayManager(StaticDisplayManager):
-    """Extends StaticDisplayManager to handle dynamic symbol updates."""
-
-    def __init__(
-        self, activity_tracker: ActivityTracker, max_symbols: int, *args, **kwargs
-    ):
-        super().__init__([], *args, **kwargs)  # Start with empty symbol list
-        self.activity_tracker = activity_tracker
-        self.max_symbols = max_symbols
-        self.update_thread = threading.Thread(
-            target=self._update_symbols_thread, daemon=True
-        )
-        self.stop_event = threading.Event()
-
-    def _update_symbols_thread(self):
-        """Periodically updates the list of displayed symbols."""
-        while not self.stop_event.is_set():
-            new_symbols = self.activity_tracker.get_most_active_symbols(
-                self.max_symbols
-            )
-            with self.lock:
-                # Update symbols and row offsets
-                self.symbols = sorted(new_symbols)
-                self.symbol_to_row_offset = {
-                    symbol: i for i, symbol in enumerate(self.symbols)
-                }
-                self.num_display_lines = len(self.symbols)
-
-                # Reset display if needed
-                if self.display_prepared:
-                    self.cleanup_display()
-                    self.prepare_display()
-
-            time.sleep(1)  # Update every second
-
-    def start(self):
-        """Start the dynamic display manager."""
-        self.stop_event.clear()
-        self.update_thread.start()
-
-    def cleanup_display(self):
-        """Clean up the display and stop the update thread."""
-        self.stop_event.set()
-        if self.update_thread.is_alive():
-            self.update_thread.join(timeout=2)
-        super().cleanup_display()
-
 
 async def quote_data_handler(
     data,
@@ -324,18 +199,13 @@ async def quote_data_handler(
     symbol_type: str,
     only_log_updates: bool,
     csv_data_dir: str | None,
-    display_manager: StaticDisplayManager | None,
     save_max_retries: int,
     save_retry_delay: float,
-    activity_tracker: ActivityTracker | None = None,
 ):
     """Asynchronous handler to process and optionally save incoming quote data."""
     global _last_quote_prices
     symbol = data.symbol
 
-    # Track activity if we have an activity tracker
-    if activity_tracker is not None:
-        activity_tracker.add_activity(symbol, data.timestamp, data.ask_size)
 
     current_prices = {
         'bid_price': data.bid_price,
@@ -349,41 +219,10 @@ async def quote_data_handler(
         prices_have_changed = True
 
     if not only_log_updates or prices_have_changed:
-        if display_manager:
-            # Colors for display
-            GREEN = "\x1b[32m"
-            RED = "\x1b[31m"
-            RESET = "\x1b[0m"
-
-            # Helper to format one side (bid or ask)
-            def format_side_display(current_price, prev_price_val, size_val):
-                price_fmt = f"{current_price:<7.2f}"
-                size_val_for_fmt = size_val if size_val is not None else 0
-                size_fmt = f"(S:{size_val_for_fmt:<4})"
-
-                if prev_price_val is not None:
-                    change = current_price - prev_price_val
-                    if change != 0:
-                        arrow = "↑" if change > 0 else "↓"
-                        color = GREEN if change > 0 else RED
-                        change_indicator = f" ({arrow}{abs(change):.2f})"
-                        return f"{color}{price_fmt}{change_indicator}{RESET} {size_fmt}"
-                    else:
-                        return f"{price_fmt} (---) {size_fmt}"
-                else:
-                    return f"{price_fmt} (---) {size_fmt}"
-
-            final_bid_str = format_side_display(data.bid_price, last_symbol_prices['bid_price'], data.bid_size)
-            final_ask_str = format_side_display(data.ask_price, last_symbol_prices['ask_price'], data.ask_size)
-
-            local_timestamp = data.timestamp.astimezone()
-            time_str = local_timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-            data_str = f"Q: B:{final_bid_str} A:{final_ask_str} T:{time_str}"
-            display_manager.update_symbol(symbol, data_str)
-        else:
-            local_timestamp = data.timestamp.astimezone()
-            time_str = local_timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-            print(f"Quote for {symbol} ({symbol_type}): Bid - {data.bid_price} (Size: {data.bid_size}), Ask - {data.ask_price} (Size: {data.ask_size}) at {time_str}")
+        print(f"DEBUG: Received quote data for {symbol} - No display manager", file=sys.stderr)
+        local_timestamp = data.timestamp.astimezone()
+        time_str = local_timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        print(f"Quote for {symbol} ({symbol_type}): Bid - {data.bid_price} (Size: {data.bid_size}), Ask - {data.ask_price} (Size: {data.ask_size}) at {time_str}")
 
         quote_df = pd.DataFrame({
             'timestamp': [pd.to_datetime(data.timestamp, utc=True)],
@@ -416,17 +255,15 @@ async def quote_data_handler(
     _last_quote_prices[symbol] = current_prices
 
 
-def setup_and_run_stream(
+async def setup_and_run_stream(
     stock_db_instance: StockDBBase | None,
     symbols: list[str],
     feed: str,
     inferred_symbol_type: str,
     only_log_updates: bool,
     csv_data_dir: str | None,
-    display_manager: StaticDisplayManager | None,
     save_max_retries: int,
     save_retry_delay: float,
-    activity_tracker: ActivityTracker | None = None,
 ):
     """Sets up and runs the WebSocket stream for a given list of symbols and type."""
     api_key = os.getenv("ALPACA_API_KEY")
@@ -457,10 +294,8 @@ def setup_and_run_stream(
             inferred_symbol_type,
             only_log_updates,
             csv_data_dir,
-            display_manager,
             save_max_retries,
             save_retry_delay,
-            activity_tracker,
         )
 
     async def internal_trade_handler(data):
@@ -470,7 +305,6 @@ def setup_and_run_stream(
             inferred_symbol_type,
             only_log_updates,
             csv_data_dir,
-            display_manager,
             save_max_retries,
             save_retry_delay,
         )
@@ -498,39 +332,37 @@ def setup_and_run_stream(
 
         if wss_client:
             print(f"Starting WebSocket client for {inferred_symbol_type} symbols: {symbols_str}...", file=sys.stderr)
-            wss_client.run()
+            # Run the WebSocket client in a separate thread
+            await asyncio.to_thread(wss_client.run)
         else:
             print(f"WebSocket client for {inferred_symbol_type} was not initialized. This might be due to missing API keys for stock data or an internal error.", file=sys.stderr)
 
     except KeyboardInterrupt:
-        if not display_manager:
-            print(f"KeyboardInterrupt caught in {inferred_symbol_type} stream for {symbols_str}. Stopping stream...", file=sys.stderr)
+        print(f"KeyboardInterrupt caught in {inferred_symbol_type} stream for {symbols_str}. Stopping stream...", file=sys.stderr)
     except Exception as e:
         print(f"An error occurred during {inferred_symbol_type} stream operation for {symbols_str}: {e}", file=sys.stderr)
         traceback.print_exc()
     finally:
-        if not display_manager:
-            print(f"Stream processing for {inferred_symbol_type} symbols ({symbols_str}) ended. Cleaning up WebSocket client...", file=sys.stderr)
+        print(f"Stream processing for {inferred_symbol_type} symbols ({symbols_str}) ended. Cleaning up WebSocket client...", file=sys.stderr)
         if wss_client:
             try:
-                wss_client.close()
+                await wss_client.close()  # Make sure to await the close
             except Exception as e_close:
                 print(
                     f"Error during WebSocket client close for {inferred_symbol_type} ({symbols_str}): {e_close}",
                     file=sys.stderr,
                 )
-        if not display_manager:
-            print(f"Cleanup complete for {inferred_symbol_type} stream ({symbols_str}).", file=sys.stderr)
+        print(f"Cleanup complete for {inferred_symbol_type} stream ({symbols_str}).", file=sys.stderr)
 
 
 async def main():
-    global _db_client_instance_for_cleanup
+    global _db_client_instance_for_cleanup, _csv_buffer_manager
     parser = argparse.ArgumentParser(description="Stream real-time market data and optionally save it to a database and/or CSV files.")
 
     # Create a mutually exclusive group for symbol input methods
     symbol_group = parser.add_mutually_exclusive_group(required=True)
     symbol_group.add_argument(
-        "symbols",
+        "--symbols",
         nargs="+",
         help="One or more stock or crypto symbols (e.g., SPY AAPL, or BTC/USD ETH/USD). Crypto symbols should contain /.",
     )
@@ -543,20 +375,6 @@ async def main():
     parser.add_argument("--feed", choices=["quotes", "trades"], default="quotes",
                         help="The type of data feed to subscribe to (quotes or trades). Default is quotes.")
 
-    # Add new arguments for activity tracking
-    activity_group = parser.add_argument_group(title="Activity Tracking Options")
-    activity_group.add_argument(
-        "--max-active-symbols",
-        type=int,
-        default=10,
-        help="Maximum number of most active symbols to display. If not set, 10 symbols will be displayed.",
-    )
-    activity_group.add_argument(
-        "--activity-window",
-        type=int,
-        default=10,
-        help="Time window in seconds to track activity (default: 10).",
-    )
 
     # Database arguments group
     group = parser.add_mutually_exclusive_group(required=False) # Not strictly required to save data
@@ -570,23 +388,17 @@ async def main():
                         help="Type of local database to use if --db-path is specified (default: duckdb). \
                              Ignored if --remote-db-server is used.")
 
-    display_group = parser.add_argument_group(title="Display Options")
-    display_group.add_argument('--static-display', action='store_true',
-                        help="Enable static, cursor-based display for real-time updates on stdout. Other logs go to stderr.")
-    display_group.add_argument(
-        '--display-update-interval', 
-        type=float, 
-        default=1.0,
-        help="Minimum interval in seconds between static display updates (default: 1.0)."
-    )
-    display_group.add_argument('--only-log-updates', dest='only_log_updates', action='store_true',
+    parser.add_argument('--only-log-updates', dest='only_log_updates', action='store_true',
                         help="Log/save data only if bid/ask prices change (for quotes). Trades always logged/saved. Affects static display too.")
-    display_group.add_argument('--log-all-data', dest='only_log_updates', action='store_false',
+    parser.add_argument('--log-all-data', dest='only_log_updates', action='store_false',
                         help="Log/save all incoming quote data, regardless of price changes. Affects static display too.")
     parser.set_defaults(only_log_updates=True)
 
-    # CSV arguments group
     csv_group = parser.add_argument_group(title="CSV Options")
+    csv_group.add_argument("--csv-buffer-size", type=int, default=0,
+                        help="Number of transactions to buffer before writing to CSV (default: 0, immediate write)")
+    csv_group.add_argument("--csv-flush-interval", type=float, default=60.0,
+                        help="Interval in seconds for periodic buffer flushing (default: 60.0, set to 0 to disable)")
     csv_group.add_argument("--csv-data-dir", type=str, default=None,
                         help="Base directory to save market data as CSV files. If provided, data is saved to CSV_DATA_DIR/SYMBOL/SYMBOL_YYYY-MM-DD_feedtype.csv.")
 
@@ -625,44 +437,8 @@ async def main():
         print("No symbols provided. Exiting.", file=sys.stderr)
         return
 
-    # Initialize activity tracker if needed
-    activity_tracker = None
-    if args.max_active_symbols is not None:
-        activity_tracker = ActivityTracker(args.activity_window)
-        print(
-            f"Activity tracking enabled: showing top {args.max_active_symbols} symbols over {args.activity_window}s window",
-            file=sys.stderr,
-        )
-
-    # Initialize appropriate display manager
-    display_manager = None
-    if args.static_display:
-        if args.max_active_symbols is not None:
-            display_manager = DynamicDisplayManager(
-                activity_tracker,
-                args.max_active_symbols,
-                symbols_to_process,  # Initial symbols list
-                sys.stdout,
-                args.display_update_interval,
-            )
-            display_manager.start()  # Start the dynamic update thread
-        else:
-            all_symbols_for_display = sorted(list(set(symbols_to_process)))
-            if not all_symbols_for_display:
-                print(
-                    "Static display enabled, but no symbols to display.",
-                    file=sys.stderr,
-                )
-            else:
-                display_manager = StaticDisplayManager(
-                    all_symbols_for_display, sys.stdout, args.display_update_interval
-                )
-
     main_task_completed_normally = False
     try:
-        if display_manager:
-            display_manager.prepare_display()
-
         stock_db_instance: StockDBBase | None = None
         db_type_to_use: str
         db_config_to_use: str | None = None
@@ -704,7 +480,9 @@ async def main():
             print("No database configured. Market data will be printed to console but not saved.", file=sys.stderr)
 
         if args.csv_data_dir:
-            print(f"CSV data will be saved in: {Path(args.csv_data_dir).resolve()}", file=sys.stderr)
+            print(f"CSV data will be saved in: {Path(args.csv_data_dir).resolve()} "
+                  f"with buffer size: {args.csv_buffer_size} "
+                  f"and flush interval: {args.csv_flush_interval}s", file=sys.stderr)
             # Create the base directory if it doesn't exist
             try:
                 Path(args.csv_data_dir).mkdir(parents=True, exist_ok=True)
@@ -721,41 +499,36 @@ async def main():
             else:
                 stock_symbols.append(symbol_arg)
 
+        activity_tracker = None
         tasks_to_run = []
+        display_manager = None
         if stock_symbols:
             print(f"Preparing to stream stocks: { ', '.join(stock_symbols) }", file=sys.stderr)
-            # setup_and_run_stream is blocking, so it needs to run in a thread
             tasks_to_run.append(
-                asyncio.to_thread(
-                    setup_and_run_stream,
+                setup_and_run_stream(
                     stock_db_instance,
                     stock_symbols,
                     args.feed,
                     "stock",
                     args.only_log_updates,
                     args.csv_data_dir,
-                    display_manager,
                     args.save_max_retries,
                     args.save_retry_delay,
-                    activity_tracker,
                 )
             )
 
         if crypto_symbols:
             print(f"Preparing to stream cryptos: { ', '.join(crypto_symbols) }", file=sys.stderr)
             tasks_to_run.append(
-                asyncio.to_thread(
-                    setup_and_run_stream,
+                setup_and_run_stream(
                     stock_db_instance,
                     crypto_symbols,
                     args.feed,
                     "crypto",
                     args.only_log_updates,
                     args.csv_data_dir,
-                    display_manager,
                     args.save_max_retries,
                     args.save_retry_delay,
-                    activity_tracker,
                 )
             )
 
@@ -801,16 +574,40 @@ async def main():
             print("Remote DB client session closed.", file=sys.stderr)
         print("Main application shutdown sequence finished.", file=sys.stderr)
 
+        if _csv_buffer_manager:
+            print("Cleaning up CSV buffer manager...", file=sys.stderr)
+            _csv_buffer_manager.cleanup()
+
 if __name__ == "__main__":
     try:
+        # Create a custom stderr that filters out debug messages
+        class DebugFilter:
+            def __init__(self, original_stderr):
+                self.original_stderr = original_stderr
+            
+            def write(self, message):
+                # Always write debug messages
+                if message.startswith("DEBUG:"):
+                    self.original_stderr.write(message)
+                # For non-debug messages, only write if they're not empty
+                elif message.strip():
+                    self.original_stderr.write(message)
+            
+            def flush(self):
+                self.original_stderr.flush()
+
+        # Replace stderr with our filtered version
+        original_stderr = sys.stderr
+        sys.stderr = DebugFilter(original_stderr)
+        
         print("Starting market data streaming application...", file=sys.stderr)
         asyncio.run(main())
-    except KeyboardInterrupt: # This will catch Ctrl+C if it happens before/during asyncio.run() or if main() re-raises it.
+    except KeyboardInterrupt:
         print("\nApplication terminated by user (KeyboardInterrupt in __main__).", file=sys.stderr)
     except Exception as e:
         print(f"Unhandled top-level exception: {e}", file=sys.stderr)
         traceback.print_exc()
     finally:
-        # sys.exit(0) is not typically needed here as the script will exit naturally.
-        # If main() has sys.exit, this part might not be reached on normal exit.
+        # Restore original stderr
+        sys.stderr = original_stderr
         print("Application has exited.", file=sys.stderr)
