@@ -119,54 +119,92 @@ class StockDBBase(metaclass=ABCMeta):
                 historical_df.reset_index(inplace=True)
                 historical_df.columns = [col.lower() for col in historical_df.columns]
 
-                # Combine datasets
-                combined_df = pd.concat([historical_df, df_copy], ignore_index=True)
-                combined_df = combined_df.sort_values(date_col)
-                combined_df = combined_df.drop_duplicates(
-                    subset=[date_col], keep="last"
-                )
+                # Ensure consistent timezone handling
+                if isinstance(historical_df[date_col].dtype, pd.DatetimeTZDtype):
+                    historical_df[date_col] = historical_df[date_col].dt.tz_localize(None)
+                if isinstance(df_copy[date_col].dtype, pd.DatetimeTZDtype):
+                    df_copy[date_col] = df_copy[date_col].dt.tz_localize(None)
+
+                # Ensure both DataFrames have the same columns and data types
+                common_cols = list(set(historical_df.columns) & set(df_copy.columns))
+                
+                # Convert both DataFrames to have the same dtypes for common columns
+                for col in common_cols:
+                    if col in historical_df.columns and col in df_copy.columns:
+                        # Use the dtype from df_copy as the target
+                        target_dtype = df_copy[col].dtype
+                        historical_df[col] = historical_df[col].astype(target_dtype)
+                
+                # Select only common columns
+                historical_df = historical_df[common_cols].copy()
+                df_copy = df_copy[common_cols].copy()
+
+                # Ensure both DataFrames are not empty
+                if not historical_df.empty and not df_copy.empty:
+                    try:
+                        # Combine datasets
+                        combined_df = pd.concat([historical_df, df_copy], ignore_index=True)
+                        combined_df = combined_df.sort_values(date_col)
+                        combined_df = combined_df.drop_duplicates(
+                            subset=[date_col], keep="last"
+                        )
+                    except Exception as e:
+                        print(f"Error concatenating DataFrames for {ticker}: {str(e)}")
+                        print(f"Historical DataFrame shape: {historical_df.shape}")
+                        print(f"New DataFrame shape: {df_copy.shape}")
+                        print(f"Historical DataFrame columns: {historical_df.columns.tolist()}")
+                        print(f"New DataFrame columns: {df_copy.columns.tolist()}")
+                        # Fall back to using just the new data
+                        combined_df = df_copy.copy()
+                else:
+                    combined_df = df_copy.copy()
             else:
                 combined_df = df_copy.copy()
+        else:
+            combined_df = df_copy.copy()
 
-            # Prepare data for MA/EMA calculation
-            records_for_calculation = []
-            for _, row in combined_df.iterrows():
-                record = {
-                    "date": row[date_col].strftime("%Y-%m-%d"),
-                    "price": row.get("close", 0),
-                }
-                records_for_calculation.append(record)
+        # Prepare data for MA/EMA calculation
+        records_for_calculation = []
+        for _, row in combined_df.iterrows():
+            record = {
+                "date": row[date_col].strftime("%Y-%m-%d"),
+                "price": row.get("close", 0),
+            }
+            records_for_calculation.append(record)
 
-            # Calculate moving averages
-            for period in ma_periods:
-                records_for_calculation = calculate_moving_average(
-                    ticker, records_for_calculation, period, "price"
-                )
+        # Calculate moving averages
+        for period in ma_periods:
+            records_for_calculation = calculate_moving_average(
+                ticker, records_for_calculation, period, "price"
+            )
 
-            # Calculate exponential moving averages
-            for period in ema_periods:
-                records_for_calculation = calculate_exponential_moving_average(
-                    ticker, records_for_calculation, period, "price"
-                )
+        # Calculate exponential moving averages
+        for period in ema_periods:
+            records_for_calculation = calculate_exponential_moving_average(
+                ticker, records_for_calculation, period, "price"
+            )
 
-            # Add MA and EMA values back to df_copy for the new data only
-            for i, row in df_copy.iterrows():
-                row_date = row[date_col].strftime("%Y-%m-%d")
-                for calc_record in records_for_calculation:
-                    if calc_record["date"] == row_date:
-                        # Add MA values
-                        for period in ma_periods:
-                            ma_key = f"ma_{period}"
-                            if ma_key in calc_record:
-                                df_copy.at[i, ma_key] = calc_record[ma_key]
+        # Create a new DataFrame for the results
+        result_df = df_copy.copy()
+        
+        # Add MA and EMA values back to result_df for the new data only
+        for i, row in result_df.iterrows():
+            row_date = row[date_col].strftime("%Y-%m-%d")
+            for calc_record in records_for_calculation:
+                if calc_record["date"] == row_date:
+                    # Add MA values
+                    for period in ma_periods:
+                        ma_key = f"ma_{period}"
+                        if ma_key in calc_record:
+                            result_df.loc[i, ma_key] = calc_record[ma_key]
 
-                        # Add EMA values
-                        for period in ema_periods:
-                            ema_key = f"ema_{period}"
-                            if ema_key in calc_record:
-                                df_copy.at[i, ema_key] = calc_record[ema_key]
-                        break
-        return df_copy
+                    # Add EMA values
+                    for period in ema_periods:
+                        ema_key = f"ema_{period}"
+                        if ema_key in calc_record:
+                            result_df.loc[i, ema_key] = calc_record[ema_key]
+                    break
+        return result_df
 
 
 class StockDBSQLite(StockDBBase):
