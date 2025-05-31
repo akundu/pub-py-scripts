@@ -219,7 +219,7 @@ async def quote_data_handler(
         prices_have_changed = True
 
     if not only_log_updates or prices_have_changed:
-        print(f"DEBUG: Received quote data for {symbol} - No display manager", file=sys.stderr)
+        #print(f"DEBUG: Received quote data for {symbol} - No display manager", file=sys.stderr)
         local_timestamp = data.timestamp.astimezone()
         time_str = local_timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
         print(f"Quote for {symbol} ({symbol_type}): Bid - {data.bid_price} (Size: {data.bid_size}), Ask - {data.ask_price} (Size: {data.ask_size}) at {time_str}")
