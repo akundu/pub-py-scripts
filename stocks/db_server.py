@@ -70,18 +70,22 @@ class WebSocketManager:
             "data": data
         })
 
-        async with self.lock:
-            # Create a copy of the set to avoid modification during iteration
-            subscribers = self.connections[symbol].copy()
-            
-        for ws in subscribers:
-            try:
-                if not ws.closed:
-                    await ws.send_str(message)
-            except Exception as e:
-                logger.error(f"Error broadcasting to subscriber for {symbol}: {e}")
-                # Remove failed connection
-                await self.remove_subscriber(symbol, ws)
+        try:    
+            async with self.lock:
+                # Create a copy of the set to avoid modification during iteration
+                subscribers = self.connections[symbol].copy()
+                
+            for ws in subscribers:
+                try:
+                    if not ws.closed:
+                        await ws.send_str(message)
+                except Exception as e:
+                    logger.error(f"Error broadcasting to subscriber for {symbol}: {e}")
+                    # Remove failed connection
+                    await self.remove_subscriber(symbol, ws)
+        except Exception as e:
+            logger.error(f"Error in broadcast method for {symbol}: {e}")
+            # Continue execution even if broadcast fails
 
     async def shutdown(self) -> None:
         """Shutdown the WebSocket manager and cancel all heartbeat tasks."""
@@ -348,6 +352,14 @@ async def handle_db_command(request: web.Request) -> web.Response:
             # For simplicity, client sends all available fields, DB layer picks what it needs.
 
             await db_instance.save_realtime_data(df_to_save, ticker, data_type)
+            #broadcast the data to the websocket subscribers
+            if data_records: # Ensure there's something to broadcast
+                await ws_manager.broadcast(ticker, {
+                    "type": data_type, 
+                    "timestamp": data_records[0].get("timestamp"), # Assuming first record's timestamp is representative
+                    "event_type": "quote_update", # Or some other indicator client can use
+                    "payload": data_records 
+                })
             return web.json_response({"message": f"Realtime data ({data_type}) for {ticker} saved successfully."})
 
         elif command == "get_realtime_data":
