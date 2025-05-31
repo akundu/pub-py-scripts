@@ -10,6 +10,21 @@ from datetime import datetime, timezone, timedelta
 import signal
 from typing import Set, Optional, Dict, List
 import logging
+
+# Determine the project root directory.
+# This script ('stream_market_data.py') is typically in a subdirectory (e.g., 'ux/').
+# The 'common' module is expected to be in a directory (e.g., 'common/')
+# that is a sibling to this script's parent directory (e.g., 'project_root/common/').
+# Thus, the project_root is one level above the directory containing this script.
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _SCRIPT_DIR.parent
+
+# Add the project root to sys.path. This allows Python to find the 'common' module.
+# This approach ensures that the import 'from common.stock_db import ...' works correctly,
+# especially when running this script directly from its own directory (e.g., 'python stream_market_data.py' from within 'ux/'),
+# or when running from the project root (e.g., 'python ux/stream_market_data.py').
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 from ux.ux_common import StaticDisplayManager, DynamicDisplayManager, ActivityTracker
 
 # Setup logging
