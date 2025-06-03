@@ -171,7 +171,6 @@ def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: s
 
 # Function to fetch and save data for a single symbol
 async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: StockDBBase, all_time: bool = True, days_back: int | None = None) -> bool:
-    # API_KEY and API_SECRET are fetched here, as this function makes direct API calls
     API_KEY = os.getenv('ALPACA_API_KEY')
     API_SECRET = os.getenv('ALPACA_API_SECRET')
     if not API_KEY or not API_SECRET:
@@ -180,7 +179,6 @@ async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: Sto
 
     try:
         end_date = datetime.now(timezone.utc)
-
         if days_back is not None:
             start_date_daily = end_date - timedelta(days=days_back)
             start_date_hourly = end_date - timedelta(days=min(days_back, 730)) # Max 2 years for hourly for sensible data size
@@ -204,12 +202,30 @@ async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: Sto
         )
 
         final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, symbol, 'daily', data_dir)
+
+        # Define a batch size for sending data to the DB server
+        DB_SAVE_BATCH_SIZE = 1000  # Adjust as needed (e.g., 500, 1000, 2000 rows)
+
+        # Save daily data in batches
         if not final_daily_bars.empty:
-            # Use the passed stock_db_instance
-            await stock_db_instance.save_stock_data(final_daily_bars, symbol, interval='daily')
-            print(f"Daily data for {symbol} also updated in database.")
-        elif new_daily_bars.empty:
-            print(f"No new daily data fetched for {symbol} from API via aiohttp.")
+            num_daily_batches = (len(final_daily_bars) - 1) // DB_SAVE_BATCH_SIZE + 1
+            print(f"Saving daily data for {symbol} to database in {num_daily_batches} batch(es) of up to {DB_SAVE_BATCH_SIZE} rows each...")
+            for i in range(0, len(final_daily_bars), DB_SAVE_BATCH_SIZE):
+                batch_df = final_daily_bars.iloc[i:i + DB_SAVE_BATCH_SIZE]
+                current_batch_num = (i // DB_SAVE_BATCH_SIZE) + 1
+                print(f"  Saving daily batch {current_batch_num}/{num_daily_batches} ({len(batch_df)} rows) for {symbol}...")
+                try:
+                    await stock_db_instance.save_stock_data(batch_df, symbol, interval='daily')
+                except Exception as e_save_daily:
+                    print(f"    Error saving daily batch {current_batch_num} for {symbol}: {e_save_daily}", file=sys.stderr)
+                    # Optionally, re-raise, or log and continue to hourly, or skip remaining daily batches
+                    # For now, we'll let it fail the symbol fetch if a batch fails.
+                    raise
+            print(f"Daily data for {symbol} processed for database.")
+        elif new_daily_bars.empty: # Check if new data was fetched before merging
+            print(f"No new daily data for {symbol} to process for database.")
+        else: # new_daily_bars was not empty, but final_daily_bars is (e.g. all old data)
+            print(f"No data in final_daily_bars for {symbol} to save to database (possibly all old data or merge issue).")
 
         print(f"Fetching hourly data for {symbol} from {start_date_hourly_api_str} to {end_date_api_str} via aiohttp...")
         new_hourly_bars = await fetch_bars_single_aiohttp_all_pages(
@@ -217,12 +233,25 @@ async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: Sto
         )
 
         final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, symbol, 'hourly', data_dir)
+
+        # Save hourly data in batches
         if not final_hourly_bars.empty:
-            # Use the passed stock_db_instance
-            await stock_db_instance.save_stock_data(final_hourly_bars, symbol, interval='hourly')
-            print(f"Hourly data for {symbol} also updated in database.")
-        elif new_hourly_bars.empty:
-            print(f"No new hourly data fetched for {symbol} from API via aiohttp.")
+            num_hourly_batches = (len(final_hourly_bars) - 1) // DB_SAVE_BATCH_SIZE + 1
+            print(f"Saving hourly data for {symbol} to database in {num_hourly_batches} batch(es) of up to {DB_SAVE_BATCH_SIZE} rows each...")
+            for i in range(0, len(final_hourly_bars), DB_SAVE_BATCH_SIZE):
+                batch_df = final_hourly_bars.iloc[i:i + DB_SAVE_BATCH_SIZE]
+                current_batch_num = (i // DB_SAVE_BATCH_SIZE) + 1
+                print(f"  Saving hourly batch {current_batch_num}/{num_hourly_batches} ({len(batch_df)} rows) for {symbol}...")
+                try:
+                    await stock_db_instance.save_stock_data(batch_df, symbol, interval='hourly')
+                except Exception as e_save_hourly:
+                    print(f"    Error saving hourly batch {current_batch_num} for {symbol}: {e_save_hourly}", file=sys.stderr)
+                    raise # Fail the symbol fetch if a batch fails
+            print(f"Hourly data for {symbol} processed for database.")
+        elif new_hourly_bars.empty: # Check if new data was fetched before merging
+            print(f"No new hourly data for {symbol} to process for database.")
+        else: # new_hourly_bars was not empty, but final_hourly_bars is
+            print(f"No data in final_hourly_bars for {symbol} to save to database (possibly all old data or merge issue).")
 
         return True
     except Exception as e:

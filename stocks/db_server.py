@@ -283,11 +283,27 @@ async def handle_db_command(request: web.Request) -> web.Response:
         return web.json_response({"error": "Only POST requests are allowed"}, status=405)
 
     try:
+        # Read the body to get its size and log it
+        # request.read() caches the body, so request.json() can use the cache later.
+        raw_body = await request.read()
+        body_size_bytes = len(raw_body)
+        # Compare with the server's configured max size if available in request.app context
+        # Note: app['client_max_size'] was an attempt, actual configured limit might be elsewhere
+        # or this provides a good indication of actual received size vs. intended limit.
+        configured_max_size = request.app.get('client_max_size', "Not directly available in app context for comparison here")
+        logger.info(f"Received /db_command. Body size: {body_size_bytes} bytes. (Configured max: {configured_max_size})")
+
+        # Now, attempt to parse the JSON from the (potentially large) body that has been read
+        # request.json() will use the cached body from request.read()
         payload = await request.json()
         command = payload.get("command")
         params = payload.get("params", {})
-    except ValueError:
+    except ValueError: # This can be raised by request.json() if body is not valid JSON
+        logger.error(f"Invalid JSON payload received for /db_command. Body size was {body_size_bytes} bytes.", exc_info=True)
         return web.json_response({"error": "Invalid JSON payload"}, status=400)
+    except Exception as e_read_payload: # Catch other errors during read/parse
+        logger.error(f"Error reading or parsing payload for /db_command: {e_read_payload}", exc_info=True)
+        return web.json_response({"error": "Error processing request payload"}, status=400)
 
     if not command:
         return web.json_response({"error": "Missing 'command' in payload"}, status=400)
