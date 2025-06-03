@@ -69,10 +69,41 @@ class CSVBufferManager:
     def _periodic_flush_worker(self):
         """Worker thread that periodically flushes all buffers."""
         while not self.stop_event.is_set():
-            time.sleep(self.flush_interval)
-            if not self.stop_event.is_set():  # Check again after sleep
-                print(f"Performing periodic flush of CSV buffers...", file=sys.stderr)
+            iteration_start_time = time.monotonic() # Record time at the start of the iteration
+
+            # 1. Perform the flush operation first (if not stopped)
+            if not self.stop_event.is_set():
+                print(f"Performing periodic flush of CSV buffers (Target interval: {self.flush_interval}s)...", file=sys.stderr)
                 self.flush_all_buffers()
+            
+            # If stop_event was set during flush or by other means, break before attempting to sleep
+            if self.stop_event.is_set():
+                break
+
+            # 2. Calculate time taken by the flush operation
+            flush_duration = time.monotonic() - iteration_start_time
+            
+            # 3. Calculate how long to sleep to aim for the next flush at roughly flush_interval from the START of THIS flush
+            sleep_needed = self.flush_interval - flush_duration
+            
+            # 4. Sleep for the calculated duration (if positive), interruptibly
+            if sleep_needed > 0:
+                # Sleep in small chunks to make it responsive to self.stop_event
+                chunk_duration = 0.1  # Check stop event roughly every 100ms, or smaller if flush_interval is tiny
+                if self.flush_interval > 0 and self.flush_interval < 1.0 : # If interval is small, use smaller chunks
+                    chunk_duration = min(chunk_duration, self.flush_interval / 5.0) # e.g. 1/5th of interval
+                chunk_duration = max(0.01, chunk_duration) # Ensure chunk is not zero or negative
+                
+                remaining_sleep_to_do = sleep_needed
+                while remaining_sleep_to_do > 0 and not self.stop_event.is_set():
+                    actual_sleep_this_step = min(chunk_duration, remaining_sleep_to_do)
+                    time.sleep(actual_sleep_this_step)
+                    remaining_sleep_to_do -= actual_sleep_this_step
+            else:
+                # If flush took longer than or equal to the interval, or interval is very short,
+                # sleep for a very short period to yield control and prevent a tight loop.
+                if not self.stop_event.is_set(): # Avoid sleep if we are about to exit due to stop_event
+                    time.sleep(0.01) # Minimal sleep (e.g., 10ms)
 
     def add_to_buffer(self, symbol: str, df: pd.DataFrame) -> None:
         """Add a DataFrame to the buffer for a symbol."""
@@ -85,7 +116,8 @@ class CSVBufferManager:
         """Flush the buffer for a specific symbol."""
         if symbol in self.buffers and self.buffers[symbol]:
             dfs = self.buffers[symbol]
-            self.buffers[symbol] = []
+            self.buffers[symbol] = [] # Clear the list for the symbol
+            del self.buffers[symbol]  # Remove the symbol key as its buffer has been processed
             if dfs:
                 combined_df = pd.concat(dfs)
                 _save_df_to_csv_sync(combined_df, self._get_file_path(symbol, dfs[0]))
