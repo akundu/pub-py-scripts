@@ -5,6 +5,7 @@ import traceback
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 import heapq
+from typing import Dict, Optional
 
 class StaticDisplayManager:
     def __init__(self, all_symbols: list[str], output_handle=sys.stdout, display_update_interval: float = 1.0):
@@ -134,6 +135,7 @@ class StaticDisplayManager:
             self._print("\n" * 2)
             self.display_prepared = False
             print("DEBUG: Display cleanup complete", file=sys.stderr, flush=True)
+        return 0
 
 # --- End Static Display Manager ---
 class ActivityTracker:
@@ -215,6 +217,7 @@ class DynamicDisplayManager(StaticDisplayManager):
         )
         self.stop_event = threading.Event()
         self.display_lock = threading.Lock()  # Separate lock for display updates
+        self.last_prices: Dict[str, Dict[str, Optional[float]]] = {}
         print(f"DEBUG: DynamicDisplayManager initialized with max_symbols={max_symbols}", file=sys.stderr, flush=True)
 
     def _update_symbols_thread(self):

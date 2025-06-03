@@ -46,6 +46,7 @@ class StreamDataClient:
         self.stop_event = asyncio.Event()
         self.display_manager = display_manager
         self.tasks: List[asyncio.Task] = []
+        self.last_prices: Dict[str, Dict[str, Optional[float]]] = {} # Store last prices here
         self._setup_signal_handlers()
 
     def _setup_signal_handlers(self):
@@ -96,51 +97,97 @@ class StreamDataClient:
     async def handle_messages(self, connection: websockets.WebSocketClientProtocol, symbol: str):
         """Handle incoming messages for a symbol."""
         try:
-            async for message in connection:
+            async for message_text in connection:
                 if self.stop_event.is_set():
                     break
                     
                 try:
-                    data = json.loads(message)
-                    # Format the timestamp for display
-                    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                    
-                    if self.display_manager:
-                        # Format data for display
-                        if 'price' in data:  # Trade data
-                            data_str = f"Trade  : Price: {data['price']:<8.2f} (Sz: {data['size']:<5}) @ {timestamp}"
-                        else:  # Quote data
-                            # Colors for display
-                            GREEN = "\x1b[32m"
-                            RED = "\x1b[31m"
-                            RESET = "\x1b[0m"
+                    message_json = json.loads(message_text)
+                    # logger.debug(f"Raw message for {symbol}: {message_json}") # Optional: for very verbose debugging
 
-                            # Helper to format one side (bid or ask)
-                            def format_side_display(current_price, prev_price_val, size_val):
-                                price_fmt = f"{current_price:<7.2f}"
-                                size_val_for_fmt = size_val if size_val is not None else 0
-                                size_fmt = f"(S:{size_val_for_fmt:<4})"
+                    # Expecting structure: {"symbol": "XYZ", "data": { ... actual data ...}}
+                    if 'data' not in message_json or not isinstance(message_json['data'], dict):
+                        logger.warning(f"Malformed message structure for {symbol} (missing 'data' dict): {message_json}")
+                        continue
 
-                                if prev_price_val is not None:
-                                    change = current_price - prev_price_val
-                                    if change != 0:
-                                        arrow = "↑" if change > 0 else "↓"
-                                        color = GREEN if change > 0 else RED
-                                        change_indicator = f" ({arrow}{abs(change):.2f})"
-                                        return f"{color}{price_fmt}{change_indicator}{RESET} {size_fmt}"
-                                    else:
-                                        return f"{price_fmt} (---) {size_fmt}"
-                                else:
-                                    return f"{price_fmt} (---) {size_fmt}"
+                    inner_data = message_json['data']
+                    message_type = inner_data.get('type')
+                    event_type = inner_data.get('event_type')
+                    received_symbol = message_json.get('symbol')
 
-                            final_bid_str = format_side_display(data['bid_price'], None, data['bid_size'])
-                            final_ask_str = format_side_display(data['ask_price'], None, data['ask_size'])
-                            data_str = f"Q: B:{final_bid_str} A:{final_ask_str} T:{timestamp}"
+                    if message_type == 'heartbeat':
+                        logger.debug(f"Heartbeat for {received_symbol or symbol} @ {inner_data.get('timestamp')}")
+                        continue # Skip further processing for heartbeats
+
+                    # --- Handle Quote Updates ---
+                    if event_type == 'quote_update' and message_type == 'quote':
+                        payload = inner_data.get('payload')
+                        if not isinstance(payload, list) or not payload:
+                            logger.warning(f"Quote update for {symbol} has missing or empty payload: {inner_data}")
+                            continue
                         
-                        self.display_manager.update_symbol(symbol, data_str)
+                        # Assuming payload for quote_update contains a single dictionary for the quote
+                        for quote_details in payload:
+                            # It's good practice to use .get() for potentially missing keys if structure isn't guaranteed
+                            bid_price = quote_details.get('bid_price')
+                            bid_size = quote_details.get('bid_size')
+                            ask_price = quote_details.get('ask_price')
+                            ask_size = quote_details.get('ask_size')
+                            data_timestamp_str = quote_details.get('timestamp', datetime.now(timezone.utc).isoformat())
+
+                            if bid_price is None or ask_price is None:
+                                logger.warning(f"Quote update for {symbol} missing bid/ask price: {quote_details}")
+                                continue
+
+                            # Retrieve last prices for this symbol for display comparison
+                            last_symbol_prices = self.last_prices.get(symbol, {'bid_price': None, 'ask_price': None})
+                            prev_bid_for_display = last_symbol_prices['bid_price']
+                            prev_ask_for_display = last_symbol_prices['ask_price']
+
+                            if self.display_manager:
+                                GREEN = "\x1b[32m"
+                                RED = "\x1b[31m"
+                                RESET = "\x1b[0m"
+
+                                def format_side_display(current_price, prev_price_val, size_val):
+                                    price_fmt = f"{current_price:<7.2f}"
+                                    size_val_for_fmt = size_val if size_val is not None else 0
+                                    size_fmt = f"(S:{size_val_for_fmt:<4})"
+                                    
+                                    if prev_price_val is not None:
+                                        change = current_price - prev_price_val
+                                        if change != 0:
+                                            arrow = "↑" if change > 0 else "↓"
+                                            color = GREEN if change > 0 else RED
+                                            change_indicator = f" ({arrow}{abs(change):.2f})"
+                                            return f"{color}{price_fmt}{change_indicator}{RESET} {size_fmt}"
+                                        else: # No change
+                                            return f"{price_fmt} (---) {size_fmt}"
+                                    else: # No previous data
+                                        return f"{price_fmt} (---) {size_fmt}"
+
+                                final_bid_str = format_side_display(bid_price, prev_bid_for_display, bid_size)
+                                final_ask_str = format_side_display(ask_price, prev_ask_for_display, ask_size)
+                                # Use data_timestamp_str from the payload for display
+                                try:
+                                    dt_obj = datetime.fromisoformat(data_timestamp_str.replace('Z', '+00:00'))
+                                    display_time_str = dt_obj.astimezone().strftime('%H:%M:%S.%f')[:-3]
+                                except ValueError:
+                                    display_time_str = data_timestamp_str # Fallback if parsing fails
+
+                                data_str = f"Q: B:{final_bid_str} A:{final_ask_str} T:{display_time_str}"
+                                self.display_manager.update_symbol(symbol, data_str)
+                            else:
+                                print(f"\n[{data_timestamp_str}] {symbol} Quote: Bid={bid_price} (Size:{bid_size}), Ask={ask_price} (Size:{ask_size})")
+
+                            # Update last prices for this symbol
+                            self.last_prices[symbol] = {
+                                'bid_price': bid_price,
+                                'ask_price': ask_price
+                            }
                     else:
-                        print(f"\n[{timestamp}] {symbol}:")
-                        print(json.dumps(data, indent=2))
+                        logger.warning(f"Received unhandled message type/event for {symbol}: type='{message_type}', event='{event_type}'. Data: {inner_data}")
+
                 except json.JSONDecodeError as e:
                     logger.error(f"Error decoding message for {symbol}: {e}")
         except websockets.exceptions.ConnectionClosed:
@@ -182,7 +229,8 @@ class StreamDataClient:
                     logger.error(f"Error closing connection during cleanup: {e}")
             
             if self.display_manager:
-                self.display_manager.cleanup_display()
+                logger.error(f"dsplay cx")
+                return self.display_manager.cleanup_display()
 
 def load_symbols_from_yaml(yaml_file: str) -> Set[str]:
     """Load symbols from a YAML file."""
