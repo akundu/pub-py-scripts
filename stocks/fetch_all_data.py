@@ -16,7 +16,8 @@ def run_fetch_and_save_in_process(
     db_type_for_worker: str,    # Renamed for clarity
     db_config_for_worker: str,  # Renamed for clarity (can be path or URL)
     all_time_flag: bool, 
-    days_back_val: int | None
+    days_back_val: int | None,
+    db_save_batch_size_val: int # New parameter for batch size
 ) -> bool:
     """Creates a DB instance in the worker process and runs fetch_and_save_data."""
     worker_db_instance = None # Initialize to None
@@ -30,7 +31,8 @@ def run_fetch_and_save_in_process(
             data_dir,
             worker_db_instance, # Use the instance created in this process
             all_time_flag,
-            days_back_val
+            days_back_val,
+            db_save_batch_size_val # Pass batch size to fetch_and_save_data
         ))
         return result
     except Exception as e:
@@ -84,6 +86,12 @@ async def main():
         choices=["sqlite", "duckdb"],
         default="sqlite",
         help="Type of local database if --db-path is specified (default: sqlite). Ignored if --remote-db-server is used."
+    )
+    parser.add_argument(
+        "--db-batch-size",
+        type=int,
+        default=1000,
+        help="Batch size for saving data to the database when sending to db_server (default: 1000 rows)."
     )
     
     # Time interval for fetching market data
@@ -170,7 +178,8 @@ async def main():
                         db_type_for_workers,       # Pass determined DB type
                         db_config_for_workers,     # Pass determined DB config (path or URL)
                         args.all_time,
-                        args.days_back
+                        args.days_back,
+                        args.db_batch_size # Pass parsed batch size
                     )
                     tasks.append(task)
                 

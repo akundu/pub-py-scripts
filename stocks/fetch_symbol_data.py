@@ -170,7 +170,14 @@ def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: s
     return final_df
 
 # Function to fetch and save data for a single symbol
-async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: StockDBBase, all_time: bool = True, days_back: int | None = None) -> bool:
+async def fetch_and_save_data(
+    symbol: str, 
+    data_dir: str, 
+    stock_db_instance: StockDBBase, 
+    all_time: bool = True, 
+    days_back: int | None = None,
+    db_save_batch_size: int = 1000  # New parameter with default
+) -> bool:
     API_KEY = os.getenv('ALPACA_API_KEY')
     API_SECRET = os.getenv('ALPACA_API_SECRET')
     if not API_KEY or not API_SECRET:
@@ -203,16 +210,13 @@ async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: Sto
 
         final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, symbol, 'daily', data_dir)
 
-        # Define a batch size for sending data to the DB server
-        DB_SAVE_BATCH_SIZE = 1000  # Adjust as needed (e.g., 500, 1000, 2000 rows)
-
-        # Save daily data in batches
+        # Use the passed db_save_batch_size parameter
         if not final_daily_bars.empty:
-            num_daily_batches = (len(final_daily_bars) - 1) // DB_SAVE_BATCH_SIZE + 1
-            print(f"Saving daily data for {symbol} to database in {num_daily_batches} batch(es) of up to {DB_SAVE_BATCH_SIZE} rows each...")
-            for i in range(0, len(final_daily_bars), DB_SAVE_BATCH_SIZE):
-                batch_df = final_daily_bars.iloc[i:i + DB_SAVE_BATCH_SIZE]
-                current_batch_num = (i // DB_SAVE_BATCH_SIZE) + 1
+            num_daily_batches = (len(final_daily_bars) - 1) // db_save_batch_size + 1
+            print(f"Saving daily data for {symbol} to database in {num_daily_batches} batch(es) of up to {db_save_batch_size} rows each...")
+            for i in range(0, len(final_daily_bars), db_save_batch_size):
+                batch_df = final_daily_bars.iloc[i:i + db_save_batch_size]
+                current_batch_num = (i // db_save_batch_size) + 1
                 print(f"  Saving daily batch {current_batch_num}/{num_daily_batches} ({len(batch_df)} rows) for {symbol}...")
                 try:
                     await stock_db_instance.save_stock_data(batch_df, symbol, interval='daily')
@@ -234,13 +238,13 @@ async def fetch_and_save_data(symbol: str, data_dir: str, stock_db_instance: Sto
 
         final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, symbol, 'hourly', data_dir)
 
-        # Save hourly data in batches
+        # Use the passed db_save_batch_size parameter
         if not final_hourly_bars.empty:
-            num_hourly_batches = (len(final_hourly_bars) - 1) // DB_SAVE_BATCH_SIZE + 1
-            print(f"Saving hourly data for {symbol} to database in {num_hourly_batches} batch(es) of up to {DB_SAVE_BATCH_SIZE} rows each...")
-            for i in range(0, len(final_hourly_bars), DB_SAVE_BATCH_SIZE):
-                batch_df = final_hourly_bars.iloc[i:i + DB_SAVE_BATCH_SIZE]
-                current_batch_num = (i // DB_SAVE_BATCH_SIZE) + 1
+            num_hourly_batches = (len(final_hourly_bars) - 1) // db_save_batch_size + 1
+            print(f"Saving hourly data for {symbol} to database in {num_hourly_batches} batch(es) of up to {db_save_batch_size} rows each...")
+            for i in range(0, len(final_hourly_bars), db_save_batch_size):
+                batch_df = final_hourly_bars.iloc[i:i + db_save_batch_size]
+                current_batch_num = (i // db_save_batch_size) + 1
                 print(f"  Saving hourly batch {current_batch_num}/{num_hourly_batches} ({len(batch_df)} rows) for {symbol}...")
                 try:
                     await stock_db_instance.save_stock_data(batch_df, symbol, interval='hourly')
@@ -273,6 +277,7 @@ async def process_symbol_data(
     db_type: str = "sqlite",
     db_path: str | None = None,
     days_back_fetch: int | None = None,
+    db_save_batch_size: int = 1000  # New parameter with default
 ) -> pd.DataFrame:
     """Processes symbol data: queries DB, fetches if needed, and returns DataFrame."""
 
@@ -329,7 +334,13 @@ async def process_symbol_data(
         os.makedirs(daily_dir, exist_ok=True)
         os.makedirs(hourly_dir, exist_ok=True)
 
-        fetch_success = await fetch_and_save_data(symbol, data_dir, stock_db_instance=current_db_instance, days_back=days_back_fetch) 
+        fetch_success = await fetch_and_save_data(
+            symbol, 
+            data_dir, 
+            stock_db_instance=current_db_instance, 
+            days_back=days_back_fetch,
+            db_save_batch_size=db_save_batch_size # Pass it through
+        ) 
 
         if fetch_success:
             print(
@@ -401,6 +412,12 @@ async def main() -> None:
         default=None,
         help="Number of days back to fetch historical data from the network. Overrides default fetch period. Used when --force-fetch or when data is missing (and not --query-only)."
     )
+    parser.add_argument(
+        "--db-batch-size",
+        type=int,
+        default=1000,
+        help="Batch size for saving data to the database (default: 1000 rows)."
+    )
     args = parser.parse_args()
 
     if args.start_date is None:
@@ -426,7 +443,8 @@ async def main() -> None:
         query_only=args.query_only,
         db_type=args.db_type,      # Pass db_type
         db_path=args.db_path,       # Pass db_path (can be None)
-        days_back_fetch=args.days_back # Pass the new argument
+        days_back_fetch=args.days_back, # Pass the new argument
+        db_save_batch_size=args.db_batch_size # Pass the new argument
     )
 
     if not final_df.empty:
