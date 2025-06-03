@@ -354,12 +354,27 @@ async def handle_db_command(request: web.Request) -> web.Response:
             await db_instance.save_realtime_data(df_to_save, ticker, data_type)
             #broadcast the data to the websocket subscribers
             if data_records: # Ensure there's something to broadcast
-                await ws_manager.broadcast(ticker, {
-                    "type": data_type, 
-                    "timestamp": data_records[0].get("timestamp"), # Assuming first record's timestamp is representative
-                    "event_type": "quote_update", # Or some other indicator client can use
-                    "payload": data_records 
-                })
+                transformed_payload_for_broadcast = []
+                if data_type == "quote":
+                    for record in data_records:
+                        transformed_payload_for_broadcast.append({
+                            "timestamp": record.get("timestamp"),
+                            "bid_price": record.get("price"),      # Map 'price' to 'bid_price'
+                            "bid_size": record.get("size"),        # Map 'size' to 'bid_size'
+                            "ask_price": record.get("ask_price"),
+                            "ask_size": record.get("ask_size")
+                            # Add other relevant fields if necessary
+                        })
+                else: # For trades or other data types, pass through or apply different mapping
+                    transformed_payload_for_broadcast = data_records
+
+                if transformed_payload_for_broadcast:
+                    await ws_manager.broadcast(ticker, {
+                        "type": data_type,
+                        "timestamp": transformed_payload_for_broadcast[0].get("timestamp"),
+                        "event_type": f"{data_type}_update", # More generic: e.g., quote_update, trade_update
+                        "payload": transformed_payload_for_broadcast
+                    })
             return web.json_response({"message": f"Realtime data ({data_type}) for {ticker} saved successfully."})
 
         elif command == "get_realtime_data":
@@ -431,6 +446,12 @@ async def main_server_runner():
                         help="Logging level (default: INFO).")
     parser.add_argument("--heartbeat-interval", type=float, default=1.0,
                         help="Interval in seconds between WebSocket heartbeats (default: 1.0).")
+    parser.add_argument(
+        "--max-body-mb", 
+        type=int, 
+        default=100, # Default to 100MB
+        help="Maximum request body size in Megabytes (MB) (default: 100MB). Set to 1024 for 1GB."
+    )
     args = parser.parse_args()
 
     # Setup logging as the first step after parsing args
@@ -451,15 +472,28 @@ async def main_server_runner():
 
     app = web.Application(middlewares=[logging_middleware])
     app['db_instance'] = app_db_instance
+    
+    # Set client_max_size on the application object
+    # This is a common way to try and influence the default server factory
+    max_size_bytes = args.max_body_mb * 1024 * 1024
+    app['client_max_size'] = max_size_bytes
+    # Ensure this is an int, not float, if aiohttp is strict
+    if not isinstance(app['client_max_size'], int):
+        app['client_max_size'] = int(app['client_max_size'])
+
     app.router.add_post("/db_command", handle_db_command)
     app.router.add_get("/ws", handle_websocket)  # Add WebSocket endpoint
     
-    runner = web.AppRunner(app)
+    # Remove handler_kwargs from AppRunner if app['client_max_size'] is the preferred method
+    # The handler_args approach might not be effective for client_max_size directly.
+    # runner = web.AppRunner(app, handler_args=handler_kwargs)
+    runner = web.AppRunner(app) # Initialize AppRunner without handler_args for this attempt
     await runner.setup()
     site = web.TCPSite(runner, "localhost", args.port)
     
     logger.info(f"Server starting on http://localhost:{args.port}")
     logger.info(f"Using database file: {os.path.abspath(args.db_file)}")
+    logger.info(f"Maximum request body size set to: {args.max_body_mb}MB ({max_size_bytes} bytes)")
     logger.info("Listening for POST requests on /db_command")
     logger.info(f"WebSocket endpoint available at ws://localhost:{args.port}/ws?symbol=SYMBOL")
     logger.info(f"WebSocket heartbeat interval: {args.heartbeat_interval}s")
