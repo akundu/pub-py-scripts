@@ -7,6 +7,45 @@ import os
 import argparse
 import sys
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor
+
+# Synchronous wrapper function to be executed by ProcessPoolExecutor
+def run_fetch_and_save_in_process(
+    symbol: str, 
+    data_dir: str, 
+    db_type_for_worker: str,    # Renamed for clarity
+    db_config_for_worker: str,  # Renamed for clarity (can be path or URL)
+    all_time_flag: bool, 
+    days_back_val: int | None
+) -> bool:
+    """Creates a DB instance in the worker process and runs fetch_and_save_data."""
+    worker_db_instance = None # Initialize to None
+    try:
+        # Each worker process creates its own StockDBBase instance.
+        print(f"Worker for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr)
+        worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
+        
+        result = asyncio.run(fetch_and_save_data(
+            symbol,
+            data_dir,
+            worker_db_instance, # Use the instance created in this process
+            all_time_flag,
+            days_back_val
+        ))
+        return result
+    except Exception as e:
+        print(f"Error in worker process for symbol {symbol}: {e}", file=sys.stderr)
+        # import traceback # Uncomment for full traceback from worker
+        # traceback.print_exc(file=sys.stderr)
+        return False # Indicate failure
+    finally:
+        if worker_db_instance and hasattr(worker_db_instance, 'close_session') and callable(worker_db_instance.close_session):
+            try:
+                print(f"Worker for {symbol}: Closing DB session...", file=sys.stderr)
+                asyncio.run(worker_db_instance.close_session()) # Assuming it's an async close
+                print(f"Worker for {symbol}: DB session closed.", file=sys.stderr)
+            except Exception as e_close:
+                print(f"Error closing DB in worker for symbol {symbol}: {e_close}", file=sys.stderr)
 
 # Main function to orchestrate fetching
 async def main():
@@ -20,15 +59,32 @@ async def main():
     parser.add_argument('--limit', type=int, default=None,
                       help='Limit symbols for market data fetch (default: None)')
     parser.add_argument('--max-concurrent', type=int, default=None,
-                      help='Max concurrent market data fetches (default: None, no limit)')
+                      help='Max concurrent processes for market data fetches (default: os.cpu_count())')
     parser.add_argument('--fetch-market-data', action='store_true',
                       help='Fetch historical market data for selected symbols. Disabled by default.')
     parser.add_argument('--fetch-online', action='store_true', default=False,
                         help='Force fetch symbol lists from network. Default loads from disk.')
-    parser.add_argument("--db-type", type=str, default='sqlite', choices=['sqlite', 'duckdb'], 
-                        help="Type of database to use (default: sqlite).")
-    parser.add_argument("--db-path", type=str, default=None,
-                        help=f"Path to the database file. If not provided, uses default for selected db-type.")
+
+    # Database configuration arguments
+    db_config_group = parser.add_mutually_exclusive_group(required=False)
+    db_config_group.add_argument(
+        "--db-path",
+        type=str,
+        default=None,
+        help="Path to the local database file (SQLite/DuckDB)."
+    )
+    db_config_group.add_argument(
+        "--remote-db-server",
+        type=str,
+        default=None,
+        help="Address of the remote DB server (e.g., localhost:8080). If used, --db-type is implicitly 'remote'."
+    )
+    parser.add_argument(
+        "--db-type",
+        choices=["sqlite", "duckdb"],
+        default="sqlite",
+        help="Type of local database if --db-path is specified (default: sqlite). Ignored if --remote-db-server is used."
+    )
     
     # Time interval for fetching market data
     time_group = parser.add_mutually_exclusive_group()
@@ -39,13 +95,36 @@ async def main():
     
     args = parser.parse_args()
 
-    # Determine the actual database path to use
-    actual_db_path = args.db_path
-    if actual_db_path is None:
-        actual_db_path = get_default_db_path("duckdb") if args.db_type == 'duckdb' else get_default_db_path("db")
+    # Determine the database type and configuration for worker processes
+    db_type_for_workers: str
+    db_config_for_workers: str
 
-    # Create a single StockDBBase instance using the factory
-    stock_db_instance: StockDBBase = get_stock_db(args.db_type, actual_db_path)
+    if args.remote_db_server:
+        db_type_for_workers = "remote"
+        db_config_for_workers = args.remote_db_server
+        if args.db_path:
+            print("Warning: --db-path is ignored when --remote-db-server is used.", file=sys.stderr)
+        # Check if user explicitly set a local db-type when remote is chosen
+        if args.db_type != parser.get_default("db_type") and args.db_type not in ["sqlite", "duckdb"]: # Check against valid local types
+             print(f"Warning: --db-type ('{args.db_type}') is ignored when --remote-db-server is used (implicitly 'remote').", file=sys.stderr)
+        print(f"Configuring workers to use remote database server at: {db_config_for_workers}")
+    elif args.db_path:
+        db_type_for_workers = args.db_type # User specified or default local type
+        db_config_for_workers = args.db_path
+        print(f"Configuring workers to use local database: type='{db_type_for_workers}', path='{db_config_for_workers}'")
+    else:
+        # Default to a local DB if no remote and no specific db-path, only if fetching market data.
+        if args.fetch_market_data:
+            db_type_for_workers = args.db_type # Default local type
+            db_config_for_workers = get_default_db_path(db_type_for_workers)
+            print(f"No explicit DB target. Configuring workers to default to local database: type='{db_type_for_workers}', path='{db_config_for_workers}'")
+        else:
+            # If not fetching market data, DB config might not be strictly necessary for workers
+            # but set defaults to avoid UnboundLocalError if some logic path expects them.
+            db_type_for_workers = args.db_type 
+            db_config_for_workers = get_default_db_path(db_type_for_workers)
+            # print("DB configuration for workers defaulting, but may not be used as market data fetching is off.", file=sys.stderr)
+
 
     # Create base data directories if any action is to be taken
     if args.types or args.fetch_market_data:
@@ -68,26 +147,49 @@ async def main():
         print(f"Limited to {len(all_symbols_list)} symbols for market data fetching")
 
     if args.fetch_market_data:
-        if all_symbols_list:
-            print(f"Fetching market data for {len(all_symbols_list)} symbols...")
-            
-            semaphore = asyncio.Semaphore(args.max_concurrent) if args.max_concurrent else None
-            
-            async def fetch_with_semaphore(symbol: str) -> None:
-                # Pass the stock_db_instance to fetch_and_save_data
-                task_func = fetch_and_save_data(symbol, args.data_dir, stock_db_instance, args.all_time, args.days_back)
-                if semaphore:
-                    async with semaphore:
-                        await task_func
-                else:
-                    await task_func
-            
-            tasks = [fetch_with_semaphore(symbol) for symbol in all_symbols_list]
-            await asyncio.gather(*tasks)
-            print("Market data fetching complete.")
-        else:
+        if not all_symbols_list:
             print("No symbols specified or found. Skipping market data fetching.")
             print("Use --types and/or --fetch-online to get symbols.")
+        elif not db_config_for_workers: # Should not happen with current logic if fetch_market_data is True
+            print("Error: Database configuration is missing for workers. Cannot fetch market data.", file=sys.stderr)
+        else:
+            print(f"Fetching market data for {len(all_symbols_list)} symbols using ProcessPoolExecutor...")
+            
+            executor_max_workers = args.max_concurrent if args.max_concurrent and args.max_concurrent > 0 else os.cpu_count()
+            
+            loop = asyncio.get_running_loop()
+            tasks = []
+            with ProcessPoolExecutor(max_workers=executor_max_workers) as executor:
+                for symbol_to_fetch in all_symbols_list:
+                    task = loop.run_in_executor(
+                        executor,
+                        run_fetch_and_save_in_process, # Call the synchronous wrapper
+                        # Arguments for the wrapper:
+                        symbol_to_fetch,
+                        args.data_dir,
+                        db_type_for_workers,       # Pass determined DB type
+                        db_config_for_workers,     # Pass determined DB config (path or URL)
+                        args.all_time,
+                        args.days_back
+                    )
+                    tasks.append(task)
+                
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                success_count = 0
+                failure_count = 0
+                for i, result in enumerate(results):
+                    symbol_name = all_symbols_list[i] if i < len(all_symbols_list) else "Unknown Symbol"
+                    if isinstance(result, Exception):
+                        print(f"Error processing symbol {symbol_name}: {result}", file=sys.stderr)
+                        failure_count +=1
+                    elif result is True:
+                        success_count += 1
+                    else: 
+                        print(f"Fetching failed or returned unexpected result for symbol {symbol_name}: {result}", file=sys.stderr)
+                        failure_count +=1
+                
+                print(f"Market data fetching attempts complete. Successes: {success_count}, Failures: {failure_count} out of {len(all_symbols_list)} symbols.")
     else:
         print("Market data fetching is disabled. Use --fetch-market-data to enable it.")
 
