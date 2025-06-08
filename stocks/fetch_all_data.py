@@ -49,6 +49,43 @@ def run_fetch_and_save_in_process(
             except Exception as e_close:
                 print(f"Error closing DB in worker for symbol {symbol}: {e_close}", file=sys.stderr)
 
+async def process_symbols_by_process_pool(all_symbols_list: list[str], args: argparse.Namespace, db_type_for_workers: str, db_config_for_workers: str): # Process pool version of process_symbols
+    executor_max_workers = args.max_concurrent if args.max_concurrent and args.max_concurrent > 0 else os.cpu_count()
+    
+    loop = asyncio.get_running_loop()
+    tasks = []
+    with ProcessPoolExecutor(max_workers=executor_max_workers) as executor:
+        for symbol_to_fetch in all_symbols_list:
+            task = loop.run_in_executor(
+                executor,
+                run_fetch_and_save_in_process, # Call the synchronous wrapper
+                # Arguments for the wrapper:
+                symbol_to_fetch,
+                args.data_dir,
+                db_type_for_workers,       # Pass determined DB type
+                db_config_for_workers,     # Pass determined DB config (path or URL)
+                args.all_time,
+                args.days_back,
+                args.db_batch_size # Pass parsed batch size
+            )
+            tasks.append(task)
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        success_count = 0
+        failure_count = 0
+        for i, result in enumerate(results):
+            symbol_name = all_symbols_list[i] if i < len(all_symbols_list) else "Unknown Symbol"
+            if isinstance(result, Exception):
+                print(f"Error processing symbol {symbol_name}: {result}", file=sys.stderr)
+                failure_count +=1
+            elif result is True:
+                success_count += 1
+            else: 
+                print(f"Fetching failed or returned unexpected result for symbol {symbol_name}: {result}", file=sys.stderr)
+                failure_count +=1
+    return (success_count, failure_count)
+
 # Main function to orchestrate fetching
 async def main():
     parser = argparse.ArgumentParser(description='Fetch stock lists and optionally market data from Alpaca API')
@@ -163,42 +200,8 @@ async def main():
         else:
             print(f"Fetching market data for {len(all_symbols_list)} symbols using ProcessPoolExecutor...")
             
-            executor_max_workers = args.max_concurrent if args.max_concurrent and args.max_concurrent > 0 else os.cpu_count()
-            
-            loop = asyncio.get_running_loop()
-            tasks = []
-            with ProcessPoolExecutor(max_workers=executor_max_workers) as executor:
-                for symbol_to_fetch in all_symbols_list:
-                    task = loop.run_in_executor(
-                        executor,
-                        run_fetch_and_save_in_process, # Call the synchronous wrapper
-                        # Arguments for the wrapper:
-                        symbol_to_fetch,
-                        args.data_dir,
-                        db_type_for_workers,       # Pass determined DB type
-                        db_config_for_workers,     # Pass determined DB config (path or URL)
-                        args.all_time,
-                        args.days_back,
-                        args.db_batch_size # Pass parsed batch size
-                    )
-                    tasks.append(task)
-                
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-
-                success_count = 0
-                failure_count = 0
-                for i, result in enumerate(results):
-                    symbol_name = all_symbols_list[i] if i < len(all_symbols_list) else "Unknown Symbol"
-                    if isinstance(result, Exception):
-                        print(f"Error processing symbol {symbol_name}: {result}", file=sys.stderr)
-                        failure_count +=1
-                    elif result is True:
-                        success_count += 1
-                    else: 
-                        print(f"Fetching failed or returned unexpected result for symbol {symbol_name}: {result}", file=sys.stderr)
-                        failure_count +=1
-                
-                print(f"Market data fetching attempts complete. Successes: {success_count}, Failures: {failure_count} out of {len(all_symbols_list)} symbols.")
+            (success_count, failure_count) = await process_symbols_by_process_pool(all_symbols_list, args, db_type_for_workers, db_config_for_workers)
+            print(f"Market data fetching attempts complete. Successes: {success_count}, Failures: {failure_count} out of {len(all_symbols_list)} symbols.")
     else:
         print("Market data fetching is disabled. Use --fetch-market-data to enable it.")
 
