@@ -16,6 +16,7 @@ from matplotlib.ticker import FuncFormatter
 from typing import List, Tuple, Optional, Union
 import numpy as np
 from zoneinfo import ZoneInfo
+from lib.sql_info_to_provide import generate_prompt
 
 # --- Configuration ---
 # DATABASE_FILE = "your_stock_data.db" # Replace with your actual database file path
@@ -67,17 +68,23 @@ def fetch_data(conn: Union[sqlite3.Connection, duckdb.DuckDBPyConnection], query
     Returns a pandas DataFrame.
     """
     try:
+        print(f"(0) query: {query}", file=sys.stderr)
+        print(f"(0) params: {params}", file=sys.stderr)
         if isinstance(conn, duckdb.DuckDBPyConnection):
             if params:
                 # DuckDB uses ? for parameters, so we need to convert named parameters
                 for key, value in params.items():
+                    print(f"replacing key: {key}, value: {value}", file=sys.stderr)
                     query = query.replace(f":{key}", f"'{value}'" if isinstance(value, str) else str(value))
             return conn.execute(query).df()
         else:  # SQLite
+            print(f"(1) query: {query}", file=sys.stderr)
+            print(f"(1) params: {params}", file=sys.stderr)
             return pd.read_sql_query(query, conn, params=params)
     except Exception as e:
         print(f"Error fetching data with query '{query}': {e}")
-        return pd.DataFrame()
+        raise e
+        #return pd.DataFrame()
 
 def get_daily_prices(conn: Union[sqlite3.Connection, duckdb.DuckDBPyConnection], 
                      ticker: str, 
@@ -182,11 +189,12 @@ def get_table_schema(conn: Union[sqlite3.Connection, duckdb.DuckDBPyConnection],
     return "\n\n".join(schema_info)
 
 # --- LLM Based Strategy to SQL ---
-async def generate_sql_from_strategy_llm(strategy_string: str, model_name: str = "gemini-2.0-flash", db_type: str = 'sqlite', db_connection: Union[sqlite3.Connection, duckdb.DuckDBPyConnection] = None):
+async def generate_sql_from_strategy_llm(strategy_string: str, model_name: str = "gemini-2.0-flash", db_type: str = 'sqlite', db_connection: Union[sqlite3.Connection, duckdb.DuckDBPyConnection] = None, provider: str = "gemini"):
     """
     Takes an English strategy string and uses an LLM to generate a SQL query.
+    Supports both Gemini and OpenAI providers.
     """
-    print(f"\n--- Attempting to generate SQL for: '{strategy_string}' using LLM ---", file=sys.stderr )
+    print(f"\n--- Attempting to generate SQL for: '{strategy_string}' using {provider.upper()} LLM ({model_name}) ---", file=sys.stderr )
 
     # Get date range from database
     if db_connection is None:
@@ -260,155 +268,126 @@ async def generate_sql_from_strategy_llm(strategy_string: str, model_name: str =
 
     # Get schema from database
     schema_info = get_table_schema(db_connection, db_type)
-
-    # Detailed instructions for the LLM
-    prompt = f"""
-    You are an expert financial analyst and SQL query writer.
-    Your task is to convert an English stock trading strategy into a single, executable SQL query for {db_type.upper()}.
-    The query should be read-only (i.e., only SELECT statements) and should be made for {db_type.upper()} and should explicitly use the schema of the tables and explicit only provide the select statement.
-    Assume today's date is {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}.
-
-    {db_specific_instructions[db_type]}
-
-    Available tables and their schemas:
-
-    {schema_info}
-
-    Instructions for query generation:
-    - The query MUST be a single SELECT statement.
-    - Identify the ticker, timeframe (daily/hourly), and conditions from the strategy.
-    - For MA crossovers (e.g., "MA_10 crosses above MA_50"):
-        - You'll need to compare the MAs on the current period and the previous period.
-        - Use window functions (LAG) if appropriate or select consecutive rows.
-        - Example logic for MA10 crossing above MA50:
-          (prev.ma_10 <= prev.ma_50 AND curr.ma_10 > curr.ma_50)
-    - For price level conditions (e.g., "close drops below $150"):
-        - Compare the relevant price (usually 'close') with the target value.
-    - Handle date/time references:
-        - "latest" or "current" usually means the most recent record.
-        - "today" refers to {datetime.now().strftime('%Y-%m-%d')}.
-        - "last N days/hours" requires date arithmetic (e.g., date('now', '-N days')).
-    - If the strategy implies an action (BUY/SELL), the query should select data points WHERE the conditions for that action are met.
-    - IMPORTANT: Always include an 'action' column in your SELECT statement that indicates the action to take (e.g., 'BUY' or 'SELL').
-    - Select relevant columns that would help verify the condition, including ticker, date/datetime, prices, and involved indicators.
-    - If a strategy is too complex to be represented by a single SELECT query or is ambiguous, return "Error: Strategy too complex or ambiguous for a single SQL query."
-    - IMPORTANT: Make sure to use dates within the available date range shown above. Do not use future dates or dates outside the available range.
-
-    REQUIRED COLUMNS FOR PERFORMANCE CALCULATION:
-    Your query MUST return exactly these columns in this order:
-    1. date: The date and time of the signal (DATETIME type, format: YYYY-MM-DD HH:MM:SS)
-    2. ticker: The stock symbol (TEXT type)
-    3. close: The closing price at the time of the signal (REAL type)
-    4. action: The action to take ('BUY' or 'SELL' as TEXT)
-    5. buying_price: The price at which the position was bought (REAL type)
-    6. buying_datetime: The exact date and time when the position was bought (DATETIME type, format: YYYY-MM-DD HH:MM:SS)
-
-    IMPORTANT: For buying_price and buying_datetime:
-    - These should be the price and time of the most recent BUY signal
-    - Use window functions to track the last BUY signal
-    - Example for SQLite:
-      LAG(CASE WHEN action = 'BUY' THEN close ELSE NULL END, 1) OVER (
-        PARTITION BY ticker 
-        ORDER BY datetime
-      ) as buying_price
-    - Example for DuckDB:
-      LAG(CASE WHEN action = 'BUY' THEN close ELSE NULL END, 1) OVER (
-        PARTITION BY ticker 
-        ORDER BY datetime
-      ) as buying_price
-
-    Example of correct column selection:
-    WITH signals AS (
-      SELECT 
-        datetime as date,
-        ticker,
-        close,
-        CASE WHEN condition THEN 'BUY' ELSE 'SELL' END as action
-      FROM ...
-    )
-    SELECT 
-      date,
-      ticker,
-      close,
-      action,
-      LAG(CASE WHEN action = 'BUY' THEN close ELSE NULL END, 1) OVER (
-        PARTITION BY ticker 
-        ORDER BY date
-      ) as buying_price,
-      LAG(CASE WHEN action = 'BUY' THEN date ELSE NULL END, 1) OVER (
-        PARTITION BY ticker 
-        ORDER BY date
-      ) as buying_datetime
-    FROM signals
-
-    Note: 
-    - For the first row of each ticker, buying_price and buying_datetime will be NULL, which is expected.
-    - Always use the full datetime (YYYY-MM-DD HH:MM:SS) for both date and buying_datetime columns.
-    - For hourly data, use the datetime column directly.
-    - For daily data, convert the date to datetime by appending ' 00:00:00' or use the appropriate datetime function.
-
-    User's Strategy: "{strategy_string}"
-
-    Generated SQL Query:
-    """
-
-    print("\n--- LLM Prompt ---", file=sys.stderr)
-    print(prompt, file=sys.stderr)
-    print("--- End Prompt ---\n", file=sys.stderr)
-
-    chat_history = [{"role": "user", "parts": [{"text": prompt}]}]
-    payload = {"contents": chat_history}
-    api_key = os.getenv('GEMINI_KEY')
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    prompt = generate_prompt(
+            strategy_string, 
+            db_type,
+            db_specific_instructions,
+            schema_info)
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(api_url, headers={'Content-Type': 'application/json'}, data=json.dumps(payload)) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    print(f"LLM API request failed with status {response.status}: {error_text}")
-                    return f"Error: LLM API request failed ({response.status})."
-                result = await response.json()
+        if provider.lower() == "gemini":
+            result = await _call_gemini_api(prompt, model_name)
+        elif provider.lower() == "openai":
+            result = await _call_openai_api(prompt, model_name)
+        else:
+            return f"Error: Unsupported provider '{provider}'. Use 'gemini' or 'openai'."
 
-        if (result is not None and 
-            result.get('candidates') and result['candidates'][0].get('content') and
-            result['candidates'][0]['content'].get('parts') and
-            result['candidates'][0]['content']['parts'][0].get('text')):
-            generated_text = result['candidates'][0]['content']['parts'][0]['text']
-            # Clean up the response, sometimes LLMs wrap SQL in ```sql ... ```
-            sql_query = generated_text.replace("```sql", "").replace("```", "").strip()
-            
-            # Remove any leading/trailing whitespace and newlines
-            sql_query = sql_query.strip()
-            
-            # Remove any leading text that's not SQL (like "ite" in your case)
-            if not sql_query.upper().startswith(("SELECT", "WITH")):
-                # Find the first occurrence of SELECT or WITH
-                select_pos = sql_query.upper().find("SELECT")
-                with_pos = sql_query.upper().find("WITH")
-                if select_pos != -1 and (with_pos == -1 or select_pos < with_pos):
-                    sql_query = sql_query[select_pos:]
-                elif with_pos != -1:
-                    sql_query = sql_query[with_pos:]
-                else:
-                    print("LLM did not return a valid SELECT or WITH query.")
-                    return "Error: LLM did not return a valid SELECT or WITH query."
+        if result.startswith("Error:"):
+            return result
 
-            print(f"LLM Generated SQL: \n{sql_query}")
-
-            # Basic validation: ensure it's a SELECT query
-            if not (sql_query.upper().startswith("SELECT") or 
-                    sql_query.upper().startswith("WITH")):
+        # Clean up the response, sometimes LLMs wrap SQL in ```sql ... ```
+        sql_query = result.replace("```sql", "").replace("```", "").strip()
+        
+        # Remove any leading/trailing whitespace and newlines
+        sql_query = sql_query.strip()
+        
+        # Remove any leading text that's not SQL (like "ite" in your case)
+        if not sql_query.upper().startswith(("SELECT", "WITH")):
+            # Find the first occurrence of SELECT or WITH
+            select_pos = sql_query.upper().find("SELECT")
+            with_pos = sql_query.upper().find("WITH")
+            if select_pos != -1 and (with_pos == -1 or select_pos < with_pos):
+                sql_query = sql_query[select_pos:]
+            elif with_pos != -1:
+                sql_query = sql_query[with_pos:]
+            else:
                 print("LLM did not return a valid SELECT or WITH query.")
                 return "Error: LLM did not return a valid SELECT or WITH query."
-            return sql_query
-        else:
-            print("LLM response structure unexpected or content missing.")
-            print(f"Full LLM response: {result}")
-            return "Error: LLM response structure unexpected."
+
+        print(f"LLM Generated SQL: \n{sql_query}")
+
+        # Basic validation: ensure it's a SELECT query
+        if not (sql_query.upper().startswith("SELECT") or 
+                sql_query.upper().startswith("WITH")):
+            print("LLM did not return a valid SELECT or WITH query.")
+            return "Error: LLM did not return a valid SELECT or WITH query."
+        return sql_query
+
     except Exception as e:
         print(f"Error in LLM interaction: {str(e)}")
         return f"Error: {str(e)}"
+
+
+async def _call_gemini_api(prompt: str, model_name: str) -> str:
+    """Call Google Gemini API."""
+    chat_history = [{"role": "user", "parts": [{"text": prompt}]}]
+    payload = {"contents": chat_history}
+    api_key = os.getenv('GEMINI_KEY')
+    
+    if not api_key:
+        return "Error: GEMINI_KEY environment variable not set."
+    
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(api_url, headers={'Content-Type': 'application/json'}, data=json.dumps(payload)) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                print(f"Gemini API request failed with status {response.status}: {error_text}")
+                return f"Error: Gemini API request failed ({response.status})."
+            result = await response.json()
+
+    if (result is not None and 
+        result.get('candidates') and result['candidates'][0].get('content') and
+        result['candidates'][0]['content'].get('parts') and
+        result['candidates'][0]['content']['parts'][0].get('text')):
+        return result['candidates'][0]['content']['parts'][0]['text']
+    else:
+        print("Gemini response structure unexpected or content missing.")
+        print(f"Full Gemini response: {result}")
+        return "Error: Gemini response structure unexpected."
+
+
+async def _call_openai_api(prompt: str, model_name: str) -> str:
+    """Call OpenAI API."""
+    api_key = os.getenv('OPENAI_API_KEY')
+    
+    if not api_key:
+        return "Error: OPENAI_API_KEY environment variable not set."
+    
+    payload = {
+        "model": model_name,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 2000,
+        "temperature": 0.1
+    }
+    
+    api_url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {api_key}'
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(api_url, headers=headers, data=json.dumps(payload)) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                print(f"OpenAI API request failed with status {response.status}: {error_text}")
+                return f"Error: OpenAI API request failed ({response.status})."
+            result = await response.json()
+
+    if (result is not None and 
+        result.get('choices') and 
+        len(result['choices']) > 0 and 
+        result['choices'][0].get('message') and
+        result['choices'][0]['message'].get('content')):
+        return result['choices'][0]['message']['content']
+    else:
+        print("OpenAI response structure unexpected or content missing.")
+        print(f"Full OpenAI response: {result}")
+        return "Error: OpenAI response structure unexpected."
 
 
 # --- Strategy Parsing (Simplified Regex-based) ---
@@ -638,7 +617,9 @@ async def calculate_strategy_performance(
     timeframe: str = 'daily',
     signals_df: pd.DataFrame = None,
     db_type: str = 'sqlite',
-    sql_query: Optional[str] = None
+    sql_query: Optional[str] = None,
+    model_name: str = 'gemini-2.0-flash',
+    provider: str = 'gemini'
 ) -> Tuple[pd.DataFrame, float]:
     """
     Calculate the performance of a trading strategy.
@@ -647,7 +628,7 @@ async def calculate_strategy_performance(
     if signals_df is None:
         # If an explicit SQL query is not provided, generate one from the NL strategy.
         if sql_query is None:
-            sql_query = await generate_sql_from_strategy_llm(strategy, db_type=db_type, db_connection=db_connection)
+            sql_query = await generate_sql_from_strategy_llm(strategy, model_name=model_name, db_type=db_type, db_connection=db_connection, provider=provider)
             if sql_query.startswith("Error:"):
                 print(f"Error generating SQL: {sql_query}")
                 return pd.DataFrame(), 0.0
@@ -878,8 +859,10 @@ def process_args():
     parser.add_argument('--end-date', help='End date for backtesting (YYYY-MM-DD)')
     parser.add_argument('--timeframe', choices=['daily', 'hourly'], default='daily',
                       help='Timeframe for analysis (default: daily)')
-    parser.add_argument('--model', default='gemini-2.0-flash',
-                      help='LLM model to use for SQL generation (default: gemini-2.0-flash)')
+    parser.add_argument('--model', 
+                      help='LLM model to use for SQL generation. For Gemini: gemini-2.0-flash, gemini-1.5-pro, etc. For OpenAI: o1, gpt-4, gpt-3.5-turbo, etc. (default: auto-selected based on provider)')
+    parser.add_argument('--provider', choices=['gemini', 'openai'], default='gemini',
+                      help='LLM provider to use for SQL generation (default: gemini)')
     parser.add_argument('--plot', action='store_true',
                       help='Plot strategy performance')
     parser.add_argument('--export-csv', 
@@ -890,6 +873,13 @@ def process_args():
                       help='Number of rows to display in results (default: 5, use -1 for all rows)')
 
     args = parser.parse_args()
+    
+    # Set default model based on provider if not explicitly provided
+    if args.model is None:
+        if args.provider == 'openai':
+            args.model = 'o1'
+        else:  # gemini
+            args.model = 'gemini-2.0-flash'
     
     # Convert dates to datetime objects
     start_date = datetime.strptime(args.start_date, '%Y-%m-%d') if args.start_date else None
@@ -956,8 +946,11 @@ def replace_placeholders(text: str, stock: str, start_date: Optional[datetime], 
     """Replace placeholders in text with actual values."""
     replacements = {
         "{STOCK}": stock,
+        ":ticker": stock,
         "{START_DATE}": format_date_for_sql(start_date, db_type),
-        "{END_DATE}": format_date_for_sql(end_date, db_type)
+        ":start_date": format_date_for_sql(start_date, db_type),
+        "{END_DATE}": format_date_for_sql(end_date, db_type),
+        ":end_date": format_date_for_sql(end_date, db_type)
     }
     
     result = text
@@ -1014,10 +1007,10 @@ async def execute_strategies(db_connection: Union[sqlite3.Connection, duckdb.Duc
             stock_specific_sql = replace_placeholders(sql_query, stock, start_date, end_date, db_type)
             
             # Check if any placeholders weren't replaced
-            missing_placeholders = [p for p in ["{STOCK}", "{START_DATE}", "{END_DATE}"] if p in stock_specific_sql]
+            missing_placeholders = [p for p in ["{STOCK}", "{START_DATE}", "{END_DATE}", ":ticker", ":start_date", ":end_date"] if p in stock_specific_sql]
             if missing_placeholders:
                 print(f"Warning: The following placeholders were not replaced: {', '.join(missing_placeholders)}", file=sys.stderr)
-            print(f"query to execute: {stock_specific_sql}", file=sys.stderr)
+            # print(f"query to execute: {stock_specific_sql}", file=sys.stderr)
             
             if args.execute_only:
                 # Just execute and display results
@@ -1038,7 +1031,9 @@ async def execute_strategies(db_connection: Union[sqlite3.Connection, duckdb.Duc
                     end_date=end_date,
                     timeframe=args.timeframe,
                     db_type=db_type,
-                    sql_query=stock_specific_sql
+                    sql_query=stock_specific_sql,
+                    model_name=args.model,
+                    provider=args.provider
                 )
                 
                 report_performance(
@@ -1057,26 +1052,28 @@ async def execute_strategies(db_connection: Union[sqlite3.Connection, duckdb.Duc
             return
 
         for strategy in strategies:
-            print("\n" + "="*80)
+            print("\n" + "="*80, file=sys.stderr)
             print(f"Testing Strategy: {strategy}", file=sys.stderr)
-            print("="*80 + "\n")
+            print("="*80 + "\n", file=sys.stderr)
 
             for stock in stocks:
-                print(f"\n--- Processing stock: {stock} ---")
+                print(f"\n--- Processing stock: {stock} ---", file=sys.stderr)
                 
                 stock_specific_strategy = replace_placeholders(strategy, stock, start_date, end_date, db_type)
                 
                 # Check if any placeholders weren't replaced
-                missing_placeholders = [p for p in ["{STOCK}", "{START_DATE}", "{END_DATE}"] if p in stock_specific_strategy]
+                missing_placeholders = [p for p in ["{STOCK}", "{START_DATE}", "{END_DATE}", ":ticker", ":start_date", ":end_date"] if p in stock_specific_strategy]
                 if missing_placeholders:
                     print(f"Warning: The following placeholders were not replaced: {', '.join(missing_placeholders)}", file=sys.stderr)
                 
                 if args.execute_only:
                     # Generate SQL and execute
-                    sql_query = await generate_sql_from_strategy_llm(stock_specific_strategy, db_type=db_type, db_connection=db_connection)
+                    sql_query = await generate_sql_from_strategy_llm(stock_specific_strategy, model_name=args.model, db_type=db_type, db_connection=db_connection, provider=args.provider)
                     if sql_query.startswith("Error:"):
                         print(f"Error generating SQL: {sql_query}")
                         continue
+
+                    # print(f"query to execute: {sql_query}", file=sys.stderr)
                     
                     results_df = fetch_data(db_connection, sql_query)
                     display_sql_results(results_df, stock, sql_query, args.rows)
@@ -1094,7 +1091,9 @@ async def execute_strategies(db_connection: Union[sqlite3.Connection, duckdb.Duc
                         start_date,
                         end_date,
                         args.timeframe,
-                        db_type=db_type
+                        db_type=db_type,
+                        model_name=args.model,
+                        provider=args.provider
                     )
                     
                     report_performance(
