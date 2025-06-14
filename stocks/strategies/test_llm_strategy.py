@@ -340,7 +340,7 @@ async def _call_gemini_api(prompt: str, model_name: str) -> str:
     if (result is not None and 
         result.get('candidates') and result['candidates'][0].get('content') and
         result['candidates'][0]['content'].get('parts') and
-        result['candidates'][0]['content']['parts'][0].get('text')):
+        result['candidates'][-1]['content']['parts'][0].get('text')):
         return result['candidates'][0]['content']['parts'][0]['text']
     else:
         print("Gemini response structure unexpected or content missing.")
@@ -942,7 +942,7 @@ def format_date_for_sql(date: Optional[datetime], db_type: str) -> str:
     # else:  # duckdb
     #     return f"DATE '{date.strftime('%Y-%m-%d')}'"
 
-def replace_placeholders(text: str, stock: str, start_date: Optional[datetime], end_date: Optional[datetime], db_type: str) -> str:
+def replace_placeholders(text: str, stock: str, start_date: Optional[datetime], end_date: Optional[datetime], db_type: str, investment_amount: Optional[float] = None) -> str:
     """Replace placeholders in text with actual values."""
     replacements = {
         "{STOCK}": stock,
@@ -950,7 +950,8 @@ def replace_placeholders(text: str, stock: str, start_date: Optional[datetime], 
         "{START_DATE}": format_date_for_sql(start_date, db_type),
         ":start_date": format_date_for_sql(start_date, db_type),
         "{END_DATE}": format_date_for_sql(end_date, db_type),
-        ":end_date": format_date_for_sql(end_date, db_type)
+        ":end_date": format_date_for_sql(end_date, db_type),
+        "{INVESTMENT_AMOUNT}": str(investment_amount) if investment_amount is not None else "NULL"
     }
     
     result = text
@@ -1004,10 +1005,10 @@ async def execute_strategies(db_connection: Union[sqlite3.Connection, duckdb.Duc
 
         for stock in stocks:
             print(f"\n--- Processing stock: {stock} ---")
-            stock_specific_sql = replace_placeholders(sql_query, stock, start_date, end_date, db_type)
+            stock_specific_sql = replace_placeholders(sql_query, stock, start_date, end_date, db_type, args.investment_amount)
             
             # Check if any placeholders weren't replaced
-            missing_placeholders = [p for p in ["{STOCK}", "{START_DATE}", "{END_DATE}", ":ticker", ":start_date", ":end_date"] if p in stock_specific_sql]
+            missing_placeholders = [p for p in ["{STOCK}", "{START_DATE}", "{END_DATE}", ":ticker", ":start_date", ":end_date", "{INVESTMENT_AMOUNT}"] if p in stock_specific_sql]
             if missing_placeholders:
                 print(f"Warning: The following placeholders were not replaced: {', '.join(missing_placeholders)}", file=sys.stderr)
             # print(f"query to execute: {stock_specific_sql}", file=sys.stderr)
@@ -1059,10 +1060,10 @@ async def execute_strategies(db_connection: Union[sqlite3.Connection, duckdb.Duc
             for stock in stocks:
                 print(f"\n--- Processing stock: {stock} ---", file=sys.stderr)
                 
-                stock_specific_strategy = replace_placeholders(strategy, stock, start_date, end_date, db_type)
+                stock_specific_strategy = replace_placeholders(strategy, stock, start_date, end_date, db_type, args.investment_amount)
                 
                 # Check if any placeholders weren't replaced
-                missing_placeholders = [p for p in ["{STOCK}", "{START_DATE}", "{END_DATE}", ":ticker", ":start_date", ":end_date"] if p in stock_specific_strategy]
+                missing_placeholders = [p for p in ["{STOCK}", "{START_DATE}", "{END_DATE}", ":ticker", ":start_date", ":end_date", "{INVESTMENT_AMOUNT}"] if p in stock_specific_strategy]
                 if missing_placeholders:
                     print(f"Warning: The following placeholders were not replaced: {', '.join(missing_placeholders)}", file=sys.stderr)
                 
