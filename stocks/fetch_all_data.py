@@ -8,6 +8,8 @@ import argparse
 import sys
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, Executor
+import time
+import random
 
 # Synchronous wrapper function to be executed by ThreadPoolExecutor
 def run_fetch_and_save(
@@ -20,6 +22,8 @@ def run_fetch_and_save(
     db_save_batch_size_val: int
 ) -> bool:
     """Creates a DB instance in the worker thread and runs fetch_and_save_data."""
+    print(f"{os.getpid()} Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr, flush=True)
+
     # This function is very similar to the process one. The key is that get_stock_db
     # should provide a connection that is safe for this thread. For SQLite, this means
     # a new connection object.
@@ -51,54 +55,173 @@ def run_fetch_and_save(
             except Exception as e_close:
                 print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
 
-async def process_symbols(loop: asyncio.AbstractEventLoop, executor: Executor, all_symbols_list: list[str], args: argparse.Namespace, db_type_for_workers: str, db_config_for_workers: str):
-    tasks = []
-    loop = asyncio.get_running_loop()
-    for symbol_to_fetch in all_symbols_list:
-        task = loop.run_in_executor(
-            executor,
-            run_fetch_and_save, # Call the synchronous wrapper
-            # Arguments for the wrapper:
-            symbol_to_fetch,
-            args.data_dir,
-            db_type_for_workers,       # Pass determined DB type
-            db_config_for_workers,     # Pass determined DB config (path or URL)
-            args.all_time,
-            args.days_back,
-            args.db_batch_size # Pass parsed batch size
-        )
-        tasks.append(task)
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    success_count = 0
-    failure_count = 0
-    for i, result in enumerate(results):
-        symbol_name = all_symbols_list[i] if i < len(all_symbols_list) else "Unknown Symbol"
-        if isinstance(result, Exception):
-            print(f"Error processing symbol {symbol_name}: {result}", file=sys.stderr)
-            failure_count +=1
-        elif result is True:
-            success_count += 1
-        else: 
-            print(f"Fetching failed or returned unexpected result for symbol {symbol_name}: {result}", file=sys.stderr)
-            failure_count +=1
+def process_symbols_for_single_db(all_symbols_list: list[str], data_dir: str, db_type: str, db_config: str, all_time: bool, days_back: int | None, db_batch_size: int, stock_executor_type: str, max_concurrent: int | None) -> tuple[int, int]:
+    """Process all symbols for a single database using the specified executor type for stock-level tasks."""
+    print(f"{os.getpid()} Processing {len(all_symbols_list)} symbols for database {db_config} using {stock_executor_type} executor", file=sys.stderr, flush=True)
+    
+    # Determine max workers for stock-level tasks
+    if max_concurrent and max_concurrent > 0:
+        max_workers = max_concurrent
+    else:
+        max_workers = os.cpu_count() if stock_executor_type == "process" else (os.cpu_count() or 1) * 5
+    
+    # Create the appropriate executor for stock-level tasks
+    if stock_executor_type == "process":
+        from concurrent.futures import ProcessPoolExecutor
+        executor_class = ProcessPoolExecutor
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        executor_class = ThreadPoolExecutor
+    
+    with executor_class(max_workers=max_workers) as executor:
+        # Level 2: Split by stock symbols
+        stock_tasks = []
+        for symbol_to_fetch in all_symbols_list:
+            task = executor.submit(
+                run_fetch_and_save,
+                symbol_to_fetch,
+                data_dir,
+                db_type,
+                db_config,
+                all_time,
+                days_back,
+                db_batch_size
+            )
+            stock_tasks.append((task, symbol_to_fetch))
+        
+        # Process completed stock-level tasks as they finish
+        success_count = 0
+        failure_count = 0
+        
+        for task, symbol_to_fetch in stock_tasks:
+            try:
+                result = task.result()  # This blocks until the task completes
+                if isinstance(result, Exception):
+                    print(f"{os.getpid()} Error processing symbol {symbol_to_fetch} for database {db_config}: {result}", file=sys.stderr, flush=True)
+                    failure_count += 1
+                elif result is True:
+                    success_count += 1
+                else:
+                    print(f"{os.getpid()} Fetching failed or returned unexpected result for symbol {symbol_to_fetch} for database {db_config}: {result}", file=sys.stderr, flush=True)
+                    failure_count += 1
+            except Exception as e:
+                print(f"{os.getpid()} Unexpected error processing symbol {symbol_to_fetch} for database {db_config}: {e}", file=sys.stderr, flush=True)
+                failure_count += 1
+    
+    print(f"{os.getpid()} Completed processing for database {db_config}: {success_count} successes, {failure_count} failures", file=sys.stderr, flush=True)
     return (success_count, failure_count)
 
-async def process_symbols_by_process_pool(all_symbols_list: list[str], args: argparse.Namespace, db_type_for_workers: str, db_config_for_workers: str): # Process pool version of process_symbols
-    executor_max_workers = args.max_concurrent if args.max_concurrent and args.max_concurrent > 0 else os.cpu_count()
+async def process_symbols_by_process_pool(all_symbols_list: list[str], args: argparse.Namespace, db_configs_for_workers: list[tuple[str, str]]): # Process pool version of process_symbols
+    executor_max_workers = max(args.max_concurrent if args.max_concurrent and args.max_concurrent > 0 else os.cpu_count() or 1 * 2, os.cpu_count() or 1)
     
     loop = asyncio.get_running_loop()
     with ProcessPoolExecutor(max_workers=executor_max_workers) as executor:
-        (success_count, failure_count) = await process_symbols(loop, executor, all_symbols_list, args, db_type_for_workers, db_config_for_workers)
-    return (success_count, failure_count)
+        # Level 1: Split by database configuration
+        db_tasks = []
+        for db_type, db_config in db_configs_for_workers:
+            task = loop.run_in_executor(
+                executor,
+                process_symbols_for_single_db,
+                all_symbols_list,
+                args.data_dir,
+                db_type,
+                db_config,
+                args.all_time,
+                args.days_back,
+                args.db_batch_size,
+                args.stock_executor_type,
+                args.max_concurrent
+            )
+            db_tasks.append((task, db_config))
+        
+        # Process completed database-level tasks as they finish
+        total_success_count = 0
+        total_failure_count = 0
+        
+        for done in asyncio.as_completed([task for task, _ in db_tasks]):
+            try:
+                result = await done
+                # Find the corresponding task info
+                task_info = None
+                for task, db_config in db_tasks:
+                    if task == done:
+                        task_info = db_config
+                        break
+                
+                if task_info:
+                    db_config = task_info
+                    if isinstance(result, Exception):
+                        print(f"Error processing database {db_config}: {result}", file=sys.stderr)
+                        total_failure_count += len(all_symbols_list)  # Assume all symbols failed
+                    elif isinstance(result, tuple) and len(result) == 2:
+                        success_count, failure_count = result
+                        total_success_count += success_count
+                        total_failure_count += failure_count
+                        print(f"Database {db_config}: {success_count} successes, {failure_count} failures", file=sys.stderr)
+                    else:
+                        print(f"Unexpected result format for database {db_config}: {result}", file=sys.stderr)
+                        total_failure_count += len(all_symbols_list)
+            except Exception as e:
+                print(f"Unexpected error in database-level task processing: {e}", file=sys.stderr)
+                total_failure_count += len(all_symbols_list)
+    
+    return (total_success_count, total_failure_count)
 
-async def process_symbols_by_thread_pool(all_symbols_list: list[str], args: argparse.Namespace, db_type_for_workers: str, db_config_for_workers: str):
-    executor_max_workers = args.max_concurrent if args.max_concurrent and args.max_concurrent > 0 else (os.cpu_count() or 1) * 5
+async def process_symbols_by_thread_pool(all_symbols_list: list[str], args: argparse.Namespace, db_configs_for_workers: list[tuple[str, str]]):
+    executor_max_workers = max(args.max_concurrent if args.max_concurrent and args.max_concurrent > 0 else (os.cpu_count() or 1 * 5), os.cpu_count() or 1)
     
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=executor_max_workers) as executor:
-        (success_count, failure_count) = await process_symbols(loop, executor, all_symbols_list, args, db_type_for_workers, db_config_for_workers)
-    return (success_count, failure_count)
+        # Level 1: Split by database configuration
+        db_tasks = []
+        for db_type, db_config in db_configs_for_workers:
+            task = loop.run_in_executor(
+                executor,
+                process_symbols_for_single_db,
+                all_symbols_list,
+                args.data_dir,
+                db_type,
+                db_config,
+                args.all_time,
+                args.days_back,
+                args.db_batch_size,
+                args.stock_executor_type,
+                args.max_concurrent
+            )
+            db_tasks.append((task, db_config))
+        
+        # Process completed database-level tasks as they finish
+        total_success_count = 0
+        total_failure_count = 0
+        
+        for done in asyncio.as_completed([task for task, _ in db_tasks]):
+            try:
+                result = await done
+                # Find the corresponding task info
+                task_info = None
+                for task, db_config in db_tasks:
+                    if task == done:
+                        task_info = db_config
+                        break
+                
+                if task_info:
+                    db_config = task_info
+                    if isinstance(result, Exception):
+                        print(f"Error processing database {db_config}: {result}", file=sys.stderr)
+                        total_failure_count += len(all_symbols_list)  # Assume all symbols failed
+                    elif isinstance(result, tuple) and len(result) == 2:
+                        success_count, failure_count = result
+                        total_success_count += success_count
+                        total_failure_count += failure_count
+                        print(f"Database {db_config}: {success_count} successes, {failure_count} failures", file=sys.stderr)
+                    else:
+                        print(f"Unexpected result format for database {db_config}: {result}", file=sys.stderr)
+                        total_failure_count += len(all_symbols_list)
+            except Exception as e:
+                print(f"Unexpected error in database-level task processing: {e}", file=sys.stderr)
+                total_failure_count += len(all_symbols_list)
+    
+    return (total_success_count, total_failure_count)
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Fetch stock lists and optionally market data from Alpaca API')
@@ -118,24 +241,12 @@ def parse_args():
                         help='Force fetch symbol lists from network. Default loads from disk.')
 
     # Database configuration arguments
-    db_config_group = parser.add_mutually_exclusive_group(required=False)
-    db_config_group.add_argument(
+    parser.add_argument(
         "--db-path",
         type=str,
+        nargs='+',
         default=None,
-        help="Path to the local database file (SQLite/DuckDB)."
-    )
-    db_config_group.add_argument(
-        "--remote-db-server",
-        type=str,
-        default=None,
-        help="Address of the remote DB server (e.g., localhost:8080). If used, --db-type is implicitly 'remote'."
-    )
-    parser.add_argument(
-        "--db-type",
-        choices=["sqlite", "duckdb"],
-        default="sqlite",
-        help="Type of local database if --db-path is specified (default: sqlite). Ignored if --remote-db-server is used."
+        help="Path to the local database file (SQLite/DuckDB) or remote server address (host:port). Type is inferred from format. Can specify multiple databases."
     )
     parser.add_argument(
         "--db-batch-size",
@@ -147,7 +258,13 @@ def parse_args():
         "--executor-type",
         choices=["process", "thread"],
         default=None,
-        help="Type of executor for parallel fetching. Defaults to 'process' if --remote-db-server is used, otherwise 'thread'."
+        help="Type of executor for parallel fetching. Defaults to 'process' if remote database is used, otherwise 'thread'."
+    )
+    parser.add_argument(
+        "--stock-executor-type",
+        choices=["process", "thread"],
+        default="thread",
+        help="Type of executor for stock-level tasks after database-level split. Defaults to 'thread'."
     )
     
     # Time interval for fetching market data
@@ -161,47 +278,59 @@ def parse_args():
 
     # Set default executor type based on other args if not explicitly set
     if args.executor_type is None:
-        if args.remote_db_server:
+        if args.db_path and any(':' in path for path in args.db_path):
             args.executor_type = "process"
-            print("Info: --remote-db-server used, defaulting --executor-type to 'process'.", file=sys.stderr)
+            print("Info: Remote database detected, defaulting --executor-type to 'process'.", file=sys.stderr)
         else:
             args.executor_type = "thread"
-            print("Info: No --remote-db-server, defaulting --executor-type to 'thread'.", file=sys.stderr)
+            print("Info: Local database detected, defaulting --executor-type to 'thread'.", file=sys.stderr)
             
     # Determine the database type and configuration for worker processes
-    db_type_for_workers: str
-    db_config_for_workers: str
+    db_configs_for_workers = []
 
-    if args.remote_db_server:
-        db_type_for_workers = "remote"
-        db_config_for_workers = args.remote_db_server
-        if args.db_path:
-            print("Warning: --db-path is ignored when --remote-db-server is used.", file=sys.stderr)
-        # Check if user explicitly set a local db-type when remote is chosen
-        if args.db_type != parser.get_default("db_type") and args.db_type not in ["sqlite", "duckdb"]: # Check against valid local types
-             print(f"Warning: --db-type ('{args.db_type}') is ignored when --remote-db-server is used (implicitly 'remote').", file=sys.stderr)
-        print(f"Configuring workers to use remote database server at: {db_config_for_workers}")
-    elif args.db_path:
-        db_type_for_workers = args.db_type # User specified or default local type
-        db_config_for_workers = args.db_path
-        print(f"Configuring workers to use local database: type='{db_type_for_workers}', path='{db_config_for_workers}'")
+    if args.db_path:
+        for db_path in args.db_path:
+            if ':' in db_path:
+                # Remote database (host:port format)
+                db_type = "remote"
+                db_config = db_path
+                print(f"Configuring workers to use remote database server at: {db_config}")
+            else:
+                # Local database - infer type from file extension
+                db_path_lower = db_path.lower()
+                if db_path_lower.endswith('.db') or db_path_lower.endswith('.sqlite') or db_path_lower.endswith('.sqlite3'):
+                    db_type = "sqlite"
+                elif db_path_lower.endswith('.duckdb'):
+                    db_type = "duckdb"
+                else:
+                    # Default to sqlite if no clear extension
+                    db_type = "sqlite"
+                    print(f"Warning: Could not infer database type from path '{db_path}'. Defaulting to 'sqlite'.", file=sys.stderr)
+                
+                db_config = db_path
+                print(f"Configuring workers to use local database: type='{db_type}' (inferred from path), path='{db_config}'")
+            
+            db_configs_for_workers.append((db_type, db_config))
     else:
-        # Default to a local DB if no remote and no specific db-path, only if fetching market data.
+        # Default to a local DB if no specific db-path, only if fetching market data.
         if args.fetch_market_data:
-            db_type_for_workers = args.db_type # Default local type
-            db_config_for_workers = get_default_db_path(db_type_for_workers)
-            print(f"No explicit DB target. Configuring workers to default to local database: type='{db_type_for_workers}', path='{db_config_for_workers}'")
+            db_type = "sqlite"  # Default to sqlite
+            db_config = get_default_db_path(db_type)
+            print(f"No explicit DB target. Configuring workers to default to local database: type='{db_type}', path='{db_config}'")
+            db_configs_for_workers.append((db_type, db_config))
         else:
             # If not fetching market data, DB config might not be strictly necessary for workers
             # but set defaults to avoid UnboundLocalError if some logic path expects them.
-            db_type_for_workers = args.db_type 
-            db_config_for_workers = get_default_db_path(db_type_for_workers)
+            db_type = "sqlite" 
+            db_config = get_default_db_path(db_type)
+            db_configs_for_workers.append((db_type, db_config))
             # print("DB configuration for workers defaulting, but may not be used as market data fetching is off.", file=sys.stderr)
-    return args, db_type_for_workers, db_config_for_workers
+    
+    return args, db_configs_for_workers
 
 # Main function to orchestrate fetching
 async def main():
-    args, db_type_for_workers, db_config_for_workers = parse_args()
+    args, db_configs_for_workers = parse_args()
     
     # Create base data directories if any action is to be taken
     if args.types or args.fetch_market_data:
@@ -227,15 +356,15 @@ async def main():
         if not all_symbols_list:
             print("No symbols specified or found. Skipping market data fetching.")
             print("Use --types and/or --fetch-online to get symbols.")
-        elif not db_config_for_workers: # Should not happen with current logic if fetch_market_data is True
+        elif not db_configs_for_workers: # Should not happen with current logic if fetch_market_data is True
             print("Error: Database configuration is missing for workers. Cannot fetch market data.", file=sys.stderr)
         else:
             print(f"Fetching market data for {len(all_symbols_list)} symbols using {args.executor_type} pool...")
             
             if args.executor_type == 'process':
-                (success_count, failure_count) = await process_symbols_by_process_pool(all_symbols_list, args, db_type_for_workers, db_config_for_workers)
+                (success_count, failure_count) = await process_symbols_by_process_pool(all_symbols_list, args, db_configs_for_workers)
             else: # 'thread'
-                (success_count, failure_count) = await process_symbols_by_thread_pool(all_symbols_list, args, db_type_for_workers, db_config_for_workers)
+                (success_count, failure_count) = await process_symbols_by_thread_pool(all_symbols_list, args, db_configs_for_workers)
 
             print(f"Market data fetching attempts complete. Successes: {success_count}, Failures: {failure_count} out of {len(all_symbols_list)} symbols.")
     else:
