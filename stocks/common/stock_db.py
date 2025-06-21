@@ -358,13 +358,47 @@ class StockDBSQLite(StockDBBase):
             max_date_str = max_date_val.strftime(date_format_str)
 
             cursor = conn.cursor()
-            cursor.execute(f'''
-                DELETE FROM {table} 
-                WHERE ticker = ? 
-                AND {date_col} BETWEEN ? AND ?
-            ''', (ticker, min_date_str, max_date_str))
+            
+            # For hourly data, we need to be more careful with the datetime format
+            # Delete existing data in the range to avoid UNIQUE constraint violations
+            if interval == 'hourly':
+                # First, let's see what's actually in the database for this range
+                cursor.execute(f'''
+                    SELECT COUNT(*) FROM {table} 
+                    WHERE ticker = ? 
+                    AND {date_col} >= ? 
+                    AND {date_col} <= ?
+                ''', (ticker, min_date_str, max_date_str))
+                existing_count = cursor.fetchone()[0]
+                print(f"Found {existing_count} existing {interval} records for {ticker} in range {min_date_str} to {max_date_str}")
+                
+                # Delete existing data in the range
+                cursor.execute(f'''
+                    DELETE FROM {table} 
+                    WHERE ticker = ? 
+                    AND {date_col} >= ? 
+                    AND {date_col} <= ?
+                ''', (ticker, min_date_str, max_date_str))
+                deleted_count = cursor.rowcount
+                print(f"Deleted {deleted_count} existing {interval} records for {ticker}")
+                
+            else:
+                # Daily data uses simple date format
+                cursor.execute(f'''
+                    DELETE FROM {table} 
+                    WHERE ticker = ? 
+                    AND {date_col} BETWEEN ? AND ?
+                ''', (ticker, min_date_str, max_date_str))
 
             df_copy[date_col] = df_copy[date_col].dt.strftime(date_format_str)
+            
+            # Check for duplicates in the DataFrame before insertion
+            duplicate_check = df_copy.duplicated(subset=['ticker', date_col], keep=False)
+            if duplicate_check.any():
+                print(f"Warning: Found {duplicate_check.sum()} duplicate rows in {ticker} {interval} data. Removing duplicates...")
+                df_copy = df_copy.drop_duplicates(subset=['ticker', date_col], keep='last')
+                print(f"After removing duplicates: {len(df_copy)} rows remaining")
+            
             df_copy.to_sql(table, conn, if_exists='append', index=False)
 
     async def _get_stock_data(
