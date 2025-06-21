@@ -25,6 +25,7 @@ symbols:
 - ANET
 - AON
 - APD
+- APG
 - APH
 - APO
 - APTV
@@ -55,8 +56,6 @@ symbols:
 - BDX
 - BEKE
 - BEP
-- BF.A
-- BF.B
 - BHP
 - BIP
 - BJ
@@ -66,6 +65,7 @@ symbols:
 - BMY
 - BN
 - BNS
+- BNT
 - BP
 - BR
 - BRK.A
@@ -112,6 +112,7 @@ symbols:
 - CPNG
 - CQP
 - CRBG
+- CRCL
 - CRH
 - CRM
 - CSL
@@ -186,6 +187,7 @@ symbols:
 - FMX
 - FNF
 - FNV
+- FTI
 - FTS
 - FTV
 - GD
@@ -199,7 +201,6 @@ symbols:
 - GIS
 - GLW
 - GM
-- GME
 - GPC
 - GPN
 - GRMN
@@ -215,6 +216,7 @@ symbols:
 - HEI.A
 - HES
 - HIG
+- HIMS
 - HLN
 - HLT
 - HMC
@@ -251,12 +253,11 @@ symbols:
 - JPM
 - K
 - KB
-- KEP
 - KEY
 - KEYS
 - KGC
+- KIM
 - KKR
-- KMB
 - KMI
 - KO
 - KOF
@@ -326,13 +327,11 @@ symbols:
 - NWG
 - O
 - OKE
-- OMC
 - ONON
 - ORCL
 - OTIS
 - OWL
 - OXY
-- PAYC
 - PBA
 - PBR
 - PBR.A
@@ -376,7 +375,6 @@ symbols:
 - RMD
 - ROK
 - ROL
-- RPM
 - RS
 - RSG
 - RTX
@@ -494,10 +492,12 @@ symbols:
 - WY
 - XOM
 - XPEV
+- XPO
 - XYL
 - XYZ
 - YPF
 - YUM
 - YUMC
 - ZBH
+- ZTO
 - ZTS

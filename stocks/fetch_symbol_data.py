@@ -15,7 +15,7 @@ try:
     POLYGON_AVAILABLE = True
 except ImportError:
     POLYGON_AVAILABLE = False
-    print("Warning: polygon-api-client not installed. Polygon.io data source will not be available.")
+    print("Warning: polygon-api-client not installed. Polygon.io data source will not be available.", file=sys.stderr)
 
 # Alpaca Market Data API base URL
 MARKET_DATA_BASE_URL = "https://data.alpaca.markets/v2"
@@ -47,7 +47,7 @@ async def fetch_polygon_data(
     start_date: str,
     end_date: str,
     api_key: str,
-    chunk_size: str = "auto"  # New parameter: "auto", "daily", "weekly", "monthly"
+    chunk_size: str = "monthly"  # New parameter: "auto", "daily", "weekly", "monthly"
 ) -> pd.DataFrame:
     """Fetch data from Polygon.io using their REST API with pagination support."""
     if not POLYGON_AVAILABLE:
@@ -68,8 +68,8 @@ async def fetch_polygon_data(
             start_date_formatted = start_dt.strftime('%Y-%m-%d')
             end_date_formatted = end_dt.strftime('%Y-%m-%d')
         except Exception as e:
-            print(f"Error parsing dates: {e}")
-            print(f"Start date: {start_date}, End date: {end_date}")
+            print(f"Error parsing dates: {e}", file=sys.stderr)
+            print(f"Start date: {start_date}, End date: {end_date}", file=sys.stderr)
             return pd.DataFrame()
         
         # Determine chunk size for fetching
@@ -87,7 +87,7 @@ async def fetch_polygon_data(
                 chunk_size = "daily"  # Daily data can be fetched in one go
         
         all_data = []
-        
+
         if chunk_size in ["daily", "weekly", "monthly"]:
             # Fetch data in chunks
             current_start = start_dt
@@ -104,13 +104,13 @@ async def fetch_polygon_data(
                 
                 # Safety check: if chunk_end equals current_start, we're not making progress
                 if chunk_end <= current_start:
-                    print(f"Warning: Chunk end date {chunk_end} is not after start date {current_start}. Stopping to prevent infinite loop.")
+                    print(f"Warning: Chunk end date {chunk_end} is not after start date {current_start}. Stopping to prevent infinite loop.", file=sys.stderr)
                     break
                 
                 chunk_start_str = current_start.strftime('%Y-%m-%d')
                 chunk_end_str = chunk_end.strftime('%Y-%m-%d')
                 
-                print(f"Fetching {timespan} data for {symbol} chunk {chunk_count + 1}: {chunk_start_str} to {chunk_end_str}")
+                print(f"Fetching {timespan} data for {symbol} chunk {chunk_count + 1}: {chunk_start_str} to {chunk_end_str}", file=sys.stderr)
                 
                 # Fetch data for this chunk
                 chunk_data = await _fetch_polygon_chunk(
@@ -119,9 +119,9 @@ async def fetch_polygon_data(
                 
                 if chunk_data:
                     all_data.extend(chunk_data)
-                    print(f"Fetched {len(chunk_data)} {timespan} records for chunk {chunk_count + 1}")
+                    print(f"Fetched {len(chunk_data)} {timespan} records for chunk {chunk_count + 1}", file=sys.stderr)
                 else:
-                    print(f"No data for chunk {chunk_count + 1}")
+                    print(f"No data for chunk {chunk_count + 1}", file=sys.stderr)
                 
                 chunk_count += 1
                 current_start = chunk_end
@@ -135,7 +135,7 @@ async def fetch_polygon_data(
             )
         
         if not all_data:
-            print(f"No {timespan} data returned for {symbol} in the specified date range.")
+            print(f"No {timespan} data returned for {symbol} in the specified date range.", file=sys.stderr)
             return pd.DataFrame()
         
         # Validate that we reached the expected end date or are within 24 hours
@@ -148,11 +148,11 @@ async def fetch_polygon_data(
             date_diff = (expected_end_date - last_date).total_seconds() / (24 * 3600)
             
             if date_diff > 1:  # More than 1 day difference
-                print(f"Warning: Data fetch may be incomplete for {symbol}. Last data point: {last_date.strftime('%Y-%m-%d')}, Expected end: {expected_end_date.strftime('%Y-%m-%d')} (gap: {date_diff:.1f} days)")
+                print(f"Warning: Data fetch may be incomplete for {symbol}. Last data point: {last_date.strftime('%Y-%m-%d')}, Expected end: {expected_end_date.strftime('%Y-%m-%d')} (gap: {date_diff:.1f} days)", file=sys.stderr)
             elif date_diff > 0:  # Within 1 day but not exact
-                print(f"Info: Data fetch completed for {symbol}. Last data point: {last_date.strftime('%Y-%m-%d')}, Expected end: {expected_end_date.strftime('%Y-%m-%d')} (gap: {date_diff:.1f} days)")
+                print(f"Info: Data fetch completed for {symbol}. Last data point: {last_date.strftime('%Y-%m-%d')}, Expected end: {expected_end_date.strftime('%Y-%m-%d')} (gap: {date_diff:.1f} days)", file=sys.stderr)
             else:
-                print(f"Success: Data fetch completed for {symbol}. Reached expected end date: {last_date.strftime('%Y-%m-%d')}")
+                print(f"Success: Data fetch completed for {symbol}. Reached expected end date: {last_date.strftime('%Y-%m-%d')}", file=sys.stderr)
         
         # Convert all collected data to a pandas DataFrame
         df = pd.DataFrame(all_data)
@@ -172,12 +172,13 @@ async def fetch_polygon_data(
         else:
             df.index.name = 'datetime'
             
-        print(f"Successfully fetched {len(df)} {timespan} records of data for {symbol} from Polygon.io (total across all chunks).")
+        print(f"Successfully fetched {len(df)} {timespan} records of data for {symbol} from Polygon.io (total across all chunks).", file=sys.stderr)
         return df
 
     except Exception as e:
-        print(f"Error fetching data from Polygon.io for {symbol}: {e}")
-        return pd.DataFrame()
+        print(f"Error fetching data from Polygon.io for {symbol}: {e}", file=sys.stderr)
+        raise e
+        #return pd.DataFrame()
 
 async def _fetch_polygon_chunk(
     client: PolygonRESTClient,
@@ -200,7 +201,7 @@ async def _fetch_polygon_chunk(
         )
         return resp if resp else []
     except Exception as e:
-        print(f"Error fetching chunk for {symbol} from {start_date} to {end_date}: {e}")
+        print(f"Error fetching chunk for {symbol} from {start_date} to {end_date}: {e}", file=sys.stderr)
         return []
 
 async def _fetch_polygon_paginated(
@@ -215,7 +216,7 @@ async def _fetch_polygon_paginated(
     current_start_date = start_date
     limit = 50000  # Polygon's max limit per request
     
-    print(f"Fetching {timespan} data for {symbol} from {start_date} to {end_date}...")
+    print(f"Fetching {timespan} data for {symbol} from {start_date} to {end_date}...", file=sys.stderr)
     
     while current_start_date <= end_date:
         # Query the aggregates API for current batch
@@ -231,16 +232,16 @@ async def _fetch_polygon_paginated(
         )
 
         if not resp:
-            print(f"No more {timespan} data returned for {symbol} from {current_start_date}.")
+            print(f"No more {timespan} data returned for {symbol} from {current_start_date}.", file=sys.stderr)
             break
         
         # Add current batch to all data
         all_data.extend(resp)
-        print(f"Fetched {len(resp)} {timespan} records for {symbol} from {current_start_date}")
+        print(f"Fetched {len(resp)} {timespan} records for {symbol} from {current_start_date}", file=sys.stderr)
         
         # If we got less than the limit, we've reached the end
         if len(resp) < limit:
-            print(f"Received {len(resp)} records (less than limit {limit}), ending pagination for {symbol}")
+            print(f"Received {len(resp)} records (less than limit {limit}), ending pagination for {symbol}", file=sys.stderr)
             break
         
         # Calculate next start date based on the last timestamp in the response
@@ -255,11 +256,11 @@ async def _fetch_polygon_paginated(
             next_date = last_date + pd.Timedelta(hours=1)
         
         current_start_date = next_date.strftime('%Y-%m-%d')
-        print(f"Next batch will start from {current_start_date} for {symbol}")
+        print(f"Next batch will start from {current_start_date} for {symbol}", file=sys.stderr)
         
         # Safety check: if we're not making progress, break to avoid infinite loop
         if current_start_date >= end_date:
-            print(f"Reached end date boundary for {symbol}. Stopping pagination.")
+            print(f"Reached end date boundary for {symbol}. Stopping pagination.", file=sys.stderr)
             break
         
         # Add a small delay to be respectful to the API
@@ -325,10 +326,10 @@ async def fetch_bars_single_page_aiohttp(
         return df, next_page_token_resp
         
     except aiohttp.ClientError as e:
-        print(f"aiohttp.ClientError fetching bars for {symbol} ({timeframe_str}): {e}")
+        print(f"aiohttp.ClientError fetching bars for {symbol} ({timeframe_str}): {e}", file=sys.stderr)
         return pd.DataFrame(), None
     except Exception as e:
-        print(f"Unexpected error processing aiohttp response for {symbol} ({timeframe_str}): {e}")
+        print(f"Unexpected error processing aiohttp response for {symbol} ({timeframe_str}): {e}", file=sys.stderr)
         return pd.DataFrame(), None
 
 async def fetch_bars_single_aiohttp_all_pages(
@@ -356,7 +357,7 @@ async def fetch_bars_single_aiohttp_all_pages(
             
             if next_page_token:
                 page_token = next_page_token
-                print(f"Fetching next page for {symbol} ({_get_timeframe_string(timeframe_enum)}) with token: {page_token[:10]}...")
+                print(f"Fetching next page for {symbol} ({_get_timeframe_string(timeframe_enum)}) with token: {page_token[:10]}...", file=sys.stderr)
                 await asyncio.sleep(0.2) # Be respectful to the API
             else:
                 break
@@ -382,7 +383,7 @@ def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: s
             try:
                 return pd.read_csv(csv_path, index_col=idx_name, parse_dates=True)
             except Exception as e:
-                print(f"Error reading existing {interval_type} CSV for {symbol} when new data was empty: {e}")
+                print(f"Error reading existing {interval_type} CSV for {symbol} when new data was empty: {e}", file=sys.stderr)
         return new_data_df # Return empty if no existing and no new
 
     idx_name = 'date' if interval_type == 'daily' else 'datetime'
@@ -406,12 +407,12 @@ def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: s
             final_df = final_df[~final_df.index.duplicated(keep='last')]
         except Exception as e:
             print(f"Error processing existing {interval_type} CSV for {symbol}: {e}. \
-                  CSV will be overwritten with new data or created if it doesn't exist.")
+                  CSV will be overwritten with new data or created if it doesn't exist.", file=sys.stderr)
             # final_df remains new_data_df if merging fails
     
     final_df.sort_index(inplace=True)
     final_df.to_csv(csv_path)
-    print(f"{interval_type.capitalize()} data for {symbol} merged/saved to CSV. Total rows: {len(final_df)}")
+    print(f"{interval_type.capitalize()} data for {symbol} merged/saved to CSV. Total rows: {len(final_df)}", file=sys.stderr)
     return final_df
 
 # Function to fetch and save data for a single symbol
@@ -425,18 +426,18 @@ async def fetch_and_save_data(
     end_date: str | None = None,    # New parameter
     db_save_batch_size: int = 1000,  # New parameter with default
     data_source: str = "polygon",  # New parameter for data source selection
-    chunk_size: str = "auto"  # New parameter for chunk size
+    chunk_size: str = "monthly"  # New parameter for chunk size
 ) -> bool:
     if data_source == "polygon":
         API_KEY = os.getenv('POLYGON_API_KEY')
         if not API_KEY:
-            print("Error: POLYGON_API_KEY environment variable must be set for Polygon.io data source")
+            print("Error: POLYGON_API_KEY environment variable must be set for Polygon.io data source", file=sys.stderr)
             raise ValueError("POLYGON_API_KEY environment variable must be set")
     else:  # alpaca
         API_KEY = os.getenv('ALPACA_API_KEY')
         API_SECRET = os.getenv('ALPACA_API_SECRET')
         if not API_KEY or not API_SECRET:
-            print("Error: ALPACA_API_KEY and ALPACA_API_SECRET environment variables must be set")
+            print("Error: ALPACA_API_KEY and ALPACA_API_SECRET environment variables must be set", file=sys.stderr)
             raise ValueError("ALPACA_API_KEY and ALPACA_API_SECRET environment variables must be set")
 
     try:
@@ -466,7 +467,7 @@ async def fetch_and_save_data(
                 start_date_hourly = end_date - timedelta(days=730) # Default 2 years for hourly
             else:
                 # This case should ideally not be reached if CLI args are mutually exclusive and one is always effectively set
-                print(f"Warning: No valid time interval specified for {symbol}. Defaulting to all_time behavior.")
+                print(f"Warning: No valid time interval specified for {symbol}. Defaulting to all_time behavior.", file=sys.stderr)
                 start_date_daily = end_date - timedelta(days=5*365)
                 start_date_hourly = end_date - timedelta(days=730)
             
@@ -479,7 +480,7 @@ async def fetch_and_save_data(
         end_date_hourly_api_str = end_date_hourly.isoformat()
 
         # Fetch daily data
-        print(f"Fetching daily data for {symbol} from {start_date_daily_api_str} to {end_date_api_str} via {data_source}...")
+        print(f"Fetching daily data for {symbol} from {start_date_daily_api_str} to {end_date_api_str} via {data_source}...", file=sys.stderr)
         if data_source == "polygon":
             new_daily_bars = await fetch_polygon_data(
                 symbol, "daily", start_date_daily_api_str, end_date_api_str, API_KEY, chunk_size
@@ -494,11 +495,11 @@ async def fetch_and_save_data(
         # Use the passed db_save_batch_size parameter
         if not final_daily_bars.empty:
             num_daily_batches = (len(final_daily_bars) - 1) // db_save_batch_size + 1
-            print(f"Saving daily data for {symbol} to database in {num_daily_batches} batch(es) of up to {db_save_batch_size} rows each...")
+            print(f"Saving daily data for {symbol} to database in {num_daily_batches} batch(es) of up to {db_save_batch_size} rows each...", file=sys.stderr)
             for i in range(0, len(final_daily_bars), db_save_batch_size):
                 batch_df = final_daily_bars.iloc[i:i + db_save_batch_size]
                 current_batch_num = (i // db_save_batch_size) + 1
-                print(f"  Saving daily batch {current_batch_num}/{num_daily_batches} ({len(batch_df)} rows) for {symbol}...")
+                print(f"  Saving daily batch {current_batch_num}/{num_daily_batches} ({len(batch_df)} rows) for {symbol}...", file=sys.stderr)
                 try:
                     await stock_db_instance.save_stock_data(batch_df, symbol, interval='daily')
                 except Exception as e_save_daily:
@@ -506,14 +507,14 @@ async def fetch_and_save_data(
                     # Optionally, re-raise, or log and continue to hourly, or skip remaining daily batches
                     # For now, we'll let it fail the symbol fetch if a batch fails.
                     raise
-            print(f"Daily data for {symbol} processed for database.")
+            print(f"Daily data for {symbol} processed for database.", file=sys.stderr)
         elif new_daily_bars.empty: # Check if new data was fetched before merging
-            print(f"No new daily data for {symbol} to process for database.")
+            print(f"No new daily data for {symbol} to process for database.", file=sys.stderr)
         else: # new_daily_bars was not empty, but final_daily_bars is (e.g. all old data)
-            print(f"No data in final_daily_bars for {symbol} to save to database (possibly all old data or merge issue).")
+            print(f"No data in final_daily_bars for {symbol} to save to database (possibly all old data or merge issue).", file=sys.stderr)
 
         # Fetch hourly data
-        print(f"Fetching hourly data for {symbol} from {start_date_hourly_api_str} to {end_date_hourly_api_str} via {data_source}...")
+        print(f"Fetching hourly data for {symbol} from {start_date_hourly_api_str} to {end_date_hourly_api_str} via {data_source}...", file=sys.stderr)
         if data_source == "polygon":
             new_hourly_bars = await fetch_polygon_data(
                 symbol, "hourly", start_date_hourly_api_str, end_date_hourly_api_str, API_KEY, chunk_size
@@ -528,27 +529,27 @@ async def fetch_and_save_data(
         # Use the passed db_save_batch_size parameter
         if not final_hourly_bars.empty:
             num_hourly_batches = (len(final_hourly_bars) - 1) // db_save_batch_size + 1
-            print(f"Saving hourly data for {symbol} to database in {num_hourly_batches} batch(es) of up to {db_save_batch_size} rows each...")
+            print(f"Saving hourly data for {symbol} to database in {num_hourly_batches} batch(es) of up to {db_save_batch_size} rows each...", file=sys.stderr)
             for i in range(0, len(final_hourly_bars), db_save_batch_size):
                 batch_df = final_hourly_bars.iloc[i:i + db_save_batch_size]
                 current_batch_num = (i // db_save_batch_size) + 1
-                print(f"  Saving hourly batch {current_batch_num}/{num_hourly_batches} ({len(batch_df)} rows) for {symbol}...")
+                print(f"  Saving hourly batch {current_batch_num}/{num_hourly_batches} ({len(batch_df)} rows) for {symbol}...", file=sys.stderr)
                 try:
                     await stock_db_instance.save_stock_data(batch_df, symbol, interval='hourly')
                 except Exception as e_save_hourly:
                     print(f"    Error saving hourly batch {current_batch_num} for {symbol}: {e_save_hourly}", file=sys.stderr)
                     raise # Fail the symbol fetch if a batch fails
-            print(f"Hourly data for {symbol} processed for database.")
+            print(f"Hourly data for {symbol} processed for database.", file=sys.stderr)
         elif new_hourly_bars.empty: # Check if new data was fetched before merging
-            print(f"No new hourly data for {symbol} to process for database.")
+            print(f"No new hourly data for {symbol} to process for database.", file=sys.stderr)
         else: # new_hourly_bars was not empty, but final_hourly_bars is
-            print(f"No data in final_hourly_bars for {symbol} to save to database (possibly all old data or merge issue).")
+            print(f"No data in final_hourly_bars for {symbol} to save to database (possibly all old data or merge issue).", file=sys.stderr)
 
         return True
     except Exception as e:
-        print(f"Error in fetch_and_save_data for {symbol} ({data_source} method): {e}")
+        print(f"Error in fetch_and_save_data for {symbol} ({data_source} method): {e}", file=sys.stderr)
         import traceback
-        traceback.print_exc()
+        traceback.print_exc(file=sys.stderr)
         return False
 
 
@@ -566,7 +567,7 @@ async def process_symbol_data(
     days_back_fetch: int | None = None,
     db_save_batch_size: int = 1000,  # New parameter with default
     data_source: str = "polygon",  # New parameter for data source selection
-    chunk_size: str = "auto"  # New parameter for chunk size
+    chunk_size: str = "monthly"  # New parameter for chunk size
 ) -> pd.DataFrame:
     """Processes symbol data: queries DB, fetches if needed, and returns DataFrame."""
 
@@ -595,28 +596,28 @@ async def process_symbol_data(
 
     if not force_fetch:
         print(
-            f"Attempting to retrieve {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})..."
+            f"Attempting to retrieve {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})...", file=sys.stderr
         )
         data_df = await current_db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval=timeframe)
 
         if not data_df.empty:
             action_taken = f"Data for {symbol} ({timeframe}) retrieved from database."
-            print(action_taken)
+            print(action_taken, file=sys.stderr)
 
             min_date_in_df = data_df.index.min().strftime('%Y-%m-%d')
             if start_date and min_date_in_df > start_date:
-                print(f"Note: Data retrieved from DB starts at {min_date_in_df}, after the requested start date {start_date} (e.g., due to non-trading days).")
+                print(f"Note: Data retrieved from DB starts at {min_date_in_df}, after the requested start date {start_date} (e.g., due to non-trading days).", file=sys.stderr)
         else:
-            print(f"No {timeframe} data found for {symbol} in the database for the specified range.")
+            print(f"No {timeframe} data found for {symbol} in the database for the specified range.", file=sys.stderr)
             if query_only:
                 action_taken = "Query only mode: No data in DB, and fetching is disabled."
-                print(action_taken)
+                print(action_taken, file=sys.stderr)
 
     if force_fetch or (data_df.empty and not query_only):
         if force_fetch:
-            print(f"Force-fetching {timeframe} data for {symbol} from {data_source}...")
+            print(f"Force-fetching {timeframe} data for {symbol} from {data_source}...", file=sys.stderr)
         elif data_df.empty and not query_only : 
-            print(f"No data in DB for {symbol} ({timeframe}). Fetching from {data_source}...")
+            print(f"No data in DB for {symbol} ({timeframe}). Fetching from {data_source}...", file=sys.stderr)
 
         daily_dir = os.path.join(data_dir, "daily")
         hourly_dir = os.path.join(data_dir, "hourly")
@@ -637,16 +638,16 @@ async def process_symbol_data(
 
         if fetch_success:
             print(
-                f"Retrieving newly fetched/updated {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})..."
+                f"Retrieving newly fetched/updated {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})...", file=sys.stderr
             )
             data_df = await current_db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval=timeframe)
             if data_df.empty:
-                print(f"Warning: Data for {symbol} ({timeframe}) was fetched but not found in DB with current query parameters. Check fetch ranges and query.")
+                print(f"Warning: Data for {symbol} ({timeframe}) was fetched but not found in DB with current query parameters. Check fetch ranges and query.", file=sys.stderr)
             else:
                 action_taken = f"Fetched/updated and retrieved data for {symbol} ({timeframe}) from {data_source}/DB."
-                print(action_taken)
+                print(action_taken, file=sys.stderr)
         else:
-            print(f"Fetching data failed for {symbol}. Cannot retrieve from DB.")
+            print(f"Fetching data failed for {symbol}. Cannot retrieve from DB.", file=sys.stderr)
             data_df = pd.DataFrame() 
 
     return data_df
@@ -720,25 +721,25 @@ async def main() -> None:
     parser.add_argument(
         "--chunk-size",
         choices=["auto", "daily", "weekly", "monthly"],
-        default="auto",
-        help="Chunk size for fetching large datasets (auto: smart selection, daily: 1-day chunks, weekly: 1-week chunks, monthly: 1-month chunks)"
+        default="monthly",
+        help="Chunk size for fetching large datasets (auto: smart selection, daily: 1-day chunks, weekly: 1-week chunks, monthly: 1-month chunks, default: monthly)"
     )
     args = parser.parse_args()
 
     # Check if Polygon is available when selected
     if args.data_source == "polygon" and not POLYGON_AVAILABLE:
-        print("Error: Polygon.io data source selected but polygon-api-client is not installed.")
-        print("Install with: pip install polygon-api-client")
-        print("Or use --data-source alpaca to use Alpaca instead.")
+        print("Error: Polygon.io data source selected but polygon-api-client is not installed.", file=sys.stderr)
+        print("Install with: pip install polygon-api-client", file=sys.stderr)
+        print("Or use --data-source alpaca to use Alpaca instead.", file=sys.stderr)
         exit(1)
 
     if args.start_date is None:
         if args.timeframe == 'daily':
             args.start_date = (datetime.now() - timedelta(days=5*365)).strftime('%Y-%m-%d')
-            print(f"--start-date not specified, defaulting to {args.start_date} for daily timeframe.")
+            print(f"--start-date not specified, defaulting to {args.start_date} for daily timeframe.", file=sys.stderr)
         elif args.timeframe == 'hourly':
             args.start_date = (datetime.now() - timedelta(days=2*365)).strftime('%Y-%m-%d') 
-            print(f"--start-date not specified, defaulting to {args.start_date} for hourly timeframe.")
+            print(f"--start-date not specified, defaulting to {args.start_date} for hourly timeframe.", file=sys.stderr)
 
     # Ensure data directories exist
     os.makedirs(f"{args.data_dir}/daily", exist_ok=True)

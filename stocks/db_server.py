@@ -465,8 +465,8 @@ async def main_server_runner():
     parser.add_argument(
         "--max-body-mb", 
         type=int, 
-        default=100, # Default to 100MB
-        help="Maximum request body size in Megabytes (MB) (default: 100MB). Set to 1024 for 1GB."
+        default=10, # Default to 10MB
+        help="Maximum request body size in Megabytes (MB) (default: 10MB). Set to 1024 for 1GB."
     )
     args = parser.parse_args()
 

@@ -19,7 +19,8 @@ def run_fetch_and_save(
     db_config_for_worker: str,
     all_time_flag: bool, 
     days_back_val: int | None,
-    db_save_batch_size_val: int
+    db_save_batch_size_val: int,
+    chunk_size_val: str = "monthly"  # New parameter with default
 ) -> bool:
     """Creates a DB instance in the worker thread and runs fetch_and_save_data."""
     print(f"{os.getpid()} Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr, flush=True)
@@ -40,7 +41,8 @@ def run_fetch_and_save(
             worker_db_instance,
             all_time_flag,
             days_back_val,
-            db_save_batch_size_val
+            db_save_batch_size_val,
+            chunk_size=chunk_size_val  # Pass the new parameter
         ))
         return result
     except Exception as e:
@@ -55,7 +57,7 @@ def run_fetch_and_save(
             except Exception as e_close:
                 print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
 
-def process_symbols_for_single_db(all_symbols_list: list[str], data_dir: str, db_type: str, db_config: str, all_time: bool, days_back: int | None, db_batch_size: int, stock_executor_type: str, max_concurrent: int | None) -> tuple[int, int]:
+def process_symbols_for_single_db(all_symbols_list: list[str], data_dir: str, db_type: str, db_config: str, all_time: bool, days_back: int | None, db_batch_size: int, stock_executor_type: str, max_concurrent: int | None, chunk_size: str = "monthly") -> tuple[int, int]:
     """Process all symbols for a single database using the specified executor type for stock-level tasks."""
     print(f"{os.getpid()} Processing {len(all_symbols_list)} symbols for database {db_config} using {stock_executor_type} executor", file=sys.stderr, flush=True)
     
@@ -85,7 +87,8 @@ def process_symbols_for_single_db(all_symbols_list: list[str], data_dir: str, db
                 db_config,
                 all_time,
                 days_back,
-                db_batch_size
+                db_batch_size,
+                chunk_size  # Pass the new parameter
             )
             stock_tasks.append((task, symbol_to_fetch))
         
@@ -117,7 +120,7 @@ async def process_symbols_by_process_pool(all_symbols_list: list[str], args: arg
     loop = asyncio.get_running_loop()
     with ProcessPoolExecutor(max_workers=executor_max_workers) as executor:
         # Level 1: Split by database configuration
-        db_tasks = []
+        db_tasks = {}
         for db_type, db_config in db_configs_for_workers:
             task = loop.run_in_executor(
                 executor,
@@ -130,37 +133,32 @@ async def process_symbols_by_process_pool(all_symbols_list: list[str], args: arg
                 args.days_back,
                 args.db_batch_size,
                 args.stock_executor_type,
-                args.max_concurrent
+                args.max_concurrent,
+                args.chunk_size # Pass the new parameter
             )
-            db_tasks.append((task, db_config))
+            db_tasks[task] = db_config
         
         # Process completed database-level tasks as they finish
         total_success_count = 0
         total_failure_count = 0
         
-        for done in asyncio.as_completed([task for task, _ in db_tasks]):
+        # Wait for all tasks to complete and process results
+        for task in db_tasks:
             try:
-                result = await done
-                # Find the corresponding task info
-                task_info = None
-                for task, db_config in db_tasks:
-                    if task == done:
-                        task_info = db_config
-                        break
+                result = await task
+                db_config = db_tasks[task]
                 
-                if task_info:
-                    db_config = task_info
-                    if isinstance(result, Exception):
-                        print(f"Error processing database {db_config}: {result}", file=sys.stderr)
-                        total_failure_count += len(all_symbols_list)  # Assume all symbols failed
-                    elif isinstance(result, tuple) and len(result) == 2:
-                        success_count, failure_count = result
-                        total_success_count += success_count
-                        total_failure_count += failure_count
-                        print(f"Database {db_config}: {success_count} successes, {failure_count} failures", file=sys.stderr)
-                    else:
-                        print(f"Unexpected result format for database {db_config}: {result}", file=sys.stderr)
-                        total_failure_count += len(all_symbols_list)
+                if isinstance(result, Exception):
+                    print(f"Error processing database {db_config}: {result}", file=sys.stderr)
+                    total_failure_count += len(all_symbols_list)  # Assume all symbols failed
+                elif isinstance(result, tuple) and len(result) == 2:
+                    success_count, failure_count = result
+                    total_success_count += success_count
+                    total_failure_count += failure_count
+                    print(f"Database {db_config}: {success_count} successes, {failure_count} failures", file=sys.stderr)
+                else:
+                    print(f"Unexpected result format for database {db_config}: {result}", file=sys.stderr)
+                    total_failure_count += len(all_symbols_list)
             except Exception as e:
                 print(f"Unexpected error in database-level task processing: {e}", file=sys.stderr)
                 total_failure_count += len(all_symbols_list)
@@ -173,7 +171,7 @@ async def process_symbols_by_thread_pool(all_symbols_list: list[str], args: argp
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=executor_max_workers) as executor:
         # Level 1: Split by database configuration
-        db_tasks = []
+        db_tasks = {}
         for db_type, db_config in db_configs_for_workers:
             task = loop.run_in_executor(
                 executor,
@@ -186,37 +184,32 @@ async def process_symbols_by_thread_pool(all_symbols_list: list[str], args: argp
                 args.days_back,
                 args.db_batch_size,
                 args.stock_executor_type,
-                args.max_concurrent
+                args.max_concurrent,
+                args.chunk_size # Pass the new parameter
             )
-            db_tasks.append((task, db_config))
+            db_tasks[task] = db_config
         
         # Process completed database-level tasks as they finish
         total_success_count = 0
         total_failure_count = 0
         
-        for done in asyncio.as_completed([task for task, _ in db_tasks]):
+        # Wait for all tasks to complete and process results
+        for task in db_tasks:
             try:
-                result = await done
-                # Find the corresponding task info
-                task_info = None
-                for task, db_config in db_tasks:
-                    if task == done:
-                        task_info = db_config
-                        break
+                result = await task
+                db_config = db_tasks[task]
                 
-                if task_info:
-                    db_config = task_info
-                    if isinstance(result, Exception):
-                        print(f"Error processing database {db_config}: {result}", file=sys.stderr)
-                        total_failure_count += len(all_symbols_list)  # Assume all symbols failed
-                    elif isinstance(result, tuple) and len(result) == 2:
-                        success_count, failure_count = result
-                        total_success_count += success_count
-                        total_failure_count += failure_count
-                        print(f"Database {db_config}: {success_count} successes, {failure_count} failures", file=sys.stderr)
-                    else:
-                        print(f"Unexpected result format for database {db_config}: {result}", file=sys.stderr)
-                        total_failure_count += len(all_symbols_list)
+                if isinstance(result, Exception):
+                    print(f"Error processing database {db_config}: {result}", file=sys.stderr)
+                    total_failure_count += len(all_symbols_list)  # Assume all symbols failed
+                elif isinstance(result, tuple) and len(result) == 2:
+                    success_count, failure_count = result
+                    total_success_count += success_count
+                    total_failure_count += failure_count
+                    print(f"Database {db_config}: {success_count} successes, {failure_count} failures", file=sys.stderr)
+                else:
+                    print(f"Unexpected result format for database {db_config}: {result}", file=sys.stderr)
+                    total_failure_count += len(all_symbols_list)
             except Exception as e:
                 print(f"Unexpected error in database-level task processing: {e}", file=sys.stderr)
                 total_failure_count += len(all_symbols_list)
@@ -265,6 +258,12 @@ def parse_args():
         choices=["process", "thread"],
         default="thread",
         help="Type of executor for stock-level tasks after database-level split. Defaults to 'thread'."
+    )
+    parser.add_argument(
+        "--chunk-size",
+        choices=["auto", "daily", "weekly", "monthly"],
+        default="monthly",
+        help="Chunk size for fetching large datasets (auto: smart selection, daily: 1-day chunks, weekly: 1-week chunks, monthly: 1-month chunks). Defaults to 'monthly'."
     )
     
     # Time interval for fetching market data
@@ -368,7 +367,7 @@ async def main():
 
             print(f"Market data fetching attempts complete. Successes: {success_count}, Failures: {failure_count} out of {len(all_symbols_list)} symbols.")
     else:
-        print("Market data fetching is disabled. Use --fetch-market-data to enable it.")
+        print("Market data fetching is disabled. Use --fetch-market-data to enable it.", file=sys.stderr)
 
 if __name__ == '__main__':
     asyncio.run(main())

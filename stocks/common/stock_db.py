@@ -166,6 +166,11 @@ class StockDBBase(metaclass=ABCMeta):
         # Prepare data for MA/EMA calculation
         records_for_calculation = []
         for _, row in combined_df.iterrows():
+            # Check if the date is NaT before calling strftime
+            if pd.isna(row[date_col]):
+                print(f"Warning: Skipping row with NaT date for {ticker}")
+                continue
+                
             record = {
                 "date": row[date_col].strftime("%Y-%m-%d"),
                 "price": row.get("close", 0),
@@ -189,6 +194,11 @@ class StockDBBase(metaclass=ABCMeta):
         
         # Add MA and EMA values back to result_df for the new data only
         for i, row in result_df.iterrows():
+            # Check if the date is NaT before calling strftime
+            if pd.isna(row[date_col]):
+                print(f"Warning: Skipping row with NaT date for {ticker} in result processing")
+                continue
+                
             row_date = row[date_col].strftime("%Y-%m-%d")
             for calc_record in records_for_calculation:
                 if calc_record["date"] == row_date:
@@ -332,6 +342,17 @@ class StockDBSQLite(StockDBBase):
                 return
 
             df_copy[date_col] = pd.to_datetime(df_copy[date_col])
+            
+            # Remove rows with NaT dates
+            initial_count = len(df_copy)
+            df_copy = df_copy.dropna(subset=[date_col])
+            if len(df_copy) < initial_count:
+                print(f"Warning: Removed {initial_count - len(df_copy)} rows with NaT dates for {ticker} ({interval})")
+            
+            if df_copy.empty:
+                print(f"Warning: No valid data remaining for {ticker} ({interval}) after removing NaT dates. Skipping DB save.")
+                return
+            
             min_date_val = df_copy[date_col].min()
             max_date_val = df_copy[date_col].max()
 

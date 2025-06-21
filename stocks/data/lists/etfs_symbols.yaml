@@ -28,7 +28,6 @@ symbols:
 - ITOT
 - IUSB
 - IUSG
-- IUSV
 - IVE
 - IVV
 - IVW
@@ -38,6 +37,7 @@ symbols:
 - IWM
 - IWR
 - IXUS
+- IYW
 - JAAA
 - JEPI
 - JEPQ

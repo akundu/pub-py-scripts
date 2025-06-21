@@ -5,6 +5,7 @@ symbols:
 - AAON
 - AAPL
 - ABNB
+- ACAD
 - ACGL
 - ACIW
 - ACT
@@ -17,7 +18,6 @@ symbols:
 - AEP
 - AFRM
 - AGNC
-- AIFU
 - AKAM
 - AKRO
 - ALAB
@@ -44,7 +44,6 @@ symbols:
 - AUR
 - AVAV
 - AVGO
-- AVPT
 - AVT
 - AXON
 - AXSM
@@ -70,6 +69,7 @@ symbols:
 - BWIN
 - BZ
 - CACC
+- CAI
 - CALM
 - CAR
 - CART
@@ -91,6 +91,7 @@ symbols:
 - CHRW
 - CHTR
 - CHX
+- CHYM
 - CIGI
 - CINF
 - CLBT
@@ -107,20 +108,20 @@ symbols:
 - CPRT
 - CRDO
 - CROX
+- CRSP
 - CRUS
 - CRVL
 - CRWD
 - CRWV
 - CSCO
 - CSGP
-- CSWI
 - CSX
 - CTAS
 - CTSH
-- CVCO
 - CVLT
 - CWST
 - CYBR
+- CYTK
 - CZR
 - DASH
 - DBX
@@ -175,7 +176,6 @@ symbols:
 - FOXA
 - FRHC
 - FROG
-- FRPT
 - FRSH
 - FSLR
 - FSV
@@ -198,6 +198,7 @@ symbols:
 - GLBE
 - GLNG
 - GLPI
+- GLXY
 - GMAB
 - GNTX
 - GOOG
@@ -243,6 +244,7 @@ symbols:
 - KDP
 - KHC
 - KLAC
+- KMB
 - KRYS
 - KSPI
 - KTOS
@@ -296,7 +298,6 @@ symbols:
 - MORN
 - MPWR
 - MRNA
-- MRNO
 - MRUS
 - MRVL
 - MSFT
@@ -337,7 +338,6 @@ symbols:
 - OPCH
 - ORLY
 - OS
-- OSIS
 - OTEX
 - OZK
 - PAA
@@ -362,6 +362,7 @@ symbols:
 - POOL
 - PPC
 - PTC
+- PTCT
 - PYPL
 - QCOM
 - QFIN
@@ -375,11 +376,9 @@ symbols:
 - RGC
 - RGEN
 - RGLD
-- RGTI
 - RIVN
 - RKLB
 - RMBS
-- RNA
 - ROAD
 - ROIV
 - ROKU
@@ -402,6 +401,7 @@ symbols:
 - SBRA
 - SBUX
 - SEIC
+- SEZL
 - SFD
 - SFM
 - SHOP
@@ -423,10 +423,10 @@ symbols:
 - SOUN
 - SPSC
 - SRAD
-- SRPT
 - SSNC
 - STEP
 - STLD
+- STNE
 - STRL
 - STX
 - SWKS
@@ -453,6 +453,7 @@ symbols:
 - TTAN
 - TTD
 - TTEK
+- TTMI
 - TTWO
 - TW
 - TXN
@@ -466,10 +467,8 @@ symbols:
 - URBN
 - UTHR
 - VCTR
-- VEON
 - VERX
 - VFS
-- VIRT
 - VLY
 - VNOM
 - VOD
@@ -499,5 +498,6 @@ symbols:
 - ZBRA
 - ZG
 - ZION
+- ZLAB
 - ZM
 - ZS
