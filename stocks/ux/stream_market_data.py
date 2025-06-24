@@ -31,6 +31,14 @@ from alpaca.data.enums import DataFeed
 from common.stock_db import get_stock_db, StockDBBase, get_default_db_path
 import traceback
 
+# Try to import Polygon client
+try:
+    from polygon.websocket import WebSocketClient
+    POLYGON_AVAILABLE = True
+except ImportError:
+    POLYGON_AVAILABLE = False
+    print("Warning: polygon-api-client not installed. Polygon.io data source will not be available.", file=sys.stderr)
+
 # Global variable to hold the DB client session, to be closed on exit
 # This is a simple way; for more complex apps, pass it around or use a context manager.
 _db_client_instance_for_cleanup: StockDBBase | None = None
@@ -301,6 +309,8 @@ async def setup_and_run_stream(
     api_key = os.getenv("ALPACA_API_KEY")
     secret_key = os.getenv("ALPACA_API_SECRET")
     wss_client = None
+    last_activity_time = time.time()
+    heartbeat_interval = 30  # Check every 30 seconds
 
     if not symbols:
         print("No symbols provided to stream.", file=sys.stderr)
@@ -320,6 +330,8 @@ async def setup_and_run_stream(
         print(f"Streaming data will also be saved to CSVs in: {Path(csv_data_dir).resolve()}", file=sys.stderr)
 
     async def internal_quote_handler(data):
+        nonlocal last_activity_time
+        last_activity_time = time.time()
         await quote_data_handler(
             data,
             stock_db_instance,
@@ -331,6 +343,8 @@ async def setup_and_run_stream(
         )
 
     async def internal_trade_handler(data):
+        nonlocal last_activity_time
+        last_activity_time = time.time()
         await trade_data_handler(
             data,
             stock_db_instance,
@@ -341,6 +355,21 @@ async def setup_and_run_stream(
             save_retry_delay,
         )
 
+    async def heartbeat_checker():
+        """Monitor stream activity and detect timeouts."""
+        while True:
+            await asyncio.sleep(heartbeat_interval)
+            current_time = time.time()
+            time_since_last_activity = current_time - last_activity_time
+            
+            if time_since_last_activity > 60:  # No activity for 60 seconds
+                print(f"WARNING: No activity detected for {inferred_symbol_type} stream ({symbols_str}) for {time_since_last_activity:.1f} seconds", file=sys.stderr)
+                print(f"This could indicate a connection issue or API problem.", file=sys.stderr)
+            elif time_since_last_activity > 120:  # No activity for 2 minutes
+                print(f"ERROR: Stream appears to be dead for {inferred_symbol_type} ({symbols_str}). No activity for {time_since_last_activity:.1f} seconds.", file=sys.stderr)
+                print(f"Terminating stream due to inactivity.", file=sys.stderr)
+                return  # Exit the heartbeat checker, which will cause the stream to terminate
+
     try:
         if inferred_symbol_type == "stock":
             wss_client = StockDataStream(api_key, secret_key, feed=DataFeed.SIP)
@@ -350,6 +379,10 @@ async def setup_and_run_stream(
             elif feed == "trades":
                 print(f"Subscribing to stock trades for: {symbols_str}", file=sys.stderr)
                 wss_client.subscribe_trades(internal_trade_handler, *symbols)
+            elif feed == "both":
+                print(f"Subscribing to stock quotes and trades for: {symbols_str}", file=sys.stderr)
+                wss_client.subscribe_quotes(internal_quote_handler, *symbols)
+                wss_client.subscribe_trades(internal_trade_handler, *symbols)
         elif inferred_symbol_type == "crypto":
             wss_client = CryptoDataStream(api_key, secret_key) if api_key and secret_key else CryptoDataStream()
             if feed == "quotes":
@@ -358,27 +391,49 @@ async def setup_and_run_stream(
             elif feed == "trades":
                 print(f"Subscribing to crypto trades for: {symbols_str}", file=sys.stderr)
                 wss_client.subscribe_trades(internal_trade_handler, *symbols)
+            elif feed == "both":
+                print(f"Subscribing to crypto quotes and trades for: {symbols_str}", file=sys.stderr)
+                wss_client.subscribe_quotes(internal_quote_handler, *symbols)
+                wss_client.subscribe_trades(internal_trade_handler, *symbols)
         else:
             print(f"Internal error: Unsupported inferred symbol type: {inferred_symbol_type}", file=sys.stderr)
             return
 
         if wss_client:
             print(f"Starting WebSocket client for {inferred_symbol_type} symbols: {symbols_str}...", file=sys.stderr)
-            # Run the WebSocket client in a separate thread
-            await asyncio.to_thread(wss_client.run)
+            print(f"Feed type: {feed}, Symbol type: {inferred_symbol_type}", file=sys.stderr)
+            print(f"API keys configured: {'Yes' if api_key and secret_key else 'No'}", file=sys.stderr)
+            # Run the WebSocket client and heartbeat checker concurrently
+            try:
+                await asyncio.gather(
+                    asyncio.to_thread(wss_client.run),
+                    heartbeat_checker(),
+                    return_exceptions=True
+                )
+            except Exception as e:
+                print(f"Error in WebSocket client execution: {e}", file=sys.stderr)
+                raise
         else:
             print(f"WebSocket client for {inferred_symbol_type} was not initialized. This might be due to missing API keys for stock data or an internal error.", file=sys.stderr)
 
     except KeyboardInterrupt:
         print(f"KeyboardInterrupt caught in {inferred_symbol_type} stream for {symbols_str}. Stopping stream...", file=sys.stderr)
+        raise  # Re-raise to be handled by the main loop
+    except ConnectionError as e:
+        print(f"Connection error in {inferred_symbol_type} stream for {symbols_str}: {e}", file=sys.stderr)
+        print(f"This could be due to network issues, API rate limits, or server problems.", file=sys.stderr)
+        raise
     except Exception as e:
         print(f"An error occurred during {inferred_symbol_type} stream operation for {symbols_str}: {e}", file=sys.stderr)
+        print(f"Exception type: {type(e).__name__}", file=sys.stderr)
         traceback.print_exc()
+        raise  # Re-raise to be handled by the main loop
     finally:
         print(f"Stream processing for {inferred_symbol_type} symbols ({symbols_str}) ended. Cleaning up WebSocket client...", file=sys.stderr)
         if wss_client:
             try:
                 await wss_client.close()  # Make sure to await the close
+                print(f"WebSocket client for {inferred_symbol_type} closed successfully.", file=sys.stderr)
             except Exception as e_close:
                 print(
                     f"Error during WebSocket client close for {inferred_symbol_type} ({symbols_str}): {e_close}",
@@ -386,6 +441,188 @@ async def setup_and_run_stream(
                 )
         print(f"Cleanup complete for {inferred_symbol_type} stream ({symbols_str}).", file=sys.stderr)
 
+
+async def setup_and_run_polygon_stream(
+    stock_db_instance: StockDBBase | None,
+    symbols: list[str],
+    feed: str,
+    market: str,
+    only_log_updates: bool,
+    csv_data_dir: str | None,
+    save_max_retries: int,
+    save_retry_delay: float,
+):
+    """Sets up and runs the Polygon WebSocket stream for a given list of symbols."""
+    api_key = os.getenv("POLYGON_API_KEY")
+    last_activity_time = time.time()
+    heartbeat_interval = 30  # Check every 30 seconds
+    
+    if not symbols:
+        print("No symbols provided to stream.", file=sys.stderr)
+        return
+
+    if not api_key:
+        print("Error: POLYGON_API_KEY must be set for Polygon data.", file=sys.stderr)
+        return
+
+    if not POLYGON_AVAILABLE:
+        print("Error: Polygon WebSocket client not available. Please install polygon-api-client.", file=sys.stderr)
+        return
+
+    symbols_str = ", ".join(symbols)
+    print(f"Attempting to stream {feed} for {market} symbols via Polygon: {symbols_str}", file=sys.stderr)
+    if csv_data_dir:
+        print(f"Streaming data will also be saved to CSVs in: {Path(csv_data_dir).resolve()}", file=sys.stderr)
+
+    # Create Polygon WebSocket client
+    stream = WebSocketClient(
+        api_key=api_key,
+        market=market
+    )
+
+    async def heartbeat_checker():
+        """Monitor stream activity and detect timeouts."""
+        while True:
+            await asyncio.sleep(heartbeat_interval)
+            current_time = time.time()
+            time_since_last_activity = current_time - last_activity_time
+            
+            if time_since_last_activity > 60:  # No activity for 60 seconds
+                print(f"WARNING: No activity detected for Polygon stream ({symbols_str}) for {time_since_last_activity:.1f} seconds", file=sys.stderr)
+                print(f"This could indicate a connection issue or API problem.", file=sys.stderr)
+            elif time_since_last_activity > 120:  # No activity for 2 minutes
+                print(f"ERROR: Polygon stream appears to be dead ({symbols_str}). No activity for {time_since_last_activity:.1f} seconds.", file=sys.stderr)
+                print(f"Terminating stream due to inactivity.", file=sys.stderr)
+                return  # Exit the heartbeat checker, which will cause the stream to terminate
+
+    # Define the callback function that will handle incoming messages
+    async def handle_msg(msg):
+        """
+        This function is called for every message received from the stream.
+        """
+        nonlocal last_activity_time
+        last_activity_time = time.time()
+        
+        # The 'msg' object is a list of events
+        if isinstance(msg, list):
+            for event in msg:
+                await handle_single_event(event)
+        else:
+            await handle_single_event(msg)
+
+    async def handle_single_event(event):
+        """
+        Handle a single event from the Polygon stream.
+        """
+        try:
+            # 'T' for Trade
+            if event.event_type == "T" and (feed == "trades" or feed == "both"):
+                trade_time = pd.to_datetime(event.timestamp, unit='ns').tz_localize('UTC').tz_convert('America/New_York')
+                print(f"Trade on {event.symbol}: Price: ${event.price:.2f}, Size: {event.size}, Time: {trade_time.strftime('%H:%M:%S.%f')}")
+                
+                # Create DataFrame for trade data
+                trade_df = pd.DataFrame({
+                    'timestamp': [pd.to_datetime(event.timestamp, unit='ns', utc=True)],
+                    'price': [event.price],
+                    'size': [event.size]
+                }).set_index('timestamp')
+
+                # Save trade data
+                retry_count = 0
+                save_successful = False
+                while retry_count < save_max_retries and not save_successful:
+                    try:
+                        if stock_db_instance:
+                            await stock_db_instance.save_realtime_data(trade_df, event.symbol, data_type="trade")
+                        if csv_data_dir:
+                            await save_df_to_daily_csv(trade_df, event.symbol, "trade", csv_data_dir)
+                        save_successful = True
+                    except Exception as e:
+                        retry_count += 1
+                        if retry_count < save_max_retries:
+                            print(f"Error saving trade data for {event.symbol} (attempt {retry_count}/{save_max_retries}): {e}. Retrying in {save_retry_delay}s...", file=sys.stderr)
+                            await asyncio.sleep(save_retry_delay)
+                        else:
+                            print(f"Failed to save trade data for {event.symbol} after {save_max_retries} attempts: {e}", file=sys.stderr)
+
+            # 'Q' for Quote
+            elif event.event_type == "Q" and (feed == "quotes" or feed == "both"):
+                quote_time = pd.to_datetime(event.timestamp, unit='ns').tz_localize('UTC').tz_convert('America/New_York')
+                print(f"Quote for {event.symbol}: Bid: ${event.bid_price:.2f}, Ask: ${event.ask_price:.2f}, Time: {quote_time.strftime('%H:%M:%S.%f')}")
+                
+                # Create DataFrame for quote data
+                quote_df = pd.DataFrame({
+                    'timestamp': [pd.to_datetime(event.timestamp, unit='ns', utc=True)],
+                    'price': [event.bid_price],  # Use bid_price as primary price
+                    'size': [event.bid_size],    # Use bid_size as primary size
+                    'ask_price': [event.ask_price],
+                    'ask_size': [event.ask_size]
+                }).set_index('timestamp')
+
+                # Save quote data
+                retry_count = 0
+                save_successful = False
+                while retry_count < save_max_retries and not save_successful:
+                    try:
+                        if stock_db_instance:
+                            await stock_db_instance.save_realtime_data(quote_df, event.symbol, data_type="quote")
+                        if csv_data_dir:
+                            await save_df_to_daily_csv(quote_df, event.symbol, "quote", csv_data_dir)
+                        save_successful = True
+                    except Exception as e:
+                        retry_count += 1
+                        if retry_count < save_max_retries:
+                            print(f"Error saving quote data for {event.symbol} (attempt {retry_count}/{save_max_retries}): {e}. Retrying in {save_retry_delay}s...", file=sys.stderr)
+                            await asyncio.sleep(save_retry_delay)
+                        else:
+                            print(f"Failed to save quote data for {event.symbol} after {save_max_retries} attempts: {e}", file=sys.stderr)
+                
+        except Exception as e:
+            print(f"Error processing Polygon event: {e}")
+            print(f"Event data: {event}")
+
+    # Subscribe to the desired data feeds for your chosen tickers
+    for ticker in symbols:
+        if feed == "trades":
+            stream.subscribe(f"T.{ticker}")  # Subscribe to trades
+        elif feed == "quotes":
+            stream.subscribe(f"Q.{ticker}")  # Subscribe to quotes
+        elif feed == "both":
+            stream.subscribe(f"T.{ticker}")  # Subscribe to trades
+            stream.subscribe(f"Q.{ticker}")  # Subscribe to quotes
+
+    print(f"Successfully subscribed to {feed} for: {', '.join(symbols)}")
+    print(f"Market: {market}, Feed: {feed}, Symbols: {symbols_str}", file=sys.stderr)
+    print(f"Polygon API key configured: {'Yes' if api_key else 'No'}", file=sys.stderr)
+    print("--- Waiting for real-time data... Press Ctrl+C to stop. ---")
+    
+    try:
+        # Run the stream connection and heartbeat checker concurrently
+        await asyncio.gather(
+            stream.connect(handle_msg),
+            heartbeat_checker(),
+            return_exceptions=True
+        )
+    except KeyboardInterrupt:
+        print(f"KeyboardInterrupt caught in Polygon stream for {symbols_str}. Stopping stream...", file=sys.stderr)
+        raise  # Re-raise to be handled by the main loop
+    except ConnectionError as e:
+        print(f"Connection error in Polygon stream for {symbols_str}: {e}", file=sys.stderr)
+        print(f"This could be due to network issues, API rate limits, or server problems.", file=sys.stderr)
+        raise
+    except Exception as e:
+        print(f"An error occurred during Polygon stream operation for {symbols_str}: {e}", file=sys.stderr)
+        print(f"Exception type: {type(e).__name__}", file=sys.stderr)
+        traceback.print_exc()
+        raise  # Re-raise to be handled by the main loop
+    finally:
+        print(f"Polygon stream processing for {symbols_str} ended.", file=sys.stderr)
+        try:
+            # Close the stream connection
+            await stream.close()
+            print(f"Polygon WebSocket stream closed successfully.", file=sys.stderr)
+        except Exception as e_close:
+            print(f"Error during Polygon stream close: {e_close}", file=sys.stderr)
 
 async def main():
     global _db_client_instance_for_cleanup, _csv_buffer_manager
@@ -404,9 +641,14 @@ async def main():
         help="Path to a YAML file containing a list of symbols under the 'symbols' key (e.g., data/lists/sp-500_symbols.yaml).",
     )
 
-    parser.add_argument("--feed", choices=["quotes", "trades"], default="quotes",
-                        help="The type of data feed to subscribe to (quotes or trades). Default is quotes.")
+    parser.add_argument("--feed", choices=["quotes", "trades", "both"], default="both",
+                        help="The type of data feed to subscribe to (quotes, trades, or both). Default is both.")
 
+    parser.add_argument("--data-source", choices=["alpaca", "polygon"], default="alpaca",
+                        help="The data source to use for streaming (alpaca or polygon). Default is alpaca.")
+
+    parser.add_argument("--polygon-market", choices=["stocks", "crypto", "forex"], default="stocks",
+                        help="The market to stream from Polygon (stocks, crypto, or forex). Only used when --data-source=polygon. Default is stocks.")
 
     # Database arguments group
     group = parser.add_mutually_exclusive_group(required=False) # Not strictly required to save data
@@ -520,6 +762,14 @@ async def main():
                 Path(args.csv_data_dir).mkdir(parents=True, exist_ok=True)
             except Exception as e:
                 print(f"Error creating base CSV directory {args.csv_data_dir}: {e}. CSV saving might fail.", file=sys.stderr)
+            
+            # Initialize CSV buffer manager if CSV saving is enabled
+            if args.csv_buffer_size > 0 or args.csv_flush_interval > 0:
+                _csv_buffer_manager = CSVBufferManager(
+                    buffer_size=args.csv_buffer_size,
+                    flush_interval=args.csv_flush_interval
+                )
+                print(f"CSV buffer manager initialized with buffer size: {args.csv_buffer_size}, flush interval: {args.csv_flush_interval}s", file=sys.stderr)
 
         stock_symbols = []
         crypto_symbols = []
@@ -534,49 +784,90 @@ async def main():
         activity_tracker = None
         tasks_to_run = []
         display_manager = None
-        if stock_symbols:
-            print(f"Preparing to stream stocks: { ', '.join(stock_symbols) }", file=sys.stderr)
-            tasks_to_run.append(
-                setup_and_run_stream(
-                    stock_db_instance,
-                    stock_symbols,
-                    args.feed,
-                    "stock",
-                    args.only_log_updates,
-                    args.csv_data_dir,
-                    args.save_max_retries,
-                    args.save_retry_delay,
+        
+        # Handle data source selection
+        if args.data_source == "polygon":
+            # For Polygon, we use the market argument and don't separate by symbol type
+            all_symbols = stock_symbols + crypto_symbols
+            if all_symbols:
+                print(f"Preparing to stream via Polygon ({args.polygon_market}): {', '.join(all_symbols)}", file=sys.stderr)
+                tasks_to_run.append(
+                    setup_and_run_polygon_stream(
+                        stock_db_instance,
+                        all_symbols,
+                        args.feed,
+                        args.polygon_market,
+                        args.only_log_updates,
+                        args.csv_data_dir,
+                        args.save_max_retries,
+                        args.save_retry_delay,
+                    )
                 )
-            )
+        else:  # alpaca (default)
+            if stock_symbols:
+                print(f"Preparing to stream stocks via Alpaca: {', '.join(stock_symbols)}", file=sys.stderr)
+                tasks_to_run.append(
+                    setup_and_run_stream(
+                        stock_db_instance,
+                        stock_symbols,
+                        args.feed,
+                        "stock",
+                        args.only_log_updates,
+                        args.csv_data_dir,
+                        args.save_max_retries,
+                        args.save_retry_delay,
+                    )
+                )
 
-        if crypto_symbols:
-            print(f"Preparing to stream cryptos: { ', '.join(crypto_symbols) }", file=sys.stderr)
-            tasks_to_run.append(
-                setup_and_run_stream(
-                    stock_db_instance,
-                    crypto_symbols,
-                    args.feed,
-                    "crypto",
-                    args.only_log_updates,
-                    args.csv_data_dir,
-                    args.save_max_retries,
-                    args.save_retry_delay,
+            if crypto_symbols:
+                print(f"Preparing to stream cryptos via Alpaca: {', '.join(crypto_symbols)}", file=sys.stderr)
+                tasks_to_run.append(
+                    setup_and_run_stream(
+                        stock_db_instance,
+                        crypto_symbols,
+                        args.feed,
+                        "crypto",
+                        args.only_log_updates,
+                        args.csv_data_dir,
+                        args.save_max_retries,
+                        args.save_retry_delay,
+                    )
                 )
-            )
 
         if not tasks_to_run:
-            print("No valid stock or crypto symbols to stream based on input. Exiting.", file=sys.stderr)
+            print("No valid symbols to stream based on input. Exiting.", file=sys.stderr)
             if _db_client_instance_for_cleanup and hasattr(_db_client_instance_for_cleanup, 'close_session'):
                 await _db_client_instance_for_cleanup.close_session() # type: ignore
             return
 
         print(f"Starting {len(tasks_to_run)} stream(s) concurrently...", file=sys.stderr)
         try:
-            await asyncio.gather(*tasks_to_run)
-            main_task_completed_normally = True # Mark that gather completed
+            # Run tasks and capture any exceptions
+            results = await asyncio.gather(*tasks_to_run, return_exceptions=True)
+            
+            # Check for exceptions in the results
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    print(f"Stream task {i+1} failed with exception: {result}", file=sys.stderr)
+                    print(f"Exception type: {type(result).__name__}", file=sys.stderr)
+                    traceback.print_exception(type(result), result, result.__traceback__, file=sys.stderr)
+                elif result is not None:
+                    print(f"Stream task {i+1} completed with unexpected result: {result}", file=sys.stderr)
+                else:
+                    print(f"Stream task {i+1} completed normally", file=sys.stderr)
+            
+            # Check if any tasks failed
+            if any(isinstance(result, Exception) for result in results):
+                print("One or more stream tasks failed. Check the error messages above.", file=sys.stderr)
+                main_task_completed_normally = False
+            else:
+                main_task_completed_normally = True
+                
         except Exception as e:
             print(f"Error during asyncio.gather for streams: {e}", file=sys.stderr)
+            print(f"Exception type: {type(e).__name__}", file=sys.stderr)
             traceback.print_exc()
+            main_task_completed_normally = False
         finally:
             print("All stream tasks have completed or an error occurred.", file=sys.stderr)
             if _db_client_instance_for_cleanup and hasattr(_db_client_instance_for_cleanup, 'close_session'):

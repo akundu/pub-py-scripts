@@ -10,6 +10,9 @@ from datetime import datetime, timezone, timedelta
 import signal
 from typing import Set, Optional, Dict, List
 import logging
+import threading
+import time
+import traceback
 
 # Determine the project root directory.
 # This script ('stream_market_data.py') is typically in a subdirectory (e.g., 'ux/').
@@ -38,15 +41,215 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class DynamicCombinedDisplayManager(DynamicDisplayManager):
+    """Dynamic display manager that shows quotes and trades in separate columns when both are enabled."""
+    
+    def __init__(self, activity_tracker, max_symbols, initial_symbols, output_stream, update_interval: float = 1.0):
+        super().__init__(activity_tracker, max_symbols, initial_symbols, output_stream, update_interval)
+        self.symbol_data = {symbol: {"quotes": "", "trades": ""} for symbol in initial_symbols}
+        
+    def update_symbol(self, symbol: str, data_str: str):
+        """Update symbol data based on the type of data."""
+        # Track activity for dynamic display
+        self.activity_tracker.add_activity(symbol, datetime.now(timezone.utc), 1)  # Use size 1 as default
+        
+        # Ensure symbol exists in data dictionary
+        if symbol not in self.symbol_data:
+            self.symbol_data[symbol] = {"quotes": "", "trades": ""}
+        
+        # Determine if this is quote or trade data based on the prefix
+        if data_str.startswith("B:") or data_str.startswith("A:"):
+            # Quote data (B: or A: prefix)
+            self.symbol_data[symbol]["quotes"] = data_str
+        elif data_str.startswith("T:"):
+            # Trade data (T: prefix)
+            self.symbol_data[symbol]["trades"] = data_str
+            
+        # Also update the parent's buffer for compatibility
+        super().update_symbol(symbol, data_str)
+        
+    def prepare_display(self):
+        """Prepare the display with headers for combined view."""
+        print("DEBUG: Preparing combined display", file=sys.stderr, flush=True)
+        with self.lock:
+            if self.display_prepared:
+                print("DEBUG: Display already prepared", file=sys.stderr, flush=True)
+                return
+            if self.num_display_lines == 0:
+                print("DEBUG: No lines to display", file=sys.stderr, flush=True)
+                return
+
+            try:
+                print("DEBUG: Starting combined display preparation", file=sys.stderr, flush=True)
+                
+                # Clear screen and move to top
+                self._print("\x1b[2J\x1b[H", end="")
+                
+                # Print header for combined view
+                self._print("=== Real-time Market Updates (Quotes & Trades) ===")
+                self._print("Symbol   Bid/Ask                    Trade                Time")
+                self._print("-" * 65)
+                
+                # Print initial state for each symbol
+                for symbol in self.symbols:
+                    self._print(f"{symbol:<8} {'No quotes':<25} {'No trades':<20} {'':<12}")
+                
+                # Print footer
+                self._print("-" * 65)
+                
+                self.display_prepared = True
+                print("DEBUG: Combined display prepared successfully", file=sys.stderr, flush=True)
+            except Exception as e:
+                print(f"DEBUG: Error in prepare_display: {e}", file=sys.stderr, flush=True)
+                traceback.print_exc(file=sys.stderr)
+        
+        if self.num_display_lines > 0 and self.display_update_interval > 0:
+            print("DEBUG: Starting combined display updater thread", file=sys.stderr, flush=True)
+            self.stop_event.clear()
+            self.updater_thread = threading.Thread(target=self._updater_thread_target, daemon=True)
+            self.updater_thread.start()
+            print("DEBUG: Combined display updater thread started", file=sys.stderr, flush=True)
+                
+    def _updater_thread_target(self):
+        """Periodically updates the display with buffered data in combined format."""
+        print("DEBUG: Starting combined display updater thread", file=sys.stderr, flush=True)
+        while not self.stop_event.is_set():
+            try:
+                time.sleep(self.display_update_interval)
+                with self.display_lock:
+                    if not self.display_prepared:
+                        print("DEBUG: Display not prepared yet", file=sys.stderr, flush=True)
+                        continue
+                    if self.num_display_lines == 0:
+                        print("DEBUG: No lines to display", file=sys.stderr, flush=True)
+                        continue
+
+                    # Clear screen and move to top
+                    self._print("\x1b[2J\x1b[H", end="")
+                    
+                    # Print header for combined view
+                    self._print("=== Real-time Market Updates (Quotes & Trades) ===")
+                    self._print("Symbol   Bid/Ask                    Trade                Time")
+                    self._print("-" * 65)
+                    
+                    # Print each symbol's data in combined format
+                    for symbol in self.symbols:
+                        data = self.symbol_data.get(symbol, {"quotes": "", "trades": ""})
+                        quotes_str = data["quotes"] if data["quotes"] else "No quotes"
+                        trades_str = data["trades"] if data["trades"] else "No trades"
+                        
+                        # Extract time from either quotes or trades
+                        time_str = ""
+                        if data["quotes"]:
+                            if "T:" in data["quotes"]:
+                                time_part = data["quotes"].split("T:")[-1].strip()
+                                if len(time_part) >= 8:
+                                    time_str = time_part[:8]
+                        elif data["trades"]:
+                            if "T:" in data["trades"]:
+                                time_part = data["trades"].split("T:")[-1].strip()
+                                if len(time_part) >= 8:
+                                    time_str = time_part[:8]
+                        
+                        line = f"{symbol:<8} {quotes_str:<25} {trades_str:<20} {time_str:<12}"
+                        self._print(line)
+                    
+                    # Print footer
+                    self._print("-" * 65)
+            except Exception as e:
+                print(f"DEBUG: Error in combined display updater thread: {e}", file=sys.stderr, flush=True)
+                traceback.print_exc(file=sys.stderr)
+
+
+class CombinedDisplayManager:
+    """Display manager that shows quotes and trades in separate columns when both are enabled."""
+    
+    def __init__(self, symbols: List[str], output_stream, update_interval: float = 1.0):
+        self.symbols = sorted(symbols)
+        self.output_stream = output_stream
+        self.update_interval = update_interval
+        self.symbol_data = {symbol: {"quotes": "", "trades": ""} for symbol in symbols}
+        self.lock = threading.Lock()
+        self.last_update_time = 0
+        
+    def prepare_display(self):
+        """Prepare the display with headers."""
+        header = "=== Real-time Market Updates (Quotes & Trades) ===\n"
+        header += f"{'Symbol':<8} {'Bid/Ask':<25} {'Trade':<20} {'Time':<12}\n"
+        header += "-" * 65 + "\n"
+        self.output_stream.write(header)
+        self.output_stream.flush()
+        
+    def update_symbol(self, symbol: str, data_str: str):
+        """Update symbol data based on the type of data."""
+        with self.lock:
+            if symbol in self.symbol_data:
+                # Determine if this is quote or trade data based on the prefix
+                if data_str.startswith("B:") or data_str.startswith("A:"):
+                    # Quote data (B: or A: prefix)
+                    self.symbol_data[symbol]["quotes"] = data_str
+                elif data_str.startswith("T:"):
+                    # Trade data (T: prefix)
+                    self.symbol_data[symbol]["trades"] = data_str
+                    
+                # Check if we should update the display
+                current_time = time.time()
+                if current_time - self.last_update_time >= self.update_interval:
+                    self._update_display()
+                    self.last_update_time = current_time
+                    
+    def _update_display(self):
+        """Update the display with current data."""
+        # Clear previous lines
+        lines_to_clear = len(self.symbols)
+        for _ in range(lines_to_clear):
+            self.output_stream.write("\033[K\n")  # Clear line and move down
+        self.output_stream.write(f"\033[{lines_to_clear}A")  # Move cursor up
+        
+        # Write updated data
+        for symbol in self.symbols:
+            data = self.symbol_data[symbol]
+            quotes_str = data["quotes"] if data["quotes"] else "No quotes"
+            trades_str = data["trades"] if data["trades"] else "No trades"
+            
+            # Extract time from either quotes or trades
+            time_str = ""
+            if data["quotes"]:
+                # Try to extract time from quotes
+                if "T:" in data["quotes"]:
+                    time_part = data["quotes"].split("T:")[-1].strip()
+                    if len(time_part) >= 8:  # Basic time format check
+                        time_str = time_part[:8]  # HH:MM:SS
+            elif data["trades"]:
+                # Try to extract time from trades
+                if "T:" in data["trades"]:
+                    time_part = data["trades"].split("T:")[-1].strip()
+                    if len(time_part) >= 8:  # Basic time format check
+                        time_str = time_part[:8]  # HH:MM:SS
+            
+            line = f"{symbol:<8} {quotes_str:<25} {trades_str:<20} {time_str:<12}\n"
+            self.output_stream.write(line)
+            
+        self.output_stream.flush()
+        
+    def cleanup_display(self):
+        """Clean up the display."""
+        # Move cursor down to avoid overwriting the display
+        self.output_stream.write(f"\n{'='*65}\n")
+        self.output_stream.write("Display cleaned up.\n")
+        self.output_stream.flush()
+
+
 class StreamDataClient:
-    def __init__(self, server_url: str, symbols: Set[str], display_manager: Optional[StaticDisplayManager] = None):
+    def __init__(self, server_url: str, symbols: Set[str], display_manager: Optional[StaticDisplayManager] = None, feed_filter: str = "both"):
         self.server_url = server_url
         self.symbols = symbols
         self.connections: Set[websockets.WebSocketClientProtocol] = set()
         self.stop_event = asyncio.Event()
         self.display_manager = display_manager
         self.tasks: List[asyncio.Task] = []
-        self.last_prices: Dict[str, Dict[str, Optional[float]]] = {} # Store last prices here
+        self.last_prices: Dict[str, Dict[str, Optional[float]]] = {} # Store last prices here (bid_price, ask_price, trade_price)
+        self.feed_filter = feed_filter  # "quotes", "trades", or "both"
         self._setup_signal_handlers()
 
     def _setup_signal_handlers(self):
@@ -121,6 +324,10 @@ class StreamDataClient:
 
                     # --- Handle Quote Updates ---
                     if event_type == 'quote_update' and message_type == 'quote':
+                        # Skip if only trades are requested
+                        if self.feed_filter == "trades":
+                            continue
+                            
                         payload = inner_data.get('payload')
                         if not isinstance(payload, list) or not payload:
                             logger.warning(f"Quote update for {symbol} has missing or empty payload: {inner_data}")
@@ -140,7 +347,7 @@ class StreamDataClient:
                                 continue
 
                             # Retrieve last prices for this symbol for display comparison
-                            last_symbol_prices = self.last_prices.get(symbol, {'bid_price': None, 'ask_price': None})
+                            last_symbol_prices = self.last_prices.get(symbol, {'bid_price': None, 'ask_price': None, 'trade_price': None})
                             prev_bid_for_display = last_symbol_prices['bid_price']
                             prev_ask_for_display = last_symbol_prices['ask_price']
 
@@ -175,16 +382,92 @@ class StreamDataClient:
                                 except ValueError:
                                     display_time_str = data_timestamp_str # Fallback if parsing fails
 
-                                data_str = f"Q: B:{final_bid_str} A:{final_ask_str} T:{display_time_str}"
+                                # Create display string based on feed filter
+                                if self.feed_filter == "quotes":
+                                    data_str = f"Q: B:{final_bid_str} A:{final_ask_str} T:{display_time_str}"
+                                else:  # "both" - show quotes in separate columns
+                                    data_str = f"B:{final_bid_str} A:{final_ask_str}"
+                                
                                 self.display_manager.update_symbol(symbol, data_str)
                             else:
                                 print(f"\n[{data_timestamp_str}] {symbol} Quote: Bid={bid_price} (Size:{bid_size}), Ask={ask_price} (Size:{ask_size})")
 
                             # Update last prices for this symbol
-                            self.last_prices[symbol] = {
-                                'bid_price': bid_price,
-                                'ask_price': ask_price
-                            }
+                            current_prices = self.last_prices.get(symbol, {'bid_price': None, 'ask_price': None, 'trade_price': None})
+                            current_prices['bid_price'] = bid_price
+                            current_prices['ask_price'] = ask_price
+                            self.last_prices[symbol] = current_prices
+                    
+                    # --- Handle Trade Updates ---
+                    elif event_type == 'trade_update' and message_type == 'trade':
+                        # Skip if only quotes are requested
+                        if self.feed_filter == "quotes":
+                            continue
+                            
+                        payload = inner_data.get('payload')
+                        if not isinstance(payload, list) or not payload:
+                            logger.warning(f"Trade update for {symbol} has missing or empty payload: {inner_data}")
+                            continue
+                        
+                        # Assuming payload for trade_update contains a single dictionary for the trade
+                        for trade_details in payload:
+                            # Extract trade data
+                            trade_price = trade_details.get('price')
+                            trade_size = trade_details.get('size')
+                            data_timestamp_str = trade_details.get('timestamp', datetime.now(timezone.utc).isoformat())
+
+                            if trade_price is None:
+                                logger.warning(f"Trade update for {symbol} missing price: {trade_details}")
+                                continue
+
+                            # Retrieve last prices for this symbol for display comparison
+                            last_symbol_prices = self.last_prices.get(symbol, {'bid_price': None, 'ask_price': None, 'trade_price': None})
+                            prev_trade_price = last_symbol_prices.get('trade_price')
+
+                            if self.display_manager:
+                                GREEN = "\x1b[32m"
+                                RED = "\x1b[31m"
+                                RESET = "\x1b[0m"
+
+                                def format_trade_display(current_price, prev_price_val, size_val):
+                                    price_fmt = f"{current_price:<7.2f}"
+                                    size_val_for_fmt = size_val if size_val is not None else 0
+                                    size_fmt = f"(S:{size_val_for_fmt:<4})"
+                                    
+                                    if prev_price_val is not None:
+                                        change = current_price - prev_price_val
+                                        if change != 0:
+                                            arrow = "↑" if change > 0 else "↓"
+                                            color = GREEN if change > 0 else RED
+                                            change_indicator = f" ({arrow}{abs(change):.2f})"
+                                            return f"{color}{price_fmt}{change_indicator}{RESET} {size_fmt}"
+                                        else: # No change
+                                            return f"{price_fmt} (---) {size_fmt}"
+                                    else: # No previous data
+                                        return f"{price_fmt} (---) {size_fmt}"
+
+                                final_trade_str = format_trade_display(trade_price, prev_trade_price, trade_size)
+                                # Use data_timestamp_str from the payload for display
+                                try:
+                                    dt_obj = datetime.fromisoformat(data_timestamp_str.replace('Z', '+00:00'))
+                                    display_time_str = dt_obj.astimezone().strftime('%H:%M:%S.%f')[:-3]
+                                except ValueError:
+                                    display_time_str = data_timestamp_str # Fallback if parsing fails
+
+                                # Create display string based on feed filter
+                                if self.feed_filter == "trades":
+                                    data_str = f"T: {final_trade_str} T:{display_time_str}"
+                                else:  # "both" - show trades in separate columns
+                                    data_str = f"T:{final_trade_str}"
+                                
+                                self.display_manager.update_symbol(symbol, data_str)
+                            else:
+                                print(f"\n[{data_timestamp_str}] {symbol} Trade: Price={trade_price} (Size:{trade_size})")
+
+                            # Update last prices for this symbol (preserve existing bid/ask prices)
+                            current_prices = self.last_prices.get(symbol, {'bid_price': None, 'ask_price': None, 'trade_price': None})
+                            current_prices['trade_price'] = trade_price
+                            self.last_prices[symbol] = current_prices
                     else:
                         logger.warning(f"Received unhandled message type/event for {symbol}: type='{message_type}', event='{event_type}'. Data: {inner_data}")
 
@@ -279,6 +562,12 @@ async def main():
         default=1.0,
         help="Minimum interval in seconds between static display updates (default: 1.0)."
     )
+    display_group.add_argument(
+        '--feed-filter',
+        choices=['quotes', 'trades', 'both'],
+        default='both',
+        help="Filter to show only quotes, only trades, or both (default: both)."
+    )
 
     # Add activity tracking options
     activity_group = parser.add_argument_group(title="Activity Tracking Options")
@@ -312,27 +601,45 @@ async def main():
     if args.static_display:
         if args.max_active_symbols is not None:
             activity_tracker = ActivityTracker(args.activity_window)
-            display_manager = DynamicDisplayManager(
-                activity_tracker,
-                args.max_active_symbols,
-                list(symbols),  # Initial symbols list
-                sys.stdout,
-                args.display_update_interval,
-            )
+            # Use DynamicCombinedDisplayManager for "both" feeds, DynamicDisplayManager for single feeds
+            if args.feed_filter == "both":
+                display_manager = DynamicCombinedDisplayManager(
+                    activity_tracker,
+                    args.max_active_symbols,
+                    list(symbols),  # Initial symbols list
+                    sys.stdout,
+                    args.display_update_interval,
+                )
+            else:
+                display_manager = DynamicDisplayManager(
+                    activity_tracker,
+                    args.max_active_symbols,
+                    list(symbols),  # Initial symbols list
+                    sys.stdout,
+                    args.display_update_interval,
+                )
             display_manager.start()  # Start the dynamic update thread
         else:
             all_symbols_for_display = sorted(list(symbols))
             if not all_symbols_for_display:
                 logger.error("Static display enabled, but no symbols to display.")
             else:
-                display_manager = StaticDisplayManager(
-                    all_symbols_for_display, 
-                    sys.stdout, 
-                    args.display_update_interval
-                )
+                # Use CombinedDisplayManager for "both" feeds, StaticDisplayManager for single feeds
+                if args.feed_filter == "both":
+                    display_manager = CombinedDisplayManager(
+                        all_symbols_for_display, 
+                        sys.stdout, 
+                        args.display_update_interval
+                    )
+                else:
+                    display_manager = StaticDisplayManager(
+                        all_symbols_for_display, 
+                        sys.stdout, 
+                        args.display_update_interval
+                    )
 
     # Create and run the client
-    client = StreamDataClient(args.server, symbols, display_manager)
+    client = StreamDataClient(args.server, symbols, display_manager, args.feed_filter)
     await client.run()
 
 if __name__ == "__main__":
