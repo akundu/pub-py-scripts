@@ -357,18 +357,32 @@ async def setup_and_run_stream(
 
     async def heartbeat_checker():
         """Monitor stream activity and detect timeouts."""
+        consecutive_warnings = 0
         while True:
             await asyncio.sleep(heartbeat_interval)
             current_time = time.time()
             time_since_last_activity = current_time - last_activity_time
             
             if time_since_last_activity > 60:  # No activity for 60 seconds
+                consecutive_warnings += 1
                 print(f"WARNING: No activity detected for {inferred_symbol_type} stream ({symbols_str}) for {time_since_last_activity:.1f} seconds", file=sys.stderr)
                 print(f"This could indicate a connection issue or API problem.", file=sys.stderr)
+                print(f"Debug info: Market={inferred_symbol_type}, Feed={feed}, Symbols={symbols}", file=sys.stderr)
+                print(f"Consecutive warnings: {consecutive_warnings}", file=sys.stderr)
+                
+                if consecutive_warnings >= 3:  # After 3 consecutive warnings (3 minutes)
+                    print(f"ERROR: Stream appears to be dead for {inferred_symbol_type} ({symbols_str}). No activity for {time_since_last_activity:.1f} seconds.", file=sys.stderr)
+                    print(f"Terminating stream due to inactivity.", file=sys.stderr)
+                    return  # Exit the heartbeat checker, which will cause the stream to terminate
             elif time_since_last_activity > 120:  # No activity for 2 minutes
                 print(f"ERROR: Stream appears to be dead for {inferred_symbol_type} ({symbols_str}). No activity for {time_since_last_activity:.1f} seconds.", file=sys.stderr)
                 print(f"Terminating stream due to inactivity.", file=sys.stderr)
                 return  # Exit the heartbeat checker, which will cause the stream to terminate
+            else:
+                # Reset warning counter if we have recent activity
+                if consecutive_warnings > 0:
+                    print(f"DEBUG: Stream activity resumed after {consecutive_warnings} warnings", file=sys.stderr)
+                consecutive_warnings = 0
 
     try:
         if inferred_symbol_type == "stock":
@@ -474,6 +488,19 @@ async def setup_and_run_polygon_stream(
     if csv_data_dir:
         print(f"Streaming data will also be saved to CSVs in: {Path(csv_data_dir).resolve()}", file=sys.stderr)
 
+    # Test Polygon API key before connecting
+    try:
+        import requests
+        test_url = f"https://api.polygon.io/v2/aggs/ticker/AAPL/range/1/day/2023-01-09/2023-01-09?apiKey={api_key}"
+        response = requests.get(test_url, timeout=10)
+        if response.status_code == 200:
+            print(f"DEBUG: Polygon API key validation successful", file=sys.stderr)
+        else:
+            print(f"WARNING: Polygon API key validation failed with status {response.status_code}", file=sys.stderr)
+            print(f"This might indicate an API key issue.", file=sys.stderr)
+    except Exception as e:
+        print(f"WARNING: Could not validate Polygon API key: {e}", file=sys.stderr)
+
     # Create Polygon WebSocket client
     stream = WebSocketClient(
         api_key=api_key,
@@ -482,18 +509,32 @@ async def setup_and_run_polygon_stream(
 
     async def heartbeat_checker():
         """Monitor stream activity and detect timeouts."""
+        consecutive_warnings = 0
         while True:
             await asyncio.sleep(heartbeat_interval)
             current_time = time.time()
             time_since_last_activity = current_time - last_activity_time
             
             if time_since_last_activity > 60:  # No activity for 60 seconds
+                consecutive_warnings += 1
                 print(f"WARNING: No activity detected for Polygon stream ({symbols_str}) for {time_since_last_activity:.1f} seconds", file=sys.stderr)
                 print(f"This could indicate a connection issue or API problem.", file=sys.stderr)
+                print(f"Debug info: Market={market}, Feed={feed}, Symbols={symbols}", file=sys.stderr)
+                print(f"Consecutive warnings: {consecutive_warnings}", file=sys.stderr)
+                
+                if consecutive_warnings >= 3:  # After 3 consecutive warnings (3 minutes)
+                    print(f"ERROR: Polygon stream appears to be dead ({symbols_str}). No activity for {time_since_last_activity:.1f} seconds.", file=sys.stderr)
+                    print(f"Terminating stream due to inactivity.", file=sys.stderr)
+                    return  # Exit the heartbeat checker, which will cause the stream to terminate
             elif time_since_last_activity > 120:  # No activity for 2 minutes
                 print(f"ERROR: Polygon stream appears to be dead ({symbols_str}). No activity for {time_since_last_activity:.1f} seconds.", file=sys.stderr)
                 print(f"Terminating stream due to inactivity.", file=sys.stderr)
                 return  # Exit the heartbeat checker, which will cause the stream to terminate
+            else:
+                # Reset warning counter if we have recent activity
+                if consecutive_warnings > 0:
+                    print(f"DEBUG: Stream activity resumed after {consecutive_warnings} warnings", file=sys.stderr)
+                consecutive_warnings = 0
 
     # Define the callback function that will handle incoming messages
     async def handle_msg(msg):
@@ -502,6 +543,8 @@ async def setup_and_run_polygon_stream(
         """
         nonlocal last_activity_time
         last_activity_time = time.time()
+        
+        print(f"DEBUG: Received Polygon message: {type(msg)} - {msg[:200] if msg else 'None'}", file=sys.stderr)
         
         # The 'msg' object is a list of events
         if isinstance(msg, list):
@@ -585,24 +628,56 @@ async def setup_and_run_polygon_stream(
     for ticker in symbols:
         if feed == "trades":
             stream.subscribe(f"T.{ticker}")  # Subscribe to trades
+            print(f"DEBUG: Subscribed to trades for {ticker}", file=sys.stderr)
         elif feed == "quotes":
             stream.subscribe(f"Q.{ticker}")  # Subscribe to quotes
+            print(f"DEBUG: Subscribed to quotes for {ticker}", file=sys.stderr)
         elif feed == "both":
             stream.subscribe(f"T.{ticker}")  # Subscribe to trades
             stream.subscribe(f"Q.{ticker}")  # Subscribe to quotes
+            print(f"DEBUG: Subscribed to both trades and quotes for {ticker}", file=sys.stderr)
 
     print(f"Successfully subscribed to {feed} for: {', '.join(symbols)}")
     print(f"Market: {market}, Feed: {feed}, Symbols: {symbols_str}", file=sys.stderr)
     print(f"Polygon API key configured: {'Yes' if api_key else 'No'}", file=sys.stderr)
+    print(f"DEBUG: Total subscriptions: {len(symbols) * (2 if feed == 'both' else 1)}", file=sys.stderr)
     print("--- Waiting for real-time data... Press Ctrl+C to stop. ---")
     
     try:
-        # Run the stream connection and heartbeat checker concurrently
-        await asyncio.gather(
-            stream.connect(handle_msg),
+        print(f"DEBUG: Attempting to connect to Polygon WebSocket...", file=sys.stderr)
+        
+        # Create a task to keep the connection alive
+        async def keep_connection_alive():
+            """Keep the connection alive by running the connect method in a loop."""
+            while True:
+                try:
+                    print(f"DEBUG: Starting Polygon WebSocket connection...", file=sys.stderr)
+                    await stream.connect(handle_msg)
+                    print(f"DEBUG: Polygon WebSocket connection completed, restarting...", file=sys.stderr)
+                    # If we get here, the connection completed (which might be normal)
+                    # Wait a bit before trying to reconnect
+                    await asyncio.sleep(5)
+                except Exception as e:
+                    print(f"DEBUG: Polygon WebSocket connection error: {e}", file=sys.stderr)
+                    # Wait before retrying
+                    await asyncio.sleep(1)
+        
+        # Run the connection keeper and heartbeat checker concurrently
+        results = await asyncio.gather(
+            keep_connection_alive(),
             heartbeat_checker(),
             return_exceptions=True
         )
+        
+        # Check results for exceptions
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                print(f"DEBUG: Task {i} failed with exception: {result}", file=sys.stderr)
+                if i == 0:  # Connection keeper task
+                    print(f"DEBUG: Connection keeper failed: {result}", file=sys.stderr)
+                elif i == 1:  # Heartbeat checker task
+                    print(f"DEBUG: Heartbeat checker failed: {result}", file=sys.stderr)
+        
     except KeyboardInterrupt:
         print(f"KeyboardInterrupt caught in Polygon stream for {symbols_str}. Stopping stream...", file=sys.stderr)
         raise  # Re-raise to be handled by the main loop
