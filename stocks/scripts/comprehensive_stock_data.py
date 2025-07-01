@@ -613,8 +613,10 @@ class PolygonStockData:
             chain_snapshots = data['options_data']['data'].get('chain_snapshots', [])
             
             if options or chain_snapshots:
-                output.append("OPTIONS DATA")
+                output.append("OPTIONS DATA (Current/Live)")
                 output.append("=" * 50)
+                output.append("Note: Options data shows current/active contracts with live market data")
+                output.append("")
                 
                 # Basic options statistics
                 if options:
@@ -641,36 +643,71 @@ class PolygonStockData:
                     output.append("")
                 
                 # Show sample options with live data if available
-                if chain_snapshots:
+                if chain_snapshots or options:
                     output.append("SAMPLE OPTIONS WITH LIVE DATA")
                     output.append("=" * 50)
                     
                     live_options = []
-                    for snapshot in chain_snapshots[:10]:  # Show first 10
-                        ticker = snapshot.get('ticker', 'N/A')
-                        if ticker != 'N/A':
-                            # Extract info from ticker (e.g., O:AAPL241231C00200000)
-                            try:
-                                parts = ticker.split(':')[1] if ':' in ticker else ticker
-                                # This is a basic parsing - actual format may vary
-                                contract_type = 'Call' if 'C' in parts[-10:] else 'Put' if 'P' in parts[-10:] else 'N/A'
-                            except:
-                                contract_type = 'N/A'
-                        else:
-                            contract_type = 'N/A'
+                    
+                    # If we have options contracts, show those with any available snapshot data
+                    if options:
+                        for i, contract in enumerate(options[:10]):  # Show first 10 contracts
+                            ticker = contract.get('ticker', 'N/A')
+                            contract_type = contract.get('contract_type', 'N/A').title()
+                            strike = contract.get('strike_price', 'N/A')
+                            expiration = contract.get('expiration_date', 'N/A')
                             
-                        live_options.append([
-                            ticker[:20] + '...' if ticker and len(ticker) > 20 else ticker,
-                            contract_type,
-                            f"${snapshot.get('last_trade_price', 'N/A')}" if snapshot.get('last_trade_price') else 'N/A',
-                            f"${snapshot.get('last_quote_bid', 'N/A')}" if snapshot.get('last_quote_bid') else 'N/A',
-                            f"${snapshot.get('last_quote_ask', 'N/A')}" if snapshot.get('last_quote_ask') else 'N/A',
-                            f"{snapshot.get('day_change_percent', 'N/A'):.2f}%" if snapshot.get('day_change_percent') else 'N/A'
-                        ])
+                            # Try to find corresponding snapshot data
+                            snapshot_data = {}
+                            if i < len(chain_snapshots) and chain_snapshots[i]:
+                                snapshot_data = chain_snapshots[i]
+                            
+                            # Format strike price and expiration for display
+                            strike_str = f"${strike:.0f}" if isinstance(strike, (int, float)) else str(strike)
+                            contract_display = f"{ticker[-15:]}" if ticker and ticker != 'N/A' else f"{contract_type} {strike_str} {expiration}"
+                            
+                            # Get available data from snapshot or contract
+                            last_price = snapshot_data.get('last_trade_price')
+                            bid = snapshot_data.get('last_quote_bid')
+                            ask = snapshot_data.get('last_quote_ask')
+                            day_change_pct = snapshot_data.get('day_change_percent')
+                            open_interest = snapshot_data.get('open_interest')
+                            
+                            live_options.append([
+                                contract_display[:25] + '...' if contract_display and len(contract_display) > 25 else contract_display,
+                                contract_type,
+                                f"${last_price:.2f}" if last_price else 'N/A',
+                                f"${bid:.2f}" if bid else 'N/A',
+                                f"${ask:.2f}" if ask else 'N/A',
+                                f"{day_change_pct:.2f}%" if day_change_pct else 'N/A',
+                                f"{open_interest:,}" if open_interest else 'N/A'
+                            ])
+                            
+                    # If no contracts but we have snapshots, show what we can
+                    elif chain_snapshots:
+                        for i, snapshot in enumerate(chain_snapshots[:10]):
+                            day_change_pct = snapshot.get('day_change_percent')
+                            open_interest = snapshot.get('open_interest')
+                            implied_vol = snapshot.get('implied_volatility')
+                            
+                            live_options.append([
+                                f"Option #{i+1}",
+                                'N/A',
+                                'N/A',
+                                'N/A', 
+                                'N/A',
+                                f"{day_change_pct:.2f}%" if day_change_pct else 'N/A',
+                                f"{open_interest:,}" if open_interest else 'N/A'
+                            ])
                     
                     if live_options:
-                        output.append(tabulate(live_options, headers=['Contract', 'Type', 'Last Price', 'Bid', 'Ask', 'Day Change %'], tablefmt='grid'))
+                        output.append(tabulate(live_options, headers=['Contract', 'Type', 'Last Price', 'Bid', 'Ask', 'Day Change %', 'Open Interest'], tablefmt='grid'))
                         output.append("")
+                        
+                        # Show a note about limited data availability
+                        if any('N/A' in str(row) for row in live_options):
+                            output.append("Note: Some options data may be limited due to market hours, API tier, or contract liquidity")
+                            output.append("")
         
         # Recent News
         if 'news_and_events' in data and data['news_and_events'].get('success'):
