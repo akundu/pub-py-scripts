@@ -10,4 +10,6 @@ pyyaml
 alpaca-py
 duckdb
 websockets==10.4
-
+polygon-api-client
+requests
+tabulate
