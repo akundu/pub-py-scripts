@@ -244,6 +244,62 @@ class PolygonStockData:
                 options_data['contracts'] = options_contracts
                 print(f"Found {len(options_contracts)} options contracts for {self.config.symbol}")
                 
+                # Try to get individual option quotes for better pricing data
+                enhanced_contracts = []
+                print("Fetching individual option quotes for pricing data...")
+                quotes_found = 0
+                trades_found = 0
+                
+                for i, contract in enumerate(options_contracts[:10]):  # Limit to first 10 for performance
+                    contract_ticker = contract.get('ticker')
+                    if not contract_ticker:
+                        enhanced_contracts.append(contract)
+                        continue
+                        
+                    try:
+                        # Try to get snapshot for this specific option
+                        option_snapshot = self.client.get_snapshot_option(self.config.symbol, contract_ticker)
+                        if option_snapshot:
+                            # Extract quote data from snapshot
+                            if hasattr(option_snapshot, 'last_quote') and option_snapshot.last_quote:
+                                contract['quote_bid'] = getattr(option_snapshot.last_quote, 'bid', None)
+                                contract['quote_ask'] = getattr(option_snapshot.last_quote, 'ask', None)
+                                contract['quote_bid_size'] = getattr(option_snapshot.last_quote, 'bid_size', None)
+                                contract['quote_ask_size'] = getattr(option_snapshot.last_quote, 'ask_size', None)
+                                contract['quote_timestamp'] = getattr(option_snapshot.last_quote, 'timestamp', None)
+                                if contract.get('quote_bid') or contract.get('quote_ask'):
+                                    quotes_found += 1
+                            
+                            # Extract trade data from snapshot
+                            if hasattr(option_snapshot, 'last_trade') and option_snapshot.last_trade:
+                                contract['trade_price'] = getattr(option_snapshot.last_trade, 'price', None)
+                                contract['trade_size'] = getattr(option_snapshot.last_trade, 'size', None)
+                                contract['trade_timestamp'] = getattr(option_snapshot.last_trade, 'timestamp', None)
+                                if contract.get('trade_price'):
+                                    trades_found += 1
+                            
+                            # Get other useful data from snapshot
+                            contract['break_even_price'] = getattr(option_snapshot, 'break_even_price', None)
+                            contract['fair_market_value'] = getattr(option_snapshot, 'fair_market_value', None)
+                            contract['implied_volatility'] = getattr(option_snapshot, 'implied_volatility', None)
+                            
+                            # Use break-even price as a fallback for pricing when quotes aren't available
+                            if not contract.get('quote_bid') and not contract.get('quote_ask') and not contract.get('trade_price'):
+                                if contract.get('break_even_price'):
+                                    contract['estimated_price'] = contract['break_even_price']
+                                    quotes_found += 1  # Count this as found data
+                            
+                    except Exception as e:
+                        # Individual quote might not be available, continue with basic data
+                        pass
+                        
+                    enhanced_contracts.append(contract)
+                
+                print(f"Successfully fetched quotes for {quotes_found} contracts and trades for {trades_found} contracts")
+                
+                # Replace contracts with enhanced versions
+                options_data['contracts'] = enhanced_contracts
+                
                 # Try to get options chain snapshot for additional data
                 try:
                     chain_snapshot = self.client.list_snapshot_options_chain(
@@ -666,21 +722,33 @@ class PolygonStockData:
                             strike_str = f"${strike:.0f}" if isinstance(strike, (int, float)) else str(strike)
                             contract_display = f"{ticker[-15:]}" if ticker and ticker != 'N/A' else f"{contract_type} {strike_str} {expiration}"
                             
-                            # Get available data from snapshot or contract
-                            last_price = snapshot_data.get('last_trade_price')
-                            bid = snapshot_data.get('last_quote_bid')
-                            ask = snapshot_data.get('last_quote_ask')
-                            day_change_pct = snapshot_data.get('day_change_percent')
-                            open_interest = snapshot_data.get('open_interest')
+                            # Prioritize individual contract data over snapshot data
+                            last_price = (contract.get('trade_price') or 
+                                        snapshot_data.get('last_trade_price') or 
+                                        contract.get('estimated_price'))  # Use break-even as estimate
+                            bid = contract.get('quote_bid') or snapshot_data.get('last_quote_bid')
+                            ask = contract.get('quote_ask') or snapshot_data.get('last_quote_ask')
+                            day_change_pct = snapshot_data.get('day_change_percent')  # This comes from snapshots
+                            open_interest = snapshot_data.get('open_interest')  # This comes from snapshots
+                            implied_vol = contract.get('implied_volatility')
+                            
+                            # Format price with indicator if it's estimated
+                            price_str = 'N/A'
+                            if last_price:
+                                if contract.get('estimated_price') == last_price:  # This is break-even estimate
+                                    price_str = f"${last_price:.2f}*"  # Add asterisk for estimated
+                                else:
+                                    price_str = f"${last_price:.2f}"
                             
                             live_options.append([
                                 contract_display[:25] + '...' if contract_display and len(contract_display) > 25 else contract_display,
                                 contract_type,
-                                f"${last_price:.2f}" if last_price else 'N/A',
+                                price_str,
                                 f"${bid:.2f}" if bid else 'N/A',
                                 f"${ask:.2f}" if ask else 'N/A',
                                 f"{day_change_pct:.2f}%" if day_change_pct else 'N/A',
-                                f"{open_interest:,}" if open_interest else 'N/A'
+                                f"{open_interest:,}" if open_interest else 'N/A',
+                                f"{implied_vol:.3f}" if implied_vol else 'N/A'
                             ])
                             
                     # If no contracts but we have snapshots, show what we can
@@ -701,13 +769,15 @@ class PolygonStockData:
                             ])
                     
                     if live_options:
-                        output.append(tabulate(live_options, headers=['Contract', 'Type', 'Last Price', 'Bid', 'Ask', 'Day Change %', 'Open Interest'], tablefmt='grid'))
+                        output.append(tabulate(live_options, headers=['Contract', 'Type', 'Est. Price', 'Bid', 'Ask', 'Day Change %', 'Open Interest', 'Implied Vol'], tablefmt='grid'))
                         output.append("")
                         
-                        # Show a note about limited data availability
+                        # Show notes about data
+                        output.append("Notes:")
+                        output.append("  * = Estimated price based on break-even calculation")
                         if any('N/A' in str(row) for row in live_options):
-                            output.append("Note: Some options data may be limited due to market hours, API tier, or contract liquidity")
-                            output.append("")
+                            output.append("  • Some data may be limited due to market hours, API tier, or low liquidity")
+                        output.append("")
         
         # Recent News
         if 'news_and_events' in data and data['news_and_events'].get('success'):
