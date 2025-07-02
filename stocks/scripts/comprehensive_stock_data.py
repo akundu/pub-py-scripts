@@ -83,7 +83,21 @@ class PolygonStockData:
             start_date = self.config.start_date
             end_date = self.config.end_date
             
-            print(f"Fetching historical market data for {self.config.symbol} from {start_date} to {end_date}...")
+            # For single-day requests on weekends/holidays, expand the search range
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+            is_single_day = start_dt == end_dt
+            
+            # If it's a single day request, expand the range to catch nearby trading days
+            if is_single_day:
+                search_start = (start_dt - timedelta(days=7)).strftime('%Y-%m-%d')  # Look back 7 days
+                search_end = (end_dt + timedelta(days=7)).strftime('%Y-%m-%d')      # Look forward 7 days
+                print(f"Fetching historical market data for {self.config.symbol}")
+                print(f"Target date: {start_date} (searching {search_start} to {search_end} for nearest trading day)")
+            else:
+                search_start = start_date
+                search_end = end_date
+                print(f"Fetching historical market data for {self.config.symbol} from {start_date} to {end_date}...")
             
             # Daily bars
             daily_bars = []
@@ -92,8 +106,8 @@ class PolygonStockData:
                     ticker=self.config.symbol,
                     multiplier=1,
                     timespan="day",
-                    from_=start_date,
-                    to=end_date,
+                    from_=search_start,
+                    to=search_end,
                     adjusted=True,
                     sort="asc",
                     limit=50000
@@ -101,8 +115,9 @@ class PolygonStockData:
                 
                 if hasattr(aggs, 'results') and aggs.results:
                     for bar in aggs.results:
+                        bar_date = datetime.fromtimestamp(bar.timestamp / 1000).strftime('%Y-%m-%d')
                         daily_bars.append({
-                            'date': datetime.fromtimestamp(bar.timestamp / 1000).strftime('%Y-%m-%d'),
+                            'date': bar_date,
                             'open': bar.open,
                             'high': bar.high,
                             'low': bar.low,
@@ -110,6 +125,25 @@ class PolygonStockData:
                             'volume': bar.volume,
                             'vwap': getattr(bar, 'vwap', None)
                         })
+                    
+                    # If it's a single day request, find the closest trading day
+                    if is_single_day and daily_bars:
+                        target_date_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                        closest_bar = None
+                        min_diff = float('inf')
+                        
+                        for bar in daily_bars:
+                            bar_date_dt = datetime.strptime(bar['date'], '%Y-%m-%d')
+                            diff = abs((bar_date_dt - target_date_dt).days)
+                            if diff < min_diff:
+                                min_diff = diff
+                                closest_bar = bar
+                        
+                        if closest_bar:
+                            market_data['target_date'] = start_date
+                            market_data['closest_trading_date'] = closest_bar['date']
+                            market_data['days_difference'] = min_diff
+                            print(f"Closest trading day to {start_date}: {closest_bar['date']} ({min_diff} days {'after' if datetime.strptime(closest_bar['date'], '%Y-%m-%d') > target_date_dt else 'before'})")
                         
             except Exception as e:
                 print(f"Error fetching daily bars: {e}")
@@ -200,22 +234,127 @@ class PolygonStockData:
         options_data = {}
         
         try:
-            print(f"Fetching options data for {self.config.symbol} (current/live data)...")
+            target_date = self.config.start_date
+            is_single_day = self.config.start_date == self.config.end_date
+            
+            if is_single_day:
+                print(f"Fetching options data for {self.config.symbol} for target date: {target_date}")
+                print("Note: Searching for options contracts that were active on this date")
+            else:
+                print(f"Fetching options data for {self.config.symbol} (current/live data)...")
             
             # Get options contracts
             try:
                 options_contracts = []
-                contracts_generator = self.client.list_options_contracts(
-                    underlying_ticker=self.config.symbol,
-                    limit=50,  # Limit for performance
-                    expired=False
-                )
                 
-                # Iterate through the generator to get actual contracts
-                contract_count = 0
-                for contract in contracts_generator:
-                    if contract_count >= 50:  # Limit to first 50 for performance
-                        break
+                # For historical data, we need to get both expired and non-expired contracts
+                # and filter by expiration date
+                if is_single_day:
+                    # Get expired contracts that were active on the target date
+                    try:
+                        expired_contracts_generator = self.client.list_options_contracts(
+                            underlying_ticker=self.config.symbol,
+                            limit=1000,  # Increase limit for historical search
+                            expired=True  # Get expired contracts
+                        )
+                        
+                        # Also get current contracts in case some were already active
+                        current_contracts_generator = self.client.list_options_contracts(
+                            underlying_ticker=self.config.symbol,
+                            limit=1000,
+                            expired=False
+                        )
+                        
+                        # Combine both generators
+                        all_contracts = []
+                        contract_count = 0
+                        
+                        # Process expired contracts
+                        for contract in expired_contracts_generator:
+                            if contract_count >= 500:  # Limit for performance
+                                break
+                            all_contracts.append(contract)
+                            contract_count += 1
+                        
+                        # Process current contracts
+                        for contract in current_contracts_generator:
+                            if contract_count >= 1000:  # Total limit
+                                break
+                            all_contracts.append(contract)
+                            contract_count += 1
+                        
+                        print(f"Found {len(all_contracts)} total options contracts (expired + current)")
+                        
+                    except Exception as e:
+                        print(f"Error fetching expired contracts: {e}")
+                        # Fallback to current contracts only
+                        all_contracts = list(self.client.list_options_contracts(
+                            underlying_ticker=self.config.symbol,
+                            limit=100,
+                            expired=False
+                        ))
+                else:
+                    # For date ranges, use current contracts
+                    all_contracts = list(self.client.list_options_contracts(
+                        underlying_ticker=self.config.symbol,
+                        limit=50,
+                        expired=False
+                    ))
+                
+                # Filter contracts that were active on the target date
+                target_date_dt = datetime.strptime(target_date, '%Y-%m-%d')
+                active_contracts = []
+                
+                # Debug: let's see what expiration dates we have
+                exp_dates_found = set()
+                contracts_by_year = {}
+                
+                for contract in all_contracts:
+                    expiration_date = getattr(contract, 'expiration_date', None)
+                    if expiration_date:
+                        exp_dates_found.add(expiration_date)
+                        year = expiration_date.split('-')[0] if '-' in expiration_date else 'unknown'
+                        if year not in contracts_by_year:
+                            contracts_by_year[year] = 0
+                        contracts_by_year[year] += 1
+                        
+                        try:
+                            exp_date_dt = datetime.strptime(expiration_date, '%Y-%m-%d')
+                            # Contract was active if it hadn't expired yet on the target date
+                            # Show ALL options that were still active (not expired) on the target date
+                            
+                            days_to_expiry = (exp_date_dt - target_date_dt).days
+                            
+                            # Include ALL options that haven't expired yet (days_to_expiry >= 0)
+                            # This will show all options that were active on the target date
+                            if days_to_expiry >= 0:
+                                active_contracts.append(contract)
+                        except ValueError:
+                            # Skip contracts with invalid date formats
+                            continue
+                
+                # Debug output
+                print(f"Debug: Found expiration dates by year: {contracts_by_year}")
+                sample_dates = sorted(list(exp_dates_found))[:10]
+                print(f"Debug: Sample expiration dates found: {sample_dates}")
+                
+                if is_single_day:
+                    print(f"Found {len(active_contracts)} options contracts that were actively trading around {target_date}")
+                    
+                    # Sort by expiration date and strike price for better organization
+                    active_contracts.sort(key=lambda x: (
+                        getattr(x, 'expiration_date', '9999-12-31'),
+                        getattr(x, 'contract_type', 'call'),
+                        getattr(x, 'strike_price', 999999)
+                    ))
+                
+                # Convert to our format and try to get some pricing data
+                print("Processing options contracts...")
+                contracts_with_data = 0
+                
+                for i, contract in enumerate(active_contracts[:100]):  # Show more contracts
+                    if i % 20 == 0 and i > 0:  # Progress indicator
+                        print(f"  Processed {i} contracts...")
                         
                     contract_data = {
                         'ticker': getattr(contract, 'ticker', None),
@@ -227,135 +366,67 @@ class PolygonStockData:
                         'primary_exchange': getattr(contract, 'primary_exchange', None)
                     }
                     
-                    # Try to get additional option details if available
-                    try:
-                        # Note: Some fields might require higher tier access
-                        contract_data.update({
-                            'exercise_type': getattr(contract, 'exercise_type', None),
-                            'additional_underlyings': getattr(contract, 'additional_underlyings', None)
-                        })
-                    except Exception as e:
-                        # Additional fields might not be available
-                        pass
-                        
+                    # Try to get snapshot data for Greeks and current pricing
+                    if is_single_day:
+                        contract_ticker = contract_data.get('ticker')
+                        if contract_ticker:
+                            try:
+                                # Try to get option snapshot for current data (includes Greeks)
+                                snapshot = self.client.get_snapshot_option(
+                                    underlying_asset=self.config.symbol,
+                                    option_contract=contract_ticker
+                                )
+                                
+                                if snapshot:
+                                    # Extract pricing data
+                                    if hasattr(snapshot, 'fair_market_value') and snapshot.fair_market_value:
+                                        contract_data['fair_market_value'] = snapshot.fair_market_value
+                                        contract_data['estimated_price'] = snapshot.fair_market_value
+                                    if hasattr(snapshot, 'implied_volatility') and snapshot.implied_volatility:
+                                        contract_data['implied_volatility'] = snapshot.implied_volatility
+                                    
+                                    # Extract Greeks
+                                    if hasattr(snapshot, 'delta') and snapshot.delta:
+                                        contract_data['delta'] = snapshot.delta
+                                    if hasattr(snapshot, 'theta') and snapshot.theta:
+                                        contract_data['theta'] = snapshot.theta
+                                    if hasattr(snapshot, 'gamma') and snapshot.gamma:
+                                        contract_data['gamma'] = snapshot.gamma
+                                    if hasattr(snapshot, 'vega') and snapshot.vega:
+                                        contract_data['vega'] = snapshot.vega
+                                    
+                                    # Extract quote data
+                                    if hasattr(snapshot, 'last_quote') and snapshot.last_quote:
+                                        contract_data['bid'] = getattr(snapshot.last_quote, 'bid', None)
+                                        contract_data['ask'] = getattr(snapshot.last_quote, 'ask', None)
+                                    
+                                    # Extract trade data
+                                    if hasattr(snapshot, 'last_trade') and snapshot.last_trade:
+                                        contract_data['last_price'] = getattr(snapshot.last_trade, 'price', None)
+                                    
+                                    if any(contract_data.get(key) for key in ['delta', 'estimated_price', 'bid', 'ask']):
+                                        contracts_with_data += 1
+                                        
+                            except Exception as e:
+                                # Snapshot might not be available for all contracts
+                                pass
+                    
                     options_contracts.append(contract_data)
-                    contract_count += 1
-                        
+                
                 options_data['contracts'] = options_contracts
-                print(f"Found {len(options_contracts)} options contracts for {self.config.symbol}")
                 
-                # Try to get individual option quotes for better pricing data
-                enhanced_contracts = []
-                print("Fetching individual option quotes for pricing data...")
-                quotes_found = 0
-                trades_found = 0
-                
-                for i, contract in enumerate(options_contracts[:10]):  # Limit to first 10 for performance
-                    contract_ticker = contract.get('ticker')
-                    if not contract_ticker:
-                        enhanced_contracts.append(contract)
-                        continue
-                        
-                    try:
-                        # Try to get snapshot for this specific option
-                        option_snapshot = self.client.get_snapshot_option(self.config.symbol, contract_ticker)
-                        if option_snapshot:
-                            # Extract quote data from snapshot
-                            if hasattr(option_snapshot, 'last_quote') and option_snapshot.last_quote:
-                                contract['quote_bid'] = getattr(option_snapshot.last_quote, 'bid', None)
-                                contract['quote_ask'] = getattr(option_snapshot.last_quote, 'ask', None)
-                                contract['quote_bid_size'] = getattr(option_snapshot.last_quote, 'bid_size', None)
-                                contract['quote_ask_size'] = getattr(option_snapshot.last_quote, 'ask_size', None)
-                                contract['quote_timestamp'] = getattr(option_snapshot.last_quote, 'timestamp', None)
-                                if contract.get('quote_bid') or contract.get('quote_ask'):
-                                    quotes_found += 1
-                            
-                            # Extract trade data from snapshot
-                            if hasattr(option_snapshot, 'last_trade') and option_snapshot.last_trade:
-                                contract['trade_price'] = getattr(option_snapshot.last_trade, 'price', None)
-                                contract['trade_size'] = getattr(option_snapshot.last_trade, 'size', None)
-                                contract['trade_timestamp'] = getattr(option_snapshot.last_trade, 'timestamp', None)
-                                if contract.get('trade_price'):
-                                    trades_found += 1
-                            
-                            # Get other useful data from snapshot
-                            contract['break_even_price'] = getattr(option_snapshot, 'break_even_price', None)
-                            contract['fair_market_value'] = getattr(option_snapshot, 'fair_market_value', None)
-                            contract['implied_volatility'] = getattr(option_snapshot, 'implied_volatility', None)
-                            
-                            # Use break-even price as a fallback for pricing when quotes aren't available
-                            if not contract.get('quote_bid') and not contract.get('quote_ask') and not contract.get('trade_price'):
-                                if contract.get('break_even_price'):
-                                    contract['estimated_price'] = contract['break_even_price']
-                                    quotes_found += 1  # Count this as found data
-                            
-                    except Exception as e:
-                        # Individual quote might not be available, continue with basic data
-                        pass
-                        
-                    enhanced_contracts.append(contract)
-                
-                print(f"Successfully fetched quotes for {quotes_found} contracts and trades for {trades_found} contracts")
-                
-                # Replace contracts with enhanced versions
-                options_data['contracts'] = enhanced_contracts
-                
-                # Try to get options chain snapshot for additional data
-                try:
-                    chain_snapshot = self.client.list_snapshot_options_chain(
-                        underlying_asset=self.config.symbol
-                    )
-                    
-                    chain_data = []
-                    if chain_snapshot:
-                        snapshot_count = 0
-                        for snapshot in chain_snapshot:
-                            if snapshot_count >= 20:  # Limit for performance
-                                break
-                            
-                            # Extract day data
-                            day_change = None
-                            day_change_percent = None
-                            if hasattr(snapshot, 'day') and snapshot.day:
-                                day_change = getattr(snapshot.day, 'change', None)
-                                day_change_percent = getattr(snapshot.day, 'change_percent', None)
-                            
-                            # Extract quote data
-                            last_quote_bid = None
-                            last_quote_ask = None
-                            if hasattr(snapshot, 'last_quote') and snapshot.last_quote:
-                                last_quote_bid = getattr(snapshot.last_quote, 'bid', None)
-                                last_quote_ask = getattr(snapshot.last_quote, 'ask', None)
-                            
-                            # Extract trade data
-                            last_trade_price = None
-                            if hasattr(snapshot, 'last_trade') and snapshot.last_trade:
-                                last_trade_price = getattr(snapshot.last_trade, 'price', None)
-                            
-                            chain_data.append({
-                                'ticker': getattr(snapshot, 'ticker', None),
-                                'day_change': day_change,
-                                'day_change_percent': day_change_percent,
-                                'last_quote_bid': last_quote_bid,
-                                'last_quote_ask': last_quote_ask,
-                                'last_trade_price': last_trade_price,
-                                'open_interest': getattr(snapshot, 'open_interest', None),
-                                'implied_volatility': getattr(snapshot, 'implied_volatility', None)
-                            })
-                            snapshot_count += 1
-                    
-                    options_data['chain_snapshots'] = chain_data
-                    if chain_data:
-                        print(f"Found {len(chain_data)} options chain snapshots")
-                        
-                except Exception as e:
-                    print(f"Note: Options chain snapshots not available: {e}")
-                    options_data['chain_snapshots'] = []
+                if is_single_day:
+                    historical_prices_count = sum(1 for c in options_contracts if c.get('historical_price'))
+                    pricing_data_count = sum(1 for c in options_contracts if c.get('estimated_price') or c.get('bid') or c.get('ask'))
+                    greeks_count = sum(1 for c in options_contracts if c.get('delta') is not None)
+                    print(f"Successfully found historical prices for {historical_prices_count} options contracts")
+                    print(f"Successfully found pricing data for {pricing_data_count} options contracts")
+                    print(f"Successfully found Greeks for {greeks_count} options contracts")
+                    print(f"Total contracts found: {len(options_contracts)}")
                 
             except Exception as e:
                 print(f"Error fetching options contracts: {e}")
                 options_data['contracts'] = []
-                options_data['chain_snapshots'] = []
                 
         except Exception as e:
             return self._handle_api_error(e, "options data")
@@ -569,12 +640,24 @@ class PolygonStockData:
         start_dt = datetime.strptime(self.config.start_date, '%Y-%m-%d')
         end_dt = datetime.strptime(self.config.end_date, '%Y-%m-%d')
         total_days = (end_dt - start_dt).days + 1
+        is_single_day = start_dt == end_dt
         
         range_table = [
             ['Start Date', self.config.start_date],
             ['End Date', self.config.end_date],
             ['Total Days', str(total_days)]
         ]
+        
+        # Add weekend/holiday information for single day requests
+        if is_single_day and 'market_data' in data and data['market_data'].get('success'):
+            market = data['market_data']['data']
+            if market.get('target_date') and market.get('closest_trading_date'):
+                range_table.append(['Target Date', market['target_date']])
+                range_table.append(['Closest Trading Day', market['closest_trading_date']])
+                if market.get('days_difference', 0) > 0:
+                    day_type = 'after' if datetime.strptime(market['closest_trading_date'], '%Y-%m-%d') > start_dt else 'before'
+                    range_table.append(['Days Difference', f"{market['days_difference']} days {day_type}"])
+        
         output.append(tabulate(range_table, headers=['Period', 'Value'], tablefmt='grid'))
         output.append("")
         
@@ -599,8 +682,57 @@ class PolygonStockData:
         if 'market_data' in data and data['market_data'].get('success'):
             market = data['market_data']['data']
             
-            # Latest quote and trade data
-            if market.get('latest_trade') or market.get('latest_quote'):
+            # For single day requests, show the specific date data
+            if is_single_day and market.get('daily_bars'):
+                target_date = self.config.start_date
+                closest_date = market.get('closest_trading_date', target_date)
+                
+                # Find the bar for the closest trading date
+                target_bar = None
+                for bar in market['daily_bars']:
+                    if bar.get('date') == closest_date:
+                        target_bar = bar
+                        break
+                
+                if target_bar:
+                    output.append(f"STOCK PRICE DATA FOR {closest_date}")
+                    if closest_date != target_date:
+                        output.append(f"(Closest trading day to requested date: {target_date})")
+                    output.append("=" * 50)
+                    
+                    price_table = [
+                        ['Date', target_bar.get('date', 'N/A')],
+                        ['Open', f"${target_bar.get('open', 'N/A'):.2f}" if target_bar.get('open') else 'N/A'],
+                        ['High', f"${target_bar.get('high', 'N/A'):.2f}" if target_bar.get('high') else 'N/A'],
+                        ['Low', f"${target_bar.get('low', 'N/A'):.2f}" if target_bar.get('low') else 'N/A'],
+                        ['Close', f"${target_bar.get('close', 'N/A'):.2f}" if target_bar.get('close') else 'N/A'],
+                        ['Volume', f"{target_bar.get('volume', 'N/A'):,}" if target_bar.get('volume') else 'N/A'],
+                        ['VWAP', f"${target_bar.get('vwap', 'N/A'):.2f}" if target_bar.get('vwap') else 'N/A']
+                    ]
+                    output.append(tabulate(price_table, headers=['Metric', 'Value'], tablefmt='grid'))
+                    output.append("")
+            
+            # Show recent trading history for date ranges
+            elif market.get('daily_bars') and not is_single_day:
+                output.append("RECENT TRADING HISTORY (Last 5 days)")
+                output.append("=" * 50)
+                recent_bars = market['daily_bars'][-5:] if len(market['daily_bars']) > 5 else market['daily_bars']
+                if recent_bars:
+                    hist_table = []
+                    for bar in recent_bars:
+                        hist_table.append([
+                            bar.get('date', 'N/A'),
+                            f"${bar.get('open', 'N/A'):.2f}" if bar.get('open') else 'N/A',
+                            f"${bar.get('high', 'N/A'):.2f}" if bar.get('high') else 'N/A',
+                            f"${bar.get('low', 'N/A'):.2f}" if bar.get('low') else 'N/A',
+                            f"${bar.get('close', 'N/A'):.2f}" if bar.get('close') else 'N/A',
+                            f"{bar.get('volume', 'N/A'):,}" if bar.get('volume') else 'N/A'
+                        ])
+                    output.append(tabulate(hist_table, headers=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'], tablefmt='grid'))
+                    output.append("")
+            
+            # Latest quote and trade data (only for date ranges, not single day historical requests)
+            if not is_single_day and (market.get('latest_trade') or market.get('latest_quote')):
                 output.append("LATEST MARKET DATA")
                 output.append("=" * 50)
                 
@@ -619,25 +751,6 @@ class PolygonStockData:
                     
                 if market_table:
                     output.append(tabulate(market_table, headers=['Metric', 'Value'], tablefmt='grid'))
-                    output.append("")
-            
-            # Historical data summary
-            if market.get('daily_bars'):
-                output.append("RECENT TRADING HISTORY (Last 5 days)")
-                output.append("=" * 50)
-                recent_bars = market['daily_bars'][-5:] if market['daily_bars'] and len(market['daily_bars']) > 5 else market['daily_bars']
-                if recent_bars:
-                    hist_table = []
-                    for bar in recent_bars:
-                        hist_table.append([
-                            bar.get('date', 'N/A'),
-                            f"${bar.get('open', 'N/A'):.2f}" if bar.get('open') else 'N/A',
-                            f"${bar.get('high', 'N/A'):.2f}" if bar.get('high') else 'N/A',
-                            f"${bar.get('low', 'N/A'):.2f}" if bar.get('low') else 'N/A',
-                            f"${bar.get('close', 'N/A'):.2f}" if bar.get('close') else 'N/A',
-                            f"{bar.get('volume', 'N/A'):,}" if bar.get('volume') else 'N/A'
-                        ])
-                    output.append(tabulate(hist_table, headers=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'], tablefmt='grid'))
                     output.append("")
             
             # Dividends and splits
@@ -666,117 +779,179 @@ class PolygonStockData:
         # Options summary
         if 'options_data' in data and data['options_data'].get('success'):
             options = data['options_data']['data'].get('contracts', [])
-            chain_snapshots = data['options_data']['data'].get('chain_snapshots', [])
             
-            if options or chain_snapshots:
-                output.append("OPTIONS DATA (Current/Live)")
-                output.append("=" * 50)
-                output.append("Note: Options data shows current/active contracts with live market data")
+            if options:
+                if is_single_day:
+                    output.append(f"OPTIONS DATA FOR {self.config.start_date}")
+                    output.append("=" * 50)
+                    output.append("Note: Historical options contracts that were active on this date")
+                else:
+                    output.append("OPTIONS DATA (Current/Live)")
+                    output.append("=" * 50)
+                    output.append("Note: Options data shows current/active contracts with live market data")
                 output.append("")
                 
                 # Basic options statistics
-                if options:
-                    calls = [opt for opt in options if opt.get('contract_type') == 'call']
-                    puts = [opt for opt in options if opt.get('contract_type') == 'put']
-                    
-                    opts_table = [
-                        ['Total Options Contracts', f"{len(options):,}"],
-                        ['Call Options', f"{len(calls):,}"],
-                        ['Put Options', f"{len(puts):,}"]
-                    ]
-                    
-                    # Show expiration dates
-                    exp_dates = list(set([opt.get('expiration_date') for opt in options[:20] if opt.get('expiration_date')]))
-                    if exp_dates:
-                        opts_table.append(['Next Expiration Dates', ', '.join(sorted(exp_dates)[:3])])
-                    
-                    # Show strike price range
-                    strikes = [opt.get('strike_price') for opt in options if opt.get('strike_price')]
-                    if strikes:
-                        opts_table.append(['Strike Price Range', f"${min(strikes):.2f} - ${max(strikes):.2f}"])
-                    
-                    output.append(tabulate(opts_table, headers=['Metric', 'Value'], tablefmt='grid'))
-                    output.append("")
+                calls = [opt for opt in options if opt.get('contract_type') == 'call']
+                puts = [opt for opt in options if opt.get('contract_type') == 'put']
                 
-                # Show sample options with live data if available
-                if chain_snapshots or options:
-                    output.append("SAMPLE OPTIONS WITH LIVE DATA")
+                opts_table = [
+                    ['Total Options Contracts', f"{len(options):,}"],
+                    ['Call Options', f"{len(calls):,}"],
+                    ['Put Options', f"{len(puts):,}"]
+                ]
+                
+                # Show expiration dates
+                exp_dates = list(set([opt.get('expiration_date') for opt in options[:20] if opt.get('expiration_date')]))
+                if exp_dates:
+                    opts_table.append(['Expiration Dates (sample)', ', '.join(sorted(exp_dates)[:3])])
+                
+                # Show strike price range
+                strikes = [opt.get('strike_price') for opt in options if opt.get('strike_price')]
+                if strikes:
+                    opts_table.append(['Strike Price Range', f"${min(strikes):.2f} - ${max(strikes):.2f}"])
+                
+                output.append(tabulate(opts_table, headers=['Metric', 'Value'], tablefmt='grid'))
+                output.append("")
+                
+                # Group options by expiration date for better organization
+                if is_single_day:
+                    # Group options by expiration date
+                    options_by_expiry = {}
+                    for opt in options:
+                        exp_date = opt.get('expiration_date', 'Unknown')
+                        if exp_date not in options_by_expiry:
+                            options_by_expiry[exp_date] = []
+                        options_by_expiry[exp_date].append(opt)
+                    
+                    # Sort expiration dates
+                    sorted_exp_dates = sorted(options_by_expiry.keys())
+                    
+                    output.append("OPTIONS BY EXPIRATION DATE")
                     output.append("=" * 50)
                     
-                    live_options = []
+                    # Show options for each expiration date (limit to first 3 expiration dates)
+                    for exp_date in sorted_exp_dates[:3]:
+                        exp_options = options_by_expiry[exp_date]
+                        calls = [opt for opt in exp_options if opt.get('contract_type') == 'call']
+                        puts = [opt for opt in exp_options if opt.get('contract_type') == 'put']
+                        
+                        output.append(f"\nExpiration Date: {exp_date}")
+                        output.append("-" * 30)
+                        output.append(f"Calls: {len(calls)}, Puts: {len(puts)}")
+                        
+                        # Show sample options for this expiration (prioritize those with data)
+                        exp_options_with_data = [opt for opt in exp_options if opt.get('historical_price') or opt.get('estimated_price') or opt.get('delta') or opt.get('bid')]
+                        display_exp_options = (exp_options_with_data[:12] if exp_options_with_data 
+                                             else exp_options[:12])
+                        
+                        if display_exp_options:
+                            options_table = []
+                            
+                            for contract in display_exp_options:
+                                contract_type = contract.get('contract_type', 'N/A').title()
+                                strike = contract.get('strike_price', 'N/A')
+                                strike_str = f"${strike:.0f}" if isinstance(strike, (int, float)) else str(strike)
+                                
+                                # Get price information (prioritize different sources)
+                                price = 'N/A'
+                                if contract.get('historical_price'):
+                                    price = f"${contract['historical_price']:.2f}"
+                                    if contract.get('exact_date_match'):
+                                        price += "*"
+                                elif contract.get('last_price'):
+                                    price = f"${contract['last_price']:.2f}L"
+                                elif contract.get('estimated_price'):
+                                    price = f"${contract['estimated_price']:.2f}E"
+                                elif contract.get('bid') and contract.get('ask'):
+                                    mid_price = (contract['bid'] + contract['ask']) / 2
+                                    price = f"${mid_price:.2f}M"
+                                
+                                # Get bid/ask
+                                bid_ask = 'N/A'
+                                if contract.get('bid') and contract.get('ask'):
+                                    bid_ask = f"${contract['bid']:.2f}/${contract['ask']:.2f}"
+                                
+                                # Get Greeks
+                                delta = f"{contract.get('delta', 'N/A'):.3f}" if contract.get('delta') is not None else 'N/A'
+                                theta = f"{contract.get('theta', 'N/A'):.3f}" if contract.get('theta') is not None else 'N/A'
+                                
+                                # Get volume
+                                volume = f"{contract.get('historical_volume', 'N/A'):,}" if contract.get('historical_volume') else 'N/A'
+                                
+                                # Get implied volatility
+                                iv = f"{contract.get('implied_volatility', 'N/A'):.3f}" if contract.get('implied_volatility') else 'N/A'
+                                
+                                options_table.append([
+                                    f"{contract_type} {strike_str}",
+                                    price,
+                                    bid_ask,
+                                    delta,
+                                    theta,
+                                    iv
+                                ])
+                            
+                            output.append(tabulate(options_table, headers=['Contract', 'Price', 'Bid/Ask', 'Delta', 'Theta', 'IV'], tablefmt='grid'))
                     
-                    # If we have options contracts, show those with any available snapshot data
-                    if options:
-                        for i, contract in enumerate(options[:10]):  # Show first 10 contracts
+                    # Show notes
+                    output.append("\nNotes:")
+                    output.append("  * = Exact date match for historical price")
+                    output.append("  L = Last trade price")
+                    output.append("  E = Estimated price (Fair Market Value)")
+                    output.append("  M = Mid-price (average of bid/ask)")
+                    historical_count = sum(1 for opt in options if opt.get('historical_price'))
+                    pricing_count = sum(1 for opt in options if opt.get('estimated_price') or opt.get('bid') or opt.get('last_price'))
+                    greeks_count = sum(1 for opt in options if opt.get('delta') is not None)
+                    output.append(f"  Historical prices found: {historical_count} contracts")
+                    output.append(f"  Current pricing data found: {pricing_count} contracts")
+                    output.append(f"  Greeks data found: {greeks_count} contracts")
+                    output.append("")
+                    
+                else:
+                    # Original display for date ranges
+                    output.append("SAMPLE OPTIONS WITH PRICING DATA")
+                    output.append("=" * 50)
+                    
+                    options_with_prices = [opt for opt in options if opt.get('historical_price') or opt.get('estimated_price')]
+                    display_options = (options_with_prices[:10] if options_with_prices 
+                                     else options[:10])
+                    
+                    if display_options:
+                        options_table = []
+                        
+                        for contract in display_options:
                             ticker = contract.get('ticker', 'N/A')
                             contract_type = contract.get('contract_type', 'N/A').title()
                             strike = contract.get('strike_price', 'N/A')
                             expiration = contract.get('expiration_date', 'N/A')
                             
-                            # Try to find corresponding snapshot data
-                            snapshot_data = {}
-                            if i < len(chain_snapshots) and chain_snapshots[i]:
-                                snapshot_data = chain_snapshots[i]
-                            
-                            # Format strike price and expiration for display
                             strike_str = f"${strike:.0f}" if isinstance(strike, (int, float)) else str(strike)
-                            contract_display = f"{ticker[-15:]}" if ticker and ticker != 'N/A' else f"{contract_type} {strike_str} {expiration}"
+                            contract_display = f"{contract_type} {strike_str} {expiration}"
                             
-                            # Prioritize individual contract data over snapshot data
-                            last_price = (contract.get('trade_price') or 
-                                        snapshot_data.get('last_trade_price') or 
-                                        contract.get('estimated_price'))  # Use break-even as estimate
-                            bid = contract.get('quote_bid') or snapshot_data.get('last_quote_bid')
-                            ask = contract.get('quote_ask') or snapshot_data.get('last_quote_ask')
-                            day_change_pct = snapshot_data.get('day_change_percent')  # This comes from snapshots
-                            open_interest = snapshot_data.get('open_interest')  # This comes from snapshots
-                            implied_vol = contract.get('implied_volatility')
+                            if contract.get('historical_price'):
+                                price = f"${contract['historical_price']:.2f}"
+                                price_date = contract.get('historical_date', 'N/A')
+                                volume = f"{contract.get('historical_volume', 'N/A'):,}" if contract.get('historical_volume') else 'N/A'
+                                daily_range = 'N/A'
+                                if contract.get('historical_low') and contract.get('historical_high'):
+                                    daily_range = f"${contract['historical_low']:.2f} - ${contract['historical_high']:.2f}"
+                            else:
+                                price = 'N/A'
+                                price_date = 'N/A'
+                                volume = 'N/A'
+                                daily_range = 'N/A'
                             
-                            # Format price with indicator if it's estimated
-                            price_str = 'N/A'
-                            if last_price:
-                                if contract.get('estimated_price') == last_price:  # This is break-even estimate
-                                    price_str = f"${last_price:.2f}*"  # Add asterisk for estimated
-                                else:
-                                    price_str = f"${last_price:.2f}"
-                            
-                            live_options.append([
-                                contract_display[:25] + '...' if contract_display and len(contract_display) > 25 else contract_display,
+                            options_table.append([
+                                contract_display[:30] + '...' if len(contract_display) > 30 else contract_display,
                                 contract_type,
-                                price_str,
-                                f"${bid:.2f}" if bid else 'N/A',
-                                f"${ask:.2f}" if ask else 'N/A',
-                                f"{day_change_pct:.2f}%" if day_change_pct else 'N/A',
-                                f"{open_interest:,}" if open_interest else 'N/A',
-                                f"{implied_vol:.3f}" if implied_vol else 'N/A'
+                                price,
+                                price_date,
+                                volume,
+                                daily_range
                             ])
-                            
-                    # If no contracts but we have snapshots, show what we can
-                    elif chain_snapshots:
-                        for i, snapshot in enumerate(chain_snapshots[:10]):
-                            day_change_pct = snapshot.get('day_change_percent')
-                            open_interest = snapshot.get('open_interest')
-                            implied_vol = snapshot.get('implied_volatility')
-                            
-                            live_options.append([
-                                f"Option #{i+1}",
-                                'N/A',
-                                'N/A',
-                                'N/A', 
-                                'N/A',
-                                f"{day_change_pct:.2f}%" if day_change_pct else 'N/A',
-                                f"{open_interest:,}" if open_interest else 'N/A'
-                            ])
-                    
-                    if live_options:
-                        output.append(tabulate(live_options, headers=['Contract', 'Type', 'Est. Price', 'Bid', 'Ask', 'Day Change %', 'Open Interest', 'Implied Vol'], tablefmt='grid'))
-                        output.append("")
                         
-                        # Show notes about data
-                        output.append("Notes:")
-                        output.append("  * = Estimated price based on break-even calculation")
-                        if any('N/A' in str(row) for row in live_options):
-                            output.append("  • Some data may be limited due to market hours, API tier, or low liquidity")
+                        headers = ['Contract', 'Type', 'Price', 'Price Date', 'Volume', 'Daily Range']
+                        output.append(tabulate(options_table, headers=headers, tablefmt='grid'))
                         output.append("")
         
         # Recent News
