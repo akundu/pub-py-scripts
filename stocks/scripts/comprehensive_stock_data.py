@@ -97,7 +97,7 @@ class PolygonStockData:
             else:
                 search_start = start_date
                 search_end = end_date
-                print(f"Fetching historical market data for {self.config.symbol} from {start_date} to {end_date}...")
+            print(f"Fetching historical market data for {self.config.symbol} from {start_date} to {end_date}...")
             
             # Daily bars
             daily_bars = []
@@ -241,7 +241,7 @@ class PolygonStockData:
                 print(f"Fetching options data for {self.config.symbol} for target date: {target_date}")
                 print("Note: Searching for options contracts that were active on this date")
             else:
-                print(f"Fetching options data for {self.config.symbol} (current/live data)...")
+            print(f"Fetching options data for {self.config.symbol} (current/live data)...")
             
             # Get options contracts
             try:
@@ -253,7 +253,7 @@ class PolygonStockData:
                     # Get expired contracts that were active on the target date
                     try:
                         expired_contracts_generator = self.client.list_options_contracts(
-                            underlying_ticker=self.config.symbol,
+                    underlying_ticker=self.config.symbol,
                             limit=1000,  # Increase limit for historical search
                             expired=True  # Get expired contracts
                         )
@@ -262,17 +262,17 @@ class PolygonStockData:
                         current_contracts_generator = self.client.list_options_contracts(
                             underlying_ticker=self.config.symbol,
                             limit=1000,
-                            expired=False
-                        )
-                        
+                    expired=False
+                )
+                
                         # Combine both generators
                         all_contracts = []
-                        contract_count = 0
+                contract_count = 0
                         
                         # Process expired contracts
                         for contract in expired_contracts_generator:
                             if contract_count >= 500:  # Limit for performance
-                                break
+                        break
                             all_contracts.append(contract)
                             contract_count += 1
                         
@@ -394,20 +394,20 @@ class PolygonStockData:
                                         contract_data['gamma'] = snapshot.gamma
                                     if hasattr(snapshot, 'vega') and snapshot.vega:
                                         contract_data['vega'] = snapshot.vega
-                                    
-                                    # Extract quote data
-                                    if hasattr(snapshot, 'last_quote') and snapshot.last_quote:
+                            
+                            # Extract quote data
+                            if hasattr(snapshot, 'last_quote') and snapshot.last_quote:
                                         contract_data['bid'] = getattr(snapshot.last_quote, 'bid', None)
                                         contract_data['ask'] = getattr(snapshot.last_quote, 'ask', None)
-                                    
-                                    # Extract trade data
-                                    if hasattr(snapshot, 'last_trade') and snapshot.last_trade:
+                            
+                            # Extract trade data
+                            if hasattr(snapshot, 'last_trade') and snapshot.last_trade:
                                         contract_data['last_price'] = getattr(snapshot.last_trade, 'price', None)
-                                    
+                            
                                     if any(contract_data.get(key) for key in ['delta', 'estimated_price', 'bid', 'ask']):
                                         contracts_with_data += 1
-                                        
-                            except Exception as e:
+                        
+                except Exception as e:
                                 # Snapshot might not be available for all contracts
                                 pass
                     
@@ -786,33 +786,33 @@ class PolygonStockData:
                     output.append("=" * 50)
                     output.append("Note: Historical options contracts that were active on this date")
                 else:
-                    output.append("OPTIONS DATA (Current/Live)")
-                    output.append("=" * 50)
-                    output.append("Note: Options data shows current/active contracts with live market data")
+                output.append("OPTIONS DATA (Current/Live)")
+                output.append("=" * 50)
+                output.append("Note: Options data shows current/active contracts with live market data")
                 output.append("")
                 
                 # Basic options statistics
-                calls = [opt for opt in options if opt.get('contract_type') == 'call']
-                puts = [opt for opt in options if opt.get('contract_type') == 'put']
-                
-                opts_table = [
-                    ['Total Options Contracts', f"{len(options):,}"],
-                    ['Call Options', f"{len(calls):,}"],
-                    ['Put Options', f"{len(puts):,}"]
-                ]
-                
-                # Show expiration dates
-                exp_dates = list(set([opt.get('expiration_date') for opt in options[:20] if opt.get('expiration_date')]))
-                if exp_dates:
+                    calls = [opt for opt in options if opt.get('contract_type') == 'call']
+                    puts = [opt for opt in options if opt.get('contract_type') == 'put']
+                    
+                    opts_table = [
+                        ['Total Options Contracts', f"{len(options):,}"],
+                        ['Call Options', f"{len(calls):,}"],
+                        ['Put Options', f"{len(puts):,}"]
+                    ]
+                    
+                    # Show expiration dates
+                    exp_dates = list(set([opt.get('expiration_date') for opt in options[:20] if opt.get('expiration_date')]))
+                    if exp_dates:
                     opts_table.append(['Expiration Dates (sample)', ', '.join(sorted(exp_dates)[:3])])
-                
-                # Show strike price range
-                strikes = [opt.get('strike_price') for opt in options if opt.get('strike_price')]
-                if strikes:
-                    opts_table.append(['Strike Price Range', f"${min(strikes):.2f} - ${max(strikes):.2f}"])
-                
-                output.append(tabulate(opts_table, headers=['Metric', 'Value'], tablefmt='grid'))
-                output.append("")
+                    
+                    # Show strike price range
+                    strikes = [opt.get('strike_price') for opt in options if opt.get('strike_price')]
+                    if strikes:
+                        opts_table.append(['Strike Price Range', f"${min(strikes):.2f} - ${max(strikes):.2f}"])
+                    
+                    output.append(tabulate(opts_table, headers=['Metric', 'Value'], tablefmt='grid'))
+                    output.append("")
                 
                 # Group options by expiration date for better organization
                 if is_single_day:
@@ -935,7 +935,7 @@ class PolygonStockData:
                                 daily_range = 'N/A'
                                 if contract.get('historical_low') and contract.get('historical_high'):
                                     daily_range = f"${contract['historical_low']:.2f} - ${contract['historical_high']:.2f}"
-                            else:
+                                else:
                                 price = 'N/A'
                                 price_date = 'N/A'
                                 volume = 'N/A'

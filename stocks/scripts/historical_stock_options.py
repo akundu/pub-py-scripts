@@ -41,19 +41,19 @@ class HistoricalDataFetcher:
 
     async def get_stock_price_for_date(self, symbol: str, target_date_str: str) -> Dict[str, Any]:
         """
-        Fetches the historical stock price (OHLCV) for a specific date.
-        If the date is a non-trading day, it finds the nearest trading day.
+        Fetches the historical stock price (OHLCV) for the requested date.
+        If the date is a non-trading day, it finds the most recent previous trading day.
         """
-        stock_data = {}
         target_date_dt = datetime.strptime(target_date_str, '%Y-%m-%d')
         
-        # Search a 7-day window around the target date to find a trading day
+        # We look at a 7-day window ending on the target date to ensure we find a trading day.
         search_start = (target_date_dt - timedelta(days=7)).strftime('%Y-%m-%d')
-        search_end = (target_date_dt + timedelta(days=7)).strftime('%Y-%m-%d')
+        search_end = target_date_str
         
-        print(f"Fetching historical price for {symbol} around {target_date_str}...")
+        print(f"Fetching historical price for {symbol} on or before {target_date_str}...", flush=True)
 
         try:
+            # Sort descending and limit to 1 to get the latest trading day on or before the target date
             aggs = self.client.get_aggs(
                 ticker=symbol,
                 multiplier=1,
@@ -61,42 +61,31 @@ class HistoricalDataFetcher:
                 from_=search_start,
                 to=search_end,
                 adjusted=True,
-                sort="asc",
-                limit=10
+                sort="desc", 
+                limit=1
             )
             
             if not aggs:
-                return self._handle_api_error(Exception("No aggregates found for this date range"), "stock price")
+                return self._handle_api_error(Exception(f"No trading data found on or before {target_date_str} in the last 7 days"), "stock price")
 
-            # Find the closest trading day to the target date
-            closest_bar = None
-            min_diff = float('inf')
-            for bar in aggs:
-                bar_date_dt = datetime.fromtimestamp(bar.timestamp / 1000)
-                diff = abs((bar_date_dt - target_date_dt).days)
-                if diff < min_diff:
-                    min_diff = diff
-                    closest_bar = bar
+            # The first (and only) result is the one we want
+            bar = aggs[0]
+            trading_date = datetime.fromtimestamp(bar.timestamp / 1000).strftime('%Y-%m-%d')
             
-            if closest_bar:
-                bar_date = datetime.fromtimestamp(closest_bar.timestamp / 1000).strftime('%Y-%m-%d')
-                stock_data = {
-                    'target_date': target_date_str,
-                    'trading_date': bar_date,
-                    'open': closest_bar.open,
-                    'high': closest_bar.high,
-                    'low': closest_bar.low,
-                    'close': closest_bar.close,
-                    'volume': closest_bar.volume,
-                }
-                print(f"Found data for closest trading day: {bar_date}")
-            else:
-                 return self._handle_api_error(Exception("Could not find a trading day"), "stock price")
+            print(f"Found data for trading day: {trading_date} (requested: {target_date_str})")
+            
+            return {"success": True, "data": {
+                'target_date': target_date_str,
+                'trading_date': trading_date,
+                'open': bar.open,
+                'high': bar.high,
+                'low': bar.low,
+                'close': bar.close,
+                'volume': bar.volume,
+            }}
 
         except Exception as e:
             return self._handle_api_error(e, "stock price")
-            
-        return {"success": True, "data": stock_data}
 
     async def get_active_options_for_date(
         self,
