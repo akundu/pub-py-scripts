@@ -1,0 +1,9 @@
+[project]
+name = "music-test"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13.0"
+dependencies = [
+    "numpy>=2.3.1",
+    "sounddevice>=0.5.2",
+]
