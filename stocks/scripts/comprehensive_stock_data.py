@@ -241,7 +241,7 @@ class PolygonStockData:
                 print(f"Fetching options data for {self.config.symbol} for target date: {target_date}")
                 print("Note: Searching for options contracts that were active on this date")
             else:
-            print(f"Fetching options data for {self.config.symbol} (current/live data)...")
+                print(f"Fetching options data for {self.config.symbol} (current/live data)...")
             
             # Get options contracts
             try:
@@ -262,17 +262,17 @@ class PolygonStockData:
                         current_contracts_generator = self.client.list_options_contracts(
                             underlying_ticker=self.config.symbol,
                             limit=1000,
-                    expired=False
-                )
+                            expired=False
+                        )
                 
                         # Combine both generators
                         all_contracts = []
-                contract_count = 0
+                        contract_count = 0
                         
                         # Process expired contracts
                         for contract in expired_contracts_generator:
                             if contract_count >= 500:  # Limit for performance
-                        break
+                                break
                             all_contracts.append(contract)
                             contract_count += 1
                         
