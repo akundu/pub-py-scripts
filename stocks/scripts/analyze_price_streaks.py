@@ -123,15 +123,28 @@ def print_streaks(streaks, label):
     for s in streaks:
         print(f"  {s['start_date'].strftime('%Y-%m-%d')} to {s['end_date'].strftime('%Y-%m-%d')}: {s['length']} days")
 
-def print_histogram(streaks, label):
+def print_histogram(streaks, label, total_days=None):
     freq = Counter(s['length'] for s in streaks)
     if not freq:
         print(f"No {label} streaks to show in histogram.")
         return
     print(f"\n{label.capitalize()} streaks histogram:")
+    total = sum(freq.values()) if total_days is None else total_days
     for length in sorted(freq):
-        bar = '#' * freq[length]
-        print(f"  {length} days: {bar} ({freq[length]})")
+        count = freq[length]
+        percent = (count / total * 100) if total else 0
+        bar = '#' * count
+        print(f"  {length} days: {count:4d} {percent:6.2f}%  {bar}")
+
+def print_summary(up_streaks, down_streaks):
+    up_days = sum(s['length'] for s in up_streaks)
+    down_days = sum(s['length'] for s in down_streaks)
+    total = up_days + down_days
+    up_pct = (up_days / total * 100) if total else 0
+    down_pct = (down_days / total * 100) if total else 0
+    print("\nSummary:")
+    print(f"  Up days:   {up_days} ({up_pct:.1f}%)")
+    print(f"  Down days: {down_days} ({down_pct:.1f}%)")
 
 async def main():
     args = parse_args()
@@ -151,10 +164,11 @@ async def main():
         up_streaks, down_streaks = compute_streaks(df)
         if args.debug:
             print_streaks(up_streaks, "up")
-        print_histogram(up_streaks, "up")
+        print_histogram(up_streaks, "up", total_days=sum(s['length'] for s in up_streaks))
         if args.debug:
             print_streaks(down_streaks, "down")
-        print_histogram(down_streaks, "down")
+        print_histogram(down_streaks, "down", total_days=sum(s['length'] for s in down_streaks))
+        print_summary(up_streaks, down_streaks)
     finally:
         await client.close_session()
 
