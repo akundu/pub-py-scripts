@@ -395,20 +395,20 @@ class PolygonStockData:
                                     if hasattr(snapshot, 'vega') and snapshot.vega:
                                         contract_data['vega'] = snapshot.vega
                             
-                            # Extract quote data
-                            if hasattr(snapshot, 'last_quote') and snapshot.last_quote:
+                                    # Extract quote data
+                                    if hasattr(snapshot, 'last_quote') and snapshot.last_quote:
                                         contract_data['bid'] = getattr(snapshot.last_quote, 'bid', None)
                                         contract_data['ask'] = getattr(snapshot.last_quote, 'ask', None)
                             
-                            # Extract trade data
-                            if hasattr(snapshot, 'last_trade') and snapshot.last_trade:
+                                    # Extract trade data
+                                    if hasattr(snapshot, 'last_trade') and snapshot.last_trade:
                                         contract_data['last_price'] = getattr(snapshot.last_trade, 'price', None)
                             
                                     if any(contract_data.get(key) for key in ['delta', 'estimated_price', 'bid', 'ask']):
                                         contracts_with_data += 1
                         
-                except Exception as e:
-                                # Snapshot might not be available for all contracts
+                            except Exception as e:
+                                        # Snapshot might not be available for all contracts
                                 pass
                     
                     options_contracts.append(contract_data)
@@ -786,12 +786,12 @@ class PolygonStockData:
                     output.append("=" * 50)
                     output.append("Note: Historical options contracts that were active on this date")
                 else:
-                output.append("OPTIONS DATA (Current/Live)")
-                output.append("=" * 50)
-                output.append("Note: Options data shows current/active contracts with live market data")
-                output.append("")
+                    output.append("OPTIONS DATA (Current/Live)")
+                    output.append("=" * 50)
+                    output.append("Note: Options data shows current/active contracts with live market data")
+                    output.append("")
                 
-                # Basic options statistics
+                    # Basic options statistics
                     calls = [opt for opt in options if opt.get('contract_type') == 'call']
                     puts = [opt for opt in options if opt.get('contract_type') == 'put']
                     
@@ -804,7 +804,7 @@ class PolygonStockData:
                     # Show expiration dates
                     exp_dates = list(set([opt.get('expiration_date') for opt in options[:20] if opt.get('expiration_date')]))
                     if exp_dates:
-                    opts_table.append(['Expiration Dates (sample)', ', '.join(sorted(exp_dates)[:3])])
+                        opts_table.append(['Expiration Dates (sample)', ', '.join(sorted(exp_dates)[:3])])
                     
                     # Show strike price range
                     strikes = [opt.get('strike_price') for opt in options if opt.get('strike_price')]
@@ -928,18 +928,18 @@ class PolygonStockData:
                             strike_str = f"${strike:.0f}" if isinstance(strike, (int, float)) else str(strike)
                             contract_display = f"{contract_type} {strike_str} {expiration}"
                             
+                            # Initialize to N/A to avoid unbound local variable errors
+                            price = 'N/A'
+                            price_date = 'N/A'
+                            volume = 'N/A'
+                            daily_range = 'N/A'
+                            
                             if contract.get('historical_price'):
                                 price = f"${contract['historical_price']:.2f}"
                                 price_date = contract.get('historical_date', 'N/A')
                                 volume = f"{contract.get('historical_volume', 'N/A'):,}" if contract.get('historical_volume') else 'N/A'
-                                daily_range = 'N/A'
                                 if contract.get('historical_low') and contract.get('historical_high'):
                                     daily_range = f"${contract['historical_low']:.2f} - ${contract['historical_high']:.2f}"
-                                else:
-                                price = 'N/A'
-                                price_date = 'N/A'
-                                volume = 'N/A'
-                                daily_range = 'N/A'
                             
                             options_table.append([
                                 contract_display[:30] + '...' if len(contract_display) > 30 else contract_display,
