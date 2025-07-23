@@ -221,12 +221,143 @@ def analyze_months(df):
         'down_months': down_months
     }
 
-def print_timeframe_analysis(df):
-    print("\nDay-of-week up/down analysis:")
-    day_results = analyze_days_of_week(df)
+def analyze_hours_of_day(df):
+    # Only consider rows with a valid close and sorted by date
+    df = df.copy()
+    df = df.sort_index()
+    df = df[df['close'].notna()]
+    if df.empty:
+        return {}
+    # Compute up/down for each hour
+    df['prev_close'] = df['close'].shift(1)
+    df['up'] = df['close'] > df['prev_close']
+    df['down'] = df['close'] < df['prev_close']
+    df['hour'] = df.index.hour
+    result = {}
+    # Market hours are typically 9-16 (9 AM to 4 PM)
+    for hour in range(9, 17):
+        hour_df = df[df['hour'] == hour]
+        up = hour_df['up'].sum()
+        down = hour_df['down'].sum()
+        total = up + down
+        up_pct = (up / total * 100) if total else 0
+        down_pct = (down / total * 100) if total else 0
+        result[hour] = {'up': int(up), 'down': int(down), 'up_pct': up_pct, 'down_pct': down_pct, 'total': total}
+    return result
+
+def analyze_hourly_days_of_week(df):
+    # Only consider rows with a valid close and sorted by date
+    df = df.copy()
+    df = df.sort_index()
+    df = df[df['close'].notna()]
+    if df.empty:
+        return {}
+    # Compute up/down for each day
+    df['prev_close'] = df['close'].shift(1)
+    df['up'] = df['close'] > df['prev_close']
+    df['down'] = df['close'] < df['prev_close']
+    df['weekday'] = df.index.day_name()
+    result = {}
     for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']:
-        res = day_results.get(day, {'up': 0, 'down': 0, 'up_pct': 0, 'down_pct': 0, 'total': 0})
-        print(f"  {day:9}: Up {res['up']:3d} ({res['up_pct']:5.1f}%)  Down {res['down']:3d} ({res['down_pct']:5.1f}%)  Total {res['total']:3d}")
+        day_df = df[df['weekday'] == day]
+        up = day_df['up'].sum()
+        down = day_df['down'].sum()
+        total = up + down
+        up_pct = (up / total * 100) if total else 0
+        down_pct = (down / total * 100) if total else 0
+        result[day] = {'up': int(up), 'down': int(down), 'up_pct': up_pct, 'down_pct': down_pct, 'total': total}
+    return result
+
+def analyze_hourly_streaks(df):
+    # Analyze hourly streaks (consecutive up/down hours)
+    if df.empty or 'close' not in df.columns:
+        return [], []
+    closes = df['close'].values
+    dates = df.index.to_list()
+    up_streaks = []
+    down_streaks = []
+    streak_type = None
+    streak_start = 0
+    streak_len = 0
+    for i in range(1, len(closes)):
+        if closes[i] > closes[i-1]:
+            if streak_type == 'up':
+                streak_len += 1
+            else:
+                if streak_type == 'down' and streak_len > 0:
+                    down_streaks.append({
+                        'start_date': dates[streak_start],
+                        'end_date': dates[i-1],
+                        'length': streak_len
+                    })
+                streak_type = 'up'
+                streak_start = i-1
+                streak_len = 1
+        elif closes[i] < closes[i-1]:
+            if streak_type == 'down':
+                streak_len += 1
+            else:
+                if streak_type == 'up' and streak_len > 0:
+                    up_streaks.append({
+                        'start_date': dates[streak_start],
+                        'end_date': dates[i-1],
+                        'length': streak_len
+                    })
+                streak_type = 'down'
+                streak_start = i-1
+                streak_len = 1
+        else:
+            # Flat hour, treat as streak break
+            if streak_type == 'up' and streak_len > 0:
+                up_streaks.append({
+                    'start_date': dates[streak_start],
+                    'end_date': dates[i-1],
+                    'length': streak_len
+                })
+            elif streak_type == 'down' and streak_len > 0:
+                down_streaks.append({
+                    'start_date': dates[streak_start],
+                    'end_date': dates[i-1],
+                    'length': streak_len
+                })
+            streak_type = None
+            streak_len = 0
+            streak_start = i
+    # Add last streak
+    if streak_type == 'up' and streak_len > 0:
+        up_streaks.append({
+            'start_date': dates[streak_start],
+            'end_date': dates[len(closes)-1],
+            'length': streak_len
+        })
+    elif streak_type == 'down' and streak_len > 0:
+        down_streaks.append({
+            'start_date': dates[streak_start],
+            'end_date': dates[len(closes)-1],
+            'length': streak_len
+        })
+    return up_streaks, down_streaks
+
+def print_timeframe_analysis(df, interval="daily"):
+    if interval == "hourly":
+        print("\nHour-of-day up/down analysis (market hours 9-16):")
+        hour_results = analyze_hours_of_day(df)
+        for hour in range(9, 17):
+            res = hour_results.get(hour, {'up': 0, 'down': 0, 'up_pct': 0, 'down_pct': 0, 'total': 0})
+            print(f"  {hour:2d}:00    : Up {res['up']:3d} ({res['up_pct']:5.1f}%)  Down {res['down']:3d} ({res['down_pct']:5.1f}%)  Total {res['total']:3d}")
+        
+        print("\nHourly day-of-week up/down analysis:")
+        day_results = analyze_hourly_days_of_week(df)
+        for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']:
+            res = day_results.get(day, {'up': 0, 'down': 0, 'up_pct': 0, 'down_pct': 0, 'total': 0})
+            print(f"  {day:9}: Up {res['up']:3d} ({res['up_pct']:5.1f}%)  Down {res['down']:3d} ({res['down_pct']:5.1f}%)  Total {res['total']:3d}")
+    else:
+        print("\nDay-of-week up/down analysis:")
+        day_results = analyze_days_of_week(df)
+        for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']:
+            res = day_results.get(day, {'up': 0, 'down': 0, 'up_pct': 0, 'down_pct': 0, 'total': 0})
+            print(f"  {day:9}: Up {res['up']:3d} ({res['up_pct']:5.1f}%)  Down {res['down']:3d} ({res['down_pct']:5.1f}%)  Total {res['total']:3d}")
+    
     print("\nWeekly up/down analysis:")
     week_res = analyze_weeks(df)
     print(f"  Up weeks:   {week_res['up']:3d} ({week_res['up_pct']:5.1f}%)  Down weeks: {week_res['down']:3d} ({week_res['down_pct']:5.1f}%)  Total: {week_res['total']:3d}")
@@ -253,15 +384,27 @@ async def main():
             print(f"No data found for {args.symbol} between {args.start} and {args.end}.")
             return
         df = df.sort_index()
-        up_streaks, down_streaks = compute_streaks(df)
-        if args.debug:
-            print_streaks(up_streaks, "up")
-        print_histogram(up_streaks, "up", total_days=sum(s['length'] for s in up_streaks))
-        if args.debug:
-            print_streaks(down_streaks, "down")
-        print_histogram(down_streaks, "down", total_days=sum(s['length'] for s in down_streaks))
-        print_summary(up_streaks, down_streaks)
-        print_timeframe_analysis(df)
+        
+        if args.interval == "hourly":
+            up_streaks, down_streaks = analyze_hourly_streaks(df)
+            if args.debug:
+                print_streaks(up_streaks, "up")
+            print_histogram(up_streaks, "up", total_days=sum(s['length'] for s in up_streaks))
+            if args.debug:
+                print_streaks(down_streaks, "down")
+            print_histogram(down_streaks, "down", total_days=sum(s['length'] for s in down_streaks))
+            print_summary(up_streaks, down_streaks)
+        else:
+            up_streaks, down_streaks = compute_streaks(df)
+            if args.debug:
+                print_streaks(up_streaks, "up")
+            print_histogram(up_streaks, "up", total_days=sum(s['length'] for s in up_streaks))
+            if args.debug:
+                print_streaks(down_streaks, "down")
+            print_histogram(down_streaks, "down", total_days=sum(s['length'] for s in down_streaks))
+            print_summary(up_streaks, down_streaks)
+        
+        print_timeframe_analysis(df, args.interval)
     finally:
         await client.close_session()
 

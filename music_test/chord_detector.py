@@ -4,9 +4,9 @@ import time
 import argparse
 from collections import deque
 import sys
-from common_sound_capture import recognize_audio
-from common import get_hop_size, get_overlap_ratio, set_overlap_ratio, get_buffer_size
-from common_music_understanding import INSTRUMENT_PRESETS
+from lib.sound_capture import recognize_audio
+from lib.common import get_hop_size, get_overlap_ratio, set_overlap_ratio, get_buffer_size
+from lib.music_understanding import INSTRUMENT_PRESETS
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Sounddevice-based chord detector')
