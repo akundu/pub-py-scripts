@@ -115,7 +115,7 @@ def compute_streaks(df: pd.DataFrame):
             # Flat day, treat as continuation only if a streak is ongoing
             if streak_type in ('up', 'down'):
                 streak_len += 1
-            # else: do nothing, just move past the day
+            # else: do nothing, just move past the day 
     # Add last streak
     if streak_type == 'up' and streak_len > 0:
         start_price = closes[streak_start]
