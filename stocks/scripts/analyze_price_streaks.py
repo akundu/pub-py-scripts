@@ -34,6 +34,7 @@ def parse_args():
     parser.add_argument("--raw", action="store_true", help="Show raw price data downloaded from server.")
     parser.add_argument("--remove-outliers", type=float, nargs='?', const=10.0, metavar='PERCENT', 
                        help="Remove outliers: remove PERCENT%% from bottom and top when calculating averages (default: 10%%)")
+    parser.add_argument("--print-avg", action="store_true", help="Print average values in output.")
     
     args = parser.parse_args()
     
@@ -143,15 +144,18 @@ def compute_streaks(df: pd.DataFrame):
         })
     return up_streaks, down_streaks
 
-def print_streaks(streaks, label):
+def print_streaks(streaks, label, print_avg=True):
     if not streaks:
         print(f"No {label} streaks found.")
         return
     print(f"\n{label.capitalize()} streaks (date ranges, lengths, and total movements):")
     for s in streaks:
-        print(f"  {s['start_date'].strftime('%Y-%m-%d')} to {s['end_date'].strftime('%Y-%m-%d')}: {s['length']} days, total {s['avg_movement']:+6.2f}%")
+        if print_avg:
+            print(f"  {s['start_date'].strftime('%Y-%m-%d')} to {s['end_date'].strftime('%Y-%m-%d')}: {s['length']} days, total {s['avg_movement']:+6.2f}%")
+        else:
+            print(f"  {s['start_date'].strftime('%Y-%m-%d')} to {s['end_date'].strftime('%Y-%m-%d')}: {s['length']} days")
 
-def print_histogram(streaks, label, total_days=None, debug=False, remove_outliers=False, outlier_percent=10.0):
+def print_histogram(streaks, label, total_days=None, debug=False, remove_outliers=False, outlier_percent=10.0, print_avg=True):
     freq = Counter(s['length'] for s in streaks)
     if not freq:
         print(f"No {label} streaks to show in histogram.")
@@ -159,7 +163,7 @@ def print_histogram(streaks, label, total_days=None, debug=False, remove_outlier
     print(f"\n{label.capitalize()} streaks histogram:")
     total = sum(freq.values()) if total_days is None else total_days
     
-    # Calculate average movement for each streak length
+    # Calculate average movement, with outlier removal if requested
     length_avg_movements = {}
     length_streak_details = {}  # Store full streak details for debug
     for streak in streaks:
@@ -190,7 +194,10 @@ def print_histogram(streaks, label, total_days=None, debug=False, remove_outlier
             avg_movement = sum(movements) / len(movements) if movements else 0
             outlier_info = ""
         
-        print(f"  {length} days: {count:4d} {percent:6.2f}% avg {avg_movement:+6.2f}%{outlier_info}  {bar}")
+        if print_avg:
+            print(f"  {length} days: {count:4d} {percent:6.2f}% avg {avg_movement:+6.2f}%{outlier_info}  {bar}")
+        else:
+            print(f"  {length} days: {count:4d} {percent:6.2f}% {bar}")
         
         if debug:
             print(f"    DEBUG - Individual movements for {length}-day {label} streaks:")
@@ -200,7 +207,10 @@ def print_histogram(streaks, label, total_days=None, debug=False, remove_outlier
                 end_date = streak['end_date']
                 start_price = streak['start_price']
                 end_price = streak['end_price']
-                print(f"      Streak {i+1}: {streak['avg_movement']:+6.2f}% ({start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}) ${start_price:.2f} → ${end_price:.2f}")
+                if print_avg:
+                    print(f"      Streak {i+1}: {streak['avg_movement']:+6.2f}% ({start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}) ${start_price:.2f} → ${end_price:.2f}")
+                else:
+                    print(f"      Streak {i+1}: ({start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}) ${start_price:.2f} → ${end_price:.2f}")
 
 def print_summary(up_streaks, down_streaks):
     up_days = sum(s['length'] for s in up_streaks)
@@ -516,32 +526,47 @@ def analyze_hourly_streaks(df):
         })
     return up_streaks, down_streaks
 
-def print_timeframe_analysis(df, interval="daily"):
+def print_timeframe_analysis(df, interval="daily", print_avg=True):
     if interval == "hourly":
         print("\nHour-of-day up/down analysis (market hours 9-16):")
         hour_results = analyze_hours_of_day(df)
         for hour in range(9, 17):
             res = hour_results.get(hour, {'up': 0, 'down': 0, 'up_pct': 0, 'down_pct': 0, 'total': 0, 'avg_up_pct': 0, 'avg_down_pct': 0, 'avg_hour_movement': 0})
-            print(f"  {hour:2d}:00    : {GREEN}↑{RESET} {res['up']:3d} ({res['up_pct']:5.1f}%) avg +{res['avg_up_pct']:5.2f}%  {RED}↓{RESET} {res['down']:3d} ({res['down_pct']:5.1f}%) avg {res['avg_down_pct']:6.2f}%  Total {res['total']:3d}  Avg hour: {res['avg_hour_movement']:+6.2f}%")
+            if print_avg:
+                print(f"  {hour:2d}:00    : {GREEN}↑{RESET} {res['up']:3d} ({res['up_pct']:5.1f}%) avg +{res['avg_up_pct']:5.2f}%  {RED}↓{RESET} {res['down']:3d} ({res['down_pct']:5.1f}%) avg {res['avg_down_pct']:6.2f}%  Total {res['total']:3d}  Avg hour: {res['avg_hour_movement']:+6.2f}%")
+            else:
+                print(f"  {hour:2d}:00    : {GREEN}↑{RESET} {res['up']:3d} ({res['up_pct']:5.1f}%)  {RED}↓{RESET} {res['down']:3d} ({res['down_pct']:5.1f}%)  Total {res['total']:3d}")
         
         print("\nHourly day-of-week up/down analysis:")
         day_results = analyze_hourly_days_of_week(df)
         for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']:
             res = day_results.get(day, {'up': 0, 'down': 0, 'up_pct': 0, 'down_pct': 0, 'total': 0, 'avg_up_pct': 0, 'avg_down_pct': 0, 'avg_day_movement': 0})
-            print(f"  {day:9}: {GREEN}↑{RESET} {res['up']:3d} ({res['up_pct']:5.1f}%) avg +{res['avg_up_pct']:5.2f}%  {RED}↓{RESET} {res['down']:3d} ({res['down_pct']:5.1f}%) avg {res['avg_down_pct']:6.2f}%  Total {res['total']:3d}  Avg day: {res['avg_day_movement']:+6.2f}%")
+            if print_avg:
+                print(f"  {day:9}: {GREEN}↑{RESET} {res['up']:3d} ({res['up_pct']:5.1f}%) avg +{res['avg_up_pct']:5.2f}%  {RED}↓{RESET} {res['down']:3d} ({res['down_pct']:5.1f}%) avg {res['avg_down_pct']:6.2f}%  Total {res['total']:3d}  Avg day: {res['avg_day_movement']:+6.2f}%")
+            else:
+                print(f"  {day:9}: {GREEN}↑{RESET} {res['up']:3d} ({res['up_pct']:5.1f}%)  {RED}↓{RESET} {res['down']:3d} ({res['down_pct']:5.1f}%)  Total {res['total']:3d}")
     else:
         print("\nDay-of-week up/down analysis:")
         day_results = analyze_days_of_week(df)
         for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']:
             res = day_results.get(day, {'up': 0, 'down': 0, 'up_pct': 0, 'down_pct': 0, 'total': 0, 'avg_up_pct': 0, 'avg_down_pct': 0, 'avg_day_movement': 0})
-            print(f"  {day:9}: {GREEN}↑{RESET} {res['up']:3d} ({res['up_pct']:5.1f}%) avg +{res['avg_up_pct']:5.2f}%  {RED}↓{RESET} {res['down']:3d} ({res['down_pct']:5.1f}%) avg {res['avg_down_pct']:6.2f}%  Total {res['total']:3d}  Avg day: {res['avg_day_movement']:+6.2f}%")
+            if print_avg:
+                print(f"  {day:9}: {GREEN}↑{RESET} {res['up']:3d} ({res['up_pct']:5.1f}%) avg +{res['avg_up_pct']:5.2f}%  {RED}↓{RESET} {res['down']:3d} ({res['down_pct']:5.1f}%) avg {res['avg_down_pct']:6.2f}%  Total {res['total']:3d}  Avg day: {res['avg_day_movement']:+6.2f}%")
+            else:
+                print(f"  {day:9}: {GREEN}↑{RESET} {res['up']:3d} ({res['up_pct']:5.1f}%)  {RED}↓{RESET} {res['down']:3d} ({res['down_pct']:5.1f}%)  Total {res['total']:3d}")
     
     print("\nWeekly up/down analysis:")
     week_res = analyze_weeks(df)
-    print(f"  {GREEN}↑{RESET} weeks:   {week_res['up']:3d} ({week_res['up_pct']:5.1f}%) avg +{week_res['avg_up_pct']:5.2f}%  {RED}↓{RESET} weeks: {week_res['down']:3d} ({week_res['down_pct']:5.1f}%) avg {week_res['avg_down_pct']:6.2f}%  Total: {week_res['total']:3d}  Avg week: {week_res['avg_week_movement']:+6.2f}%")
+    if print_avg:
+        print(f"  {GREEN}↑{RESET} weeks:   {week_res['up']:3d} ({week_res['up_pct']:5.1f}%) avg +{week_res['avg_up_pct']:5.2f}%  {RED}↓{RESET} weeks: {week_res['down']:3d} ({week_res['down_pct']:5.1f}%) avg {week_res['avg_down_pct']:6.2f}%  Total: {week_res['total']:3d}  Avg week: {week_res['avg_week_movement']:+6.2f}%")
+    else:
+        print(f"  {GREEN}↑{RESET} weeks:   {week_res['up']:3d} ({week_res['up_pct']:5.1f}%)  {RED}↓{RESET} weeks: {week_res['down']:3d} ({week_res['down_pct']:5.1f}%)  Total: {week_res['total']:3d}")
     print("\nMonthly up/down analysis:")
     month_res = analyze_months(df)
-    print(f"  {GREEN}↑{RESET} months:  {month_res['up']:3d} ({month_res['up_pct']:5.1f}%) avg +{month_res['avg_up_pct']:5.2f}%  {RED}↓{RESET} months: {month_res['down']:3d} ({month_res['down_pct']:5.1f}%) avg {month_res['avg_down_pct']:6.2f}%  Total: {month_res['total']:3d}  Avg month: {month_res['avg_month_movement']:+6.2f}%")
+    if print_avg:
+        print(f"  {GREEN}↑{RESET} months:  {month_res['up']:3d} ({month_res['up_pct']:5.1f}%) avg +{month_res['avg_up_pct']:5.2f}%  {RED}↓{RESET} months: {month_res['down']:3d} ({month_res['down_pct']:5.1f}%) avg {month_res['avg_down_pct']:6.2f}%  Total: {month_res['total']:3d}  Avg month: {month_res['avg_month_movement']:+6.2f}%")
+    else:
+        print(f"  {GREEN}↑{RESET} months:  {month_res['up']:3d} ({month_res['up_pct']:5.1f}%)  {RED}↓{RESET} months: {month_res['down']:3d} ({month_res['down_pct']:5.1f}%)  Total: {month_res['total']:3d}")
     if month_res['up_months']:
         print(f"    {GREEN}↑{RESET} months:   {', '.join(month_res['up_months'])}")
     if month_res['down_months']:
@@ -578,23 +603,23 @@ async def main():
         if args.interval == "hourly":
             up_streaks, down_streaks = analyze_hourly_streaks(df)
             if args.debug:
-                print_streaks(up_streaks, "up")
-            print_histogram(up_streaks, "up", total_days=sum(s['length'] for s in up_streaks), debug=args.debug, remove_outliers=args.remove_outliers is not None, outlier_percent=args.remove_outliers or 10.0)
+                print_streaks(up_streaks, "up", print_avg=args.print_avg)
+            print_histogram(up_streaks, "up", total_days=sum(s['length'] for s in up_streaks), debug=args.debug, remove_outliers=args.remove_outliers is not None, outlier_percent=args.remove_outliers or 10.0, print_avg=args.print_avg)
             if args.debug:
-                print_streaks(down_streaks, "down")
-            print_histogram(down_streaks, "down", total_days=sum(s['length'] for s in down_streaks), debug=args.debug, remove_outliers=args.remove_outliers is not None, outlier_percent=args.remove_outliers or 10.0)
+                print_streaks(down_streaks, "down", print_avg=args.print_avg)
+            print_histogram(down_streaks, "down", total_days=sum(s['length'] for s in down_streaks), debug=args.debug, remove_outliers=args.remove_outliers is not None, outlier_percent=args.remove_outliers or 10.0, print_avg=args.print_avg)
             print_summary(up_streaks, down_streaks)
         else:
             up_streaks, down_streaks = compute_streaks(df)
             if args.debug:
-                print_streaks(up_streaks, "up")
-            print_histogram(up_streaks, "up", total_days=sum(s['length'] for s in up_streaks), debug=args.debug, remove_outliers=args.remove_outliers is not None, outlier_percent=args.remove_outliers or 10.0)
+                print_streaks(up_streaks, "up", print_avg=args.print_avg)
+            print_histogram(up_streaks, "up", total_days=sum(s['length'] for s in up_streaks), debug=args.debug, remove_outliers=args.remove_outliers is not None, outlier_percent=args.remove_outliers or 10.0, print_avg=args.print_avg)
             if args.debug:
-                print_streaks(down_streaks, "down")
-            print_histogram(down_streaks, "down", total_days=sum(s['length'] for s in down_streaks), debug=args.debug, remove_outliers=args.remove_outliers is not None, outlier_percent=args.remove_outliers or 10.0)
+                print_streaks(down_streaks, "down", print_avg=args.print_avg)
+            print_histogram(down_streaks, "down", total_days=sum(s['length'] for s in down_streaks), debug=args.debug, remove_outliers=args.remove_outliers is not None, outlier_percent=args.remove_outliers or 10.0, print_avg=args.print_avg)
             print_summary(up_streaks, down_streaks)
         
-        print_timeframe_analysis(df, args.interval)
+        print_timeframe_analysis(df, args.interval, print_avg=args.print_avg)
     finally:
         await client.close_session()
 
