@@ -146,6 +146,98 @@ def print_summary(up_streaks, down_streaks):
     print(f"  Up days:   {up_days} ({up_pct:.1f}%)")
     print(f"  Down days: {down_days} ({down_pct:.1f}%)")
 
+def analyze_days_of_week(df):
+    # Only consider rows with a valid close and sorted by date
+    df = df.copy()
+    df = df.sort_index()
+    df = df[df['close'].notna()]
+    if df.empty:
+        return {}
+    # Compute up/down for each day
+    df['prev_close'] = df['close'].shift(1)
+    df['up'] = df['close'] > df['prev_close']
+    df['down'] = df['close'] < df['prev_close']
+    df['weekday'] = df.index.day_name()
+    result = {}
+    for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']:
+        day_df = df[df['weekday'] == day]
+        up = day_df['up'].sum()
+        down = day_df['down'].sum()
+        total = up + down
+        up_pct = (up / total * 100) if total else 0
+        down_pct = (down / total * 100) if total else 0
+        result[day] = {'up': int(up), 'down': int(down), 'up_pct': up_pct, 'down_pct': down_pct, 'total': total}
+    return result
+
+def analyze_weeks(df):
+    # Resample to weekly (using last close of each week)
+    df = df.copy()
+    df = df.sort_index()
+    df = df[df['close'].notna()]
+    if df.empty:
+        return {'up': 0, 'down': 0, 'up_pct': 0, 'down_pct': 0, 'total': 0}
+    weekly = df['close'].resample('W-FRI').last()
+    weekly = weekly.dropna()
+    if len(weekly) < 2:
+        return {'up': 0, 'down': 0, 'up_pct': 0, 'down_pct': 0, 'total': 0}
+    prev = weekly.shift(1)
+    up = (weekly > prev).sum()
+    down = (weekly < prev).sum()
+    total = up + down
+    up_pct = (up / total * 100) if total else 0
+    down_pct = (down / total * 100) if total else 0
+    return {'up': int(up), 'down': int(down), 'up_pct': up_pct, 'down_pct': down_pct, 'total': total}
+
+def analyze_months(df):
+    # Resample to monthly (using last close of each month)
+    df = df.copy()
+    df = df.sort_index()
+    df = df[df['close'].notna()]
+    if df.empty:
+        return {'up': 0, 'down': 0, 'up_pct': 0, 'down_pct': 0, 'total': 0, 'up_months': [], 'down_months': []}
+    # Use 'ME' for month-end to avoid FutureWarning
+    monthly = df['close'].resample('ME').last()
+    monthly = monthly.dropna()
+    if len(monthly) < 2:
+        return {'up': 0, 'down': 0, 'up_pct': 0, 'down_pct': 0, 'total': 0, 'up_months': [], 'down_months': []}
+    prev = monthly.shift(1)
+    up_mask = (monthly > prev)
+    down_mask = (monthly < prev)
+    up = up_mask.sum()
+    down = down_mask.sum()
+    total = up + down
+    up_pct = (up / total * 100) if total else 0
+    down_pct = (down / total * 100) if total else 0
+    # Get month names for up and down months
+    up_months = [idx.strftime('%B %Y') for idx, is_up in zip(monthly.index, up_mask) if is_up]
+    down_months = [idx.strftime('%B %Y') for idx, is_down in zip(monthly.index, down_mask) if is_down]
+    return {
+        'up': int(up),
+        'down': int(down),
+        'up_pct': up_pct,
+        'down_pct': down_pct,
+        'total': total,
+        'up_months': up_months,
+        'down_months': down_months
+    }
+
+def print_timeframe_analysis(df):
+    print("\nDay-of-week up/down analysis:")
+    day_results = analyze_days_of_week(df)
+    for day in ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']:
+        res = day_results.get(day, {'up': 0, 'down': 0, 'up_pct': 0, 'down_pct': 0, 'total': 0})
+        print(f"  {day:9}: Up {res['up']:3d} ({res['up_pct']:5.1f}%)  Down {res['down']:3d} ({res['down_pct']:5.1f}%)  Total {res['total']:3d}")
+    print("\nWeekly up/down analysis:")
+    week_res = analyze_weeks(df)
+    print(f"  Up weeks:   {week_res['up']:3d} ({week_res['up_pct']:5.1f}%)  Down weeks: {week_res['down']:3d} ({week_res['down_pct']:5.1f}%)  Total: {week_res['total']:3d}")
+    print("\nMonthly up/down analysis:")
+    month_res = analyze_months(df)
+    print(f"  Up months:  {month_res['up']:3d} ({month_res['up_pct']:5.1f}%)  Down months: {month_res['down']:3d} ({month_res['down_pct']:5.1f}%)  Total: {month_res['total']:3d}")
+    if month_res['up_months']:
+        print(f"    Up months:   {', '.join(month_res['up_months'])}")
+    if month_res['down_months']:
+        print(f"    Down months: {', '.join(month_res['down_months'])}")
+
 async def main():
     args = parse_args()
     server_addr = f"{args.host}:{args.port}"
@@ -169,6 +261,7 @@ async def main():
             print_streaks(down_streaks, "down")
         print_histogram(down_streaks, "down", total_days=sum(s['length'] for s in down_streaks))
         print_summary(up_streaks, down_streaks)
+        print_timeframe_analysis(df)
     finally:
         await client.close_session()
 
