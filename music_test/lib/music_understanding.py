@@ -2,7 +2,7 @@ import math
 import numpy as np
 import sys
 from scipy.signal import butter, filtfilt, correlate
-from common import get_chunk, get_hop_size, get_rate, get_channels, get_buffer_size
+from lib.common import get_chunk, get_hop_size, get_rate, get_channels, get_buffer_size
 
 # Enhanced chord definitions with more comprehensive coverage
 CHORD_DEFINITIONS = {

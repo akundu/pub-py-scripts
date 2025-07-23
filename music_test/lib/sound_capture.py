@@ -1,10 +1,9 @@
-from common import clear_line
-from common_music_understanding import detect_notes_with_sounddevice, frequency_to_note, analyze_chord_progression, find_best_matching_chord
+from lib.common import clear_line, get_chunk, get_rate, get_channels, get_buffer_size
+from lib.music_understanding import detect_notes_with_sounddevice, frequency_to_note, analyze_chord_progression, find_best_matching_chord
 import sounddevice as sd
 import numpy as np
 import time
 import sys
-from common import get_chunk, get_rate, get_channels, get_buffer_size
 
 def grab_audio_chunk(chunk, rate, channels):
     """Grab a chunk of audio from the microphone"""
