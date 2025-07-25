@@ -652,6 +652,325 @@ async def process_symbol_data(
 
     return data_df
 
+async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str) -> dict | None:
+    """
+    Get the latest price with timestamp from the database.
+    Returns a dictionary with 'price' and 'timestamp' keys, or None if not found.
+    """
+    try:
+        # Try to get realtime data first (most recent)
+        realtime_data = await db_instance.get_realtime_data(symbol, data_type="quote")
+        if not realtime_data.empty:
+            latest_row = realtime_data.iloc[-1]
+            return {
+                'price': latest_row['price'],
+                'timestamp': latest_row.name  # Index is the timestamp
+            }
+        
+        # Try hourly data
+        hourly_data = await db_instance.get_stock_data(symbol, interval="hourly")
+        if not hourly_data.empty:
+            latest_row = hourly_data.iloc[-1]
+            return {
+                'price': latest_row['close'],
+                'timestamp': latest_row.name  # Index is the datetime
+            }
+        
+        # Try daily data
+        daily_data = await db_instance.get_stock_data(symbol, interval="daily")
+        if not daily_data.empty:
+            latest_row = daily_data.iloc[-1]
+            return {
+                'price': latest_row['close'],
+                'timestamp': latest_row.name  # Index is the date
+            }
+        
+        return None
+    except Exception as e:
+        print(f"Error getting latest price with timestamp for {symbol}: {e}", file=sys.stderr)
+        return None
+
+async def get_current_price(
+    symbol: str,
+    data_source: str = "polygon",
+    stock_db_instance: StockDBBase | None = None,
+    db_type: str = "sqlite",
+    db_path: str | None = None,
+    max_age_seconds: int = 600  # Default 10 minutes (600 seconds)
+) -> dict:
+    """
+    Get the current price of a stock using the specified data source.
+    
+    Args:
+        symbol: Stock symbol (e.g., 'AAPL')
+        data_source: Data source to use ('polygon' or 'alpaca')
+        stock_db_instance: Optional database instance
+        db_type: Database type if no instance provided
+        db_path: Database path if no instance provided
+        
+    Returns:
+        Dictionary containing price information:
+        {
+            'symbol': str,
+            'price': float,
+            'bid_price': float,
+            'ask_price': float,
+            'timestamp': str,
+            'source': str,
+            'data_source': str
+        }
+    """
+    
+    # Initialize database instance if not provided
+    current_db_instance = stock_db_instance
+    if current_db_instance is None:
+        actual_db_path = db_path
+        if actual_db_path is None:
+            actual_db_path = get_default_db_path("duckdb") if db_type == 'duckdb' else get_default_db_path("db")
+        current_db_instance = get_stock_db(db_type, actual_db_path)
+    
+    # First, try to get the latest price from the database
+    try:
+        db_price_data = await _get_latest_price_with_timestamp(current_db_instance, symbol)
+        if db_price_data and db_price_data['price'] is not None:
+            # Check if the price is recent enough
+            price_timestamp = db_price_data['timestamp']
+            current_time = datetime.now(timezone.utc)
+            
+            # Calculate age of the price data
+            if isinstance(price_timestamp, str):
+                price_dt = datetime.fromisoformat(price_timestamp.replace('Z', '+00:00'))
+            else:
+                price_dt = price_timestamp
+            
+            # Ensure both datetimes are timezone-aware for comparison
+            if price_dt.tzinfo is None:
+                # If price_dt is naive, assume it's UTC
+                price_dt = price_dt.replace(tzinfo=timezone.utc)
+            elif current_time.tzinfo is None:
+                # If current_time is naive, assume it's UTC
+                current_time = current_time.replace(tzinfo=timezone.utc)
+                
+            age_seconds = (current_time - price_dt).total_seconds()
+            
+            if age_seconds <= max_age_seconds:
+                print(f"Found recent price for {symbol} in database: ${db_price_data['price']:.2f} (age: {age_seconds:.1f}s)", file=sys.stderr)
+                return {
+                    'symbol': symbol,
+                    'price': db_price_data['price'],
+                    'bid_price': None,
+                    'ask_price': None,
+                    'timestamp': price_timestamp.isoformat() if hasattr(price_timestamp, 'isoformat') else str(price_timestamp),
+                    'source': 'database',
+                    'data_source': data_source
+                }
+            else:
+                print(f"Database price for {symbol} is too old ({age_seconds:.1f}s > {max_age_seconds}s), fetching fresh data", file=sys.stderr)
+    except Exception as e:
+        print(f"Error getting price from database for {symbol}: {e}", file=sys.stderr)
+    
+    # If no database price, fetch from API
+    if data_source == "polygon":
+        return await _get_current_price_polygon(symbol)
+    elif data_source == "alpaca":
+        return await _get_current_price_alpaca(symbol)
+    else:
+        raise ValueError(f"Unsupported data source: {data_source}")
+
+async def _get_current_price_polygon(symbol: str) -> dict:
+    """Get current price from Polygon.io API."""
+    if not POLYGON_AVAILABLE:
+        raise ImportError("Polygon API client not available. Install with: pip install polygon-api-client")
+    
+    API_KEY = os.getenv('POLYGON_API_KEY')
+    if not API_KEY:
+        raise ValueError("POLYGON_API_KEY environment variable must be set")
+    
+    try:
+        client = PolygonRESTClient(API_KEY)
+        
+        # Get the latest quote
+        quote = client.get_last_quote(ticker=symbol)
+        if quote:
+            return {
+                'symbol': symbol,
+                'price': quote.bid_price,  # Use bid price as primary price
+                'bid_price': quote.bid_price,
+                'ask_price': quote.ask_price,
+                'bid_size': quote.bid_size,
+                'ask_size': quote.ask_size,
+                'timestamp': datetime.fromtimestamp(quote.sip_timestamp / 1000000000).isoformat() if hasattr(quote, 'sip_timestamp') else datetime.now().isoformat(),
+                'source': 'polygon_quote',
+                'data_source': 'polygon'
+            }
+        
+        # If no quote, try to get the latest trade
+        trade = client.get_last_trade(ticker=symbol)
+        if trade:
+            return {
+                'symbol': symbol,
+                'price': trade.price,
+                'bid_price': None,
+                'ask_price': None,
+                'size': trade.size,
+                'timestamp': datetime.fromtimestamp(trade.sip_timestamp / 1000000000).isoformat() if hasattr(trade, 'sip_timestamp') else datetime.now().isoformat(),
+                'source': 'polygon_trade',
+                'data_source': 'polygon'
+            }
+        
+        # If neither quote nor trade available, try to get the latest daily bar
+        today = datetime.now().strftime('%Y-%m-%d')
+        aggs = client.get_aggs(
+            ticker=symbol,
+            multiplier=1,
+            timespan="day",
+            from_=today,
+            to=today,
+            adjusted=True,
+            sort="desc",
+            limit=1
+        )
+        
+        if aggs:
+            bar = aggs[0]
+            return {
+                'symbol': symbol,
+                'price': bar.close,
+                'bid_price': None,
+                'ask_price': None,
+                'open': bar.open,
+                'high': bar.high,
+                'low': bar.low,
+                'close': bar.close,
+                'volume': bar.volume,
+                'timestamp': datetime.fromtimestamp(bar.timestamp / 1000).isoformat(),
+                'source': 'polygon_daily',
+                'data_source': 'polygon'
+            }
+        
+        raise Exception(f"No price data available for {symbol} from Polygon.io")
+        
+    except Exception as e:
+        print(f"Error fetching current price for {symbol} from Polygon: {e}", file=sys.stderr)
+        raise
+
+async def _get_current_price_alpaca(symbol: str) -> dict:
+    """Get current price from Alpaca API."""
+    API_KEY = os.getenv('ALPACA_API_KEY')
+    API_SECRET = os.getenv('ALPACA_API_SECRET')
+    
+    if not API_KEY or not API_SECRET:
+        raise ValueError("ALPACA_API_KEY and ALPACA_API_SECRET environment variables must be set")
+    
+    try:
+        # Use aiohttp for async HTTP calls
+        async with aiohttp.ClientSession() as session:
+            # Get the latest quote
+            quote_url = f"{MARKET_DATA_BASE_URL}/stocks/{symbol}/quotes/latest"
+            headers = {
+                "APCA-API-KEY-ID": API_KEY,
+                "APCA-API-SECRET-KEY": API_SECRET,
+                "accept": "application/json"
+            }
+            
+            async with session.get(quote_url, headers=headers) as response:
+                if response.status == 200:
+                    quote_data = await response.json()
+                    quote = quote_data.get('quote', {})
+                    
+                    if quote:
+                        return {
+                            'symbol': symbol,
+                            'price': quote.get('bp', 0),  # Use bid price as primary price
+                            'bid_price': quote.get('bp'),
+                            'ask_price': quote.get('ap'),
+                            'bid_size': quote.get('bs'),
+                            'ask_size': quote.get('as'),
+                            'timestamp': quote.get('t'),
+                            'source': 'alpaca_quote',
+                            'data_source': 'alpaca'
+                        }
+            
+            # If no quote, try to get the latest trade
+            trade_url = f"{MARKET_DATA_BASE_URL}/stocks/{symbol}/trades/latest"
+            async with session.get(trade_url, headers=headers) as response:
+                if response.status == 200:
+                    trade_data = await response.json()
+                    trade = trade_data.get('trade', {})
+                    
+                    if trade:
+                        return {
+                            'symbol': symbol,
+                            'price': trade.get('p'),
+                            'bid_price': None,
+                            'ask_price': None,
+                            'size': trade.get('s'),
+                            'timestamp': trade.get('t'),
+                            'source': 'alpaca_trade',
+                            'data_source': 'alpaca'
+                        }
+            
+            # If neither quote nor trade available, try to get the latest bar
+            end_time = datetime.now(timezone.utc)
+            start_time = end_time - timedelta(days=1)
+            
+            bars_url = f"{MARKET_DATA_BASE_URL}/stocks/{symbol}/bars"
+            params = {
+                "start": start_time.isoformat(),
+                "end": end_time.isoformat(),
+                "timeframe": "1Day",
+                "limit": 1
+            }
+            
+            async with session.get(bars_url, headers=headers, params=params) as response:
+                if response.status == 200:
+                    bars_data = await response.json()
+                    bars = bars_data.get('bars', [])
+                    
+                    if bars:
+                        bar = bars[0]
+                        return {
+                            'symbol': symbol,
+                            'price': bar.get('c'),  # Close price
+                            'bid_price': None,
+                            'ask_price': None,
+                            'open': bar.get('o'),
+                            'high': bar.get('h'),
+                            'low': bar.get('l'),
+                            'close': bar.get('c'),
+                            'volume': bar.get('v'),
+                            'timestamp': bar.get('t'),
+                            'source': 'alpaca_daily',
+                            'data_source': 'alpaca'
+                        }
+            
+            raise Exception(f"No price data available for {symbol} from Alpaca")
+            
+    except Exception as e:
+        print(f"Error fetching current price for {symbol} from Alpaca: {e}", file=sys.stderr)
+        raise
+
+def get_stock_price_simple(symbol: str, data_source: str = "polygon", max_age_seconds: int = 600) -> float:
+    """
+    Simple synchronous wrapper to get current stock price.
+    
+    Args:
+        symbol: Stock symbol (e.g., 'AAPL')
+        data_source: Data source to use ('polygon' or 'alpaca')
+        
+    Returns:
+        Current stock price as float, or None if not available
+    """
+    try:
+        # Run the async function in a new event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        price_data = loop.run_until_complete(get_current_price(symbol, data_source, max_age_seconds=max_age_seconds))
+        loop.close()
+        return price_data['price']
+    except Exception as e:
+        print(f"Error getting price for {symbol}: {e}", file=sys.stderr)
+        return None
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch, save, and query historical stock data for a specific symbol.")
@@ -724,6 +1043,17 @@ async def main() -> None:
         default="monthly",
         help="Chunk size for fetching large datasets (auto: smart selection, daily: 1-day chunks, weekly: 1-week chunks, monthly: 1-month chunks, default: monthly)"
     )
+    parser.add_argument(
+        "--current-price",
+        action="store_true",
+        help="Get only the current price of the stock (no historical data fetching). Also triggered automatically when no start/end dates are specified."
+    )
+    parser.add_argument(
+        "--current-price-max-age",
+        type=int,
+        default=600,
+        help="Maximum age of database price data in seconds before fetching fresh data (default: 600 seconds = 10 minutes)"
+    )
     args = parser.parse_args()
 
     # Check if Polygon is available when selected
@@ -744,6 +1074,35 @@ async def main() -> None:
     # Ensure data directories exist
     os.makedirs(f"{args.data_dir}/daily", exist_ok=True)
     os.makedirs(f"{args.data_dir}/hourly", exist_ok=True)
+
+    # Handle current price request - either explicit or implicit (no dates specified)
+    should_get_current_price = args.current_price or (args.start_date is None and args.end_date is None and not args.force_fetch and not args.query_only)
+    
+    if should_get_current_price:
+        try:
+            price_data = await get_current_price(
+                symbol=args.symbol,
+                data_source=args.data_source,
+                db_type=args.db_type,
+                db_path=args.db_path,
+                max_age_seconds=args.current_price_max_age
+            )
+            
+            print(f"\n--- Current Price for {args.symbol} ---")
+            print(f"Price: ${price_data['price']:.2f}")
+            if price_data['bid_price'] and price_data['ask_price']:
+                print(f"Bid: ${price_data['bid_price']:.2f}")
+                print(f"Ask: ${price_data['ask_price']:.2f}")
+            if 'size' in price_data and price_data['size']:
+                print(f"Size: {price_data['size']}")
+            print(f"Source: {price_data['source']}")
+            print(f"Data Source: {price_data['data_source']}")
+            print(f"Timestamp: {price_data['timestamp']}")
+            print(f"--- End of Current Price ---")
+            return
+        except Exception as e:
+            print(f"Error getting current price for {args.symbol}: {e}", file=sys.stderr)
+            return
 
     # Call process_symbol_data which now handles DB initialization internally if no instance is passed.
     final_df = await process_symbol_data(
