@@ -1,6 +1,6 @@
 import sqlite3
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 from abc import ABCMeta, abstractmethod
 import duckdb
@@ -278,9 +278,19 @@ class StockDBSQLite(StockDBBase):
                     size INTEGER,
                     ask_price REAL, -- Nullable, for quotes
                     ask_size INTEGER, -- Nullable, for quotes
+                    write_timestamp DATETIME DEFAULT (DATETIME('now')), -- When the data was written to DB
                     PRIMARY KEY (ticker, timestamp, type)
                 )
             ''')
+            
+            # Add write_timestamp column to existing table if it doesn't exist
+            cursor.execute("PRAGMA table_info(realtime_data)")
+            existing_columns = {row[1] for row in cursor.fetchall()}
+            if 'write_timestamp' not in existing_columns:
+                # SQLite doesn't allow non-constant defaults in ALTER TABLE, so add without default first
+                cursor.execute("ALTER TABLE realtime_data ADD COLUMN write_timestamp DATETIME")
+                # Update existing rows to have write_timestamp = timestamp
+                cursor.execute("UPDATE realtime_data SET write_timestamp = timestamp WHERE write_timestamp IS NULL")
 
             # Add MA and EMA columns to existing daily_prices table if they don't exist
             self._add_ma_ema_columns_if_needed(cursor)
@@ -509,6 +519,11 @@ class StockDBSQLite(StockDBBase):
                 print(f"Warning: Min/max timestamp is NaT for realtime data of {ticker}. Skipping DB save.")
                 return
 
+            # Add write_timestamp column if not already present
+            if 'write_timestamp' not in df_copy.columns:
+                current_time = datetime.now(timezone.utc)
+                df_copy['write_timestamp'] = current_time
+
             # SQLite DATETIME stores up to milliseconds if string is formatted that way
             ts_format_str = '%Y-%m-%d %H:%M:%S.%f' 
             min_ts_str = min_ts_val.strftime(ts_format_str)
@@ -523,6 +538,7 @@ class StockDBSQLite(StockDBBase):
             ''', (ticker, data_type, min_ts_str, max_ts_str))
 
             df_copy['timestamp'] = df_copy['timestamp'].dt.strftime(ts_format_str)
+            df_copy['write_timestamp'] = df_copy['write_timestamp'].dt.strftime(ts_format_str)
             df_copy.to_sql('realtime_data', conn, if_exists='append', index=False)
 
     async def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None, data_type: str = "quote") -> pd.DataFrame:
@@ -543,6 +559,9 @@ class StockDBSQLite(StockDBBase):
 
         if not df.empty:
             df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+            # Ensure write_timestamp is also converted to datetime
+            if 'write_timestamp' in df.columns:
+                df['write_timestamp'] = pd.to_datetime(df['write_timestamp'], errors='coerce')
             df.set_index('timestamp', inplace=True)
             df = df[df.index.notna()]
         return df
@@ -666,10 +685,22 @@ class StockDBDuckDB(StockDBBase):
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS realtime_data (
                     ticker VARCHAR, timestamp TIMESTAMP, type VARCHAR, price DOUBLE, size BIGINT,
-                    ask_price DOUBLE, ask_size BIGINT,
+                    ask_price DOUBLE, ask_size BIGINT, write_timestamp TIMESTAMP DEFAULT NOW(),
                     PRIMARY KEY (ticker, timestamp, type)
                 )
             ''')
+            
+            # Add write_timestamp column to existing table if it doesn't exist
+            try:
+                result = conn.execute("DESCRIBE realtime_data").fetchall()
+                existing_columns = {row[0] for row in result}
+                if 'write_timestamp' not in existing_columns:
+                    conn.execute("ALTER TABLE realtime_data ADD COLUMN write_timestamp TIMESTAMP DEFAULT NOW()")
+                    # Update existing rows to have write_timestamp = timestamp
+                    conn.execute("UPDATE realtime_data SET write_timestamp = timestamp WHERE write_timestamp IS NULL")
+            except Exception as e:
+                # Table might not exist yet, which is fine
+                pass
 
             # Add MA and EMA columns to existing daily_prices table if they don't exist
             self._add_ma_ema_columns_if_needed_duckdb(conn)
@@ -835,6 +866,11 @@ class StockDBDuckDB(StockDBBase):
                 print(f"Warning: Min/max timestamp is NaT for realtime data (DuckDB) of {ticker}. Skipping.")
                 return
 
+            # Add write_timestamp column if not already present
+            if 'write_timestamp' not in df_copy.columns:
+                current_time = datetime.now(timezone.utc)
+                df_copy['write_timestamp'] = current_time
+
             conn.execute("DELETE FROM realtime_data WHERE ticker = ? AND type = ? AND timestamp BETWEEN ? AND ?",
                          (ticker, data_type, min_ts_val, max_ts_val))
             try:
@@ -862,6 +898,9 @@ class StockDBDuckDB(StockDBBase):
 
         if not df.empty:
             df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+            # Ensure write_timestamp is also converted to datetime
+            if 'write_timestamp' in df.columns:
+                df['write_timestamp'] = pd.to_datetime(df['write_timestamp'], errors='coerce')
             df.set_index('timestamp', inplace=True)
             df = df[df.index.notna()]
         return df

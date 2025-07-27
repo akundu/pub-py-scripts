@@ -655,7 +655,7 @@ async def process_symbol_data(
 async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str) -> dict | None:
     """
     Get the latest price with timestamp from the database.
-    Returns a dictionary with 'price' and 'timestamp' keys, or None if not found.
+    Returns a dictionary with 'price', 'timestamp', and 'write_timestamp' keys, or None if not found.
     """
     try:
         # Try to get realtime data first (most recent)
@@ -664,7 +664,8 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
             latest_row = realtime_data.iloc[-1]
             return {
                 'price': latest_row['price'],
-                'timestamp': latest_row.name  # Index is the timestamp
+                'timestamp': latest_row.name,  # Index is the timestamp
+                'write_timestamp': latest_row.get('write_timestamp')  # When it was written to DB
             }
         
         # Try hourly data
@@ -673,7 +674,8 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
             latest_row = hourly_data.iloc[-1]
             return {
                 'price': latest_row['close'],
-                'timestamp': latest_row.name  # Index is the datetime
+                'timestamp': latest_row.name,  # Index is the datetime
+                'write_timestamp': None  # Historical data doesn't have write_timestamp
             }
         
         # Try daily data
@@ -682,7 +684,8 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
             latest_row = daily_data.iloc[-1]
             return {
                 'price': latest_row['close'],
-                'timestamp': latest_row.name  # Index is the date
+                'timestamp': latest_row.name,  # Index is the date
+                'write_timestamp': None  # Historical data doesn't have write_timestamp
             }
         
         return None
@@ -733,15 +736,37 @@ async def get_current_price(
     try:
         db_price_data = await _get_latest_price_with_timestamp(current_db_instance, symbol)
         if db_price_data and db_price_data['price'] is not None:
-            # Check if the price is recent enough
+            # Check if the price is recent enough using both timestamp and write_timestamp
             price_timestamp = db_price_data['timestamp']
+            write_timestamp = db_price_data.get('write_timestamp')
             current_time = datetime.now(timezone.utc)
             
-            # Calculate age of the price data
+            # Calculate age of the price data (original timestamp)
             if isinstance(price_timestamp, str):
                 price_dt = datetime.fromisoformat(price_timestamp.replace('Z', '+00:00'))
             else:
                 price_dt = price_timestamp
+            
+            # Calculate age of the write timestamp if available
+            write_age_seconds = None
+            if write_timestamp:
+                if isinstance(write_timestamp, str):
+                    # Handle both timezone-aware and naive datetime strings
+                    if 'Z' in write_timestamp or '+' in write_timestamp:
+                        write_dt = datetime.fromisoformat(write_timestamp.replace('Z', '+00:00'))
+                    else:
+                        # If it's a naive datetime string, assume it's UTC
+                        write_dt = datetime.fromisoformat(write_timestamp).replace(tzinfo=timezone.utc)
+                else:
+                    write_dt = write_timestamp
+                
+                # Ensure both datetimes are timezone-aware for comparison
+                if write_dt.tzinfo is None:
+                    write_dt = write_dt.replace(tzinfo=timezone.utc)
+                elif current_time.tzinfo is None:
+                    current_time = current_time.replace(tzinfo=timezone.utc)
+                
+                write_age_seconds = (current_time - write_dt).total_seconds()
             
             # Ensure both datetimes are timezone-aware for comparison
             if price_dt.tzinfo is None:
@@ -753,31 +778,42 @@ async def get_current_price(
                 
             age_seconds = (current_time - price_dt).total_seconds()
             
-            if age_seconds <= max_age_seconds:
-                print(f"Found recent price for {symbol} in database: ${db_price_data['price']:.2f} (age: {age_seconds:.1f}s)", file=sys.stderr)
+            # Use write_timestamp for age check if available, otherwise use original timestamp
+            # This makes more sense since write_timestamp represents when we last stored the data
+            max_age_check_seconds = write_age_seconds if write_age_seconds is not None else age_seconds
+            
+            if max_age_check_seconds <= max_age_seconds:
+                age_info = f"price age: {age_seconds:.1f}s"
+                if write_age_seconds is not None:
+                    age_info += f", write age: {write_age_seconds:.1f}s"
+                print(f"Found recent price for {symbol} in database: ${db_price_data['price']:.2f} ({age_info})", file=sys.stderr)
                 return {
                     'symbol': symbol,
                     'price': db_price_data['price'],
                     'bid_price': None,
                     'ask_price': None,
                     'timestamp': price_timestamp.isoformat() if hasattr(price_timestamp, 'isoformat') else str(price_timestamp),
+                    'write_timestamp': write_timestamp.isoformat() if write_timestamp and hasattr(write_timestamp, 'isoformat') else str(write_timestamp) if write_timestamp else None,
                     'source': 'database',
                     'data_source': data_source
                 }
             else:
-                print(f"Database price for {symbol} is too old ({age_seconds:.1f}s > {max_age_seconds}s), fetching fresh data", file=sys.stderr)
+                age_info = f"price age: {age_seconds:.1f}s"
+                if write_age_seconds is not None:
+                    age_info += f", write age: {write_age_seconds:.1f}s"
+                print(f"Database price for {symbol} is too old ({age_info} > {max_age_seconds}s), fetching fresh data", file=sys.stderr)
     except Exception as e:
         print(f"Error getting price from database for {symbol}: {e}", file=sys.stderr)
     
     # If no database price, fetch from API
     if data_source == "polygon":
-        return await _get_current_price_polygon(symbol)
+        return await _get_current_price_polygon(symbol, current_db_instance)
     elif data_source == "alpaca":
-        return await _get_current_price_alpaca(symbol)
+        return await _get_current_price_alpaca(symbol, current_db_instance)
     else:
         raise ValueError(f"Unsupported data source: {data_source}")
 
-async def _get_current_price_polygon(symbol: str) -> dict:
+async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBase | None = None) -> dict:
     """Get current price from Polygon.io API."""
     if not POLYGON_AVAILABLE:
         raise ImportError("Polygon API client not available. Install with: pip install polygon-api-client")
@@ -792,6 +828,23 @@ async def _get_current_price_polygon(symbol: str) -> dict:
         # Get the latest quote
         quote = client.get_last_quote(ticker=symbol)
         if quote:
+            # Create DataFrame for saving to realtime table
+            timestamp = datetime.fromtimestamp(quote.sip_timestamp / 1000000000) if hasattr(quote, 'sip_timestamp') else datetime.now()
+            quote_df = pd.DataFrame({
+                'price': [quote.bid_price],
+                'size': [quote.bid_size],
+                'ask_price': [quote.ask_price],
+                'ask_size': [quote.ask_size]
+            }, index=[timestamp])
+            
+            # Save to realtime table if we have a database instance
+            if current_db_instance:
+                try:
+                    await current_db_instance.save_realtime_data(quote_df, symbol, data_type="quote")
+                    print(f"Saved quote data for {symbol} to realtime table", file=sys.stderr)
+                except Exception as e:
+                    print(f"Warning: Failed to save quote data for {symbol} to realtime table: {e}", file=sys.stderr)
+            
             return {
                 'symbol': symbol,
                 'price': quote.bid_price,  # Use bid price as primary price
@@ -799,7 +852,8 @@ async def _get_current_price_polygon(symbol: str) -> dict:
                 'ask_price': quote.ask_price,
                 'bid_size': quote.bid_size,
                 'ask_size': quote.ask_size,
-                'timestamp': datetime.fromtimestamp(quote.sip_timestamp / 1000000000).isoformat() if hasattr(quote, 'sip_timestamp') else datetime.now().isoformat(),
+                'timestamp': timestamp.isoformat(),
+                'write_timestamp': datetime.now().isoformat(),
                 'source': 'polygon_quote',
                 'data_source': 'polygon'
             }
@@ -807,13 +861,29 @@ async def _get_current_price_polygon(symbol: str) -> dict:
         # If no quote, try to get the latest trade
         trade = client.get_last_trade(ticker=symbol)
         if trade:
+            # Create DataFrame for saving to realtime table
+            timestamp = datetime.fromtimestamp(trade.sip_timestamp / 1000000000) if hasattr(trade, 'sip_timestamp') else datetime.now()
+            trade_df = pd.DataFrame({
+                'price': [trade.price],
+                'size': [trade.size]
+            }, index=[timestamp])
+            
+            # Save to realtime table if we have a database instance
+            if current_db_instance:
+                try:
+                    await current_db_instance.save_realtime_data(trade_df, symbol, data_type="trade")
+                    print(f"Saved trade data for {symbol} to realtime table", file=sys.stderr)
+                except Exception as e:
+                    print(f"Warning: Failed to save trade data for {symbol} to realtime table: {e}", file=sys.stderr)
+            
             return {
                 'symbol': symbol,
                 'price': trade.price,
                 'bid_price': None,
                 'ask_price': None,
                 'size': trade.size,
-                'timestamp': datetime.fromtimestamp(trade.sip_timestamp / 1000000000).isoformat() if hasattr(trade, 'sip_timestamp') else datetime.now().isoformat(),
+                'timestamp': timestamp.isoformat(),
+                'write_timestamp': datetime.now().isoformat(),
                 'source': 'polygon_trade',
                 'data_source': 'polygon'
             }
@@ -844,6 +914,7 @@ async def _get_current_price_polygon(symbol: str) -> dict:
                 'close': bar.close,
                 'volume': bar.volume,
                 'timestamp': datetime.fromtimestamp(bar.timestamp / 1000).isoformat(),
+                'write_timestamp': datetime.now().isoformat(),
                 'source': 'polygon_daily',
                 'data_source': 'polygon'
             }
@@ -854,7 +925,7 @@ async def _get_current_price_polygon(symbol: str) -> dict:
         print(f"Error fetching current price for {symbol} from Polygon: {e}", file=sys.stderr)
         raise
 
-async def _get_current_price_alpaca(symbol: str) -> dict:
+async def _get_current_price_alpaca(symbol: str, current_db_instance: StockDBBase | None = None) -> dict:
     """Get current price from Alpaca API."""
     API_KEY = os.getenv('ALPACA_API_KEY')
     API_SECRET = os.getenv('ALPACA_API_SECRET')
@@ -879,6 +950,23 @@ async def _get_current_price_alpaca(symbol: str) -> dict:
                     quote = quote_data.get('quote', {})
                     
                     if quote:
+                        # Create DataFrame for saving to realtime table
+                        timestamp = pd.to_datetime(quote.get('t')) if quote.get('t') else datetime.now()
+                        quote_df = pd.DataFrame({
+                            'price': [quote.get('bp', 0)],
+                            'size': [quote.get('bs', 0)],
+                            'ask_price': [quote.get('ap')],
+                            'ask_size': [quote.get('as')]
+                        }, index=[timestamp])
+                        
+                        # Save to realtime table if we have a database instance
+                        if current_db_instance:
+                            try:
+                                await current_db_instance.save_realtime_data(quote_df, symbol, data_type="quote")
+                                print(f"Saved quote data for {symbol} to realtime table", file=sys.stderr)
+                            except Exception as e:
+                                print(f"Warning: Failed to save quote data for {symbol} to realtime table: {e}", file=sys.stderr)
+                        
                         return {
                             'symbol': symbol,
                             'price': quote.get('bp', 0),  # Use bid price as primary price
@@ -887,6 +975,7 @@ async def _get_current_price_alpaca(symbol: str) -> dict:
                             'bid_size': quote.get('bs'),
                             'ask_size': quote.get('as'),
                             'timestamp': quote.get('t'),
+                            'write_timestamp': datetime.now().isoformat(),
                             'source': 'alpaca_quote',
                             'data_source': 'alpaca'
                         }
@@ -899,6 +988,21 @@ async def _get_current_price_alpaca(symbol: str) -> dict:
                     trade = trade_data.get('trade', {})
                     
                     if trade:
+                        # Create DataFrame for saving to realtime table
+                        timestamp = pd.to_datetime(trade.get('t')) if trade.get('t') else datetime.now()
+                        trade_df = pd.DataFrame({
+                            'price': [trade.get('p')],
+                            'size': [trade.get('s')]
+                        }, index=[timestamp])
+                        
+                        # Save to realtime table if we have a database instance
+                        if current_db_instance:
+                            try:
+                                await current_db_instance.save_realtime_data(trade_df, symbol, data_type="trade")
+                                print(f"Saved trade data for {symbol} to realtime table", file=sys.stderr)
+                            except Exception as e:
+                                print(f"Warning: Failed to save trade data for {symbol} to realtime table: {e}", file=sys.stderr)
+                        
                         return {
                             'symbol': symbol,
                             'price': trade.get('p'),
@@ -906,6 +1010,7 @@ async def _get_current_price_alpaca(symbol: str) -> dict:
                             'ask_price': None,
                             'size': trade.get('s'),
                             'timestamp': trade.get('t'),
+                            'write_timestamp': datetime.now().isoformat(),
                             'source': 'alpaca_trade',
                             'data_source': 'alpaca'
                         }
@@ -940,6 +1045,7 @@ async def _get_current_price_alpaca(symbol: str) -> dict:
                             'close': bar.get('c'),
                             'volume': bar.get('v'),
                             'timestamp': bar.get('t'),
+                            'write_timestamp': datetime.now().isoformat(),
                             'source': 'alpaca_daily',
                             'data_source': 'alpaca'
                         }
@@ -1051,8 +1157,8 @@ async def main() -> None:
     parser.add_argument(
         "--current-price-max-age",
         type=int,
-        default=600,
-        help="Maximum age of database price data in seconds before fetching fresh data (default: 600 seconds = 10 minutes)"
+        default=60,
+        help="Maximum age of database price data in seconds before fetching fresh data (default: 60 seconds = 1 minutes)"
     )
     args = parser.parse_args()
 
@@ -1063,7 +1169,7 @@ async def main() -> None:
         print("Or use --data-source alpaca to use Alpaca instead.", file=sys.stderr)
         exit(1)
 
-    if args.start_date is None:
+    if args.start_date is None and not args.current_price:
         if args.timeframe == 'daily':
             args.start_date = (datetime.now() - timedelta(days=5*365)).strftime('%Y-%m-%d')
             print(f"--start-date not specified, defaulting to {args.start_date} for daily timeframe.", file=sys.stderr)
@@ -1098,6 +1204,8 @@ async def main() -> None:
             print(f"Source: {price_data['source']}")
             print(f"Data Source: {price_data['data_source']}")
             print(f"Timestamp: {price_data['timestamp']}")
+            if price_data.get('write_timestamp'):
+                print(f"Write Timestamp: {price_data['write_timestamp']}")
             print(f"--- End of Current Price ---")
             return
         except Exception as e:
