@@ -272,8 +272,8 @@ def parse_args():
     parser.add_argument(
         "--current-price-max-age",
         type=int,
-        default=600,
-        help="Maximum age of database price data in seconds before fetching fresh data (default: 600 seconds = 10 minutes)"
+        default=60,
+        help="Maximum age of database price data in seconds before fetching fresh data (default: 60 seconds = 1 minutes)"
     )
     
     # Time interval for fetching market data
