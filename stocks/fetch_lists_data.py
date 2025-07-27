@@ -7,7 +7,7 @@ import yaml
 
 
 # Define all available concrete types
-ALL_AVAILABLE_TYPES = ['nyse', 'nasdaq', 'dow-jones', 'sp-500', 'etfs', 'crypto']
+ALL_AVAILABLE_TYPES = ['nyse', 'nasdaq', 'dow-jones', 'sp-500', 'etfs', 'crypto', 'stocks_to_track']
 
 async def fetch_stock_analysis_symbols(list_type="nyse"):
     url = f"https://stockanalysis.com/list/{list_type}-stocks/"
