@@ -1,5 +1,5 @@
 from fetch_lists_data import ALL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
-from fetch_symbol_data import fetch_and_save_data
+from fetch_symbol_data import fetch_and_save_data, get_current_price
 from common.stock_db import get_stock_db, get_default_db_path
 import asyncio
 import os
@@ -8,7 +8,7 @@ import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 # Synchronous wrapper function to get current price for a single symbol
-def run_get_current_price(
+def fetch_get_current_price(
     symbol: str,
     data_source: str,
     db_type_for_worker: str,
@@ -25,7 +25,6 @@ def run_get_current_price(
         worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
         
         # We need a new event loop for each thread. asyncio.run() does this.
-        from fetch_symbol_data import get_current_price
         result = asyncio.run(get_current_price(
             symbol,
             data_source,
@@ -112,7 +111,7 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
         for symbol_to_fetch in all_symbols_list:
             if should_get_current_prices:
                 task = executor.submit(
-                    run_get_current_price,
+                    fetch_get_current_price,
                     symbol_to_fetch,
                     args.data_source,
                     db_type,
