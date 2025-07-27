@@ -13,7 +13,7 @@ def fetch_get_current_price(
     data_source: str,
     db_type_for_worker: str,
     db_config_for_worker: str,
-    max_age_seconds: int = 600
+    max_age_seconds: int = 60
 ) -> dict:
     """Creates a DB instance in the worker thread and gets current price for a symbol."""
     # print(f"{os.getpid()} Worker thread for {symbol}: Getting current price", file=sys.stderr, flush=True)
