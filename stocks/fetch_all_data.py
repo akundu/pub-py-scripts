@@ -1,18 +1,14 @@
 from fetch_lists_data import ALL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
-from fetch_symbol_data import fetch_and_save_data, get_current_price
-from common.stock_db import get_stock_db, StockDBBase, get_default_db_path
+from fetch_symbol_data import fetch_and_save_data
+from common.stock_db import get_stock_db, get_default_db_path
 import asyncio
-from datetime import datetime, timedelta
 import os
 import argparse
 import sys
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, Executor
-# from pathlib import Path
-# import time
-# import random
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 # Synchronous wrapper function to get current price for a single symbol
-def get_current_price(
+def run_get_current_price(
     symbol: str,
     data_source: str,
     db_type_for_worker: str,
@@ -20,156 +16,35 @@ def get_current_price(
     max_age_seconds: int = 600
 ) -> dict:
     """Creates a DB instance in the worker thread and gets current price for a symbol."""
-    print(f"{os.getpid()} Worker thread for {symbol}: Getting current price", file=sys.stderr, flush=True)
+    # print(f"{os.getpid()} Worker thread for {symbol}: Getting current price", file=sys.stderr, flush=True)
 
     worker_db_instance = None
     try:
         # Each worker thread creates its own StockDBBase instance.
-        print(f"Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr)
+        # print(f"Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr)
         worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
         
         # We need a new event loop for each thread. asyncio.run() does this.
+        from fetch_symbol_data import get_current_price
         result = asyncio.run(get_current_price(
             symbol,
             data_source,
-            worker_db_instance,
+            stock_db_instance=worker_db_instance,
             max_age_seconds=max_age_seconds
         ))
         return result
     except Exception as e:
-        print(f"Error in worker thread for symbol {symbol}: {e}", file=sys.stderr)
+        # print(f"Error in worker thread for symbol {symbol}: {e}", file=sys.stderr)
         return {"symbol": symbol, "error": str(e)}
     finally:
         if worker_db_instance and hasattr(worker_db_instance, 'close_session') and callable(worker_db_instance.close_session):
             try:
-                print(f"Worker thread for {symbol}: Closing DB session...", file=sys.stderr)
+                # print(f"Worker thread for {symbol}: Closing DB session...", file=sys.stderr)
                 asyncio.run(worker_db_instance.close_session())
-                print(f"Worker thread for {symbol}: DB session closed.", file=sys.stderr)
+                # print(f"Worker thread for {symbol}: DB session closed.", file=sys.stderr)
             except Exception as e_close:
                 print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
 
-def process_current_prices_for_single_db(all_symbols_list: list[str], data_source: str, db_type: str, db_config: str, stock_executor_type: str, max_concurrent: int | None) -> tuple[int, int, list]:
-    """Process current prices for all symbols using the specified executor type."""
-    print(f"{os.getpid()} Getting current prices for {len(all_symbols_list)} symbols using {stock_executor_type} executor", file=sys.stderr, flush=True)
-    
-    # Determine max workers for stock-level tasks
-    if max_concurrent and max_concurrent > 0:
-        max_workers = max_concurrent
-    else:
-        max_workers = os.cpu_count() if stock_executor_type == "process" else (os.cpu_count() or 1) * 5
-    
-    # Create the appropriate executor for stock-level tasks
-    if stock_executor_type == "process":
-        from concurrent.futures import ProcessPoolExecutor
-        executor_class = ProcessPoolExecutor
-    else:
-        from concurrent.futures import ThreadPoolExecutor
-        executor_class = ThreadPoolExecutor
-    
-    with executor_class(max_workers=max_workers) as executor:
-        # Level 2: Split by stock symbols
-        stock_tasks = []
-        for symbol_to_fetch in all_symbols_list:
-            task = executor.submit(
-                get_current_price,
-                symbol_to_fetch,
-                data_source,
-                db_type,
-                db_config,
-                args.current_price_max_age
-            )
-            stock_tasks.append((task, symbol_to_fetch))
-        
-        # Process completed stock-level tasks as they finish
-        success_count = 0
-        failure_count = 0
-        price_results = []
-        
-        for task, symbol_to_fetch in stock_tasks:
-            try:
-                result = task.result()  # This blocks until the task completes
-                if isinstance(result, Exception):
-                    print(f"{os.getpid()} Error getting current price for {symbol_to_fetch}: {result}", file=sys.stderr, flush=True)
-                    failure_count += 1
-                    price_results.append({"symbol": symbol_to_fetch, "error": str(result)})
-                elif isinstance(result, dict) and "error" in result:
-                    print(f"{os.getpid()} Error getting current price for {symbol_to_fetch}: {result['error']}", file=sys.stderr, flush=True)
-                    failure_count += 1
-                    price_results.append(result)
-                elif isinstance(result, dict):
-                    success_count += 1
-                    price_results.append(result)
-                    print(f"{os.getpid()} Successfully got current price for {symbol_to_fetch}: ${result.get('price', 'N/A'):.2f}", file=sys.stderr, flush=True)
-                else:
-                    print(f"{os.getpid()} Unexpected result format for {symbol_to_fetch}: {result}", file=sys.stderr, flush=True)
-                    failure_count += 1
-                    price_results.append({"symbol": symbol_to_fetch, "error": f"Unexpected result format: {result}"})
-            except Exception as e:
-                print(f"{os.getpid()} Unexpected error getting current price for {symbol_to_fetch}: {e}", file=sys.stderr, flush=True)
-                failure_count += 1
-                price_results.append({"symbol": symbol_to_fetch, "error": str(e)})
-    
-    print(f"{os.getpid()} Completed getting current prices for database {db_config}: {success_count} successes, {failure_count} failures", file=sys.stderr, flush=True)
-    return (success_count, failure_count, price_results)
-
-async def process_current_prices_per_output(all_symbols_list: list[str], args: argparse.Namespace, db_configs_for_workers: list[tuple[str, str]]):
-    """Process current prices using thread pool executor."""
-    executor_max_workers = max(args.max_concurrent if args.max_concurrent and args.max_concurrent > 0 else (os.cpu_count() or 1 * 5), os.cpu_count() or 1)
-
-    executor_class = None
-    if args.executor_type == 'thread':
-        from concurrent.futures import ThreadPoolExecutor
-        executor_class = ThreadPoolExecutor
-    else:
-        from concurrent.futures import ProcessPoolExecutor
-        executor_class = ProcessPoolExecutor
-
-    loop = asyncio.get_running_loop()
-    with executor_class(max_workers=executor_max_workers) as executor:
-        # Level 1: Split by database configuration
-        db_tasks = {}
-        for db_type, db_config in db_configs_for_workers:
-            task = loop.run_in_executor(
-                process_current_prices_for_single_db,
-                all_symbols_list,
-                args.data_source,
-                db_type,
-                db_config,
-                args.stock_executor_type,
-                args.max_concurrent
-            )
-            db_tasks[task] = db_config
-        
-        # Process completed database-level tasks as they finish
-        total_success_count = 0
-        total_failure_count = 0
-        all_price_results = []
-        
-        # Wait for all tasks to complete and process results
-        for task in db_tasks:
-            try:
-                result = await task
-                db_config = db_tasks[task]
-                
-                if isinstance(result, Exception):
-                    print(f"Error processing current prices for database {db_config}: {result}", file=sys.stderr)
-                    total_failure_count += len(all_symbols_list)  # Assume all symbols failed
-                elif isinstance(result, tuple) and len(result) == 3:
-                    success_count, failure_count, price_results = result
-                    total_success_count += success_count
-                    total_failure_count += failure_count
-                    all_price_results.extend(price_results)
-                    print(f"Database {db_config}: {success_count} successes, {failure_count} failures", file=sys.stderr)
-                else:
-                    print(f"Unexpected result format for database {db_config}: {result}", file=sys.stderr)
-                    total_failure_count += len(all_symbols_list)
-            except Exception as e:
-                print(f"Unexpected error in database-level task processing: {e}", file=sys.stderr)
-                total_failure_count += len(all_symbols_list)
-    
-    return (total_success_count, total_failure_count, all_price_results)
-
-# Synchronous wrapper function to be executed by ThreadPoolExecutor
 def fetch_price_and_save(
     symbol: str, 
     data_dir: str, 
@@ -215,7 +90,7 @@ def fetch_price_and_save(
             except Exception as e_close:
                 print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
 
-def process_symbols_per_output(all_symbols_list: list[str], data_dir: str, db_type: str, db_config: str, all_time: bool, days_back: int | None, db_batch_size: int, stock_executor_type: str, max_concurrent: int | None, chunk_size: str = "monthly") -> tuple[int, int]:
+def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Namespace, db_type: str, db_config: str, stock_executor_type: str, max_concurrent: int | None) -> tuple[int, int]:
     """Process all symbols for a single database using the specified executor type for stock-level tasks."""
     print(f"{os.getpid()} Processing {len(all_symbols_list)} symbols for database {db_config} using {stock_executor_type} executor", file=sys.stderr, flush=True)
     
@@ -226,28 +101,36 @@ def process_symbols_per_output(all_symbols_list: list[str], data_dir: str, db_ty
         max_workers = os.cpu_count() if stock_executor_type == "process" else (os.cpu_count() or 1) * 5
     
     # Create the appropriate executor for stock-level tasks
-    if stock_executor_type == "process":
-        from concurrent.futures import ProcessPoolExecutor
-        executor_class = ProcessPoolExecutor
-    else:
-        from concurrent.futures import ThreadPoolExecutor
-        executor_class = ThreadPoolExecutor
+    executor_class = ProcessPoolExecutor if stock_executor_type == "process" else ThreadPoolExecutor
+    
+    # Determine if we should get current prices (explicit or implicit)
+    should_get_current_prices = args.current_price or (not args.all_time and args.days_back is None and not args.fetch_market_data)
     
     with executor_class(max_workers=max_workers) as executor:
         # Level 2: Split by stock symbols
         stock_tasks = []
         for symbol_to_fetch in all_symbols_list:
-            task = executor.submit(
-                fetch_price_and_save,
-                symbol_to_fetch,
-                data_dir,
-                db_type,
-                db_config,
-                all_time,
-                days_back,
-                db_batch_size,
-                chunk_size  # Pass the new parameter
-            )
+            if should_get_current_prices:
+                task = executor.submit(
+                    run_get_current_price,
+                    symbol_to_fetch,
+                    args.data_source,
+                    db_type,
+                    db_config,
+                    args.current_price_max_age
+                )
+            else:
+                task = executor.submit(
+                    fetch_price_and_save,
+                    symbol_to_fetch,
+                    args.data_dir,
+                    db_type,
+                    db_config,
+                    args.all_time,
+                    args.days_back,
+                    args.db_batch_size,
+                    args.chunk_size  # Pass the new parameter
+                )
             stock_tasks.append((task, symbol_to_fetch))
         
         # Process completed stock-level tasks as they finish
@@ -262,6 +145,13 @@ def process_symbols_per_output(all_symbols_list: list[str], data_dir: str, db_ty
                     failure_count += 1
                 elif result is True:
                     success_count += 1
+                elif isinstance(result, dict) and "error" in result:
+                    print(f"{os.getpid()} Error processing symbol {symbol_to_fetch} for database {db_config}: {result['error']}", file=sys.stderr, flush=True)
+                    failure_count += 1
+                elif isinstance(result, dict) and "price" in result:
+                    # Current price fetch successful
+                    success_count += 1
+                    print(f"{os.getpid()} Successfully got current price for {symbol_to_fetch}: ${result.get('price', 'N/A'):.2f}", file=sys.stderr, flush=True)
                 else:
                     print(f"{os.getpid()} Fetching failed or returned unexpected result for symbol {symbol_to_fetch} for database {db_config}: {result}", file=sys.stderr, flush=True)
                     failure_count += 1
@@ -272,45 +162,24 @@ def process_symbols_per_output(all_symbols_list: list[str], data_dir: str, db_ty
     print(f"{os.getpid()} Completed processing for database {db_config}: {success_count} successes, {failure_count} failures", file=sys.stderr, flush=True)
     return (success_count, failure_count)
 
-async def process_symbols(all_symbols_list: list[str], args: argparse.Namespace, db_configs_for_workers: list[tuple[str, str]], should_get_current_prices: bool):
+async def process_symbols(all_symbols_list: list[str], args: argparse.Namespace, db_configs_for_workers: list[tuple[str, str]]):
     executor_max_workers = max(args.max_concurrent if args.max_concurrent and args.max_concurrent > 0 else (os.cpu_count() or 1 * 5), os.cpu_count() or 1)
     
-    if args.executor_type == 'thread':
-        from concurrent.futures import ThreadPoolExecutor
-        executor_class = ThreadPoolExecutor
-    else:
-        from concurrent.futures import ProcessPoolExecutor
-        executor_class = ProcessPoolExecutor
+    executor_class = ThreadPoolExecutor if args.executor_type == 'thread' else ProcessPoolExecutor
 
     with executor_class(max_workers=executor_max_workers) as executor:
         # Level 1: Split by database configuration
         db_tasks = {}
         for db_type, db_config in db_configs_for_workers:
-            if should_get_current_prices:
-                pass
-                task = executor.submit(
-                    process_current_prices_per_output,
-                    all_symbols_list,
-                    args.data_source,
-                    db_type,
-                    db_config,
-                    args.stock_executor_type,
-                    args.max_concurrent
-                )
-            else:
-                task = executor.submit(
-                    process_symbols_per_output,
-                    all_symbols_list,
-                    args.data_dir,
-                    db_type,
-                    db_config,
-                    args.all_time,
-                    args.days_back,
-                    args.db_batch_size,
-                    args.stock_executor_type,
-                    args.max_concurrent,
-                    args.chunk_size # Pass the new parameter
-                )
+            task = executor.submit(
+                process_symbols_per_output,
+                all_symbols_list,
+                args,
+                db_type,
+                db_config,
+                args.stock_executor_type,   
+                args.max_concurrent,
+            )
             db_tasks[task] = db_config
         
         # Process completed database-level tasks as they finish
@@ -318,7 +187,6 @@ async def process_symbols(all_symbols_list: list[str], args: argparse.Namespace,
         total_failure_count = 0
         
         # Process tasks as they complete (not in submission order)
-        from concurrent.futures import as_completed
         for task in as_completed(db_tasks):
             try:
                 result = task.result()  # Use .result() instead of await for executor.submit()
@@ -465,7 +333,6 @@ def parse_args():
             db_type = "sqlite" 
             db_config = get_default_db_path(db_type)
             db_configs_for_workers.append((db_type, db_config))
-            # print("DB configuration for workers defaulting, but may not be used as market data fetching is off.", file=sys.stderr)
     
     return args, db_configs_for_workers
 
@@ -496,9 +363,6 @@ async def main():
 
     all_symbols_list = await fetch_lists_data(args)
 
-    # Determine if we should get current prices (explicit or implicit)
-    should_get_current_prices = args.current_price or (not args.all_time and args.days_back is None and not args.fetch_market_data)
-    
     if not all_symbols_list:
         print("No symbols specified or found. Skipping market data fetching.")
         print("Use --types and/or --fetch-online to get symbols.")
@@ -506,60 +370,9 @@ async def main():
         print("Error: Database configuration is missing for workers. Cannot fetch market data.", file=sys.stderr)
     else:
         print(f"Fetching market data for {len(all_symbols_list)} symbols using {args.executor_type} pool...")
-        (success_count, failure_count) = await process_symbols(all_symbols_list, args, db_configs_for_workers, should_get_current_prices)
+        (success_count, failure_count) = await process_symbols(all_symbols_list, args, db_configs_for_workers)
 
         print(f"Market data fetching attempts complete. Successes: {success_count}, Failures: {failure_count} out of {len(all_symbols_list)} symbols.")
 
 if __name__ == '__main__':
     asyncio.run(main())
-
-
-async def process_current_prices_by_process_pool(all_symbols_list: list[str], args: argparse.Namespace, db_configs_for_workers: list[tuple[str, str]]):
-    """Process current prices using process pool executor."""
-    executor_max_workers = max(args.max_concurrent if args.max_concurrent and args.max_concurrent > 0 else os.cpu_count() or 1 * 2, os.cpu_count() or 1)
-    
-    loop = asyncio.get_running_loop()
-    with ProcessPoolExecutor(max_workers=executor_max_workers) as executor:
-        # Level 1: Split by database configuration
-        db_tasks = {}
-        for db_type, db_config in db_configs_for_workers:
-            task = loop.run_in_executor(
-                executor,
-                process_current_prices_for_single_db,
-                all_symbols_list,
-                args.data_source,
-                db_type,
-                db_config,
-                args.stock_executor_type,
-                args.max_concurrent
-            )
-            db_tasks[task] = db_config
-        
-        # Process completed database-level tasks as they finish
-        total_success_count = 0
-        total_failure_count = 0
-        all_price_results = []
-        
-        # Wait for all tasks to complete and process results
-        for task in db_tasks:
-            try:
-                result = await task
-                db_config = db_tasks[task]
-                
-                if isinstance(result, Exception):
-                    print(f"Error processing current prices for database {db_config}: {result}", file=sys.stderr)
-                    total_failure_count += len(all_symbols_list)  # Assume all symbols failed
-                elif isinstance(result, tuple) and len(result) == 3:
-                    success_count, failure_count, price_results = result
-                    total_success_count += success_count
-                    total_failure_count += failure_count
-                    all_price_results.extend(price_results)
-                    print(f"Database {db_config}: {success_count} successes, {failure_count} failures", file=sys.stderr)
-                else:
-                    print(f"Unexpected result format for database {db_config}: {result}", file=sys.stderr)
-                    total_failure_count += len(all_symbols_list)
-            except Exception as e:
-                print(f"Unexpected error in database-level task processing: {e}", file=sys.stderr)
-                total_failure_count += len(all_symbols_list)
-    
-    return (total_success_count, total_failure_count, all_price_results)

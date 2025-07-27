@@ -13,6 +13,7 @@ from .common_strategies import (
     calculate_moving_average,
     calculate_exponential_moving_average,
 )
+import sys
 
 DEFAULT_DATA_DIR = './data'
 def get_default_db_path(db_type: str) -> str:   
@@ -940,7 +941,7 @@ class StockDBClient(StockDBBase):
         super().__init__(server_address)
         self.server_url = f"http://{server_address}"
         self._session: aiohttp.ClientSession | None = None
-        print(f"StockDBClient initialized, configured for server at {self.server_url}")
+        # print(f"StockDBClient initialized, configured for server at {self.server_url}", file=sys.stderr)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
