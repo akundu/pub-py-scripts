@@ -42,7 +42,9 @@ async def stream_stock_data(tickers_to_stream):
         try:
             # 'T' for Trade
             if event.event_type == "T":
-                trade_time = pd.to_datetime(event.timestamp, unit='ns').tz_localize('UTC').tz_convert('America/New_York')
+                # Use current time instead of potentially invalid event.timestamp
+                current_time = pd.Timestamp.now(tz='UTC')
+                trade_time = current_time.tz_convert('America/New_York')
                 print(
                     f"Trade on {event.symbol}: "
                     f"Price: ${event.price:.2f}, "
@@ -52,7 +54,9 @@ async def stream_stock_data(tickers_to_stream):
 
             # 'Q' for Quote
             elif event.event_type == "Q":
-                quote_time = pd.to_datetime(event.timestamp, unit='ns').tz_localize('UTC').tz_convert('America/New_York')
+                # Use current time instead of potentially invalid event.timestamp
+                current_time = pd.Timestamp.now(tz='UTC')
+                quote_time = current_time.tz_convert('America/New_York')
                 print(
                     f"Quote for {event.symbol}: "
                     f"Bid: ${event.bid_price:.2f}, "

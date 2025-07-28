@@ -567,12 +567,14 @@ async def setup_and_run_polygon_stream(
         try:
             # 'T' for Trade
             if event.event_type == "T" and (feed == "trades" or feed == "both"):
-                trade_time = pd.to_datetime(event.timestamp, unit='ns').tz_localize('UTC').tz_convert('America/New_York')
+                # Use current time instead of potentially invalid event.timestamp
+                current_time = pd.Timestamp.now(tz='UTC')
+                trade_time = current_time.tz_convert('America/New_York')
                 print(f"Trade on {event.symbol}: Price: ${event.price:.2f}, Size: {event.size}, Time: {trade_time.strftime('%H:%M:%S.%f')}")
                 
                 # Create DataFrame for trade data
                 trade_df = pd.DataFrame({
-                    'timestamp': [pd.to_datetime(event.timestamp, unit='ns', utc=True)],
+                    'timestamp': [current_time],
                     'price': [event.price],
                     'size': [event.size]
                 }).set_index('timestamp')
@@ -610,12 +612,14 @@ async def setup_and_run_polygon_stream(
                     prices_have_changed = True
 
                 if not only_log_updates or prices_have_changed:
-                    quote_time = pd.to_datetime(event.timestamp, unit='ns').tz_localize('UTC').tz_convert('America/New_York')
+                    # Use current time instead of potentially invalid event.timestamp
+                    current_time = pd.Timestamp.now(tz='UTC')
+                    quote_time = current_time.tz_convert('America/New_York')
                     print(f"Quote for {symbol}: Bid: ${event.bid_price:.2f}, Ask: ${event.ask_price:.2f}, Time: {quote_time.strftime('%H:%M:%S.%f')}")
                     
                     # Create DataFrame for quote data
                     quote_df = pd.DataFrame({
-                        'timestamp': [pd.to_datetime(event.timestamp, unit='ns', utc=True)],
+                        'timestamp': [current_time],
                         'price': [event.bid_price],  # Use bid_price as primary price
                         'size': [event.bid_size],    # Use bid_size as primary size
                         'ask_price': [event.ask_price],
