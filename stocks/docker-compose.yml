@@ -52,7 +52,7 @@ services:
     build: .
     command: >
       sh -c "ulimit -n 65536 && 
-              python db_server.py --db-file data/streaming/streaming.duckdb --port 9000 --log-level INFO --heartbeat-interval 60"
+              python db_server.py --db-file data/streaming/streaming.db --port 9000 --log-level ERROR --heartbeat-interval 60"
     ports:
       - "9000:9000"
     volumes:
@@ -85,10 +85,8 @@ services:
       --remote-db-server db-server-streaming:9000 
       --max-symbols-per-connection 5
     volumes:
-      - ./data:/app/data:rw
       - ./data/daily:/app/data/daily:rw
       - ./data/hourly:/app/data/hourly:rw
-      - ./data/streaming:/app/data/streaming:rw
       - ./data/streaming/raw:/app/data/streaming/raw:rw
       - ./data/lists:/app/data/lists:rw
     environment:
