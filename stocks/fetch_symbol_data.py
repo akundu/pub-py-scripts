@@ -730,7 +730,14 @@ async def get_current_price(
         actual_db_path = db_path
         if actual_db_path is None:
             actual_db_path = get_default_db_path("duckdb") if db_type == 'duckdb' else get_default_db_path("db")
-        current_db_instance = get_stock_db(db_type, actual_db_path)
+        
+        # Detect if this is a remote database (contains ':')
+        if actual_db_path and ':' in actual_db_path:
+            # Remote database - use remote type
+            current_db_instance = get_stock_db("remote", actual_db_path)
+        else:
+            # Local database - use specified type
+            current_db_instance = get_stock_db(db_type, actual_db_path)
     
     # First, try to get the latest price from the database
     try:
@@ -741,13 +748,20 @@ async def get_current_price(
             write_timestamp = db_price_data.get('write_timestamp')
             current_time = datetime.now(timezone.utc)
             
-            # Calculate age of the price data (original timestamp)
+            # Calculate age of the price data (original timestamp) - ensure UTC comparison
             if isinstance(price_timestamp, str):
                 price_dt = datetime.fromisoformat(price_timestamp.replace('Z', '+00:00'))
             else:
                 price_dt = price_timestamp
             
-            # Calculate age of the write timestamp if available
+            # Ensure price_dt is timezone-aware (UTC)
+            if price_dt.tzinfo is None:
+                price_dt = price_dt.replace(tzinfo=timezone.utc)
+            elif price_dt.tzinfo != timezone.utc:
+                # Convert to UTC if it's in a different timezone
+                price_dt = price_dt.astimezone(timezone.utc)
+            
+            # Calculate age of the write timestamp if available - ensure UTC comparison
             write_age_seconds = None
             if write_timestamp:
                 if isinstance(write_timestamp, str):
@@ -760,22 +774,16 @@ async def get_current_price(
                 else:
                     write_dt = write_timestamp
                 
-                # Ensure both datetimes are timezone-aware for comparison
+                # Ensure write_dt is timezone-aware (UTC)
                 if write_dt.tzinfo is None:
                     write_dt = write_dt.replace(tzinfo=timezone.utc)
-                elif current_time.tzinfo is None:
-                    current_time = current_time.replace(tzinfo=timezone.utc)
+                elif write_dt.tzinfo != timezone.utc:
+                    # Convert to UTC if it's in a different timezone
+                    write_dt = write_dt.astimezone(timezone.utc)
                 
                 write_age_seconds = (current_time - write_dt).total_seconds()
             
-            # Ensure both datetimes are timezone-aware for comparison
-            if price_dt.tzinfo is None:
-                # If price_dt is naive, assume it's UTC
-                price_dt = price_dt.replace(tzinfo=timezone.utc)
-            elif current_time.tzinfo is None:
-                # If current_time is naive, assume it's UTC
-                current_time = current_time.replace(tzinfo=timezone.utc)
-                
+            # Calculate age using UTC timestamps
             age_seconds = (current_time - price_dt).total_seconds()
             
             # Use write_timestamp for age check if available, otherwise use original timestamp
@@ -783,9 +791,13 @@ async def get_current_price(
             max_age_check_seconds = write_age_seconds if write_age_seconds is not None else age_seconds
             
             if max_age_check_seconds <= max_age_seconds:
-                age_info = f"price age: {age_seconds:.1f}s"
+                # Show which age was used for the decision
                 if write_age_seconds is not None:
-                    age_info += f", write age: {write_age_seconds:.1f}s"
+                    age_info = f"write age: {write_age_seconds:.1f}s (used for decision)"
+                    if age_seconds != write_age_seconds:
+                        age_info += f", original price age: {age_seconds:.1f}s"
+                else:
+                    age_info = f"price age: {age_seconds:.1f}s"
                 print(f"Found recent price for {symbol} in database: ${db_price_data['price']:.2f} ({age_info})", file=sys.stderr)
                 return {
                     'symbol': symbol,
@@ -798,9 +810,13 @@ async def get_current_price(
                     'data_source': data_source
                 }
             else:
-                age_info = f"price age: {age_seconds:.1f}s"
+                # Show which age was used for the decision
                 if write_age_seconds is not None:
-                    age_info += f", write age: {write_age_seconds:.1f}s"
+                    age_info = f"write age: {write_age_seconds:.1f}s (used for decision)"
+                    if age_seconds != write_age_seconds:
+                        age_info += f", original price age: {age_seconds:.1f}s"
+                else:
+                    age_info = f"price age: {age_seconds:.1f}s"
                 print(f"Database price for {symbol} is too old ({age_info} > {max_age_seconds}s), fetching fresh data", file=sys.stderr)
     except Exception as e:
         print(f"Error getting price from database for {symbol}: {e}", file=sys.stderr)
@@ -829,13 +845,16 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
         quote = client.get_last_quote(ticker=symbol)
         if quote:
             # Create DataFrame for saving to realtime table
-            timestamp = datetime.fromtimestamp(quote.sip_timestamp / 1000000000) if hasattr(quote, 'sip_timestamp') else datetime.now()
+            if hasattr(quote, 'sip_timestamp'):
+                # Convert Polygon timestamp to UTC datetime
+                timestamp = datetime.fromtimestamp(quote.sip_timestamp / 1000000000, tz=timezone.utc)
+            else:
+                timestamp = datetime.now(timezone.utc)
             quote_df = pd.DataFrame({
                 'price': [quote.bid_price],
-                'size': [quote.bid_size],
-                'ask_price': [quote.ask_price],
-                'ask_size': [quote.ask_size]
+                'size': [quote.bid_size]
             }, index=[timestamp])
+            quote_df.index.name = 'timestamp'  # Ensure index has the correct name
             
             # Save to realtime table if we have a database instance
             if current_db_instance:
@@ -853,7 +872,7 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
                 'bid_size': quote.bid_size,
                 'ask_size': quote.ask_size,
                 'timestamp': timestamp.isoformat(),
-                'write_timestamp': datetime.now().isoformat(),
+                'write_timestamp': datetime.now(timezone.utc).isoformat(),
                 'source': 'polygon_quote',
                 'data_source': 'polygon'
             }
@@ -862,11 +881,16 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
         trade = client.get_last_trade(ticker=symbol)
         if trade:
             # Create DataFrame for saving to realtime table
-            timestamp = datetime.fromtimestamp(trade.sip_timestamp / 1000000000) if hasattr(trade, 'sip_timestamp') else datetime.now()
+            if hasattr(trade, 'sip_timestamp'):
+                # Convert Polygon timestamp to UTC datetime
+                timestamp = datetime.fromtimestamp(trade.sip_timestamp / 1000000000, tz=timezone.utc)
+            else:
+                timestamp = datetime.now(timezone.utc)
             trade_df = pd.DataFrame({
                 'price': [trade.price],
                 'size': [trade.size]
             }, index=[timestamp])
+            trade_df.index.name = 'timestamp'  # Ensure index has the correct name
             
             # Save to realtime table if we have a database instance
             if current_db_instance:
@@ -883,7 +907,7 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
                 'ask_price': None,
                 'size': trade.size,
                 'timestamp': timestamp.isoformat(),
-                'write_timestamp': datetime.now().isoformat(),
+                'write_timestamp': datetime.now(timezone.utc).isoformat(),
                 'source': 'polygon_trade',
                 'data_source': 'polygon'
             }
@@ -913,8 +937,8 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
                 'low': bar.low,
                 'close': bar.close,
                 'volume': bar.volume,
-                'timestamp': datetime.fromtimestamp(bar.timestamp / 1000).isoformat(),
-                'write_timestamp': datetime.now().isoformat(),
+                'timestamp': datetime.fromtimestamp(bar.timestamp / 1000, tz=timezone.utc).isoformat(),
+                'write_timestamp': datetime.now(timezone.utc).isoformat(),
                 'source': 'polygon_daily',
                 'data_source': 'polygon'
             }
@@ -951,13 +975,15 @@ async def _get_current_price_alpaca(symbol: str, current_db_instance: StockDBBas
                     
                     if quote:
                         # Create DataFrame for saving to realtime table
-                        timestamp = pd.to_datetime(quote.get('t')) if quote.get('t') else datetime.now()
+                        if quote.get('t'):
+                            timestamp = pd.to_datetime(quote.get('t'))
+                        else:
+                            timestamp = datetime.now(timezone.utc)
                         quote_df = pd.DataFrame({
                             'price': [quote.get('bp', 0)],
-                            'size': [quote.get('bs', 0)],
-                            'ask_price': [quote.get('ap')],
-                            'ask_size': [quote.get('as')]
+                            'size': [quote.get('bs', 0)]
                         }, index=[timestamp])
+                        quote_df.index.name = 'timestamp'  # Ensure index has the correct name
                         
                         # Save to realtime table if we have a database instance
                         if current_db_instance:
@@ -975,7 +1001,7 @@ async def _get_current_price_alpaca(symbol: str, current_db_instance: StockDBBas
                             'bid_size': quote.get('bs'),
                             'ask_size': quote.get('as'),
                             'timestamp': quote.get('t'),
-                            'write_timestamp': datetime.now().isoformat(),
+                            'write_timestamp': datetime.now(timezone.utc).isoformat(),
                             'source': 'alpaca_quote',
                             'data_source': 'alpaca'
                         }
@@ -989,11 +1015,15 @@ async def _get_current_price_alpaca(symbol: str, current_db_instance: StockDBBas
                     
                     if trade:
                         # Create DataFrame for saving to realtime table
-                        timestamp = pd.to_datetime(trade.get('t')) if trade.get('t') else datetime.now()
+                        if trade.get('t'):
+                            timestamp = pd.to_datetime(trade.get('t'))
+                        else:
+                            timestamp = datetime.now(timezone.utc)
                         trade_df = pd.DataFrame({
                             'price': [trade.get('p')],
                             'size': [trade.get('s')]
                         }, index=[timestamp])
+                        trade_df.index.name = 'timestamp'  # Ensure index has the correct name
                         
                         # Save to realtime table if we have a database instance
                         if current_db_instance:
@@ -1010,7 +1040,7 @@ async def _get_current_price_alpaca(symbol: str, current_db_instance: StockDBBas
                             'ask_price': None,
                             'size': trade.get('s'),
                             'timestamp': trade.get('t'),
-                            'write_timestamp': datetime.now().isoformat(),
+                            'write_timestamp': datetime.now(timezone.utc).isoformat(),
                             'source': 'alpaca_trade',
                             'data_source': 'alpaca'
                         }
@@ -1045,7 +1075,7 @@ async def _get_current_price_alpaca(symbol: str, current_db_instance: StockDBBas
                             'close': bar.get('c'),
                             'volume': bar.get('v'),
                             'timestamp': bar.get('t'),
-                            'write_timestamp': datetime.now().isoformat(),
+                            'write_timestamp': datetime.now(timezone.utc).isoformat(),
                             'source': 'alpaca_daily',
                             'data_source': 'alpaca'
                         }
@@ -1185,12 +1215,23 @@ async def main() -> None:
     should_get_current_price = args.current_price or (args.start_date is None and args.end_date is None and not args.force_fetch and not args.query_only)
     
     if should_get_current_price:
+        db_instance = None
         try:
+            # Create database instance for current price request
+            if args.db_path and ':' in args.db_path:
+                # Remote database
+                db_instance = get_stock_db("remote", args.db_path)
+            else:
+                # Local database
+                actual_db_path = args.db_path
+                if actual_db_path is None:
+                    actual_db_path = get_default_db_path("duckdb") if args.db_type == 'duckdb' else get_default_db_path("db")
+                db_instance = get_stock_db(args.db_type, actual_db_path)
+            
             price_data = await get_current_price(
                 symbol=args.symbol,
                 data_source=args.data_source,
-                db_type=args.db_type,
-                db_path=args.db_path,
+                stock_db_instance=db_instance,
                 max_age_seconds=args.current_price_max_age
             )
             
@@ -1211,6 +1252,13 @@ async def main() -> None:
         except Exception as e:
             print(f"Error getting current price for {args.symbol}: {e}", file=sys.stderr)
             return
+        finally:
+            # Clean up database session
+            if db_instance and hasattr(db_instance, 'close_session') and callable(db_instance.close_session):
+                try:
+                    await db_instance.close_session()
+                except Exception as e:
+                    print(f"Warning: Error closing database session: {e}", file=sys.stderr)
 
     # Call process_symbol_data which now handles DB initialization internally if no instance is passed.
     final_df = await process_symbol_data(
