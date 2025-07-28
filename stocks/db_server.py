@@ -100,8 +100,8 @@ ws_manager = None  # Will be initialized in main_server_runner
 
 # Custom Formatter to handle different log record types
 class RequestFormatter(logging.Formatter):
-    access_log_format = "%(asctime)s [%(levelname)s] %(client_ip)s - \\\"%(request_line)s\\\" %(status_code)s %(response_size)s \\\"%(user_agent)s\\\" - %(message)s"
-    basic_log_format = "%(asctime)s [%(levelname)s] - %(message)s"
+    access_log_format = "%(asctime)s [PID:%(process)d] [%(levelname)s] %(client_ip)s - \\\"%(request_line)s\\\" %(status_code)s %(response_size)s \\\"%(user_agent)s\\\" - %(message)s"
+    basic_log_format = "%(asctime)s [PID:%(process)d] [%(levelname)s] - %(message)s"
 
     def __init__(self):
         super().__init__(fmt=self.basic_log_format, datefmt=None, style='%') # Default to basic
@@ -220,12 +220,20 @@ async def logging_middleware(request: web.Request, handler):
         extra_log_info["status_code"] = response.status
         extra_log_info["response_size"] = response.body_length if hasattr(response, 'body_length') else len(response.body) if response.body else 0
         # For general messages not specific to a request field, we add it directly
-        logger.info(f"Request handled for {request.path}", extra=extra_log_info)
+        # Reduce log noise for health checks and static resource requests
+        if request.path in ["/", "/health", "/healthz", "/ready", "/live"] or request.path.endswith(('.js', '.css', '.ico', '.png', '.jpg', '.jpeg', '.gif')):
+            logger.debug(f"Request handled for {request.path}", extra=extra_log_info)
+        else:
+            logger.info(f"Request handled for {request.path}", extra=extra_log_info)
         return response
     except web.HTTPException as ex: # Catch HTTP exceptions to log them correctly
         extra_log_info["status_code"] = ex.status_code
         extra_log_info["response_size"] = ex.body.tell() if ex.body and hasattr(ex.body, 'tell') else (len(ex.body) if ex.body else 0)
-        logger.error(f"HTTP Exception: {ex.reason}", extra=extra_log_info, exc_info=False) # Don't print full stack for HTTP errors unless debug
+        # Reduce log noise for common health check and static resource errors
+        if request.path in ["/", "/health", "/healthz", "/ready", "/live"] or request.path.endswith(('.js', '.css', '.ico', '.png', '.jpg', '.jpeg', '.gif')):
+            logger.debug(f"HTTP Exception: {ex.reason}", extra=extra_log_info, exc_info=False)
+        else:
+            logger.error(f"HTTP Exception: {ex.reason}", extra=extra_log_info, exc_info=False) # Don't print full stack for HTTP errors unless debug
         raise
     except Exception as e: # Catch all other exceptions
         extra_log_info["status_code"] = 500
@@ -272,6 +280,64 @@ async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
         if not ws.closed:
             await ws.close()
         return ws
+
+async def handle_health_check(request: web.Request) -> web.Response:
+    """Simple health check endpoint."""
+    # Get database information from the app context
+    db_instance = request.app.get('db_instance')
+    db_info = {}
+    
+    if db_instance:
+        # Try to get database file path from the instance
+        try:
+            # Access the database file path from the instance
+            if hasattr(db_instance, 'db_file_path'):
+                db_info['db_file'] = db_instance.db_file_path
+            elif hasattr(db_instance, 'db_config'):
+                db_info['db_file'] = db_instance.db_config
+            else:
+                db_info['db_file'] = 'Unknown'
+            
+            # Get database type
+            if hasattr(db_instance, 'db_type'):
+                db_info['db_type'] = db_instance.db_type
+            else:
+                db_info['db_type'] = 'Unknown'
+                
+        except Exception as e:
+            db_info['error'] = f"Could not retrieve database info: {str(e)}"
+    
+    return web.json_response({
+        "status": "healthy", 
+        "message": "Stock DB Server is running",
+        "database": db_info
+    })
+
+async def handle_catch_all(request: web.Request) -> web.Response:
+    """Catch-all handler for unknown routes."""
+    # Log the request but don't spam the logs for repeated requests
+    path = request.path
+    user_agent = request.headers.get("User-Agent", "Unknown")
+    
+    # If it's a health check or monitoring request, return a simple response
+    if path in ["/", "/health", "/healthz", "/ready", "/live"]:
+        # Use the same enhanced health check response
+        return await handle_health_check(request)
+    
+    # For JavaScript files or other static resources, return 404 with a helpful message
+    if path.endswith(('.js', '.css', '.ico', '.png', '.jpg', '.jpeg', '.gif')):
+        return web.json_response({
+            "error": "Not Found",
+            "message": f"Static resource '{path}' not found. This is a database API server.",
+            "available_endpoints": ["/db_command (POST)", "/ws (WebSocket)"]
+        }, status=404)
+    
+    # For other unknown routes, return a helpful 404
+    return web.json_response({
+        "error": "Not Found", 
+        "message": f"Endpoint '{path}' not found",
+        "available_endpoints": ["/db_command (POST)", "/ws (WebSocket)"]
+    }, status=404)
 
 async def handle_db_command(request: web.Request) -> web.Response:
     """
@@ -497,15 +563,22 @@ async def main_server_runner():
     if not isinstance(app['client_max_size'], int):
         app['client_max_size'] = int(app['client_max_size'])
 
+    # Add specific endpoints
     app.router.add_post("/db_command", handle_db_command)
     app.router.add_get("/ws", handle_websocket)  # Add WebSocket endpoint
+    app.router.add_get("/", handle_health_check)  # Add health check endpoint
+    app.router.add_get("/health", handle_health_check)  # Alternative health check endpoint
+    
+    # Add catch-all handler for unknown routes (must be last)
+    app.router.add_get("/{path:.*}", handle_catch_all)
+    app.router.add_post("/{path:.*}", handle_catch_all)
     
     # Remove handler_kwargs from AppRunner if app['client_max_size'] is the preferred method
     # The handler_args approach might not be effective for client_max_size directly.
     # runner = web.AppRunner(app, handler_args=handler_kwargs)
     runner = web.AppRunner(app) # Initialize AppRunner without handler_args for this attempt
     await runner.setup()
-    site = web.TCPSite(runner, "localhost", args.port)
+    site = web.TCPSite(runner, "0.0.0.0", args.port)
     
     logger.info(f"Server starting on http://localhost:{args.port}")
     logger.info(f"Using database file: {os.path.abspath(args.db_file)}")

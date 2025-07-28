@@ -10,8 +10,12 @@ services:
     ports:
       - "9002:9002"
     volumes:
-      - ./data:/app/data
-      - ./data/lists:/app/data/lists
+      - ./data:/app/data:rw
+      - ./data/daily:/app/data/daily:rw
+      - ./data/hourly:/app/data/hourly:rw
+      - ./data/streaming:/app/data/streaming:rw
+      - ./data/streaming/raw:/app/data/streaming/raw:rw
+      - ./data/lists:/app/data/lists:rw
     environment:
       - POLYGON_API_KEY=${POLYGON_API_KEY}
       - ALPACA_API_KEY=${ALPACA_API_KEY}
@@ -29,8 +33,12 @@ services:
     ports:
       - "9001:9001"
     volumes:
-      - ./data:/app/data
-      - ./data/lists:/app/data/lists
+      - ./data:/app/data:rw
+      - ./data/daily:/app/data/daily:rw
+      - ./data/hourly:/app/data/hourly:rw
+      - ./data/streaming:/app/data/streaming:rw
+      - ./data/streaming/raw:/app/data/streaming/raw:rw
+      - ./data/lists:/app/data/lists:rw
     environment:
       - POLYGON_API_KEY=${POLYGON_API_KEY}
       - ALPACA_API_KEY=${ALPACA_API_KEY}
@@ -44,12 +52,16 @@ services:
     build: .
     command: >
       sh -c "ulimit -n 65536 && 
-              python db_server.py --db-file data/streaming/streaming.duckdb --port 9000 --log-level ERROR --heartbeat-interval 60"
+              python db_server.py --db-file data/streaming/streaming.duckdb --port 9000 --log-level INFO --heartbeat-interval 60"
     ports:
       - "9000:9000"
     volumes:
-      - ./data:/app/data
-      - ./data/lists:/app/data/lists
+      - ./data:/app/data:rw
+      - ./data/daily:/app/data/daily:rw
+      - ./data/hourly:/app/data/hourly:rw
+      - ./data/streaming:/app/data/streaming:rw
+      - ./data/streaming/raw:/app/data/streaming/raw:rw
+      - ./data/lists:/app/data/lists:rw
     environment:
       - POLYGON_API_KEY=${POLYGON_API_KEY}
       - ALPACA_API_KEY=${ALPACA_API_KEY}
@@ -70,11 +82,15 @@ services:
       --csv-data-dir data/streaming/raw/ 
       --save-max-retries 30 
       --only-log-updates 
-      --remote-db-server localhost:9000 
+      --remote-db-server db-server-streaming:9000 
       --max-symbols-per-connection 5
     volumes:
-      - ./data:/app/data
-      - ./data/lists:/app/data/lists
+      - ./data:/app/data:rw
+      - ./data/daily:/app/data/daily:rw
+      - ./data/hourly:/app/data/hourly:rw
+      - ./data/streaming:/app/data/streaming:rw
+      - ./data/streaming/raw:/app/data/streaming/raw:rw
+      - ./data/lists:/app/data/lists:rw
     environment:
       - POLYGON_API_KEY=${POLYGON_API_KEY}
       - ALPACA_API_KEY=${ALPACA_API_KEY}
