@@ -225,13 +225,13 @@ class HistoricalDataFetcher:
             filter_end = time.time()
             print(f"  [TIMER] Local filtering took {filter_end - filter_start:.2f} seconds.")
 
-            print(f"Found {len(filtered_contracts)} contracts after filtering. Fetching snapshot data for up to 100 contracts...", flush=True)
+            print(f"Found {len(filtered_contracts)} contracts after filtering. Fetching snapshot data for all {len(filtered_contracts)} contracts...", flush=True)
 
             # --- Fetch snapshot data only for the contracts we will display ---
             processing_start = time.time()
-            for i, contract in enumerate(filtered_contracts[:100]): # Limit to 100 for performance
+            for i, contract in enumerate(filtered_contracts): # Process all contracts
                 if i > 0 and i % 10 == 0:
-                    print(f"  ...processed {i} of {len(filtered_contracts[:100])} contracts...", flush=True)
+                    print(f"  ...processed {i} of {len(filtered_contracts)} contracts...", flush=True)
 
                 contract_ticker = getattr(contract, 'ticker', None)
                 if not contract_ticker:
@@ -263,7 +263,7 @@ class HistoricalDataFetcher:
                 options_data["contracts"].append(contract_details)
 
             processing_end = time.time()
-            print(f"  [TIMER] Processing and fetching snapshots for {len(filtered_contracts[:100])} contracts took {processing_end - processing_start:.2f} seconds.")
+            print(f"  [TIMER] Processing and fetching snapshots for {len(filtered_contracts)} contracts took {processing_end - processing_start:.2f} seconds.")
             
             overall_end_time = time.time()
             print(f"  [TIMER] Total time for get_active_options_for_date: {overall_end_time - overall_start_time:.2f} seconds.")
@@ -340,7 +340,12 @@ class HistoricalDataFetcher:
                         options_by_expiry[exp] = []
                     options_by_expiry[exp].append(c)
                 
-                for exp_date in sorted(options_by_expiry.keys())[:5]: # Show first 5 expirations
+                # Debug: Print all available expirations
+                print(f"\nDEBUG: Found {len(options_by_expiry)} unique expirations:")
+                for exp in sorted(options_by_expiry.keys()):
+                    print(f"  {exp}: {len(options_by_expiry[exp])} contracts")
+                
+                for exp_date in sorted(options_by_expiry.keys())[:20]: # Show first 20 expirations
                     output.append(f"\nExpiration: {exp_date}")
                     options_table = []
                     
