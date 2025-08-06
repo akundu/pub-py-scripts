@@ -576,7 +576,19 @@ async def process_symbol_data(
         actual_db_path = db_path
         if actual_db_path is None:
             actual_db_path = get_default_db_path("duckdb") if db_type == 'duckdb' else get_default_db_path("db")
-        current_db_instance = get_stock_db(db_type, actual_db_path)
+        
+        # Detect if this is a remote database (contains ':')
+        if actual_db_path and ':' in actual_db_path:
+            # Check if it's a PostgreSQL connection string
+            if actual_db_path.startswith('postgresql://'):
+                # PostgreSQL database - use postgresql type
+                current_db_instance = get_stock_db("postgresql", actual_db_path)
+            else:
+                # Remote database - use remote type
+                current_db_instance = get_stock_db("remote", actual_db_path)
+        else:
+            # Local database - use specified type
+            current_db_instance = get_stock_db(db_type, actual_db_path)
 
     # Calculate start_date based on days_back_fetch if provided
     if days_back_fetch is not None:
@@ -733,8 +745,13 @@ async def get_current_price(
         
         # Detect if this is a remote database (contains ':')
         if actual_db_path and ':' in actual_db_path:
-            # Remote database - use remote type
-            current_db_instance = get_stock_db("remote", actual_db_path)
+            # Check if it's a PostgreSQL connection string
+            if actual_db_path.startswith('postgresql://'):
+                # PostgreSQL database - use postgresql type
+                current_db_instance = get_stock_db("postgresql", actual_db_path)
+            else:
+                # Remote database - use remote type
+                current_db_instance = get_stock_db("remote", actual_db_path)
         else:
             # Local database - use specified type
             current_db_instance = get_stock_db(db_type, actual_db_path)
@@ -786,16 +803,21 @@ async def get_current_price(
             # Calculate age using UTC timestamps
             age_seconds = (current_time - price_dt).total_seconds()
             
-            # Use write_timestamp for age check if available, otherwise use original timestamp
-            # This makes more sense since write_timestamp represents when we last stored the data
-            max_age_check_seconds = write_age_seconds if write_age_seconds is not None else age_seconds
+            # Use the most recent timestamp (smallest age) for the age check
+            # This ensures we use whichever timestamp is more recent (original fetch or last save)
+            if write_age_seconds is not None:
+                max_age_check_seconds = min(write_age_seconds, age_seconds)
+                used_timestamp = "most recent" if write_age_seconds < age_seconds else "original"
+            else:
+                max_age_check_seconds = age_seconds
+                used_timestamp = "original"
             
             if max_age_check_seconds <= max_age_seconds:
                 # Show which age was used for the decision
                 if write_age_seconds is not None:
-                    age_info = f"write age: {write_age_seconds:.1f}s (used for decision)"
-                    if age_seconds != write_age_seconds:
-                        age_info += f", original price age: {age_seconds:.1f}s"
+                    age_info = f"{used_timestamp} age: {max_age_check_seconds:.1f}s (used for decision)"
+                    if write_age_seconds != age_seconds:
+                        age_info += f", write age: {write_age_seconds:.1f}s, original age: {age_seconds:.1f}s"
                 else:
                     age_info = f"price age: {age_seconds:.1f}s"
                 print(f"Found recent price for {symbol} in database: ${db_price_data['price']:.2f} ({age_info})", file=sys.stderr)
@@ -812,9 +834,9 @@ async def get_current_price(
             else:
                 # Show which age was used for the decision
                 if write_age_seconds is not None:
-                    age_info = f"write age: {write_age_seconds:.1f}s (used for decision)"
-                    if age_seconds != write_age_seconds:
-                        age_info += f", original price age: {age_seconds:.1f}s"
+                    age_info = f"{used_timestamp} age: {max_age_check_seconds:.1f}s (used for decision)"
+                    if write_age_seconds != age_seconds:
+                        age_info += f", write age: {write_age_seconds:.1f}s, original age: {age_seconds:.1f}s"
                 else:
                     age_info = f"price age: {age_seconds:.1f}s"
                 print(f"Database price for {symbol} is too old ({age_info} > {max_age_seconds}s), fetching fresh data", file=sys.stderr)
@@ -1120,14 +1142,14 @@ async def main() -> None:
         "--db-type",
         type=str,
         default='sqlite',
-        choices=['sqlite', 'duckdb'],
-        help="Type of database to use (default: sqlite)."
+        choices=['sqlite', 'duckdb', 'postgresql'],
+        help="Type of database to use (default: sqlite). Use 'postgresql' for PostgreSQL databases."
     )
     parser.add_argument(
         "--db-path",
         type=str,
         default=None,
-        help="Path to the database file. If not provided, uses default for selected db-type."
+        help="Path to the database file or PostgreSQL connection string (e.g., postgresql://user:pass@host:port/db). If not provided, uses default for selected db-type."
     )
     parser.add_argument(
         "--timeframe",
@@ -1219,8 +1241,13 @@ async def main() -> None:
         try:
             # Create database instance for current price request
             if args.db_path and ':' in args.db_path:
-                # Remote database
-                db_instance = get_stock_db("remote", args.db_path)
+                # Check if it's a PostgreSQL connection string
+                if args.db_path.startswith('postgresql://'):
+                    # PostgreSQL database - use postgresql type
+                    db_instance = get_stock_db("postgresql", args.db_path)
+                else:
+                    # Remote database - use remote type
+                    db_instance = get_stock_db("remote", args.db_path)
             else:
                 # Local database
                 actual_db_path = args.db_path

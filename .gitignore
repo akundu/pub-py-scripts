@@ -19,3 +19,10 @@ requirements/
 .env
 .env.local
 .env.*.local
+
+# db files
+data/
+.db
+
+# lock
+*.lock

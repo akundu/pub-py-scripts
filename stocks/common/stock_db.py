@@ -8,7 +8,7 @@ import asyncio
 import aiohttp
 import json
 import base64
-from typing import Any, List
+from typing import Any, List, Dict
 from .common_strategies import (
     calculate_moving_average,
     calculate_exponential_moving_average,
@@ -34,7 +34,7 @@ class StockDBBase(metaclass=ABCMeta):
 
     @abstractmethod
     def _init_db(self) -> None:
-        """Initialize the database with required tables. (No-op for client)"""
+        "Initialize the database with required tables. (No-op for client)"""
         pass
 
     @abstractmethod
@@ -74,6 +74,16 @@ class StockDBBase(metaclass=ABCMeta):
     @abstractmethod
     async def get_latest_price(self, ticker: str) -> float | None:
         """Get the most recent price for a ticker from any available data (realtime, hourly, daily)."""
+        pass
+
+    @abstractmethod
+    async def get_latest_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+        """Get the most recent prices for multiple tickers from any available data (realtime, hourly, daily)."""
+        pass
+
+    @abstractmethod
+    async def get_previous_close_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+        """Get the most recent daily close prices for multiple tickers."""
         pass
 
     @abstractmethod
@@ -600,6 +610,66 @@ class StockDBSQLite(StockDBBase):
 
         return latest_price
 
+    async def get_latest_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+        """Get the most recent prices for multiple tickers (realtime -> hourly -> daily)."""
+        result = {}
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            for ticker in tickers:
+                latest_price = None
+
+                # 1. Try realtime_data
+                try:
+                    cursor.execute("SELECT price FROM realtime_data WHERE ticker = ? AND type = 'quote' ORDER BY timestamp DESC LIMIT 1", (ticker,))
+                    row = cursor.fetchone()
+                    if row: latest_price = row[0]
+                except sqlite3.Error as e:
+                    print(f"SQLite error (realtime_data for {ticker}): {e}")
+
+                # 2. Try hourly_prices if no realtime found
+                if latest_price is None:
+                    try:
+                        cursor.execute("SELECT close FROM hourly_prices WHERE ticker = ? ORDER BY datetime DESC LIMIT 1", (ticker,))
+                        row = cursor.fetchone()
+                        if row: latest_price = row[0]
+                    except sqlite3.Error as e:
+                        print(f"SQLite error (hourly_prices for {ticker}): {e}")
+
+                # 3. Try daily_prices if no hourly found
+                if latest_price is None:
+                    try:
+                        cursor.execute("SELECT close FROM daily_prices WHERE ticker = ? ORDER BY date DESC LIMIT 1", (ticker,))
+                        row = cursor.fetchone()
+                        if row: latest_price = row[0]
+                    except sqlite3.Error as e:
+                        print(f"SQLite error (daily_prices for {ticker}): {e}")
+
+                result[ticker] = latest_price
+        
+        return result
+
+    async def get_previous_close_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+        """Get the most recent daily close prices for multiple tickers."""
+        result = {}
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            for ticker in tickers:
+                latest_close = None
+                try:
+                    cursor.execute("SELECT close FROM daily_prices WHERE ticker = ? ORDER BY date DESC LIMIT 1", (ticker,))
+                    row = cursor.fetchone()
+                    if row: latest_close = row[0]
+                except sqlite3.Error as e:
+                    print(f"SQLite error (daily_prices for {ticker}): {e}")
+                
+                result[ticker] = latest_close
+        
+        return result
+
     async def execute_select_sql(self, sql_query: str, params: tuple = ()) -> pd.DataFrame:
         """Execute a direct SELECT SQL query on SQLite and return results as a DataFrame."""        
         def _run_sync():
@@ -934,6 +1004,58 @@ class StockDBDuckDB(StockDBBase):
 
         return latest_price
 
+    async def get_latest_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+        """Get the most recent prices for multiple tickers (realtime -> hourly -> daily) from DuckDB."""
+        result = {}
+        
+        with duckdb.connect(database=self.db_path, read_only=True) as conn:
+            for ticker in tickers:
+                latest_price = None
+                
+                # 1. Try realtime_data
+                try:
+                    res_rt = conn.execute("SELECT price FROM realtime_data WHERE ticker = ? AND type = 'quote' ORDER BY timestamp DESC LIMIT 1", (ticker,)).fetchone()
+                    if res_rt: latest_price = res_rt[0]
+                except duckdb.Error as e:
+                    print(f"DuckDB error (realtime_data for {ticker}): {e}")
+
+                # 2. Try hourly_prices
+                if latest_price is None:
+                    try:
+                        res_h = conn.execute("SELECT close FROM hourly_prices WHERE ticker = ? ORDER BY datetime DESC LIMIT 1", (ticker,)).fetchone()
+                        if res_h: latest_price = res_h[0]
+                    except duckdb.Error as e:
+                        print(f"DuckDB error (hourly_prices for {ticker}): {e}")
+
+                # 3. Try daily_prices
+                if latest_price is None:
+                    try:
+                        res_d = conn.execute("SELECT close FROM daily_prices WHERE ticker = ? ORDER BY date DESC LIMIT 1", (ticker,)).fetchone()
+                        if res_d: latest_price = res_d[0]
+                    except duckdb.Error as e:
+                        print(f"DuckDB error (daily_prices for {ticker}): {e}")
+
+                result[ticker] = latest_price
+        
+        return result
+
+    async def get_previous_close_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+        """Get the most recent daily close prices for multiple tickers."""
+        result = {}
+        
+        with duckdb.connect(database=self.db_path, read_only=True) as conn:
+            for ticker in tickers:
+                latest_close = None
+                try:
+                    res = conn.execute("SELECT close FROM daily_prices WHERE ticker = ? ORDER BY date DESC LIMIT 1", (ticker,)).fetchone()
+                    if res: latest_close = res[0]
+                except duckdb.Error as e:
+                    print(f"DuckDB error (daily_prices for {ticker}): {e}")
+                
+                result[ticker] = latest_close
+        
+        return result
+
     async def execute_select_sql(self, sql_query: str, params: tuple = ()) -> pd.DataFrame:
         """Execute a direct SELECT SQL query on DuckDB and return results as a DataFrame."""
         def _run_sync():
@@ -1015,7 +1137,25 @@ class StockDBClient(StockDBBase):
             return pd.DataFrame()
         df = pd.DataFrame.from_records(response_data)
         if index_col in df.columns:
-            df[index_col] = pd.to_datetime(df[index_col], errors='coerce')
+            # Try to parse with explicit format first, then fall back to flexible parsing
+            try:
+                # Try ISO format first (most common for our timestamps)
+                df[index_col] = pd.to_datetime(df[index_col], format='ISO8601', errors='coerce')
+            except (ValueError, TypeError):
+                try:
+                    # Try specific ISO format patterns
+                    df[index_col] = pd.to_datetime(df[index_col], format='%Y-%m-%dT%H:%M:%S.%fZ', errors='coerce')
+                except (ValueError, TypeError):
+                    try:
+                        # Try without microseconds
+                        df[index_col] = pd.to_datetime(df[index_col], format='%Y-%m-%dT%H:%M:%SZ', errors='coerce')
+                    except (ValueError, TypeError):
+                        # Fall back to flexible parsing but suppress the warning
+                        import warnings
+                        with warnings.catch_warnings():
+                            warnings.filterwarnings('ignore', category=UserWarning, message='Could not infer format')
+                            df[index_col] = pd.to_datetime(df[index_col], errors='coerce')
+            
             df.set_index(index_col, inplace=True)
             df = df[df.index.notna()]
         return df
@@ -1102,6 +1242,22 @@ class StockDBClient(StockDBBase):
             raise Exception(f"Server error getting latest price: {response['error']}")
         return response.get("latest_price")
 
+    async def get_latest_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+        """Get the most recent prices for multiple tickers from the server."""
+        params = {"tickers": tickers}
+        response = await self._make_request("get_latest_prices", params)
+        if response.get("error"):
+            raise Exception(f"Server error getting latest prices: {response['error']}")
+        return response.get("prices", {})
+
+    async def get_previous_close_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+        """Get the most recent daily close prices for multiple tickers from the server."""
+        params = {"tickers": tickers}
+        response = await self._make_request("get_previous_close_prices", params)
+        if response.get("error"):
+            raise Exception(f"Server error getting previous close prices: {response['error']}")
+        return response.get("prices", {})
+
     async def execute_select_sql(self, sql_query: str, params: tuple = ()) -> pd.DataFrame:
         server_params = {
             "sql_query": sql_query,
@@ -1136,7 +1292,10 @@ def get_stock_db(db_type: str, db_config: str | None = None) -> StockDBBase:
         return StockDBSQLite(actual_db_config)
     elif db_type_lower == "duckdb":
         return StockDBDuckDB(actual_db_config)
+    elif db_type_lower == "postgresql":
+        from .postgres_db import StockDBPostgreSQL
+        return StockDBPostgreSQL(actual_db_config)
     elif db_type_lower == "remote":
         return StockDBClient(actual_db_config)
     else:
-        raise ValueError(f"Unsupported database type: {db_type}. Choose 'sqlite', 'duckdb', or 'remote'.")
+        raise ValueError(f"Unsupported database type: {db_type}. Choose 'sqlite', 'duckdb', 'postgresql', or 'remote'.")

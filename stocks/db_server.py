@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Dict, Set, Any
 import json
+from datetime import datetime, timezone
 
 # Global logger instance
 logger = logging.getLogger("db_server_logger")
@@ -147,14 +148,17 @@ def initialize_database(db_file_path: str) -> StockDBBase:
     if not db_file_path:
         raise ValueError("Database file path (--db-file) is required.")
 
-    db_dir = os.path.dirname(db_file_path)
-    if db_dir and not os.path.exists(db_dir):
-        try:
-            os.makedirs(db_dir, exist_ok=True) # Added exist_ok=True
-            logger.info(f"Created directory for database: {db_dir}")
-        except OSError as e:
-            logger.error(f"Could not create directory {db_dir} for database: {e}")
-            raise ValueError(f"Could not create directory {db_dir} for database: {e}")
+    # Only create directory for file-based databases (SQLite, DuckDB)
+    # Skip directory creation for connection strings (PostgreSQL, remote)
+    if not db_file_path.startswith(('postgresql://', 'http://', 'https://')) and '://' not in db_file_path:
+        db_dir = os.path.dirname(db_file_path)
+        if db_dir and not os.path.exists(db_dir):
+            try:
+                os.makedirs(db_dir, exist_ok=True) # Added exist_ok=True
+                logger.info(f"Created directory for database: {db_dir}")
+            except OSError as e:
+                logger.error(f"Could not create directory {db_dir} for database: {e}")
+                raise ValueError(f"Could not create directory {db_dir} for database: {e}")
 
     _, file_extension = os.path.splitext(db_file_path)
     db_type_arg: str
@@ -163,15 +167,44 @@ def initialize_database(db_file_path: str) -> StockDBBase:
         db_type_arg = "sqlite"
     elif file_extension.lower() == ".duckdb":
         db_type_arg = "duckdb"
+    elif file_extension.lower() == ".postgresql" or "postgresql" in db_file_path.lower():
+        db_type_arg = "postgresql"
+    elif ":" in db_file_path and not file_extension:  # Remote connection string
+        db_type_arg = "remote"
     else:
         raise ValueError(
             f"Unsupported database file extension: '{file_extension}'. "
-            "Use .db, .sqlite, .sqlite3 for SQLite or .duckdb for DuckDB."
+            "Use .db, .sqlite, .sqlite3 for SQLite, .duckdb for DuckDB, "
+            "or specify a PostgreSQL connection string."
         )
     
     logger.info(f"Attempting to initialize database: type='{db_type_arg}', path='{db_file_path}'")
-    # db_config for local DBs is the file path.
-    instance = get_stock_db(db_type=db_type_arg, db_config=db_file_path)
+    
+    # For PostgreSQL, we need to construct a proper connection string
+    if db_type_arg == "postgresql":
+        # Parse connection string or use defaults
+        if "://" in db_file_path:
+            # Full connection string provided
+            db_config = db_file_path
+        else:
+            # Construct connection string from components
+            # Format: host:port:database:username:password
+            parts = db_file_path.split(":")
+            if len(parts) >= 3:
+                host = parts[0]
+                port = parts[1]
+                database = parts[2]
+                username = parts[3] if len(parts) > 3 else "stock_user"
+                password = parts[4] if len(parts) > 4 else "stock_password"
+                db_config = f"postgresql://{username}:{password}@{host}:{port}/{database}"
+            else:
+                # Default to localhost with standard credentials
+                db_config = "postgresql://stock_user:stock_password@localhost:5432/stock_data"
+    else:
+        # For other database types, use the file path as config
+        db_config = db_file_path
+    
+    instance = get_stock_db(db_type=db_type_arg, db_config=db_config)
     logger.info(f"Database '{db_file_path}' initialized successfully as {db_type_arg}.")
     return instance
 
@@ -256,6 +289,33 @@ async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
 
         # Add this connection as a subscriber
         await ws_manager.add_subscriber(symbol, ws)
+
+        # Get the latest price and broadcast it to the new subscriber
+        db_instance = request.app.get('db_instance')
+        if db_instance:
+            try:
+                # Get the latest price from the database
+                latest_price = await db_instance.get_latest_price(symbol)
+                if latest_price is not None:
+                    # Create an initial price message
+                    initial_message = {
+                        "symbol": symbol,
+                        "data": {
+                            "type": "initial_price",
+                            "event_type": "initial_price_update",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "payload": [{
+                                "price": latest_price,
+                                "timestamp": datetime.now(timezone.utc).isoformat()
+                            }]
+                        }
+                    }
+                    
+                    # Send the initial price to the new subscriber
+                    await ws.send_str(json.dumps(initial_message))
+                    logger.info(f"Sent initial price {latest_price} to new subscriber for {symbol}")
+            except Exception as e:
+                logger.warning(f"Could not send initial price for {symbol}: {e}")
 
         # Keep the connection alive and handle client messages
         async for msg in ws:
@@ -405,7 +465,12 @@ async def handle_db_command(request: web.Request) -> web.Response:
             df_to_save.set_index(index_col, inplace=True)
             df_to_save.index.name = 'date' if interval == 'daily' else 'datetime'
             
-            await db_instance.save_stock_data(df_to_save, ticker, interval)
+            # Get on_duplicate parameter from request, default to "ignore"
+            on_duplicate = params.get("on_duplicate", "ignore")
+            if on_duplicate not in ["ignore", "replace"]:
+                return web.json_response({"error": "Invalid 'on_duplicate' parameter. Must be 'ignore' or 'replace'."}, status=400)
+            
+            await db_instance.save_stock_data(df_to_save, ticker, interval, on_duplicate=on_duplicate)
             
             # Broadcast the new data to WebSocket subscribers
             await ws_manager.broadcast(ticker, data_records)
@@ -433,7 +498,12 @@ async def handle_db_command(request: web.Request) -> web.Response:
             # based on the data_type and the DataFrame columns provided.
             # For simplicity, client sends all available fields, DB layer picks what it needs.
 
-            await db_instance.save_realtime_data(df_to_save, ticker, data_type)
+            # Get on_duplicate parameter from request, default to "ignore"
+            on_duplicate = params.get("on_duplicate", "ignore")
+            if on_duplicate not in ["ignore", "replace"]:
+                return web.json_response({"error": "Invalid 'on_duplicate' parameter. Must be 'ignore' or 'replace'."}, status=400)
+            
+            await db_instance.save_realtime_data(df_to_save, ticker, data_type, on_duplicate)
             #broadcast the data to the websocket subscribers
             if data_records: # Ensure there's something to broadcast
                 transformed_payload_for_broadcast = []
@@ -476,6 +546,22 @@ async def handle_db_command(request: web.Request) -> web.Response:
             if not ticker: return web.json_response({"error": "Missing 'ticker'"}, status=400)
             price = await db_instance.get_latest_price(ticker)
             return web.json_response({"ticker": ticker, "latest_price": price})
+
+        elif command == "get_latest_prices":
+            tickers = params.get("tickers")
+            if not tickers or not isinstance(tickers, list):
+                return web.json_response({"error": "Missing or invalid 'tickers' parameter (must be a list)"}, status=400)
+            
+            prices = await db_instance.get_latest_prices(tickers)
+            return web.json_response({"prices": prices})
+
+        elif command == "get_previous_close_prices":
+            tickers = params.get("tickers")
+            if not tickers or not isinstance(tickers, list):
+                return web.json_response({"error": "Missing or invalid 'tickers' parameter (must be a list)"}, status=400)
+            
+            prices = await db_instance.get_previous_close_prices(tickers)
+            return web.json_response({"prices": prices})
 
         elif command == "execute_sql":
             sql_query = params.get("sql_query")
@@ -521,7 +607,11 @@ async def handle_db_command(request: web.Request) -> web.Response:
 async def main_server_runner():
     parser = argparse.ArgumentParser(description="HTTP server for stock database operations.")
     parser.add_argument("--db-file", required=True, type=str, 
-                        help="Path to the database file (e.g., data/stock_data.db or data/stock_data.duckdb). Extension determines DB type.")
+                        help="Path to the database file or connection string. "
+                             "For SQLite: data/stock_data.db, "
+                             "For DuckDB: data/stock_data.duckdb, "
+                             "For PostgreSQL: localhost:5432:stock_data:stock_user:stock_password "
+                             "or postgresql://user:pass@host:port/db")
     parser.add_argument("--port", type=int, default=8080, help="Port to run the server on (default: 8080).")
     parser.add_argument("--log-file", type=str, default=None, help="Path to a log file. If not provided, logs to stdout.")
     parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
@@ -581,7 +671,11 @@ async def main_server_runner():
     site = web.TCPSite(runner, "0.0.0.0", args.port)
     
     logger.info(f"Server starting on http://localhost:{args.port}")
-    logger.info(f"Using database file: {os.path.abspath(args.db_file)}")
+    # Show database info appropriately based on type
+    if args.db_file.startswith(('postgresql://', 'http://', 'https://')) or '://' in args.db_file:
+        logger.info(f"Using database connection: {args.db_file}")
+    else:
+        logger.info(f"Using database file: {os.path.abspath(args.db_file)}")
     logger.info(f"Maximum request body size set to: {args.max_body_mb}MB ({max_size_bytes} bytes)")
     logger.info("Listening for POST requests on /db_command")
     logger.info(f"WebSocket endpoint available at ws://localhost:{args.port}/ws?symbol=SYMBOL")

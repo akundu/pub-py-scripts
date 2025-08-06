@@ -44,9 +44,10 @@ logger = logging.getLogger(__name__)
 class DynamicCombinedDisplayManager(DynamicDisplayManager):
     """Dynamic display manager that shows quotes and trades in separate columns when both are enabled."""
     
-    def __init__(self, activity_tracker, max_symbols, initial_symbols, output_stream, update_interval: float = 1.0):
+    def __init__(self, activity_tracker, max_symbols, initial_symbols, output_stream, update_interval: float = 1.0, stale_threshold_minutes: int = 10):
         super().__init__(activity_tracker, max_symbols, initial_symbols, output_stream, update_interval)
-        self.symbol_data = {symbol: {"quotes": "", "trades": ""} for symbol in initial_symbols}
+        self.stale_threshold_minutes = stale_threshold_minutes
+        self.symbol_data = {symbol: {"quotes": "", "trades": "", "last_update": None} for symbol in initial_symbols}
         
     def update_symbol(self, symbol: str, data_str: str):
         """Update symbol data based on the type of data."""
@@ -55,15 +56,17 @@ class DynamicCombinedDisplayManager(DynamicDisplayManager):
         
         # Ensure symbol exists in data dictionary
         if symbol not in self.symbol_data:
-            self.symbol_data[symbol] = {"quotes": "", "trades": ""}
+            self.symbol_data[symbol] = {"quotes": "", "trades": "", "last_update": None}
         
         # Determine if this is quote or trade data based on the prefix
-        if data_str.startswith("B:") or data_str.startswith("A:"):
-            # Quote data (B: or A: prefix)
+        if data_str.startswith("B:") or data_str.startswith("A:") or data_str.startswith("INIT:"):
+            # Quote data (B: or A: prefix) or Initial price data
             self.symbol_data[symbol]["quotes"] = data_str
+            self.symbol_data[symbol]["last_update"] = datetime.now(timezone.utc)
         elif data_str.startswith("T:"):
             # Trade data (T: prefix)
             self.symbol_data[symbol]["trades"] = data_str
+            self.symbol_data[symbol]["last_update"] = datetime.now(timezone.utc)
             
         # Also update the parent's buffer for compatibility
         super().update_symbol(symbol, data_str)
@@ -134,9 +137,23 @@ class DynamicCombinedDisplayManager(DynamicDisplayManager):
                     
                     # Print each symbol's data in combined format
                     for symbol in self.symbols:
-                        data = self.symbol_data.get(symbol, {"quotes": "", "trades": ""})
-                        quotes_str = data["quotes"] if data["quotes"] else "No quotes"
-                        trades_str = data["trades"] if data["trades"] else "No trades"
+                        data = self.symbol_data.get(symbol, {"quotes": "", "trades": "", "last_update": None})
+                        current_time = datetime.now(timezone.utc)
+                        last_update = data.get("last_update")
+                        
+                        # Check if data is stale
+                        is_stale = False
+                        if last_update:
+                            time_diff = (current_time - last_update).total_seconds() / 60  # Convert to minutes
+                            is_stale = time_diff > self.stale_threshold_minutes
+                        
+                        # Determine what to display
+                        if is_stale:
+                            quotes_str = "No quotes" if not data["quotes"] else data["quotes"]
+                            trades_str = "No trades" if not data["trades"] else data["trades"]
+                        else:
+                            quotes_str = data["quotes"] if data["quotes"] else "No quotes"
+                            trades_str = data["trades"] if data["trades"] else "No trades"
                         
                         # Extract time from either quotes or trades
                         time_str = ""
@@ -164,11 +181,12 @@ class DynamicCombinedDisplayManager(DynamicDisplayManager):
 class CombinedDisplayManager:
     """Display manager that shows quotes and trades in separate columns when both are enabled."""
     
-    def __init__(self, symbols: List[str], output_stream, update_interval: float = 1.0):
+    def __init__(self, symbols: List[str], output_stream, update_interval: float = 1.0, stale_threshold_minutes: int = 10):
         self.symbols = sorted(symbols)
         self.output_stream = output_stream
         self.update_interval = update_interval
-        self.symbol_data = {symbol: {"quotes": "", "trades": ""} for symbol in symbols}
+        self.stale_threshold_minutes = stale_threshold_minutes
+        self.symbol_data = {symbol: {"quotes": "", "trades": "", "last_update": None} for symbol in symbols}
         self.lock = threading.Lock()
         self.last_update_time = 0
         
@@ -185,12 +203,14 @@ class CombinedDisplayManager:
         with self.lock:
             if symbol in self.symbol_data:
                 # Determine if this is quote or trade data based on the prefix
-                if data_str.startswith("B:") or data_str.startswith("A:"):
-                    # Quote data (B: or A: prefix)
+                if data_str.startswith("B:") or data_str.startswith("A:") or data_str.startswith("INIT:"):
+                    # Quote data (B: or A: prefix) or Initial price data
                     self.symbol_data[symbol]["quotes"] = data_str
+                    self.symbol_data[symbol]["last_update"] = datetime.now(timezone.utc)
                 elif data_str.startswith("T:"):
                     # Trade data (T: prefix)
                     self.symbol_data[symbol]["trades"] = data_str
+                    self.symbol_data[symbol]["last_update"] = datetime.now(timezone.utc)
                     
                 # Check if we should update the display
                 current_time = time.time()
@@ -209,8 +229,22 @@ class CombinedDisplayManager:
         # Write updated data
         for symbol in self.symbols:
             data = self.symbol_data[symbol]
-            quotes_str = data["quotes"] if data["quotes"] else "No quotes"
-            trades_str = data["trades"] if data["trades"] else "No trades"
+            current_time = datetime.now(timezone.utc)
+            last_update = data.get("last_update")
+            
+            # Check if data is stale
+            is_stale = False
+            if last_update:
+                time_diff = (current_time - last_update).total_seconds() / 60  # Convert to minutes
+                is_stale = time_diff > self.stale_threshold_minutes
+            
+            # Determine what to display
+            if is_stale:
+                quotes_str = "No quotes" if not data["quotes"] else data["quotes"]
+                trades_str = "No trades" if not data["trades"] else data["trades"]
+            else:
+                quotes_str = data["quotes"] if data["quotes"] else "No quotes"
+                trades_str = data["trades"] if data["trades"] else "No trades"
             
             # Extract time from either quotes or trades
             time_str = ""
@@ -241,7 +275,7 @@ class CombinedDisplayManager:
 
 
 class StreamDataClient:
-    def __init__(self, server_url: str, symbols: Set[str], display_manager: Optional[StaticDisplayManager] = None, feed_filter: str = "both"):
+    def __init__(self, server_url: str, symbols: Set[str], display_manager: Optional[StaticDisplayManager] = None, feed_filter: str = "both", stale_threshold_minutes: int = 10):
         self.server_url = server_url
         self.symbols = symbols
         self.connections: Set[websockets.WebSocketClientProtocol] = set()
@@ -249,7 +283,9 @@ class StreamDataClient:
         self.display_manager = display_manager
         self.tasks: List[asyncio.Task] = []
         self.last_prices: Dict[str, Dict[str, Optional[float]]] = {} # Store last prices here (bid_price, ask_price, trade_price)
+        self.last_update_times: Dict[str, datetime] = {} # Store last update times for each symbol
         self.feed_filter = feed_filter  # "quotes", "trades", or "both"
+        self.stale_threshold_minutes = stale_threshold_minutes
         self._setup_signal_handlers()
 
     def _setup_signal_handlers(self):
@@ -321,6 +357,47 @@ class StreamDataClient:
                     if message_type == 'heartbeat':
                         logger.debug(f"Heartbeat for {received_symbol or symbol} @ {inner_data.get('timestamp')}")
                         continue # Skip further processing for heartbeats
+
+                    # --- Handle Initial Price Updates ---
+                    if event_type == 'initial_price_update' and message_type == 'initial_price':
+                        payload = inner_data.get('payload')
+                        if not isinstance(payload, list) or not payload:
+                            logger.warning(f"Initial price update for {symbol} has missing or empty payload: {inner_data}")
+                            continue
+                        
+                        for price_details in payload:
+                            initial_price = price_details.get('price')
+                            data_timestamp_str = price_details.get('timestamp', datetime.now(timezone.utc).isoformat())
+
+                            if initial_price is None:
+                                logger.warning(f"Initial price update for {symbol} missing price: {price_details}")
+                                continue
+
+                            if self.display_manager:
+                                # Format initial price display - show it prominently
+                                price_fmt = f"{initial_price:<7.2f}"
+                                if self.feed_filter == "quotes":
+                                    data_str = f"Q: INIT: {price_fmt} T:{data_timestamp_str}"
+                                elif self.feed_filter == "trades":
+                                    data_str = f"T: INIT: {price_fmt} T:{data_timestamp_str}"
+                                else:  # "both" - show in quotes column
+                                    data_str = f"B: INIT: {price_fmt} A: INIT: {price_fmt}"
+                                
+                                self.display_manager.update_symbol(symbol, data_str)
+                                logger.info(f"Displayed initial price ${initial_price:.2f} for {symbol}")
+                            else:
+                                print(f"\n[{data_timestamp_str}] {symbol} Initial Price: ${initial_price:.2f}")
+
+                            # Store initial price as last trade price for comparison
+                            current_prices = self.last_prices.get(symbol, {'bid_price': None, 'ask_price': None, 'trade_price': None})
+                            current_prices['trade_price'] = initial_price
+                            self.last_prices[symbol] = current_prices
+                            
+                            # Update last update time
+                            self.last_update_times[symbol] = datetime.now(timezone.utc)
+                        
+                        # Skip to next message - initial price handled
+                        continue
 
                     # --- Handle Quote Updates ---
                     if event_type == 'quote_update' and message_type == 'quote':
@@ -397,6 +474,9 @@ class StreamDataClient:
                             current_prices['bid_price'] = bid_price
                             current_prices['ask_price'] = ask_price
                             self.last_prices[symbol] = current_prices
+                            
+                            # Update last update time
+                            self.last_update_times[symbol] = datetime.now(timezone.utc)
                     
                     # --- Handle Trade Updates ---
                     elif event_type == 'trade_update' and message_type == 'trade':
@@ -468,6 +548,9 @@ class StreamDataClient:
                             current_prices = self.last_prices.get(symbol, {'bid_price': None, 'ask_price': None, 'trade_price': None})
                             current_prices['trade_price'] = trade_price
                             self.last_prices[symbol] = current_prices
+                            
+                            # Update last update time
+                            self.last_update_times[symbol] = datetime.now(timezone.utc)
                     else:
                         logger.warning(f"Received unhandled message type/event for {symbol}: type='{message_type}', event='{event_type}'. Data: {inner_data}")
 
@@ -568,6 +651,12 @@ async def main():
         default='both',
         help="Filter to show only quotes, only trades, or both (default: both)."
     )
+    display_group.add_argument(
+        '--stale-threshold-minutes',
+        type=int,
+        default=10,
+        help="Minutes after which to show 'No quotes/trades' instead of old data (default: 10)."
+    )
 
     # Add activity tracking options
     activity_group = parser.add_argument_group(title="Activity Tracking Options")
@@ -609,6 +698,7 @@ async def main():
                     list(symbols),  # Initial symbols list
                     sys.stdout,
                     args.display_update_interval,
+                    args.stale_threshold_minutes,
                 )
             else:
                 display_manager = DynamicDisplayManager(
@@ -629,7 +719,8 @@ async def main():
                     display_manager = CombinedDisplayManager(
                         all_symbols_for_display, 
                         sys.stdout, 
-                        args.display_update_interval
+                        args.display_update_interval,
+                        args.stale_threshold_minutes,
                     )
                 else:
                     display_manager = StaticDisplayManager(
@@ -639,7 +730,7 @@ async def main():
                     )
 
     # Create and run the client
-    client = StreamDataClient(args.server, symbols, display_manager, args.feed_filter)
+    client = StreamDataClient(args.server, symbols, display_manager, args.feed_filter, args.stale_threshold_minutes)
     await client.run()
 
 if __name__ == "__main__":

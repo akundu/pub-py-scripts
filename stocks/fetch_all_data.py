@@ -5,6 +5,8 @@ import asyncio
 import os
 import argparse
 import sys
+import time
+from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 # Synchronous wrapper function to get current price for a single symbol
@@ -274,6 +276,17 @@ def parse_args():
         default=60,
         help="Maximum age of database price data in seconds before fetching fresh data (default: 60 seconds = 1 minutes)"
     )
+    parser.add_argument(
+        "--continuous",
+        action="store_true",
+        help="Continuously fetch current prices in a loop. Uses current-price-max-age to determine optimal fetch intervals."
+    )
+    parser.add_argument(
+        "--continuous-max-runs",
+        type=int,
+        default=None,
+        help="Maximum number of continuous fetch runs before stopping (default: run indefinitely)"
+    )
     
     # Time interval for fetching market data
     time_group = parser.add_mutually_exclusive_group()
@@ -286,7 +299,7 @@ def parse_args():
 
     # Set default executor type based on other args if not explicitly set
     if args.executor_type is None:
-        if args.db_path and any(':' in path for path in args.db_path):
+        if args.db_path and any(':' in path and not path.startswith('postgresql://') for path in args.db_path):
             args.executor_type = "process"
             print("Info: Remote database detected, defaulting --executor-type to 'process'.", file=sys.stderr)
         else:
@@ -299,10 +312,17 @@ def parse_args():
     if args.db_path:
         for db_path in args.db_path:
             if ':' in db_path:
-                # Remote database (host:port format)
-                db_type = "remote"
-                db_config = db_path
-                print(f"Configuring workers to use remote database server at: {db_config}")
+                # Check if it's a PostgreSQL connection string
+                if db_path.startswith('postgresql://'):
+                    # PostgreSQL database - use postgresql type
+                    db_type = "postgresql"
+                    db_config = db_path
+                    print(f"Configuring workers to use PostgreSQL database at: {db_config}")
+                else:
+                    # Remote database (host:port format)
+                    db_type = "remote"
+                    db_config = db_path
+                    print(f"Configuring workers to use remote database server at: {db_config}")
             else:
                 # Local database - infer type from file extension
                 db_path_lower = db_path.lower()
@@ -334,6 +354,71 @@ def parse_args():
             db_configs_for_workers.append((db_type, db_config))
     
     return args, db_configs_for_workers
+
+async def run_continuous_current_price_fetch(all_symbols_list: list[str], args: argparse.Namespace, db_configs_for_workers: list[tuple[str, str]]):
+    """
+    Continuously fetch current prices with intelligent interval management.
+    
+    The function optimizes fetch intervals based on:
+    - The current_price_max_age parameter
+    - The actual time taken for the last fetch
+    - Ensuring we don't miss the window for any symbol
+    """
+    print(f"Starting continuous current price fetch for {len(all_symbols_list)} symbols...")
+    print(f"Max age window: {args.current_price_max_age} seconds")
+    print(f"Max runs: {args.continuous_max_runs if args.continuous_max_runs else 'unlimited'}")
+    
+    run_count = 0
+    last_fetch_duration = 0  # Track how long the last fetch took
+    
+    while True:
+        run_count += 1
+        start_time = time.time()
+        
+        print(f"\n--- Run #{run_count} at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} ---")
+        
+        try:
+            # Run the current price fetch
+            (success_count, failure_count) = await process_symbols(all_symbols_list, args, db_configs_for_workers)
+            
+            # Calculate how long this fetch took
+            fetch_duration = time.time() - start_time
+            last_fetch_duration = fetch_duration
+            
+            print(f"Run #{run_count} completed in {fetch_duration:.1f}s: {success_count} successes, {failure_count} failures")
+            
+            # Check if we should stop
+            if args.continuous_max_runs and run_count >= args.continuous_max_runs:
+                print(f"Reached maximum runs ({args.continuous_max_runs}), stopping continuous fetch.")
+                break
+            
+            # Calculate optimal sleep time
+            # We want to ensure we fetch within the max_age window, but also account for:
+            # 1. The time the fetch itself takes
+            # 2. A safety margin to ensure we don't miss the window
+            safety_margin = 5  # 5 seconds safety margin
+            available_window = args.current_price_max_age - fetch_duration - safety_margin
+            
+            if available_window <= 0:
+                print(f"Warning: Fetch took {fetch_duration:.1f}s, which is longer than max_age window ({args.current_price_max_age}s).")
+                print("Consider increasing --current-price-max-age or reducing --max-concurrent for faster fetches.")
+                sleep_time = 0.5  # Minimal sleep to avoid overwhelming the system
+            else:
+                sleep_time = available_window
+                print(f"Next fetch in {sleep_time:.1f}s (window: {args.current_price_max_age}s - fetch: {fetch_duration:.1f}s - safety: {safety_margin}s)")
+            
+            # Sleep until next fetch
+            await asyncio.sleep(sleep_time)
+            
+        except KeyboardInterrupt:
+            print(f"\nContinuous fetch interrupted by user after {run_count} runs.")
+            break
+        except Exception as e:
+            print(f"Error in continuous fetch run #{run_count}: {e}")
+            # Wait a bit before retrying to avoid rapid error loops
+            await asyncio.sleep(10)
+    
+    print(f"Continuous fetch stopped after {run_count} runs.")
 
 async def fetch_lists_data(args: argparse.Namespace):
     all_symbols_list = []
@@ -368,10 +453,12 @@ async def main():
     elif not db_configs_for_workers: # Should not happen with current logic if fetch_market_data is True
         print("Error: Database configuration is missing for workers. Cannot fetch market data.", file=sys.stderr)
     else:
-        print(f"Fetching market data for {len(all_symbols_list)} symbols using {args.executor_type} pool...")
-        (success_count, failure_count) = await process_symbols(all_symbols_list, args, db_configs_for_workers)
-
-        print(f"Market data fetching attempts complete. Successes: {success_count}, Failures: {failure_count} out of {len(all_symbols_list)} symbols.")
+        if args.continuous and args.current_price:
+            await run_continuous_current_price_fetch(all_symbols_list, args, db_configs_for_workers)
+        else:
+            print(f"Fetching market data for {len(all_symbols_list)} symbols using {args.executor_type} pool...")
+            (success_count, failure_count) = await process_symbols(all_symbols_list, args, db_configs_for_workers)
+            print(f"Market data fetching attempts complete. Successes: {success_count}, Failures: {failure_count} out of {len(all_symbols_list)} symbols.")
 
 if __name__ == '__main__':
     asyncio.run(main())
