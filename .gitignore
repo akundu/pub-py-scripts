@@ -26,3 +26,7 @@ data/
 
 # lock
 *.lock
+
+# tmp
+tmp*/
+tmp*
