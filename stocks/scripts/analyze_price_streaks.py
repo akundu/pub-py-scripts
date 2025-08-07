@@ -36,6 +36,18 @@ def parse_args():
                        help="Remove outliers: remove PERCENT%% from bottom and top when calculating averages (default: 10%%)")
     parser.add_argument("--print-avg", action="store_true", help="Print average values in output.")
     
+    # Filter arguments
+    parser.add_argument("--filter-change", type=float, metavar='PERCENT', 
+                       help="Filter data to show behavior after stock has made a +/- change of PERCENT%%")
+    parser.add_argument("--filter-periods", type=int, default=1, metavar='PERIODS',
+                       help="Number of periods (days/hours) for the filter change (default: 1)")
+    parser.add_argument("--filter-direction", choices=['up', 'down', 'either'], default='either',
+                       help="Direction of the filter change: up, down, or either (default: either)")
+    parser.add_argument("--filter-mode", choices=['first', 'all', 'segments', 'trigger_periods', 'before_triggers', 'after_all_triggers'], default='after_all_triggers',
+                       help="Filter mode: 'first' (after first trigger), 'all' (after any trigger), 'segments' (separate analysis for each trigger), 'trigger_periods' (only trigger periods), 'before_triggers' (periods leading to triggers), 'after_all_triggers' (aggregate all after periods)")
+    parser.add_argument("--exclude-trigger-dates", action="store_true", default=True,
+                       help="Exclude trigger dates from analysis (default: True)")
+    
     args = parser.parse_args()
     
     today = datetime.today().strftime('%Y-%m-%d')
@@ -55,6 +67,118 @@ def parse_args():
             parser.error("--start is required if --days-back is not provided.")
     
     return args
+
+def filter_data_by_change(df: pd.DataFrame, change_percent: float, periods: int = 1, direction: str = 'either', mode: str = 'first', exclude_trigger_dates: bool = True) -> pd.DataFrame:
+    """
+    Filter data to only include periods after the stock has made a specified change.
+    
+    Args:
+        df: DataFrame with price data
+        change_percent: The percentage change to filter by (positive or negative)
+        periods: Number of periods (days/hours) for the change
+        direction: 'up', 'down', or 'either' for the direction of change
+        mode: 'first' (after first trigger), 'all' (after any trigger), 'segments' (separate analysis for each trigger), 'after_all_triggers' (aggregate all after periods)
+    
+    Returns:
+        Filtered DataFrame containing only data after the specified changes
+    """
+    if df.empty or 'close' not in df.columns:
+        return df
+    
+    df = df.copy()
+    df = df.sort_index()
+    
+    # Calculate percentage change over the specified number of periods
+    df['pct_change'] = df['close'].pct_change(periods=periods) * 100
+    
+    # Create mask based on direction and change percentage
+    if direction == 'up':
+        mask = df['pct_change'] >= change_percent
+    elif direction == 'down':
+        mask = df['pct_change'] <= -change_percent
+    else:  # 'either'
+        mask = (df['pct_change'] >= change_percent) | (df['pct_change'] <= -change_percent)
+    
+    # Find indices where the condition is met
+    trigger_indices = df[mask].index
+    
+    if len(trigger_indices) == 0:
+        print(f"No periods found where stock made {direction} change of {change_percent}% over {periods} period(s)")
+        return pd.DataFrame()  # Return empty DataFrame
+    
+    print(f"Found {len(trigger_indices)} trigger events where stock made {direction} change of {change_percent}% over {periods} period(s)")
+    print(f"Trigger dates: {[idx.strftime('%Y-%m-%d') for idx in trigger_indices[:10]]}{'...' if len(trigger_indices) > 10 else ''}")
+    
+    if mode == 'first':
+        # Show data after the first trigger only
+        after_trigger_mask = df.index >= trigger_indices[0]
+        filtered_df = df[after_trigger_mask].copy()
+        print(f"Filtered data: {len(df)} -> {len(filtered_df)} periods (after first trigger)")
+        
+    elif mode == 'all':
+        # Show data after any trigger (this is the same as 'first' for now, but could be enhanced)
+        after_trigger_mask = df.index >= trigger_indices[0]
+        filtered_df = df[after_trigger_mask].copy()
+        print(f"Filtered data: {len(df)} -> {len(filtered_df)} periods (after any trigger)")
+        
+    elif mode == 'after_all_triggers':
+        # Aggregate all periods that come after any trigger (excluding trigger periods themselves)
+        after_mask = pd.Series(False, index=df.index)
+        
+        print(f"\nDebug: Trigger analysis:")
+        for i, trigger_idx in enumerate(trigger_indices):
+            # For each trigger, include ALL data after that trigger (not just until the next trigger)
+            if exclude_trigger_dates:
+                after_start = df.index.get_loc(trigger_idx) + 1  # Exclude trigger date
+                print(f"  Trigger {i+1}: {trigger_idx.strftime('%Y-%m-%d')} -> After: {df.index[after_start].strftime('%Y-%m-%d')} to end (excluded trigger date)")
+            else:
+                after_start = df.index.get_loc(trigger_idx)  # Include trigger date
+                print(f"  Trigger {i+1}: {trigger_idx.strftime('%Y-%m-%d')} -> After: {df.index[after_start].strftime('%Y-%m-%d')} to end (included trigger date)")
+            after_mask.iloc[after_start:] = True
+        
+        filtered_df = df[after_mask].copy()
+        print(f"Filtered data: {len(df)} -> {len(filtered_df)} periods (aggregated after all triggers)")
+        print(f"Showing behavior after {len(trigger_indices)} trigger events (excluding trigger periods themselves)")
+        print(f"Note: This includes overlapping periods after each trigger")
+        
+        # Show what percentage of original data is included
+        original_days = len(df)
+        filtered_days = len(filtered_df)
+        percentage = (filtered_days / original_days) * 100
+        print(f"Data coverage: {filtered_days}/{original_days} days ({percentage:.1f}%)")
+        
+    elif mode == 'segments':
+        # For segments mode, we'll return the original data but mark the triggers
+        # The analysis will be done separately for each segment
+        filtered_df = df.copy()
+        print(f"Using segments mode: will analyze each {periods}-period segment after triggers")
+        # Add trigger information to the DataFrame for later use
+        filtered_df['is_trigger'] = mask
+        filtered_df['trigger_number'] = 0
+        for i, trigger_idx in enumerate(trigger_indices):
+            filtered_df.loc[trigger_idx, 'trigger_number'] = i + 1
+    
+    elif mode == 'trigger_periods':
+        # Show only the periods where triggers occur
+        filtered_df = df[mask].copy()
+        print(f"Filtered data: {len(df)} -> {len(filtered_df)} periods (only trigger periods)")
+        print(f"Showing only the {len(trigger_indices)} periods where stock made {direction} change of {change_percent}% over {periods} period(s)")
+    
+    elif mode == 'before_triggers':
+        # Show periods leading up to triggers (the periods that caused the triggers)
+        # For each trigger, include the periods that led to it
+        before_mask = pd.Series(False, index=df.index)
+        for trigger_idx in trigger_indices:
+            # Include the trigger period and the periods leading up to it
+            start_idx = df.index.get_loc(trigger_idx) - periods + 1
+            if start_idx >= 0:
+                before_mask.iloc[start_idx:df.index.get_loc(trigger_idx) + 1] = True
+        
+        filtered_df = df[before_mask].copy()
+        print(f"Filtered data: {len(df)} -> {len(filtered_df)} periods (periods leading to triggers)")
+        print(f"Showing the {periods}-period segments that led to {len(trigger_indices)} trigger events")
+    
+    return filtered_df
 
 def compute_streaks(df: pd.DataFrame):
     """
@@ -587,6 +711,14 @@ async def main():
             print(f"No data found for {args.symbol} between {args.start} and {args.end}.")
             return
         df = df.sort_index()
+        
+        # Apply filter if specified
+        if args.filter_change is not None:
+            print(f"\nApplying filter: {args.filter_direction} change of {args.filter_change}% over {args.filter_periods} period(s) (mode: {args.filter_mode})")
+            df = filter_data_by_change(df, args.filter_change, args.filter_periods, args.filter_direction, args.filter_mode, args.exclude_trigger_dates)
+            if df.empty:
+                print("No data remaining after applying filter.")
+                return
         
         if args.raw:
             print(f"\nRaw Price Data for {args.symbol} ({args.start} to {args.end}):")
