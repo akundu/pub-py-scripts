@@ -137,9 +137,78 @@ def get_pitch_and_amplitude(audio_data, sr):
 
     return fundamental_frequency, rms_amplitude, None
 
+def calculate_chroma_vector(detected_notes, detected_frequencies_all):
+    """
+    Calculate a 12-dimensional chroma vector from detected notes and their frequencies.
+    Returns a normalized chroma vector where each element represents the strength of each pitch class.
+    """
+    # Initialize chroma vector (12 pitch classes: C, C#, D, D#, E, F, F#, G, G#, A, A#, B)
+    chroma = np.zeros(12)
+    
+    # Note mapping to chroma indices
+    note_to_chroma = {
+        'C': 0, 'C#': 1, 'D': 2, 'D#': 3, 'E': 4, 'F': 5,
+        'F#': 6, 'G': 7, 'G#': 8, 'A': 9, 'A#': 10, 'B': 11
+    }
+    
+    # Accumulate energy for each pitch class from all detected frequencies
+    if detected_frequencies_all:
+        # Group by note and sum amplitudes to handle multiple detections of same note
+        note_amplitudes = {}
+        for freq, amplitude in detected_frequencies_all:
+            note = frequency_to_note(freq)
+            if note and note in note_to_chroma:
+                if note not in note_amplitudes:
+                    note_amplitudes[note] = 0
+                note_amplitudes[note] += amplitude
+        
+        # Populate chroma vector with accumulated amplitudes
+        for note, total_amplitude in note_amplitudes.items():
+            chroma_idx = note_to_chroma[note]
+            chroma[chroma_idx] = total_amplitude
+    
+    # Normalize the chroma vector (L2 normalization)
+    magnitude = np.linalg.norm(chroma)
+    if magnitude > 0:
+        chroma = chroma / magnitude
+    
+    return chroma
+
+def detect_multiple_pitches_fft(audio_data, sample_rate, low_freq=80, high_freq=2000, num_peaks=5):
+    """
+    Detect multiple pitches in audio using FFT peak detection.
+    This complements the autocorrelation method for polyphonic detection.
+    """
+    # Compute FFT
+    fft = np.fft.rfft(audio_data)
+    magnitude = np.abs(fft)
+    
+    # Create frequency bins
+    freqs = np.fft.rfftfreq(len(audio_data), 1/sample_rate)
+    
+    # Apply frequency range filter
+    freq_mask = (freqs >= low_freq) & (freqs <= high_freq)
+    filtered_magnitude = magnitude * freq_mask
+    
+    # Find peaks in the magnitude spectrum
+    # Use a simple peak detection: find local maxima
+    peaks = []
+    min_peak_height = np.max(filtered_magnitude) * 0.1  # 10% of max as threshold
+    
+    for i in range(1, len(filtered_magnitude) - 1):
+        if (filtered_magnitude[i] > filtered_magnitude[i-1] and 
+            filtered_magnitude[i] > filtered_magnitude[i+1] and
+            filtered_magnitude[i] > min_peak_height):
+            peaks.append((freqs[i], filtered_magnitude[i]))
+    
+    # Sort by magnitude and take top peaks
+    peaks.sort(key=lambda x: x[1], reverse=True)
+    return peaks[:num_peaks]
+
 def detect_notes_with_sounddevice(audio_buffer, sample_rate=get_rate(), sensitivity=1.0, 
                                  silence_threshold=200, low_freq=80, high_freq=2000, 
-                                 show_frequencies=False, show_fft=False, raw_frequencies=False):
+                                 show_frequencies=False, show_fft=False, raw_frequencies=False, 
+                                 calculate_chroma=False, multi_pitch=False):
     """
     Enhanced note detection using sounddevice and autocorrelation.
     """
@@ -156,24 +225,35 @@ def detect_notes_with_sounddevice(audio_buffer, sample_rate=get_rate(), sensitiv
         if rms_energy < silence_threshold:
             continue
 
-        # Get pitch and amplitude using autocorrelation
-        frequency, amplitude, error_message = get_pitch_and_amplitude(window_samples, sample_rate)
-        if error_message or frequency is None:
-            continue
+        # Use multi-pitch detection if enabled, otherwise use single-pitch autocorrelation
+        if multi_pitch:
+            # FFT-based multi-pitch detection
+            fft_peaks = detect_multiple_pitches_fft(window_samples, sample_rate, low_freq, high_freq)
+            for freq, magnitude in fft_peaks:
+                # Convert magnitude to amplitude-like value
+                amplitude = magnitude / np.max([p[1] for p in fft_peaks]) if fft_peaks else 0
+                amplitude *= rms_energy  # Scale by window energy
+                
+                note = frequency_to_note(freq)
+                if note:
+                    detected_notes_all.append(note)
+                    detected_frequencies_all.append((freq, amplitude))
+        else:
+            # Single-pitch autocorrelation detection (original method)
+            frequency, amplitude, error_message = get_pitch_and_amplitude(window_samples, sample_rate)
+            if error_message or frequency is None:
+                continue
 
-        # Check if frequency is in the desired range (with a buffer) based on the instrument's frequency range
-        BUFFER_pct = 0.25
-        if not raw_frequencies and (frequency < low_freq*BUFFER_pct or frequency > high_freq*BUFFER_pct):
-            continue
-        if show_frequencies:
+            # Check if frequency is in the desired range (with a buffer) based on the instrument's frequency range
+            BUFFER_pct = 0.25
+            if not raw_frequencies and (frequency < low_freq*BUFFER_pct or frequency > high_freq*BUFFER_pct):
+                continue
+
+            # Convert frequency to note
             note = frequency_to_note(frequency)
-            print(f"frequency: {frequency:.1f} Hz -> {note}, amplitude: {amplitude:.4f}", file=sys.stderr)
-
-        # Convert frequency to note
-        note = frequency_to_note(frequency)
-        if note:
-            detected_notes_all.append(note)
-            detected_frequencies_all.append((frequency, amplitude))
+            if note:
+                detected_notes_all.append(note)
+                detected_frequencies_all.append((frequency, amplitude))
 
             # Show FFT data if requested
             if show_fft:
@@ -203,7 +283,12 @@ def detect_notes_with_sounddevice(audio_buffer, sample_rate=get_rate(), sensitiv
             max_magnitude = max([f[1] for f in freqs])
             print(f"  {note}: {avg_freq:.1f} Hz (amplitude: {max_magnitude:.4f})")
 
-    return unique_notes, detected_frequencies_all
+    # Calculate chroma vector if requested
+    chroma_vector = None
+    if calculate_chroma:
+        chroma_vector = calculate_chroma_vector(unique_notes, detected_frequencies_all)
+    
+    return unique_notes, detected_frequencies_all, chroma_vector
 
 def advanced_chord_identifier(notes, bass_note=None, key_context=None):
     """
@@ -862,14 +947,223 @@ def test_advanced_chord_identifier_with_instrument():
         
         print("-" * 60)
 
+def find_best_matching_chord_enhanced(notes, detected_frequencies_all=None, chroma_vector=None, instrument="Guitar", verbose=False):
+    """
+    Enhanced chord matching that uses frequency amplitudes and chroma vectors for better accuracy.
+    
+    Args:
+        notes: List of detected note names
+        detected_frequencies_all: List of (frequency, amplitude) tuples  
+        chroma_vector: 12-dimensional chroma vector
+        instrument: Instrument type for context
+        verbose: If True, print detailed analysis information
+        
+    Returns:
+        Dictionary with chord analysis including confidence scores
+    """
+    if not notes:
+        return {"error": "No notes detected"}
+    
+    if verbose:
+        print(f"\n🔍 DETAILED CHORD ANALYSIS", file=sys.stderr)
+        print(f"📝 Input Notes: {notes}", file=sys.stderr)
+        if detected_frequencies_all:
+            print(f"🎵 Frequencies: {[(f'{freq:.1f}Hz', f'{amp:.3f}') for freq, amp in detected_frequencies_all]}", file=sys.stderr)
+        if chroma_vector is not None:
+            chroma_str = ', '.join([f'{val:.3f}' for val in chroma_vector])
+            print(f"🌈 Chroma Vector: [{chroma_str}]", file=sys.stderr)
+            # Show which pitch classes are active
+            active_notes = []
+            note_names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+            for i, val in enumerate(chroma_vector):
+                if val > 0.1:  # Threshold for "active"
+                    active_notes.append(f"{note_names[i]}({val:.3f})")
+            print(f"🎯 Active Pitch Classes: {active_notes}", file=sys.stderr)
+    
+    # Get base chord analysis
+    base_result = advanced_chord_identifier_with_instrument(notes, instrument=instrument.lower())
+    
+    if verbose:
+        print(f"🔤 Base Analysis: Primary={base_result.get('primary_chords', [])}, Alt={base_result.get('alternative_chords', [])}", file=sys.stderr)
+    
+    # If we have additional data, enhance the analysis
+    if detected_frequencies_all and chroma_vector is not None:
+        # Calculate amplitude-weighted note strengths
+        note_amplitudes = {}
+        for freq, amplitude in detected_frequencies_all:
+            note = frequency_to_note(freq)
+            if note:
+                if note not in note_amplitudes:
+                    note_amplitudes[note] = 0
+                note_amplitudes[note] += amplitude
+        
+        if verbose:
+            print(f"📊 Note Amplitudes: {note_amplitudes}", file=sys.stderr)
+        
+        # Use chroma vector to refine chord selection
+        enhanced_result = enhance_chord_with_chroma(base_result, chroma_vector, note_amplitudes, verbose=verbose)
+        
+        if verbose:
+            print(f"✨ Enhanced Result: {enhanced_result.get('primary_chords', [])} (confidence: {enhanced_result.get('chord_confidence', 'N/A')})", file=sys.stderr)
+            print(f"=" * 50, file=sys.stderr)
+        
+        return enhanced_result
+    
+    return base_result
+
+def enhance_chord_with_chroma(base_result, chroma_vector, note_amplitudes, verbose=False):
+    """
+    Use chroma vector and amplitude data to refine chord identification.
+    """
+    note_to_chroma = {
+        'C': 0, 'C#': 1, 'D': 2, 'D#': 3, 'E': 4, 'F': 5,
+        'F#': 6, 'G': 7, 'G#': 8, 'A': 9, 'A#': 10, 'B': 11
+    }
+    
+    # Score each potential chord based on chroma vector alignment
+    scored_chords = []
+    
+    all_candidates = (base_result.get('primary_chords', []) + 
+                     base_result.get('alternative_chords', []))
+    
+    for chord_name in all_candidates:
+        score = calculate_chord_chroma_score(chord_name, chroma_vector, note_amplitudes, note_to_chroma)
+        scored_chords.append((chord_name, score))
+        # if verbose:
+        #     print(f"🎯 Chord Score: {chord_name} = {score:.3f}", file=sys.stderr)
+    
+    # Sort by score (highest first)
+    scored_chords.sort(key=lambda x: x[1], reverse=True)
+    
+    if verbose and scored_chords:
+        print(f"🏆 Top Scored Chords: {[(name, f'{score:.3f}') for name, score in scored_chords[:3]]}", file=sys.stderr)
+    
+    # Reorganize results based on chroma-enhanced scoring
+    enhanced_result = base_result.copy()
+    if scored_chords:
+        best_chord, best_score = scored_chords[0]
+        
+        # Move best scoring chord to primary
+        enhanced_result['primary_chords'] = [best_chord]
+        enhanced_result['alternative_chords'] = [chord for chord, _ in scored_chords[1:3]]  # Top 2 alternatives
+        enhanced_result['chord_confidence'] = best_score
+        enhanced_result['chroma_enhanced'] = True
+    
+    return enhanced_result
+
+def calculate_chord_chroma_score(chord_name, chroma_vector, note_amplitudes, note_to_chroma):
+    """
+    Calculate how well a chord matches the chroma vector and amplitude data.
+    """
+    # Extract root note and chord type
+    if len(chord_name) == 0:
+        return 0.0
+        
+    root_note = chord_name[0]
+    chord_type = chord_name[1:] if len(chord_name) > 1 else ""
+    
+    # Define expected chord patterns  
+    chord_patterns = {
+        "": [0, 4, 7],          # Major
+        "m": [0, 3, 7],         # Minor  
+        "7": [0, 4, 7, 10],     # Dominant 7th
+        "maj7": [0, 4, 7, 11],  # Major 7th
+        "m7": [0, 3, 7, 10],    # Minor 7th
+        "5": [0, 7],            # Power chord
+        "sus2": [0, 2, 7],      # Sus2
+        "sus4": [0, 5, 7],      # Sus4
+    }
+    
+    # Get pattern for this chord type
+    pattern = chord_patterns.get(chord_type, [0, 4, 7])  # Default to major
+    
+    # Calculate root position in chroma
+    if root_note not in note_to_chroma:
+        return 0.0
+    root_chroma_idx = note_to_chroma[root_note]
+    
+    # Calculate expected chroma positions for this chord
+    expected_positions = [(root_chroma_idx + interval) % 12 for interval in pattern]
+    
+    # Score based on chroma vector alignment
+    chroma_score = 0.0
+    total_expected_energy = 0.0
+    
+    for pos in expected_positions:
+        chroma_score += chroma_vector[pos]
+        total_expected_energy += 1.0
+    
+    # Normalize by number of expected notes
+    if total_expected_energy > 0:
+        chroma_score /= total_expected_energy
+    
+    # Bonus for amplitude consistency (stronger notes in the chord get higher weight)
+    amplitude_bonus = 0.0
+    if note_amplitudes:
+        chord_note_names = []
+        note_names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+        for interval in pattern:
+            note_idx = (root_chroma_idx + interval) % 12
+            chord_note_names.append(note_names[note_idx])
+        
+        total_amplitude = sum(note_amplitudes.values())
+        if total_amplitude > 0:
+            chord_amplitude = sum(note_amplitudes.get(note, 0) for note in chord_note_names)
+            amplitude_bonus = chord_amplitude / total_amplitude
+    
+    # Combine chroma score (70%) and amplitude bonus (30%)
+    final_score = chroma_score * 0.7 + amplitude_bonus * 0.3
+    
+    return final_score
+
 def find_best_matching_chord(notes, instrument="Guitar"):
     """
+    Legacy function for backward compatibility.
     Find the best matching chord for a list of notes.
     """
     return advanced_chord_identifier_with_instrument(notes, instrument=instrument.lower())
 
+def analyze_chord_progression_enhanced(notes_history, frequencies_history=None, chroma_history=None, window_size=5, verbose=False):
+    """
+    Enhanced chord progression analysis using chroma vectors and frequency data.
+    """
+    if len(notes_history) < window_size:
+        return None
+    
+    recent_notes = []
+    notes_list = list(notes_history)
+    for notes in notes_list[-window_size:]:
+        recent_notes.extend(notes)
+    
+    note_counts = {}
+    for note in recent_notes:
+        note_counts[note] = note_counts.get(note, 0) + 1
+    
+    threshold = max(1, window_size // 2)
+    stable_notes = [note for note, count in note_counts.items() if count >= threshold]
+    
+    if not stable_notes:
+        return None
+    
+    # Use enhanced analysis if we have frequency and chroma data
+    if frequencies_history and chroma_history and len(frequencies_history) > 0 and len(chroma_history) > 0:
+        # Aggregate recent frequency and chroma data
+        recent_frequencies = frequencies_history[-1] if frequencies_history else None
+        recent_chroma = chroma_history[-1] if chroma_history else None
+        
+        return find_best_matching_chord_enhanced(
+            stable_notes, 
+            detected_frequencies_all=recent_frequencies,
+            chroma_vector=recent_chroma,
+            verbose=verbose
+        )
+    
+    # Fallback to basic analysis
+    return find_best_matching_chord(stable_notes)
+
 def analyze_chord_progression(notes_history, window_size=5):
     """
+    Legacy function for backward compatibility.
     Analyze chord progression over time for more stable detection.
     """
     if len(notes_history) < window_size:

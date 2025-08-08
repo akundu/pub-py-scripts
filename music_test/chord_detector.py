@@ -28,7 +28,16 @@ def parse_args():
     parser.add_argument('--notes-only', action='store_true', help='Show only detected notes, skip chord processing')
     parser.add_argument('--wait-time', type=float, default=0.0, help='Wait time between iterations in seconds (default: 0.0)')
     parser.add_argument('--amplitude-threshold', type=float, default=0.005, help='Minimum amplitude threshold for processing (default: 0.005)')
+    parser.add_argument('--show-chroma', action='store_true', help='Show chroma vector along with frequencies')
+    parser.add_argument('--single-pitch', action='store_true', help='Use single-pitch detection (autocorrelation only)')
+    parser.add_argument('--multi-pitch', action='store_true', default=True, help='Enable multi-pitch detection using FFT (default, better for chords)')
+    parser.add_argument('--confidence-threshold', type=float, default=0.6, help='Minimum confidence score to show chords (default: 0.6)')
     args = parser.parse_args()
+    
+    # Handle single-pitch override
+    if args.single_pitch:
+        args.multi_pitch = False
+    
     return args
 
 # --- 3. Main Application Logic ---
@@ -52,27 +61,46 @@ def main():
         high_freq = preset['high_freq']
         instrument_name = preset['name']
 
-    print(f"🎸 Sounddevice-based chord detector listening for {instrument_name}... Press Ctrl+C to stop.")
-    if args.raw_frequencies:
-        print("🔓 RAW MODE: Using unfiltered frequencies (no frequency range limits)")
-    else:
-        print(f"📊 Frequency range: {low_freq}-{high_freq} Hz")
-    print(f"🔄 Overlap: {get_overlap_ratio()*100:.0f}% (hop size: {get_hop_size()} samples)")
-    print(f"📊 Amplitude threshold: {args.amplitude_threshold}")
+    print(f"🎸 Chord detector listening for {instrument_name}... Press Ctrl+C to stop.")
+    
+    # Show configuration only in debug mode or with specific flags
+    if args.debug or args.show_frequencies or args.frequencies_only or args.notes_only:
+        if args.raw_frequencies:
+            print("🔓 RAW MODE: Using unfiltered frequencies (no frequency range limits)")
+        else:
+            print(f"📊 Frequency range: {low_freq}-{high_freq} Hz")
+        print(f"🔄 Overlap: {get_overlap_ratio()*100:.0f}% (hop size: {get_hop_size()} samples)")
+        print(f"📊 Amplitude threshold: {args.amplitude_threshold}")
+    
+    # Show mode information
     if args.frequencies_only:
         print("📊 FREQUENCIES ONLY MODE: Showing frequencies, skipping chord processing")
-    if args.notes_only:
+    elif args.notes_only:
         print("🎵 NOTES ONLY MODE: Showing detected notes, skipping chord processing")
-    if args.progression and not args.frequencies_only and not args.notes_only:
-        print("📈 Chord progression analysis enabled")
-    if args.wait_time > 0:
-        print(f"⏱️  Wait time between iterations: {args.wait_time} seconds")
+    else:
+        # Default chord detection mode
+        print(f"🎯 Confidence threshold: {args.confidence_threshold:.1f} (only showing chords above this score)")
+        if args.log:
+            print("📝 Logging mode: Showing timestamped chord detections")
+    
+    if args.debug:
+        print(f"⏱️  Wait time: {args.wait_time} seconds" if args.wait_time > 0 else "⏱️  Wait time: 0 seconds")
+        if getattr(args, 'multi_pitch', True):
+            print("🎼 Multi-pitch detection enabled (default, better for chords)")
+        else:
+            print("🎵 Single-pitch detection enabled (autocorrelation only)")
+        if getattr(args, 'show_chroma', False):
+            print("🌈 Chroma vector output enabled")
+        if args.progression and not args.frequencies_only and not args.notes_only:
+            print("📈 Chord progression analysis enabled")
 
     # Audio buffer for overlapping windows
     audio_buffer = np.zeros(get_buffer_size(), dtype=np.float32)
     buffer_index = 0
     
     notes_history = deque(maxlen=5)
+    frequencies_history = deque(maxlen=5)  # For enhanced chord analysis
+    chroma_history = deque(maxlen=5)       # For enhanced chord analysis
     last_chord = None
     chord_stability = 0
     last_log_time = time.time()
@@ -80,7 +108,7 @@ def main():
     try:
         while True:
             try:
-                recognize_audio(args, audio_buffer, buffer_index, low_freq, high_freq, notes_history, last_chord, chord_stability, last_log_time, debug=args.debug, frequencies_only=args.frequencies_only, notes_only=args.notes_only, log=args.log)
+                recognize_audio(args, audio_buffer, buffer_index, low_freq, high_freq, notes_history, last_chord, chord_stability, last_log_time, frequencies_history, chroma_history, debug=args.debug, frequencies_only=args.frequencies_only, notes_only=args.notes_only, log=args.log)
             except ValueError as e:
                 pass
                 # print(f"Caught exception: {e}", file=sys.stderr)
