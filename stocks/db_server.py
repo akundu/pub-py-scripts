@@ -13,9 +13,19 @@ from typing import Dict, Set, Any
 import json
 from datetime import datetime, timezone
 import time
+import socket
+import multiprocessing
+import signal
+from concurrent.futures import ProcessPoolExecutor
+import threading
+import weakref
 
 # Global logger instance
 logger = logging.getLogger("db_server_logger")
+
+# Global process tracking
+current_worker_id = None
+is_multiprocess_mode = False
 
 # Global WebSocket connection management
 class WebSocketManager:
@@ -99,6 +109,323 @@ class WebSocketManager:
 
 # Create global WebSocket manager instance
 ws_manager = None  # Will be initialized in main_server_runner
+
+
+class MultiProcessServer:
+    """Manages multiple worker processes for the database server."""
+    
+    def __init__(self, workers: int, port: int, db_file: str, log_file: str = None, 
+                 log_level: str = "INFO", heartbeat_interval: float = 1.0, 
+                 max_body_mb: int = 10, worker_restart_timeout: int = 30):
+        self.workers = workers
+        self.port = port
+        self.db_file = db_file
+        self.log_file = log_file
+        self.log_level = log_level
+        self.heartbeat_interval = heartbeat_interval
+        self.max_body_mb = max_body_mb
+        self.worker_restart_timeout = worker_restart_timeout
+        
+        self.processes = {}  # worker_id -> Process
+        self.shared_socket = None
+        self.shutdown_event = multiprocessing.Event()
+        self.restart_lock = threading.Lock()
+        
+        # Setup signal handlers
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+        
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals."""
+        logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+        self.shutdown_event.set()
+        
+    def _create_shared_socket(self) -> socket.socket:
+        """Create a socket that can be shared across processes."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        
+        # Enable SO_REUSEPORT for load balancing across processes
+        if hasattr(socket, 'SO_REUSEPORT'):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        else:
+            # Fallback for systems without SO_REUSEPORT
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+        sock.bind(('0.0.0.0', self.port))
+        sock.listen(128)  # Backlog for pending connections
+        
+        logger.info(f"Created shared socket on port {self.port}")
+        return sock
+        
+    def _start_worker(self, worker_id: int) -> multiprocessing.Process:
+        """Start a single worker process."""
+        process = multiprocessing.Process(
+            target=worker_main,
+            args=(
+                worker_id,
+                self.port,
+                self.db_file,
+                self.log_file,
+                self.log_level,
+                self.heartbeat_interval,
+                self.max_body_mb,
+                self.shutdown_event
+            ),
+            name=f"DBServerWorker-{worker_id}"
+        )
+        process.start()
+        logger.info(f"Started worker {worker_id} with PID {process.pid}")
+        return process
+        
+    def start_workers(self):
+        """Start all worker processes."""
+        logger.info(f"Starting {self.workers} worker processes on port {self.port}")
+        
+        # Start worker processes
+        for worker_id in range(self.workers):
+            process = self._start_worker(worker_id)
+            self.processes[worker_id] = process
+            
+        logger.info(f"All {self.workers} workers started successfully")
+        
+    def monitor_workers(self):
+        """Monitor worker processes and restart failed ones."""
+        while not self.shutdown_event.is_set():
+            try:
+                # Check each worker process
+                for worker_id, process in list(self.processes.items()):
+                    if not process.is_alive():
+                        logger.warning(f"Worker {worker_id} (PID {process.pid}) has died, restarting...")
+                        
+                        with self.restart_lock:
+                            # Clean up dead process
+                            try:
+                                process.join(timeout=5)
+                            except:
+                                pass
+                                
+                            # Start new worker
+                            new_process = self._start_worker(worker_id)
+                            self.processes[worker_id] = new_process
+                            
+                # Sleep before next check
+                threading.Event().wait(5)  # Check every 5 seconds
+                
+            except Exception as e:
+                logger.error(f"Error in worker monitoring: {e}")
+                threading.Event().wait(5)
+                
+    def shutdown_workers(self):
+        """Gracefully shutdown all worker processes."""
+        logger.info("Shutting down all worker processes...")
+        
+        # Signal shutdown to all workers
+        self.shutdown_event.set()
+        
+        # Wait for workers to shut down gracefully
+        shutdown_start = time.time()
+        for worker_id, process in self.processes.items():
+            remaining_time = max(0, self.worker_restart_timeout - (time.time() - shutdown_start))
+            try:
+                process.join(timeout=remaining_time)
+                if process.is_alive():
+                    logger.warning(f"Worker {worker_id} did not shut down gracefully, terminating...")
+                    process.terminate()
+                    process.join(timeout=5)
+                    if process.is_alive():
+                        logger.error(f"Worker {worker_id} did not terminate, killing...")
+                        process.kill()
+                        process.join()
+                else:
+                    logger.info(f"Worker {worker_id} shut down gracefully")
+            except Exception as e:
+                logger.error(f"Error shutting down worker {worker_id}: {e}")
+                
+        # Close shared socket if created
+        if self.shared_socket:
+            try:
+                self.shared_socket.close()
+            except:
+                pass
+                
+        logger.info("All workers shut down")
+        
+    def run(self):
+        """Run the multi-process server."""
+        try:
+            self.start_workers()
+            
+            # Start monitoring thread
+            monitor_thread = threading.Thread(target=self.monitor_workers, daemon=True)
+            monitor_thread.start()
+            
+            # Wait for shutdown signal
+            while not self.shutdown_event.is_set():
+                time.sleep(1)
+                
+        except KeyboardInterrupt:
+            logger.info("KeyboardInterrupt received, shutting down...")
+        finally:
+            self.shutdown_workers()
+
+
+def worker_main(worker_id: int, port: int, db_file: str, log_file: str = None, 
+                log_level: str = "INFO", heartbeat_interval: float = 1.0, 
+                max_body_mb: int = 10, shutdown_event = None):
+    """Main function for worker processes."""
+    global current_worker_id, is_multiprocess_mode
+    current_worker_id = worker_id
+    is_multiprocess_mode = True
+    
+    # Setup process-specific logging
+    setup_worker_logging(worker_id, log_file, log_level)
+    
+    logger.info(f"Worker {worker_id} starting (PID: {os.getpid()})")
+    
+    try:
+        # Run the async server
+        asyncio.run(worker_server_runner(
+            worker_id, port, db_file, heartbeat_interval, max_body_mb, shutdown_event
+        ))
+    except KeyboardInterrupt:
+        logger.info(f"Worker {worker_id} received KeyboardInterrupt")
+    except Exception as e:
+        logger.error(f"Worker {worker_id} crashed: {e}", exc_info=True)
+    finally:
+        logger.info(f"Worker {worker_id} shutting down")
+
+
+def setup_worker_logging(worker_id: int, log_file: str = None, log_level_str: str = "INFO"):
+    """Setup logging for worker processes with process-specific identification."""
+    log_level = getattr(logging, log_level_str.upper(), logging.INFO)
+    
+    # Create worker-specific logger
+    worker_logger = logging.getLogger("db_server_logger")
+    worker_logger.setLevel(log_level)
+    
+    # Clear any existing handlers
+    worker_logger.handlers.clear()
+    
+    # Create custom formatter that includes worker ID
+    class WorkerFormatter(RequestFormatter):
+        def __init__(self, worker_id: int):
+            super().__init__()
+            self.worker_id = worker_id
+            
+        def format(self, record):
+            # Add worker ID to the record
+            record.worker_id = self.worker_id
+            
+            # Update format strings to include worker ID
+            if hasattr(record, 'client_ip'):
+                self._style._fmt = f"%(asctime)s [PID:%(process)d] [Worker-{self.worker_id}] [%(levelname)s] %(client_ip)s - \\\"%(request_line)s\\\" %(status_code)s %(response_size)s \\\"%(user_agent)s\\\" - %(message)s"
+            else:
+                self._style._fmt = f"%(asctime)s [PID:%(process)d] [Worker-{self.worker_id}] [%(levelname)s] - %(message)s"
+                
+            return super(RequestFormatter, self).format(record)
+    
+    worker_formatter = WorkerFormatter(worker_id)
+    
+    # Console Handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(worker_formatter)
+    worker_logger.addHandler(console_handler)
+    
+    if log_file:
+        # Create worker-specific log file
+        log_path = Path(log_file)
+        worker_log_file = log_path.parent / f"{log_path.stem}_worker_{worker_id}{log_path.suffix}"
+        
+        # File Handler - Rotate logs, 5MB per file, keep 5 backups
+        file_handler = RotatingFileHandler(worker_log_file, maxBytes=5*1024*1024, backupCount=5)
+        file_handler.setFormatter(worker_formatter)
+        worker_logger.addHandler(file_handler)
+        
+        worker_logger.info(f"Worker {worker_id} logging to file: {worker_log_file} with level {log_level_str.upper()}")
+    else:
+        worker_logger.info(f"Worker {worker_id} logging to console with level {log_level_str.upper()}")
+
+
+async def worker_server_runner(worker_id: int, port: int, db_file: str, 
+                              heartbeat_interval: float = 1.0, max_body_mb: int = 10,
+                              shutdown_event = None):
+    """Server runner for individual worker processes."""
+    global ws_manager
+    
+    try:
+        logger.info(f"Worker {worker_id}: Initializing database from file: {db_file}")
+        app_db_instance = initialize_database(db_file)
+        logger.info(f"Worker {worker_id}: Database initialized successfully: {db_file}")
+    except Exception as e:
+        logger.critical(f"Worker {worker_id}: Fatal Error: Could not initialize database from file '{db_file}': {e}", exc_info=True)
+        return
+
+    # Initialize WebSocket manager with heartbeat interval
+    ws_manager = WebSocketManager(heartbeat_interval=heartbeat_interval)
+    logger.info(f"Worker {worker_id}: WebSocket manager initialized with heartbeat interval: {heartbeat_interval}s")
+
+    app = web.Application(middlewares=[logging_middleware])
+    app['db_instance'] = app_db_instance
+    
+    # Set client_max_size
+    max_size_bytes = max_body_mb * 1024 * 1024
+    app['client_max_size'] = max_size_bytes
+
+    # Add specific endpoints
+    app.router.add_post("/db_command", handle_db_command)
+    app.router.add_get("/ws", handle_websocket)
+    app.router.add_get("/", handle_health_check)
+    app.router.add_get("/health", handle_health_check)
+    
+    # Add stats endpoints
+    app.router.add_get("/stats/database", handle_stats_database)
+    app.router.add_get("/stats/tables", handle_stats_tables)
+    app.router.add_get("/stats/performance", handle_stats_performance)
+    app.router.add_get("/stats/pool", handle_stats_pool)
+    
+    # Add catch-all handler for unknown routes (must be last)
+    app.router.add_get("/{path:.*}", handle_catch_all)
+    app.router.add_post("/{path:.*}", handle_catch_all)
+
+    # Create server with SO_REUSEPORT socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if hasattr(socket, 'SO_REUSEPORT'):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    else:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(('0.0.0.0', port))
+    sock.listen(128)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.SockSite(runner, sock)
+    
+    logger.info(f"Worker {worker_id}: Server starting on http://localhost:{port}")
+    logger.info(f"Worker {worker_id}: Maximum request body size set to: {max_body_mb}MB ({max_size_bytes} bytes)")
+    logger.info(f"Worker {worker_id}: WebSocket heartbeat interval: {heartbeat_interval}s")
+    
+    await site.start()
+    
+    try:
+        # Monitor shutdown event
+        while shutdown_event is None or not shutdown_event.is_set():
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        logger.info(f"Worker {worker_id}: KeyboardInterrupt received, shutting down...")
+    finally:
+        logger.info(f"Worker {worker_id}: Cleaning up server resources...")
+        if ws_manager:
+            await ws_manager.shutdown()
+        await runner.cleanup()
+        if hasattr(app_db_instance, 'close_session') and callable(app_db_instance.close_session):
+             logger.info(f"Worker {worker_id}: Closing client session if applicable...")
+             await app_db_instance.close_session()
+        # Close database pool if available
+        if hasattr(app_db_instance, 'close_pool') and callable(app_db_instance.close_pool):
+             logger.info(f"Worker {worker_id}: Closing database connection pool...")
+             await app_db_instance.close_pool()
+        sock.close()
+        logger.info(f"Worker {worker_id}: Server has been shut down.")
 
 # Custom Formatter to handle different log record types
 class RequestFormatter(logging.Formatter):
@@ -558,10 +885,20 @@ async def handle_health_check(request: web.Request) -> web.Response:
         except Exception as e:
             db_info['error'] = f"Could not retrieve database info: {str(e)}"
     
+    # Add process information
+    process_info = {
+        "pid": os.getpid(),
+        "multiprocess_mode": is_multiprocess_mode,
+    }
+    
+    if current_worker_id is not None:
+        process_info["worker_id"] = current_worker_id
+    
     return web.json_response({
         "status": "healthy", 
         "message": "Stock DB Server is running",
-        "database": db_info
+        "database": db_info,
+        "process": process_info
     })
 
 async def handle_catch_all(request: web.Request) -> web.Response:
@@ -831,10 +1168,66 @@ async def main_server_runner():
         default=10, # Default to 10MB
         help="Maximum request body size in Megabytes (MB) (default: 10MB). Set to 1024 for 1GB."
     )
+    
+    # Multi-process arguments
+    parser.add_argument(
+        "--workers", 
+        type=int, 
+        default=1,
+        help="Number of worker processes to start (default: 1 for single-process mode). "
+             "Use 0 to auto-detect based on CPU count."
+    )
+    parser.add_argument(
+        "--worker-restart-timeout", 
+        type=int, 
+        default=30,
+        help="Timeout in seconds for graceful worker shutdown before termination (default: 30)."
+    )
+    
     args = parser.parse_args()
+    
+    # Handle auto-detection of workers
+    if args.workers == 0:
+        args.workers = multiprocessing.cpu_count()
+        logger.info(f"Auto-detected {args.workers} workers based on CPU count")
 
     # Setup logging as the first step after parsing args
     setup_logging(args.log_file, args.log_level)
+    
+    # Check if multi-process mode should be used
+    if args.workers > 1:
+        logger.info(f"Starting server in multi-process mode with {args.workers} workers")
+        # For multi-process mode, delegate to the MultiProcessServer
+        multiprocess_server = MultiProcessServer(
+            workers=args.workers,
+            port=args.port,
+            db_file=args.db_file,
+            log_file=args.log_file,
+            log_level=args.log_level,
+            heartbeat_interval=args.heartbeat_interval,
+            max_body_mb=args.max_body_mb,
+            worker_restart_timeout=args.worker_restart_timeout
+        )
+        
+        # Show configuration info
+        if args.db_file.startswith(('postgresql://', 'http://', 'https://')) or '://' in args.db_file:
+            logger.info(f"Using database connection: {args.db_file}")
+        else:
+            logger.info(f"Using database file: {os.path.abspath(args.db_file)}")
+        
+        logger.info(f"Multi-process server starting on http://localhost:{args.port}")
+        logger.info(f"Workers: {args.workers}")
+        logger.info(f"Worker restart timeout: {args.worker_restart_timeout}s")
+        logger.info(f"Maximum request body size: {args.max_body_mb}MB")
+        logger.info(f"WebSocket heartbeat interval: {args.heartbeat_interval}s")
+        logger.info("Press Ctrl+C to stop the server.")
+        
+        # Run the multi-process server (this will block until shutdown)
+        multiprocess_server.run()
+        return
+    
+    # Single-process mode (original behavior)
+    logger.info("Starting server in single-process mode")
 
     try:
         logger.info(f"Initializing database from file: {args.db_file}")
@@ -911,17 +1304,24 @@ async def main_server_runner():
         if hasattr(app_db_instance, 'close_session') and callable(app_db_instance.close_session):
              logger.info("Closing client session if applicable...")
              await app_db_instance.close_session() # type: ignore
+        # Close database pool if available
+        if hasattr(app_db_instance, 'close_pool') and callable(app_db_instance.close_pool):
+             logger.info("Closing database connection pool...")
+             await app_db_instance.close_pool()
         logger.info("Server has been shut down.")
 
-if __name__ == "__main__":
-    # No top-level try-except here for KeyboardInterrupt as main_server_runner handles it.
-    # Top-level exception catch for other unhandled startup issues.
+def main():
+    """Main entry point that handles both single-process and multi-process modes."""
+    # Just run the main server runner - it handles all argument parsing
     try:
         asyncio.run(main_server_runner())
     except Exception as e:
-        # Use a basic print here if logger isn't even set up yet or fails
-        print(f"Unhandled exception in asyncio.run or during very early startup: {e}")
+        print(f"Unhandled exception during server startup: {e}")
         traceback.print_exc()
+
+
+if __name__ == "__main__":
+    main()
 
 # --- BEGIN: Dynamic import of common.stock_db from parent's 'common' directory ---
 _script_path = Path(__file__).resolve()
