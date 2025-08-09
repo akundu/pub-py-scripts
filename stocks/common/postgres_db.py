@@ -24,7 +24,8 @@ class StockDBPostgreSQL(StockDBBase):
                  db_config: str, 
                  tables_cache_timeout_minutes: int = 10,
                  pool_max_size: int = 10,
-                 pool_connection_timeout_minutes: int = 30):
+                 pool_connection_timeout_minutes: int = 30,
+                 mv_refresh_interval_minutes: int = 5):
         super().__init__(db_config)
         self.db_config = db_config
         print(f"PostgreSQL database config: {self.db_config}", file=sys.stderr)
@@ -43,6 +44,10 @@ class StockDBPostgreSQL(StockDBBase):
         self._pool_lock = asyncio.Lock()
         self._cleanup_task = None
         self._shutdown = False
+        
+        # Materialized view refresh configuration
+        self.mv_refresh_interval_minutes = mv_refresh_interval_minutes
+        self._mv_refresh_task = None
         
         # Register cleanup on instance deletion
         weakref.finalize(self, self._cleanup_pool_sync)
@@ -69,6 +74,9 @@ class StockDBPostgreSQL(StockDBBase):
         
         # Start cleanup task if not already running
         await self._start_cleanup_task()
+        
+        # Start materialized view refresh task if not already running
+        await self._start_mv_refresh_task()
         
         async with self.get_connection() as conn:
             # Create daily_prices table
@@ -133,11 +141,12 @@ class StockDBPostgreSQL(StockDBBase):
             # Add MA and EMA columns to existing daily_prices table if they don't exist
             await self._add_ma_ema_columns_if_needed_postgresql_async(conn)
             
-            # Verify tables exist by checking if we can query them
+            # Verify tables exist by checking if we can query them (using fast method)
             tables_to_check = ['daily_prices', 'hourly_prices', 'realtime_data']
             for table in tables_to_check:
                 try:
-                    await conn.fetchval(f"SELECT COUNT(*) FROM {table} LIMIT 1")
+                    # Use fast existence check instead of COUNT(*)
+                    await conn.fetchval(f"SELECT 1 FROM {table} LIMIT 1")
                 except Exception as e:
                     raise Exception(f"Failed to verify table {table}: {e}")
             
@@ -248,6 +257,11 @@ class StockDBPostgreSQL(StockDBBase):
         """Start the background cleanup task for stale connections."""
         if self._cleanup_task is None or self._cleanup_task.done():
             self._cleanup_task = asyncio.create_task(self._cleanup_stale_connections())
+    
+    async def _start_mv_refresh_task(self) -> None:
+        """Start the background task for refreshing materialized views."""
+        if self._mv_refresh_task is None or self._mv_refresh_task.done():
+            self._mv_refresh_task = asyncio.create_task(self._periodic_mv_refresh())
 
     async def _cleanup_stale_connections(self) -> None:
         """Background task to clean up stale connections."""
@@ -259,6 +273,29 @@ class StockDBPostgreSQL(StockDBBase):
                 break
             except Exception as e:
                 print(f"Error in connection cleanup task: {e}", file=sys.stderr)
+    
+    async def _periodic_mv_refresh(self) -> None:
+        """Background task to periodically refresh materialized views."""
+        while not self._shutdown:
+            try:
+                # Wait for the refresh interval
+                await asyncio.sleep(self.mv_refresh_interval_minutes * 60)
+                
+                # Check if optimizations are available before refreshing
+                if await self._check_optimizations_available():
+                    print(f"Refreshing materialized views (interval: {self.mv_refresh_interval_minutes} minutes)", file=sys.stderr)
+                    await self.refresh_count_materialized_views()
+                    print("Materialized views refreshed successfully", file=sys.stderr)
+                else:
+                    # If optimizations aren't available, refresh less frequently to avoid spam
+                    await asyncio.sleep(300)  # Wait 5 more minutes before checking again
+                    
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"Error in materialized view refresh task: {e}", file=sys.stderr)
+                # Continue running even if refresh fails
+                await asyncio.sleep(60)  # Wait 1 minute before retrying
 
     async def _cleanup_pool(self) -> None:
         """Clean up stale connections from the available pool."""
@@ -290,15 +327,25 @@ class StockDBPostgreSQL(StockDBBase):
         self._shutdown = True
         if self._cleanup_task and not self._cleanup_task.done():
             self._cleanup_task.cancel()
+        if self._mv_refresh_task and not self._mv_refresh_task.done():
+            self._mv_refresh_task.cancel()
 
     async def close_pool(self) -> None:
         """Manually close all available connections in the pool."""
         self._shutdown = True
         
+        # Cancel background tasks
         if self._cleanup_task and not self._cleanup_task.done():
             self._cleanup_task.cancel()
             try:
                 await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+        
+        if self._mv_refresh_task and not self._mv_refresh_task.done():
+            self._mv_refresh_task.cancel()
+            try:
+                await self._mv_refresh_task
             except asyncio.CancelledError:
                 pass
         
@@ -338,6 +385,8 @@ class StockDBPostgreSQL(StockDBBase):
             "stale_connections": stale_connections,
             "connection_timeout_minutes": self.pool_connection_timeout_minutes,
             "cleanup_task_running": self._cleanup_task is not None and not self._cleanup_task.done(),
+            "mv_refresh_interval_minutes": self.mv_refresh_interval_minutes,
+            "mv_refresh_task_running": self._mv_refresh_task is not None and not self._mv_refresh_task.done(),
             "shutdown": self._shutdown
         }
 
@@ -740,6 +789,16 @@ class StockDBPostgreSQL(StockDBBase):
                     continue
         finally:
             await self._return_connection(conn)
+            
+        # Trigger materialized view refresh if significant data was added
+        if len(records_for_insertion) > 0:
+            # Only refresh if optimizations are available and we have substantial data
+            if await self._check_optimizations_available() and len(records_for_insertion) >= 10:
+                try:
+                    await self.refresh_count_materialized_views()
+                    print(f"Refreshed materialized views after inserting {len(records_for_insertion)} records for {ticker}", file=sys.stderr)
+                except Exception as e:
+                    print(f"Failed to refresh materialized views after data insertion: {e}", file=sys.stderr)
 
     async def _get_stock_data(
         self,
@@ -934,6 +993,16 @@ class StockDBPostgreSQL(StockDBBase):
                     continue
         finally:
             await self._return_connection(conn)
+            
+        # Trigger materialized view refresh if significant realtime data was added
+        if len(df_copy) > 0:
+            # Refresh less frequently for realtime data (higher threshold)
+            if await self._check_optimizations_available() and len(df_copy) >= 100:
+                try:
+                    await self.refresh_count_materialized_views()
+                    print(f"Refreshed materialized views after inserting {len(df_copy)} realtime records for {ticker}", file=sys.stderr)
+                except Exception as e:
+                    print(f"Failed to refresh materialized views after realtime data insertion: {e}", file=sys.stderr)
 
     async def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None, data_type: str = "quote") -> pd.DataFrame:
         """Retrieve realtime (tick) stock data from the PostgreSQL database."""
