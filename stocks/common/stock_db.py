@@ -235,8 +235,8 @@ class StockDBSQLite(StockDBBase):
     """
     A class to manage stock data storage and retrieval in an SQLite database.
     """
-    def __init__(self, db_path: str = get_default_db_path("db")) -> None:
-        super().__init__(db_path)
+    def __init__(self, db_path: str = get_default_db_path("db"), logger: logging.Logger = None) -> None:
+        super().__init__(db_path, logger)
         self.db_path = db_path
         self._init_db()
 
@@ -711,8 +711,8 @@ class StockDBDuckDB(StockDBBase):
     """
     A class to manage stock data storage and retrieval in a DuckDB database.
     """
-    def __init__(self, db_path: str = get_default_db_path("duckdb")) -> None:
-        super().__init__(db_path)
+    def __init__(self, db_path: str = get_default_db_path("duckdb"), logger: logging.Logger = None) -> None:
+        super().__init__(db_path, logger)
         self.db_path = db_path
         self._init_db()
 
@@ -1101,8 +1101,8 @@ class StockDBClient(StockDBBase):
     A client class that implements the StockDBBase interface by sending
     requests to a StockDBServer over a network.
     """
-    def __init__(self, server_address: str):
-        super().__init__(server_address)
+    def __init__(self, server_address: str, logger: logging.Logger = None):
+        super().__init__(server_address, logger)
         self.server_url = f"http://{server_address}"
         self._session: aiohttp.ClientSession | None = None
         # print(f"StockDBClient initialized, configured for server at {self.server_url}", file=sys.stderr)
@@ -1285,20 +1285,20 @@ class StockDBClient(StockDBBase):
         return response.get("data", []) 
 
 
-def get_stock_db(db_type: str, db_config: str | None = None) -> StockDBBase:
+def get_stock_db(db_type: str, db_config: str | None = None, logger: logging.Logger = None, log_level: str = "INFO") -> StockDBBase:
     actual_db_config = db_config
     if actual_db_config is None:
         actual_db_config = get_default_db_path(db_type)
     
     db_type_lower = db_type.lower()
     if db_type_lower == "sqlite":
-        return StockDBSQLite(actual_db_config)
+        return StockDBSQLite(actual_db_config, logger)
     elif db_type_lower == "duckdb":
-        return StockDBDuckDB(actual_db_config)
+        return StockDBDuckDB(actual_db_config, logger)
     elif db_type_lower == "postgresql":
         from .postgres_db import StockDBPostgreSQL
-        return StockDBPostgreSQL(actual_db_config)
+        return StockDBPostgreSQL(actual_db_config, logger=logger, log_level=log_level)
     elif db_type_lower == "remote":
-        return StockDBClient(actual_db_config)
+        return StockDBClient(actual_db_config, logger)
     else:
         raise ValueError(f"Unsupported database type: {db_type}. Choose 'sqlite', 'duckdb', 'postgresql', or 'remote'.")

@@ -285,7 +285,7 @@ def worker_main(worker_id: int, port: int, db_file: str, log_file: str = None,
     try:
         # Run the async server
         asyncio.run(worker_server_runner(
-            worker_id, port, db_file, heartbeat_interval, max_body_mb, shutdown_event
+            worker_id, port, db_file, heartbeat_interval, max_body_mb, shutdown_event, log_level
         ))
     except KeyboardInterrupt:
         logger.info(f"Worker {worker_id} received KeyboardInterrupt")
@@ -348,13 +348,13 @@ def setup_worker_logging(worker_id: int, log_file: str = None, log_level_str: st
 
 async def worker_server_runner(worker_id: int, port: int, db_file: str, 
                               heartbeat_interval: float = 1.0, max_body_mb: int = 10,
-                              shutdown_event = None):
+                              shutdown_event = None, log_level: str = "INFO"):
     """Server runner for individual worker processes."""
     global ws_manager
     
     try:
         logger.info(f"Worker {worker_id}: Initializing database from file: {db_file}")
-        app_db_instance = initialize_database(db_file)
+        app_db_instance = initialize_database(db_file, log_level)
         logger.info(f"Worker {worker_id}: Database initialized successfully: {db_file}")
     except Exception as e:
         logger.critical(f"Worker {worker_id}: Fatal Error: Could not initialize database from file '{db_file}': {e}", exc_info=True)
@@ -468,7 +468,7 @@ class RequestFormatter(logging.Formatter):
 
 # This function initializes the database instance.
 # It's called once at server startup.
-def initialize_database(db_file_path: str) -> StockDBBase:
+def initialize_database(db_file_path: str, log_level: str = "INFO") -> StockDBBase:
     """
     Initializes and returns a database instance based on the file path and its extension.
     This function is synchronous, but the DB methods it returns will be async.
@@ -532,7 +532,7 @@ def initialize_database(db_file_path: str) -> StockDBBase:
         # For other database types, use the file path as config
         db_config = db_file_path
     
-    instance = get_stock_db(db_type=db_type_arg, db_config=db_config)
+    instance = get_stock_db(db_type=db_type_arg, db_config=db_config, logger=logger, log_level=log_level)
     logger.info(f"Database '{db_file_path}' initialized successfully as {db_type_arg}.")
     return instance
 
@@ -1231,7 +1231,7 @@ async def main_server_runner():
 
     try:
         logger.info(f"Initializing database from file: {args.db_file}")
-        app_db_instance = initialize_database(args.db_file)
+        app_db_instance = initialize_database(args.db_file, args.log_level)
         logger.info(f"Database initialized successfully: {args.db_file}")
     except Exception as e:
         logger.critical(f"Fatal Error: Could not initialize database from file '{args.db_file}': {e}", exc_info=True)
