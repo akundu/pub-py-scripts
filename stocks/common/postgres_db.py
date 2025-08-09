@@ -15,6 +15,8 @@ import sys
 import weakref
 from collections import deque
 from contextlib import asynccontextmanager
+import logging
+from .logging_utils import get_logger, log_info, log_warning, log_error, log_debug
 
 class StockDBPostgreSQL(StockDBBase):
     """
@@ -25,10 +27,13 @@ class StockDBPostgreSQL(StockDBBase):
                  tables_cache_timeout_minutes: int = 10,
                  pool_max_size: int = 10,
                  pool_connection_timeout_minutes: int = 30,
-                 mv_refresh_interval_minutes: int = 5):
-        super().__init__(db_config)
+                 mv_refresh_interval_minutes: int = 5,
+                 logger: Optional[logging.Logger] = None,
+                 log_level: str = "INFO"):
+        super().__init__(db_config, logger)
         self.db_config = db_config
-        print(f"PostgreSQL database config: {self.db_config}", file=sys.stderr)
+        self.logger = get_logger("postgres_db", logger, log_level)
+        self.logger.info(f"PostgreSQL database config: {self.db_config}")
         # Create SQLAlchemy engine for pandas operations - defer until needed
         self.engine = None
         
@@ -228,7 +233,7 @@ class StockDBPostgreSQL(StockDBBase):
                 conn = await asyncpg.connect(self.db_config)
                 return conn
             except Exception as e:
-                print(f"Failed to create database connection: {e}", file=sys.stderr)
+                self.logger.error(f"Failed to create database connection: {e}", exc_info=True)
                 raise
 
     async def _return_connection(self, conn: asyncpg.Connection) -> None:
@@ -272,7 +277,7 @@ class StockDBPostgreSQL(StockDBBase):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"Error in connection cleanup task: {e}", file=sys.stderr)
+                self.logger.error(f"Error in connection cleanup task: {e}", exc_info=True)
     
     async def _periodic_mv_refresh(self) -> None:
         """Background task to periodically refresh materialized views."""
@@ -283,9 +288,9 @@ class StockDBPostgreSQL(StockDBBase):
                 
                 # Check if optimizations are available before refreshing
                 if await self._check_optimizations_available():
-                    print(f"Refreshing materialized views (interval: {self.mv_refresh_interval_minutes} minutes)", file=sys.stderr)
+                    self.logger.info(f"Refreshing materialized views (interval: {self.mv_refresh_interval_minutes} minutes)")
                     await self.refresh_count_materialized_views()
-                    print("Materialized views refreshed successfully", file=sys.stderr)
+                    self.logger.info("Materialized views refreshed successfully")
                 else:
                     # If optimizations aren't available, refresh less frequently to avoid spam
                     await asyncio.sleep(300)  # Wait 5 more minutes before checking again
@@ -293,7 +298,7 @@ class StockDBPostgreSQL(StockDBBase):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"Error in materialized view refresh task: {e}", file=sys.stderr)
+                self.logger.error(f"Error in materialized view refresh task: {e}", exc_info=True)
                 # Continue running even if refresh fails
                 await asyncio.sleep(60)  # Wait 1 minute before retrying
 
@@ -494,11 +499,11 @@ class StockDBPostgreSQL(StockDBBase):
                             subset=[date_col], keep="last"
                         )
                     except Exception as e:
-                        print(f"Error concatenating DataFrames for {ticker}: {str(e)}")
-                        print(f"Historical DataFrame shape: {historical_df.shape}")
-                        print(f"New DataFrame shape: {df_copy.shape}")
-                        print(f"Historical DataFrame columns: {historical_df.columns.tolist()}")
-                        print(f"New DataFrame columns: {df_copy.columns.tolist()}")
+                        self.logger.warning(f"Error concatenating DataFrames for {ticker}: {str(e)}")
+                        self.logger.debug(f"Historical DataFrame shape: {historical_df.shape}")
+                        self.logger.debug(f"New DataFrame shape: {df_copy.shape}")
+                        self.logger.debug(f"Historical DataFrame columns: {historical_df.columns.tolist()}")
+                        self.logger.debug(f"New DataFrame columns: {df_copy.columns.tolist()}")
                         # Fall back to using just the new data
                         combined_df = df_copy.copy()
                 else:
@@ -513,7 +518,7 @@ class StockDBPostgreSQL(StockDBBase):
         for _, row in combined_df.iterrows():
             # Check if the date is NaT before calling strftime
             if pd.isna(row[date_col]):
-                print(f"Warning: Skipping row with NaT date for {ticker}")
+                self.logger.warning(f"Skipping row with NaT date for {ticker}")
                 continue
                 
             record = {
@@ -541,7 +546,7 @@ class StockDBPostgreSQL(StockDBBase):
         for i, row in result_df.iterrows():
             # Check if the date is NaT before calling strftime
             if pd.isna(row[date_col]):
-                print(f"Warning: Skipping row with NaT date for {ticker} in result processing")
+                self.logger.warning(f"Skipping row with NaT date for {ticker} in result processing")
                 continue
                 
             row_date = row[date_col].strftime("%Y-%m-%d")
@@ -603,7 +608,7 @@ class StockDBPostgreSQL(StockDBBase):
             df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
 
             if date_col not in df_copy.columns:
-                print(f"Warning: Date column '{date_col}' not found in DataFrame for {ticker} ({interval}). Skipping.")
+                self.logger.warning(f"Date column '{date_col}' not found in DataFrame for {ticker} ({interval}). Skipping.")
                 return
 
             df_copy[date_col] = pd.to_datetime(df_copy[date_col])
@@ -611,7 +616,7 @@ class StockDBPostgreSQL(StockDBBase):
             max_date_val = df_copy[date_col].max()
 
             if pd.isna(min_date_val) or pd.isna(max_date_val):
-                print(f"Warning: Min/max date is NaT for {ticker} ({interval}). Skipping DB save.")
+                self.logger.warning(f"Min/max date is NaT for {ticker} ({interval}). Skipping DB save.")
                 return
 
             # Calculate MA and EMA for daily data only
@@ -785,7 +790,7 @@ class StockDBPostgreSQL(StockDBBase):
                     await conn.execute(insert_query, *values)
                 except asyncpg.exceptions.UniqueViolationError:
                     # This should not happen with ON CONFLICT DO NOTHING, but just in case
-                    print(f"Warning: Duplicate key violation for {ticker} at {record.get(date_col, 'unknown')}")
+                    self.logger.warning(f"Duplicate key violation for {ticker} at {record.get(date_col, 'unknown')}")
                     continue
         finally:
             await self._return_connection(conn)
@@ -796,9 +801,9 @@ class StockDBPostgreSQL(StockDBBase):
             if await self._check_optimizations_available() and len(records_for_insertion) >= 10:
                 try:
                     await self.refresh_count_materialized_views()
-                    print(f"Refreshed materialized views after inserting {len(records_for_insertion)} records for {ticker}", file=sys.stderr)
+                    self.logger.info(f"Refreshed materialized views after inserting {len(records_for_insertion)} records for {ticker}")
                 except Exception as e:
-                    print(f"Failed to refresh materialized views after data insertion: {e}", file=sys.stderr)
+                    self.logger.error(f"Failed to refresh materialized views after data insertion: {e}", exc_info=True)
 
     async def _get_stock_data(
         self,
@@ -902,7 +907,7 @@ class StockDBPostgreSQL(StockDBBase):
             df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
 
             if 'timestamp' not in df_copy.columns or 'price' not in df_copy.columns or 'size' not in df_copy.columns:
-                print(f"Warning: Missing required columns for realtime data (PostgreSQL) of {ticker}. Skipping.")
+                self.logger.warning(f"Missing required columns for realtime data (PostgreSQL) of {ticker}. Skipping.")
                 return
 
             df_copy['timestamp'] = pd.to_datetime(df_copy['timestamp']) # Ensure it's datetime64[ns]
@@ -916,14 +921,14 @@ class StockDBPostgreSQL(StockDBBase):
                     df_copy['timestamp'] = df_copy['timestamp'].dt.tz_convert('UTC')
             except Exception as e:
                 # If there's any issue with timezone handling, force UTC conversion
-                print(f"Warning: Timezone conversion issue for {ticker}: {e}")
+                self.logger.warning(f"Timezone conversion issue for {ticker}: {e}")
                 # Try to convert to UTC by first making naive, then localizing
                 df_copy['timestamp'] = df_copy['timestamp'].dt.tz_localize(None).dt.tz_localize('UTC')
             min_ts_val = df_copy['timestamp'].min()
             max_ts_val = df_copy['timestamp'].max()
 
             if pd.isna(min_ts_val) or pd.isna(max_ts_val):
-                print(f"Warning: Min/max timestamp is NaT for realtime data (PostgreSQL) of {ticker}. Skipping.")
+                self.logger.warning(f"Min/max timestamp is NaT for realtime data (PostgreSQL) of {ticker}. Skipping.")
                 return
 
             # Convert pandas Timestamps to Python datetime objects for asyncpg
@@ -989,7 +994,7 @@ class StockDBPostgreSQL(StockDBBase):
                     await conn.execute(insert_query, *converted_values)
                 except asyncpg.exceptions.UniqueViolationError:
                     # This should not happen with ON CONFLICT DO NOTHING, but just in case
-                    print(f"Warning: Duplicate key violation for {ticker} at {record.get('timestamp', 'unknown')}")
+                    self.logger.warning(f"Duplicate key violation for {ticker} at {record.get('timestamp', 'unknown')}")
                     continue
         finally:
             await self._return_connection(conn)
@@ -1000,9 +1005,9 @@ class StockDBPostgreSQL(StockDBBase):
             if await self._check_optimizations_available() and len(df_copy) >= 100:
                 try:
                     await self.refresh_count_materialized_views()
-                    print(f"Refreshed materialized views after inserting {len(df_copy)} realtime records for {ticker}", file=sys.stderr)
+                    self.logger.info(f"Refreshed materialized views after inserting {len(df_copy)} realtime records for {ticker}")
                 except Exception as e:
-                    print(f"Failed to refresh materialized views after realtime data insertion: {e}", file=sys.stderr)
+                    self.logger.error(f"Failed to refresh materialized views after realtime data insertion: {e}", exc_info=True)
 
     async def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None, data_type: str = "quote") -> pd.DataFrame:
         """Retrieve realtime (tick) stock data from the PostgreSQL database."""
@@ -1054,7 +1059,7 @@ class StockDBPostgreSQL(StockDBBase):
                 res_rt = await conn.fetchrow("SELECT price FROM realtime_data WHERE ticker = $1 AND type = $2 ORDER BY timestamp DESC LIMIT 1", ticker, 'quote')
                 if res_rt: latest_price = res_rt['price']
             except Exception as e:
-                print(f"PostgreSQL error (realtime_data for {ticker}): {e}")
+                self.logger.error(f"PostgreSQL error (realtime_data for {ticker}): {e}", exc_info=True)
 
             # 2. Try hourly_prices
             if latest_price is None:
@@ -1062,7 +1067,7 @@ class StockDBPostgreSQL(StockDBBase):
                     res_h = await conn.fetchrow("SELECT close FROM hourly_prices WHERE ticker = $1 ORDER BY datetime DESC LIMIT 1", ticker)
                     if res_h: latest_price = res_h['close']
                 except Exception as e:
-                    print(f"PostgreSQL error (hourly_prices for {ticker}): {e}")
+                    self.logger.error(f"PostgreSQL error (hourly_prices for {ticker}): {e}", exc_info=True)
 
             # 3. Try daily_prices
             if latest_price is None:
@@ -1070,7 +1075,7 @@ class StockDBPostgreSQL(StockDBBase):
                     res_d = await conn.fetchrow("SELECT close FROM daily_prices WHERE ticker = $1 ORDER BY date DESC LIMIT 1", ticker)
                     if res_d: latest_price = res_d['close']
                 except Exception as e:
-                    print(f"PostgreSQL error (daily_prices for {ticker}): {e}")
+                    self.logger.error(f"PostgreSQL error (daily_prices for {ticker}): {e}", exc_info=True)
         finally:
             await self._return_connection(conn)
         return latest_price
@@ -1099,7 +1104,7 @@ class StockDBPostgreSQL(StockDBBase):
                     res = await conn.fetchrow("SELECT close FROM daily_prices WHERE ticker = $1 ORDER BY date DESC LIMIT 1", ticker)
                     if res: latest_close = res['close']
                 except Exception as e:
-                    print(f"PostgreSQL error (daily_prices for {ticker}): {e}")
+                    self.logger.error(f"PostgreSQL error (daily_prices for {ticker}): {e}", exc_info=True)
                 
                 result[ticker] = latest_close
         finally:
@@ -1409,7 +1414,7 @@ class StockDBPostgreSQL(StockDBBase):
                 for row in rows:
                     result[row['ticker']] = row['price']
             except Exception as e:
-                print(f"PostgreSQL error (realtime_data for multiple tickers): {e}")
+                self.logger.error(f"PostgreSQL error (realtime_data for multiple tickers): {e}", exc_info=True)
 
             # Try hourly_prices for missing tickers - uses (ticker, datetime) index
             missing_tickers = [ticker for ticker in tickers if result[ticker] is None]
@@ -1426,7 +1431,7 @@ class StockDBPostgreSQL(StockDBBase):
                     for row in rows:
                         result[row['ticker']] = row['price']
                 except Exception as e:
-                    print(f"PostgreSQL error (hourly_prices for multiple tickers): {e}")
+                    self.logger.error(f"PostgreSQL error (hourly_prices for multiple tickers): {e}", exc_info=True)
 
             # Try daily_prices for remaining missing tickers - uses (ticker, date) index
             missing_tickers = [ticker for ticker in tickers if result[ticker] is None]
@@ -1443,7 +1448,7 @@ class StockDBPostgreSQL(StockDBBase):
                     for row in rows:
                         result[row['ticker']] = row['price']
                 except Exception as e:
-                    print(f"PostgreSQL error (daily_prices for multiple tickers): {e}")
+                    self.logger.error(f"PostgreSQL error (daily_prices for multiple tickers): {e}", exc_info=True)
         finally:
             await self._return_connection(conn)
         return result

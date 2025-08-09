@@ -14,6 +14,8 @@ from .common_strategies import (
     calculate_exponential_moving_average,
 )
 import sys
+import logging
+from .logging_utils import get_logger, log_info, log_warning, log_error, log_debug
 
 DEFAULT_DATA_DIR = './data'
 def get_default_db_path(db_type: str) -> str:   
@@ -29,8 +31,9 @@ class StockDBBase(metaclass=ABCMeta):
     """
     Abstract base class for stock database operations.
     """
-    def __init__(self, db_config: str):
+    def __init__(self, db_config: str, logger: logging.Logger = None):
         self.db_config = db_config
+        self.logger = get_logger("stock_db", logger)
 
     @abstractmethod
     def _init_db(self) -> None:
@@ -1126,10 +1129,10 @@ class StockDBClient(StockDBBase):
                 response.raise_for_status()
                 return await response.json()
         except aiohttp.ClientError as e:
-            print(f"StockDBClient network error for command '{command}': {e}")
+            self.logger.error(f"StockDBClient network error for command '{command}': {e}", exc_info=True)
             raise ConnectionError(f"Failed to connect or communicate with server for command '{command}': {e}") from e
         except json.JSONDecodeError as e:
-            print(f"StockDBClient JSON decode error for command '{command}': {e}")
+            self.logger.error(f"StockDBClient JSON decode error for command '{command}': {e}", exc_info=True)
             raise ValueError(f"Invalid JSON response from server for command '{command}': {e}") from e
 
     def _parse_df_from_response(self, response_data: list[dict], index_col: str) -> pd.DataFrame:
