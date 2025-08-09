@@ -1,5 +1,5 @@
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import asyncio
 import asyncpg
 import sqlalchemy
@@ -17,12 +17,18 @@ class StockDBPostgreSQL(StockDBBase):
     """
     A class to manage stock data storage and retrieval in a PostgreSQL database.
     """
-    def __init__(self, db_config: str):
+    def __init__(self, db_config: str, tables_cache_timeout_minutes: int = 10):
         super().__init__(db_config)
         self.db_config = db_config
         print(f"PostgreSQL database config: {self.db_config}", file=sys.stderr)
         # Create SQLAlchemy engine for pandas operations - defer until needed
         self.engine = None
+        
+        # Cache configuration for _ensure_tables_exist
+        self.tables_cache_timeout_minutes = tables_cache_timeout_minutes
+        self._tables_ensured = False
+        self._tables_ensured_at = None
+        
         self._init_db()
 
     def _init_db(self) -> None:
@@ -32,7 +38,17 @@ class StockDBPostgreSQL(StockDBBase):
         pass
 
     async def _ensure_tables_exist(self) -> None:
-        """Ensure all required tables exist in the PostgreSQL database."""
+        """Ensure all required tables exist in the PostgreSQL database.
+        Uses caching to avoid repeated database calls within the configured timeout period.
+        """
+        # Check if tables have been ensured recently
+        now = datetime.now()
+        if (self._tables_ensured and 
+            self._tables_ensured_at is not None and 
+            now - self._tables_ensured_at < timedelta(minutes=self.tables_cache_timeout_minutes)):
+            # Cache is still valid, skip database operations
+            return
+        
         conn = await asyncpg.connect(self.db_config)
         try:
             # Create daily_prices table
@@ -104,6 +120,10 @@ class StockDBPostgreSQL(StockDBBase):
                     await conn.fetchval(f"SELECT COUNT(*) FROM {table} LIMIT 1")
                 except Exception as e:
                     raise Exception(f"Failed to verify table {table}: {e}")
+            
+            # Update cache state
+            self._tables_ensured = True
+            self._tables_ensured_at = now
                     
         finally:
             await conn.close()
@@ -117,6 +137,35 @@ class StockDBPostgreSQL(StockDBBase):
         if self.engine is None:
             self.engine = create_engine(self.db_config)
         return self.engine
+
+    def invalidate_tables_cache(self) -> None:
+        """Manually invalidate the tables existence cache.
+        Use this if you know tables have been modified externally.
+        """
+        self._tables_ensured = False
+        self._tables_ensured_at = None
+
+    def get_tables_cache_status(self) -> Dict[str, Any]:
+        """Get the current status of the tables existence cache."""
+        now = datetime.now()
+        cache_valid = False
+        remaining_minutes = 0
+        
+        if (self._tables_ensured and self._tables_ensured_at is not None):
+            time_since_ensured = now - self._tables_ensured_at
+            cache_valid = time_since_ensured < timedelta(minutes=self.tables_cache_timeout_minutes)
+            if cache_valid:
+                remaining_time = timedelta(minutes=self.tables_cache_timeout_minutes) - time_since_ensured
+                remaining_minutes = remaining_time.total_seconds() / 60
+        
+        return {
+            "cache_enabled": True,
+            "cache_timeout_minutes": self.tables_cache_timeout_minutes,
+            "tables_ensured": self._tables_ensured,
+            "tables_ensured_at": self._tables_ensured_at.isoformat() if self._tables_ensured_at else None,
+            "cache_valid": cache_valid,
+            "remaining_cache_minutes": remaining_minutes
+        }
 
     async def _add_ma_ema_columns_if_needed_postgresql_async(self, conn) -> None:
         """Add MA and EMA columns to daily_prices table if they don't exist in PostgreSQL using asyncpg."""
