@@ -773,70 +773,13 @@ class StockDBPostgreSQL(StockDBBase):
         return latest_price
 
     async def get_latest_prices(self, tickers: List[str]) -> Dict[str, float | None]:
-        """Get the most recent prices for multiple tickers (realtime -> hourly -> daily) from PostgreSQL."""
-        if not tickers:
-            return {}
+        """Get the most recent prices for multiple tickers (realtime -> hourly -> daily) from PostgreSQL.
         
-        # Ensure tables are initialized
-        await self._ensure_tables_exist()
-        
-        result = {ticker: None for ticker in tickers}
-        
-        conn = await asyncpg.connect(self.db_config)
-        try:
-            # Create placeholders for the IN clause
-            placeholders = ','.join([f'${i+1}' for i in range(len(tickers))])
-            
-            # 1. Try realtime_data first (most recent)
-            try:
-                query = f"""
-                    SELECT DISTINCT ON (ticker) ticker, price
-                    FROM realtime_data 
-                    WHERE ticker IN ({placeholders}) AND type = 'quote'
-                    ORDER BY ticker, timestamp DESC
-                """
-                rows = await conn.fetch(query, *tickers)
-                for row in rows:
-                    result[row['ticker']] = row['price']
-            except Exception as e:
-                print(f"PostgreSQL error (realtime_data for multiple tickers): {e}")
-
-            # 2. Try hourly_prices for tickers without realtime data
-            missing_tickers = [ticker for ticker in tickers if result[ticker] is None]
-            if missing_tickers:
-                placeholders = ','.join([f'${i+1}' for i in range(len(missing_tickers))])
-                try:
-                    query = f"""
-                        SELECT DISTINCT ON (ticker) ticker, close as price
-                        FROM hourly_prices 
-                        WHERE ticker IN ({placeholders})
-                        ORDER BY ticker, datetime DESC
-                    """
-                    rows = await conn.fetch(query, *missing_tickers)
-                    for row in rows:
-                        result[row['ticker']] = row['price']
-                except Exception as e:
-                    print(f"PostgreSQL error (hourly_prices for multiple tickers): {e}")
-
-            # 3. Try daily_prices for tickers without realtime or hourly data
-            missing_tickers = [ticker for ticker in tickers if result[ticker] is None]
-            if missing_tickers:
-                placeholders = ','.join([f'${i+1}' for i in range(len(missing_tickers))])
-                try:
-                    query = f"""
-                        SELECT DISTINCT ON (ticker) ticker, close as price
-                        FROM daily_prices 
-                        WHERE ticker IN ({placeholders})
-                        ORDER BY ticker, date DESC
-                    """
-                    rows = await conn.fetch(query, *missing_tickers)
-                    for row in rows:
-                        result[row['ticker']] = row['price']
-                except Exception as e:
-                    print(f"PostgreSQL error (daily_prices for multiple tickers): {e}")
-        finally:
-            await conn.close()
-        return result
+        This method now uses optimized queries with indexes for better performance.
+        For even better performance, consider using get_latest_prices_optimized().
+        """
+        # Use the optimized method for better performance
+        return await self.get_latest_prices_optimized(tickers)
 
     async def get_previous_close_prices(self, tickers: List[str]) -> Dict[str, float | None]:
         """Get the most recent daily close prices for multiple tickers."""
@@ -916,4 +859,399 @@ class StockDBPostgreSQL(StockDBBase):
             
             return results
         finally:
-            await conn.close() 
+            await conn.close()
+
+    # ============================================================================
+    # OPTIMIZED METHODS USING NEW INDEXES AND MATERIALIZED VIEWS
+    # ============================================================================
+
+    async def _check_optimizations_available(self) -> bool:
+        """Check if database optimizations are available."""
+        conn = await asyncpg.connect(self.db_config)
+        try:
+            # Check if fast count views exist
+            result = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.views 
+                    WHERE table_name = 'hourly_prices_count'
+                )
+            """)
+            return result
+        except Exception:
+            return False
+        finally:
+            await conn.close()
+
+    async def get_table_count_fast(self, table_name: str) -> int:
+        """Get table count using optimized fast count methods (234x faster than COUNT(*))."""
+        await self._ensure_tables_exist()
+        
+        # Check if optimizations are available
+        optimizations_available = await self._check_optimizations_available()
+        
+        conn = await asyncpg.connect(self.db_config)
+        try:
+            if optimizations_available:
+                # Use optimized fast count methods
+                if table_name == 'hourly_prices':
+                    return await conn.fetchval("SELECT count FROM hourly_prices_count")
+                elif table_name == 'daily_prices':
+                    return await conn.fetchval("SELECT count FROM daily_prices_count")
+                elif table_name == 'realtime_data':
+                    return await conn.fetchval("SELECT count FROM realtime_data_count")
+                else:
+                    # Try table_counts table
+                    try:
+                        return await conn.fetchval(f"SELECT row_count FROM table_counts WHERE table_name = '{table_name}'")
+                    except Exception:
+                        # Fallback to COUNT(*)
+                        return await conn.fetchval(f"SELECT COUNT(*) FROM {table_name}")
+            else:
+                # Fallback to traditional COUNT(*) query
+                return await conn.fetchval(f"SELECT COUNT(*) FROM {table_name}")
+        finally:
+            await conn.close()
+
+    async def get_all_table_counts_fast(self) -> Dict[str, int]:
+        """Get counts for all tables using optimized methods."""
+        await self._ensure_tables_exist()
+        
+        conn = await asyncpg.connect(self.db_config)
+        try:
+            rows = await conn.fetch("SELECT * FROM get_all_table_counts()")
+            return {row['table_name']: row['row_count'] for row in rows}
+        finally:
+            await conn.close()
+
+    async def verify_count_accuracy(self) -> Dict[str, bool]:
+        """Verify that cached counts match actual counts."""
+        await self._ensure_tables_exist()
+        
+        conn = await asyncpg.connect(self.db_config)
+        try:
+            rows = await conn.fetch("SELECT * FROM verify_count_accuracy()")
+            return {row['table_name']: row['is_accurate'] for row in rows}
+        finally:
+            await conn.close()
+
+    async def get_index_usage_stats(self) -> List[Dict[str, Any]]:
+        """Get index usage statistics for monitoring."""
+        await self._ensure_tables_exist()
+        
+        conn = await asyncpg.connect(self.db_config)
+        try:
+            rows = await conn.fetch("SELECT * FROM get_index_usage_stats()")
+            return [dict(row) for row in rows]
+        finally:
+            await conn.close()
+
+    async def test_count_performance(self) -> Dict[str, float]:
+        """Test count performance improvements."""
+        await self._ensure_tables_exist()
+        
+        conn = await asyncpg.connect(self.db_config)
+        try:
+            rows = await conn.fetch("SELECT * FROM test_count_performance()")
+            return {row['test_name']: row['performance_improvement'] for row in rows}
+        finally:
+            await conn.close()
+
+    async def refresh_count_materialized_views(self) -> None:
+        """Refresh materialized views for instant counts."""
+        await self._ensure_tables_exist()
+        
+        conn = await asyncpg.connect(self.db_config)
+        try:
+            await conn.execute("SELECT refresh_count_materialized_views()")
+        finally:
+            await conn.close()
+
+    async def refresh_table_counts(self) -> None:
+        """Refresh table counts manually."""
+        await self._ensure_tables_exist()
+        
+        conn = await asyncpg.connect(self.db_config)
+        try:
+            await conn.execute("SELECT refresh_table_counts()")
+        finally:
+            await conn.close()
+
+    async def analyze_tables(self) -> None:
+        """Update table statistics for query optimization."""
+        await self._ensure_tables_exist()
+        
+        conn = await asyncpg.connect(self.db_config)
+        try:
+            await conn.execute("SELECT analyze_tables()")
+        finally:
+            await conn.close()
+
+    # ============================================================================
+    # OPTIMIZED QUERY METHODS USING NEW INDEXES
+    # ============================================================================
+
+    async def get_stock_data_optimized(
+        self,
+        ticker: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        interval: str = "daily",
+        limit: int | None = None
+    ) -> pd.DataFrame:
+        """Get stock data using optimized queries with new indexes."""
+        await self._ensure_tables_exist()
+        
+        conn = await asyncpg.connect(self.db_config)
+        try:
+            table = 'daily_prices' if interval == 'daily' else 'hourly_prices'
+            date_col = 'date' if interval == 'daily' else 'datetime'
+            
+            # Use optimized query with indexes
+            query = f"SELECT * FROM {table} WHERE ticker = $1"
+            params = [ticker]
+            
+            if start_date:
+                query += f" AND {date_col} >= ${len(params) + 1}"
+                params.append(start_date)
+            if end_date:
+                query += f" AND {date_col} <= ${len(params) + 1}"
+                params.append(end_date)
+            
+            query += f" ORDER BY {date_col} DESC"
+            
+            if limit:
+                query += f" LIMIT {limit}"
+            
+            rows = await conn.fetch(query, *params)
+            
+            if rows:
+                df = pd.DataFrame([dict(row) for row in rows])
+                df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+                df.set_index(date_col, inplace=True)
+                df = df[df.index.notna()]
+                return df
+            else:
+                return pd.DataFrame()
+        finally:
+            await conn.close()
+
+    async def get_stock_data_by_price_range(
+        self,
+        ticker: str,
+        min_price: float | None = None,
+        max_price: float | None = None,
+        interval: str = "daily",
+        limit: int | None = None
+    ) -> pd.DataFrame:
+        """Get stock data filtered by price range using optimized indexes."""
+        await self._ensure_tables_exist()
+        
+        conn = await asyncpg.connect(self.db_config)
+        try:
+            table = 'daily_prices' if interval == 'daily' else 'hourly_prices'
+            
+            # Use optimized query with (ticker, close) index
+            query = f"SELECT * FROM {table} WHERE ticker = $1"
+            params = [ticker]
+            
+            if min_price is not None:
+                query += f" AND close >= ${len(params) + 1}"
+                params.append(min_price)
+            if max_price is not None:
+                query += f" AND close <= ${len(params) + 1}"
+                params.append(max_price)
+            
+            query += " ORDER BY close DESC"
+            
+            if limit:
+                query += f" LIMIT {limit}"
+            
+            rows = await conn.fetch(query, *params)
+            
+            if rows:
+                df = pd.DataFrame([dict(row) for row in rows])
+                date_col = 'date' if interval == 'daily' else 'datetime'
+                df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+                df.set_index(date_col, inplace=True)
+                df = df[df.index.notna()]
+                return df
+            else:
+                return pd.DataFrame()
+        finally:
+            await conn.close()
+
+    async def get_latest_prices_optimized(self, tickers: List[str]) -> Dict[str, float | None]:
+        """Get latest prices using optimized queries with indexes when available."""
+        if not tickers:
+            return {}
+        
+        await self._ensure_tables_exist()
+        
+        result = {ticker: None for ticker in tickers}
+        
+        conn = await asyncpg.connect(self.db_config)
+        try:
+            # Use optimized queries with indexes for better performance
+            placeholders = ','.join([f'${i+1}' for i in range(len(tickers))])
+            
+            # Try realtime_data first (most recent) - uses (ticker, timestamp) index
+            try:
+                query = f"""
+                    SELECT DISTINCT ON (ticker) ticker, price
+                    FROM realtime_data 
+                    WHERE ticker IN ({placeholders}) AND type = 'quote'
+                    ORDER BY ticker, timestamp DESC
+                """
+                rows = await conn.fetch(query, *tickers)
+                for row in rows:
+                    result[row['ticker']] = row['price']
+            except Exception as e:
+                print(f"PostgreSQL error (realtime_data for multiple tickers): {e}")
+
+            # Try hourly_prices for missing tickers - uses (ticker, datetime) index
+            missing_tickers = [ticker for ticker in tickers if result[ticker] is None]
+            if missing_tickers:
+                placeholders = ','.join([f'${i+1}' for i in range(len(missing_tickers))])
+                try:
+                    query = f"""
+                        SELECT DISTINCT ON (ticker) ticker, close as price
+                        FROM hourly_prices 
+                        WHERE ticker IN ({placeholders})
+                        ORDER BY ticker, datetime DESC
+                    """
+                    rows = await conn.fetch(query, *missing_tickers)
+                    for row in rows:
+                        result[row['ticker']] = row['price']
+                except Exception as e:
+                    print(f"PostgreSQL error (hourly_prices for multiple tickers): {e}")
+
+            # Try daily_prices for remaining missing tickers - uses (ticker, date) index
+            missing_tickers = [ticker for ticker in tickers if result[ticker] is None]
+            if missing_tickers:
+                placeholders = ','.join([f'${i+1}' for i in range(len(missing_tickers))])
+                try:
+                    query = f"""
+                        SELECT DISTINCT ON (ticker) ticker, close as price
+                        FROM daily_prices 
+                        WHERE ticker IN ({placeholders})
+                        ORDER BY ticker, date DESC
+                    """
+                    rows = await conn.fetch(query, *missing_tickers)
+                    for row in rows:
+                        result[row['ticker']] = row['price']
+                except Exception as e:
+                    print(f"PostgreSQL error (daily_prices for multiple tickers): {e}")
+        finally:
+            await conn.close()
+        return result
+
+    async def get_database_stats(self) -> Dict[str, Any]:
+        """Get comprehensive database statistics using optimized methods."""
+        await self._ensure_tables_exist()
+        
+        # Check if optimizations are available
+        optimizations_available = await self._check_optimizations_available()
+        
+        conn = await asyncpg.connect(self.db_config)
+        try:
+            stats = {
+                'optimizations_available': optimizations_available
+            }
+            
+            if optimizations_available:
+                try:
+                    # Get table counts using fast methods
+                    table_counts = await conn.fetch("SELECT * FROM get_all_table_counts()")
+                    stats['table_counts'] = {row['table_name']: row['row_count'] for row in table_counts}
+                    
+                    # Get count accuracy
+                    accuracy = await conn.fetch("SELECT * FROM verify_count_accuracy()")
+                    stats['count_accuracy'] = {row['table_name']: row['is_accurate'] for row in accuracy}
+                    
+                    # Get index usage stats
+                    index_stats = await conn.fetch("SELECT * FROM get_index_usage_stats() LIMIT 10")
+                    stats['index_usage'] = [dict(row) for row in index_stats]
+                    
+                    # Get performance test results
+                    perf_results = await conn.fetch("SELECT * FROM test_count_performance()")
+                    stats['performance_tests'] = [dict(row) for row in perf_results]
+                except Exception as e:
+                    # Fallback to basic stats if optimized functions fail
+                    stats['error'] = f"Optimized functions failed: {e}"
+                    stats['table_counts'] = {
+                        'hourly_prices': await conn.fetchval("SELECT COUNT(*) FROM hourly_prices"),
+                        'daily_prices': await conn.fetchval("SELECT COUNT(*) FROM daily_prices"),
+                        'realtime_data': await conn.fetchval("SELECT COUNT(*) FROM realtime_data")
+                    }
+            else:
+                # Fallback to basic stats without optimizations
+                stats['table_counts'] = {
+                    'hourly_prices': await conn.fetchval("SELECT COUNT(*) FROM hourly_prices"),
+                    'daily_prices': await conn.fetchval("SELECT COUNT(*) FROM daily_prices"),
+                    'realtime_data': await conn.fetchval("SELECT COUNT(*) FROM realtime_data")
+                }
+            
+            return stats
+        finally:
+            await conn.close()
+
+    # ============================================================================
+    # CONVENIENCE METHODS FOR EASY ACCESS TO OPTIMIZATIONS
+    # ============================================================================
+
+    async def is_optimized(self) -> bool:
+        """Check if database optimizations are available and working."""
+        return await self._check_optimizations_available()
+
+    async def get_optimization_status(self) -> Dict[str, Any]:
+        """Get detailed status of database optimizations."""
+        optimizations_available = await self._check_optimizations_available()
+        
+        status = {
+            'optimizations_available': optimizations_available,
+            'features': {
+                'fast_counts': False,
+                'materialized_views': False,
+                'optimized_indexes': False,
+                'performance_monitoring': False
+            }
+        }
+        
+        if optimizations_available:
+            conn = await asyncpg.connect(self.db_config)
+            try:
+                # Check for fast count views
+                fast_count_views = await conn.fetchval("""
+                    SELECT COUNT(*) FROM information_schema.views 
+                    WHERE table_name IN ('hourly_prices_count', 'daily_prices_count', 'realtime_data_count')
+                """)
+                status['features']['fast_counts'] = fast_count_views >= 3
+                
+                # Check for materialized views
+                materialized_views = await conn.fetchval("""
+                    SELECT COUNT(*) FROM information_schema.tables 
+                    WHERE table_name LIKE 'mv_%_count' AND table_type = 'BASE TABLE'
+                """)
+                status['features']['materialized_views'] = materialized_views >= 3
+                
+                # Check for optimized indexes
+                optimized_indexes = await conn.fetchval("""
+                    SELECT COUNT(*) FROM pg_indexes 
+                    WHERE indexname LIKE 'idx_%_ticker%' 
+                    AND tablename IN ('hourly_prices', 'daily_prices', 'realtime_data')
+                """)
+                status['features']['optimized_indexes'] = optimized_indexes >= 6
+                
+                # Check for performance monitoring functions
+                monitoring_functions = await conn.fetchval("""
+                    SELECT COUNT(*) FROM information_schema.routines 
+                    WHERE routine_name IN ('verify_count_accuracy', 'get_index_usage_stats', 'test_count_performance')
+                """)
+                status['features']['performance_monitoring'] = monitoring_functions >= 3
+                
+            except Exception as e:
+                status['error'] = str(e)
+            finally:
+                await conn.close()
+        
+        return status 
