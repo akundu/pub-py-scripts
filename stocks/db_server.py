@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, Set, Any
 import json
 from datetime import datetime, timezone
+import time
 
 # Global logger instance
 logger = logging.getLogger("db_server_logger")
@@ -341,6 +342,196 @@ async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
             await ws.close()
         return ws
 
+async def handle_stats_database(request: web.Request) -> web.Response:
+    """Get comprehensive database statistics."""
+    db_instance: StockDBBase = request.app['db_instance']
+    
+    # Check for timeout parameter (default 30 seconds)
+    timeout = request.query.get('timeout', '30')
+    try:
+        timeout_seconds = float(timeout)
+        if timeout_seconds <= 0 or timeout_seconds > 300:  # Max 5 minutes
+            return web.json_response({"error": "Timeout must be between 0 and 300 seconds"}, status=400)
+    except ValueError:
+        return web.json_response({"error": "Invalid timeout parameter"}, status=400)
+    
+    try:
+        start_time = time.time()
+        
+        # Use asyncio.wait_for to bound the execution time
+        stats = await asyncio.wait_for(
+            db_instance.get_database_stats(),
+            timeout=timeout_seconds
+        )
+        
+        execution_time = (time.time() - start_time) * 1000  # Convert to milliseconds
+        
+        response_data = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "execution_time_ms": round(execution_time, 2),
+            "timeout_seconds": timeout_seconds,
+            "stats": stats
+        }
+        
+        return web.json_response(response_data)
+        
+    except asyncio.TimeoutError:
+        return web.json_response({
+            "error": f"Database stats query timed out after {timeout_seconds} seconds",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }, status=504)
+    except Exception as e:
+        logger.error(f"Error getting database stats: {e}", exc_info=True)
+        return web.json_response({
+            "error": f"Failed to get database stats: {str(e)}",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }, status=500)
+
+async def handle_stats_tables(request: web.Request) -> web.Response:
+    """Get fast table counts for all tables."""
+    db_instance: StockDBBase = request.app['db_instance']
+    
+    # Check for timeout parameter (default 15 seconds)
+    timeout = request.query.get('timeout', '15')
+    try:
+        timeout_seconds = float(timeout)
+        if timeout_seconds <= 0 or timeout_seconds > 120:  # Max 2 minutes
+            return web.json_response({"error": "Timeout must be between 0 and 120 seconds"}, status=400)
+    except ValueError:
+        return web.json_response({"error": "Invalid timeout parameter"}, status=400)
+    
+    try:
+        start_time = time.time()
+        
+        # Check if the database instance has the fast count method
+        if not hasattr(db_instance, 'get_all_table_counts_fast'):
+            return web.json_response({
+                "error": "Fast table counts not supported by this database type",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }, status=501)
+        
+        # Use asyncio.wait_for to bound the execution time
+        table_counts = await asyncio.wait_for(
+            db_instance.get_all_table_counts_fast(),
+            timeout=timeout_seconds
+        )
+        
+        execution_time = (time.time() - start_time) * 1000  # Convert to milliseconds
+        
+        response_data = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "execution_time_ms": round(execution_time, 2),
+            "timeout_seconds": timeout_seconds,
+            "table_counts": table_counts,
+            "total_tables": len(table_counts)
+        }
+        
+        return web.json_response(response_data)
+        
+    except asyncio.TimeoutError:
+        return web.json_response({
+            "error": f"Table counts query timed out after {timeout_seconds} seconds",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }, status=504)
+    except Exception as e:
+        logger.error(f"Error getting table counts: {e}", exc_info=True)
+        return web.json_response({
+            "error": f"Failed to get table counts: {str(e)}",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }, status=500)
+
+async def handle_stats_performance(request: web.Request) -> web.Response:
+    """Get performance test results."""
+    db_instance: StockDBBase = request.app['db_instance']
+    
+    # Check for timeout parameter (default 20 seconds)
+    timeout = request.query.get('timeout', '20')
+    try:
+        timeout_seconds = float(timeout)
+        if timeout_seconds <= 0 or timeout_seconds > 180:  # Max 3 minutes
+            return web.json_response({"error": "Timeout must be between 0 and 180 seconds"}, status=400)
+    except ValueError:
+        return web.json_response({"error": "Invalid timeout parameter"}, status=400)
+    
+    try:
+        start_time = time.time()
+        
+        # Check if the database instance has the performance test method
+        if not hasattr(db_instance, 'test_count_performance'):
+            return web.json_response({
+                "error": "Performance testing not supported by this database type",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }, status=501)
+        
+        # Use asyncio.wait_for to bound the execution time
+        performance_results = await asyncio.wait_for(
+            db_instance.test_count_performance(),
+            timeout=timeout_seconds
+        )
+        
+        execution_time = (time.time() - start_time) * 1000  # Convert to milliseconds
+        
+        response_data = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "execution_time_ms": round(execution_time, 2),
+            "timeout_seconds": timeout_seconds,
+            "performance_tests": performance_results
+        }
+        
+        return web.json_response(response_data)
+        
+    except asyncio.TimeoutError:
+        return web.json_response({
+            "error": f"Performance test query timed out after {timeout_seconds} seconds",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }, status=504)
+    except Exception as e:
+        logger.error(f"Error getting performance results: {e}", exc_info=True)
+        return web.json_response({
+            "error": f"Failed to get performance results: {str(e)}",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }, status=500)
+
+async def handle_stats_pool(request: web.Request) -> web.Response:
+    """Get connection pool statistics."""
+    db_instance: StockDBBase = request.app['db_instance']
+    
+    try:
+        start_time = time.time()
+        
+        # Check if the database instance has the pool status method
+        if not hasattr(db_instance, 'get_pool_status'):
+            return web.json_response({
+                "error": "Connection pool statistics not supported by this database type",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }, status=501)
+        
+        # Pool status should be very fast, no need for timeout
+        pool_status = db_instance.get_pool_status()
+        
+        # Also get table cache status if available
+        cache_status = None
+        if hasattr(db_instance, 'get_tables_cache_status'):
+            cache_status = db_instance.get_tables_cache_status()
+        
+        execution_time = (time.time() - start_time) * 1000  # Convert to milliseconds
+        
+        response_data = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "execution_time_ms": round(execution_time, 2),
+            "pool_status": pool_status,
+            "cache_status": cache_status
+        }
+        
+        return web.json_response(response_data)
+        
+    except Exception as e:
+        logger.error(f"Error getting pool stats: {e}", exc_info=True)
+        return web.json_response({
+            "error": f"Failed to get pool stats: {str(e)}",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }, status=500)
+
 async def handle_health_check(request: web.Request) -> web.Response:
     """Simple health check endpoint."""
     # Get database information from the app context
@@ -389,14 +580,30 @@ async def handle_catch_all(request: web.Request) -> web.Response:
         return web.json_response({
             "error": "Not Found",
             "message": f"Static resource '{path}' not found. This is a database API server.",
-            "available_endpoints": ["/db_command (POST)", "/ws (WebSocket)"]
+            "available_endpoints": [
+                "/db_command (POST)", 
+                "/ws (WebSocket)", 
+                "/health (GET)",
+                "/stats/database (GET)",
+                "/stats/tables (GET)",
+                "/stats/performance (GET)", 
+                "/stats/pool (GET)"
+            ]
         }, status=404)
     
     # For other unknown routes, return a helpful 404
     return web.json_response({
         "error": "Not Found", 
         "message": f"Endpoint '{path}' not found",
-        "available_endpoints": ["/db_command (POST)", "/ws (WebSocket)"]
+        "available_endpoints": [
+            "/db_command (POST)", 
+            "/ws (WebSocket)", 
+            "/health (GET)",
+            "/stats/database (GET)",
+            "/stats/tables (GET)", 
+            "/stats/performance (GET)",
+            "/stats/pool (GET)"
+        ]
     }, status=404)
 
 async def handle_db_command(request: web.Request) -> web.Response:
@@ -658,6 +865,12 @@ async def main_server_runner():
     app.router.add_get("/ws", handle_websocket)  # Add WebSocket endpoint
     app.router.add_get("/", handle_health_check)  # Add health check endpoint
     app.router.add_get("/health", handle_health_check)  # Alternative health check endpoint
+    
+    # Add stats endpoints
+    app.router.add_get("/stats/database", handle_stats_database)  # Comprehensive database statistics
+    app.router.add_get("/stats/tables", handle_stats_tables)      # Fast table counts
+    app.router.add_get("/stats/performance", handle_stats_performance)  # Performance test results
+    app.router.add_get("/stats/pool", handle_stats_pool)          # Connection pool and cache status
     
     # Add catch-all handler for unknown routes (must be last)
     app.router.add_get("/{path:.*}", handle_catch_all)

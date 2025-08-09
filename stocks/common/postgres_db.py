@@ -4,7 +4,7 @@ import asyncio
 import asyncpg
 import sqlalchemy
 from sqlalchemy import create_engine
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from .common_strategies import (
     calculate_moving_average,
     calculate_exponential_moving_average,
@@ -12,12 +12,19 @@ from .common_strategies import (
 from .stock_db import StockDBBase
 import base64
 import sys
+import weakref
+from collections import deque
+from contextlib import asynccontextmanager
 
 class StockDBPostgreSQL(StockDBBase):
     """
     A class to manage stock data storage and retrieval in a PostgreSQL database.
     """
-    def __init__(self, db_config: str, tables_cache_timeout_minutes: int = 10):
+    def __init__(self, 
+                 db_config: str, 
+                 tables_cache_timeout_minutes: int = 10,
+                 pool_max_size: int = 10,
+                 pool_connection_timeout_minutes: int = 30):
         super().__init__(db_config)
         self.db_config = db_config
         print(f"PostgreSQL database config: {self.db_config}", file=sys.stderr)
@@ -28,6 +35,17 @@ class StockDBPostgreSQL(StockDBBase):
         self.tables_cache_timeout_minutes = tables_cache_timeout_minutes
         self._tables_ensured = False
         self._tables_ensured_at = None
+        
+        # Connection pool configuration
+        self.pool_max_size = pool_max_size
+        self.pool_connection_timeout_minutes = pool_connection_timeout_minutes
+        self._available_connections = deque()  # Only stores available connections
+        self._pool_lock = asyncio.Lock()
+        self._cleanup_task = None
+        self._shutdown = False
+        
+        # Register cleanup on instance deletion
+        weakref.finalize(self, self._cleanup_pool_sync)
         
         self._init_db()
 
@@ -49,8 +67,10 @@ class StockDBPostgreSQL(StockDBBase):
             # Cache is still valid, skip database operations
             return
         
-        conn = await asyncpg.connect(self.db_config)
-        try:
+        # Start cleanup task if not already running
+        await self._start_cleanup_task()
+        
+        async with self.get_connection() as conn:
             # Create daily_prices table
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS daily_prices (
@@ -124,9 +144,6 @@ class StockDBPostgreSQL(StockDBBase):
             # Update cache state
             self._tables_ensured = True
             self._tables_ensured_at = now
-                    
-        finally:
-            await conn.close()
 
     async def _init_db_async(self) -> None:
         """Async initialization of PostgreSQL database tables."""
@@ -166,6 +183,172 @@ class StockDBPostgreSQL(StockDBBase):
             "cache_valid": cache_valid,
             "remaining_cache_minutes": remaining_minutes
         }
+
+    # ============================================================================
+    # CONNECTION POOL MANAGEMENT
+    # ============================================================================
+
+    async def _get_connection(self) -> asyncpg.Connection:
+        """Get a connection from the pool or create a new one.
+        Connection is removed from pool when retrieved and only returned when explicitly returned.
+        """
+        async with self._pool_lock:
+            now = datetime.now()
+            
+            # Try to get a valid connection from available connections
+            while self._available_connections:
+                conn_info = self._available_connections.popleft()
+                conn, created_at = conn_info
+                
+                # Check if connection is still valid and not too old
+                connection_age = now - created_at
+                if (connection_age < timedelta(minutes=self.pool_connection_timeout_minutes) 
+                    and not conn.is_closed()):
+                    # Connection is valid and removed from pool - return it
+                    return conn
+                else:
+                    # Connection is stale or closed, clean it up
+                    try:
+                        if not conn.is_closed():
+                            await conn.close()
+                    except Exception:
+                        pass  # Ignore errors when closing stale connections
+            
+            # No valid connection available, create a new one
+            try:
+                conn = await asyncpg.connect(self.db_config)
+                return conn
+            except Exception as e:
+                print(f"Failed to create database connection: {e}", file=sys.stderr)
+                raise
+
+    async def _return_connection(self, conn: asyncpg.Connection) -> None:
+        """Return a connection to the available pool if there's space, otherwise close it."""
+        async with self._pool_lock:
+            if self._shutdown or conn.is_closed():
+                # Don't return connections if we're shutting down or connection is closed
+                try:
+                    if not conn.is_closed():
+                        await conn.close()
+                except Exception:
+                    pass
+                return
+            
+            # Only add to available connections if pool isn't full
+            if len(self._available_connections) < self.pool_max_size:
+                self._available_connections.append((conn, datetime.now()))
+            else:
+                # Pool is full, close the connection
+                try:
+                    await conn.close()
+                except Exception:
+                    pass
+
+    async def _start_cleanup_task(self) -> None:
+        """Start the background cleanup task for stale connections."""
+        if self._cleanup_task is None or self._cleanup_task.done():
+            self._cleanup_task = asyncio.create_task(self._cleanup_stale_connections())
+
+    async def _cleanup_stale_connections(self) -> None:
+        """Background task to clean up stale connections."""
+        while not self._shutdown:
+            try:
+                await asyncio.sleep(60)  # Check every minute
+                await self._cleanup_pool()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"Error in connection cleanup task: {e}", file=sys.stderr)
+
+    async def _cleanup_pool(self) -> None:
+        """Clean up stale connections from the available pool."""
+        async with self._pool_lock:
+            now = datetime.now()
+            fresh_connections = deque()
+            
+            while self._available_connections:
+                conn_info = self._available_connections.popleft()
+                conn, created_at = conn_info
+                
+                connection_age = now - created_at
+                if (connection_age < timedelta(minutes=self.pool_connection_timeout_minutes) 
+                    and not conn.is_closed()):
+                    # Connection is still fresh and valid
+                    fresh_connections.append(conn_info)
+                else:
+                    # Connection is stale or closed, clean it up
+                    try:
+                        if not conn.is_closed():
+                            await conn.close()
+                    except Exception:
+                        pass  # Ignore errors when closing stale connections
+            
+            self._available_connections = fresh_connections
+
+    def _cleanup_pool_sync(self) -> None:
+        """Synchronous cleanup for use with weakref.finalize."""
+        self._shutdown = True
+        if self._cleanup_task and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
+
+    async def close_pool(self) -> None:
+        """Manually close all available connections in the pool."""
+        self._shutdown = True
+        
+        if self._cleanup_task and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+        
+        async with self._pool_lock:
+            # Close all available connections
+            while self._available_connections:
+                conn_info = self._available_connections.popleft()
+                conn, _ = conn_info
+                try:
+                    if not conn.is_closed():
+                        await conn.close()
+                except Exception:
+                    pass
+
+    def get_pool_status(self) -> Dict[str, Any]:
+        """Get the current status of the connection pool."""
+        available_count = len(self._available_connections)
+        
+        # Count active and stale connections in available pool
+        now = datetime.now()
+        active_connections = 0
+        stale_connections = 0
+        
+        for conn, created_at in self._available_connections:
+            connection_age = now - created_at
+            if (connection_age < timedelta(minutes=self.pool_connection_timeout_minutes) 
+                and not conn.is_closed()):
+                active_connections += 1
+            else:
+                stale_connections += 1
+        
+        return {
+            "pool_enabled": True,
+            "pool_max_size": self.pool_max_size,
+            "available_connections": available_count,
+            "active_connections": active_connections,
+            "stale_connections": stale_connections,
+            "connection_timeout_minutes": self.pool_connection_timeout_minutes,
+            "cleanup_task_running": self._cleanup_task is not None and not self._cleanup_task.done(),
+            "shutdown": self._shutdown
+        }
+
+    @asynccontextmanager
+    async def get_connection(self):
+        """Context manager for safely getting and returning connections."""
+        conn = await self._get_connection()
+        try:
+            yield conn
+        finally:
+            await self._return_connection(conn)
 
     async def _add_ma_ema_columns_if_needed_postgresql_async(self, conn) -> None:
         """Add MA and EMA columns to daily_prices table if they don't exist in PostgreSQL using asyncpg."""
@@ -351,7 +534,7 @@ class StockDBPostgreSQL(StockDBBase):
         if ema_periods is None:
             ema_periods = [8, 21, 34, 55, 89]
 
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             df_copy = df.copy()
             if df_copy.empty:
@@ -556,7 +739,7 @@ class StockDBPostgreSQL(StockDBBase):
                     print(f"Warning: Duplicate key violation for {ticker} at {record.get(date_col, 'unknown')}")
                     continue
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     async def _get_stock_data(
         self,
@@ -624,11 +807,13 @@ class StockDBPostgreSQL(StockDBBase):
         
         df = None
         if conn is None:
-            conn = await asyncpg.connect(self.db_config)
-            df = await self._get_stock_data(
-                conn, ticker, start_date, end_date, interval
-            )
-            await conn.close()
+            conn = await self._get_connection()
+            try:
+                df = await self._get_stock_data(
+                    conn, ticker, start_date, end_date, interval
+                )
+            finally:
+                await self._return_connection(conn)
         else:
             df = await self._get_stock_data(
                 conn, ticker, start_date, end_date, interval
@@ -640,7 +825,7 @@ class StockDBPostgreSQL(StockDBBase):
         # Ensure tables are initialized
         await self._ensure_tables_exist()
         
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             df_copy = df.copy()
             if df_copy.empty:
@@ -748,14 +933,14 @@ class StockDBPostgreSQL(StockDBBase):
                     print(f"Warning: Duplicate key violation for {ticker} at {record.get('timestamp', 'unknown')}")
                     continue
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     async def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None, data_type: str = "quote") -> pd.DataFrame:
         """Retrieve realtime (tick) stock data from the PostgreSQL database."""
         # Ensure tables are initialized
         await self._ensure_tables_exist()
         
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             query = "SELECT * FROM realtime_data WHERE ticker = $1 AND type = $2"
             params: list[str | None] = [ticker, data_type]
@@ -785,14 +970,14 @@ class StockDBPostgreSQL(StockDBBase):
             else:
                 return pd.DataFrame()
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     async def get_latest_price(self, ticker: str) -> float | None:
         """Get the most recent price for a ticker (realtime -> hourly -> daily) from PostgreSQL."""
         # Ensure tables are initialized
         await self._ensure_tables_exist()
         
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             latest_price = None
             # 1. Try realtime_data
@@ -818,7 +1003,7 @@ class StockDBPostgreSQL(StockDBBase):
                 except Exception as e:
                     print(f"PostgreSQL error (daily_prices for {ticker}): {e}")
         finally:
-            await conn.close()
+            await self._return_connection(conn)
         return latest_price
 
     async def get_latest_prices(self, tickers: List[str]) -> Dict[str, float | None]:
@@ -837,7 +1022,7 @@ class StockDBPostgreSQL(StockDBBase):
         
         result = {}
         
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             for ticker in tickers:
                 latest_close = None
@@ -849,12 +1034,12 @@ class StockDBPostgreSQL(StockDBBase):
                 
                 result[ticker] = latest_close
         finally:
-            await conn.close()
+            await self._return_connection(conn)
         return result
 
     async def execute_select_sql(self, sql_query: str, params: tuple = ()) -> pd.DataFrame:
         """Execute a direct SELECT SQL query on PostgreSQL and return results as a DataFrame."""
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             # Convert %s placeholders to $1, $2, etc. for asyncpg
             if '%s' in sql_query:
@@ -872,12 +1057,12 @@ class StockDBPostgreSQL(StockDBBase):
             else:
                 return pd.DataFrame()
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     async def execute_raw_sql(self, sql_query: str, params: tuple = ()) -> list[dict[str, Any]]:
         """Execute a raw SQL query on PostgreSQL. If it returns data (e.g., RETURNING clause),
            that data is returned with binary fields Base64 encoded. Otherwise, an empty list is returned."""
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             # Convert %s placeholders to $1, $2, etc. for asyncpg
             if '%s' in sql_query:
@@ -908,7 +1093,7 @@ class StockDBPostgreSQL(StockDBBase):
             
             return results
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     # ============================================================================
     # OPTIMIZED METHODS USING NEW INDEXES AND MATERIALIZED VIEWS
@@ -916,7 +1101,7 @@ class StockDBPostgreSQL(StockDBBase):
 
     async def _check_optimizations_available(self) -> bool:
         """Check if database optimizations are available."""
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             # Check if fast count views exist
             result = await conn.fetchval("""
@@ -929,7 +1114,7 @@ class StockDBPostgreSQL(StockDBBase):
         except Exception:
             return False
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     async def get_table_count_fast(self, table_name: str) -> int:
         """Get table count using optimized fast count methods (234x faster than COUNT(*))."""
@@ -938,7 +1123,7 @@ class StockDBPostgreSQL(StockDBBase):
         # Check if optimizations are available
         optimizations_available = await self._check_optimizations_available()
         
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             if optimizations_available:
                 # Use optimized fast count methods
@@ -959,81 +1144,81 @@ class StockDBPostgreSQL(StockDBBase):
                 # Fallback to traditional COUNT(*) query
                 return await conn.fetchval(f"SELECT COUNT(*) FROM {table_name}")
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     async def get_all_table_counts_fast(self) -> Dict[str, int]:
         """Get counts for all tables using optimized methods."""
         await self._ensure_tables_exist()
         
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             rows = await conn.fetch("SELECT * FROM get_all_table_counts()")
             return {row['table_name']: row['row_count'] for row in rows}
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     async def verify_count_accuracy(self) -> Dict[str, bool]:
         """Verify that cached counts match actual counts."""
         await self._ensure_tables_exist()
         
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             rows = await conn.fetch("SELECT * FROM verify_count_accuracy()")
             return {row['table_name']: row['is_accurate'] for row in rows}
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     async def get_index_usage_stats(self) -> List[Dict[str, Any]]:
         """Get index usage statistics for monitoring."""
         await self._ensure_tables_exist()
         
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             rows = await conn.fetch("SELECT * FROM get_index_usage_stats()")
             return [dict(row) for row in rows]
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     async def test_count_performance(self) -> Dict[str, float]:
         """Test count performance improvements."""
         await self._ensure_tables_exist()
         
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             rows = await conn.fetch("SELECT * FROM test_count_performance()")
             return {row['test_name']: row['performance_improvement'] for row in rows}
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     async def refresh_count_materialized_views(self) -> None:
         """Refresh materialized views for instant counts."""
         await self._ensure_tables_exist()
         
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             await conn.execute("SELECT refresh_count_materialized_views()")
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     async def refresh_table_counts(self) -> None:
         """Refresh table counts manually."""
         await self._ensure_tables_exist()
         
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             await conn.execute("SELECT refresh_table_counts()")
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     async def analyze_tables(self) -> None:
         """Update table statistics for query optimization."""
         await self._ensure_tables_exist()
         
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             await conn.execute("SELECT analyze_tables()")
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     # ============================================================================
     # OPTIMIZED QUERY METHODS USING NEW INDEXES
@@ -1050,7 +1235,7 @@ class StockDBPostgreSQL(StockDBBase):
         """Get stock data using optimized queries with new indexes."""
         await self._ensure_tables_exist()
         
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             table = 'daily_prices' if interval == 'daily' else 'hourly_prices'
             date_col = 'date' if interval == 'daily' else 'datetime'
@@ -1082,7 +1267,7 @@ class StockDBPostgreSQL(StockDBBase):
             else:
                 return pd.DataFrame()
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     async def get_stock_data_by_price_range(
         self,
@@ -1095,7 +1280,7 @@ class StockDBPostgreSQL(StockDBBase):
         """Get stock data filtered by price range using optimized indexes."""
         await self._ensure_tables_exist()
         
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             table = 'daily_prices' if interval == 'daily' else 'hourly_prices'
             
@@ -1127,7 +1312,7 @@ class StockDBPostgreSQL(StockDBBase):
             else:
                 return pd.DataFrame()
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     async def get_latest_prices_optimized(self, tickers: List[str]) -> Dict[str, float | None]:
         """Get latest prices using optimized queries with indexes when available."""
@@ -1138,7 +1323,7 @@ class StockDBPostgreSQL(StockDBBase):
         
         result = {ticker: None for ticker in tickers}
         
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             # Use optimized queries with indexes for better performance
             placeholders = ','.join([f'${i+1}' for i in range(len(tickers))])
@@ -1191,7 +1376,7 @@ class StockDBPostgreSQL(StockDBBase):
                 except Exception as e:
                     print(f"PostgreSQL error (daily_prices for multiple tickers): {e}")
         finally:
-            await conn.close()
+            await self._return_connection(conn)
         return result
 
     async def get_database_stats(self) -> Dict[str, Any]:
@@ -1201,7 +1386,7 @@ class StockDBPostgreSQL(StockDBBase):
         # Check if optimizations are available
         optimizations_available = await self._check_optimizations_available()
         
-        conn = await asyncpg.connect(self.db_config)
+        conn = await self._get_connection()
         try:
             stats = {
                 'optimizations_available': optimizations_available
@@ -1227,22 +1412,28 @@ class StockDBPostgreSQL(StockDBBase):
                 except Exception as e:
                     # Fallback to basic stats if optimized functions fail
                     stats['error'] = f"Optimized functions failed: {e}"
+                    # Use the fast count methods as fallback instead of direct COUNT(*)
+                    await self._return_connection(conn)  # Return current connection
                     stats['table_counts'] = {
-                        'hourly_prices': await conn.fetchval("SELECT COUNT(*) FROM hourly_prices"),
-                        'daily_prices': await conn.fetchval("SELECT COUNT(*) FROM daily_prices"),
-                        'realtime_data': await conn.fetchval("SELECT COUNT(*) FROM realtime_data")
+                        'hourly_prices': await self.get_table_count_fast('hourly_prices'),
+                        'daily_prices': await self.get_table_count_fast('daily_prices'),
+                        'realtime_data': await self.get_table_count_fast('realtime_data')
                     }
+                    return stats  # Early return to avoid using closed connection
             else:
                 # Fallback to basic stats without optimizations
+                # Use the fast count methods which will fallback to COUNT(*) if needed
+                await self._return_connection(conn)  # Return current connection
                 stats['table_counts'] = {
-                    'hourly_prices': await conn.fetchval("SELECT COUNT(*) FROM hourly_prices"),
-                    'daily_prices': await conn.fetchval("SELECT COUNT(*) FROM daily_prices"),
-                    'realtime_data': await conn.fetchval("SELECT COUNT(*) FROM realtime_data")
+                    'hourly_prices': await self.get_table_count_fast('hourly_prices'),
+                    'daily_prices': await self.get_table_count_fast('daily_prices'),
+                    'realtime_data': await self.get_table_count_fast('realtime_data')
                 }
+                return stats  # Early return to avoid using closed connection
             
             return stats
         finally:
-            await conn.close()
+            await self._return_connection(conn)
 
     # ============================================================================
     # CONVENIENCE METHODS FOR EASY ACCESS TO OPTIMIZATIONS
@@ -1267,7 +1458,7 @@ class StockDBPostgreSQL(StockDBBase):
         }
         
         if optimizations_available:
-            conn = await asyncpg.connect(self.db_config)
+            conn = await self._get_connection()
             try:
                 # Check for fast count views
                 fast_count_views = await conn.fetchval("""
@@ -1301,6 +1492,6 @@ class StockDBPostgreSQL(StockDBBase):
             except Exception as e:
                 status['error'] = str(e)
             finally:
-                await conn.close()
+                await self._return_connection(conn)
         
         return status 
