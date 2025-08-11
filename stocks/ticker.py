@@ -420,6 +420,14 @@ class TickerDisplay:
             return f"{volume/1_000:.1f}K"
         return str(volume)
     
+    def format_last_update(self, last_update: Optional[datetime]) -> str:
+        """Format last update timestamp for display."""
+        if last_update is None:
+            return "N/A"
+        # Convert UTC to local time and format as HH:MM:SS for compact display
+        local_time = last_update.astimezone()
+        return local_time.strftime("%H:%M:%S")
+    
     def create_rich_table(self) -> Table:
         """Create a rich table for display."""
         current_session = get_trading_session()
@@ -440,6 +448,7 @@ class TickerDisplay:
         table.add_column("Volume", width=12)
         table.add_column("Bid/Ask", width=15)
         table.add_column("Session", width=8)
+        table.add_column("Last Update", width=12)
         
         for symbol in sorted(self.stock_data.keys()):
             stock = self.stock_data[symbol]
@@ -464,7 +473,8 @@ class TickerDisplay:
                 Text(self.format_change_percent(stock), style=color),
                 self.format_volume(stock.volume),
                 bid_ask,
-                Text(session_display, style=session_color)
+                Text(session_display, style=session_color),
+                self.format_last_update(stock.last_update)
             )
         
         return table
@@ -476,8 +486,8 @@ class TickerDisplay:
         
         lines = []
         lines.append(f"┌─ MARKET TICKER - {session_name} " + "─" * 45 + "┐")
-        lines.append("│ Symbol │ Price    │ PrevClose│ Change   │ % Change │ Volume │ Session│")
-        lines.append("├─" + "─" * 70 + "┤")
+        lines.append("│ Symbol │ Price    │ PrevClose│ Change   │ % Change │ Volume │ Session│ LastUpd│")
+        lines.append("├─" + "─" * 78 + "┤")
         
         for symbol in sorted(self.stock_data.keys()):
             stock = self.stock_data[symbol]
@@ -487,15 +497,15 @@ class TickerDisplay:
             is_stale = stock.is_stale()
             session_display = get_session_display_name(stock.trading_session)
             
-            line = f"│ {symbol:<6} │ {self.format_price(stock.price):<8} │ {self.format_previous_close(stock):<8} │ {self.format_change(stock):<8} │ {self.format_change_percent(stock):<8} │ {self.format_volume(stock.volume):<6} │ {session_display:<6} │"
+            line = f"│ {symbol:<6} │ {self.format_price(stock.price):<8} │ {self.format_previous_close(stock):<8} │ {self.format_change(stock):<8} │ {self.format_change_percent(stock):<8} │ {self.format_volume(stock.volume):<6} │ {session_display:<6} │ {self.format_last_update(stock.last_update):<6} │"
             lines.append(line)
         
-        lines.append("└─" + "─" * 70 + "┘")
+        lines.append("└─" + "─" * 78 + "┘")
         # Add status buffer lines
         status_lines = self.get_status_display().split('\n')
         for line in status_lines:
             lines.append(line)
-        lines.append("─" * 70)
+        lines.append("─" * 78)
         lines.append("Press 'q' to quit, 'p' to pause, 'r' to refresh, 'a' to add symbol")
         
         return "\n".join(lines)
