@@ -1111,6 +1111,14 @@ async def handle_db_command(request: web.Request) -> web.Response:
             prices = await db_instance.get_previous_close_prices(tickers)
             return web.json_response({"prices": prices})
 
+        elif command == "get_today_opening_prices":
+            tickers = params.get("tickers")
+            if not tickers or not isinstance(tickers, list):
+                return web.json_response({"error": "Missing or invalid 'tickers' parameter (must be a list)"}, status=400)
+            
+            prices = await db_instance.get_today_opening_prices(tickers)
+            return web.json_response({"prices": prices})
+
         elif command == "execute_sql":
             sql_query = params.get("sql_query")
             query_type = params.get("query_type") # "select" or "raw"

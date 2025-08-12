@@ -215,6 +215,7 @@ class StockData:
     # Trading session fields
     trading_session: str = "unknown"
     previous_close: Optional[float] = None
+    opening_price: Optional[float] = None
     session_high: Optional[float] = None
     session_low: Optional[float] = None
     session_volume: Optional[int] = None
@@ -387,6 +388,12 @@ class TickerDisplay:
         if stock.previous_close is None:
             return "N/A"
         return f"${stock.previous_close:.2f}"
+
+    def format_opening_price(self, stock: StockData) -> str:
+        """Format opening price for display."""
+        if stock.opening_price is None:
+            return "N/A"
+        return f"${stock.opening_price:.2f}"
     
     def recalculate_changes(self):
         """Recalculate changes for all stocks based on previous close."""
@@ -402,14 +409,21 @@ class TickerDisplay:
             return "N/A"
         sign = "+" if stock.change >= 0 else ""
         return f"{sign}{stock.change:.2f}"
-    
+
     def format_change_percent(self, stock: StockData) -> str:
         """Format change percentage for display."""
         if stock.change_percent is None:
             return "N/A"
         sign = "+" if stock.change_percent >= 0 else ""
         return f"{sign}{stock.change_percent:.2f}%"
-    
+
+    def format_change_with_percent(self, stock: StockData) -> str:
+        """Format change and percentage together for display."""
+        if stock.change is None or stock.change_percent is None:
+            return "N/A"
+        sign = "+" if stock.change >= 0 else ""
+        return f"{sign}{stock.change:.2f} ({sign}{stock.change_percent:.2f}%)"
+
     def format_volume(self, volume: Optional[int]) -> str:
         """Format volume for display."""
         if volume is None:
@@ -441,10 +455,10 @@ class TickerDisplay:
         )
         
         table.add_column("Symbol", style="cyan", width=8)
-        table.add_column("Price", style="white", width=10)
+        table.add_column("Current", style="white", width=10)
+        table.add_column("Open", style="dim", width=10)
         table.add_column("Prev Close", style="dim", width=10)
-        table.add_column("Change", width=10)
-        table.add_column("% Change", width=10)
+        table.add_column("Change", width=15)
         table.add_column("Volume", width=12)
         table.add_column("Bid/Ask", width=15)
         table.add_column("Session", width=8)
@@ -468,9 +482,9 @@ class TickerDisplay:
             table.add_row(
                 symbol,
                 self.format_price(stock.price),
+                self.format_opening_price(stock),
                 self.format_previous_close(stock),
-                Text(self.format_change(stock), style=color),
-                Text(self.format_change_percent(stock), style=color),
+                Text(self.format_change_with_percent(stock), style=color),
                 self.format_volume(stock.volume),
                 bid_ask,
                 Text(session_display, style=session_color),
@@ -486,8 +500,8 @@ class TickerDisplay:
         
         lines = []
         lines.append(f"┌─ MARKET TICKER - {session_name} " + "─" * 45 + "┐")
-        lines.append("│ Symbol │ Price    │ PrevClose│ Change   │ % Change │ Volume │ Session│ LastUpd│")
-        lines.append("├─" + "─" * 78 + "┤")
+        lines.append("│ Symbol │ Current  │ Open      │ PrevClose│ Change           │ Volume │ Session│ LastUpd│")
+        lines.append("├─" + "─" * 95 + "┤")
         
         for symbol in sorted(self.stock_data.keys()):
             stock = self.stock_data[symbol]
@@ -497,16 +511,16 @@ class TickerDisplay:
             is_stale = stock.is_stale()
             session_display = get_session_display_name(stock.trading_session)
             
-            line = f"│ {symbol:<6} │ {self.format_price(stock.price):<8} │ {self.format_previous_close(stock):<8} │ {self.format_change(stock):<8} │ {self.format_change_percent(stock):<8} │ {self.format_volume(stock.volume):<6} │ {session_display:<6} │ {self.format_last_update(stock.last_update):<6} │"
+            line = f"│ {symbol:<6} │ {self.format_price(stock.price):<8} │ {self.format_opening_price(stock):<8} │ {self.format_previous_close(stock):<8} │ {self.format_change_with_percent(stock):<15} │ {self.format_volume(stock.volume):<6} │ {session_display:<6} │ {self.format_last_update(stock.last_update):<6} │"
             lines.append(line)
         
-        lines.append("└─" + "─" * 78 + "┘")
+        lines.append("└─" + "─" * 95 + "┘")
         # Add status buffer lines
         status_lines = self.get_status_display().split('\n')
         for line in status_lines:
             lines.append(line)
-        lines.append("─" * 78)
-        lines.append("Press 'q' to quit, 'p' to pause, 'r' to refresh, 'a' to add symbol")
+        lines.append("─" * 95)
+        lines.append("Press 'q' to quit, 'p' to pause, 'r' to refresh, 'a' to add symbol, 'f' to refresh prev close, 'o' to refresh open, 'd' to debug")
         
         return "\n".join(lines)
     
@@ -518,7 +532,7 @@ class TickerDisplay:
         if self.use_rich:
             table = self.create_rich_table()
             status_text = self.get_status_display()
-            help_text = "Press 'q' to quit, 'p' to pause, 'r' to refresh, 'a' to add symbol"
+            help_text = "Press 'q' to quit, 'p' to pause, 'r' to refresh, 'a' to add symbol, 'f' to refresh prev close, 'o' to refresh open, 'd' to debug"
             
             # Create compact status panel with fixed height for exactly 5 lines
             status_panel = Panel(status_text, style="dim", height=self.status_buffer_size + 1)
@@ -702,7 +716,7 @@ class TickerTerminal:
             while not self.stop_event.is_set():
                 try:
                     if RICH_AVAILABLE:
-                        key = Prompt.ask("", choices=["q", "p", "r", "a", "s"], default="")
+                        key = Prompt.ask("", choices=["q", "p", "r", "a", "s", "f", "o", "d"], default="")
                     else:
                         # Basic input handling
                         if os.name == 'nt':
@@ -743,6 +757,25 @@ class TickerTerminal:
                     elif key == 's':
                         self.save_symbols()
                         get_logger().info("Symbols saved to file")
+                    elif key == 'f':
+                        # Force refresh of previous close prices
+                        asyncio.create_task(self.fetch_previous_close_prices())
+                        get_logger().info("Refreshing previous close prices...")
+                    elif key == 'o':
+                        # Force refresh of opening prices
+                        asyncio.create_task(self.fetch_today_opening_prices())
+                        get_logger().info("Refreshing opening prices...")
+                    elif key == 'd':
+                        # Debug: show current previous close prices
+                        get_logger().info("=== Current Stock Data ===")
+                        for symbol, stock in self.display.stock_data.items():
+                            current_price = f"${stock.price:.2f}" if stock.price else "N/A"
+                            prev_close = f"${stock.previous_close:.2f}" if stock.previous_close else "N/A"
+                            opening_price = f"${stock.opening_price:.2f}" if stock.opening_price else "N/A"
+                            change_info = f"${stock.change:.2f} ({stock.change_percent:.2f}%)" if stock.change is not None and stock.change_percent is not None else "N/A"
+                            
+                            get_logger().info(f"{symbol}: Current {current_price}, Open {opening_price}, Prev Close {prev_close}, Change {change_info}")
+                        get_logger().info("=== End Debug Info ===")
                         
                 except Exception as e:
                     get_logger().error(f"Error in keyboard loop: {e}")
@@ -788,10 +821,19 @@ class TickerTerminal:
             return
         
         try:
+            # Log current date for debugging
+            from datetime import datetime
+            import pytz
+            est_tz = pytz.timezone('US/Eastern')
+            now_est = datetime.now(est_tz)
+            get_logger().info(f"Current EST time: {now_est.strftime('%Y-%m-%d %H:%M:%S %Z')}")
             get_logger().info(f"Fetching previous close prices for {len(self.symbols)} symbols...")
             
             # Get previous close prices for all symbols at once
             prices = await self.db_client.get_previous_close_prices(list(self.symbols))
+            
+            # Log what we received
+            get_logger().info(f"Received prices from database: {prices}")
             
             # Update all stock data with previous close prices
             for symbol, price in prices.items():
@@ -800,6 +842,16 @@ class TickerTerminal:
                     if stock:
                         stock.previous_close = price
                         get_logger().info(f"Fetched previous close for {symbol}: ${price:.2f}")
+                        
+                        # Validate that this is actually a previous day's close
+                        if stock.price is not None:
+                            # Check if the "previous close" is actually today's price
+                            if abs(stock.price - price) < 0.01:  # Within 1 cent
+                                get_logger().warning(f"WARNING: {symbol} previous close (${price:.2f}) appears to be today's price (${stock.price:.2f})")
+                            
+                            # Log the difference for debugging
+                            diff = stock.price - price
+                            get_logger().info(f"Price difference for {symbol}: Current ${stock.price:.2f} - Previous Close ${price:.2f} = ${diff:.2f}")
                     else:
                         get_logger().warning(f"No stock data found for {symbol}")
                 else:
@@ -810,6 +862,38 @@ class TickerTerminal:
                 
         except Exception as e:
             get_logger().error(f"Error fetching previous close prices: {e}")
+            import traceback
+            traceback.print_exc()
+
+    async def fetch_today_opening_prices(self):
+        """Fetch today's opening prices for all symbols."""
+        if not self.db_client:
+            get_logger().warning("No database client available, skipping opening prices fetch")
+            return
+        
+        try:
+            get_logger().info(f"Fetching today's opening prices for {len(self.symbols)} symbols...")
+            
+            # Get opening prices for all symbols at once
+            prices = await self.db_client.get_today_opening_prices(list(self.symbols))
+            
+            # Log what we received
+            get_logger().info(f"Received opening prices from database: {prices}")
+            
+            # Update all stock data with opening prices
+            for symbol, price in prices.items():
+                if price is not None:
+                    stock = self.display.stock_data.get(symbol)
+                    if stock:
+                        stock.opening_price = price
+                        get_logger().info(f"Fetched opening price for {symbol}: ${price:.2f}")
+                    else:
+                        get_logger().warning(f"No stock data found for {symbol}")
+                else:
+                    get_logger().warning(f"No opening price data found for {symbol}")
+                
+        except Exception as e:
+            get_logger().error(f"Error fetching today's opening prices: {e}")
             import traceback
             traceback.print_exc()
     
@@ -832,6 +916,9 @@ class TickerTerminal:
         
         # Fetch previous close prices if database client is available
         await self.fetch_previous_close_prices()
+        
+        # Fetch today's opening prices if database client is available
+        await self.fetch_today_opening_prices()
         
         # Start display and keyboard threads
         self.start_display_updater()

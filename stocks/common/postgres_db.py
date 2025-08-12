@@ -5,6 +5,7 @@ import asyncpg
 import sqlalchemy
 from sqlalchemy import create_engine
 from typing import List, Dict, Any, Optional
+import pytz
 from .common_strategies import (
     calculate_moving_average,
     calculate_exponential_moving_average,
@@ -1167,7 +1168,7 @@ class StockDBPostgreSQL(StockDBBase):
         return await self.get_latest_prices_optimized(tickers)
 
     async def get_previous_close_prices(self, tickers: List[str]) -> Dict[str, float | None]:
-        """Get the most recent daily close prices for multiple tickers."""
+        """Get the most recent daily close prices for multiple tickers, excluding today's data."""
         # Ensure tables are initialized
         await self._ensure_tables_exist()
         
@@ -1175,17 +1176,89 @@ class StockDBPostgreSQL(StockDBBase):
         
         conn = await self._get_connection()
         try:
+            # Get today's date in EST timezone (market timezone)
+            est_tz = pytz.timezone('US/Eastern')
+            now_est = datetime.now(est_tz)
+            today = now_est.date()
+            
+            self.logger.info(f"Fetching previous close prices. Current EST time: {now_est.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            self.logger.info(f"Today's date (EST): {today}")
+            
             for ticker in tickers:
                 latest_close = None
                 try:
-                    res = await conn.fetchrow("SELECT close FROM daily_prices WHERE ticker = $1 ORDER BY date DESC LIMIT 1", ticker)
-                    if res: latest_close = res['close']
+                    # First, get the most recent close price that is NOT from today
+                    query = """
+                        SELECT date, close 
+                        FROM daily_prices 
+                        WHERE ticker = $1 AND date < $2 
+                        ORDER BY date DESC 
+                        LIMIT 1
+                    """
+                    res = await conn.fetchrow(query, ticker, today)
+                    
+                    if res: 
+                        latest_close = res['close']
+                        self.logger.info(f"Found previous close for {ticker}: {res['date']} = ${res['close']:.2f}")
+                    else:
+                        # Fallback: if no previous day data, get the most recent available
+                        self.logger.warning(f"No previous day data found for {ticker}, falling back to most recent")
+                        res = await conn.fetchrow(
+                            "SELECT date, close FROM daily_prices WHERE ticker = $1 ORDER BY date DESC LIMIT 1", 
+                            ticker
+                        )
+                        if res: 
+                            latest_close = res['close']
+                            self.logger.warning(f"Using most recent data for {ticker}: {res['date']} = ${res['close']:.2f}")
                 except Exception as e:
                     self.logger.error(f"PostgreSQL error (daily_prices for {ticker}): {e}", exc_info=True)
                 
                 result[ticker] = latest_close
         finally:
             await self._return_connection(conn)
+        
+        self.logger.info(f"Previous close prices result: {result}")
+        return result
+
+    async def get_today_opening_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+        """Get today's opening prices for multiple tickers."""
+        # Ensure tables are initialized
+        await self._ensure_tables_exist()
+        
+        result = {}
+        
+        conn = await self._get_connection()
+        try:
+            # Get today's date in EST timezone (market timezone)
+            est_tz = pytz.timezone('US/Eastern')
+            now_est = datetime.now(est_tz)
+            today = now_est.date()
+            
+            self.logger.info(f"Fetching today's opening prices. Today's date (EST): {today}")
+            
+            for ticker in tickers:
+                opening_price = None
+                try:
+                    query = """
+                        SELECT date, open 
+                        FROM daily_prices 
+                        WHERE ticker = $1 AND date = $2
+                    """
+                    res = await conn.fetchrow(query, ticker, today)
+                    
+                    if res: 
+                        opening_price = res['open']
+                        self.logger.info(f"Found opening price for {ticker}: {res['date']} = ${res['open']:.2f}")
+                    else:
+                        self.logger.warning(f"No opening price found for {ticker} on {today}")
+                except Exception as e:
+                    self.logger.error(f"PostgreSQL error getting opening price for {ticker}: {e}", exc_info=True)
+                
+                result[ticker] = opening_price
+        finally:
+            await self._return_connection(conn)
+        
+        self.logger.info(f"Today's opening prices result: {result}")
         return result
 
     async def execute_select_sql(self, sql_query: str, params: tuple = ()) -> pd.DataFrame:

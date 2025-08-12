@@ -90,6 +90,11 @@ class StockDBBase(metaclass=ABCMeta):
         pass
 
     @abstractmethod
+    async def get_today_opening_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+        """Get today's opening prices for multiple tickers."""
+        pass
+
+    @abstractmethod
     async def execute_select_sql(self, sql_query: str, params: tuple = ()) -> pd.DataFrame:
         """Execute a direct SELECT SQL query and return results as a DataFrame."""
         pass
@@ -654,18 +659,30 @@ class StockDBSQLite(StockDBBase):
         return result
 
     async def get_previous_close_prices(self, tickers: List[str]) -> Dict[str, float | None]:
-        """Get the most recent daily close prices for multiple tickers."""
+        """Get the most recent daily close prices for multiple tickers, excluding today's data."""
         result = {}
         
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
+            # Get today's date in EST timezone (market timezone)
+            import pytz
+            today = datetime.now(pytz.timezone('US/Eastern')).date()
+            
             for ticker in tickers:
                 latest_close = None
                 try:
-                    cursor.execute("SELECT close FROM daily_prices WHERE ticker = ? ORDER BY date DESC LIMIT 1", (ticker,))
+                    # Get the most recent close price that is NOT from today
+                    cursor.execute("SELECT close FROM daily_prices WHERE ticker = ? AND date < ? ORDER BY date DESC LIMIT 1", (ticker, today))
                     row = cursor.fetchone()
-                    if row: latest_close = row[0]
+                    if row: 
+                        latest_close = row[0]
+                    else:
+                        # Fallback: if no previous day data, get the most recent available
+                        cursor.execute("SELECT close FROM daily_prices WHERE ticker = ? ORDER BY date DESC LIMIT 1", (ticker,))
+                        row = cursor.fetchone()
+                        if row: 
+                            latest_close = row[0]
                 except sqlite3.Error as e:
                     print(f"SQLite error (daily_prices for {ticker}): {e}")
                 
@@ -1043,15 +1060,26 @@ class StockDBDuckDB(StockDBBase):
         return result
 
     async def get_previous_close_prices(self, tickers: List[str]) -> Dict[str, float | None]:
-        """Get the most recent daily close prices for multiple tickers."""
+        """Get the most recent daily close prices for multiple tickers, excluding today's data."""
         result = {}
         
         with duckdb.connect(database=self.db_path, read_only=True) as conn:
+            # Get today's date in EST timezone (market timezone)
+            import pytz
+            today = datetime.now(pytz.timezone('US/Eastern')).date()
+            
             for ticker in tickers:
                 latest_close = None
                 try:
-                    res = conn.execute("SELECT close FROM daily_prices WHERE ticker = ? ORDER BY date DESC LIMIT 1", (ticker,)).fetchone()
-                    if res: latest_close = res[0]
+                    # Get the most recent close price that is NOT from today
+                    res = conn.execute("SELECT close FROM daily_prices WHERE ticker = ? AND date < ? ORDER BY date DESC LIMIT 1", (ticker, today)).fetchone()
+                    if res: 
+                        latest_close = res[0]
+                    else:
+                        # Fallback: if no previous day data, get the most recent available
+                        res = conn.execute("SELECT close FROM daily_prices WHERE ticker = ? ORDER BY date DESC LIMIT 1", (ticker,)).fetchone()
+                        if res: 
+                            latest_close = res[0]
                 except duckdb.Error as e:
                     print(f"DuckDB error (daily_prices for {ticker}): {e}")
                 
@@ -1259,6 +1287,14 @@ class StockDBClient(StockDBBase):
         response = await self._make_request("get_previous_close_prices", params)
         if response.get("error"):
             raise Exception(f"Server error getting previous close prices: {response['error']}")
+        return response.get("prices", {})
+
+    async def get_today_opening_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+        """Get today's opening prices for multiple tickers from the server."""
+        params = {"tickers": tickers}
+        response = await self._make_request("get_today_opening_prices", params)
+        if response.get("error"):
+            raise Exception(f"Server error getting today's opening prices: {response['error']}")
         return response.get("prices", {})
 
     async def execute_select_sql(self, sql_query: str, params: tuple = ()) -> pd.DataFrame:
