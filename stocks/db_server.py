@@ -497,6 +497,8 @@ def initialize_database(db_file_path: str, log_level: str = "INFO") -> StockDBBa
         db_type_arg = "duckdb"
     elif file_extension.lower() == ".postgresql" or "postgresql" in db_file_path.lower():
         db_type_arg = "postgresql"
+    elif file_extension.lower() == ".timescaledb" or "timescaledb" in db_file_path.lower():
+        db_type_arg = "timescaledb"
     elif ":" in db_file_path and not file_extension:  # Remote connection string
         db_type_arg = "remote"
     else:
@@ -508,8 +510,8 @@ def initialize_database(db_file_path: str, log_level: str = "INFO") -> StockDBBa
     
     logger.info(f"Attempting to initialize database: type='{db_type_arg}', path='{db_file_path}'")
     
-    # For PostgreSQL, we need to construct a proper connection string
-    if db_type_arg == "postgresql":
+    # For PostgreSQL and TimescaleDB, we need to construct a proper connection string
+    if db_type_arg in ["postgresql", "timescaledb"]:
         # Parse connection string or use defaults
         if "://" in db_file_path:
             # Full connection string provided
@@ -1065,12 +1067,14 @@ async def handle_db_command(request: web.Request) -> web.Response:
                     transformed_payload_for_broadcast = data_records
 
                 if transformed_payload_for_broadcast:
-                    await ws_manager.broadcast(ticker, {
+                    data_to_broadcast = {
                         "type": data_type,
                         "timestamp": transformed_payload_for_broadcast[0].get("timestamp"),
                         "event_type": f"{data_type}_update", # More generic: e.g., quote_update, trade_update
                         "payload": transformed_payload_for_broadcast
-                    })
+                    }
+                    await ws_manager.broadcast(ticker, data_to_broadcast)
+                print(f"Broadcasted realtime {data_type} data for {ticker} with data = {data_to_broadcast}", file=sys.stderr)
             return web.json_response({"message": f"Realtime data ({data_type}) for {ticker} saved successfully."})
 
         elif command == "get_realtime_data":
@@ -1154,8 +1158,9 @@ async def main_server_runner():
                         help="Path to the database file or connection string. "
                              "For SQLite: data/stock_data.db, "
                              "For DuckDB: data/stock_data.duckdb, "
-                             "For PostgreSQL: localhost:5432:stock_data:stock_user:stock_password "
-                             "or postgresql://user:pass@host:port/db")
+                             "For PostgreSQL: postgresql://user:pass@host:port/db, "
+                             "For TimescaleDB: timescaledb://user:pass@host:port/db "
+                             "or localhost:5432:stock_data:stock_user:stock_password")
     parser.add_argument("--port", type=int, default=8080, help="Port to run the server on (default: 8080).")
     parser.add_argument("--log-file", type=str, default=None, help="Path to a log file. If not provided, logs to stdout.")
     parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],

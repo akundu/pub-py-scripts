@@ -29,35 +29,61 @@ class StockDBPostgreSQL(StockDBBase):
                  pool_connection_timeout_minutes: int = 30,
                  mv_refresh_interval_minutes: int = 5,
                  logger: Optional[logging.Logger] = None,
-                 log_level: str = "INFO"):
+                 log_level: str = "INFO",
+                 batch_size: int = 1000,
+                 statement_timeout_seconds: int = 300,
+                 idle_timeout_seconds: int = 600,
+                 lock_timeout_seconds: int = 60):
+        """
+        Initialize PostgreSQL database connection with connection pooling.
+        
+        Args:
+            db_config: PostgreSQL connection string
+            tables_cache_timeout_minutes: How long to cache table existence check
+            pool_max_size: Maximum number of connections in the pool
+            pool_connection_timeout_minutes: How long to keep connections in pool
+            mv_refresh_interval_minutes: How often to refresh materialized views
+            logger: Logger instance to use
+            log_level: Logging level
+            batch_size: Size of batches for data insertion (prevents timeouts)
+            statement_timeout_seconds: Statement timeout in seconds
+            idle_timeout_seconds: Idle transaction timeout in seconds
+            lock_timeout_seconds: Lock timeout in seconds
+        """
         super().__init__(db_config, logger)
-        self.db_config = db_config
         self.logger = get_logger("postgres_db", logger, log_level)
         self.logger.info(f"PostgreSQL database config: {self.db_config}")
         # Create SQLAlchemy engine for pandas operations - defer until needed
         self.engine = None
         
-        # Cache configuration for _ensure_tables_exist
+        self.db_config = db_config
         self.tables_cache_timeout_minutes = tables_cache_timeout_minutes
+        self.pool_max_size = pool_max_size
+        self.pool_connection_timeout_minutes = pool_connection_timeout_minutes
+        self.mv_refresh_interval_minutes = mv_refresh_interval_minutes
+        
+        # Timeout and batch configuration
+        self.batch_size = batch_size
+        self.statement_timeout_seconds = statement_timeout_seconds
+        self.idle_timeout_seconds = idle_timeout_seconds
+        self.lock_timeout_seconds = lock_timeout_seconds
+        
+        # Connection pool management
+        self._pool_lock = asyncio.Lock()
+        self._available_connections = deque()
+        self._cleanup_task = None
+        self._mv_refresh_task = None
+        self._shutdown = False
+        
+        # Table cache
         self._tables_ensured = False
         self._tables_ensured_at = None
         
-        # Connection pool configuration
-        self.pool_max_size = pool_max_size
-        self.pool_connection_timeout_minutes = pool_connection_timeout_minutes
-        self._available_connections = deque()  # Only stores available connections
-        self._pool_lock = asyncio.Lock()
-        self._cleanup_task = None
-        self._shutdown = False
-        
-        # Materialized view refresh configuration
-        self.mv_refresh_interval_minutes = mv_refresh_interval_minutes
-        self._mv_refresh_task = None
+        # Initialize database connection
+        self._init_db()
         
         # Register cleanup on instance deletion
         weakref.finalize(self, self._cleanup_pool_sync)
-        
-        self._init_db()
 
     def _init_db(self) -> None:
         """Initialize the PostgreSQL database with required tables if they don't exist."""
@@ -202,6 +228,16 @@ class StockDBPostgreSQL(StockDBBase):
     # CONNECTION POOL MANAGEMENT
     # ============================================================================
 
+    async def _set_connection_timeouts(self, conn: asyncpg.Connection) -> None:
+        """Set timeout settings for an existing connection to prevent query timeouts."""
+        try:
+            await conn.execute(f"SET statement_timeout = '{self.statement_timeout_seconds}s'")
+            await conn.execute(f"SET idle_in_transaction_session_timeout = '{self.idle_timeout_seconds}s'")
+            await conn.execute(f"SET lock_timeout = '{self.lock_timeout_seconds}s'")
+            self.logger.debug("Set timeout settings for existing connection")
+        except Exception as e:
+            self.logger.warning(f"Failed to set timeout settings: {e}")
+
     async def _get_connection(self) -> asyncpg.Connection:
         """Get a connection from the pool or create a new one.
         Connection is removed from pool when retrieved and only returned when explicitly returned.
@@ -218,7 +254,11 @@ class StockDBPostgreSQL(StockDBBase):
                 connection_age = now - created_at
                 if (connection_age < timedelta(minutes=self.pool_connection_timeout_minutes) 
                     and not conn.is_closed()):
-                    # Connection is valid and removed from pool - return it
+                    # Connection is valid and removed from pool - ensure timeouts are set
+                    try:
+                        await self._set_connection_timeouts(conn)
+                    except Exception as e:
+                        self.logger.warning(f"Failed to set timeouts on reused connection: {e}")
                     return conn
                 else:
                     # Connection is stale or closed, clean it up
@@ -231,6 +271,10 @@ class StockDBPostgreSQL(StockDBBase):
             # No valid connection available, create a new one
             try:
                 conn = await asyncpg.connect(self.db_config)
+                
+                # Set session-level timeout settings to prevent query timeouts
+                await self._set_connection_timeouts(conn)
+                
                 return conn
             except Exception as e:
                 self.logger.error(f"Failed to create database connection: {e}", exc_info=True)
@@ -739,7 +783,8 @@ class StockDBPostgreSQL(StockDBBase):
                     max_date_obj = max_date_obj.astimezone(timezone.utc)
                 max_date_obj = max_date_obj.replace(tzinfo=None)  # Convert to naive UTC
             
-            await conn.execute(f'''
+            # Use retry mechanism for DELETE operation
+            await self._execute_with_retry(conn, f'''
                 DELETE FROM {table} 
                 WHERE ticker = $1 
                 AND {date_col} BETWEEN $2 AND $3
@@ -767,31 +812,63 @@ class StockDBPostgreSQL(StockDBBase):
                     ON CONFLICT (ticker, {date_col}) DO NOTHING
                 """
             
-            for record in records_for_insertion:
-                values = []
-                for col in sorted(all_columns):
-                    value = record[col]
-                    # Convert date strings to date objects for asyncpg
-                    if col == 'date' and isinstance(value, str):
-                        try:
-                            from datetime import date
-                            value = date.fromisoformat(value)
-                        except ValueError:
-                            pass  # Keep as string if conversion fails
-                    # Convert datetime strings to datetime objects for asyncpg
-                    elif col == 'datetime' and isinstance(value, str):
-                        try:
-                            from datetime import datetime
-                            value = datetime.fromisoformat(value)
-                        except ValueError:
-                            pass  # Keep as string if conversion fails
-                    values.append(value)
+            # Batch processing to prevent query timeouts
+            batch_size = self.batch_size  # Use the configured batch size
+            total_batches = (len(records_for_insertion) + batch_size - 1) // batch_size
+            
+            self.logger.info(f"Inserting {len(records_for_insertion)} records for {ticker} in {total_batches} batches")
+            
+            successful_inserts = 0
+            failed_batches = 0
+            
+            for i in range(0, len(records_for_insertion), batch_size):
+                batch = records_for_insertion[i:i + batch_size]
+                batch_values = []
+                batch_num = i // batch_size + 1
+                
+                self.logger.debug(f"Processing batch {batch_num}/{total_batches} for {ticker} ({len(batch)} records)")
+                
+                for record in batch:
+                    record_values = []
+                    for col in sorted(all_columns):
+                        value = record[col]
+                        # Convert date strings to date objects for asyncpg
+                        if col == 'date' and isinstance(value, str):
+                            try:
+                                from datetime import date
+                                value = date.fromisoformat(value)
+                            except ValueError:
+                                pass  # Keep as string if conversion fails
+                        # Convert datetime strings to datetime objects for asyncpg
+                        elif col == 'datetime' and isinstance(value, str):
+                            try:
+                                from datetime import datetime
+                                value = datetime.fromisoformat(value)
+                            except ValueError:
+                                pass  # Keep as string if conversion fails
+                        record_values.append(value)
+                    batch_values.append(record_values)
+                
                 try:
-                    await conn.execute(insert_query, *values)
+                    # Use retry mechanism for batch insertion
+                    await self._executemany_with_retry(conn, insert_query, batch_values)
+                    successful_inserts += len(batch)
+                    self.logger.debug(f"Successfully inserted batch {batch_num}/{total_batches} for {ticker} ({len(batch)} records)")
                 except asyncpg.exceptions.UniqueViolationError:
                     # This should not happen with ON CONFLICT DO NOTHING, but just in case
-                    self.logger.warning(f"Duplicate key violation for {ticker} at {record.get(date_col, 'unknown')}")
+                    self.logger.warning(f"Duplicate key violation for {ticker} in batch {batch_num}/{total_batches}")
+                    failed_batches += 1
                     continue
+                except Exception as e:
+                    self.logger.error(f"Error inserting batch {batch_num}/{total_batches} for {ticker}: {e}")
+                    failed_batches += 1
+                    # Continue with next batch instead of failing completely
+                    continue
+            
+            self.logger.info(f"Completed insertion for {ticker}: {successful_inserts} records inserted, {failed_batches} batches failed")
+            
+            if failed_batches > 0:
+                self.logger.warning(f"Some batches failed for {ticker}. Check logs for details.")
         finally:
             await self._return_connection(conn)
             
@@ -1569,3 +1646,69 @@ class StockDBPostgreSQL(StockDBBase):
                 await self._return_connection(conn)
         
         return status 
+
+    async def _execute_with_retry(self, conn: asyncpg.Connection, query: str, *args, max_retries: int = 3, retry_delay: float = 1.0):
+        """Execute a query with retry logic for timeout and connection issues."""
+        for attempt in range(max_retries):
+            try:
+                return await conn.execute(query, *args)
+            except asyncpg.exceptions.QueryCanceledError as e:
+                if "statement timeout" in str(e).lower():
+                    if attempt < max_retries - 1:
+                        self.logger.warning(f"Query timeout on attempt {attempt + 1}/{max_retries}, retrying in {retry_delay}s...")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                        continue
+                    else:
+                        self.logger.error(f"Query timeout after {max_retries} attempts: {e}")
+                        raise
+                else:
+                    raise
+            except asyncpg.exceptions.ConnectionDoesNotExistError:
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"Connection lost on attempt {attempt + 1}/{max_retries}, retrying in {retry_delay}s...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                else:
+                    self.logger.error(f"Connection lost after {max_retries} attempts")
+                    raise
+            except Exception as e:
+                # For other errors, don't retry
+                raise
+        
+        # This should never be reached, but just in case
+        raise RuntimeError(f"Failed to execute query after {max_retries} attempts")
+
+    async def _executemany_with_retry(self, conn: asyncpg.Connection, query: str, args_list, max_retries: int = 3, retry_delay: float = 1.0):
+        """Execute a batch query with retry logic for timeout and connection issues."""
+        for attempt in range(max_retries):
+            try:
+                return await conn.executemany(query, args_list)
+            except asyncpg.exceptions.QueryCanceledError as e:
+                if "statement timeout" in str(e).lower():
+                    if attempt < max_retries - 1:
+                        self.logger.warning(f"Batch query timeout on attempt {attempt + 1}/{max_retries}, retrying in {retry_delay}s...")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                        continue
+                    else:
+                        self.logger.error(f"Batch query timeout after {max_retries} attempts: {e}")
+                        raise
+                else:
+                    raise
+            except asyncpg.exceptions.ConnectionDoesNotExistError:
+                if attempt < max_retries - 1:
+                    self.logger.warning(f"Connection lost on batch attempt {attempt + 1}/{max_retries}, retrying in {retry_delay}s...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+                    continue
+                else:
+                    self.logger.error(f"Connection lost after {max_retries} attempts")
+                    raise
+            except Exception as e:
+                # For other errors, don't retry
+                raise
+        
+        # This should never be reached, but just in case
+        raise RuntimeError(f"Failed to execute batch query after {max_retries} attempts") 

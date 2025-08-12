@@ -1,10 +1,7 @@
-FROM python:3.11-slim
+FROM python:3.11-alpine
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
+# Install minimal system dependencies for compilation
+RUN apk add --no-cache build-base gcc g++ musl-dev
 
 # Set working directory
 WORKDIR /app
@@ -12,8 +9,17 @@ WORKDIR /app
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies (install critical packages first without DuckDB)
+RUN pip install --no-cache-dir --only-binary=all --prefer-binary \
+    psycopg2-binary asyncpg pandas numpy
+
+# Try to install DuckDB as binary only, skip if not available
+RUN pip install --no-cache-dir --only-binary=duckdb duckdb || \
+    echo "Warning: DuckDB binary wheel not available for this platform, skipping..."
+
+# Install remaining requirements
+RUN pip install --no-cache-dir --only-binary=:all: -r requirements.txt || \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
@@ -27,7 +33,7 @@ ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
 # Create a non-root user
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+RUN adduser -D -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
 # Default command (can be overridden)

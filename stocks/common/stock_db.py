@@ -1298,7 +1298,10 @@ def get_stock_db(db_type: str, db_config: str | None = None, logger: logging.Log
     elif db_type_lower == "postgresql":
         from .postgres_db import StockDBPostgreSQL
         return StockDBPostgreSQL(actual_db_config, logger=logger, log_level=log_level)
+    elif db_type_lower == "timescaledb":
+        from .timescale_db import StockDBTimescale
+        return StockDBTimescale(actual_db_config, logger=logger, log_level=log_level)
     elif db_type_lower == "remote":
         return StockDBClient(actual_db_config, logger)
     else:
-        raise ValueError(f"Unsupported database type: {db_type}. Choose 'sqlite', 'duckdb', 'postgresql', or 'remote'.")
+        raise ValueError(f"Unsupported database type: {db_type}. Choose 'sqlite', 'duckdb', 'postgresql', 'timescaledb', or 'remote'.")
