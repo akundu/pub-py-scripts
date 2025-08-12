@@ -732,8 +732,44 @@ async def main():
             print(f"Total records: {len(df)}")
             print()
         
+        # Add debugging information about data coverage
+        if args.debug:
+            print(f"\nData Analysis Summary:")
+            print(f"Total records in DataFrame: {len(df)}")
+            print(f"Date range: {df.index.min()} to {df.index.max()}")
+            
+            # Count actual trading days vs calendar days
+            if args.interval == 'daily':
+                calendar_days = (df.index.max() - df.index.min()).days + 1
+                trading_days = len(df)
+                print(f"Calendar days in range: {calendar_days}")
+                print(f"Trading days with data: {trading_days}")
+                print(f"Missing trading days: {calendar_days - trading_days}")
+                
+                # Check for flat days (no price change)
+                df['prev_close'] = df['close'].shift(1)
+                flat_days = ((df['close'] == df['prev_close']) & (df['prev_close'].notna())).sum()
+                print(f"Days with no price change (flat): {flat_days}")
+                
+                # Check for weekends/holidays
+                weekend_days = df[df.index.dayofweek >= 5].shape[0]
+                print(f"Weekend days in data: {weekend_days}")
+        
         if args.interval == "hourly":
             up_streaks, down_streaks = analyze_hourly_streaks(df)
+            
+            # Debug: Show streak coverage
+            if args.debug:
+                total_up_days = sum(s['length'] for s in up_streaks)
+                total_down_days = sum(s['length'] for s in down_streaks)
+                total_streak_days = total_up_days + total_down_days
+                print(f"\nStreak Coverage Analysis:")
+                print(f"Total days in DataFrame: {len(df)}")
+                print(f"Days covered by up streaks: {total_up_days}")
+                print(f"Days covered by down streaks: {total_down_days}")
+                print(f"Total days covered by streaks: {total_streak_days}")
+                print(f"Days NOT covered by streaks: {len(df) - total_streak_days}")
+            
             if args.debug:
                 print_streaks(up_streaks, "up", print_avg=args.print_avg)
             print_histogram(up_streaks, "up", total_days=sum(s['length'] for s in up_streaks), debug=args.debug, remove_outliers=args.remove_outliers is not None, outlier_percent=args.remove_outliers or 10.0, print_avg=args.print_avg)
@@ -743,6 +779,19 @@ async def main():
             print_summary(up_streaks, down_streaks)
         else:
             up_streaks, down_streaks = compute_streaks(df)
+            
+            # Debug: Show streak coverage
+            if args.debug:
+                total_up_days = sum(s['length'] for s in up_streaks)
+                total_down_days = sum(s['length'] for s in down_streaks)
+                total_streak_days = total_up_days + total_down_days
+                print(f"\nStreak Coverage Analysis:")
+                print(f"Total days in DataFrame: {len(df)}")
+                print(f"Days covered by up streaks: {total_up_days}")
+                print(f"Days covered by down streaks: {total_down_days}")
+                print(f"Total days covered by streaks: {total_streak_days}")
+                print(f"Days NOT covered by streaks: {len(df) - total_streak_days}")
+            
             if args.debug:
                 print_streaks(up_streaks, "up", print_avg=args.print_avg)
             print_histogram(up_streaks, "up", total_days=sum(s['length'] for s in up_streaks), debug=args.debug, remove_outliers=args.remove_outliers is not None, outlier_percent=args.remove_outliers or 10.0, print_avg=args.print_avg)
