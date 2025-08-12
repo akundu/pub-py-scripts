@@ -8,6 +8,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 import pandas as pd
 from common.stock_db import StockDBClient
+from common.streak_analyzer import StreakAnalyzer, compute_streaks, analyze_hourly_streaks
 
 # Color codes for terminal output
 try:
@@ -179,94 +180,6 @@ def filter_data_by_change(df: pd.DataFrame, change_percent: float, periods: int 
         print(f"Showing the {periods}-period segments that led to {len(trigger_indices)} trigger events")
     
     return filtered_df
-
-def compute_streaks(df: pd.DataFrame):
-    """
-    Returns:
-        up_streaks: list of dicts {start_date, end_date, length, avg_movement, start_price, end_price}
-        down_streaks: list of dicts {start_date, end_date, length, avg_movement, start_price, end_price}
-    """
-    if df.empty or 'close' not in df.columns:
-        return [], []
-    closes = df['close'].values
-    dates = df.index.to_list()
-    up_streaks = []
-    down_streaks = []
-    streak_type = None
-    streak_start = 0
-    streak_len = 0
-    for i in range(1, len(closes)):
-        if closes[i] > closes[i-1]:
-            if streak_type == 'up':
-                streak_len += 1
-            else:
-                if streak_type == 'down' and streak_len > 0:
-                    # Calculate total movement from start to end of streak
-                    start_price = closes[streak_start]
-                    end_price = closes[i-1]
-                    total_movement = ((end_price - start_price) / start_price * 100) if start_price != 0 else 0
-                    down_streaks.append({
-                        'start_date': dates[streak_start],
-                        'end_date': dates[i-1],
-                        'length': streak_len,
-                        'avg_movement': total_movement,
-                        'start_price': start_price,
-                        'end_price': end_price
-                    })
-                streak_type = 'up'
-                streak_start = i-1
-                streak_len = 1
-        elif closes[i] < closes[i-1]:
-            if streak_type == 'down':
-                streak_len += 1
-            else:
-                if streak_type == 'up' and streak_len > 0:
-                    # Calculate total movement from start to end of streak
-                    start_price = closes[streak_start]
-                    end_price = closes[i-1]
-                    total_movement = ((end_price - start_price) / start_price * 100) if start_price != 0 else 0
-                    up_streaks.append({
-                        'start_date': dates[streak_start],
-                        'end_date': dates[i-1],
-                        'length': streak_len,
-                        'avg_movement': total_movement,
-                        'start_price': start_price,
-                        'end_price': end_price
-                    })
-                streak_type = 'down'
-                streak_start = i-1
-                streak_len = 1
-        else:
-            # Flat day, treat as continuation only if a streak is ongoing
-            if streak_type in ('up', 'down'):
-                streak_len += 1
-            # else: do nothing, just move past the day 
-    # Add last streak
-    if streak_type == 'up' and streak_len > 0:
-        start_price = closes[streak_start]
-        end_price = closes[len(closes)-1]
-        total_movement = ((end_price - start_price) / start_price * 100) if start_price != 0 else 0
-        up_streaks.append({
-            'start_date': dates[streak_start],
-            'end_date': dates[len(closes)-1],
-            'length': streak_len,
-            'avg_movement': total_movement,
-            'start_price': start_price,
-            'end_price': end_price
-        })
-    elif streak_type == 'down' and streak_len > 0:
-        start_price = closes[streak_start]
-        end_price = closes[len(closes)-1]
-        total_movement = ((end_price - start_price) / start_price * 100) if start_price != 0 else 0
-        down_streaks.append({
-            'start_date': dates[streak_start],
-            'end_date': dates[len(closes)-1],
-            'length': streak_len,
-            'avg_movement': total_movement,
-            'start_price': start_price,
-            'end_price': end_price
-        })
-    return up_streaks, down_streaks
 
 def print_streaks(streaks, label, print_avg=True):
     if not streaks:
@@ -567,88 +480,6 @@ def analyze_hourly_days_of_week(df):
             'avg_day_movement': avg_day_movement
         }
     return result
-
-def analyze_hourly_streaks(df):
-    # Analyze hourly streaks (consecutive up/down hours)
-    if df.empty or 'close' not in df.columns:
-        return [], []
-    closes = df['close'].values
-    dates = df.index.to_list()
-    up_streaks = []
-    down_streaks = []
-    streak_type = None
-    streak_start = 0
-    streak_len = 0
-    for i in range(1, len(closes)):
-        if closes[i] > closes[i-1]:
-            if streak_type == 'up':
-                streak_len += 1
-            else:
-                if streak_type == 'down' and streak_len > 0:
-                    start_price = closes[streak_start]
-                    end_price = closes[i-1]
-                    total_movement = ((end_price - start_price) / start_price * 100) if start_price != 0 else 0
-                    down_streaks.append({
-                        'start_date': dates[streak_start],
-                        'end_date': dates[i-1],
-                        'length': streak_len,
-                        'avg_movement': total_movement,
-                        'start_price': start_price,
-                        'end_price': end_price
-                    })
-                streak_type = 'up'
-                streak_start = i-1
-                streak_len = 1
-        elif closes[i] < closes[i-1]:
-            if streak_type == 'down':
-                streak_len += 1
-            else:
-                if streak_type == 'up' and streak_len > 0:
-                    start_price = closes[streak_start]
-                    end_price = closes[i-1]
-                    total_movement = ((end_price - start_price) / start_price * 100) if start_price != 0 else 0
-                    up_streaks.append({
-                        'start_date': dates[streak_start],
-                        'end_date': dates[i-1],
-                        'length': streak_len,
-                        'avg_movement': total_movement,
-                        'start_price': start_price,
-                        'end_price': end_price
-                    })
-                streak_type = 'down'
-                streak_start = i-1
-                streak_len = 1
-        else:
-            # Flat hour, treat as continuation only if a streak is ongoing
-            if streak_type in ('up', 'down'):
-                streak_len += 1
-            # else: do nothing, just move past the hour
-    # Add last streak
-    if streak_type == 'up' and streak_len > 0:
-        start_price = closes[streak_start]
-        end_price = closes[len(closes)-1]
-        total_movement = ((end_price - start_price) / start_price * 100) if start_price != 0 else 0
-        up_streaks.append({
-            'start_date': dates[streak_start],
-            'end_date': dates[len(closes)-1],
-            'length': streak_len,
-            'avg_movement': total_movement,
-            'start_price': start_price,
-            'end_price': end_price
-        })
-    elif streak_type == 'down' and streak_len > 0:
-        start_price = closes[streak_start]
-        end_price = closes[len(closes)-1]
-        total_movement = ((end_price - start_price) / start_price * 100) if start_price != 0 else 0
-        down_streaks.append({
-            'start_date': dates[streak_start],
-            'end_date': dates[len(closes)-1],
-            'length': streak_len,
-            'avg_movement': total_movement,
-            'start_price': start_price,
-            'end_price': end_price
-        })
-    return up_streaks, down_streaks
 
 def print_timeframe_analysis(df, interval="daily", print_avg=True):
     if interval == "hourly":
