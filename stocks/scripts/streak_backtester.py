@@ -249,9 +249,19 @@ class StreakBacktester:
     
     async def _initialize_client(self) -> None:
         """Initialize the database client."""
+        if not self.port:
+            # Prompt user for port if not provided
+            try:
+                self.port = int(input("Enter database server port (default: 9001): ") or "9001")
+            except (ValueError, KeyboardInterrupt):
+                self.port = 9001
+                print(f"Using default port: {self.port}")
+        
         server_addr = f"localhost:{self.port}"
+        print(f"Connecting to database server at {server_addr}...")
+        
         self.client = StockDBClient(server_addr)
-        await self.client._ensure_tables_exist()
+        # Note: StockDBClient doesn't have _ensure_tables_exist method, so we skip that
     
     async def _get_data_dates(self) -> Tuple[str, str]:
         """Determine start and end dates for data retrieval."""
@@ -578,7 +588,7 @@ Examples:
     parser.add_argument("--streak-multiplier", type=float, default=1.5, metavar="MULTIPLIER",
                        help="Multiplier for each consecutive streak day (default: 1.5)")
     parser.add_argument("--debug", action="store_true", help="Enable debug output and transaction log")
-    parser.add_argument("--port", type=int, default=9001, help="Port for StockDBClient (default: 9001)")
+    parser.add_argument("--port", type=int, default=9001, help="Port for database server (default: 9001)")
     
     return parser.parse_args()
 
