@@ -1,7 +1,7 @@
 FROM python:3.11-alpine
 
 # Install minimal system dependencies for compilation
-RUN apk add --no-cache build-base gcc g++ musl-dev
+RUN apk add --no-cache build-base gcc g++ musl-dev linux-headers
 
 # Set working directory
 WORKDIR /app
