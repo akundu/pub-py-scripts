@@ -248,16 +248,56 @@ class HistoricalDataFetcher:
                 try:
                     snapshot = self.client.get_snapshot_option(symbol, contract_ticker)
                     if snapshot:
-                        if hasattr(snapshot, 'last_quote'):
+                        # Try different ways to get bid/ask prices
+                        if hasattr(snapshot, 'last_quote') and snapshot.last_quote:
                             contract_details['bid'] = getattr(snapshot.last_quote, 'bid', None)
                             contract_details['ask'] = getattr(snapshot.last_quote, 'ask', None)
-                        if hasattr(snapshot, 'greeks'):
+                        elif hasattr(snapshot, 'last_trade') and snapshot.last_trade:
+                            # Use last trade price if quote not available
+                            last_price = getattr(snapshot.last_trade, 'price', None)
+                            if last_price:
+                                contract_details['bid'] = last_price
+                                contract_details['ask'] = last_price
+                        
+                        # Get Greeks if available
+                        if hasattr(snapshot, 'greeks') and snapshot.greeks:
                             contract_details['delta'] = getattr(snapshot.greeks, 'delta', None)
                             contract_details['gamma'] = getattr(snapshot.greeks, 'gamma', None)
                             contract_details['theta'] = getattr(snapshot.greeks, 'theta', None)
                             contract_details['vega'] = getattr(snapshot.greeks, 'vega', None)
-                except Exception:
-                    # Snapshot may not be available for all contracts, just continue
+                        
+                        # Debug: print what we got from snapshot
+                        if i < 3:  # Only print first 3 for debugging
+                            print(f"    DEBUG: Snapshot for {contract_ticker}: bid={contract_details.get('bid')}, ask={contract_details.get('ask')}")
+                            
+                except Exception as e:
+                    # Log the specific error for debugging
+                    if i < 3:  # Only print first 3 errors
+                        print(f"    DEBUG: Snapshot error for {contract_ticker}: {e}")
+                    
+                    # Try to get historical option data as fallback
+                    try:
+                        if i < 3:  # Only try for first 3 contracts to avoid API spam
+                            print(f"    DEBUG: Trying historical data for {contract_ticker}...")
+                            # Get historical option data for the target date
+                            historical_data = self.client.get_aggs(
+                                ticker=contract_ticker,
+                                multiplier=1,
+                                timespan="day",
+                                from_=target_date_str,
+                                to=target_date_str,
+                                adjusted=True,
+                                sort="desc",
+                                limit=1
+                            )
+                            if historical_data:
+                                bar = historical_data[0]
+                                contract_details['bid'] = bar.close
+                                contract_details['ask'] = bar.close
+                                print(f"    DEBUG: Historical price for {contract_ticker}: ${bar.close:.2f}")
+                    except Exception as hist_e:
+                        if i < 3:
+                            print(f"    DEBUG: Historical data also failed for {contract_ticker}: {hist_e}")
                     pass
 
                 options_data["contracts"].append(contract_details)
@@ -305,7 +345,9 @@ class HistoricalDataFetcher:
             output.append(f"Could not fetch stock price: {stock_result.get('error', 'Unknown error')}")
 
         # --- Options Data ---
-        output.append(f"\n--- Options for {symbol} on {target_date} (Pricing & Greeks are from a current snapshot) ---")
+        output.append(f"\n--- Options for {symbol} on {target_date} ---")
+        output.append("Note: Prices shown are from current market data (if available) or historical data as fallback.")
+        output.append("Greeks are from current market data when available.")
 
         # Add a note about the filters
         filter_notes = []
@@ -377,6 +419,7 @@ class HistoricalDataFetcher:
 
                     for contract in selected_options:
                         options_table.append([
+                            contract.get('ticker', 'N/A'),
                             contract.get('type', 'N/A').title(),
                             f"${contract.get('strike'):.2f}",
                             f"${contract.get('bid'):.2f}" if contract.get('bid') is not None else 'N/A',
@@ -386,7 +429,7 @@ class HistoricalDataFetcher:
                             f"{contract.get('theta'):.3f}" if contract.get('theta') is not None else 'N/A',
                             f"{contract.get('vega'):.3f}" if contract.get('vega') is not None else 'N/A',
                         ])
-                    output.append(tabulate(options_table, headers=['Type', 'Strike', 'Bid', 'Ask', 'Delta', 'Gamma', 'Theta', 'Vega'], tablefmt='grid'))
+                    output.append(tabulate(options_table, headers=['Ticker', 'Type', 'Strike', 'Bid', 'Ask', 'Delta', 'Gamma', 'Theta', 'Vega'], tablefmt='grid'))
         else:
             output.append(f"Could not fetch options data: {options_result.get('error', 'Unknown error')}")
             
