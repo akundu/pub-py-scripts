@@ -6,7 +6,7 @@ from aiohttp import web
 from common.stock_db import get_stock_db, StockDBBase 
 import traceback
 import logging
-from logging.handlers import RotatingFileHandler
+from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
 import sys
 from pathlib import Path
 from typing import Dict, Set, Any
@@ -14,18 +14,24 @@ import json
 from datetime import datetime, timezone
 import time
 import socket
-import multiprocessing
+# multiprocessing not used for workers anymore; keep only for Queue import
 import signal
-from concurrent.futures import ProcessPoolExecutor
-import threading
+# Removed ProcessPoolExecutor and threading imports; using native fork model
 import weakref
+import errno
+from collections import deque
 
 # Global logger instance
 logger = logging.getLogger("db_server_logger")
 
+# Global logging queue (for multi-process safe logging)
+log_queue = None
+queue_listener = None
+
 # Global process tracking
 current_worker_id = None
 is_multiprocess_mode = False
+child_shutdown_flag = False
 
 # Global WebSocket connection management
 class WebSocketManager:
@@ -111,188 +117,9 @@ class WebSocketManager:
 ws_manager = None  # Will be initialized in main_server_runner
 
 
-class MultiProcessServer:
-    """Manages multiple worker processes for the database server."""
-    
-    def __init__(self, workers: int, port: int, db_file: str, log_file: str = None, 
-                 log_level: str = "INFO", heartbeat_interval: float = 1.0, 
-                 max_body_mb: int = 10, worker_restart_timeout: int = 30):
-        self.workers = workers
-        self.port = port
-        self.db_file = db_file
-        self.log_file = log_file
-        self.log_level = log_level
-        self.heartbeat_interval = heartbeat_interval
-        self.max_body_mb = max_body_mb
-        self.worker_restart_timeout = worker_restart_timeout
-        
-        self.processes = {}  # worker_id -> Process
-        self.shared_socket = None
-        self.shutdown_event = multiprocessing.Event()
-        self.restart_lock = threading.Lock()
-        
-        # Setup signal handlers
-        signal.signal(signal.SIGTERM, self._signal_handler)
-        signal.signal(signal.SIGINT, self._signal_handler)
-        
-    def _signal_handler(self, signum, frame):
-        """Handle shutdown signals."""
-        logger.info(f"Received signal {signum}, initiating graceful shutdown...")
-        self.shutdown_event.set()
-        
-    def _create_shared_socket(self) -> socket.socket:
-        """Create a socket that can be shared across processes."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        
-        # Enable SO_REUSEPORT for load balancing across processes
-        if hasattr(socket, 'SO_REUSEPORT'):
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        else:
-            # Fallback for systems without SO_REUSEPORT
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            
-        sock.bind(('0.0.0.0', self.port))
-        sock.listen(128)  # Backlog for pending connections
-        
-        logger.info(f"Created shared socket on port {self.port}")
-        return sock
-        
-    def _start_worker(self, worker_id: int) -> multiprocessing.Process:
-        """Start a single worker process."""
-        process = multiprocessing.Process(
-            target=worker_main,
-            args=(
-                worker_id,
-                self.port,
-                self.db_file,
-                self.log_file,
-                self.log_level,
-                self.heartbeat_interval,
-                self.max_body_mb,
-                self.shutdown_event
-            ),
-            name=f"DBServerWorker-{worker_id}"
-        )
-        process.start()
-        logger.info(f"Started worker {worker_id} with PID {process.pid}")
-        return process
-        
-    def start_workers(self):
-        """Start all worker processes."""
-        logger.info(f"Starting {self.workers} worker processes on port {self.port}")
-        
-        # Start worker processes
-        for worker_id in range(self.workers):
-            process = self._start_worker(worker_id)
-            self.processes[worker_id] = process
-            
-        logger.info(f"All {self.workers} workers started successfully")
-        
-    def monitor_workers(self):
-        """Monitor worker processes and restart failed ones."""
-        while not self.shutdown_event.is_set():
-            try:
-                # Check each worker process
-                for worker_id, process in list(self.processes.items()):
-                    if not process.is_alive():
-                        logger.warning(f"Worker {worker_id} (PID {process.pid}) has died, restarting...")
-                        
-                        with self.restart_lock:
-                            # Clean up dead process
-                            try:
-                                process.join(timeout=5)
-                            except:
-                                pass
-                                
-                            # Start new worker
-                            new_process = self._start_worker(worker_id)
-                            self.processes[worker_id] = new_process
-                            
-                # Sleep before next check
-                threading.Event().wait(5)  # Check every 5 seconds
-                
-            except Exception as e:
-                logger.error(f"Error in worker monitoring: {e}")
-                threading.Event().wait(5)
-                
-    def shutdown_workers(self):
-        """Gracefully shutdown all worker processes."""
-        logger.info("Shutting down all worker processes...")
-        
-        # Signal shutdown to all workers
-        self.shutdown_event.set()
-        
-        # Wait for workers to shut down gracefully
-        shutdown_start = time.time()
-        for worker_id, process in self.processes.items():
-            remaining_time = max(0, self.worker_restart_timeout - (time.time() - shutdown_start))
-            try:
-                process.join(timeout=remaining_time)
-                if process.is_alive():
-                    logger.warning(f"Worker {worker_id} did not shut down gracefully, terminating...")
-                    process.terminate()
-                    process.join(timeout=5)
-                    if process.is_alive():
-                        logger.error(f"Worker {worker_id} did not terminate, killing...")
-                        process.kill()
-                        process.join()
-                else:
-                    logger.info(f"Worker {worker_id} shut down gracefully")
-            except Exception as e:
-                logger.error(f"Error shutting down worker {worker_id}: {e}")
-                
-        # Close shared socket if created
-        if self.shared_socket:
-            try:
-                self.shared_socket.close()
-            except:
-                pass
-                
-        logger.info("All workers shut down")
-        
-    def run(self):
-        """Run the multi-process server."""
-        try:
-            self.start_workers()
-            
-            # Start monitoring thread
-            monitor_thread = threading.Thread(target=self.monitor_workers, daemon=True)
-            monitor_thread.start()
-            
-            # Wait for shutdown signal
-            while not self.shutdown_event.is_set():
-                time.sleep(1)
-                
-        except KeyboardInterrupt:
-            logger.info("KeyboardInterrupt received, shutting down...")
-        finally:
-            self.shutdown_workers()
-
-
-def worker_main(worker_id: int, port: int, db_file: str, log_file: str = None, 
-                log_level: str = "INFO", heartbeat_interval: float = 1.0, 
-                max_body_mb: int = 10, shutdown_event = None):
-    """Main function for worker processes."""
-    global current_worker_id, is_multiprocess_mode
-    current_worker_id = worker_id
-    is_multiprocess_mode = True
-    
-    # Setup process-specific logging
-    setup_worker_logging(worker_id, log_file, log_level)
-    
-    logger.info(f"Worker {worker_id} starting (PID: {os.getpid()})")
-    
-    try:
-        # Run the async server
-        asyncio.run(worker_server_runner(
-            worker_id, port, db_file, heartbeat_interval, max_body_mb, shutdown_event, log_level
-        ))
-    except KeyboardInterrupt:
-        logger.info(f"Worker {worker_id} received KeyboardInterrupt")
-    except Exception as e:
-        logger.error(f"Worker {worker_id} crashed: {e}", exc_info=True)
-    finally:
-        logger.info(f"Worker {worker_id} shutting down")
+"""
+Removed legacy MultiProcessServer and worker_main in favor of native Unix forking.
+"""
 
 
 def setup_worker_logging(worker_id: int, log_file: str = None, log_level_str: str = "INFO"):
@@ -348,7 +175,8 @@ def setup_worker_logging(worker_id: int, log_file: str = None, log_level_str: st
 
 async def worker_server_runner(worker_id: int, port: int, db_file: str, 
                               heartbeat_interval: float = 1.0, max_body_mb: int = 10,
-                              shutdown_event = None, log_level: str = "INFO"):
+                              shutdown_event = None, log_level: str = "INFO",
+                              prebound_sock: socket.socket | None = None):
     """Server runner for individual worker processes."""
     global ws_manager
     
@@ -387,14 +215,17 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     app.router.add_get("/{path:.*}", handle_catch_all)
     app.router.add_post("/{path:.*}", handle_catch_all)
 
-    # Create server with SO_REUSEPORT socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    if hasattr(socket, 'SO_REUSEPORT'):
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    # Use pre-bound socket if provided (forked model). Otherwise create a new one (single-process mode)
+    if prebound_sock is None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if hasattr(socket, 'SO_REUSEPORT'):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        else:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(('0.0.0.0', port))
+        sock.listen(128)
     else:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(('0.0.0.0', port))
-    sock.listen(128)
+        sock = prebound_sock
     
     runner = web.AppRunner(app)
     await runner.setup()
@@ -407,8 +238,8 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     await site.start()
     
     try:
-        # Monitor shutdown event
-        while shutdown_event is None or not shutdown_event.is_set():
+        # Monitor shutdown event or child shutdown flag
+        while (shutdown_event is None or not shutdown_event.is_set()) and not child_shutdown_flag:
             await asyncio.sleep(1)
     except KeyboardInterrupt:
         logger.info(f"Worker {worker_id}: KeyboardInterrupt received, shutting down...")
@@ -424,13 +255,16 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
         if hasattr(app_db_instance, 'close_pool') and callable(app_db_instance.close_pool):
              logger.info(f"Worker {worker_id}: Closing database connection pool...")
              await app_db_instance.close_pool()
-        sock.close()
+        try:
+            sock.close()
+        except Exception:
+            pass
         logger.info(f"Worker {worker_id}: Server has been shut down.")
 
 # Custom Formatter to handle different log record types
 class RequestFormatter(logging.Formatter):
-    access_log_format = "%(asctime)s [PID:%(process)d] [%(levelname)s] %(client_ip)s - \\\"%(request_line)s\\\" %(status_code)s %(response_size)s \\\"%(user_agent)s\\\" - %(message)s"
-    basic_log_format = "%(asctime)s [PID:%(process)d] [%(levelname)s] - %(message)s"
+    access_log_format = "%(asctime)s [PID: %(process)d] [%(levelname)s] %(client_ip)s - \"%(request_line)s\" %(status_code)s %(response_size)s \"%(user_agent)s\" - %(message)s"
+    basic_log_format = "%(asctime)s [PID: %(process)d] [%(levelname)s] - %(message)s"
 
     def __init__(self):
         super().__init__(fmt=self.basic_log_format, datefmt=None, style='%') # Default to basic
@@ -465,6 +299,269 @@ class RequestFormatter(logging.Formatter):
         # Restore original format string
         self._style._fmt = original_fmt
         return result
+
+# ----------------------
+# Native Unix Fork server
+# ----------------------
+
+class ForkingServer:
+    """Parent process that binds the port then forks N children that share the socket."""
+
+    def __init__(self,
+                 workers: int,
+                 port: int,
+                 db_file: str,
+                 log_file: str | None,
+                 log_level: str,
+                 heartbeat_interval: float,
+                 max_body_mb: int,
+                 startup_delay_seconds: float = 1.0,
+                 child_stagger_ms: int = 100,
+                 bind_retries: int = 5,
+                 bind_retry_delay_ms: int = 200):
+        self.workers = max(1, int(workers))
+        self.port = port
+        self.db_file = db_file
+        self.log_file = log_file
+        self.log_level = log_level
+        self.heartbeat_interval = heartbeat_interval
+        self.max_body_mb = max_body_mb
+        self.startup_delay_seconds = startup_delay_seconds
+        self.child_stagger_ms = child_stagger_ms
+        self.bind_retries = bind_retries
+        self.bind_retry_delay_ms = bind_retry_delay_ms
+
+        self.bound_socket: socket.socket | None = None
+        self.child_index_to_pid: dict[int, int] = {}
+        self.pid_to_child_index: dict[int, int] = {}
+        self.child_death_times: dict[int, deque[float]] = {i: deque(maxlen=10) for i in range(self.workers)}
+        self.child_backoff_until: dict[int, float] = {i: 0.0 for i in range(self.workers)}
+        self.shutting_down = False
+        self.shutdown_start_time: float = 0.0
+
+        # Ignore SIGPIPE in parent
+        try:
+            signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+        except Exception:
+            pass
+
+    def bind_port_with_retries(self) -> socket.socket:
+        last_err: Exception | None = None
+        for attempt in range(1, self.bind_retries + 1):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                # Do NOT set SO_REUSEPORT; we share single bound socket across forked children
+                sock.bind(('0.0.0.0', self.port))
+                sock.listen(128)
+                logger.info(f"Bound listening socket on port {self.port} (attempt {attempt})")
+                return sock
+            except OSError as e:
+                last_err = e
+                logger.error(f"Socket bind failed on port {self.port} (attempt {attempt}/{self.bind_retries}): {e}")
+                time.sleep(self.bind_retry_delay_ms / 1000.0)
+        # Exhausted
+        raise RuntimeError(f"Failed to bind port {self.port} after {self.bind_retries} attempts: {last_err}")
+
+    def _install_parent_signal_handlers(self):
+        def _graceful_shutdown(signum, frame):
+            if self.shutting_down:
+                return
+            self.shutting_down = True
+            self.shutdown_start_time = time.time()
+            logger.info(f"Parent received signal {signum}. Initiating graceful shutdown...")
+            self._signal_children(signal.SIGTERM)
+
+        try:
+            signal.signal(signal.SIGTERM, _graceful_shutdown)
+            signal.signal(signal.SIGINT, _graceful_shutdown)
+        except Exception:
+            pass
+
+    def _signal_children(self, sig: int):
+        for idx, pid in list(self.child_index_to_pid.items()):
+            if pid <= 0:
+                continue
+            try:
+                os.kill(pid, sig)
+                logger.info(f"Sent signal {sig} to child idx={idx} pid={pid}")
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                logger.error(f"Failed to signal child pid={pid}: {e}")
+
+    def _start_child(self, index: int):
+        # Backoff check
+        now = time.time()
+        backoff_until = self.child_backoff_until.get(index, 0.0)
+        if now < backoff_until:
+            logger.warning(f"Child {index} restart delayed for {round(backoff_until - now, 2)}s due to backoff")
+            return
+
+        try:
+            pid = os.fork()
+        except OSError as e:
+            logger.error(f"fork() failed for child {index}: {e}")
+            return
+
+        if pid == 0:
+            # Child process
+            try:
+                # Child: ignore SIGPIPE, handle SIGTERM
+                try:
+                    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+                except Exception:
+                    pass
+
+                def _child_term(signum, frame):
+                    global child_shutdown_flag
+                    child_shutdown_flag = True
+                    # aiohttp loop will see flag and exit
+                try:
+                    signal.signal(signal.SIGTERM, _child_term)
+                    signal.signal(signal.SIGINT, _child_term)
+                except Exception:
+                    pass
+
+                # Mark multi-process metadata
+                global current_worker_id, is_multiprocess_mode
+                current_worker_id = index
+                is_multiprocess_mode = True
+
+                # Configure child logging to send to parent's queue
+                setup_child_process_logging(index, self.log_level)
+
+                # Run the async server with pre-bound socket
+                asyncio.run(worker_server_runner(
+                    worker_id=index,
+                    port=self.port,
+                    db_file=self.db_file,
+                    heartbeat_interval=self.heartbeat_interval,
+                    max_body_mb=self.max_body_mb,
+                    shutdown_event=None,
+                    log_level=self.log_level,
+                    prebound_sock=self.bound_socket,
+                ))
+            except Exception as e:
+                logger.error(f"Child {index} crashed: {e}", exc_info=True)
+            finally:
+                os._exit(0)
+        else:
+            # Parent path
+            self.child_index_to_pid[index] = pid
+            self.pid_to_child_index[pid] = index
+            logger.info(f"Forked child index={index}, pid={pid}")
+
+    def _restart_child_with_backoff(self, index: int):
+        now = time.time()
+        dq = self.child_death_times.setdefault(index, deque(maxlen=10))
+        dq.append(now)
+        # Count deaths in the last 60s
+        recent = [t for t in dq if now - t <= 60]
+        if len(recent) > 3:
+            self.child_backoff_until[index] = now + 30
+            logger.warning(f"Child {index} exceeded 3 deaths in 60s. Backing off 30s.")
+        self._start_child(index)
+
+    def _reap_children(self):
+        # Reap all dead children without blocking
+        while True:
+            try:
+                pid, status = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                # No children
+                return
+            except OSError as e:
+                if e.errno == errno.EINTR:
+                    continue
+                return
+
+            if pid == 0:
+                return
+
+            index = self.pid_to_child_index.pop(pid, None)
+            if index is not None:
+                old_pid = self.child_index_to_pid.get(index)
+                if old_pid == pid:
+                    self.child_index_to_pid[index] = -1
+                logger.warning(f"Child exited: idx={index} pid={pid} status={status}")
+                if not self.shutting_down:
+                    self._restart_child_with_backoff(index)
+
+    def run(self):
+        # Setup parent logging queue/listener
+        setup_parent_logging_with_queue(self.log_file, self.log_level)
+
+        # Bind the socket in parent with retries
+        self.bound_socket = self.bind_port_with_retries()
+
+        # Optional delay between binding and forking/accepting
+        if self.startup_delay_seconds and self.startup_delay_seconds > 0:
+            logger.info(f"Delaying {self.startup_delay_seconds}s before starting children")
+            time.sleep(self.startup_delay_seconds)
+
+        # Install parent signal handlers
+        self._install_parent_signal_handlers()
+
+        # Fork workers with staggering
+        for i in range(self.workers):
+            self._start_child(i)
+            if self.child_stagger_ms > 0 and i < self.workers - 1:
+                time.sleep(self.child_stagger_ms / 1000.0)
+
+        # Monitor loop
+        try:
+            while True:
+                self._reap_children()
+                # Attempt to (re)start any missing children if backoff elapsed
+                if not self.shutting_down:
+                    now = time.time()
+                    for idx in range(self.workers):
+                        pid = self.child_index_to_pid.get(idx, -1)
+                        if pid <= 0 and now >= self.child_backoff_until.get(idx, 0.0):
+                            self._start_child(idx)
+                else:
+                    # If shutting down, break once all children have exited or after a grace timeout
+                    all_dead = all(pid <= 0 for pid in self.child_index_to_pid.values()) if self.child_index_to_pid else True
+                    if all_dead:
+                        break
+                    # Secondary guard: if shutdown taking too long, proceed to finalization
+                    if self.shutdown_start_time and (time.time() - self.shutdown_start_time) > 12:
+                        break
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            self.shutting_down = True
+        finally:
+            logger.info("Parent shutting down. Signaling children...")
+            self._signal_children(signal.SIGTERM)
+
+            # Wait for children to exit with a timeout
+            end_wait = time.time() + 10
+            while time.time() < end_wait and any(pid > 0 for pid in self.child_index_to_pid.values()):
+                self._reap_children()
+                time.sleep(0.2)
+
+            # Force kill remaining
+            for idx, pid in list(self.child_index_to_pid.items()):
+                if pid > 0:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    except Exception:
+                        pass
+
+            try:
+                if self.bound_socket:
+                    self.bound_socket.close()
+            except Exception:
+                pass
+            try:
+                if queue_listener is not None:
+                    queue_listener.stop()
+            except Exception:
+                pass
+            logger.info("Parent exited.")
 
 # This function initializes the database instance.
 # It's called once at server startup.
@@ -568,6 +665,58 @@ def setup_logging(log_file: str | None = None, log_level_str: str = "INFO"):
         logger.info(f"Logging to file: {log_file} with level {log_level_str.upper()}")
     else:
         logger.info(f"Logging to console with level {log_level_str.upper()}")
+
+def setup_parent_logging_with_queue(log_file: str | None = None, log_level_str: str = "INFO"):
+    """Configure parent process logging with a QueueListener for multi-process safety.
+
+    Returns the (queue, listener) so children can use the queue via QueueHandler.
+    """
+    global log_queue, queue_listener
+
+    log_level = getattr(logging, log_level_str.upper(), logging.INFO)
+    logger.setLevel(log_level)
+
+    # Handlers used by the listener
+    handlers = []
+    formatter = RequestFormatter()
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    handlers.append(console_handler)
+
+    if log_file:
+        file_handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5)
+        file_handler.setFormatter(formatter)
+        handlers.append(file_handler)
+
+    # Start QueueListener
+    from multiprocessing import Queue as MPQueue
+    log_queue = MPQueue()
+    queue_listener = QueueListener(log_queue, *handlers, respect_handler_level=False)
+    queue_listener.start()
+
+    # Parent can also log directly to the same handlers
+    logger.handlers.clear()
+    for h in handlers:
+        logger.addHandler(h)
+    logger.info(f"Logging initialized with QueueListener. Level={log_level_str.upper()}" )
+    return log_queue, queue_listener
+
+def setup_child_process_logging(worker_id: int, log_level_str: str = "INFO"):
+    """Configure child process to send logs to parent's queue via QueueHandler."""
+    global log_queue
+    log_level = getattr(logging, log_level_str.upper(), logging.INFO)
+    child_logger = logging.getLogger("db_server_logger")
+    child_logger.setLevel(log_level)
+    child_logger.handlers.clear()
+    if log_queue is not None:
+        child_logger.addHandler(QueueHandler(log_queue))
+    else:
+        # Fallback to console if queue not available
+        fallback = logging.StreamHandler()
+        fallback.setFormatter(RequestFormatter())
+        child_logger.addHandler(fallback)
+    child_logger.info(f"Child logger configured for worker {worker_id}")
 
 # New aiohttp middleware for access logging
 @web.middleware
@@ -1082,7 +1231,7 @@ async def handle_db_command(request: web.Request) -> web.Response:
                         "payload": transformed_payload_for_broadcast
                     }
                     await ws_manager.broadcast(ticker, data_to_broadcast)
-                print(f"Broadcasted realtime {data_type} data for {ticker} with data = {data_to_broadcast}", file=sys.stderr)
+                logger.info(f"Broadcasted realtime {data_type} data for {ticker} with data = {data_to_broadcast}")
             return web.json_response({"message": f"Realtime data ({data_type}) for {ticker} saved successfully."})
 
         elif command == "get_realtime_data":
@@ -1164,8 +1313,7 @@ async def handle_db_command(request: web.Request) -> web.Response:
 
     except Exception as e:
         error_message = f"Server Error processing command '{command}': {str(e)}"
-        print(error_message)
-        traceback.print_exc()
+        logger.error(error_message, exc_info=True)
         return web.json_response({"error": "An internal server error occurred.", "details": str(e)}, status=500)
 
 async def main_server_runner():
@@ -1204,22 +1352,58 @@ async def main_server_runner():
         default=30,
         help="Timeout in seconds for graceful worker shutdown before termination (default: 30)."
     )
+    # Forking mode tuning
+    parser.add_argument(
+        "--startup-delay", type=float, default=1.0,
+        help="Delay in seconds between port binding and accepting connections (default: 1.0)."
+    )
+    parser.add_argument(
+        "--child-stagger-ms", type=int, default=100,
+        help="Delay in milliseconds between forking children (default: 100)."
+    )
+    parser.add_argument(
+        "--bind-retries", type=int, default=5,
+        help="Number of retries for socket bind on the parent (default: 5)."
+    )
+    parser.add_argument(
+        "--bind-retry-delay-ms", type=int, default=200,
+        help="Delay in milliseconds between bind retries (default: 200)."
+    )
     
     args = parser.parse_args()
     
     # Handle auto-detection of workers
     if args.workers == 0:
-        args.workers = multiprocessing.cpu_count()
+        args.workers = os.cpu_count() or 1
         logger.info(f"Auto-detected {args.workers} workers based on CPU count")
 
     # Setup logging as the first step after parsing args
     setup_logging(args.log_file, args.log_level)
     
-    # Check if multi-process mode should be used
+    # Check if multi-process mode should be used (native forking model)
     if args.workers > 1:
-        logger.info(f"Starting server in multi-process mode with {args.workers} workers")
-        # For multi-process mode, delegate to the MultiProcessServer
-        multiprocess_server = MultiProcessServer(
+        logger.info(f"Starting server in forking mode with {args.workers} workers")
+
+        # Global ignore SIGPIPE in this main process too
+        try:
+            signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+        except Exception:
+            pass
+
+        # Show configuration info
+        if args.db_file.startswith(('postgresql://', 'http://', 'https://')) or '://' in args.db_file:
+            logger.info(f"Using database connection: {args.db_file}")
+        else:
+            logger.info(f"Using database file: {os.path.abspath(args.db_file)}")
+
+        logger.info(f"Forking server starting on http://localhost:{args.port}")
+        logger.info(f"Workers: {args.workers}")
+        logger.info(f"Maximum request body size: {args.max_body_mb}MB")
+        logger.info(f"WebSocket heartbeat interval: {args.heartbeat_interval}s")
+        logger.info(f"Startup delay: {args.startup_delay}s; Child stagger: {args.child_stagger_ms}ms; Bind retries: {args.bind_retries} (delay {args.bind_retry_delay_ms}ms)")
+        logger.info("Press Ctrl+C to stop the server.")
+
+        forking_server = ForkingServer(
             workers=args.workers,
             port=args.port,
             db_file=args.db_file,
@@ -1227,24 +1411,12 @@ async def main_server_runner():
             log_level=args.log_level,
             heartbeat_interval=args.heartbeat_interval,
             max_body_mb=args.max_body_mb,
-            worker_restart_timeout=args.worker_restart_timeout
+            startup_delay_seconds=args.startup_delay,
+            child_stagger_ms=args.child_stagger_ms,
+            bind_retries=args.bind_retries,
+            bind_retry_delay_ms=args.bind_retry_delay_ms,
         )
-        
-        # Show configuration info
-        if args.db_file.startswith(('postgresql://', 'http://', 'https://')) or '://' in args.db_file:
-            logger.info(f"Using database connection: {args.db_file}")
-        else:
-            logger.info(f"Using database file: {os.path.abspath(args.db_file)}")
-        
-        logger.info(f"Multi-process server starting on http://localhost:{args.port}")
-        logger.info(f"Workers: {args.workers}")
-        logger.info(f"Worker restart timeout: {args.worker_restart_timeout}s")
-        logger.info(f"Maximum request body size: {args.max_body_mb}MB")
-        logger.info(f"WebSocket heartbeat interval: {args.heartbeat_interval}s")
-        logger.info("Press Ctrl+C to stop the server.")
-        
-        # Run the multi-process server (this will block until shutdown)
-        multiprocess_server.run()
+        forking_server.run()
         return
     
     # Single-process mode (original behavior)
@@ -1309,6 +1481,12 @@ async def main_server_runner():
     logger.info(f"WebSocket heartbeat interval: {args.heartbeat_interval}s")
     logger.info("Press Ctrl+C to stop the server.")
     
+    # Ignore SIGPIPE in single-process mode as well
+    try:
+        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+    except Exception:
+        pass
+
     await site.start()
     
     try:

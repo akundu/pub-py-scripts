@@ -15,7 +15,8 @@ def fetch_get_current_price(
     data_source: str,
     db_type_for_worker: str,
     db_config_for_worker: str,
-    max_age_seconds: int = 60
+    max_age_seconds: int = 60,
+    client_timeout: float | None = None
 ) -> dict:
     """Creates a DB instance in the worker thread and gets current price for a symbol."""
     # print(f"{os.getpid()} Worker thread for {symbol}: Getting current price", file=sys.stderr, flush=True)
@@ -24,7 +25,10 @@ def fetch_get_current_price(
     try:
         # Each worker thread creates its own StockDBBase instance.
         # print(f"Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr)
-        worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
+        if client_timeout is not None:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout)
+        else:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
         
         # We need a new event loop for each thread. asyncio.run() does this.
         result = asyncio.run(get_current_price(
@@ -54,7 +58,8 @@ def fetch_price_and_save(
     all_time_flag: bool, 
     days_back_val: int | None,
     db_save_batch_size_val: int,
-    chunk_size_val: str = "monthly"  # New parameter with default
+    chunk_size_val: str = "monthly",  # New parameter with default
+    client_timeout: float | None = None
 ) -> bool:
     """Creates a DB instance in the worker thread and runs fetch_and_save_data."""
     print(f"{os.getpid()} Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr, flush=True)
@@ -66,7 +71,10 @@ def fetch_price_and_save(
     try:
         # Each worker thread creates its own StockDBBase instance.
         print(f"Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr)
-        worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
+        if client_timeout is not None:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout)
+        else:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
         
         # We need a new event loop for each thread. asyncio.run() does this.
         result = asyncio.run(fetch_and_save_data(
@@ -118,7 +126,8 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                     args.data_source,
                     db_type,
                     db_config,
-                    args.current_price_max_age
+                    args.current_price_max_age,
+                    args.client_timeout
                 )
             else:
                 task = executor.submit(
@@ -130,7 +139,8 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                     args.all_time,
                     args.days_back,
                     args.db_batch_size,
-                    args.chunk_size  # Pass the new parameter
+                    args.chunk_size,  # Pass the new parameter
+                    args.client_timeout
                 )
             stock_tasks.append((task, symbol_to_fetch))
         
@@ -252,6 +262,12 @@ def parse_args():
         choices=["process", "thread"],
         default="thread",
         help="Type of executor for stock-level tasks after database-level split. Defaults to 'thread'."
+    )
+    parser.add_argument(
+        "--client-timeout",
+        type=float,
+        default=60.0,
+        help="Timeout in seconds for remote db_server requests (default: 60.0)."
     )
     parser.add_argument(
         "--chunk-size",
