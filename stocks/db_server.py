@@ -499,19 +499,21 @@ def initialize_database(db_file_path: str, log_level: str = "INFO") -> StockDBBa
         db_type_arg = "postgresql"
     elif file_extension.lower() == ".timescaledb" or "timescaledb" in db_file_path.lower():
         db_type_arg = "timescaledb"
+    elif "questdb://" in db_file_path.lower():
+        db_type_arg = "questdb"
     elif ":" in db_file_path and not file_extension:  # Remote connection string
         db_type_arg = "remote"
     else:
         raise ValueError(
             f"Unsupported database file extension: '{file_extension}'. "
             "Use .db, .sqlite, .sqlite3 for SQLite, .duckdb for DuckDB, "
-            "or specify a PostgreSQL connection string."
+            "or specify a PostgreSQL, TimescaleDB, or QuestDB connection string."
         )
     
     logger.info(f"Attempting to initialize database: type='{db_type_arg}', path='{db_file_path}'")
     
-    # For PostgreSQL and TimescaleDB, we need to construct a proper connection string
-    if db_type_arg in ["postgresql", "timescaledb"]:
+    # For PostgreSQL, TimescaleDB, and QuestDB, we need to construct a proper connection string
+    if db_type_arg in ["postgresql", "timescaledb", "questdb"]:
         # Parse connection string or use defaults
         if "://" in db_file_path:
             # Full connection string provided
@@ -526,10 +528,16 @@ def initialize_database(db_file_path: str, log_level: str = "INFO") -> StockDBBa
                 database = parts[2]
                 username = parts[3] if len(parts) > 3 else "stock_user"
                 password = parts[4] if len(parts) > 4 else "stock_password"
-                db_config = f"postgresql://{username}:{password}@{host}:{port}/{database}"
+                if db_type_arg == "questdb":
+                    db_config = f"questdb://{username}:{password}@{host}:{port}/{database}"
+                else:
+                    db_config = f"postgresql://{username}:{password}@{host}:{port}/{database}"
             else:
                 # Default to localhost with standard credentials
-                db_config = "postgresql://stock_user:stock_password@localhost:5432/stock_data"
+                if db_type_arg == "questdb":
+                    db_config = "questdb://stock_user:stock_password@localhost:9009/stock_data"
+                else:
+                    db_config = "postgresql://stock_user:stock_password@localhost:5432/stock_data"
     else:
         # For other database types, use the file path as config
         db_config = db_file_path

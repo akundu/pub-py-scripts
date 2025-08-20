@@ -579,8 +579,12 @@ async def process_symbol_data(
         
         # Detect if this is a remote database (contains ':')
         if actual_db_path and ':' in actual_db_path:
+            # Check if it's a QuestDB connection string
+            if actual_db_path.startswith('questdb://'):
+                # QuestDB database - use questdb type
+                current_db_instance = get_stock_db("questdb", actual_db_path)
             # Check if it's a PostgreSQL connection string
-            if actual_db_path.startswith('postgresql://'):
+            elif actual_db_path.startswith('postgresql://'):
                 # PostgreSQL database - use postgresql type
                 current_db_instance = get_stock_db("postgresql", actual_db_path)
             else:
@@ -745,8 +749,12 @@ async def get_current_price(
         
         # Detect if this is a remote database (contains ':')
         if actual_db_path and ':' in actual_db_path:
+            # Check if it's a QuestDB connection string
+            if actual_db_path.startswith('questdb://'):
+                # QuestDB database - use questdb type
+                current_db_instance = get_stock_db("questdb", actual_db_path)
             # Check if it's a PostgreSQL connection string
-            if actual_db_path.startswith('postgresql://'):
+            elif actual_db_path.startswith('postgresql://'):
                 # PostgreSQL database - use postgresql type
                 current_db_instance = get_stock_db("postgresql", actual_db_path)
             else:
@@ -1288,28 +1296,51 @@ async def main() -> None:
                     print(f"Warning: Error closing database session: {e}", file=sys.stderr)
 
     # Call process_symbol_data which now handles DB initialization internally if no instance is passed.
-    final_df = await process_symbol_data(
-        symbol=args.symbol, 
-        timeframe=args.timeframe, 
-        start_date=args.start_date, 
-        end_date=args.end_date, 
-        data_dir=args.data_dir,
-        force_fetch=args.force_fetch, 
-        query_only=args.query_only,
-        db_type=args.db_type,      # Pass db_type
-        db_path=args.db_path,       # Pass db_path (can be None)
-        days_back_fetch=args.days_back, # Pass the new argument
-        db_save_batch_size=args.db_batch_size, # Pass the new argument
-        data_source=args.data_source,  # Pass the new argument
-        chunk_size=args.chunk_size  # Pass the new argument
-    )
+    db_instance_for_cleanup = None
+    try:
+        # We need to track the database instance created internally so we can clean it up
+        # First, determine what database instance will be created
+        if args.db_path and ':' in args.db_path:
+            if args.db_path.startswith('questdb://'):
+                db_instance_for_cleanup = get_stock_db("questdb", args.db_path)
+            elif args.db_path.startswith('postgresql://'):
+                db_instance_for_cleanup = get_stock_db("postgresql", args.db_path)
+            else:
+                db_instance_for_cleanup = get_stock_db("remote", args.db_path)
+        else:
+            actual_db_path = args.db_path or (get_default_db_path("duckdb") if args.db_type == 'duckdb' else get_default_db_path("db"))
+            db_instance_for_cleanup = get_stock_db(args.db_type, actual_db_path)
+        
+        final_df = await process_symbol_data(
+            symbol=args.symbol, 
+            timeframe=args.timeframe, 
+            start_date=args.start_date, 
+            end_date=args.end_date, 
+            data_dir=args.data_dir,
+            force_fetch=args.force_fetch, 
+            query_only=args.query_only,
+            db_type=args.db_type,      # Pass db_type
+            db_path=args.db_path,       # Pass db_path (can be None)
+            days_back_fetch=args.days_back, # Pass the new argument
+            db_save_batch_size=args.db_batch_size, # Pass the new argument
+            data_source=args.data_source,  # Pass the new argument
+            chunk_size=args.chunk_size,  # Pass the new argument
+            stock_db_instance=db_instance_for_cleanup  # Pass the instance we created
+        )
 
-    if not final_df.empty:
-        print(f"\n--- {args.symbol} ({args.timeframe.capitalize()}) Data ({args.start_date or 'Earliest'} to {args.end_date}) ---")
-        print(final_df)
-        print(f"--- End of Data ---")
-    elif not args.query_only: 
-        print(f"No data to display for {args.symbol} ({args.timeframe}) with the given parameters after all operations.")
+        if not final_df.empty:
+            print(f"\n--- {args.symbol} ({args.timeframe.capitalize()}) Data ({args.start_date or 'Earliest'} to {args.end_date}) ---")
+            print(final_df)
+            print(f"--- End of Data ---")
+        elif not args.query_only: 
+            print(f"No data to display for {args.symbol} ({args.timeframe}) with the given parameters after all operations.")
+    finally:
+        # Clean up database session
+        if db_instance_for_cleanup and hasattr(db_instance_for_cleanup, 'close_session') and callable(db_instance_for_cleanup.close_session):
+            try:
+                await db_instance_for_cleanup.close_session()
+            except Exception as e:
+                print(f"Warning: Error closing database session: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     asyncio.run(main())

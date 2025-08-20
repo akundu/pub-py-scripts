@@ -8,7 +8,7 @@ import asyncio
 import aiohttp
 import json
 import base64
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Optional, Union
 from .common_strategies import (
     calculate_moving_average,
     calculate_exponential_moving_average,
@@ -16,6 +16,9 @@ from .common_strategies import (
 import sys
 import logging
 from .logging_utils import get_logger, log_info, log_warning, log_error, log_debug
+from aiohttp import ClientTimeout, TCPConnector
+import time
+import atexit
 
 DEFAULT_DATA_DIR = './data'
 def get_default_db_path(db_type: str) -> str:   
@@ -48,6 +51,7 @@ class StockDBBase(metaclass=ABCMeta):
         interval: str = "daily",
         ma_periods: List[int] = None,
         ema_periods: List[int] = None,
+        on_duplicate: str = "ignore",
     ) -> None:
         """Save aggregated (daily/hourly) stock data to the database."""
         pass
@@ -65,7 +69,7 @@ class StockDBBase(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    async def save_realtime_data(self, df: pd.DataFrame, ticker: str, data_type: str = "quote") -> None:
+    async def save_realtime_data(self, df: pd.DataFrame, ticker: str, data_type: str = "quote", on_duplicate: str = "ignore") -> None:
         """Save realtime (tick/quote/trade) stock data to the database."""
         pass
 
@@ -341,6 +345,7 @@ class StockDBSQLite(StockDBBase):
         interval: str = "daily",
         ma_periods: List[int] = None,
         ema_periods: List[int] = None,
+        on_duplicate: str = "ignore",
     ) -> None:
         """Save aggregated (daily/hourly) stock data to the SQLite database."""
         # Set default periods
@@ -505,7 +510,7 @@ class StockDBSQLite(StockDBBase):
             )
         return df
 
-    async def save_realtime_data(self, df: pd.DataFrame, ticker: str, data_type: str = "quote") -> None:
+    async def save_realtime_data(self, df: pd.DataFrame, ticker: str, data_type: str = "quote", on_duplicate: str = "ignore") -> None:
         """Save realtime (tick) stock data to the SQLite database."""
         with sqlite3.connect(self.db_path) as conn:
             df_copy = df.copy()
@@ -690,6 +695,35 @@ class StockDBSQLite(StockDBBase):
         
         return result
 
+    async def get_today_opening_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+        """Get today's opening prices for multiple tickers from daily_prices."""
+        result = {}
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # Get today's date in EST timezone (market timezone)
+            import pytz
+            today = datetime.now(pytz.timezone('US/Eastern')).date()
+            
+            for ticker in tickers:
+                opening_price = None
+                try:
+                    # Get today's opening price
+                    cursor.execute("SELECT open FROM daily_prices WHERE ticker = ? AND date = ? ORDER BY date DESC LIMIT 1", (ticker, today))
+                    row = cursor.fetchone()
+                    if row: 
+                        opening_price = row[0]
+                    else:
+                        # If no today data found, might not have market open data yet
+                        pass
+                except sqlite3.Error as e:
+                    print(f"SQLite error (daily_prices for {ticker}): {e}")
+                
+                result[ticker] = opening_price
+        
+        return result
+
     async def execute_select_sql(self, sql_query: str, params: tuple = ()) -> pd.DataFrame:
         """Execute a direct SELECT SQL query on SQLite and return results as a DataFrame."""        
         def _run_sync():
@@ -826,6 +860,7 @@ class StockDBDuckDB(StockDBBase):
         interval: str = "daily",
         ma_periods: List[int] = None,
         ema_periods: List[int] = None,
+        on_duplicate: str = "ignore",
     ) -> None:
         """Save aggregated (daily/hourly) stock data to the DuckDB database."""
         # Set default periods
@@ -926,7 +961,7 @@ class StockDBDuckDB(StockDBBase):
             with duckdb.connect(database=self.db_path, read_only=True) as new_conn:
                 return _execute_query(new_conn)
 
-    async def save_realtime_data(self, df: pd.DataFrame, ticker: str, data_type: str = "quote") -> None:
+    async def save_realtime_data(self, df: pd.DataFrame, ticker: str, data_type: str = "quote", on_duplicate: str = "ignore") -> None:
         """Save realtime (tick) stock data to the DuckDB database."""
         with duckdb.connect(database=self.db_path, read_only=False) as conn:
             df_copy = df.copy()
@@ -1087,6 +1122,32 @@ class StockDBDuckDB(StockDBBase):
         
         return result
 
+    async def get_today_opening_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+        """Get today's opening prices for multiple tickers from daily_prices."""
+        result = {}
+        
+        with duckdb.connect(database=self.db_path, read_only=True) as conn:
+            # Get today's date in EST timezone (market timezone)
+            import pytz
+            today = datetime.now(pytz.timezone('US/Eastern')).date()
+            
+            for ticker in tickers:
+                opening_price = None
+                try:
+                    # Get today's opening price
+                    res = conn.execute("SELECT open FROM daily_prices WHERE ticker = ? AND date = ? ORDER BY date DESC LIMIT 1", (ticker, today)).fetchone()
+                    if res: 
+                        opening_price = res[0]
+                    else:
+                        # If no today data found, might not have market open data yet
+                        pass
+                except duckdb.Error as e:
+                    print(f"DuckDB error (daily_prices for {ticker}): {e}")
+                
+                result[ticker] = opening_price
+        
+        return result
+
     async def execute_select_sql(self, sql_query: str, params: tuple = ()) -> pd.DataFrame:
         """Execute a direct SELECT SQL query on DuckDB and return results as a DataFrame."""
         def _run_sync():
@@ -1126,24 +1187,110 @@ class StockDBDuckDB(StockDBBase):
 
 class StockDBClient(StockDBBase):
     """
-    A client class that implements the StockDBBase interface by sending
-    requests to a StockDBServer over a network.
+    Network client that sends database requests to a StockDBServer over a network.
+    
+    Features:
+    - Configurable response timeout (default: 10 seconds)
+    - Configurable retry mechanism (default: 10 retries)
+    - Random retry intervals to prevent thundering herd (default: 1 second base)
+    - Automatic session management with aiohttp
+    - Comprehensive error handling and logging
+    
+    Args:
+        server_address: Server address in format "host:port"
+        logger: Optional logger instance
+        response_timeout: Response timeout in seconds (default: 10.0)
+        max_retries: Maximum number of retry attempts (default: 10)
+        retry_interval: Base retry interval in seconds (default: 1.0)
+    
+    Example:
+        # Create client with default settings
+        client = StockDBClient("localhost:8080")
+        
+        # Create client with custom timeout and retry settings
+        client = StockDBClient("localhost:8080", response_timeout=30.0, max_retries=5, retry_interval=2.0)
+        
+        # Update settings after initialization
+        client.update_connection_settings(response_timeout=15.0, max_retries=8)
     """
-    def __init__(self, server_address: str, logger: logging.Logger = None):
+    def __init__(self, server_address: str, logger: logging.Logger = None, 
+                 response_timeout: float = 10.0, max_retries: int = 10, retry_interval: float = 1.0):
         super().__init__(server_address, logger)
         self.server_url = f"http://{server_address}"
-        self._session: aiohttp.ClientSession | None = None
+        self.session_manager = StockDBSessionManager()
+        self.response_timeout = response_timeout
+        self.max_retries = max_retries
+        self.retry_interval = retry_interval
         # print(f"StockDBClient initialized, configured for server at {self.server_url}", file=sys.stderr)
+        # Timing metrics
+        self._timing_enabled = True
+        self._timing_start_ts = time.time()
+        self._timing_last_report_ts = self._timing_start_ts
+        self._timing_lock = asyncio.Lock()
+        self._cmd_stats: Dict[str, Dict[str, float | int]] = {}
+        # Ensure summary on exit
+        atexit.register(self._print_timing_summary_sync)
+
+    def update_connection_settings(self, response_timeout: float = None, max_retries: int = None, retry_interval: float = None) -> None:
+        """
+        Update connection settings after initialization.
+        
+        Args:
+            response_timeout: New response timeout in seconds
+            max_retries: New maximum number of retries
+            retry_interval: New retry interval in seconds
+        """
+        if response_timeout is not None:
+            self.response_timeout = response_timeout
+        if max_retries is not None:
+            self.max_retries = max_retries
+        if retry_interval is not None:
+            self.retry_interval = retry_interval
+        
+        self.logger.info(f"Updated connection settings: timeout={self.response_timeout}s, max_retries={self.max_retries}, retry_interval={self.retry_interval}s")
+
+    def get_connection_settings(self) -> Dict[str, Any]:
+        """
+        Get current connection settings.
+        
+        Returns:
+            Dictionary with current timeout, max_retries, and retry_interval values
+        """
+        return {
+            "response_timeout": self.response_timeout,
+            "max_retries": self.max_retries,
+            "retry_interval": self.retry_interval
+        }
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        return self._session
+        return await self.session_manager.get_session()
 
     async def close_session(self):
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
+        await self.session_manager.close()
+    
+    def __del__(self):
+        """Cleanup when the object is destroyed."""
+        if hasattr(self, 'session_manager'):
+            try:
+                import asyncio
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Schedule cleanup if loop is running
+                    loop.create_task(self.session_manager.close())
+                else:
+                    # Run cleanup if loop is not running
+                    loop.run_until_complete(self.session_manager.close())
+            except:
+                # Ignore cleanup errors during destruction
+                pass
+
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit with proper cleanup."""
+        await self.close_session()
 
     def _init_db(self) -> None:
         # Client does not initialize DB; server handles it.
@@ -1152,16 +1299,99 @@ class StockDBClient(StockDBBase):
     async def _make_request(self, command: str, params: dict) -> dict:
         session = await self._get_session()
         payload = {"command": command, "params": params}
+        
+        # Retry logic with random backoff
+        for attempt in range(self.max_retries):
+            try:
+                t0 = time.time()
+                async with session.post(f"{self.server_url}/db_command", json=payload, timeout=self.response_timeout) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+                    await self._record_timing(command, time.time() - t0, success=True)
+                    await self._maybe_periodic_report()
+                    return data
+                    
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                if attempt < self.max_retries - 1:
+                    # Random delay between retry_interval/2 and retry_interval*1.5 seconds
+                    import random
+                    delay = random.uniform(self.retry_interval * 0.5, self.retry_interval * 1.5)
+                    
+                    # Provide specific error messages for different error types
+                    if isinstance(e, asyncio.TimeoutError):
+                        error_msg = f"Request timeout after {self.response_timeout}s"
+                    else:
+                        error_msg = str(e)
+                    
+                    self.logger.warning(f"StockDBClient attempt {attempt + 1}/{self.max_retries} failed for command '{command}': {error_msg}. Retrying in {delay:.2f}s...")
+                    await self._record_timing(command, time.time() - t0, success=False)
+                    await self._maybe_periodic_report()
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    # Final attempt failed
+                    if isinstance(e, asyncio.TimeoutError):
+                        error_msg = f"Request timeout after {self.response_timeout}s"
+                    else:
+                        error_msg = str(e)
+                    
+                    self.logger.error(f"StockDBClient network error for command '{command}' after {self.max_retries} attempts: {error_msg}", exc_info=True)
+                    await self._record_timing(command, time.time() - t0, success=False)
+                    await self._maybe_periodic_report(force=True)
+                    raise ConnectionError(f"Failed to connect or communicate with server for command '{command}' after {self.max_retries} attempts: {error_msg}") from e
+                    
+            except json.JSONDecodeError as e:
+                self.logger.error(f"StockDBClient JSON decode error for command '{command}': {e}", exc_info=True)
+                raise ValueError(f"Invalid JSON response from server for command '{command}': {e}") from e
+
+    async def _record_timing(self, command: str, duration_s: float, success: bool) -> None:
+        if not self._timing_enabled:
+            return
+        async with self._timing_lock:
+            stats = self._cmd_stats.setdefault(command, {
+                "count": 0,
+                "success": 0,
+                "fail": 0,
+                "total_s": 0.0,
+                "max_s": 0.0
+            })
+            stats["count"] += 1
+            stats["total_s"] += duration_s
+            stats["max_s"] = max(stats["max_s"], duration_s)
+            if success:
+                stats["success"] += 1
+            else:
+                stats["fail"] += 1
+
+    def _format_summary(self) -> str:
+        lines = []
+        elapsed = time.time() - self._timing_start_ts
+        lines.append(f"Client timing summary (elapsed {elapsed:.1f}s):")
+        for cmd, s in sorted(self._cmd_stats.items()):
+            count = int(s.get("count", 0))
+            total_s = float(s.get("total_s", 0.0))
+            max_s = float(s.get("max_s", 0.0))
+            success = int(s.get("success", 0))
+            fail = int(s.get("fail", 0))
+            avg = (total_s / count) if count else 0.0
+            lines.append(f"- {cmd}: count={count}, success={success}, fail={fail}, avg={avg:.3f}s, max={max_s:.3f}s, total={total_s:.1f}s")
+        return "\n".join(lines)
+
+    async def _maybe_periodic_report(self, force: bool = False) -> None:
+        if not self._timing_enabled:
+            return
+        now = time.time()
+        if force or (now - self._timing_last_report_ts) >= 10.0:
+            self._timing_last_report_ts = now
+            summary = self._format_summary()
+            self.logger.info(summary)
+
+    def _print_timing_summary_sync(self) -> None:
         try:
-            async with session.post(f"{self.server_url}/db_command", json=payload) as response:
-                response.raise_for_status()
-                return await response.json()
-        except aiohttp.ClientError as e:
-            self.logger.error(f"StockDBClient network error for command '{command}': {e}", exc_info=True)
-            raise ConnectionError(f"Failed to connect or communicate with server for command '{command}': {e}") from e
-        except json.JSONDecodeError as e:
-            self.logger.error(f"StockDBClient JSON decode error for command '{command}': {e}", exc_info=True)
-            raise ValueError(f"Invalid JSON response from server for command '{command}': {e}") from e
+            summary = self._format_summary()
+            print(summary, file=sys.stderr)
+        except Exception:
+            pass
 
     def _parse_df_from_response(self, response_data: list[dict], index_col: str) -> pd.DataFrame:
         if not response_data:
@@ -1198,6 +1428,7 @@ class StockDBClient(StockDBBase):
         interval: str = "daily",
         ma_periods: List[int] = None,
         ema_periods: List[int] = None,
+        on_duplicate: str = "ignore",
     ) -> None:
         if df.empty: return
         # Server expects list of records and index_col hint
@@ -1215,6 +1446,7 @@ class StockDBClient(StockDBBase):
             "index_col": index_col_name,
             "ma_periods": ma_periods,
             "ema_periods": ema_periods,
+            "on_duplicate": on_duplicate,
         }
         response = await self._make_request("save_stock_data", params)
         if response.get("error"):
@@ -1236,7 +1468,7 @@ class StockDBClient(StockDBBase):
         index_col = 'date' if interval == 'daily' else 'datetime'
         return self._parse_df_from_response(response.get("data", []), index_col)
 
-    async def save_realtime_data(self, df: pd.DataFrame, ticker: str, data_type: str = "quote") -> None:
+    async def save_realtime_data(self, df: pd.DataFrame, ticker: str, data_type: str = "quote", on_duplicate: str = "ignore") -> None:
         if df.empty: return
         df_reset = df.reset_index()
         index_col_name = df.index.name or 'timestamp'
@@ -1253,7 +1485,8 @@ class StockDBClient(StockDBBase):
             "ticker": ticker,
             "data_type": data_type, # Pass data_type to server
             "data": records,
-            "index_col": index_col_name
+            "index_col": index_col_name,
+            "on_duplicate": on_duplicate
         }
         response = await self._make_request("save_realtime_data", params)
         if response.get("error"):
@@ -1321,7 +1554,62 @@ class StockDBClient(StockDBBase):
         return response.get("data", []) 
 
 
-def get_stock_db(db_type: str, db_config: str | None = None, logger: logging.Logger = None, log_level: str = "INFO") -> StockDBBase:
+class StockDBSessionManager:
+    """Manages aiohttp client sessions with connection pooling and retry logic."""
+    
+    def __init__(self, max_connections: int = 200, max_per_host: int = 100):
+        self.max_connections = max_connections
+        self.max_per_host = max_per_host
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._connector: Optional[TCPConnector] = None
+        
+    async def get_session(self) -> aiohttp.ClientSession:
+        """Get or create a client session with proper configuration."""
+        if self._session is None or self._session.closed:
+            await self._create_session()
+        return self._session
+    
+    async def _create_session(self):
+        """Create a new session with optimized settings."""
+        # Create connector with connection pooling
+        self._connector = TCPConnector(
+            limit=self.max_connections,
+            limit_per_host=self.max_per_host,
+            keepalive_timeout=60,  # Increased from 30
+            enable_cleanup_closed=True,
+            ttl_dns_cache=600,     # Increased from 300
+            use_dns_cache=True,
+            force_close=False,
+            ssl=False,             # Disable SSL for local connections
+        )
+        
+        # Configure timeouts
+        timeout = ClientTimeout(
+            total=120,  # Increased from 60 for database operations
+            connect=20,  # Increased from 10 
+            sock_read=60,  # Increased from 30
+            sock_connect=20,  # Increased from 10
+        )
+        
+        # Create session
+        self._session = aiohttp.ClientSession(
+            connector=self._connector,
+            timeout=timeout,
+            headers={'Connection': 'keep-alive'},
+        )
+    
+    async def close(self):
+        """Close the session and connector."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+        
+        if self._connector and not self._connector.closed:
+            await self._connector.close()
+            self._connector = None
+
+
+def get_stock_db(db_type: str, db_config: str | None = None, logger: logging.Logger = None, log_level: str = "INFO", timeout: float = None, historical_batch_size: int = 25) -> StockDBBase:
     actual_db_config = db_config
     if actual_db_config is None:
         actual_db_config = get_default_db_path(db_type)
@@ -1333,11 +1621,17 @@ def get_stock_db(db_type: str, db_config: str | None = None, logger: logging.Log
         return StockDBDuckDB(actual_db_config, logger)
     elif db_type_lower == "postgresql":
         from .postgres_db import StockDBPostgreSQL
-        return StockDBPostgreSQL(actual_db_config, logger=logger, log_level=log_level)
+        return StockDBPostgreSQL(actual_db_config, logger=logger, log_level=log_level, historical_batch_size=historical_batch_size)
     elif db_type_lower == "timescaledb":
         from .timescale_db import StockDBTimescale
-        return StockDBTimescale(actual_db_config, logger=logger, log_level=log_level)
+        return StockDBTimescale(actual_db_config, logger=logger, log_level=log_level, historical_batch_size=historical_batch_size)
+    elif db_type_lower == "questdb":
+        from .questdb_db import StockQuestDB
+        return StockQuestDB(actual_db_config, logger=logger, log_level=log_level)
     elif db_type_lower == "remote":
-        return StockDBClient(actual_db_config, logger)
+        if timeout is not None:
+            return StockDBClient(actual_db_config, logger, response_timeout=timeout)
+        else:
+            return StockDBClient(actual_db_config, logger)
     else:
-        raise ValueError(f"Unsupported database type: {db_type}. Choose 'sqlite', 'duckdb', 'postgresql', 'timescaledb', or 'remote'.")
+        raise ValueError(f"Unsupported database type: {db_type}. Choose 'sqlite', 'duckdb', 'postgresql', 'timescaledb', 'questdb', or 'remote'.")
