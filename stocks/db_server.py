@@ -176,13 +176,15 @@ def setup_worker_logging(worker_id: int, log_file: str = None, log_level_str: st
 async def worker_server_runner(worker_id: int, port: int, db_file: str, 
                               heartbeat_interval: float = 1.0, max_body_mb: int = 10,
                               shutdown_event = None, log_level: str = "INFO",
-                              prebound_sock: socket.socket | None = None):
+                              prebound_sock: socket.socket | None = None,
+                              questdb_connection_timeout: int = 180):
     """Server runner for individual worker processes."""
     global ws_manager
     
     try:
         logger.info(f"Worker {worker_id}: Initializing database from file: {db_file}")
-        app_db_instance = initialize_database(db_file, log_level)
+        app_db_instance = initialize_database(db_file, log_level, 
+                                               questdb_connection_timeout=questdb_connection_timeout)
         logger.info(f"Worker {worker_id}: Database initialized successfully: {db_file}")
     except Exception as e:
         logger.critical(f"Worker {worker_id}: Fatal Error: Could not initialize database from file '{db_file}': {e}", exc_info=True)
@@ -318,7 +320,8 @@ class ForkingServer:
                  startup_delay_seconds: float = 1.0,
                  child_stagger_ms: int = 100,
                  bind_retries: int = 5,
-                 bind_retry_delay_ms: int = 200):
+                 bind_retry_delay_ms: int = 200,
+                 questdb_connection_timeout: int = 180):
         self.workers = max(1, int(workers))
         self.port = port
         self.db_file = db_file
@@ -330,6 +333,7 @@ class ForkingServer:
         self.child_stagger_ms = child_stagger_ms
         self.bind_retries = bind_retries
         self.bind_retry_delay_ms = bind_retry_delay_ms
+        self.questdb_connection_timeout = questdb_connection_timeout
 
         self.bound_socket: socket.socket | None = None
         self.child_index_to_pid: dict[int, int] = {}
@@ -441,6 +445,7 @@ class ForkingServer:
                     shutdown_event=None,
                     log_level=self.log_level,
                     prebound_sock=self.bound_socket,
+                    questdb_connection_timeout=self.questdb_connection_timeout,
                 ))
             except Exception as e:
                 logger.error(f"Child {index} crashed: {e}", exc_info=True)
@@ -565,7 +570,7 @@ class ForkingServer:
 
 # This function initializes the database instance.
 # It's called once at server startup.
-def initialize_database(db_file_path: str, log_level: str = "INFO") -> StockDBBase:
+def initialize_database(db_file_path: str, log_level: str = "INFO", questdb_connection_timeout: int = 180) -> StockDBBase:
     """
     Initializes and returns a database instance based on the file path and its extension.
     This function is synchronous, but the DB methods it returns will be async.
@@ -639,7 +644,8 @@ def initialize_database(db_file_path: str, log_level: str = "INFO") -> StockDBBa
         # For other database types, use the file path as config
         db_config = db_file_path
     
-    instance = get_stock_db(db_type=db_type_arg, db_config=db_config, logger=logger, log_level=log_level)
+    instance = get_stock_db(db_type=db_type_arg, db_config=db_config, logger=logger, log_level=log_level,
+                           questdb_connection_timeout_seconds=questdb_connection_timeout)
     logger.info(f"Database '{db_file_path}' initialized successfully as {db_type_arg}.")
     return instance
 
@@ -1370,6 +1376,12 @@ async def main_server_runner():
         help="Delay in milliseconds between bind retries (default: 200)."
     )
     
+    # QuestDB-specific timeout arguments
+    parser.add_argument(
+        "--questdb-connection-timeout", type=int, default=180,
+        help="QuestDB connection establishment timeout in seconds (default: 180)."
+    )
+    
     args = parser.parse_args()
     
     # Handle auto-detection of workers
@@ -1415,6 +1427,7 @@ async def main_server_runner():
             child_stagger_ms=args.child_stagger_ms,
             bind_retries=args.bind_retries,
             bind_retry_delay_ms=args.bind_retry_delay_ms,
+            questdb_connection_timeout=args.questdb_connection_timeout,
         )
         forking_server.run()
         return
@@ -1424,7 +1437,8 @@ async def main_server_runner():
 
     try:
         logger.info(f"Initializing database from file: {args.db_file}")
-        app_db_instance = initialize_database(args.db_file, args.log_level)
+        app_db_instance = initialize_database(args.db_file, args.log_level,
+                                               questdb_connection_timeout=args.questdb_connection_timeout)
         logger.info(f"Database initialized successfully: {args.db_file}")
     except Exception as e:
         logger.critical(f"Fatal Error: Could not initialize database from file '{args.db_file}': {e}", exc_info=True)

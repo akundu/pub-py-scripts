@@ -1,13 +1,33 @@
 from fetch_lists_data import ALL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
-from fetch_symbol_data import fetch_and_save_data, get_current_price
+from fetch_symbol_data import fetch_and_save_data, get_current_price, _is_market_hours
 from common.stock_db import get_stock_db, get_default_db_path
 import asyncio
 import os
 import argparse
 import sys
 import time
+import yaml
 from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+
+def load_symbols_from_yaml(yaml_file: str) -> list[str]:
+    """Load symbols from a YAML file."""
+    try:
+        with open(yaml_file, 'r') as f:
+            data = yaml.safe_load(f)
+            if isinstance(data, dict) and 'symbols' in data:
+                symbols = data['symbols']
+                if isinstance(symbols, list):
+                    return symbols
+                else:
+                    print(f"Error: 'symbols' in {yaml_file} should be a list.", file=sys.stderr)
+                    return []
+            else:
+                print(f"Error: Invalid YAML format in {yaml_file}. Expected 'symbols' key.", file=sys.stderr)
+                return []
+    except Exception as e:
+        print(f"Error loading symbols from {yaml_file}: {e}", file=sys.stderr)
+        return []
 
 # Synchronous wrapper function to get current price for a single symbol
 def fetch_get_current_price(
@@ -224,10 +244,23 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Fetch stock lists and optionally market data from Alpaca API')
     parser.add_argument('--data-dir', default='./data',
                       help='Directory to store data (default: ./data)')
-    parser.add_argument('--types', nargs='+', 
+    
+    # Create a mutually exclusive group for symbol input methods
+    symbol_group = parser.add_mutually_exclusive_group()
+    symbol_group.add_argument(
+        '--symbols',
+        nargs='+',
+        help='One or more stock symbols (e.g., AAPL MSFT GOOGL). Mutually exclusive with --types and --symbols-list.'
+    )
+    symbol_group.add_argument(
+        '--symbols-list',
+        type=str,
+        help='Path to a YAML file containing a list of symbols under the \'symbols\' key. Mutually exclusive with --types and --symbols.'
+    )
+    symbol_group.add_argument('--types', nargs='+', 
                       choices=ALL_AVAILABLE_TYPES + ['all'],
-                      default=['all'],
-                      help='Types of symbol lists to process. \'all\' processes all. Used with --fetch-online for network fetch.')
+                      help='Types of symbol lists to process. \'all\' processes all. Used with --fetch-online for network fetch. Mutually exclusive with --symbols and --symbols-list.')
+    
     parser.add_argument('--limit', type=int, default=None,
                       help='Limit symbols for market data fetch (default: None)')
     parser.add_argument('--max-concurrent', type=int, default=None,
@@ -303,6 +336,11 @@ def parse_args():
         default=None,
         help="Maximum number of continuous fetch runs before stopping (default: run indefinitely)"
     )
+    parser.add_argument(
+        "--use-market-hours",
+        action="store_true",
+        help="Use market hours awareness to adjust fetch intervals (longer intervals when markets are closed). Off by default."
+    )
     
     # Time interval for fetching market data
     time_group = parser.add_mutually_exclusive_group()
@@ -312,6 +350,11 @@ def parse_args():
                             help='Number of days back to fetch historical market data.')
     
     args = parser.parse_args()
+
+    # Set default symbol type if no symbol input method is specified
+    if not args.symbols and not args.symbols_list and not args.types:
+        args.types = ['all']
+        print("Info: No symbol input method specified, defaulting to --types all", file=sys.stderr)
 
     # Set default executor type based on other args if not explicitly set
     if args.executor_type is None:
@@ -391,7 +434,12 @@ async def run_continuous_current_price_fetch(all_symbols_list: list[str], args: 
         run_count += 1
         start_time = time.time()
         
-        print(f"\n--- Run #{run_count} at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} ---")
+        if args.use_market_hours:
+            is_market_open_start = _is_market_hours()
+            market_status = "MARKET OPEN" if is_market_open_start else "MARKET CLOSED"
+            print(f"\n--- Run #{run_count} at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} [{market_status}] ---")
+        else:
+            print(f"\n--- Run #{run_count} at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} ---")
         
         try:
             # Run the current price fetch
@@ -410,18 +458,45 @@ async def run_continuous_current_price_fetch(all_symbols_list: list[str], args: 
             
             # Calculate optimal sleep time
             # We want to ensure we fetch within the max_age window, but also account for:
-            # 1. The time the fetch itself takes
+            # 1. The time the fetch itself takes  
             # 2. A safety margin to ensure we don't miss the window
-            safety_margin = 5  # 5 seconds safety margin
-            available_window = args.current_price_max_age - fetch_duration - safety_margin
+            # 3. Optionally, market hours (if --use-market-hours is enabled)
             
-            if available_window <= 0:
-                print(f"Warning: Fetch took {fetch_duration:.1f}s, which is longer than max_age window ({args.current_price_max_age}s).")
-                print("Consider increasing --current-price-max-age or reducing --max-concurrent for faster fetches.")
-                sleep_time = 0.5  # Minimal sleep to avoid overwhelming the system
+            if args.use_market_hours:
+                is_market_open = _is_market_hours()
+                
+                if is_market_open:
+                    # Normal market hours behavior
+                    safety_margin = 5  # 5 seconds safety margin
+                    available_window = args.current_price_max_age - fetch_duration - safety_margin
+                    
+                    if available_window <= 0:
+                        print(f"Warning: Fetch took {fetch_duration:.1f}s, which is longer than max_age window ({args.current_price_max_age}s).")
+                        print("Consider increasing --current-price-max-age or reducing --max-concurrent for faster fetches.")
+                        sleep_time = 0.5  # Minimal sleep to avoid overwhelming the system
+                    else:
+                        sleep_time = available_window
+                        print(f"Next fetch in {sleep_time:.1f}s (window: {args.current_price_max_age}s - fetch: {fetch_duration:.1f}s - safety: {safety_margin}s) [MARKET OPEN]")
+                else:
+                    # Markets closed - use longer intervals to avoid unnecessary API calls
+                    # Fetch every 5-10 minutes when markets are closed instead of every 30 seconds
+                    closed_market_interval = max(args.current_price_max_age * 10, 300)  # At least 5 minutes
+                    sleep_time = closed_market_interval - fetch_duration
+                    if sleep_time < 60:  # Minimum 1 minute when markets are closed
+                        sleep_time = 60
+                    print(f"Next fetch in {sleep_time:.1f}s (markets closed, using extended interval) [MARKET CLOSED]")
             else:
-                sleep_time = available_window
-                print(f"Next fetch in {sleep_time:.1f}s (window: {args.current_price_max_age}s - fetch: {fetch_duration:.1f}s - safety: {safety_margin}s)")
+                # Standard behavior - no market hours awareness
+                safety_margin = 5  # 5 seconds safety margin
+                available_window = args.current_price_max_age - fetch_duration - safety_margin
+                
+                if available_window <= 0:
+                    print(f"Warning: Fetch took {fetch_duration:.1f}s, which is longer than max_age window ({args.current_price_max_age}s).")
+                    print("Consider increasing --current-price-max-age or reducing --max-concurrent for faster fetches.")
+                    sleep_time = 0.5  # Minimal sleep to avoid overwhelming the system
+                else:
+                    sleep_time = available_window
+                    print(f"Next fetch in {sleep_time:.1f}s (window: {args.current_price_max_age}s - fetch: {fetch_duration:.1f}s - safety: {safety_margin}s)")
             
             # Sleep until next fetch
             await asyncio.sleep(sleep_time)
@@ -438,7 +513,22 @@ async def run_continuous_current_price_fetch(all_symbols_list: list[str], args: 
 
 async def fetch_lists_data(args: argparse.Namespace):
     all_symbols_list = []
-    if args.types:
+    
+    # Handle explicit symbols provided via command line
+    if args.symbols:
+        all_symbols_list = args.symbols
+        print(f"Using {len(all_symbols_list)} symbols provided via --symbols: {', '.join(all_symbols_list)}")
+    
+    # Handle symbols from YAML file
+    elif args.symbols_list:
+        all_symbols_list = load_symbols_from_yaml(args.symbols_list)
+        if all_symbols_list:
+            print(f"Loaded {len(all_symbols_list)} symbols from YAML file: {args.symbols_list}")
+        else:
+            print(f"Warning: No symbols loaded from YAML file: {args.symbols_list}")
+    
+    # Handle traditional types-based symbol loading
+    elif args.types:
         if not args.fetch_online:
             all_symbols_list = load_symbols_from_disk(args) # Assumes args.data_dir is used internally
             if not all_symbols_list:
@@ -446,9 +536,13 @@ async def fetch_lists_data(args: argparse.Namespace):
         else:
             print("Fetching symbol lists from network as --fetch-online was specified.")
             all_symbols_list = await fetch_types(args) # Assumes args is passed and handled
+    
+    # Apply limit if specified
     if args.limit and all_symbols_list:
+        original_count = len(all_symbols_list)
         all_symbols_list = all_symbols_list[:args.limit]
-        print(f"Limited to {len(all_symbols_list)} symbols for market data fetching")
+        print(f"Limited to {len(all_symbols_list)} symbols for market data fetching (from {original_count})")
+    
     return all_symbols_list
 
 # Main function to orchestrate fetching
@@ -456,7 +550,7 @@ async def main():
     args, db_configs_for_workers = parse_args()
     
     # Create base data directories if any action is to be taken
-    if args.types or args.fetch_market_data:
+    if args.types or args.symbols or args.symbols_list or args.fetch_market_data:
         if args.fetch_market_data: # Only make data dirs if we intend to fetch market data
             os.makedirs(os.path.join(args.data_dir, 'daily'), exist_ok=True)
             os.makedirs(os.path.join(args.data_dir, 'hourly'), exist_ok=True)
@@ -465,7 +559,7 @@ async def main():
 
     if not all_symbols_list:
         print("No symbols specified or found. Skipping market data fetching.")
-        print("Use --types and/or --fetch-online to get symbols.")
+        print("Use --symbols, --symbols-list, or --types (with --fetch-online) to specify symbols.")
     elif not db_configs_for_workers: # Should not happen with current logic if fetch_market_data is True
         print("Error: Database configuration is missing for workers. Cannot fetch market data.", file=sys.stderr)
     else:

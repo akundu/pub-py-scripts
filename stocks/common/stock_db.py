@@ -1609,7 +1609,7 @@ class StockDBSessionManager:
             self._connector = None
 
 
-def get_stock_db(db_type: str, db_config: str | None = None, logger: logging.Logger = None, log_level: str = "INFO", timeout: float = None, historical_batch_size: int = 25) -> StockDBBase:
+def get_stock_db(db_type: str, db_config: str | None = None, logger: logging.Logger = None, log_level: str = "INFO", timeout: float = None, historical_batch_size: int = 25, questdb_connection_timeout_seconds: int = 180) -> StockDBBase:
     actual_db_config = db_config
     if actual_db_config is None:
         actual_db_config = get_default_db_path(db_type)
@@ -1627,7 +1627,8 @@ def get_stock_db(db_type: str, db_config: str | None = None, logger: logging.Log
         return StockDBTimescale(actual_db_config, logger=logger, log_level=log_level, historical_batch_size=historical_batch_size)
     elif db_type_lower == "questdb":
         from .questdb_db import StockQuestDB
-        return StockQuestDB(actual_db_config, logger=logger, log_level=log_level)
+        return StockQuestDB(actual_db_config, logger=logger, log_level=log_level, 
+                           connection_timeout_seconds=questdb_connection_timeout_seconds)
     elif db_type_lower == "remote":
         if timeout is not None:
             return StockDBClient(actual_db_config, logger, response_timeout=timeout)

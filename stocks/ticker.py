@@ -611,13 +611,14 @@ class TickerTerminal:
                 server_url = self.server_url
                 
             ws_url = f"{server_url}/ws?symbol={symbol}"
-            get_logger().info(f"Connecting to {ws_url}")
+            get_logger().info(f"🔗 CONNECTING to {ws_url}")
             connection = await websockets.connect(ws_url)
             self.connections.add(connection)
             self.display.connection_status = "Connected"
+            get_logger().info(f"✅ CONNECTED successfully to {symbol} at {ws_url}")
             return connection
         except Exception as e:
-            get_logger().error(f"Error connecting to {symbol}: {e}")
+            get_logger().error(f"❌ ERROR connecting to {symbol}: {e}")
             self.display.connection_status = "Connection Error"
             return None
     
@@ -630,7 +631,8 @@ class TickerTerminal:
                 
                 try:
                     message_json = json.loads(message_text)
-                    get_logger().debug(f"Received message for {symbol}: {message_json}")
+                    get_logger().info(f"RAW MESSAGE RECEIVED for {symbol}: {message_text}")
+                    get_logger().info(f"PARSED MESSAGE for {symbol}: {message_json}")
                     
                     if 'data' not in message_json or not isinstance(message_json['data'], dict):
                         get_logger().warning(f"Malformed message structure for {symbol}: {message_json}")
@@ -640,12 +642,17 @@ class TickerTerminal:
                     message_type = inner_data.get('type')
                     event_type = inner_data.get('event_type')
                     
+                    get_logger().info(f"MESSAGE TYPE: {message_type}, EVENT TYPE: {event_type}")
+                    
                     if message_type == 'heartbeat':
+                        get_logger().debug(f"Heartbeat received for {symbol}")
                         continue
                     
                     # Handle initial price updates
                     if event_type == 'initial_price_update' and message_type == 'initial_price':
+                        get_logger().info(f"Processing initial_price_update for {symbol}")
                         payload = inner_data.get('payload', [])
+                        get_logger().info(f"Initial price payload: {payload}")
                         if payload and len(payload) > 0:
                             price = payload[0].get('price')
                             if price is not None:
@@ -655,11 +662,17 @@ class TickerTerminal:
                                     'event_type': 'initial_price_update',
                                     'payload': [{'price': price, 'timestamp': timestamp.isoformat()}]
                                 })
-                                get_logger().info(f"Updated initial price for {symbol}: ${price:.2f}")
+                                get_logger().info(f"✅ UPDATED initial price for {symbol}: ${price:.2f}")
+                            else:
+                                get_logger().warning(f"❌ No price in initial price payload for {symbol}")
+                        else:
+                            get_logger().warning(f"❌ Empty or missing payload in initial price for {symbol}")
                     
                     # Handle quote updates (if any)
                     elif event_type == 'quote_update' and message_type == 'quote':
+                        get_logger().info(f"Processing quote_update for {symbol}")
                         payload = inner_data.get('payload', [])
+                        get_logger().info(f"Quote payload: {payload}")
                         if payload and len(payload) > 0:
                             quote = payload[0]
                             bid_price = quote.get('bid_price')
@@ -678,11 +691,17 @@ class TickerTerminal:
                                         'timestamp': timestamp.isoformat()
                                     }]
                                 })
-                                get_logger().info(f"Updated quote for {symbol}: ${mid_price:.2f}")
+                                get_logger().info(f"✅ UPDATED quote for {symbol}: ${mid_price:.2f} (B:${bid_price:.2f}/A:${ask_price:.2f})")
+                            else:
+                                get_logger().warning(f"❌ Missing bid/ask prices in quote for {symbol}")
+                        else:
+                            get_logger().warning(f"❌ Empty or missing payload in quote for {symbol}")
                     
                     # Handle trade updates (if any)
                     elif event_type == 'trade_update' and message_type == 'trade':
+                        get_logger().info(f"Processing trade_update for {symbol}")
                         payload = inner_data.get('payload', [])
+                        get_logger().info(f"Trade payload: {payload}")
                         if payload and len(payload) > 0:
                             trade = payload[0]
                             price = trade.get('price')
@@ -697,7 +716,16 @@ class TickerTerminal:
                                         'timestamp': timestamp.isoformat()
                                     }]
                                 })
-                                get_logger().info(f"Updated trade for {symbol}: ${price:.2f}")
+                                get_logger().info(f"✅ UPDATED trade for {symbol}: ${price:.2f}")
+                            else:
+                                get_logger().warning(f"❌ No price in trade payload for {symbol}")
+                        else:
+                            get_logger().warning(f"❌ Empty or missing payload in trade for {symbol}")
+                    
+                    # Handle any other message types
+                    else:
+                        get_logger().warning(f"🔍 UNHANDLED MESSAGE TYPE for {symbol}: type={message_type}, event_type={event_type}")
+                        get_logger().warning(f"Full inner_data: {inner_data}")
                     
                 except json.JSONDecodeError as e:
                     get_logger().error(f"Error decoding message for {symbol}: {e}")

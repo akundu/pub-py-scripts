@@ -8,6 +8,7 @@ import sys # Added for sys.path manipulation
 from pathlib import Path # Added for path manipulation
 from common.stock_db import get_stock_db, StockDBBase, get_default_db_path, DEFAULT_DATA_DIR
 import aiohttp # Added for fully async HTTP calls
+import pytz # Added for market hours checking
 
 # Try to import Polygon client
 try:
@@ -40,6 +41,31 @@ def _get_polygon_timespan(timeframe: str) -> str:
         return "hour"
     else:
         raise ValueError(f"Unsupported timeframe for Polygon: {timeframe}")
+
+def _is_market_hours(dt: datetime = None) -> bool:
+    """
+    Check if the given datetime (or current time) falls within market hours.
+    US market hours: 9:30 AM - 4:00 PM ET, Monday-Friday
+    """
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    
+    # Convert to Eastern Time
+    et_tz = pytz.timezone('US/Eastern')
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    
+    et_dt = dt.astimezone(et_tz)
+    
+    # Check if it's a weekday (Monday=0, Sunday=6)
+    if et_dt.weekday() >= 5:  # Saturday (5) or Sunday (6)
+        return False
+    
+    # Check if it's within market hours (9:30 AM - 4:00 PM ET)
+    market_open = et_dt.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = et_dt.replace(hour=16, minute=0, second=0, microsecond=0)
+    
+    return market_open <= et_dt <= market_close
 
 async def fetch_polygon_data(
     symbol: str,
@@ -676,8 +702,10 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
     try:
         # Try to get realtime data first (most recent)
         realtime_data = await db_instance.get_realtime_data(symbol, data_type="quote")
+        
         if not realtime_data.empty:
-            latest_row = realtime_data.iloc[-1]
+            # Take the FIRST row (most recent write_timestamp) instead of last
+            latest_row = realtime_data.iloc[0]
             return {
                 'price': latest_row['price'],
                 'timestamp': latest_row.name,  # Index is the timestamp
@@ -811,12 +839,14 @@ async def get_current_price(
             # Calculate age using UTC timestamps
             age_seconds = (current_time - price_dt).total_seconds()
             
-            # Use the most recent timestamp (smallest age) for the age check
-            # This ensures we use whichever timestamp is more recent (original fetch or last save)
+            # Use write_timestamp for age calculation when available
+            # This prevents unnecessary fetches when data was recently written to database
             if write_age_seconds is not None:
-                max_age_check_seconds = min(write_age_seconds, age_seconds)
-                used_timestamp = "most recent" if write_age_seconds < age_seconds else "original"
+                # Always use write_timestamp as the primary age check
+                max_age_check_seconds = write_age_seconds
+                used_timestamp = "write"
             else:
+                # Fallback to original timestamp if no write_timestamp
                 max_age_check_seconds = age_seconds
                 used_timestamp = "original"
             
@@ -889,8 +919,10 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
             # Save to realtime table if we have a database instance
             if current_db_instance:
                 try:
-                    await current_db_instance.save_realtime_data(quote_df, symbol, data_type="quote")
+
+                    await current_db_instance.save_realtime_data(quote_df, symbol, data_type="quote", on_duplicate="replace")
                     print(f"Saved quote data for {symbol} to realtime table", file=sys.stderr)
+                    
                 except Exception as e:
                     print(f"Warning: Failed to save quote data for {symbol} to realtime table: {e}", file=sys.stderr)
             
@@ -925,7 +957,7 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
             # Save to realtime table if we have a database instance
             if current_db_instance:
                 try:
-                    await current_db_instance.save_realtime_data(trade_df, symbol, data_type="trade")
+                    await current_db_instance.save_realtime_data(trade_df, symbol, data_type="trade", on_duplicate="replace")
                     print(f"Saved trade data for {symbol} to realtime table", file=sys.stderr)
                 except Exception as e:
                     print(f"Warning: Failed to save trade data for {symbol} to realtime table: {e}", file=sys.stderr)
@@ -1018,7 +1050,7 @@ async def _get_current_price_alpaca(symbol: str, current_db_instance: StockDBBas
                         # Save to realtime table if we have a database instance
                         if current_db_instance:
                             try:
-                                await current_db_instance.save_realtime_data(quote_df, symbol, data_type="quote")
+                                await current_db_instance.save_realtime_data(quote_df, symbol, data_type="quote", on_duplicate="replace")
                                 print(f"Saved quote data for {symbol} to realtime table", file=sys.stderr)
                             except Exception as e:
                                 print(f"Warning: Failed to save quote data for {symbol} to realtime table: {e}", file=sys.stderr)
@@ -1058,7 +1090,7 @@ async def _get_current_price_alpaca(symbol: str, current_db_instance: StockDBBas
                         # Save to realtime table if we have a database instance
                         if current_db_instance:
                             try:
-                                await current_db_instance.save_realtime_data(trade_df, symbol, data_type="trade")
+                                await current_db_instance.save_realtime_data(trade_df, symbol, data_type="trade", on_duplicate="replace")
                                 print(f"Saved trade data for {symbol} to realtime table", file=sys.stderr)
                             except Exception as e:
                                 print(f"Warning: Failed to save trade data for {symbol} to realtime table: {e}", file=sys.stderr)
