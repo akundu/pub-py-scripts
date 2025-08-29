@@ -959,7 +959,6 @@ class StockQuestDB(StockDBBase):
                             result_df.loc[i, ema_key] = calc_record[ema_key]
                     break
         return result_df
-
     def _calculate_moving_average(self, ticker: str, records: List[Dict], period: int, price_col: str) -> List[Dict]:
         """Calculate moving average for a given period."""
         if len(records) < period:
@@ -997,3 +996,4 @@ class StockQuestDB(StockDBBase):
         if self._connection_pool:
             await self._connection_pool.close()
             self._connection_pool = None
+
