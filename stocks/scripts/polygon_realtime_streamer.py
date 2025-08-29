@@ -39,7 +39,7 @@ import logging
 
 # Add project root to path for imports
 _SCRIPT_DIR = Path(__file__).resolve().parent  
-_PROJECT_ROOT = _SCRIPT_DIR
+_PROJECT_ROOT = _SCRIPT_DIR.parent  # Go up one level to reach project root
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
@@ -60,43 +60,6 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
-
-def load_symbols_from_yaml(yaml_file: str) -> List[str]:
-    """Load symbols from a YAML file."""
-    try:
-        with open(yaml_file, 'r') as f:
-            data = yaml.safe_load(f)
-            if isinstance(data, dict) and 'symbols' in data:
-                symbols = data['symbols']
-                if isinstance(symbols, list):
-                    return symbols
-                else:
-                    logger.error(f"'symbols' in {yaml_file} should be a list.")
-                    return []
-            else:
-                logger.error(f"Invalid YAML format in {yaml_file}. Expected 'symbols' key.")
-                return []
-    except Exception as e:
-        logger.error(f"Error loading symbols from {yaml_file}: {e}")
-        return []
-
-def check_polygon_dependencies() -> bool:
-    """Check if Polygon dependencies are installed."""
-    try:
-        from polygon.websocket import WebSocketClient
-        return True
-    except ImportError:
-        logger.error("polygon-api-client is not installed")
-        logger.error("Install with: pip install polygon-api-client")
-        return False
-
-def check_polygon_api_key() -> bool:
-    """Check if Polygon API key is available."""
-    api_key = os.getenv("POLYGON_API_KEY")
-    if not api_key:
-        logger.error("POLYGON_API_KEY environment variable not set")
-        return False
-    return True
 
 class DatabaseClient:
     """Client for sending data to the database server."""
@@ -158,6 +121,43 @@ class DatabaseClient:
         except Exception as e:
             logger.error(f"Error sending data for {symbol}: {e}")
             return False
+
+def load_symbols_from_yaml(yaml_file: str) -> List[str]:
+    """Load symbols from a YAML file."""
+    try:
+        with open(yaml_file, 'r') as f:
+            data = yaml.safe_load(f)
+            if isinstance(data, dict) and 'symbols' in data:
+                symbols = data['symbols']
+                if isinstance(symbols, list):
+                    return symbols
+                else:
+                    logger.error(f"'symbols' in {yaml_file} should be a list.")
+                    return []
+            else:
+                logger.error(f"Invalid YAML format in {yaml_file}. Expected 'symbols' key.")
+                return []
+    except Exception as e:
+        logger.error(f"Error loading symbols from {yaml_file}: {e}")
+        return []
+
+def check_polygon_dependencies() -> bool:
+    """Check if Polygon dependencies are installed."""
+    try:
+        from polygon.websocket import WebSocketClient
+        return True
+    except ImportError:
+        logger.error("polygon-api-client is not installed")
+        logger.error("Install with: pip install polygon-api-client")
+        return False
+
+def check_polygon_api_key() -> bool:
+    """Check if Polygon API key is available."""
+    api_key = os.getenv("POLYGON_API_KEY")
+    if not api_key:
+        logger.error("POLYGON_API_KEY environment variable not set")
+        return False
+    return True
 
 class PolygonStreamManager:
     """Manages multiple Polygon WebSocket connections."""
@@ -869,6 +869,7 @@ async def main():
     
     # Create database client and stream manager
     async with DatabaseClient(args.db_server, args.db_timeout) as db_client:
+        # Normal streaming mode
         stream_manager = PolygonStreamManager(
             api_key=api_key,
             db_client=db_client,
@@ -897,8 +898,9 @@ async def main():
             logger.info(f"Test mode enabled: will run for {args.test_mode} seconds")
         
         try:
-            # Start streaming
+            # Start streaming (no display functionality)
             await stream_manager.start_streaming(all_symbols)
+                
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
         except Exception as e:
@@ -919,7 +921,7 @@ async def main():
                     await test_timer_task
                 except asyncio.CancelledError:
                     pass
-                
+                    
             # Print final stats
             stream_manager.print_stats()
     

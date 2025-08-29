@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Set, Optional, Tuple
 import pandas as pd
 import logging
+from zoneinfo import ZoneInfo
 
 # Rich library for beautiful terminal displays
 try:
@@ -104,9 +105,10 @@ class StockData:
         current_time = datetime.now()
         
         if data_type == "quote":
-            self.bid_price = data.get('price', 0)
+            # Accept both legacy and new server keys
+            self.bid_price = data.get('bid_price', data.get('price', 0))
             self.ask_price = data.get('ask_price', 0)
-            self.bid_size = data.get('size', 0)
+            self.bid_size = data.get('bid_size', data.get('size', 0))
             self.ask_size = data.get('ask_size', 0)
             self.current_price = (self.bid_price + self.ask_price) / 2 if (self.bid_price + self.ask_price) > 0 else 0
             self.last_quote_time = current_time
@@ -137,9 +139,9 @@ class StockData:
     def update_from_db_data(self, data: Dict, data_type: str):
         """Update stock data from database records (for initial data)."""
         if data_type == "quote":
-            self.bid_price = data.get('price', 0)
+            self.bid_price = data.get('bid_price', data.get('price', 0))
             self.ask_price = data.get('ask_price', 0)
-            self.bid_size = data.get('size', 0)
+            self.bid_size = data.get('bid_size', data.get('size', 0))
             self.ask_size = data.get('ask_size', 0)
             self.current_price = (self.bid_price + self.ask_price) / 2 if (self.bid_price + self.ask_price) > 0 else 0
             self.last_quote_time = datetime.fromisoformat(data.get('timestamp', '').replace('Z', '+00:00'))
@@ -307,149 +309,164 @@ class DatabaseClient:
             logger.debug(f"Could not fetch prev close for {symbol}: {e}")
             return None
 
+    async def fetch_previous_close_batch(self, symbols: List[str]) -> Dict[str, Optional[float]]:
+        """Fetch previous close prices for a list of symbols in one request."""
+        if not self.session:
+            return {}
+        payload = {"command": "get_previous_close_prices", "params": {"tickers": symbols}}
+        try:
+            url = f"http://{self.server_url}/db_command"
+            async with self.session.post(url, json=payload) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    return result.get("prices", {}) or {}
+        except Exception as e:
+            logger.debug(f"Batch prev close fetch failed: {e}")
+        return {}
+
+    async def fetch_today_open_batch(self, symbols: List[str]) -> Dict[str, Optional[float]]:
+        """Fetch today's opening prices for a list of symbols in one request."""
+        if not self.session:
+            return {}
+        payload = {"command": "get_today_opening_prices", "params": {"tickers": symbols}}
+        try:
+            url = f"http://{self.server_url}/db_command"
+            async with self.session.post(url, json=payload) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    return result.get("prices", {}) or {}
+        except Exception as e:
+            logger.debug(f"Batch open fetch failed: {e}")
+        return {}
+
 class WebSocketClient:
-    """Client for real-time WebSocket data streaming."""
-    
+    """Manages per-symbol WebSocket connections to the db_server."""
+
     def __init__(self, server_url: str, symbols: List[str], on_data_update):
         self.server_url = server_url
         self.symbols = symbols
         self.on_data_update = on_data_update
-        self.websocket = None
+        self.connections: Dict[str, websockets.WebSocketClientProtocol] = {}
         self.connected = False
-        self.reconnect_attempts = 0
-        self.max_reconnect_attempts = 5
-        self.reconnect_delay = 5.0
-        
+        self.reconnect_delay = 2.0
+
+    def _build_ws_url(self, base_http_url: str, symbol: str) -> str:
+        ws_url = base_http_url.replace('http://', 'ws://').replace('https://', 'wss://')
+        if not ws_url.startswith('ws://') and not ws_url.startswith('wss://'):
+            ws_url = f"ws://{ws_url}"
+        if ws_url.endswith('/ws'):
+            return f"{ws_url}?symbol={symbol}"
+        return f"{ws_url.rstrip('/')}/ws?symbol={symbol}"
+
     async def connect(self):
-        """Connect to the WebSocket server."""
-        try:
-            # Convert HTTP URL to WebSocket URL
-            ws_url = self.server_url.replace('http://', 'ws://').replace('https://', 'wss://')
-            if not ws_url.startswith('ws://') and not ws_url.startswith('wss://'):
-                ws_url = f"ws://{ws_url}"
-            
-            # Add WebSocket endpoint
-            if not ws_url.endswith('/ws'):
-                ws_url = f"{ws_url}/ws"
-                
-            logger.info(f"Connecting to WebSocket: {ws_url}")
-            
-            self.websocket = await websockets.connect(ws_url)
-            self.connected = True
-            self.reconnect_attempts = 0
-            
-            # Subscribe to symbols
-            await self._subscribe_to_symbols()
-            
-            logger.info("WebSocket connected successfully")
-            
-        except Exception as e:
-            logger.error(f"WebSocket connection failed: {e}")
-            self.connected = False
-            raise
-            
-    async def _subscribe_to_symbols(self):
-        """Subscribe to real-time updates for symbols."""
-        if not self.websocket or not self.connected:
-            return
-            
-        try:
-            # Send subscription message
-            subscription_msg = {
-                "action": "subscribe",
-                "symbols": self.symbols,
-                "data_types": ["quotes", "trades"]
-            }
-            
-            await self.websocket.send(json.dumps(subscription_msg))
-            logger.info(f"Subscribed to {len(self.symbols)} symbols")
-            
-        except Exception as e:
-            logger.error(f"Failed to subscribe to symbols: {e}")
-            
+        """Open one connection per symbol."""
+        failures = 0
+        for sym in self.symbols:
+            try:
+                url = self._build_ws_url(self.server_url, sym)
+                logger.info(f"Connecting WS for {sym}: {url}")
+                ws = await websockets.connect(url)
+                self.connections[sym] = ws
+            except Exception as e:
+                failures += 1
+                logger.error(f"Failed WS connect for {sym}: {e}")
+        self.connected = len(self.connections) > 0 and failures < len(self.symbols)
+
     async def listen(self):
-        """Listen for real-time data updates."""
-        if not self.websocket or not self.connected:
-            logger.error("WebSocket not connected")
+        if not self.connections:
+            logger.error("No WebSocket connections established")
             return
-            
         try:
-            async for message in self.websocket:
-                if shutdown_flag:
-                    break
-                    
-                try:
-                    # Parse the message
-                    data = json.loads(message)
-                    await self._handle_message(data)
-                    
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Invalid JSON message: {e}")
-                except Exception as e:
-                    logger.error(f"Error handling message: {e}")
-                    
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("WebSocket connection closed")
-            self.connected = False
-        except Exception as e:
-            logger.error(f"WebSocket error: {e}")
-            self.connected = False
+            tasks = [asyncio.create_task(self._listen_single(sym, ws)) for sym, ws in list(self.connections.items())]
+            await asyncio.gather(*tasks, return_exceptions=True)
         finally:
             await self.disconnect()
-            
-    async def _handle_message(self, data: Dict):
-        """Handle incoming WebSocket message."""
-        try:
-            # Check message type
-            msg_type = data.get('type', '')
-            
-            if msg_type == 'quote':
-                symbol = data.get('symbol', '')
-                if symbol in self.symbols:
-                    await self.on_data_update(symbol, 'quote', data)
-                    
-            elif msg_type == 'trade':
-                symbol = data.get('symbol', '')
-                if symbol in self.symbols:
-                    await self.on_data_update(symbol, 'trade', data)
-                    
-            elif msg_type == 'heartbeat':
-                # Handle heartbeat/ping messages
-                pass
-                
-            else:
-                logger.debug(f"Unknown message type: {msg_type}")
-                
-        except Exception as e:
-            logger.error(f"Error processing message: {e}")
-            
-    async def disconnect(self):
-        """Disconnect from the WebSocket server."""
-        if self.websocket:
+
+    async def _listen_single(self, symbol: str, ws: websockets.WebSocketClientProtocol):
+        while not shutdown_flag:
             try:
-                await self.websocket.close()
+                msg = await ws.recv()
+                await self._handle_message(symbol, msg)
+            except websockets.exceptions.ConnectionClosed:
+                logger.warning(f"WS closed for {symbol}; reconnecting...")
+                await asyncio.sleep(self.reconnect_delay)
+                # attempt reconnect
+                try:
+                    url = self._build_ws_url(self.server_url, symbol)
+                    new_ws = await websockets.connect(url)
+                    self.connections[symbol] = new_ws
+                    ws = new_ws
+                    continue
+                except Exception as e:
+                    logger.error(f"Reconnect failed for {symbol}: {e}")
+                    await asyncio.sleep(self.reconnect_delay)
             except Exception as e:
-                logger.error(f"Error closing WebSocket: {e}")
-            finally:
-                self.websocket = None
-                self.connected = False
-                
-    async def reconnect(self):
-        """Attempt to reconnect to the WebSocket server."""
-        if self.reconnect_attempts >= self.max_reconnect_attempts:
-            logger.error("Max reconnection attempts reached")
-            return False
-            
-        self.reconnect_attempts += 1
-        logger.info(f"Attempting to reconnect (attempt {self.reconnect_attempts}/{self.max_reconnect_attempts})")
-        
+                logger.error(f"WS error for {symbol}: {e}")
+                await asyncio.sleep(self.reconnect_delay)
+
+    async def _handle_message(self, expected_symbol: str, message_text: str):
         try:
-            await asyncio.sleep(self.reconnect_delay)
-            await self.connect()
-            return True
-        except Exception as e:
-            logger.error(f"Reconnection failed: {e}")
-            return False
+            message = json.loads(message_text)
+        except json.JSONDecodeError:
+            logger.debug("Ignoring non-JSON WS message")
+            return
+
+        # Server schema: {"symbol": "SYM", "data": {"type": "quote|trade|heartbeat|initial_price", "event_type": "*_update", "payload": [...]}}
+        symbol = message.get('symbol', expected_symbol)
+        inner = message.get('data', {}) or {}
+        msg_type = inner.get('type')
+        event_type = inner.get('event_type')
+
+        if msg_type == 'heartbeat':
+            return
+
+        payload = inner.get('payload') or []
+        if not isinstance(payload, list) or not payload:
+            # Some paths might send direct data
+            payload = [inner]
+
+        # We process only the first record for display cadence
+        record = payload[0] if payload else {}
+
+        if msg_type == 'initial_price' and event_type == 'initial_price_update':
+            norm = {
+                'price': float(record.get('price', 0) or 0),
+                'size': int(record.get('size', 0) or 0),
+                'timestamp': record.get('timestamp')
+            }
+            await self.on_data_update(symbol, 'trade', norm)
+            return
+
+        if msg_type == 'quote' and event_type == 'quote_update':
+            norm = {
+                'bid_price': record.get('bid_price', 0) or 0,
+                'ask_price': record.get('ask_price', 0) or 0,
+                'bid_size': record.get('bid_size', 0) or 0,
+                'ask_size': record.get('ask_size', 0) or 0,
+                'timestamp': record.get('timestamp')
+            }
+            await self.on_data_update(symbol, 'quote', norm)
+            return
+
+        if msg_type == 'trade' and event_type == 'trade_update':
+            norm = {
+                'price': record.get('price', 0) or 0,
+                'size': record.get('size', 0) or 0,
+                'timestamp': record.get('timestamp')
+            }
+            await self.on_data_update(symbol, 'trade', norm)
+            return
+
+        logger.debug(f"Unhandled WS message for {symbol}: {message}")
+
+    async def disconnect(self):
+        for sym, ws in list(self.connections.items()):
+            try:
+                await ws.close()
+            except Exception as e:
+                logger.debug(f"Error closing WS for {sym}: {e}")
+        self.connections.clear()
+        self.connected = False
 
 class DisplayManager:
     """Manages the rich terminal display for real-time data."""
@@ -472,26 +489,37 @@ class DisplayManager:
         """Initialize stock data with latest database values."""
         logger.info("Fetching initial data from database...")
         
+        # Fetch latest quote/trade per symbol
         for symbol in self.symbols:
             try:
-                # Fetch latest quotes and trades
                 quotes = await self.db_client.fetch_latest_data(symbol, "quote", 1)
                 trades = await self.db_client.fetch_latest_data(symbol, "trade", 1)
-                
-                # Update stock data
                 if quotes:
                     self.stock_data[symbol].update_from_db_data(quotes[0], "quote")
                 if trades:
                     self.stock_data[symbol].update_from_db_data(trades[0], "trade")
-                    
-                # Fetch previous close if not set
-                if not self.stock_data[symbol].prev_close:
-                    prev_close = await self.db_client.fetch_prev_close(symbol)
-                    if prev_close:
-                        self.stock_data[symbol].set_prev_close(prev_close)
-                        
             except Exception as e:
-                logger.error(f"Error fetching initial data for {symbol}: {e}")
+                logger.error(f"Error fetching latest for {symbol}: {e}")
+
+        # Batch fetch previous close and today's open
+        try:
+            prev_close_map = await self.db_client.fetch_previous_close_batch(self.symbols)
+            open_map = await self.db_client.fetch_today_open_batch(self.symbols)
+            for symbol in self.symbols:
+                prev_close_val = prev_close_map.get(symbol)
+                if prev_close_val is not None:
+                    try:
+                        self.stock_data[symbol].set_prev_close(float(prev_close_val))
+                    except Exception:
+                        pass
+                open_val = open_map.get(symbol)
+                if open_val is not None:
+                    try:
+                        self.stock_data[symbol].set_open(float(open_val))
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.error(f"Batch fetch for prev close/open failed: {e}")
                 
         logger.info("Initial data fetch completed")
         
@@ -608,7 +636,10 @@ class DisplayManager:
         last_update = datetime.fromtimestamp(self.last_update_time).strftime("%H:%M:%S")
         
         # Show WebSocket status
-        ws_status = "🟢 CONNECTED" if self.websocket_client and self.websocket_client.connected else "🔴 DISCONNECTED"
+        active_conns = 0
+        if self.websocket_client and hasattr(self.websocket_client, 'connections'):
+            active_conns = sum(1 for _ in self.websocket_client.connections.values())
+        ws_status = "🟢 CONNECTED" if active_conns > 0 else "🔴 DISCONNECTED"
         
         table.title = f"[bold blue]Real-Time Stock Market Dashboard[/bold blue] - {current_time} | WebSocket: {ws_status} | Last Update: {last_update}"
         
@@ -797,23 +828,18 @@ def setup_signal_handlers():
 
 def is_market_open() -> bool:
     """Check if the US stock market is currently open."""
-    now = datetime.now()
-    
-    # Check if it's a weekday
-    if now.weekday() >= 5:  # Saturday = 5, Sunday = 6
+    try:
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        now_et = datetime.now()
+
+    if now_et.weekday() >= 5:
         return False
-    
-    # Check if it's within market hours (9:30 AM - 4:00 PM ET)
-    # Convert to Eastern Time (simplified - in production you'd use pytz)
-    et_hour = now.hour
-    et_minute = now.minute
-    
-    # Market hours: 9:30 AM - 4:00 PM ET
-    market_start = 9 * 60 + 30  # 9:30 AM in minutes
-    market_end = 16 * 60        # 4:00 PM in minutes
-    current_time = et_hour * 60 + et_minute
-    
-    return market_start <= current_time <= market_end
+
+    market_start_minutes = 9 * 60 + 30
+    market_end_minutes = 16 * 60
+    current_minutes = now_et.hour * 60 + now_et.minute
+    return market_start_minutes <= current_minutes <= market_end_minutes
 
 def get_session_status() -> str:
     """Get current session status."""
@@ -914,19 +940,21 @@ async def _run_live_display(display_manager: DisplayManager,
                 live.update(display_manager.render_display())
                 
                 # Check WebSocket connection status
-                if display_manager.websocket_client and not display_manager.websocket_client.connected:
-                    logger.warning("WebSocket disconnected, attempting to reconnect...")
-                    try:
-                        await display_manager.websocket_client.reconnect()
-                    except Exception as e:
-                        logger.error(f"Reconnection failed: {e}")
+                if display_manager.websocket_client and hasattr(display_manager.websocket_client, 'connections'):
+                    if not display_manager.websocket_client.connections:
+                        logger.warning("No active WS connections; attempting reconnect...")
+                        try:
+                            await display_manager.websocket_client.connect()
+                        except Exception as e:
+                            logger.error(f"Reconnect attempt failed: {e}")
                 
                 # Small delay to prevent excessive updates
                 await asyncio.sleep(1.0 / refresh_rate)
                 
             except Exception as e:
                 logger.error(f"Display update error: {e}")
-                break
+                # Keep running; don't break the display loop
+                await asyncio.sleep(1.0)
                 
         # Clean up WebSocket task
         if websocket_task and not websocket_task.done():

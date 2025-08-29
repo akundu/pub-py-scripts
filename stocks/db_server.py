@@ -1258,6 +1258,139 @@ async def handle_db_command(request: web.Request) -> web.Response:
             price = await db_instance.get_latest_price(ticker)
             return web.json_response({"ticker": ticker, "latest_price": price})
 
+        elif command == "get_latest_data":
+            ticker = params.get("ticker")
+            data_type = params.get("data_type", "both")
+            limit = params.get("limit", 10)
+            
+            if not ticker: return web.json_response({"error": "Missing 'ticker'"}, status=400)
+            
+            try:
+                result_data = []
+                
+                if data_type in ["both", "quote"]:
+                    # Get latest quotes
+                    quote_df = await db_instance.get_realtime_data(
+                        ticker, None, None, "quote"
+                    )
+                    if not quote_df.empty:
+                        # Get the latest quote(s)
+                        latest_quotes = quote_df.tail(limit).reset_index()
+                        for col_name in latest_quotes.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
+                            latest_quotes[col_name] = latest_quotes[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                        
+                        for _, row in latest_quotes.iterrows():
+                            result_data.append({
+                                "type": "quote",
+                                "timestamp": row.get("timestamp"),
+                                "price": row.get("bid_price", row.get("price")),
+                                "size": row.get("bid_size", row.get("size")),
+                                "ask_price": row.get("ask_price"),
+                                "ask_size": row.get("ask_size"),
+                                "bid_price": row.get("bid_price"),
+                                "bid_size": row.get("bid_size")
+                            })
+                
+                if data_type in ["both", "trade"]:
+                    # Get latest trades
+                    trade_df = await db_instance.get_realtime_data(
+                        ticker, None, None, "trade"
+                    )
+                    if not trade_df.empty:
+                        # Get the latest trade(s)
+                        latest_trades = trade_df.tail(limit).reset_index()
+                        for col_name in latest_trades.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
+                            latest_trades[col_name] = latest_trades[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                        
+                        for _, row in latest_trades.iterrows():
+                            result_data.append({
+                                "type": "trade",
+                                "timestamp": row.get("timestamp"),
+                                "price": row.get("price"),
+                                "size": row.get("size"),
+                                "volume": row.get("size")  # Map size to volume for trades
+                            })
+                
+                # Sort by timestamp (most recent first) and limit results
+                result_data.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+                result_data = result_data[:limit]
+                
+                return web.json_response({"data": result_data})
+                
+            except Exception as e:
+                logger.error(f"Error getting latest data for {ticker}: {e}", exc_info=True)
+                return web.json_response({"error": f"Failed to get latest data: {str(e)}"}, status=500)
+
+        elif command == "get_historical_data":
+            ticker = params.get("ticker")
+            data_type = params.get("data_type", "trade")
+            start_date = params.get("start_date")
+            end_date = params.get("end_date")
+            limit = params.get("limit", 100)
+            
+            if not ticker: return web.json_response({"error": "Missing 'ticker'"}, status=400)
+            
+            try:
+                if data_type == "trade":
+                    # Get historical trade data
+                    df = await db_instance.get_realtime_data(
+                        ticker, start_date, end_date, "trade"
+                    )
+                elif data_type == "quote":
+                    # Get historical quote data
+                    df = await db_instance.get_realtime_data(
+                        ticker, start_date, end_date, "quote"
+                    )
+                else:
+                    # Get historical daily data
+                    df = await db_instance.get_stock_data(
+                        ticker, start_date, end_date, "daily"
+                    )
+                
+                if df.empty:
+                    return web.json_response({"message": "No historical data found", "data": []})
+                
+                # Reset index and format datetime columns
+                df_reset = df.reset_index()
+                for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
+                    df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                
+                # Apply limit and convert to records
+                result_data = df_reset.tail(limit).to_dict(orient='records')
+                return web.json_response({"data": result_data})
+                
+            except Exception as e:
+                logger.error(f"Error getting historical data for {ticker}: {e}", exc_info=True)
+                return web.json_response({"error": f"Failed to get historical data: {str(e)}"}, status=500)
+
+        elif command == "get_today_daily_data":
+            ticker = params.get("ticker")
+            if not ticker: return web.json_response({"error": "Missing 'ticker'"}, status=400)
+            
+            try:
+                # Get today's date
+                today = datetime.now().strftime('%Y-%m-%d')
+                
+                # Get today's daily data
+                df = await db_instance.get_stock_data(
+                    ticker, today, today, "daily"
+                )
+                
+                if df.empty:
+                    return web.json_response({"message": "No daily data found for today", "data": []})
+                
+                # Reset index and format datetime columns
+                df_reset = df.reset_index()
+                for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
+                    df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                
+                result_data = df_reset.to_dict(orient='records')
+                return web.json_response({"data": result_data})
+                
+            except Exception as e:
+                logger.error(f"Error getting today's daily data for {ticker}: {e}", exc_info=True)
+                return web.json_response({"error": f"Failed to get today's daily data: {str(e)}"}, status=500)
+
         elif command == "get_latest_prices":
             tickers = params.get("tickers")
             if not tickers or not isinstance(tickers, list):
