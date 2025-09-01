@@ -1149,7 +1149,10 @@ async def handle_db_command(request: web.Request) -> web.Response:
             ticker = params.get("ticker")
             if not ticker: return web.json_response({"error": "Missing 'ticker'"}, status=400)
             df = await db_instance.get_stock_data(
-                ticker, params.get("start_date"), params.get("end_date"), params.get("interval", "daily")
+                ticker,
+                params.get("start_date", (pd.Timestamp.now() - pd.Timedelta(days=7)).strftime('%Y-%m-%d')),
+                params.get("end_date", pd.Timestamp.now().strftime('%Y-%m-%d')),
+                params.get("interval", "daily")
             )
             if df.empty: return web.json_response({"message": "No data found", "data": []})
             df_reset = df.reset_index()
@@ -1414,6 +1417,40 @@ async def handle_db_command(request: web.Request) -> web.Response:
             
             prices = await db_instance.get_today_opening_prices(tickers)
             return web.json_response({"prices": prices})
+
+        elif command == "get_today_volume":
+            tickers = params.get("tickers")
+            if not tickers or not isinstance(tickers, list):
+                return web.json_response({"error": "Missing or invalid 'tickers' parameter (must be a list)"}, status=400)
+            
+            try:
+                volumes = {}
+                for ticker in tickers:
+                    # Get today's date
+                    today = datetime.now().strftime('%Y-%m-%d')
+                    
+                    # Get today's daily data which should include volume
+                    df = await db_instance.get_stock_data(
+                        ticker, today, today, "daily"
+                    )
+                    
+                    if not df.empty and 'volume' in df.columns:
+                        volumes[ticker] = float(df['volume'].iloc[0])
+                    else:
+                        # Fallback: try to get volume from real-time trade data
+                        trade_df = await db_instance.get_realtime_data(
+                            ticker, today, None, "trade"
+                        )
+                        if not trade_df.empty and 'size' in trade_df.columns:
+                            volumes[ticker] = float(trade_df['size'].sum())
+                        else:
+                            volumes[ticker] = None
+                
+                return web.json_response({"volumes": volumes})
+                
+            except Exception as e:
+                logger.error(f"Error getting today's volume for {tickers}: {e}", exc_info=True)
+                return web.json_response({"error": f"Failed to get today's volume: {str(e)}"}, status=500)
 
         elif command == "execute_sql":
             sql_query = params.get("sql_query")
