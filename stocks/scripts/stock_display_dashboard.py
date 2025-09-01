@@ -139,19 +139,38 @@ class StockData:
     def update_from_db_data(self, data: Dict, data_type: str):
         """Update stock data from database records (for initial data)."""
         if data_type == "quote":
-            self.bid_price = data.get('bid_price', data.get('price', 0))
-            self.ask_price = data.get('ask_price', 0)
-            self.bid_size = data.get('bid_size', data.get('size', 0))
-            self.ask_size = data.get('ask_size', 0)
-            self.current_price = (self.bid_price + self.ask_price) / 2 if (self.bid_price + self.ask_price) > 0 else 0
-            self.last_quote_time = datetime.fromisoformat(data.get('timestamp', '').replace('Z', '+00:00'))
-            self.last_update = self.last_quote_time
+            # Handle the actual data structure from the database
+            # The database stores quotes with 'price' and 'size' fields
+            quote_price = data.get('price', 0)
+            quote_size = data.get('size', 0)
+            
+            # For quotes, use the price directly as current price
+            self.current_price = quote_price
+            self.bid_price = data.get('bid_price', quote_price)  # Fallback to quote price if no bid
+            self.ask_price = data.get('ask_price', quote_price)  # Fallback to quote price if no ask
+            self.bid_size = data.get('bid_size', quote_size)
+            self.ask_size = data.get('ask_size', quote_size)
+            
+            # Update timestamp
+            if 'timestamp' in data:
+                try:
+                    self.last_quote_time = datetime.fromisoformat(data.get('timestamp', '').replace('Z', '+00:00'))
+                    self.last_update = self.last_quote_time
+                except Exception:
+                    self.last_quote_time = datetime.now()
+                    self.last_update = self.last_quote_time
             
         elif data_type == "trade":
             self.current_price = data.get('price', 0)
             self.volume = data.get('size', 0)
-            self.last_trade_time = datetime.fromisoformat(data.get('timestamp', '').replace('Z', '+00:00'))
-            self.last_update = self.last_trade_time
+            
+            if 'timestamp' in data:
+                try:
+                    self.last_trade_time = datetime.fromisoformat(data.get('timestamp', '').replace('Z', '+00:00'))
+                    self.last_update = self.last_trade_time
+                except Exception:
+                    self.last_trade_time = datetime.now()
+                    self.last_update = self.last_trade_time
             
             # Update high/low if needed
             if self.high is None or self.current_price > self.high:
@@ -326,18 +345,151 @@ class DatabaseClient:
 
     async def fetch_today_open_batch(self, symbols: List[str]) -> Dict[str, Optional[float]]:
         """Fetch today's opening prices for a list of symbols in one request."""
+        logger.info(f"fetch_today_open_batch called with {len(symbols)} symbols: {symbols}")
+        if not self.session:
+            logger.error("No database session available")
+            return {}
+        
+        # Try the new command first
+        payload = {"command": "get_today_opening_prices", "params": {"tickers": symbols}}
+        try:
+            url = f"http://{self.server_url}/db_command"
+            logger.debug(f"Trying new command: {url}")
+            async with self.session.post(url, json=payload) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    logger.debug(f"Response: {result}")
+                    if "error" not in result:
+                        prices = result.get("prices", {}) or {}
+                        # Check if we actually got valid prices (not all null)
+                        valid_prices = {k: v for k, v in prices.items() if v is not None and v > 0}
+                        if valid_prices:
+                            logger.debug(f"Fetched valid opening prices: {valid_prices}")
+                            return valid_prices
+                        else:
+                            logger.debug("Database returned null/zero opening prices, will use fallback")
+        except Exception as e:
+            logger.debug(f"New opening prices command failed: {e}")
+        
+        # Fallback: try to get first quote of the day for each symbol (since we have quote data)
+        logger.info("Falling back to individual symbol opening price fetch from quotes...")
+        fallback_prices = {}
+        for symbol in symbols:
+            try:
+                # Since historical data isn't working, let's try to get the earliest quote from today's data
+                # We'll use the current data as a proxy for opening price
+                payload = {
+                    "command": "get_latest_data",
+                    "params": {
+                        "ticker": symbol,
+                        "data_type": "quote",
+                        "limit": 100  # Get more data to find earliest
+                    }
+                }
+                
+                logger.debug(f"Trying fallback for {symbol} with payload: {payload}")
+                async with self.session.post(url, json=payload) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        logger.debug(f"Fallback response for {symbol}: {result}")
+                        if "data" in result and result["data"]:
+                            # Find the earliest quote from today
+                            today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                            today_quotes = []
+                            
+                            for quote in result["data"]:
+                                try:
+                                    quote_time = datetime.fromisoformat(quote.get("timestamp", "").replace('Z', '+00:00'))
+                                    if quote_time >= today_start:
+                                        today_quotes.append((quote_time, quote))
+                                except Exception:
+                                    continue
+                            
+                            if today_quotes:
+                                # Sort by time and get the earliest
+                                today_quotes.sort(key=lambda x: x[0])
+                                earliest_quote = today_quotes[0][1]
+                                price = float(earliest_quote.get("price", 0))
+                                if price > 0:
+                                    fallback_prices[symbol] = price
+                                    logger.debug(f"Fallback: {symbol} opening price from earliest quote = {price}")
+            except Exception as e:
+                logger.debug(f"Fallback opening price fetch failed for {symbol}: {e}")
+                continue
+        
+        if fallback_prices:
+            logger.info(f"Fallback fetched {len(fallback_prices)} opening prices from quotes")
+        else:
+            logger.warning("No opening prices found via fallback method")
+        
+        return fallback_prices
+
+    async def fetch_today_volume_batch(self, symbols: List[str]) -> Dict[str, Optional[int]]:
+        """Fetch today's volume data for a list of symbols in one request."""
         if not self.session:
             return {}
-        payload = {"command": "get_today_opening_prices", "params": {"tickers": symbols}}
+        
+        # Try the new command first
+        payload = {"command": "get_today_volume_prices", "params": {"tickers": symbols}}
         try:
             url = f"http://{self.server_url}/db_command"
             async with self.session.post(url, json=payload) as response:
                 if response.status == 200:
                     result = await response.json()
-                    return result.get("prices", {}) or {}
+                    if "error" not in result:
+                        volumes = result.get("volumes", {}) or {}
+                        # Check if we actually got valid volumes (not all null)
+                        valid_volumes = {k: v for k, v in volumes.items() if v is not None and v > 0}
+                        if valid_volumes:
+                            logger.debug(f"Fetched valid volume data: {valid_volumes}")
+                            return valid_volumes
+                        else:
+                            logger.debug("Database returned null/zero volumes, will use fallback")
         except Exception as e:
-            logger.debug(f"Batch open fetch failed: {e}")
-        return {}
+            logger.debug(f"New volume command failed: {e}")
+        
+        # Fallback: try to get today's volume for each symbol
+        logger.info("Falling back to individual symbol volume fetch...")
+        fallback_volumes = {}
+        for symbol in symbols:
+            try:
+                # Since historical data isn't working, let's try to get volume from today's current data
+                payload = {
+                    "command": "get_latest_data",
+                    "params": {
+                        "ticker": symbol,
+                        "data_type": "quote",
+                        "limit": 1000  # Get more data to sum volume
+                    }
+                }
+                
+                async with self.session.post(url, json=payload) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        if "data" in result and result["data"]:
+                            # Sum up volume from today's quotes
+                            today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                            today_volume = 0
+                            
+                            for quote in result["data"]:
+                                try:
+                                    quote_time = datetime.fromisoformat(quote.get("timestamp", "").replace('Z', '+00:00'))
+                                    if quote_time >= today_start:
+                                        today_volume += int(quote.get("size", 0))
+                                except Exception:
+                                    continue
+                            
+                            if today_volume > 0:
+                                fallback_volumes[symbol] = today_volume
+                                logger.debug(f"Fallback: {symbol} volume from today's quotes = {today_volume}")
+            except Exception as e:
+                logger.debug(f"Fallback volume fetch failed for {symbol}: {e}")
+                continue
+        
+        if fallback_volumes:
+            logger.info(f"Fallback fetched {len(fallback_volumes)} volume records")
+        
+        return fallback_volumes
 
 class WebSocketClient:
     """Manages per-symbol WebSocket connections to the db_server."""
@@ -439,6 +591,8 @@ class WebSocketClient:
 
         if msg_type == 'quote' and event_type == 'quote_update':
             norm = {
+                'price': record.get('price', 0) or 0,  # Use 'price' field from database
+                'size': record.get('size', 0) or 0,    # Use 'size' field from database
                 'bid_price': record.get('bid_price', 0) or 0,
                 'ask_price': record.get('ask_price', 0) or 0,
                 'bid_size': record.get('bid_size', 0) or 0,
@@ -492,32 +646,53 @@ class DisplayManager:
         # Fetch latest quote/trade per symbol
         for symbol in self.symbols:
             try:
+                logger.debug(f"Fetching latest data for {symbol}...")
                 quotes = await self.db_client.fetch_latest_data(symbol, "quote", 1)
                 trades = await self.db_client.fetch_latest_data(symbol, "trade", 1)
+                logger.debug(f"{symbol}: Got {len(quotes)} quotes, {len(trades)} trades")
+                
                 if quotes:
                     self.stock_data[symbol].update_from_db_data(quotes[0], "quote")
+                    logger.debug(f"Updated {symbol} from quote: {quotes[0]}")
                 if trades:
                     self.stock_data[symbol].update_from_db_data(trades[0], "trade")
+                    logger.debug(f"Updated {symbol} from trade: {trades[0]}")
             except Exception as e:
                 logger.error(f"Error fetching latest for {symbol}: {e}")
 
         # Batch fetch previous close and today's open
         try:
+            logger.info("Fetching previous close prices...")
             prev_close_map = await self.db_client.fetch_previous_close_batch(self.symbols)
+            logger.info(f"Fetched {len(prev_close_map)} previous close prices")
+            
+            logger.info("Fetching today's opening prices...")
             open_map = await self.db_client.fetch_today_open_batch(self.symbols)
+            logger.info(f"Fetched {len(open_map)} opening prices: {open_map}")
+            
+            logger.info("Fetching today's volume data...")
+            volume_map = await self.db_client.fetch_today_volume_batch(self.symbols)
+            logger.info(f"Fetched {len(volume_map)} volume records: {volume_map}")
+            
             for symbol in self.symbols:
                 prev_close_val = prev_close_map.get(symbol)
                 if prev_close_val is not None:
                     try:
                         self.stock_data[symbol].set_prev_close(float(prev_close_val))
-                    except Exception:
-                        pass
+                        logger.debug(f"Set {symbol} prev close: {prev_close_val}")
+                    except Exception as e:
+                        logger.debug(f"Failed to set {symbol} prev close: {e}")
+                
                 open_val = open_map.get(symbol)
                 if open_val is not None:
                     try:
                         self.stock_data[symbol].set_open(float(open_val))
-                    except Exception:
-                        pass
+                        logger.debug(f"Set {symbol} open: {open_val}")
+                    except Exception as e:
+                        logger.debug(f"Failed to set {symbol} open: {e}")
+                else:
+                    logger.debug(f"No opening price found for {symbol}")
+                    
         except Exception as e:
             logger.error(f"Batch fetch for prev close/open failed: {e}")
                 
@@ -887,6 +1062,7 @@ async def main():
             logger.info(f"Test mode enabled: will run for {args.test_mode} seconds")
         
         try:
+            logger.info("About to run live display...")
             # Run the live display
             await _run_live_display(display_manager, args.display_refresh, args.db_server)
                 
@@ -894,6 +1070,8 @@ async def main():
             logger.info("Interrupted by user")
         except Exception as e:
             logger.error(f"Display error: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
         finally:
             # Cancel test timer if running
             if test_timer_task:
@@ -914,55 +1092,62 @@ async def _run_live_display(display_manager: DisplayManager,
                            db_server_url: str):
     """Run the live display with WebSocket real-time data."""
     console = Console()
+    logger.info("_run_live_display started")
     
-    # Create the live display
-    with Live(display_manager.render_display(), 
-              refresh_per_second=refresh_rate,
-              screen=True) as live:
-        
-        # Initial data fetch
+    # For debugging, let's try without the Live context first
+    logger.info("Live display created, about to initialize data...")
+    # Initial data fetch
+    try:
         await display_manager.initialize_data()
-        
-        # Setup WebSocket listener
-        await display_manager.setup_websocket(db_server_url)
-        
-        # Start WebSocket listener in background
-        websocket_task = None
-        if display_manager.websocket_client:
-            websocket_task = asyncio.create_task(
-                display_manager.start_websocket_listener()
-            )
-        
-        # Main display loop
-        while not shutdown_flag:
-            try:
-                # Update the live display
-                live.update(display_manager.render_display())
-                
-                # Check WebSocket connection status
-                if display_manager.websocket_client and hasattr(display_manager.websocket_client, 'connections'):
-                    if not display_manager.websocket_client.connections:
-                        logger.warning("No active WS connections; attempting reconnect...")
-                        try:
-                            await display_manager.websocket_client.connect()
-                        except Exception as e:
-                            logger.error(f"Reconnect attempt failed: {e}")
-                
-                # Small delay to prevent excessive updates
-                await asyncio.sleep(1.0 / refresh_rate)
-                
-            except Exception as e:
-                logger.error(f"Display update error: {e}")
-                # Keep running; don't break the display loop
-                await asyncio.sleep(1.0)
-                
-        # Clean up WebSocket task
-        if websocket_task and not websocket_task.done():
-            websocket_task.cancel()
-            try:
-                await websocket_task
-            except asyncio.CancelledError:
-                pass
+        logger.info("Data initialization completed")
+    except Exception as e:
+        logger.error(f"Data initialization failed: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+    
+    logger.info("Setting up WebSocket...")
+    # Setup WebSocket listener
+    await display_manager.setup_websocket(db_server_url)
+    
+    # Start WebSocket listener in background
+    websocket_task = None
+    if display_manager.websocket_client:
+        websocket_task = asyncio.create_task(
+            display_manager.start_websocket_listener()
+        )
+    
+    logger.info("Starting main display loop...")
+    # Main display loop
+    while not shutdown_flag:
+        try:
+            # For debugging, just print the table instead of using Live
+            table = display_manager.render_display()
+            console.print(table)
+            
+            # Check WebSocket connection status
+            if display_manager.websocket_client and hasattr(display_manager.websocket_client, 'connections'):
+                if not display_manager.websocket_client.connections:
+                    logger.warning("No active WS connections; attempting reconnect...")
+                    try:
+                        await display_manager.websocket_client.connect()
+                    except Exception as e:
+                        logger.error(f"Reconnect attempt failed: {e}")
+            
+            # Small delay to prevent excessive updates
+            await asyncio.sleep(1.0 / refresh_rate)
+            
+        except Exception as e:
+            logger.error(f"Display update error: {e}")
+            # Keep running; don't break the display loop
+            await asyncio.sleep(1.0)
+            
+    # Clean up WebSocket task
+    if websocket_task and not websocket_task.done():
+        websocket_task.cancel()
+        try:
+            await websocket_task
+        except asyncio.CancelledError:
+            pass
 
 if __name__ == "__main__":
     sys.exit(asyncio.run(main()))

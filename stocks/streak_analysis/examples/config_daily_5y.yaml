@@ -1,0 +1,15 @@
+# Example configuration for 5-year daily analysis
+symbol: TQQQ
+timeframe: daily
+lookback_days: 1825
+data_horizon_years: 5
+min_streak_threshold: 1
+aggregation_level: day
+evaluation_mode: close_to_close
+evaluation_intervals:
+  n_days: 1825
+  m_days: 365
+db_host: localhost
+db_port: 9002
+export_csv: results/daily_5y
+random_seed: 42

@@ -1,0 +1,14 @@
+# Example configuration for 7-day realtime analysis
+symbol: QQQ
+timeframe: realtime
+realtime_window_days: 7
+min_streak_threshold: 0
+aggregation_level: day
+evaluation_mode: close_to_close
+evaluation_intervals:
+  n_days: 7
+  m_days: 3
+db_host: localhost
+db_port: 9002
+export_csv: results/realtime_7d
+random_seed: 42

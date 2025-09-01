@@ -1,0 +1,15 @@
+# Example configuration for 1-year hourly analysis
+symbol: SPY
+timeframe: hourly
+lookback_days: 365
+data_horizon_years: 1
+min_streak_threshold: 2
+aggregation_level: day
+evaluation_mode: close_to_close
+evaluation_intervals:
+  n_days: 365
+  m_days: 90
+db_host: localhost
+db_port: 9002
+export_csv: results/hourly_1y
+random_seed: 42

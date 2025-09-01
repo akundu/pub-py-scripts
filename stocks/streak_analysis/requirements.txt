@@ -1,0 +1,29 @@
+# Core dependencies
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.15.0
+
+# Configuration and validation
+pydantic>=2.0.0
+PyYAML>=6.0
+
+# CLI
+typer>=0.9.0
+
+# Terminal rendering
+rich>=13.0.0
+
+# HTTP client for db_server.py
+aiohttp>=3.8.0
+
+# Async support
+asyncio-compat>=0.1.2
+
+# Development and testing
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
