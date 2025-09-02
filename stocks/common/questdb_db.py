@@ -102,61 +102,15 @@ class StockQuestDB(StockDBBase):
 
     async def _create_daily_prices_table(self, conn: asyncpg.Connection) -> None:
         """Create daily_prices table with QuestDB optimizations and deduplication."""
-        create_table_sql = """
-        CREATE TABLE IF NOT EXISTS daily_prices (
-            ticker SYMBOL INDEX CAPACITY 128,
-            date TIMESTAMP,
-            open DOUBLE,
-            high DOUBLE,
-            low DOUBLE,
-            close DOUBLE,
-            volume LONG,
-            ma_10 DOUBLE,
-            ma_50 DOUBLE,
-            ma_100 DOUBLE,
-            ma_200 DOUBLE,
-            ema_8 DOUBLE,
-            ema_21 DOUBLE,
-            ema_34 DOUBLE,
-            ema_55 DOUBLE,
-            ema_89 DOUBLE
-        ) TIMESTAMP(date) PARTITION BY MONTH WAL
-        DEDUP UPSERT KEYS(date, ticker, open, high, low, close);
-        """
-        await conn.execute(create_table_sql)
+        await conn.execute(StockQuestDB.create_table_daily_prices_sql)
 
     async def _create_hourly_prices_table(self, conn: asyncpg.Connection) -> None:
         """Create hourly_prices table with QuestDB optimizations and deduplication."""
-        create_table_sql = """
-        CREATE TABLE IF NOT EXISTS hourly_prices (
-            ticker SYMBOL INDEX CAPACITY 128,
-            datetime TIMESTAMP,
-            open DOUBLE,
-            high DOUBLE,
-            low DOUBLE,
-            close DOUBLE,
-            volume LONG
-        ) TIMESTAMP(datetime) PARTITION BY MONTH WAL
-        DEDUP UPSERT KEYS(datetime, ticker, open, high, low, close);
-        """
-        await conn.execute(create_table_sql)
+        await conn.execute(StockQuestDB.create_hourly_prices_table_sql)
 
     async def _create_realtime_data_table(self, conn: asyncpg.Connection) -> None:
         """Create realtime_data table with QuestDB optimizations and deduplication."""
-        create_table_sql = """
-        CREATE TABLE IF NOT EXISTS realtime_data (
-            ticker SYMBOL INDEX CAPACITY 128,
-            timestamp TIMESTAMP,
-            type SYMBOL INDEX CAPACITY 32,
-            price DOUBLE,
-            size LONG,
-            ask_price DOUBLE,
-            ask_size LONG,
-            write_timestamp TIMESTAMP
-        ) TIMESTAMP(timestamp) PARTITION BY DAY WAL
-        DEDUP UPSERT KEYS(timestamp, ticker, type, price);
-        """
-        await conn.execute(create_table_sql)
+        await conn.execute(StockQuestDB.create_table_realtime_data_sql)
 
     async def _create_questdb_indexes(self, conn: asyncpg.Connection) -> None:
         """QuestDB indexes are created inline with table definitions."""
@@ -1019,4 +973,51 @@ class StockQuestDB(StockDBBase):
         if self._connection_pool:
             await self._connection_pool.close()
             self._connection_pool = None
+
+    create_table_daily_prices_sql = """
+    CREATE TABLE IF NOT EXISTS daily_prices (
+        ticker SYMBOL INDEX CAPACITY 128,
+        date TIMESTAMP,
+        open DOUBLE,
+        high DOUBLE,
+        low DOUBLE,
+        close DOUBLE,
+        volume LONG,
+        ma_10 DOUBLE,
+        ma_50 DOUBLE,
+        ma_100 DOUBLE,
+        ma_200 DOUBLE,
+        ema_8 DOUBLE,
+        ema_21 DOUBLE,
+        ema_34 DOUBLE,
+        ema_55 DOUBLE,
+        ema_89 DOUBLE
+    ) TIMESTAMP(date) PARTITION BY MONTH WAL
+    DEDUP UPSERT KEYS(date, ticker, open, high, low, close);
+    """
+    create_hourly_prices_table_sql = """
+    CREATE TABLE IF NOT EXISTS hourly_prices (
+        ticker SYMBOL INDEX CAPACITY 128,
+        datetime TIMESTAMP,
+        open DOUBLE,
+        high DOUBLE,
+        low DOUBLE,
+        close DOUBLE,
+        volume LONG
+    ) TIMESTAMP(datetime) PARTITION BY MONTH WAL
+    DEDUP UPSERT KEYS(datetime, ticker, open, high, low, close);
+    """
+    create_table_realtime_data_sql = """
+    CREATE TABLE IF NOT EXISTS realtime_data (
+        ticker SYMBOL INDEX CAPACITY 128,
+        timestamp TIMESTAMP,
+        type SYMBOL INDEX CAPACITY 32,
+        price DOUBLE,
+        size LONG,
+        ask_price DOUBLE,
+        ask_size LONG,
+        write_timestamp TIMESTAMP
+    ) TIMESTAMP(timestamp) PARTITION BY DAY WAL
+    DEDUP UPSERT KEYS(timestamp, ticker, type, price);
+    """
 
