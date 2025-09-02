@@ -198,6 +198,21 @@ async def cleanup_duplicates(db_instance: StockQuestDB, table: str, ticker: str 
                     find_duplicates_query, 
                     (group_ticker, group_date, group_type, group_price)
                 )
+                
+                if len(duplicate_records) > 1:
+                    # Keep the first record (most recent), remove the rest
+                    # Since QuestDB doesn't support DELETE, we'll need a different approach
+                    # We'll create a new table with only the unique records
+                    logger.info(f"Found {len(duplicate_records)} duplicate records for {group_ticker} on {group_date}")
+                    
+                    # For now, we'll log the duplicates and suggest manual cleanup
+                    # In a production environment, you might want to implement a more sophisticated approach
+                    logger.warning(f"Manual cleanup needed for {group_ticker} on {group_date}: {len(duplicate_records)} duplicate records")
+                    cleaned_count += len(duplicate_records) - 1
+                    
+            except Exception as e:
+                logger.error(f"Error finding duplicate records for {group_ticker} on {group_date}: {e}")
+                continue
         else:
             group_open = group['open']
             group_high = group['high']
@@ -217,20 +232,21 @@ async def cleanup_duplicates(db_instance: StockQuestDB, table: str, ticker: str 
                     find_duplicates_query, 
                     (group_ticker, group_date, group_open, group_high, group_low, group_close)
                 )
-        
-        if len(duplicate_records) > 1:
-            # Keep the first record (most recent), remove the rest
-            # Since QuestDB doesn't support DELETE, we'll need a different approach
-            # We'll create a new table with only the unique records
-            logger.info(f"Found {len(duplicate_records)} duplicate records for {group_ticker} on {group_date}")
-            
-            # For now, we'll log the duplicates and suggest manual cleanup
-            # In a production environment, you might want to implement a more sophisticated approach
-            logger.warning(f"Manual cleanup needed for {group_ticker} on {group_date}: {len(duplicate_records)} duplicate records")
-            cleaned_count += len(duplicate_records) - 1
-        
-        except Exception as e:
-            logger.error(f"Error processing duplicate group for {group_ticker} on {group_date}: {e}")
+                
+                if len(duplicate_records) > 1:
+                    # Keep the first record (most recent), remove the rest
+                    # Since QuestDB doesn't support DELETE, we'll need a different approach
+                    # We'll create a new table with only the unique records
+                    logger.info(f"Found {len(duplicate_records)} duplicate records for {group_ticker} on {group_date}")
+                    
+                    # For now, we'll log the duplicates and suggest manual cleanup
+                    # In a production environment, you might want to implement a more sophisticated approach
+                    logger.warning(f"Manual cleanup needed for {group_ticker} on {group_date}: {len(duplicate_records)} duplicate records")
+                    cleaned_count += len(duplicate_records) - 1
+                    
+            except Exception as e:
+                logger.error(f"Error finding duplicate records for {group_ticker} on {group_date}: {e}")
+                continue
     
     logger.info(f"Identified {cleaned_count} duplicate records for cleanup in {table}")
     return cleaned_count
