@@ -1177,12 +1177,8 @@ async def handle_db_command(request: web.Request) -> web.Response:
             df_to_save.set_index(index_col, inplace=True)
             df_to_save.index.name = 'date' if interval == 'daily' else 'datetime'
             
-            # Get on_duplicate parameter from request, default to "ignore"
-            on_duplicate = params.get("on_duplicate", "ignore")
-            if on_duplicate not in ["ignore", "replace"]:
-                return web.json_response({"error": "Invalid 'on_duplicate' parameter. Must be 'ignore' or 'replace'."}, status=400)
-            
-            await db_instance.save_stock_data(df_to_save, ticker, interval, on_duplicate=on_duplicate)
+            # QuestDB handles deduplication automatically, no need for on_duplicate parameter
+            await db_instance.save_stock_data(df_to_save, ticker, interval)
             
             # Broadcast the new data to WebSocket subscribers
             await ws_manager.broadcast(ticker, data_records)
@@ -1210,12 +1206,8 @@ async def handle_db_command(request: web.Request) -> web.Response:
             # based on the data_type and the DataFrame columns provided.
             # For simplicity, client sends all available fields, DB layer picks what it needs.
 
-            # Get on_duplicate parameter from request, default to "ignore"
-            on_duplicate = params.get("on_duplicate", "ignore")
-            if on_duplicate not in ["ignore", "replace"]:
-                return web.json_response({"error": "Invalid 'on_duplicate' parameter. Must be 'ignore' or 'replace'."}, status=400)
-            
-            await db_instance.save_realtime_data(df_to_save, ticker, data_type, on_duplicate)
+            # QuestDB handles deduplication automatically, no need for on_duplicate parameter
+            await db_instance.save_realtime_data(df_to_save, ticker, data_type)
             #broadcast the data to the websocket subscribers
             if data_records: # Ensure there's something to broadcast
                 transformed_payload_for_broadcast = []

@@ -920,7 +920,7 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
             if current_db_instance:
                 try:
 
-                    await current_db_instance.save_realtime_data(quote_df, symbol, data_type="quote", on_duplicate="replace")
+                    await current_db_instance.save_realtime_data(quote_df, symbol, data_type="quote")
                     print(f"Saved quote data for {symbol} to realtime table", file=sys.stderr)
                     
                 except Exception as e:
@@ -957,7 +957,7 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
             # Save to realtime table if we have a database instance
             if current_db_instance:
                 try:
-                    await current_db_instance.save_realtime_data(trade_df, symbol, data_type="trade", on_duplicate="replace")
+                    await current_db_instance.save_realtime_data(trade_df, symbol, data_type="trade")
                     print(f"Saved trade data for {symbol} to realtime table", file=sys.stderr)
                 except Exception as e:
                     print(f"Warning: Failed to save trade data for {symbol} to realtime table: {e}", file=sys.stderr)
@@ -1050,7 +1050,7 @@ async def _get_current_price_alpaca(symbol: str, current_db_instance: StockDBBas
                         # Save to realtime table if we have a database instance
                         if current_db_instance:
                             try:
-                                await current_db_instance.save_realtime_data(quote_df, symbol, data_type="quote", on_duplicate="replace")
+                                await current_db_instance.save_realtime_data(quote_df, symbol, data_type="quote")
                                 print(f"Saved quote data for {symbol} to realtime table", file=sys.stderr)
                             except Exception as e:
                                 print(f"Warning: Failed to save quote data for {symbol} to realtime table: {e}", file=sys.stderr)
@@ -1090,7 +1090,7 @@ async def _get_current_price_alpaca(symbol: str, current_db_instance: StockDBBas
                         # Save to realtime table if we have a database instance
                         if current_db_instance:
                             try:
-                                await current_db_instance.save_realtime_data(trade_df, symbol, data_type="trade", on_duplicate="replace")
+                                await current_db_instance.save_realtime_data(trade_df, symbol, data_type="trade")
                                 print(f"Saved trade data for {symbol} to realtime table", file=sys.stderr)
                             except Exception as e:
                                 print(f"Warning: Failed to save trade data for {symbol} to realtime table: {e}", file=sys.stderr)
@@ -1252,6 +1252,11 @@ async def main() -> None:
         default=60,
         help="Maximum age of database price data in seconds before fetching fresh data (default: 60 seconds = 1 minutes)"
     )
+    parser.add_argument(
+        "--show-volume",
+        action="store_true",
+        help="Display volume information in the output (for both current price and historical data)"
+    )
     args = parser.parse_args()
 
     # Check if Polygon is available when selected
@@ -1309,6 +1314,8 @@ async def main() -> None:
                 print(f"Ask: ${price_data['ask_price']:.2f}")
             if 'size' in price_data and price_data['size']:
                 print(f"Size: {price_data['size']}")
+            if args.show_volume and 'volume' in price_data and price_data['volume']:
+                print(f"Volume: {price_data['volume']:,}")
             print(f"Source: {price_data['source']}")
             print(f"Data Source: {price_data['data_source']}")
             print(f"Timestamp: {price_data['timestamp']}")
@@ -1362,7 +1369,17 @@ async def main() -> None:
 
         if not final_df.empty:
             print(f"\n--- {args.symbol} ({args.timeframe.capitalize()}) Data ({args.start_date or 'Earliest'} to {args.end_date}) ---")
-            print(final_df)
+            if args.show_volume:
+                # Display all columns including volume
+                print(final_df)
+            else:
+                # Display only OHLC columns (exclude volume)
+                display_columns = ['open', 'high', 'low', 'close']
+                available_columns = [col for col in display_columns if col in final_df.columns]
+                if available_columns:
+                    print(final_df[available_columns])
+                else:
+                    print(final_df)
             print(f"--- End of Data ---")
         elif not args.query_only: 
             print(f"No data to display for {args.symbol} ({args.timeframe}) with the given parameters after all operations.")

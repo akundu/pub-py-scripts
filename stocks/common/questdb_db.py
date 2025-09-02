@@ -49,6 +49,11 @@ class StockQuestDB(StockDBBase):
         original_config = db_config
         if db_config.startswith('questdb://'):
             db_config = db_config.replace('questdb://', 'postgresql://', 1)
+            # Add sslmode=disable for QuestDB connections
+            if '?' not in db_config:
+                db_config += '?sslmode=disable'
+            elif 'sslmode=' not in db_config:
+                db_config += '&sslmode=disable'
             
         super().__init__(db_config, logger)
         
@@ -96,10 +101,10 @@ class StockQuestDB(StockDBBase):
         self._tables_ensured_at = datetime.now()
 
     async def _create_daily_prices_table(self, conn: asyncpg.Connection) -> None:
-        """Create daily_prices table with QuestDB optimizations."""
+        """Create daily_prices table with QuestDB optimizations and deduplication."""
         create_table_sql = """
         CREATE TABLE IF NOT EXISTS daily_prices (
-            ticker SYMBOL,
+            ticker SYMBOL INDEX CAPACITY 128,
             date TIMESTAMP,
             open DOUBLE,
             high DOUBLE,
@@ -115,58 +120,49 @@ class StockQuestDB(StockDBBase):
             ema_34 DOUBLE,
             ema_55 DOUBLE,
             ema_89 DOUBLE
-        ) TIMESTAMP(date) PARTITION BY MONTH;
+        ) TIMESTAMP(date) PARTITION BY MONTH WAL
+        DEDUP UPSERT KEYS(date, ticker, open, high, low, close);
         """
         await conn.execute(create_table_sql)
 
     async def _create_hourly_prices_table(self, conn: asyncpg.Connection) -> None:
-        """Create hourly_prices table with QuestDB optimizations."""
+        """Create hourly_prices table with QuestDB optimizations and deduplication."""
         create_table_sql = """
         CREATE TABLE IF NOT EXISTS hourly_prices (
-            ticker SYMBOL,
+            ticker SYMBOL INDEX CAPACITY 128,
             datetime TIMESTAMP,
             open DOUBLE,
             high DOUBLE,
             low DOUBLE,
             close DOUBLE,
             volume LONG
-        ) TIMESTAMP(datetime) PARTITION BY MONTH;
+        ) TIMESTAMP(datetime) PARTITION BY MONTH WAL
+        DEDUP UPSERT KEYS(datetime, ticker, open, high, low, close);
         """
         await conn.execute(create_table_sql)
 
     async def _create_realtime_data_table(self, conn: asyncpg.Connection) -> None:
-        """Create realtime_data table with QuestDB optimizations."""
+        """Create realtime_data table with QuestDB optimizations and deduplication."""
         create_table_sql = """
         CREATE TABLE IF NOT EXISTS realtime_data (
-            ticker SYMBOL,
+            ticker SYMBOL INDEX CAPACITY 128,
             timestamp TIMESTAMP,
-            type SYMBOL,
+            type SYMBOL INDEX CAPACITY 32,
             price DOUBLE,
             size LONG,
             ask_price DOUBLE,
             ask_size LONG,
             write_timestamp TIMESTAMP
-        ) TIMESTAMP(timestamp) PARTITION BY DAY;
+        ) TIMESTAMP(timestamp) PARTITION BY DAY WAL
+        DEDUP UPSERT KEYS(timestamp, ticker, type, price);
         """
         await conn.execute(create_table_sql)
 
     async def _create_questdb_indexes(self, conn: asyncpg.Connection) -> None:
-        """Create QuestDB-specific indexes for optimal performance."""
-        indexes = [
-            "CREATE INDEX IF NOT EXISTS idx_daily_prices_ticker ON daily_prices(ticker);",
-            "CREATE INDEX IF NOT EXISTS idx_hourly_prices_ticker ON hourly_prices(ticker);",
-            "CREATE INDEX IF NOT EXISTS idx_realtime_data_ticker ON realtime_data(ticker);",
-            "CREATE INDEX IF NOT EXISTS idx_realtime_data_type ON realtime_data(type);",
-            "CREATE INDEX IF NOT EXISTS idx_daily_prices_ticker_date ON daily_prices(ticker, date);",
-            "CREATE INDEX IF NOT EXISTS idx_hourly_prices_ticker_datetime ON hourly_prices(ticker, datetime);",
-            "CREATE INDEX IF NOT EXISTS idx_realtime_data_ticker_timestamp ON realtime_data(ticker, timestamp);"
-        ]
-        
-        for index_sql in indexes:
-            try:
-                await conn.execute(index_sql)
-            except Exception as e:
-                self.logger.warning(f"Could not create index: {e}")
+        """QuestDB indexes are created inline with table definitions."""
+        # QuestDB creates indexes inline with SYMBOL columns using INDEX CAPACITY syntax
+        # No separate index creation needed
+        self.logger.info("QuestDB indexes are created inline with table definitions")
 
     @asynccontextmanager
     async def get_connection(self):
@@ -190,7 +186,6 @@ class StockQuestDB(StockDBBase):
         interval: str = "daily",
         ma_periods: List[int] = None,
         ema_periods: List[int] = None,
-        on_duplicate: str = "ignore",
     ) -> None:
         """Save aggregated (daily/hourly) stock data to QuestDB."""
         # Set default periods
@@ -275,19 +270,14 @@ class StockQuestDB(StockDBBase):
 
             if records:
                 # Use QuestDB's optimized bulk insert
-                await self._bulk_insert_stock_data(conn, table, records, interval, on_duplicate)
+                await self._bulk_insert_stock_data(conn, table, records, interval)
 
-    async def _bulk_insert_stock_data(self, conn: asyncpg.Connection, table: str, records: List[Dict], interval: str, on_duplicate: str = "ignore"):
-        """Bulk insert stock data using QuestDB's optimized insert."""
+    async def _bulk_insert_stock_data(self, conn: asyncpg.Connection, table: str, records: List[Dict], interval: str):
+        """Bulk insert stock data using QuestDB's optimized insert with built-in deduplication."""
         if not records:
             return
         
-        # Handle duplicates - QuestDB doesn't support DELETE operations
-        if on_duplicate == "replace":
-            # For QuestDB, we need a different approach since DELETE is not supported
-            # We'll use INSERT and handle conflicts appropriately for time-series data
-            self.logger.debug(f"QuestDB: on_duplicate=replace requested for {interval} data, will attempt insert")
-            
+        # QuestDB's built-in deduplication handles duplicates automatically
         # Build the INSERT statement dynamically based on available columns
         first_record = records[0]
         columns = list(first_record.keys())
@@ -318,13 +308,53 @@ class StockQuestDB(StockDBBase):
                     row_values.append(value)
             values.append(tuple(row_values))
         
-        # Execute bulk insert
+        # Execute bulk insert - QuestDB will handle deduplication automatically
         try:
             await conn.executemany(insert_sql, values)
-            self.logger.info(f"Inserted {len(records)} {interval} records for {records[0]['ticker']}")
+            self.logger.info(f"Inserted {len(records)} {interval} records for {records[0]['ticker']} (deduplication handled by QuestDB)")
         except Exception as e:
             self.logger.error(f"Error inserting {interval} data: {e}")
             raise
+
+    async def _insert_single_stock_record(self, conn: asyncpg.Connection, table: str, record: Dict, interval: str):
+        """Insert a single stock record - QuestDB handles deduplication automatically."""
+        # QuestDB's built-in deduplication handles duplicates automatically
+        # Just insert the record normally
+        await self._execute_single_stock_insert(conn, table, record)
+
+    async def _execute_single_stock_insert(self, conn: asyncpg.Connection, table: str, record: Dict):
+        """Execute a single stock record insert into the specified table."""
+        # Convert datetime objects to naive UTC for QuestDB
+        columns = list(record.keys())
+        placeholders = [f'${i+1}' for i in range(len(columns))]
+        
+        insert_sql = f"""
+        INSERT INTO {table} ({', '.join(columns)})
+        VALUES ({', '.join(placeholders)})
+        """
+        
+        # Prepare values, converting timestamps properly
+        values = []
+        for col in columns:
+            value = record.get(col)
+            if col in ['date', 'datetime', 'timestamp', 'write_timestamp']:
+                if isinstance(value, str):
+                    try:
+                        if value:
+                            values.append(date_parser.parse(value))
+                        else:
+                            values.append(None)
+                    except Exception as e:
+                        self.logger.warning(f"Failed to parse date '{value}' for column '{col}': {e}")
+                        values.append(None)
+                else:
+                    # Convert datetime objects to naive UTC
+                    values.append(self._ensure_timezone_naive_utc(value, f"insert {col}"))
+            else:
+                values.append(value)
+        
+        # Execute single insert
+        await conn.execute(insert_sql, *values)
 
     async def get_stock_data(
         self,
@@ -394,7 +424,7 @@ class StockQuestDB(StockDBBase):
             self.logger.error(f"Error retrieving {interval} data for {ticker}: {e}")
             return pd.DataFrame()
 
-    async def save_realtime_data(self, df: pd.DataFrame, ticker: str, data_type: str = "quote", on_duplicate: str = "ignore") -> None:
+    async def save_realtime_data(self, df: pd.DataFrame, ticker: str, data_type: str = "quote") -> None:
         """Save realtime (tick) stock data to QuestDB."""
         async with self.get_connection() as conn:
             df_copy = df.copy()
@@ -469,7 +499,7 @@ class StockQuestDB(StockDBBase):
                 records.append(record)
 
             if records:
-                await self._bulk_insert_realtime_data(conn, records, on_duplicate)
+                await self._bulk_insert_realtime_data(conn, records)
 
     def _ensure_timezone_naive_utc(self, dt_obj, context="unknown"):
         """Convert any datetime object to timezone-naive UTC (what QuestDB expects)."""
@@ -519,49 +549,42 @@ class StockQuestDB(StockDBBase):
             self.logger.error(f"Unknown datetime type in {context}: {type(dt_obj)} = {dt_obj}")
             return dt_obj
 
-    async def _bulk_insert_realtime_data(self, conn: asyncpg.Connection, records: List[Dict], on_duplicate: str = "ignore"):
-        """Bulk insert realtime data with proper duplicate handling to prevent data duplication."""
+    async def _bulk_insert_realtime_data(self, conn: asyncpg.Connection, records: List[Dict]):
+        """Bulk insert realtime data - QuestDB handles deduplication automatically."""
         if not records:
             return
         
-        # Handle duplicates properly - check for existing records and update write_timestamp only
-        if on_duplicate == "replace":
-            self.logger.info(f"QuestDB: Processing {len(records)} records with replace strategy")
-            
-            for record in records:
-                # Convert timestamp to naive UTC for QuestDB before checking
-                record_timestamp = self._ensure_timezone_naive_utc(record['timestamp'], "duplicate check timestamp")
-                
-                # Check if this exact record already exists (excluding write_timestamp)
-                existing_check = await conn.fetchrow("""
-                    SELECT write_timestamp FROM realtime_data 
-                    WHERE ticker = $1 AND timestamp = $2 AND type = $3 
-                    AND price = $4 AND size = $5 
-                    AND (ask_price = $6 OR (ask_price IS NULL AND $6 IS NULL))
-                    AND (ask_size = $7 OR (ask_size IS NULL AND $7 IS NULL))
-                    ORDER BY write_timestamp DESC LIMIT 1
-                """, 
-                record['ticker'], record_timestamp, record['type'], 
-                record['price'], record['size'], record.get('ask_price'), record.get('ask_size'))
-                
-                if existing_check:
-                    # Record exists - since QuestDB doesn't support UPDATE, we'll insert a new record
-                    # with the current timestamp to make it unique, but this effectively updates the data
-                    # We'll use the current time as the timestamp to ensure it's the most recent
-                    current_timestamp = datetime.now(timezone.utc)
-                    record_copy = record.copy()
-                    record_copy['timestamp'] = current_timestamp
-                    record_copy['write_timestamp'] = current_timestamp
-                    
-                    # Convert to naive UTC for QuestDB
-                    await self._insert_single_record(conn, record_copy)
-                    self.logger.info(f"Updated existing {record['ticker']} data by inserting new record with current timestamp")
+        # QuestDB's built-in deduplication handles duplicates automatically
+        # Build the INSERT statement dynamically based on available columns
+        first_record = records[0]
+        columns = list(first_record.keys())
+        placeholders = [f'${i+1}' for i in range(len(columns))]
+        
+        insert_sql = f"""
+        INSERT INTO realtime_data ({', '.join(columns)})
+        VALUES ({', '.join(placeholders)})
+        """
+        
+        # Prepare the data for insertion
+        values = []
+        for record in records:
+            row_values = []
+            for col in columns:
+                value = record.get(col)
+                if col in ['timestamp', 'write_timestamp']:
+                    # Convert datetime objects to naive UTC for QuestDB
+                    row_values.append(self._ensure_timezone_naive_utc(value, f"realtime {col}"))
                 else:
-                    # Record doesn't exist - proceed with normal insert
-                    await self._insert_single_record(conn, record)
-            
-            self.logger.info(f"QuestDB: Completed replace strategy processing")
-            return
+                    row_values.append(value)
+            values.append(tuple(row_values))
+        
+        # Execute bulk insert - QuestDB will handle deduplication automatically
+        try:
+            await conn.executemany(insert_sql, values)
+            self.logger.info(f"Inserted {len(records)} realtime records for {records[0]['ticker']} (deduplication handled by QuestDB)")
+        except Exception as e:
+            self.logger.error(f"Error inserting realtime data: {e}")
+            raise
     
     async def _insert_single_record(self, conn: asyncpg.Connection, record: Dict):
         """Insert a single record into realtime_data."""
