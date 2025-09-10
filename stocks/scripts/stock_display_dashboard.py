@@ -1094,8 +1094,6 @@ async def _run_live_display(display_manager: DisplayManager,
     console = Console()
     logger.info("_run_live_display started")
     
-    # For debugging, let's try without the Live context first
-    logger.info("Live display created, about to initialize data...")
     # Initial data fetch
     try:
         await display_manager.initialize_data()
@@ -1117,29 +1115,31 @@ async def _run_live_display(display_manager: DisplayManager,
         )
     
     logger.info("Starting main display loop...")
-    # Main display loop
-    while not shutdown_flag:
-        try:
-            # For debugging, just print the table instead of using Live
-            table = display_manager.render_display()
-            console.print(table)
-            
-            # Check WebSocket connection status
-            if display_manager.websocket_client and hasattr(display_manager.websocket_client, 'connections'):
-                if not display_manager.websocket_client.connections:
-                    logger.warning("No active WS connections; attempting reconnect...")
-                    try:
-                        await display_manager.websocket_client.connect()
-                    except Exception as e:
-                        logger.error(f"Reconnect attempt failed: {e}")
-            
-            # Small delay to prevent excessive updates
-            await asyncio.sleep(1.0 / refresh_rate)
-            
-        except Exception as e:
-            logger.error(f"Display update error: {e}")
-            # Keep running; don't break the display loop
-            await asyncio.sleep(1.0)
+    
+    # Use Rich's Live context manager for proper live updating
+    with Live(console=console, refresh_per_second=refresh_rate, screen=True) as live:
+        while not shutdown_flag:
+            try:
+                # Render the display and update the live display
+                table = display_manager.render_display()
+                live.update(table)
+                
+                # Check WebSocket connection status
+                if display_manager.websocket_client and hasattr(display_manager.websocket_client, 'connections'):
+                    if not display_manager.websocket_client.connections:
+                        logger.warning("No active WS connections; attempting reconnect...")
+                        try:
+                            await display_manager.websocket_client.connect()
+                        except Exception as e:
+                            logger.error(f"Reconnect attempt failed: {e}")
+                
+                # Small delay to prevent excessive updates
+                await asyncio.sleep(1.0 / refresh_rate)
+                
+            except Exception as e:
+                logger.error(f"Display update error: {e}")
+                # Keep running; don't break the display loop
+                await asyncio.sleep(1.0)
             
     # Clean up WebSocket task
     if websocket_task and not websocket_task.done():
