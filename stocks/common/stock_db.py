@@ -1221,6 +1221,7 @@ class StockDBClient(StockDBBase):
         self.response_timeout = response_timeout
         self.max_retries = max_retries
         self.retry_interval = retry_interval
+        self._session_closed = False  # Track if session has been explicitly closed
         # print(f"StockDBClient initialized, configured for server at {self.server_url}", file=sys.stderr)
         # Timing metrics
         self._timing_enabled = True
@@ -1267,22 +1268,25 @@ class StockDBClient(StockDBBase):
 
     async def close_session(self):
         await self.session_manager.close()
+        self._session_closed = True
     
     def __del__(self):
         """Cleanup when the object is destroyed."""
-        if hasattr(self, 'session_manager'):
-            try:
-                import asyncio
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # Schedule cleanup if loop is running
-                    loop.create_task(self.session_manager.close())
-                else:
-                    # Run cleanup if loop is not running
-                    loop.run_until_complete(self.session_manager.close())
-            except:
-                # Ignore cleanup errors during destruction
-                pass
+        if hasattr(self, 'session_manager') and hasattr(self, '_session_closed'):
+            # Only attempt cleanup if session hasn't been explicitly closed
+            if not self._session_closed:
+                try:
+                    import asyncio
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # Schedule cleanup if loop is running
+                        loop.create_task(self.session_manager.close())
+                    else:
+                        # Run cleanup if loop is not running
+                        loop.run_until_complete(self.session_manager.close())
+                except:
+                    # Ignore cleanup errors during destruction
+                    pass
 
     async def __aenter__(self):
         """Async context manager entry."""
