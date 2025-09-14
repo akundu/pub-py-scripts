@@ -9,6 +9,8 @@ import time
 import yaml
 from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from zoneinfo import ZoneInfo
+import logging
 
 def load_symbols_from_yaml(yaml_file: str) -> list[str]:
     """Load symbols from a YAML file."""
@@ -29,44 +31,243 @@ def load_symbols_from_yaml(yaml_file: str) -> list[str]:
         print(f"Error loading symbols from {yaml_file}: {e}", file=sys.stderr)
         return []
 
-# Synchronous wrapper function to get current price for a single symbol
-def fetch_get_current_price(
+def get_timezone_aware_time(tz_name: str = "America/New_York") -> datetime:
+    """Get current time in specified timezone."""
+    try:
+        return datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        return datetime.now(timezone.utc)
+
+def format_time_with_timezone(dt: datetime, tz_name: str = "America/New_York") -> str:
+    """Format datetime with timezone information."""
+    try:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo(tz_name))
+        return dt.strftime(f"%Y-%m-%d %H:%M:%S %Z")
+    except Exception:
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+# Enhanced data fetching functions
+def fetch_latest_data_with_volume(
     symbol: str,
     data_source: str,
     db_type_for_worker: str,
     db_config_for_worker: str,
     max_age_seconds: int = 60,
-    client_timeout: float | None = None
+    client_timeout: float | None = None,
+    include_volume: bool = True
 ) -> dict:
-    """Creates a DB instance in the worker thread and gets current price for a symbol."""
-    # print(f"{os.getpid()} Worker thread for {symbol}: Getting current price", file=sys.stderr, flush=True)
-
+    """Fetch latest data including volume for a single symbol."""
     worker_db_instance = None
     try:
-        # Each worker thread creates its own StockDBBase instance.
-        # print(f"Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr)
         if client_timeout is not None:
             worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout)
         else:
             worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
         
-        # We need a new event loop for each thread. asyncio.run() does this.
+        # Get current price
         result = asyncio.run(get_current_price(
             symbol,
             data_source,
             stock_db_instance=worker_db_instance,
             max_age_seconds=max_age_seconds
         ))
+        
+        # Add volume data if requested
+        if include_volume and worker_db_instance:
+            try:
+                # Try to get today's volume
+                today = datetime.now().strftime('%Y-%m-%d')
+                volume_data = asyncio.run(worker_db_instance.get_stock_data(
+                    symbol, today, today, "daily"
+                ))
+                if not volume_data.empty and 'volume' in volume_data.columns:
+                    result['volume'] = float(volume_data['volume'].iloc[0])
+                else:
+                    # Fallback: try to get volume from real-time data
+                    realtime_data = asyncio.run(worker_db_instance.get_realtime_data(
+                        symbol, today, None, "trade"
+                    ))
+                    if not realtime_data.empty and 'size' in realtime_data.columns:
+                        result['volume'] = float(realtime_data['size'].sum())
+                    else:
+                        result['volume'] = None
+            except Exception as e:
+                print(f"Warning: Could not fetch volume for {symbol}: {e}", file=sys.stderr)
+                result['volume'] = None
+        
+        # Add timezone information
+        result['timestamp'] = get_timezone_aware_time().isoformat()
+        result['timezone'] = "America/New_York"  # Default to market timezone
+        
         return result
     except Exception as e:
-        # print(f"Error in worker thread for symbol {symbol}: {e}", file=sys.stderr)
         return {"symbol": symbol, "error": str(e)}
     finally:
         if worker_db_instance and hasattr(worker_db_instance, 'close_session') and callable(worker_db_instance.close_session):
             try:
-                # print(f"Worker thread for {symbol}: Closing DB session...", file=sys.stderr)
                 asyncio.run(worker_db_instance.close_session())
-                # print(f"Worker thread for {symbol}: DB session closed.", file=sys.stderr)
+            except Exception as e_close:
+                print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
+
+def fetch_comprehensive_data(
+    symbol: str,
+    data_dir: str,
+    db_type_for_worker: str,
+    db_config_for_worker: str,
+    all_time_flag: bool,
+    days_back_val: int | None,
+    db_save_batch_size_val: int,
+    chunk_size_val: str = "monthly",
+    client_timeout: float | None = None,
+    include_volume: bool = True,
+    include_quotes: bool = True,
+    include_trades: bool = True
+) -> dict:
+    """Fetch comprehensive data including volume, quotes, and trades."""
+    worker_db_instance = None
+    try:
+        if client_timeout is not None:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout)
+        else:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
+        
+        # Fetch and save historical data
+        success = asyncio.run(fetch_and_save_data(
+            symbol,
+            data_dir,
+            worker_db_instance,
+            all_time_flag,
+            days_back_val,
+            db_save_batch_size_val,
+            chunk_size=chunk_size_val
+        ))
+        
+        result = {
+            "symbol": symbol,
+            "success": success,
+            "timestamp": get_timezone_aware_time().isoformat(),
+            "timezone": "America/New_York"
+        }
+        
+        # Add additional data if requested
+        if success and worker_db_instance:
+            try:
+                # Get latest data summary
+                today = datetime.now().strftime('%Y-%m-%d')
+                
+                if include_volume:
+                    # Get volume data
+                    volume_data = asyncio.run(worker_db_instance.get_stock_data(
+                        symbol, today, today, "daily"
+                    ))
+                    if not volume_data.empty and 'volume' in volume_data.columns:
+                        result['volume'] = float(volume_data['volume'].iloc[0])
+                    else:
+                        result['volume'] = None
+                
+                if include_quotes:
+                    # Get latest quote count
+                    quote_data = asyncio.run(worker_db_instance.get_realtime_data(
+                        symbol, today, None, "quote"
+                    ))
+                    result['quotes_count'] = len(quote_data) if not quote_data.empty else 0
+                
+                if include_trades:
+                    # Get latest trade count
+                    trade_data = asyncio.run(worker_db_instance.get_realtime_data(
+                        symbol, today, None, "trade"
+                    ))
+                    result['trades_count'] = len(trade_data) if not trade_data.empty else 0
+                    
+            except Exception as e:
+                print(f"Warning: Could not fetch additional data for {symbol}: {e}", file=sys.stderr)
+        
+        return result
+    except Exception as e:
+        return {"symbol": symbol, "error": str(e), "success": False}
+    finally:
+        if worker_db_instance and hasattr(worker_db_instance, 'close_session') and callable(worker_db_instance.close_session):
+            try:
+                asyncio.run(worker_db_instance.close_session())
+            except Exception as e_close:
+                print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
+
+# Synchronous wrapper function to get current price for a single symbol
+def fetch_latest_data(
+    symbol: str,
+    data_source: str,
+    db_type_for_worker: str,
+    db_config_for_worker: str,
+    data_dir: str,
+    client_timeout: float | None = None
+) -> dict:
+    """Creates a DB instance in the worker thread and gets latest data for a symbol."""
+    worker_db_instance = None
+    try:
+        if client_timeout is not None:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout)
+        else:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
+        
+        # Get today's daily data
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        daily_df = asyncio.run(worker_db_instance.get_stock_data(symbol, start_date=today_str, end_date=today_str, interval='daily'))
+        
+        result = {
+            "symbol": symbol,
+            "timestamp": get_timezone_aware_time().isoformat(),
+            "timezone": "America/New_York"
+        }
+        
+        if not daily_df.empty:
+            last_daily = daily_df.tail(1)
+            result['daily'] = {
+                'date': last_daily.index[0].strftime('%Y-%m-%d'),
+                'open': float(last_daily['open'].iloc[0]),
+                'high': float(last_daily['high'].iloc[0]),
+                'low': float(last_daily['low'].iloc[0]),
+                'close': float(last_daily['close'].iloc[0]),
+                'volume': float(last_daily['volume'].iloc[0]) if 'volume' in last_daily.columns else None
+            }
+        else:
+            # Try to get most recent daily as fallback
+            recent_daily_df = asyncio.run(worker_db_instance.get_stock_data(symbol, interval='daily'))
+            if not recent_daily_df.empty:
+                last_daily = recent_daily_df.tail(1)
+                result['daily'] = {
+                    'date': last_daily.index[0].strftime('%Y-%m-%d'),
+                    'open': float(last_daily['open'].iloc[0]),
+                    'high': float(last_daily['high'].iloc[0]),
+                    'low': float(last_daily['low'].iloc[0]),
+                    'close': float(last_daily['close'].iloc[0]),
+                    'volume': float(last_daily['volume'].iloc[0]) if 'volume' in last_daily.columns else None
+                }
+            else:
+                result['daily'] = None
+        
+        # Get latest hourly data
+        hourly_df = asyncio.run(worker_db_instance.get_stock_data(symbol, interval='hourly'))
+        if not hourly_df.empty:
+            last_hourly = hourly_df.tail(1)
+            result['hourly'] = {
+                'datetime': last_hourly.index[0].strftime('%Y-%m-%d %H:%M:%S'),
+                'open': float(last_hourly['open'].iloc[0]),
+                'high': float(last_hourly['high'].iloc[0]),
+                'low': float(last_hourly['low'].iloc[0]),
+                'close': float(last_hourly['close'].iloc[0]),
+                'volume': float(last_hourly['volume'].iloc[0]) if 'volume' in hourly_df.columns else None
+            }
+        else:
+            result['hourly'] = None
+        
+        return result
+    except Exception as e:
+        return {"symbol": symbol, "error": str(e)}
+    finally:
+        if worker_db_instance and hasattr(worker_db_instance, 'close_session') and callable(worker_db_instance.close_session):
+            try:
+                asyncio.run(worker_db_instance.close_session())
             except Exception as e_close:
                 print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
 
@@ -132,22 +333,39 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
     # Create the appropriate executor for stock-level tasks
     executor_class = ProcessPoolExecutor if stock_executor_type == "process" else ThreadPoolExecutor
     
-    # Determine if we should get current prices (explicit or implicit)
-    should_get_current_prices = args.current_price or (not args.all_time and args.days_back is None and not args.fetch_market_data)
+    # Determine if we should get latest data (explicit or implicit)
+    should_get_latest = args.latest or (not args.all_time and args.days_back is None and not args.fetch_market_data)
+    should_get_comprehensive = args.comprehensive_data
     
     with executor_class(max_workers=max_workers) as executor:
         # Level 2: Split by stock symbols
         stock_tasks = []
         for symbol_to_fetch in all_symbols_list:
-            if should_get_current_prices:
+            if should_get_latest:
                 task = executor.submit(
-                    fetch_get_current_price,
+                    fetch_latest_data,
                     symbol_to_fetch,
                     args.data_source,
                     db_type,
                     db_config,
-                    args.current_price_max_age,
+                    args.data_dir,
                     args.client_timeout
+                )
+            elif should_get_comprehensive:
+                task = executor.submit(
+                    fetch_comprehensive_data,
+                    symbol_to_fetch,
+                    args.data_dir,
+                    db_type,
+                    db_config,
+                    args.all_time,
+                    args.days_back,
+                    args.db_batch_size,
+                    args.chunk_size,
+                    args.client_timeout,
+                    args.include_volume,
+                    args.include_quotes,
+                    args.include_trades
                 )
             else:
                 task = executor.submit(
@@ -167,6 +385,7 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
         # Process completed stock-level tasks as they finish
         success_count = 0
         failure_count = 0
+        results = []  # Store results for output formatting
         
         for task, symbol_to_fetch in stock_tasks:
             try:
@@ -174,21 +393,64 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                 if isinstance(result, Exception):
                     print(f"{os.getpid()} Error processing symbol {symbol_to_fetch} for database {db_config}: {result}", file=sys.stderr, flush=True)
                     failure_count += 1
+                    results.append({"symbol": symbol_to_fetch, "error": str(result)})
                 elif result is True:
                     success_count += 1
+                    results.append({"symbol": symbol_to_fetch, "success": True})
                 elif isinstance(result, dict) and "error" in result:
                     print(f"{os.getpid()} Error processing symbol {symbol_to_fetch} for database {db_config}: {result['error']}", file=sys.stderr, flush=True)
                     failure_count += 1
-                elif isinstance(result, dict) and "price" in result:
-                    # Current price fetch successful
+                    results.append(result)
+                elif isinstance(result, dict) and ("daily" in result or "hourly" in result):
+                    # Latest data fetch successful
                     success_count += 1
-                    print(f"{os.getpid()} Successfully got current price for {symbol_to_fetch}: ${result.get('price', 'N/A'):.2f}", file=sys.stderr, flush=True)
+                    symbol = result.get('symbol', symbol_to_fetch)
+                    timestamp = result.get('timestamp', 'N/A')
+                    timezone = result.get('timezone', 'N/A')
+                    
+                    daily_info = result.get('daily')
+                    hourly_info = result.get('hourly')
+                    
+                    if daily_info:
+                        daily_str = f"Daily({daily_info['date']}): O:{daily_info['open']:.2f} H:{daily_info['high']:.2f} L:{daily_info['low']:.2f} C:{daily_info['close']:.2f}"
+                        if daily_info.get('volume'):
+                            daily_str += f" V:{daily_info['volume']:,}"
+                    else:
+                        daily_str = "Daily: N/A"
+                    
+                    if hourly_info:
+                        hourly_str = f"Hourly({hourly_info['datetime']}): O:{hourly_info['open']:.2f} H:{hourly_info['high']:.2f} L:{hourly_info['low']:.2f} C:{hourly_info['close']:.2f}"
+                        if hourly_info.get('volume'):
+                            hourly_str += f" V:{hourly_info['volume']:,}"
+                    else:
+                        hourly_str = "Hourly: N/A"
+                    
+                    print(f"{os.getpid()} Successfully got latest data for {symbol}: {daily_str} | {hourly_str}", file=sys.stderr, flush=True)
+                    results.append(result)
+                elif isinstance(result, dict) and "success" in result:
+                    # Comprehensive data fetch
+                    if result.get("success", False):
+                        success_count += 1
+                        symbol = result.get('symbol', symbol_to_fetch)
+                        volume = result.get('volume', 'N/A')
+                        quotes_count = result.get('quotes_count', 'N/A')
+                        trades_count = result.get('trades_count', 'N/A')
+                        timestamp = result.get('timestamp', 'N/A')
+                        timezone = result.get('timezone', 'N/A')
+                        
+                        print(f"{os.getpid()} Successfully fetched comprehensive data for {symbol}: Volume: {volume}, Quotes: {quotes_count}, Trades: {trades_count}, Time: {timestamp} {timezone}", file=sys.stderr, flush=True)
+                    else:
+                        failure_count += 1
+                        print(f"{os.getpid()} Failed to fetch comprehensive data for {symbol_to_fetch}: {result.get('error', 'Unknown error')}", file=sys.stderr, flush=True)
+                    results.append(result)
                 else:
                     print(f"{os.getpid()} Fetching failed or returned unexpected result for symbol {symbol_to_fetch} for database {db_config}: {result}", file=sys.stderr, flush=True)
                     failure_count += 1
+                    results.append({"symbol": symbol_to_fetch, "error": "Unexpected result format"})
             except Exception as e:
                 print(f"{os.getpid()} Unexpected error processing symbol {symbol_to_fetch} for database {db_config}: {e}", file=sys.stderr, flush=True)
                 failure_count += 1
+                results.append({"symbol": symbol_to_fetch, "error": str(e)})
     
     print(f"{os.getpid()} Completed processing for database {db_config}: {success_count} successes, {failure_count} failures", file=sys.stderr, flush=True)
     return (success_count, failure_count)
@@ -309,9 +571,9 @@ def parse_args():
         help="Chunk size for fetching large datasets (auto: smart selection, daily: 1-day chunks, weekly: 1-week chunks, monthly: 1-month chunks). Defaults to 'monthly'."
     )
     parser.add_argument(
-        "--current-price",
+        "--latest",
         action="store_true",
-        help="Get current prices for symbols instead of historical data. Also triggered automatically when no time parameters are specified."
+        help="Get latest data (today's daily and most recent hourly) for symbols instead of historical data. Also triggered automatically when no time parameters are specified."
     )
     parser.add_argument(
         "--data-source",
@@ -320,15 +582,9 @@ def parse_args():
         help="Data source to use for fetching data (default: polygon)."
     )
     parser.add_argument(
-        "--current-price-max-age",
-        type=int,
-        default=60,
-        help="Maximum age of database price data in seconds before fetching fresh data (default: 60 seconds = 1 minutes)"
-    )
-    parser.add_argument(
         "--continuous",
         action="store_true",
-        help="Continuously fetch current prices in a loop. Uses current-price-max-age to determine optimal fetch intervals."
+        help="Continuously fetch latest data in a loop."
     )
     parser.add_argument(
         "--continuous-max-runs",
@@ -340,6 +596,51 @@ def parse_args():
         "--use-market-hours",
         action="store_true",
         help="Use market hours awareness to adjust fetch intervals (longer intervals when markets are closed). Off by default."
+    )
+    
+    # Enhanced data fetching options
+    parser.add_argument(
+        "--include-volume",
+        action="store_true",
+        help="Include volume data in current price fetches and comprehensive data fetches."
+    )
+    parser.add_argument(
+        "--include-quotes",
+        action="store_true",
+        help="Include quote count data in comprehensive fetches."
+    )
+    parser.add_argument(
+        "--include-trades",
+        action="store_true",
+        help="Include trade count data in comprehensive fetches."
+    )
+    parser.add_argument(
+        "--comprehensive-data",
+        action="store_true",
+        help="Fetch comprehensive data including volume, quotes, and trades for each symbol."
+    )
+    parser.add_argument(
+        "--timezone",
+        type=str,
+        default="America/New_York",
+        help="Timezone for timestamps and market hours calculations (default: America/New_York)."
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        default='INFO',
+        help='Logging level (default: INFO)'
+    )
+    parser.add_argument(
+        "--output-format",
+        choices=['table', 'json', 'csv'],
+        default='table',
+        help='Output format for results (default: table)'
+    )
+    parser.add_argument(
+        "--save-results",
+        type=str,
+        help='Save results to file (specify filename, extension determines format)'
     )
     
     # Time interval for fetching market data
@@ -414,17 +715,18 @@ def parse_args():
     
     return args, db_configs_for_workers
 
-async def run_continuous_current_price_fetch(all_symbols_list: list[str], args: argparse.Namespace, db_configs_for_workers: list[tuple[str, str]]):
+FETCH_INTERVAL_MARKET_OPEN = 300
+FETCH_INTERVAL_MARKET_CLOSED = 3600
+
+async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argparse.Namespace, db_configs_for_workers: list[tuple[str, str]]):
     """
-    Continuously fetch current prices with intelligent interval management.
+    Continuously fetch latest data with intelligent interval management.
     
     The function optimizes fetch intervals based on:
-    - The current_price_max_age parameter
     - The actual time taken for the last fetch
-    - Ensuring we don't miss the window for any symbol
+    - Market hours awareness (if enabled)
     """
-    print(f"Starting continuous current price fetch for {len(all_symbols_list)} symbols...")
-    print(f"Max age window: {args.current_price_max_age} seconds")
+    print(f"Starting continuous latest data fetch for {len(all_symbols_list)} symbols...")
     print(f"Max runs: {args.continuous_max_runs if args.continuous_max_runs else 'unlimited'}")
     
     run_count = 0
@@ -457,46 +759,23 @@ async def run_continuous_current_price_fetch(all_symbols_list: list[str], args: 
                 break
             
             # Calculate optimal sleep time
-            # We want to ensure we fetch within the max_age window, but also account for:
-            # 1. The time the fetch itself takes  
-            # 2. A safety margin to ensure we don't miss the window
-            # 3. Optionally, market hours (if --use-market-hours is enabled)
+            # Use intelligent intervals based on market hours and fetch duration
             
             if args.use_market_hours:
                 is_market_open = _is_market_hours()
                 
                 if is_market_open:
-                    # Normal market hours behavior
-                    safety_margin = 5  # 5 seconds safety margin
-                    available_window = args.current_price_max_age - fetch_duration - safety_margin
-                    
-                    if available_window <= 0:
-                        print(f"Warning: Fetch took {fetch_duration:.1f}s, which is longer than max_age window ({args.current_price_max_age}s).")
-                        print("Consider increasing --current-price-max-age or reducing --max-concurrent for faster fetches.")
-                        sleep_time = 0.5  # Minimal sleep to avoid overwhelming the system
-                    else:
-                        sleep_time = available_window
-                        print(f"Next fetch in {sleep_time:.1f}s (window: {args.current_price_max_age}s - fetch: {fetch_duration:.1f}s - safety: {safety_margin}s) [MARKET OPEN]")
+                    # Market hours - fetch every 30 seconds
+                    sleep_time = max(FETCH_INTERVAL_MARKET_OPEN - fetch_duration, 5)  # At least 5 seconds between fetches
+                    print(f"Next fetch in {sleep_time:.1f}s (market open, 30s interval) [MARKET OPEN]")
                 else:
-                    # Markets closed - use longer intervals to avoid unnecessary API calls
-                    # Fetch every 5-10 minutes when markets are closed instead of every 30 seconds
-                    closed_market_interval = max(args.current_price_max_age * 10, 300)  # At least 5 minutes
-                    sleep_time = closed_market_interval - fetch_duration
-                    if sleep_time < 60:  # Minimum 1 minute when markets are closed
-                        sleep_time = 60
-                    print(f"Next fetch in {sleep_time:.1f}s (markets closed, using extended interval) [MARKET CLOSED]")
+                    # Markets closed - use longer intervals
+                    sleep_time = max(FETCH_INTERVAL_MARKET_CLOSED - fetch_duration, 60)  # At least 1 minute between fetches
+                    print(f"Next fetch in {sleep_time:.1f}s (markets closed, 5min interval) [MARKET CLOSED]")
             else:
-                # Standard behavior - no market hours awareness
-                safety_margin = 5  # 5 seconds safety margin
-                available_window = args.current_price_max_age - fetch_duration - safety_margin
-                
-                if available_window <= 0:
-                    print(f"Warning: Fetch took {fetch_duration:.1f}s, which is longer than max_age window ({args.current_price_max_age}s).")
-                    print("Consider increasing --current-price-max-age or reducing --max-concurrent for faster fetches.")
-                    sleep_time = 0.5  # Minimal sleep to avoid overwhelming the system
-                else:
-                    sleep_time = available_window
-                    print(f"Next fetch in {sleep_time:.1f}s (window: {args.current_price_max_age}s - fetch: {fetch_duration:.1f}s - safety: {safety_margin}s)")
+                # Standard behavior - fetch every 30 seconds
+                sleep_time = max(30 - fetch_duration, 5)  # At least 5 seconds between fetches
+                print(f"Next fetch in {sleep_time:.1f}s (30s interval)")
             
             # Sleep until next fetch
             await asyncio.sleep(sleep_time)
@@ -510,6 +789,95 @@ async def run_continuous_current_price_fetch(all_symbols_list: list[str], args: 
             await asyncio.sleep(10)
     
     print(f"Continuous fetch stopped after {run_count} runs.")
+
+def format_results_table(results: list, timezone: str = "America/New_York") -> str:
+    """Format results as a table."""
+    if not results:
+        return "No results to display."
+    
+    # Find all possible columns
+    all_keys = set()
+    for result in results:
+        if isinstance(result, dict):
+            all_keys.update(result.keys())
+    
+    # Define column order and headers
+    column_order = ['symbol', 'daily', 'hourly', 'quotes_count', 'trades_count', 'timestamp', 'timezone', 'success', 'error']
+    headers = ['Symbol', 'Daily', 'Hourly', 'Quotes', 'Trades', 'Timestamp', 'Timezone', 'Success', 'Error']
+    
+    # Create table
+    table_lines = []
+    table_lines.append("=" * 120)
+    table_lines.append(f"FETCH RESULTS - {len(results)} symbols processed")
+    table_lines.append("=" * 120)
+    
+    # Header row
+    header_row = " | ".join(f"{h:>12}" for h in headers)
+    table_lines.append(header_row)
+    table_lines.append("-" * 120)
+    
+    # Data rows
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+            
+        row_data = []
+        for col in column_order:
+            value = result.get(col, 'N/A')
+            if col == 'daily' and isinstance(value, dict):
+                if value.get('close'):
+                    value = f"{value['date']}: ${value['close']:.2f}"
+                else:
+                    value = "N/A"
+            elif col == 'hourly' and isinstance(value, dict):
+                if value.get('close'):
+                    value = f"{value['datetime']}: ${value['close']:.2f}"
+                else:
+                    value = "N/A"
+            elif col == 'timestamp' and value != 'N/A':
+                try:
+                    dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                    value = format_time_with_timezone(dt, timezone)
+                except:
+                    pass
+            elif col in ['quotes_count', 'trades_count'] and isinstance(value, (int, float)):
+                value = f"{value:,}"
+            elif col == 'success' and isinstance(value, bool):
+                value = "✓" if value else "✗"
+            
+            row_data.append(str(value)[:12])  # Truncate long values
+        
+        row = " | ".join(f"{data:>12}" for data in row_data)
+        table_lines.append(row)
+    
+    table_lines.append("=" * 120)
+    return "\n".join(table_lines)
+
+def save_results(results: list, filename: str, format_type: str = "json") -> None:
+    """Save results to file."""
+    import json
+    import csv
+    
+    if format_type == "json":
+        with open(filename, 'w') as f:
+            json.dump(results, f, indent=2, default=str)
+    elif format_type == "csv":
+        if not results:
+            return
+        fieldnames = set()
+        for result in results:
+            if isinstance(result, dict):
+                fieldnames.update(result.keys())
+        
+        with open(filename, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=sorted(fieldnames))
+            writer.writeheader()
+            for result in results:
+                if isinstance(result, dict):
+                    writer.writerow(result)
+    else:
+        with open(filename, 'w') as f:
+            f.write(format_results_table(results))
 
 async def fetch_lists_data(args: argparse.Namespace):
     all_symbols_list = []
@@ -549,6 +917,19 @@ async def fetch_lists_data(args: argparse.Namespace):
 async def main():
     args, db_configs_for_workers = parse_args()
     
+    # Setup logging
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    logger = logging.getLogger(__name__)
+    
+    # Display timezone information
+    current_time = get_timezone_aware_time(args.timezone)
+    print(f"Starting fetch at {format_time_with_timezone(current_time, args.timezone)}")
+    print(f"Using timezone: {args.timezone}")
+    
     # Create base data directories if any action is to be taken
     if args.types or args.symbols or args.symbols_list or args.fetch_market_data:
         if args.fetch_market_data: # Only make data dirs if we intend to fetch market data
@@ -563,12 +944,35 @@ async def main():
     elif not db_configs_for_workers: # Should not happen with current logic if fetch_market_data is True
         print("Error: Database configuration is missing for workers. Cannot fetch market data.", file=sys.stderr)
     else:
-        if args.continuous and args.current_price:
-            await run_continuous_current_price_fetch(all_symbols_list, args, db_configs_for_workers)
+        if args.continuous and args.latest:
+            await run_continuous_latest_fetch(all_symbols_list, args, db_configs_for_workers)
         else:
             print(f"Fetching market data for {len(all_symbols_list)} symbols using {args.executor_type} pool...")
+            print(f"Enhanced features enabled: Volume={args.include_volume}, Comprehensive={args.comprehensive_data}")
+            
             (success_count, failure_count) = await process_symbols(all_symbols_list, args, db_configs_for_workers)
-            print(f"Market data fetching attempts complete. Successes: {success_count}, Failures: {failure_count} out of {len(all_symbols_list)} symbols.")
+            
+            # Display final results
+            end_time = get_timezone_aware_time(args.timezone)
+            print(f"\nMarket data fetching completed at {format_time_with_timezone(end_time, args.timezone)}")
+            print(f"Results: {success_count} successes, {failure_count} failures out of {len(all_symbols_list)} symbols.")
+            
+            # Save results if requested
+            if args.save_results:
+                try:
+                    # Determine format from file extension
+                    if args.save_results.endswith('.csv'):
+                        format_type = 'csv'
+                    elif args.save_results.endswith('.json'):
+                        format_type = 'json'
+                    else:
+                        format_type = 'table'
+                    
+                    # Note: We would need to collect results from process_symbols to save them
+                    # This is a placeholder for the save functionality
+                    print(f"Results would be saved to {args.save_results} in {format_type} format")
+                except Exception as e:
+                    print(f"Error saving results: {e}", file=sys.stderr)
 
 if __name__ == '__main__':
     asyncio.run(main())

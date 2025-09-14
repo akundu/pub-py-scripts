@@ -72,6 +72,16 @@ class StockQuestDB(StockDBBase):
                         f"command timeout: {pool_connection_timeout_minutes} minutes, "
                         f"connection timeout: {connection_timeout_seconds}s")
 
+        # Ensure tables exist once during initialization (safe for both sync/async contexts)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop; run synchronously
+            asyncio.run(self._init_db())
+        else:
+            # Running inside an event loop; schedule task
+            loop.create_task(self._init_db())
+
     async def _init_db(self) -> None:
         """Initialize the QuestDB database with required tables."""
         await self._ensure_tables_exist()
@@ -993,7 +1003,7 @@ class StockQuestDB(StockDBBase):
         ema_55 DOUBLE,
         ema_89 DOUBLE
     ) TIMESTAMP(date) PARTITION BY MONTH WAL
-    DEDUP UPSERT KEYS(date, ticker, open, high, low, close);
+    DEDUP UPSERT KEYS(date, ticker);
     """
     create_hourly_prices_table_sql = """
     CREATE TABLE IF NOT EXISTS hourly_prices (
@@ -1005,7 +1015,7 @@ class StockQuestDB(StockDBBase):
         close DOUBLE,
         volume LONG
     ) TIMESTAMP(datetime) PARTITION BY MONTH WAL
-    DEDUP UPSERT KEYS(datetime, ticker, open, high, low, close);
+    DEDUP UPSERT KEYS(datetime, ticker);
     """
     create_table_realtime_data_sql = """
     CREATE TABLE IF NOT EXISTS realtime_data (
@@ -1018,6 +1028,6 @@ class StockQuestDB(StockDBBase):
         ask_size LONG,
         write_timestamp TIMESTAMP
     ) TIMESTAMP(timestamp) PARTITION BY DAY WAL
-    DEDUP UPSERT KEYS(timestamp, ticker, type, price);
+    DEDUP UPSERT KEYS(timestamp, ticker);
     """
 

@@ -9,6 +9,12 @@ from pathlib import Path # Added for path manipulation
 from common.stock_db import get_stock_db, StockDBBase, get_default_db_path, DEFAULT_DATA_DIR
 import aiohttp # Added for fully async HTTP calls
 import pytz # Added for market hours checking
+# Try to import tzlocal for local timezone detection
+try:
+    import tzlocal
+    TZLOCAL_AVAILABLE = True
+except ImportError:
+    TZLOCAL_AVAILABLE = False
 
 # Try to import Polygon client
 try:
@@ -66,6 +72,108 @@ def _is_market_hours(dt: datetime = None) -> bool:
     market_close = et_dt.replace(hour=16, minute=0, second=0, microsecond=0)
     
     return market_open <= et_dt <= market_close
+
+def _normalize_timezone_string(tz_string: str) -> str:
+    """
+    Convert common timezone abbreviations to proper pytz timezone strings.
+    """
+    # Common timezone abbreviation mappings
+    tz_abbreviations = {
+        # US Timezones
+        'EST': 'America/New_York',
+        'EDT': 'America/New_York', 
+        'CST': 'America/Chicago',
+        'CDT': 'America/Chicago',
+        'MST': 'America/Denver',
+        'MDT': 'America/Denver',
+        'PST': 'America/Los_Angeles',
+        'PDT': 'America/Los_Angeles',
+        'AKST': 'America/Anchorage',
+        'AKDT': 'America/Anchorage',
+        'HST': 'Pacific/Honolulu',
+        'HAST': 'Pacific/Honolulu',
+        
+        # Other common abbreviations
+        'UTC': 'UTC',
+        'GMT': 'Europe/London',
+        'BST': 'Europe/London',
+        'CET': 'Europe/Paris',
+        'CEST': 'Europe/Paris',
+        'JST': 'Asia/Tokyo',
+        'CST_CN': 'Asia/Shanghai',  # China Standard Time
+        'IST': 'Asia/Kolkata',      # India Standard Time
+        'AEST': 'Australia/Sydney',
+        'AEDT': 'Australia/Sydney',
+    }
+    
+    # Check if it's already a proper timezone string (contains '/')
+    if '/' in tz_string:
+        return tz_string
+    
+    # Convert abbreviation to proper timezone
+    normalized = tz_abbreviations.get(tz_string.upper())
+    if normalized:
+        return normalized
+    
+    # If not found, return as-is (might be a valid pytz string)
+    return tz_string
+
+def _convert_dataframe_timezone(df: pd.DataFrame, target_timezone: str = None) -> pd.DataFrame:
+    """
+    Convert DataFrame index timezone for display purposes.
+    For hourly data, converts to the specified timezone (or local timezone if not specified).
+    For daily data, returns as-is since daily data doesn't have timezone info.
+    """
+    if df.empty:
+        return df
+    
+    # Only convert if the index is timezone-aware
+    if df.index.tz is not None:
+        if target_timezone is None:
+            # Use local timezone
+            if TZLOCAL_AVAILABLE:
+                target_tz = tzlocal.get_localzone()
+            else:
+                # Fallback to system timezone - try to detect from system
+                import time
+                import os
+                
+                # Try to get timezone from environment variable first
+                tz_env = os.environ.get('TZ')
+                if tz_env:
+                    try:
+                        target_tz = pytz.timezone(tz_env)
+                    except:
+                        pass
+                
+                # If no TZ env var or it failed, try to detect from system
+                if 'target_tz' not in locals():
+                    # Check if we're in Pacific Time
+                    if 'PST' in time.tzname or 'PDT' in time.tzname:
+                        target_tz = pytz.timezone('America/Los_Angeles')
+                    # Check if we're in Eastern Time
+                    elif 'EST' in time.tzname or 'EDT' in time.tzname:
+                        target_tz = pytz.timezone('America/New_York')
+                    # Check if we're in Central Time
+                    elif 'CST' in time.tzname or 'CDT' in time.tzname:
+                        target_tz = pytz.timezone('America/Chicago')
+                    # Check if we're in Mountain Time
+                    elif 'MST' in time.tzname or 'MDT' in time.tzname:
+                        target_tz = pytz.timezone('America/Denver')
+                    else:
+                        # Default to UTC if we can't detect
+                        target_tz = pytz.timezone('UTC')
+        else:
+            # Normalize the timezone string (convert abbreviations to proper names)
+            normalized_tz = _normalize_timezone_string(target_timezone)
+            target_tz = pytz.timezone(normalized_tz)
+        
+        # Convert to target timezone
+        df_converted = df.copy()
+        df_converted.index = df_converted.index.tz_convert(target_tz)
+        return df_converted
+    
+    return df
 
 async def fetch_polygon_data(
     symbol: str,
@@ -633,6 +741,12 @@ async def process_symbol_data(
 
     if end_date is None:
         end_date = datetime.now().strftime('%Y-%m-%d')
+    
+    # If end_date is today and we're on a trading day, ensure we fetch today's data
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    if end_date == today_str and (_is_market_hours() or (not _is_market_hours() and datetime.now().weekday() < 5)):
+        # This is a trading day, so we should try to fetch today's data if it's not available
+        pass  # The existing logic will handle this
     data_df = pd.DataFrame()
     action_taken = "No action"
 
@@ -649,6 +763,17 @@ async def process_symbol_data(
             min_date_in_df = data_df.index.min().strftime('%Y-%m-%d')
             if start_date and min_date_in_df > start_date:
                 print(f"Note: Data retrieved from DB starts at {min_date_in_df}, after the requested start date {start_date} (e.g., due to non-trading days).", file=sys.stderr)
+            
+            # Check if we have today's data when end_date is today
+            if end_date == today_str and timeframe == 'daily':
+                max_date_in_df = data_df.index.max().strftime('%Y-%m-%d')
+                if max_date_in_df < today_str:
+                    print(f"Note: Latest data in DB is from {max_date_in_df}, but end date is {today_str}. Today's data may not be available yet.", file=sys.stderr)
+                    # If it's a trading day, we should try to fetch today's data
+                    if _is_market_hours() or (not _is_market_hours() and datetime.now().weekday() < 5):
+                        print(f"Trading day detected, will attempt to fetch today's data for {symbol}...", file=sys.stderr)
+                        # Set force_fetch to True to ensure we fetch today's data
+                        force_fetch = True
         else:
             print(f"No {timeframe} data found for {symbol} in the database for the specified range.", file=sys.stderr)
             if query_only:
@@ -1188,7 +1313,7 @@ async def main() -> None:
     parser.add_argument(
         "--db-path",
         type=str,
-        default=None,
+        default='localhost:9001',
         help="Path to the database file or PostgreSQL connection string (e.g., postgresql://user:pass@host:port/db). If not provided, uses default for selected db-type."
     )
     parser.add_argument(
@@ -1200,12 +1325,12 @@ async def main() -> None:
     parser.add_argument(
         "--start-date",
         default=None, 
-        help="Start date for data query/fetch (YYYY-MM-DD). Defaults to 5 years ago for daily, 2 years ago for hourly if not specified."
+        help="Start date for data query/fetch (YYYY-MM-DD). If not specified with end-date, will be set to 30 days before end-date. If neither specified, assumes latest price request."
     )
     parser.add_argument(
         "--end-date",
         default=datetime.now().strftime('%Y-%m-%d'), 
-        help="End date for data query/fetch (YYYY-MM-DD, default: today)."
+        help="End date for data query/fetch (YYYY-MM-DD, default: today). If not specified with start-date, will be set to 30 days after start-date."
     )
     parser.add_argument(
         "--force-fetch",
@@ -1242,20 +1367,20 @@ async def main() -> None:
         help="Chunk size for fetching large datasets (auto: smart selection, daily: 1-day chunks, weekly: 1-week chunks, monthly: 1-month chunks, default: monthly)"
     )
     parser.add_argument(
-        "--current-price",
+        "--latest",
         action="store_true",
-        help="Get only the current price of the stock (no historical data fetching). Also triggered automatically when no start/end dates are specified."
-    )
-    parser.add_argument(
-        "--current-price-max-age",
-        type=int,
-        default=60,
-        help="Maximum age of database price data in seconds before fetching fresh data (default: 60 seconds = 1 minutes)"
+        help="Show latest records: today's daily bar and most recent hourly bar for the symbol (default when no start/end dates specified)"
     )
     parser.add_argument(
         "--show-volume",
         action="store_true",
         help="Display volume information in the output (for both current price and historical data)"
+    )
+    parser.add_argument(
+        "--timezone",
+        type=str,
+        default=None,
+        help="Timezone for displaying hourly data. Supports both full names (e.g., 'America/New_York', 'UTC') and abbreviations (e.g., 'EST', 'PST', 'EDT', 'PDT'). Defaults to local system timezone."
     )
     args = parser.parse_args()
 
@@ -1266,68 +1391,140 @@ async def main() -> None:
         print("Or use --data-source alpaca to use Alpaca instead.", file=sys.stderr)
         exit(1)
 
-    if args.start_date is None and not args.current_price:
-        if args.timeframe == 'daily':
-            args.start_date = (datetime.now() - timedelta(days=5*365)).strftime('%Y-%m-%d')
-            print(f"--start-date not specified, defaulting to {args.start_date} for daily timeframe.", file=sys.stderr)
-        elif args.timeframe == 'hourly':
-            args.start_date = (datetime.now() - timedelta(days=2*365)).strftime('%Y-%m-%d') 
-            print(f"--start-date not specified, defaulting to {args.start_date} for hourly timeframe.", file=sys.stderr)
+
+    # Handle start-date and end-date logic based on user requirements
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    
+    # Case 1: No start-date and no end-date specified -> assume latest price
+    if args.start_date is None and args.end_date == today_str:
+        # This is the default case - treat as latest price request
+        print("No start-date or end-date specified, assuming latest price request.", file=sys.stderr)
+        # Set both to None to trigger current price logic
+        args.start_date = None
+        args.end_date = None
+    # Case 2: End-date is set but no start-date -> set start-date to 30 days before end-date
+    elif args.start_date is None and args.end_date != today_str:
+        end_dt = datetime.strptime(args.end_date, '%Y-%m-%d')
+        start_dt = end_dt - timedelta(days=30)
+        args.start_date = start_dt.strftime('%Y-%m-%d')
+        print(f"End-date specified ({args.end_date}) but no start-date, setting start-date to 30 days before: {args.start_date}", file=sys.stderr)
+    # Case 3: Start-date is set but no end-date -> set end-date to 30 days after start-date
+    elif args.start_date is not None and args.end_date == today_str:
+        start_dt = datetime.strptime(args.start_date, '%Y-%m-%d')
+        end_dt = start_dt + timedelta(days=30)
+        args.end_date = end_dt.strftime('%Y-%m-%d')
+        print(f"Start-date specified ({args.start_date}) but no end-date, setting end-date to 30 days after: {args.end_date}", file=sys.stderr)
+    # Case 4: Both start-date and end-date are explicitly set -> use as-is
+    elif args.start_date is not None and args.end_date != today_str:
+        print(f"Both start-date ({args.start_date}) and end-date ({args.end_date}) explicitly specified.", file=sys.stderr)
+    # Case 5: Fallback for other cases - default to --latest if no dates specified
+    else:
+        if args.start_date is None and args.end_date is None:
+            # Default to --latest when no dates are specified
+            args.latest = True
+            print("No start/end dates specified, defaulting to --latest mode.", file=sys.stderr)
+        elif args.start_date is None and not args.latest:
+            if args.timeframe == 'daily':
+                args.start_date = (datetime.now() - timedelta(days=5*365)).strftime('%Y-%m-%d')
+                print(f"--start-date not specified, defaulting to {args.start_date} for daily timeframe.", file=sys.stderr)
+            elif args.timeframe == 'hourly':
+                args.start_date = (datetime.now() - timedelta(days=2*365)).strftime('%Y-%m-%d') 
+                print(f"--start-date not specified, defaulting to {args.start_date} for hourly timeframe.", file=sys.stderr)
+        
+        # Ensure end date is set to today if not explicitly specified and not using --latest
+        if not args.latest and (not hasattr(args, 'end_date') or args.end_date is None):
+            args.end_date = today_str
+            print(f"End date set to today: {args.end_date}", file=sys.stderr)
 
     # Ensure data directories exist
     os.makedirs(f"{args.data_dir}/daily", exist_ok=True)
     os.makedirs(f"{args.data_dir}/hourly", exist_ok=True)
 
-    # Handle current price request - either explicit or implicit (no dates specified)
-    should_get_current_price = args.current_price or (args.start_date is None and args.end_date is None and not args.force_fetch and not args.query_only)
-    
-    if should_get_current_price:
+
+    # If --latest is requested, fetch and display latest daily and hourly data
+    if args.latest:
         db_instance = None
         try:
-            # Create database instance for current price request
+            # Create database instance
             if args.db_path and ':' in args.db_path:
-                # Check if it's a PostgreSQL connection string
                 if args.db_path.startswith('postgresql://'):
-                    # PostgreSQL database - use postgresql type
                     db_instance = get_stock_db("postgresql", args.db_path)
                 else:
-                    # Remote database - use remote type
                     db_instance = get_stock_db("remote", args.db_path)
             else:
-                # Local database
-                actual_db_path = args.db_path
-                if actual_db_path is None:
-                    actual_db_path = get_default_db_path("duckdb") if args.db_type == 'duckdb' else get_default_db_path("db")
+                actual_db_path = args.db_path or (get_default_db_path("duckdb") if args.db_type == 'duckdb' else get_default_db_path("db"))
                 db_instance = get_stock_db(args.db_type, actual_db_path)
+
+            # Today's date in YYYY-MM-DD
+            today_str = datetime.now().strftime('%Y-%m-%d')
             
-            price_data = await get_current_price(
-                symbol=args.symbol,
-                data_source=args.data_source,
-                stock_db_instance=db_instance,
-                max_age_seconds=args.current_price_max_age
-            )
+            print(f"\n--- {args.symbol} Latest ---")
             
-            print(f"\n--- Current Price for {args.symbol} ---")
-            print(f"Price: ${price_data['price']:.2f}")
-            if price_data['bid_price'] and price_data['ask_price']:
-                print(f"Bid: ${price_data['bid_price']:.2f}")
-                print(f"Ask: ${price_data['ask_price']:.2f}")
-            if 'size' in price_data and price_data['size']:
-                print(f"Size: {price_data['size']}")
-            if args.show_volume and 'volume' in price_data and price_data['volume']:
-                print(f"Volume: {price_data['volume']:,}")
-            print(f"Source: {price_data['source']}")
-            print(f"Data Source: {price_data['data_source']}")
-            print(f"Timestamp: {price_data['timestamp']}")
-            if price_data.get('write_timestamp'):
-                print(f"Write Timestamp: {price_data['write_timestamp']}")
-            print(f"--- End of Current Price ---")
-            return
-        except Exception as e:
-            print(f"Error getting current price for {args.symbol}: {e}", file=sys.stderr)
+            # Check for today's daily data first
+            daily_df = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=today_str, interval='daily')
+            
+            if not daily_df.empty:
+                last_daily = daily_df.tail(1)
+                print("Today's Daily:")
+                print(last_daily[['open','high','low','close','volume']] if 'volume' in last_daily.columns else last_daily[['open','high','low','close']])
+            else:
+                print("No daily row for today in DB.")
+                
+                # Show most recent daily as fallback
+                print("Checking for most recent daily data...")
+                recent_daily_df = await db_instance.get_stock_data(args.symbol, interval='daily')
+                if not recent_daily_df.empty:
+                    last_daily = recent_daily_df.tail(1)
+                    last_date = last_daily.index[0].strftime('%Y-%m-%d')
+                    print(f"Most Recent Daily ({last_date}):")
+                    print(last_daily[['open','high','low','close','volume']] if 'volume' in last_daily.columns else last_daily[['open','high','low','close']])
+                else:
+                    print("No daily data found in DB at all.")
+                
+                # If it's a trading day and we don't have today's data, try to fetch it
+                if _is_market_hours() or (not _is_market_hours() and datetime.now().weekday() < 5):
+                    print(f"\nTrading day detected, attempting to fetch today's data for {args.symbol}...")
+                    try:
+                        # Fetch today's data
+                        fetch_success = await fetch_and_save_data(
+                            symbol=args.symbol,
+                            data_dir=args.data_dir,
+                            stock_db_instance=db_instance,
+                            start_date=today_str,
+                            end_date=today_str,
+                            db_save_batch_size=args.db_batch_size,
+                            data_source=args.data_source,
+                            chunk_size=args.chunk_size
+                        )
+                        
+                        if fetch_success:
+                            # Try to get the data again
+                            daily_df = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=today_str, interval='daily')
+                            if not daily_df.empty:
+                                last_daily = daily_df.tail(1)
+                                print("Today's Daily (freshly fetched):")
+                                print(last_daily[['open','high','low','close','volume']] if 'volume' in last_daily.columns else last_daily[['open','high','low','close']])
+                            else:
+                                print("Still no daily data available after fetch attempt.")
+                        else:
+                            print("Failed to fetch today's data.")
+                    except Exception as e:
+                        print(f"Error fetching today's data: {e}")
+
+            # Get latest hourly data
+            hourly_df = await db_instance.get_stock_data(args.symbol, interval='hourly')
+            
+            if not hourly_df.empty:
+                # Convert timezone for display
+                hourly_display_df = _convert_dataframe_timezone(hourly_df, args.timezone)
+                last_hourly = hourly_display_df.tail(1)
+                print("\nMost Recent Hourly:")
+                print(last_hourly[['open','high','low','close','volume']] if 'volume' in last_hourly.columns else last_hourly[['open','high','low','close']])
+            else:
+                print("No hourly rows found in DB.")
+            print("--- End Latest ---")
             return
         finally:
-            # Clean up database session
             if db_instance and hasattr(db_instance, 'close_session') and callable(db_instance.close_session):
                 try:
                     await db_instance.close_session()
@@ -1368,18 +1565,23 @@ async def main() -> None:
         )
 
         if not final_df.empty:
+            # Convert timezone for display if this is hourly data
+            display_df = _convert_dataframe_timezone(final_df, args.timezone)
+            
             print(f"\n--- {args.symbol} ({args.timeframe.capitalize()}) Data ({args.start_date or 'Earliest'} to {args.end_date}) ---")
             if args.show_volume:
                 # Display all columns including volume
-                print(final_df)
+                print(display_df)
             else:
                 # Display only OHLC columns (exclude volume)
                 display_columns = ['open', 'high', 'low', 'close']
-                available_columns = [col for col in display_columns if col in final_df.columns]
+                available_columns = [col for col in display_columns if col in display_df.columns]
                 if available_columns:
-                    print(final_df[available_columns])
+                    print(display_df[available_columns])
                 else:
-                    print(final_df)
+                    print(display_df)
+            
+            
             print(f"--- End of Data ---")
         elif not args.query_only: 
             print(f"No data to display for {args.symbol} ({args.timeframe}) with the given parameters after all operations.")

@@ -36,12 +36,12 @@ async def analyze_duplicates(db_instance: StockQuestDB, table: str, ticker: str 
     # Define table-specific configurations
     if table == 'daily_prices':
         date_col = 'date'
-        duplicate_columns = ['ticker', 'date', 'open', 'high', 'low', 'close']
-        group_by_columns = 'ticker, date, open, high, low, close'
+        duplicate_columns = ['ticker', 'date']
+        group_by_columns = 'ticker, date'
     elif table == 'hourly_prices':
         date_col = 'datetime'
-        duplicate_columns = ['ticker', 'datetime', 'open', 'high', 'low', 'close']
-        group_by_columns = 'ticker, datetime, open, high, low, close'
+        duplicate_columns = ['ticker', 'datetime']
+        group_by_columns = 'ticker, datetime'
     elif table == 'realtime_data':
         date_col = 'timestamp'
         duplicate_columns = ['ticker', 'timestamp', 'type', 'price']
@@ -66,9 +66,9 @@ async def analyze_duplicates(db_instance: StockQuestDB, table: str, ticker: str 
             """
         else:
             duplicate_query = f"""
-            SELECT ticker, {date_col}, open, high, low, close, cnt as duplicate_count
+            SELECT ticker, {date_col}, cnt as duplicate_count
             FROM (
-                SELECT ticker, {date_col}, open, high, low, close, COUNT(*) as cnt
+                SELECT ticker, {date_col}, COUNT(*) as cnt
                 FROM {table}
                 WHERE ticker = $1
                 GROUP BY {group_by_columns}
@@ -91,9 +91,9 @@ async def analyze_duplicates(db_instance: StockQuestDB, table: str, ticker: str 
             """
         else:
             duplicate_query = f"""
-            SELECT ticker, {date_col}, open, high, low, close, cnt as duplicate_count
+            SELECT ticker, {date_col}, cnt as duplicate_count
             FROM (
-                SELECT ticker, {date_col}, open, high, low, close, COUNT(*) as cnt
+                SELECT ticker, {date_col}, COUNT(*) as cnt
                 FROM {table}
                 GROUP BY {group_by_columns}
             )
@@ -114,7 +114,7 @@ async def analyze_duplicates(db_instance: StockQuestDB, table: str, ticker: str 
         if table == 'realtime_data':
             expected_columns = ['ticker', 'timestamp', 'type', 'price', 'duplicate_count']
         else:
-            expected_columns = ['ticker', date_col, 'open', 'high', 'low', 'close', 'duplicate_count']
+            expected_columns = ['ticker', date_col, 'duplicate_count']
         
         if len(results.columns) >= len(expected_columns):
             # Map numeric columns to named columns
@@ -214,23 +214,17 @@ async def cleanup_duplicates(db_instance: StockQuestDB, table: str, ticker: str 
                 logger.error(f"Error finding duplicate records for {group_ticker} on {group_date}: {e}")
                 continue
         else:
-            group_open = group['open']
-            group_high = group['high']
-            group_low = group['low']
-            group_close = group['close']
-            
             find_duplicates_query = f"""
-            SELECT ticker, {date_col}, open, high, low, close, volume
+            SELECT *
             FROM {table}
             WHERE ticker = $1 AND {date_col} = $2 
-            AND open = $3 AND high = $4 AND low = $5 AND close = $6
             ORDER BY {date_col} DESC
             """
             
             try:
                 duplicate_records = await db_instance.execute_select_sql(
                     find_duplicates_query, 
-                    (group_ticker, group_date, group_open, group_high, group_low, group_close)
+                    (group_ticker, group_date)
                 )
                 
                 if len(duplicate_records) > 1:
@@ -259,14 +253,14 @@ async def create_clean_table(db_instance: StockQuestDB, table: str, ticker: str 
     # Define table-specific configurations
     if table == 'daily_prices':
         date_col = 'date'
-        distinct_columns = 'ticker, date, open, high, low, close'
+        distinct_columns = 'ticker, date'
         select_columns = 'ticker, date, open, high, low, close, volume, ma_10, ma_50, ma_100, ma_200, ema_8, ema_21, ema_34, ema_55, ema_89'
-        order_columns = 'ticker, date, open, high, low, close, date DESC'
+        order_columns = 'ticker, date, date DESC'
     elif table == 'hourly_prices':
         date_col = 'datetime'
-        distinct_columns = 'ticker, datetime, open, high, low, close'
+        distinct_columns = 'ticker, datetime'
         select_columns = 'ticker, datetime, open, high, low, close, volume'
-        order_columns = 'ticker, datetime, open, high, low, close, datetime DESC'
+        order_columns = 'ticker, datetime, datetime DESC'
     elif table == 'realtime_data':
         date_col = 'timestamp'
         distinct_columns = 'ticker, timestamp, type, price'
