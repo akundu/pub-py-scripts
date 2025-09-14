@@ -506,8 +506,8 @@ async def fetch_bars_single_aiohttp_all_pages(
             
     return all_bars_df
 
-def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: str, data_dir: str) -> pd.DataFrame:
-    """Helper function to merge new data with existing CSV data and save."""
+def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: str, data_dir: str, save_csv: bool = False) -> pd.DataFrame:
+    """Helper function to merge new data with existing CSV data and optionally save."""
     if new_data_df.empty:
         # print(f"No new {interval_type} data provided for {symbol} to merge into CSV.") # Potentially verbose
         # Check if CSV exists even if new data is empty, to return existing data if needed for DB save
@@ -545,8 +545,13 @@ def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: s
             # final_df remains new_data_df if merging fails
     
     final_df.sort_index(inplace=True)
-    final_df.to_csv(csv_path)
-    print(f"{interval_type.capitalize()} data for {symbol} merged/saved to CSV. Total rows: {len(final_df)}", file=sys.stderr)
+    
+    if save_csv:
+        final_df.to_csv(csv_path)
+        print(f"{interval_type.capitalize()} data for {symbol} merged/saved to CSV. Total rows: {len(final_df)}", file=sys.stderr)
+    else:
+        print(f"{interval_type.capitalize()} data for {symbol} merged (CSV saving disabled). Total rows: {len(final_df)}", file=sys.stderr)
+    
     return final_df
 
 # Function to fetch and save data for a single symbol
@@ -560,7 +565,8 @@ async def fetch_and_save_data(
     end_date: str | None = None,    # New parameter
     db_save_batch_size: int = 1000,  # New parameter with default
     data_source: str = "polygon",  # New parameter for data source selection
-    chunk_size: str = "monthly"  # New parameter for chunk size
+    chunk_size: str = "monthly",  # New parameter for chunk size
+    save_csv: bool = False  # New parameter for CSV saving control
 ) -> bool:
     if data_source == "polygon":
         API_KEY = os.getenv('POLYGON_API_KEY')
@@ -624,7 +630,7 @@ async def fetch_and_save_data(
                 symbol, TimeFrame.Day, start_date_daily_api_str, end_date_api_str, API_KEY, API_SECRET
             )
 
-        final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, symbol, 'daily', data_dir)
+        final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, symbol, 'daily', data_dir, save_csv)
 
         # Use the passed db_save_batch_size parameter
         if not final_daily_bars.empty:
@@ -658,7 +664,7 @@ async def fetch_and_save_data(
                 symbol, TimeFrame.Hour, start_date_hourly_api_str, end_date_hourly_api_str, API_KEY, API_SECRET
             )
 
-        final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, symbol, 'hourly', data_dir)
+        final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, symbol, 'hourly', data_dir, save_csv)
 
         # Use the passed db_save_batch_size parameter
         if not final_hourly_bars.empty:
@@ -701,7 +707,8 @@ async def process_symbol_data(
     days_back_fetch: int | None = None,
     db_save_batch_size: int = 1000,  # New parameter with default
     data_source: str = "polygon",  # New parameter for data source selection
-    chunk_size: str = "monthly"  # New parameter for chunk size
+    chunk_size: str = "monthly",  # New parameter for chunk size
+    save_csv: bool = False  # New parameter for CSV saving control
 ) -> pd.DataFrame:
     """Processes symbol data: queries DB, fetches if needed, and returns DataFrame."""
 
@@ -800,7 +807,8 @@ async def process_symbol_data(
             end_date=end_date,
             db_save_batch_size=db_save_batch_size, # Pass it through
             data_source=data_source,  # Pass the new argument
-            chunk_size=chunk_size  # Pass the new argument
+            chunk_size=chunk_size,  # Pass the new argument
+            save_csv=save_csv  # Pass the new argument
         ) 
 
         if fetch_success:
@@ -1382,6 +1390,12 @@ async def main() -> None:
         default=None,
         help="Timezone for displaying hourly data. Supports both full names (e.g., 'America/New_York', 'UTC') and abbreviations (e.g., 'EST', 'PST', 'EDT', 'PDT'). Defaults to local system timezone."
     )
+    parser.add_argument(
+        "--save-csv",
+        action="store_true",
+        default=False,
+        help="Save data to CSV files in addition to database. CSV saving is disabled by default."
+    )
     args = parser.parse_args()
 
     # Check if Polygon is available when selected
@@ -1494,7 +1508,8 @@ async def main() -> None:
                             end_date=today_str,
                             db_save_batch_size=args.db_batch_size,
                             data_source=args.data_source,
-                            chunk_size=args.chunk_size
+                            chunk_size=args.chunk_size,
+                            save_csv=args.save_csv
                         )
                         
                         if fetch_success:
@@ -1561,6 +1576,7 @@ async def main() -> None:
             db_save_batch_size=args.db_batch_size, # Pass the new argument
             data_source=args.data_source,  # Pass the new argument
             chunk_size=args.chunk_size,  # Pass the new argument
+            save_csv=args.save_csv,  # Pass the new argument
             stock_db_instance=db_instance_for_cleanup  # Pass the instance we created
         )
 
