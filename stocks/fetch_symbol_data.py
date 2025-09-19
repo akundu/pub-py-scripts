@@ -175,6 +175,150 @@ def _convert_dataframe_timezone(df: pd.DataFrame, target_timezone: str = None) -
     
     return df
 
+def _get_et_now() -> datetime:
+    et_tz = pytz.timezone('US/Eastern')
+    return datetime.now(timezone.utc).astimezone(et_tz)
+
+def _get_market_session(now_et: datetime | None = None) -> str:
+    """Return one of: 'regular', 'premarket', 'afterhours', 'closed' based on ET time."""
+    if now_et is None:
+        now_et = _get_et_now()
+    # Weekend closed
+    if now_et.weekday() >= 5:
+        return 'closed'
+    day = now_et.replace(second=0, microsecond=0)
+    pre_open = day.replace(hour=4, minute=0)
+    reg_open = day.replace(hour=9, minute=30)
+    reg_close = day.replace(hour=16, minute=0)
+    aft_close = day.replace(hour=20, minute=0)
+    if reg_open <= now_et < reg_close:
+        return 'regular'
+    if pre_open <= now_et < reg_open:
+        return 'premarket'
+    if reg_close <= now_et < aft_close:
+        return 'afterhours'
+    return 'closed'
+
+async def _get_last_update_age_seconds(db_instance: StockDBBase, symbol: str) -> dict | None:
+    """Return info about age since most recent update across realtime/hourly/daily.
+    Returns dict: { 'age_seconds': float, 'source': 'write'|'original', 'timestamp': iso_string }
+    """
+    try:
+        info = await _get_latest_price_with_timestamp(db_instance, symbol)
+        if not info:
+            return None
+        now_utc = datetime.now(timezone.utc)
+        ts = info.get('timestamp')
+        wt = info.get('write_timestamp')
+        ref_dt = None
+        if wt:
+            if isinstance(wt, str):
+                ref_dt = datetime.fromisoformat(wt.replace('Z', '+00:00'))
+            else:
+                ref_dt = wt
+        elif ts:
+            if isinstance(ts, str):
+                ref_dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+            else:
+                ref_dt = ts
+        if ref_dt is None:
+            return None
+        if ref_dt.tzinfo is None:
+            ref_dt = ref_dt.replace(tzinfo=timezone.utc)
+        else:
+            ref_dt = ref_dt.astimezone(timezone.utc)
+        age = (now_utc - ref_dt).total_seconds()
+        return {
+            'age_seconds': age,
+            'source': 'write' if wt else 'original',
+            'timestamp': ref_dt.isoformat()
+        }
+    except Exception:
+        return None
+async def _get_last_bar_age_seconds(db_instance: StockDBBase, symbol: str, interval: str) -> dict | None:
+    """Return age info for the latest bar of a given interval ('daily' or 'hourly').
+    Returns dict: { 'age_seconds': float, 'timestamp': iso_string }
+    """
+    try:
+        df = await db_instance.get_stock_data(symbol, interval=interval)
+        if df is None or df.empty:
+            return None
+        last_idx = df.index[-1]
+        if isinstance(last_idx, str):
+            dt = datetime.fromisoformat(last_idx.replace('Z', '+00:00'))
+        else:
+            dt = last_idx
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        now_utc = datetime.now(timezone.utc)
+        age = (now_utc - dt).total_seconds()
+        return { 'age_seconds': age, 'timestamp': dt.isoformat() }
+    except Exception:
+        return None
+
+
+def _format_price_block(price_info: dict, target_tz: str | None = 'America/New_York') -> list[str]:
+    lines: list[str] = []
+    try:
+        price = price_info.get('price')
+        bid = price_info.get('bid_price')
+        ask = price_info.get('ask_price')
+        ts = price_info.get('timestamp')
+        dt = datetime.fromisoformat(ts.replace('Z', '+00:00')) if isinstance(ts, str) else ts
+        if dt is None:
+            dt = datetime.now(timezone.utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if target_tz:
+            tzname = _normalize_timezone_string(target_tz)
+            dt_disp = dt.astimezone(pytz.timezone(tzname))
+        else:
+            dt_disp = dt
+        ts_str = dt_disp.strftime('%Y-%m-%d %H:%M:%S %Z')
+        def fmt(x):
+            try:
+                return f"{float(x):.2f}" if x is not None else "-"
+            except Exception:
+                return "-"
+        lines.append(f"Price: {fmt(price)}  Bid: {fmt(bid)}  Ask: {fmt(ask)}  Time: {ts_str}")
+    except Exception as e:
+        lines.append(f"Realtime formatting error: {e}")
+    return lines
+
+async def _get_last_write_age_seconds(db_instance: StockDBBase, symbol: str, interval: str) -> dict | None:
+    """Get age of last write_timestamp from DB for the given symbol and interval."""
+    try:
+        df = await db_instance.get_stock_data(symbol, interval=interval)
+        if df is None or df.empty:
+            return None
+        # prefer write_timestamp column if present and not null
+        if 'write_timestamp' in df.columns:
+            wt = df['write_timestamp'].iloc[-1]
+            if pd.isna(wt) or wt is None:
+                # write_timestamp is null, fallback to index timestamp
+                idx = df.index[-1]
+                dt = idx if isinstance(idx, datetime) else pd.to_datetime(idx).to_pydatetime()
+            else:
+                if isinstance(wt, str):
+                    dt = datetime.fromisoformat(wt.replace('Z', '+00:00'))
+                else:
+                    dt = pd.to_datetime(wt).to_pydatetime()
+        else:
+            # fallback to index timestamp
+            idx = df.index[-1]
+            dt = idx if isinstance(idx, datetime) else pd.to_datetime(idx).to_pydatetime()
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        now_utc = datetime.now(timezone.utc)
+        age = (now_utc - dt).total_seconds()
+        return { 'age_seconds': age, 'timestamp': dt.isoformat() }
+    except Exception:
+        return None
+
 async def fetch_polygon_data(
     symbol: str,
     timeframe: str,
@@ -222,12 +366,19 @@ async def fetch_polygon_data(
         
         all_data = []
 
+        # Ensure a single-day/hour window actually triggers one chunk
+        if start_dt == end_dt:
+            if timespan == "day":
+                end_dt = end_dt + pd.Timedelta(days=1)
+            else:
+                end_dt = end_dt + pd.Timedelta(hours=1)
+
         if chunk_size in ["daily", "weekly", "monthly"]:
             # Fetch data in chunks
             current_start = start_dt
             chunk_count = 0
             
-            while current_start < end_dt:  # Changed from <= to < to prevent infinite loop
+            while current_start < end_dt:  # keep strict <, end_dt was adjusted for same-boundary
                 # Calculate chunk end date
                 if chunk_size == "daily":
                     chunk_end = min(current_start + pd.Timedelta(days=1), end_dt)
@@ -506,19 +657,19 @@ async def fetch_bars_single_aiohttp_all_pages(
             
     return all_bars_df
 
-def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: str, data_dir: str, save_csv: bool = False) -> pd.DataFrame:
+def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: str, data_dir: str, use_csv: bool = False) -> pd.DataFrame:
     """Helper function to merge new data with existing CSV data and optionally save."""
     if new_data_df.empty:
-        # print(f"No new {interval_type} data provided for {symbol} to merge into CSV.") # Potentially verbose
-        # Check if CSV exists even if new data is empty, to return existing data if needed for DB save
-        idx_name = 'date' if interval_type == 'daily' else 'datetime'
-        csv_path = f'{data_dir}/{interval_type}/{symbol}_{interval_type}.csv'
-        if os.path.exists(csv_path):
-            try:
-                return pd.read_csv(csv_path, index_col=idx_name, parse_dates=True)
-            except Exception as e:
-                print(f"Error reading existing {interval_type} CSV for {symbol} when new data was empty: {e}", file=sys.stderr)
-        return new_data_df # Return empty if no existing and no new
+        # Do not read or merge from CSV unless explicitly enabled
+        if use_csv:
+            idx_name = 'date' if interval_type == 'daily' else 'datetime'
+            csv_path = f'{data_dir}/{interval_type}/{symbol}_{interval_type}.csv'
+            if os.path.exists(csv_path):
+                try:
+                    return pd.read_csv(csv_path, index_col=idx_name, parse_dates=True)
+                except Exception as e:
+                    print(f"Error reading existing {interval_type} CSV for {symbol} when new data was empty: {e}", file=sys.stderr)
+        return new_data_df # Return empty when not using CSV or no CSV present
 
     idx_name = 'date' if interval_type == 'daily' else 'datetime'
     csv_path = f'{data_dir}/{interval_type}/{symbol}_{interval_type}.csv'
@@ -529,7 +680,7 @@ def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: s
     
     final_df = new_data_df # Start with new data (guaranteed timezone-naive index)
 
-    if os.path.exists(csv_path):
+    if use_csv and os.path.exists(csv_path):
         try:
             existing_df = pd.read_csv(csv_path, index_col=idx_name, parse_dates=True)
             # Ensure existing_df.index is timezone-naive for consistent merging
@@ -546,11 +697,11 @@ def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: s
     
     final_df.sort_index(inplace=True)
     
-    if save_csv:
+    if use_csv:
         final_df.to_csv(csv_path)
         print(f"{interval_type.capitalize()} data for {symbol} merged/saved to CSV. Total rows: {len(final_df)}", file=sys.stderr)
     else:
-        print(f"{interval_type.capitalize()} data for {symbol} merged (CSV saving disabled). Total rows: {len(final_df)}", file=sys.stderr)
+        print(f"{interval_type.capitalize()} data for {symbol} merged (CSV disabled). Total rows: {len(final_df)}", file=sys.stderr)
     
     return final_df
 
@@ -566,7 +717,7 @@ async def fetch_and_save_data(
     db_save_batch_size: int = 1000,  # New parameter with default
     data_source: str = "polygon",  # New parameter for data source selection
     chunk_size: str = "monthly",  # New parameter for chunk size
-    save_csv: bool = False  # New parameter for CSV saving control
+    use_csv: bool = False  # New parameter for CSV usage control
 ) -> bool:
     if data_source == "polygon":
         API_KEY = os.getenv('POLYGON_API_KEY')
@@ -630,7 +781,7 @@ async def fetch_and_save_data(
                 symbol, TimeFrame.Day, start_date_daily_api_str, end_date_api_str, API_KEY, API_SECRET
             )
 
-        final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, symbol, 'daily', data_dir, save_csv)
+        final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, symbol, 'daily', data_dir, use_csv)
 
         # Use the passed db_save_batch_size parameter
         if not final_daily_bars.empty:
@@ -664,7 +815,7 @@ async def fetch_and_save_data(
                 symbol, TimeFrame.Hour, start_date_hourly_api_str, end_date_hourly_api_str, API_KEY, API_SECRET
             )
 
-        final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, symbol, 'hourly', data_dir, save_csv)
+        final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, symbol, 'hourly', data_dir, use_csv)
 
         # Use the passed db_save_batch_size parameter
         if not final_hourly_bars.empty:
@@ -708,7 +859,7 @@ async def process_symbol_data(
     db_save_batch_size: int = 1000,  # New parameter with default
     data_source: str = "polygon",  # New parameter for data source selection
     chunk_size: str = "monthly",  # New parameter for chunk size
-    save_csv: bool = False  # New parameter for CSV saving control
+    use_csv: bool = False  # New parameter for CSV usage control
 ) -> pd.DataFrame:
     """Processes symbol data: queries DB, fetches if needed, and returns DataFrame."""
 
@@ -808,7 +959,7 @@ async def process_symbol_data(
             db_save_batch_size=db_save_batch_size, # Pass it through
             data_source=data_source,  # Pass the new argument
             chunk_size=chunk_size,  # Pass the new argument
-            save_csv=save_csv  # Pass the new argument
+            use_csv=use_csv  # Pass the new argument
         ) 
 
         if fetch_success:
@@ -1391,10 +1542,10 @@ async def main() -> None:
         help="Timezone for displaying hourly data. Supports both full names (e.g., 'America/New_York', 'UTC') and abbreviations (e.g., 'EST', 'PST', 'EDT', 'PDT'). Defaults to local system timezone."
     )
     parser.add_argument(
-        "--save-csv",
+        "--use-csv",
         action="store_true",
         default=False,
-        help="Save data to CSV files in addition to database. CSV saving is disabled by default."
+        help="Use CSV files for merging and persistence in addition to the database. Disabled by default."
     )
     args = parser.parse_args()
 
@@ -1461,7 +1612,9 @@ async def main() -> None:
         try:
             # Create database instance
             if args.db_path and ':' in args.db_path:
-                if args.db_path.startswith('postgresql://'):
+                if args.db_path.startswith('questdb://'):
+                    db_instance = get_stock_db("questdb", args.db_path)
+                elif args.db_path.startswith('postgresql://'):
                     db_instance = get_stock_db("postgresql", args.db_path)
                 else:
                     db_instance = get_stock_db("remote", args.db_path)
@@ -1473,9 +1626,144 @@ async def main() -> None:
             today_str = datetime.now().strftime('%Y-%m-%d')
             
             print(f"\n--- {args.symbol} Latest ---")
+
+            # Freshness policy: if market is open or afterhours window, refetch when stale
+            session = _get_market_session()
+            max_age = None
+            if session == 'regular':
+                max_age = 60
+            elif session in ('premarket', 'afterhours'):
+                max_age = 300
+            else:
+                max_age = None  # closed -> no periodic refetch
+
+            should_refetch_now = False
+            if max_age is not None:
+                rt_info = await _get_last_update_age_seconds(db_instance, args.symbol)
+                if rt_info is None:
+                    print(f"Freshness: realtime not found; will fetch today (threshold {max_age}s, session {session}).")
+                    should_refetch_now = True
+                else:
+                    rt_age = rt_info['age_seconds']
+                    rt_src = rt_info['source']
+                    rt_ts = rt_info['timestamp']
+                    print(f"Freshness: realtime age {rt_age:.1f}s (from {rt_src} ts: {rt_ts}), threshold {max_age}s, session {session}.")
+                    if rt_age > max_age:
+                        should_refetch_now = True
+
+            if should_refetch_now:
+                try:
+                    fetch_success = await fetch_and_save_data(
+                        symbol=args.symbol,
+                        data_dir=args.data_dir,
+                        stock_db_instance=db_instance,
+                        start_date=today_str,
+                        end_date=today_str,
+                        db_save_batch_size=args.db_batch_size,
+                        data_source=args.data_source,
+                        chunk_size=args.chunk_size,
+                        use_csv=args.use_csv
+                    )
+                    if fetch_success:
+                        print(f"Freshness fetch: performed because realtime age>{max_age}s during {session} session.")
+                    else:
+                        print("Freshness fetch skipped due to failure.")
+                except Exception as e:
+                    print(f"Freshness pre-fetch error: {e}")
+            else:
+                if max_age is not None:
+                    print(f"Freshness fetch: skipped (realtime recent enough, age<= {max_age}s for {session} session).")
+                else:
+                    print("Freshness fetch: skipped (market closed).")
+
+            print()  # Spacing
+
+            # Realtime section when market is not closed
+            if session in ('regular', 'premarket', 'afterhours'):
+                try:
+                    rt_age_limit = 60 if session == 'regular' else 300
+                    price_info = await get_current_price(
+                        args.symbol,
+                        data_source=args.data_source,
+                        stock_db_instance=db_instance,
+                        db_type=args.db_type,
+                        db_path=args.db_path,
+                        max_age_seconds=rt_age_limit
+                    )
+                    if price_info:
+                        print("Realtime:")
+                        for line in _format_price_block(price_info, args.timezone or 'America/New_York'):
+                            print(line)
+                except Exception as e:
+                    print(f"Realtime fetch/display error: {e}")
             
-            # Check for today's daily data first
-            daily_df = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=today_str, interval='daily')
+            print()  # Spacing
+            
+            # Log last bar ages for context and check if daily/hourly need refresh
+            h_threshold = 60 if session == 'regular' else 300 if session in ('premarket', 'afterhours') else None
+            d_threshold = 60 if session == 'regular' else 300 if session in ('premarket', 'afterhours') else None
+            
+            try:
+                h_info = await _get_last_bar_age_seconds(db_instance, args.symbol, 'hourly')
+                d_info = await _get_last_bar_age_seconds(db_instance, args.symbol, 'daily')
+                
+                # Show hourly age with threshold
+                if h_info:
+                    h_age = h_info['age_seconds']
+                    h_status = "STALE" if h_threshold and h_age > h_threshold else "FRESH" if h_threshold else "N/A"
+                    print(f"Hourly last bar age: {h_age:.1f}s (ts: {h_info['timestamp']}) | threshold: {h_threshold}s | status: {h_status}")
+                else:
+                    print("Hourly last bar age: unavailable")
+                
+                # Show daily age with threshold  
+                if d_info:
+                    d_age = d_info['age_seconds']
+                    d_status = "STALE" if d_threshold and d_age > d_threshold else "FRESH" if d_threshold else "N/A"
+                    print(f"Daily last bar age: {d_age:.1f}s (ts: {d_info['timestamp']}) | threshold: {d_threshold}s | status: {d_status}")
+                else:
+                    print("Daily last bar age: unavailable")
+                
+                # Decide fetch based on last write times from DB (write_timestamp column)
+                w_h = await _get_last_write_age_seconds(db_instance, args.symbol, 'hourly')
+                w_d = await _get_last_write_age_seconds(db_instance, args.symbol, 'daily')
+                w_h_age = w_h['age_seconds'] if w_h else None
+                w_d_age = w_d['age_seconds'] if w_d else None
+                print(f"Hourly last write: {w_h['timestamp'] if w_h else 'unknown'} | age: {w_h_age if w_h_age is not None else 'unknown'}s | threshold: {h_threshold}s")
+                print(f"Daily last write: {w_d['timestamp'] if w_d else 'unknown'} | age: {w_d_age if w_d_age is not None else 'unknown'}s | threshold: {d_threshold}s")
+                
+                need_hourly = bool(h_threshold and (w_h_age is None or w_h_age > h_threshold))
+                need_daily = bool(d_threshold and (w_d_age is None or w_d_age > d_threshold))
+                if need_hourly or need_daily:
+                    print(f"Fetch decision (by last write): hourly={need_hourly}, daily={need_daily}")
+                    try:
+                        refreshed = await fetch_and_save_data(
+                            symbol=args.symbol,
+                            data_dir=args.data_dir,
+                            stock_db_instance=db_instance,
+                            start_date=today_str,
+                            end_date=today_str,
+                            db_save_batch_size=args.db_batch_size,
+                            data_source=args.data_source,
+                            chunk_size=args.chunk_size,
+                            use_csv=args.use_csv
+                        )
+                        if refreshed:
+                            print("Fetch by last write: performed.")
+                        else:
+                            print("Fetch by last write: attempted but failed.")
+                    except Exception as e:
+                        print(f"Fetch by last write error: {e}")
+                else:
+                    print("Fetch by last write: skipped (recent enough).")
+            except Exception as e:
+                print(f"Age diagnostics error: {e}")
+
+            print()  # Spacing
+            
+            # Check for today's daily data first (use inclusive range to catch 04:00 UTC bars)
+            from datetime import timedelta
+            tomorrow_str = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+            daily_df = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=tomorrow_str, interval='daily')
             
             if not daily_df.empty:
                 last_daily = daily_df.tail(1)
@@ -1495,8 +1783,8 @@ async def main() -> None:
                 else:
                     print("No daily data found in DB at all.")
                 
-                # If it's a trading day and we don't have today's data, try to fetch it
-                if _is_market_hours() or (not _is_market_hours() and datetime.now().weekday() < 5):
+                # If it's a trading day and most recent daily is before today, try to fetch it
+                if (_is_market_hours() or (not _is_market_hours() and datetime.now().weekday() < 5)) and (not recent_daily_df.empty and last_date < today_str or recent_daily_df.empty):
                     print(f"\nTrading day detected, attempting to fetch today's data for {args.symbol}...")
                     try:
                         # Fetch today's data
@@ -1509,22 +1797,34 @@ async def main() -> None:
                             db_save_batch_size=args.db_batch_size,
                             data_source=args.data_source,
                             chunk_size=args.chunk_size,
-                            save_csv=args.save_csv
+                            use_csv=args.use_csv
                         )
                         
                         if fetch_success:
-                            # Try to get the data again
-                            daily_df = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=today_str, interval='daily')
+                            # Try to get the data again (use inclusive range to catch 04:00 UTC bars)
+                            daily_df = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=tomorrow_str, interval='daily')
                             if not daily_df.empty:
                                 last_daily = daily_df.tail(1)
                                 print("Today's Daily (freshly fetched):")
                                 print(last_daily[['open','high','low','close','volume']] if 'volume' in last_daily.columns else last_daily[['open','high','low','close']])
                             else:
-                                print("Still no daily data available after fetch attempt.")
+                                # As a fallback, accept most recent if it's for today
+                                recent_daily_df = await db_instance.get_stock_data(args.symbol, interval='daily')
+                                if not recent_daily_df.empty and recent_daily_df.index[-1].strftime('%Y-%m-%d') == today_str:
+                                    last_daily = recent_daily_df.tail(1)
+                                    print("Today's Daily (from most recent after fetch):")
+                                    print(last_daily[['open','high','low','close','volume']] if 'volume' in last_daily.columns else last_daily[['open','high','low','close']])
+                                else:
+                                    print("Still no daily data available after fetch attempt.")
                         else:
                             print("Failed to fetch today's data.")
                     except Exception as e:
                         print(f"Error fetching today's data: {e}")
+                else:
+                    # If most recent daily is already today, rely on freshness pre-check above (no extra message)
+                    pass
+
+            print()  # Spacing
 
             # Get latest hourly data
             hourly_df = await db_instance.get_stock_data(args.symbol, interval='hourly')
@@ -1533,10 +1833,12 @@ async def main() -> None:
                 # Convert timezone for display
                 hourly_display_df = _convert_dataframe_timezone(hourly_df, args.timezone)
                 last_hourly = hourly_display_df.tail(1)
-                print("\nMost Recent Hourly:")
+                print("Most Recent Hourly:")
                 print(last_hourly[['open','high','low','close','volume']] if 'volume' in last_hourly.columns else last_hourly[['open','high','low','close']])
             else:
                 print("No hourly rows found in DB.")
+            
+            print()  # Spacing
             print("--- End Latest ---")
             return
         finally:
@@ -1576,7 +1878,7 @@ async def main() -> None:
             db_save_batch_size=args.db_batch_size, # Pass the new argument
             data_source=args.data_source,  # Pass the new argument
             chunk_size=args.chunk_size,  # Pass the new argument
-            save_csv=args.save_csv,  # Pass the new argument
+            use_csv=args.use_csv,  # Pass the new argument
             stock_db_instance=db_instance_for_cleanup  # Pass the instance we created
         )
 
@@ -1608,6 +1910,25 @@ async def main() -> None:
                 await db_instance_for_cleanup.close_session()
             except Exception as e:
                 print(f"Warning: Error closing database session: {e}", file=sys.stderr)
+
+def _get_fetch_meta_age_seconds(data_dir: str, symbol: str, interval: str) -> dict | None:
+    meta = _read_fetch_meta(data_dir)
+    key = f"{symbol}:{interval}"
+    entry = meta.get(key)
+    if not entry:
+        return None
+    ts = entry.get("last_write_utc")
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now_utc = datetime.now(timezone.utc)
+        age = (now_utc - dt).total_seconds()
+        return {"age_seconds": age, "timestamp": dt.isoformat()}
+    except Exception:
+        return None
 
 if __name__ == "__main__":
     asyncio.run(main())

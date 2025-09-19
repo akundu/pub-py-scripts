@@ -130,6 +130,7 @@ class StockDBPostgreSQL(StockDBBase):
                     ema_34 DOUBLE PRECISION,
                     ema_55 DOUBLE PRECISION,
                     ema_89 DOUBLE PRECISION,
+                    write_timestamp TIMESTAMPTZ DEFAULT NOW(),
                     PRIMARY KEY (ticker, date)
                 )
             """)
@@ -144,6 +145,7 @@ class StockDBPostgreSQL(StockDBBase):
                     low DOUBLE PRECISION,
                     close DOUBLE PRECISION,
                     volume BIGINT,
+                    write_timestamp TIMESTAMPTZ DEFAULT NOW(),
                     PRIMARY KEY (ticker, datetime)
                 )
             """)
@@ -649,7 +651,17 @@ class StockDBPostgreSQL(StockDBBase):
             if 'index' in df_copy.columns and date_col not in df_copy.columns:
                 df_copy.rename(columns={"index": date_col}, inplace=True)
 
-            required_cols = ['ticker', date_col, 'open', 'high', 'low', 'close', 'volume']
+            # Add write_timestamp column with current UTC time
+            df_copy['write_timestamp'] = datetime.now(timezone.utc)
+
+            # Ensure table has write_timestamp column
+            async with conn.cursor() as cur:
+                try:
+                    await cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS write_timestamp TIMESTAMPTZ")
+                except Exception:
+                    pass
+
+            required_cols = ['ticker', date_col, 'open', 'high', 'low', 'close', 'volume', 'write_timestamp']
             df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
 
             if date_col not in df_copy.columns:

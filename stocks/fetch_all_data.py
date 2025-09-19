@@ -59,14 +59,19 @@ def fetch_latest_data_with_volume(
 ) -> dict:
     """Fetch latest data including volume for a single symbol."""
     worker_db_instance = None
+    loop = None
     try:
         if client_timeout is not None:
             worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout)
         else:
             worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
         
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         # Get current price
-        result = asyncio.run(get_current_price(
+        result = loop.run_until_complete(get_current_price(
             symbol,
             data_source,
             stock_db_instance=worker_db_instance,
@@ -78,14 +83,14 @@ def fetch_latest_data_with_volume(
             try:
                 # Try to get today's volume
                 today = datetime.now().strftime('%Y-%m-%d')
-                volume_data = asyncio.run(worker_db_instance.get_stock_data(
+                volume_data = loop.run_until_complete(worker_db_instance.get_stock_data(
                     symbol, today, today, "daily"
                 ))
                 if not volume_data.empty and 'volume' in volume_data.columns:
                     result['volume'] = float(volume_data['volume'].iloc[0])
                 else:
                     # Fallback: try to get volume from real-time data
-                    realtime_data = asyncio.run(worker_db_instance.get_realtime_data(
+                    realtime_data = loop.run_until_complete(worker_db_instance.get_realtime_data(
                         symbol, today, None, "trade"
                     ))
                     if not realtime_data.empty and 'size' in realtime_data.columns:
@@ -106,9 +111,14 @@ def fetch_latest_data_with_volume(
     finally:
         if worker_db_instance and hasattr(worker_db_instance, 'close_session') and callable(worker_db_instance.close_session):
             try:
-                asyncio.run(worker_db_instance.close_session())
+                if loop and not loop.is_closed():
+                    loop.run_until_complete(worker_db_instance.close_session())
             except Exception as e_close:
                 print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
+        
+        # Close the event loop
+        if loop and not loop.is_closed():
+            loop.close()
 
 def fetch_comprehensive_data(
     symbol: str,
@@ -122,25 +132,32 @@ def fetch_comprehensive_data(
     client_timeout: float | None = None,
     include_volume: bool = True,
     include_quotes: bool = True,
-    include_trades: bool = True
+    include_trades: bool = True,
+    use_csv: bool = False
 ) -> dict:
     """Fetch comprehensive data including volume, quotes, and trades."""
     worker_db_instance = None
+    loop = None
     try:
         if client_timeout is not None:
             worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout)
         else:
             worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
         
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         # Fetch and save historical data
-        success = asyncio.run(fetch_and_save_data(
+        success = loop.run_until_complete(fetch_and_save_data(
             symbol,
             data_dir,
             worker_db_instance,
             all_time_flag,
             days_back_val,
             db_save_batch_size_val,
-            chunk_size=chunk_size_val
+            chunk_size=chunk_size_val,
+            use_csv=use_csv
         ))
         
         result = {
@@ -158,7 +175,7 @@ def fetch_comprehensive_data(
                 
                 if include_volume:
                     # Get volume data
-                    volume_data = asyncio.run(worker_db_instance.get_stock_data(
+                    volume_data = loop.run_until_complete(worker_db_instance.get_stock_data(
                         symbol, today, today, "daily"
                     ))
                     if not volume_data.empty and 'volume' in volume_data.columns:
@@ -168,14 +185,14 @@ def fetch_comprehensive_data(
                 
                 if include_quotes:
                     # Get latest quote count
-                    quote_data = asyncio.run(worker_db_instance.get_realtime_data(
+                    quote_data = loop.run_until_complete(worker_db_instance.get_realtime_data(
                         symbol, today, None, "quote"
                     ))
                     result['quotes_count'] = len(quote_data) if not quote_data.empty else 0
                 
                 if include_trades:
                     # Get latest trade count
-                    trade_data = asyncio.run(worker_db_instance.get_realtime_data(
+                    trade_data = loop.run_until_complete(worker_db_instance.get_realtime_data(
                         symbol, today, None, "trade"
                     ))
                     result['trades_count'] = len(trade_data) if not trade_data.empty else 0
@@ -189,9 +206,14 @@ def fetch_comprehensive_data(
     finally:
         if worker_db_instance and hasattr(worker_db_instance, 'close_session') and callable(worker_db_instance.close_session):
             try:
-                asyncio.run(worker_db_instance.close_session())
+                if loop and not loop.is_closed():
+                    loop.run_until_complete(worker_db_instance.close_session())
             except Exception as e_close:
                 print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
+        
+        # Close the event loop
+        if loop and not loop.is_closed():
+            loop.close()
 
 # Synchronous wrapper function to get current price for a single symbol
 def fetch_latest_data(
@@ -204,15 +226,20 @@ def fetch_latest_data(
 ) -> dict:
     """Creates a DB instance in the worker thread and gets latest data for a symbol."""
     worker_db_instance = None
+    loop = None
     try:
         if client_timeout is not None:
             worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout)
         else:
             worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
         
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         # Get today's daily data
         today_str = datetime.now().strftime('%Y-%m-%d')
-        daily_df = asyncio.run(worker_db_instance.get_stock_data(symbol, start_date=today_str, end_date=today_str, interval='daily'))
+        daily_df = loop.run_until_complete(worker_db_instance.get_stock_data(symbol, start_date=today_str, end_date=today_str, interval='daily'))
         
         result = {
             "symbol": symbol,
@@ -232,7 +259,7 @@ def fetch_latest_data(
             }
         else:
             # Try to get most recent daily as fallback
-            recent_daily_df = asyncio.run(worker_db_instance.get_stock_data(symbol, interval='daily'))
+            recent_daily_df = loop.run_until_complete(worker_db_instance.get_stock_data(symbol, interval='daily'))
             if not recent_daily_df.empty:
                 last_daily = recent_daily_df.tail(1)
                 result['daily'] = {
@@ -247,7 +274,7 @@ def fetch_latest_data(
                 result['daily'] = None
         
         # Get latest hourly data
-        hourly_df = asyncio.run(worker_db_instance.get_stock_data(symbol, interval='hourly'))
+        hourly_df = loop.run_until_complete(worker_db_instance.get_stock_data(symbol, interval='hourly'))
         if not hourly_df.empty:
             last_hourly = hourly_df.tail(1)
             result['hourly'] = {
@@ -267,9 +294,14 @@ def fetch_latest_data(
     finally:
         if worker_db_instance and hasattr(worker_db_instance, 'close_session') and callable(worker_db_instance.close_session):
             try:
-                asyncio.run(worker_db_instance.close_session())
+                if loop and not loop.is_closed():
+                    loop.run_until_complete(worker_db_instance.close_session())
             except Exception as e_close:
                 print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
+        
+        # Close the event loop
+        if loop and not loop.is_closed():
+            loop.close()
 
 def fetch_price_and_save(
     symbol: str, 
@@ -280,7 +312,8 @@ def fetch_price_and_save(
     days_back_val: int | None,
     db_save_batch_size_val: int,
     chunk_size_val: str = "monthly",  # New parameter with default
-    client_timeout: float | None = None
+    client_timeout: float | None = None,
+    use_csv: bool = False
 ) -> bool:
     """Creates a DB instance in the worker thread and runs fetch_and_save_data."""
     print(f"{os.getpid()} Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr, flush=True)
@@ -289,6 +322,7 @@ def fetch_price_and_save(
     # should provide a connection that is safe for this thread. For SQLite, this means
     # a new connection object.
     worker_db_instance = None
+    loop = None
     try:
         # Each worker thread creates its own StockDBBase instance.
         print(f"Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr)
@@ -297,28 +331,39 @@ def fetch_price_and_save(
         else:
             worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
         
-        # We need a new event loop for each thread. asyncio.run() does this.
-        result = asyncio.run(fetch_and_save_data(
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Run the async function
+        result = loop.run_until_complete(fetch_and_save_data(
             symbol,
             data_dir,
             worker_db_instance,
             all_time_flag,
             days_back_val,
             db_save_batch_size_val,
-            chunk_size=chunk_size_val  # Pass the new parameter
+            chunk_size=chunk_size_val,  # Pass the new parameter
+            use_csv=use_csv  # Pass the new parameter
         ))
         return result
     except Exception as e:
         print(f"Error in worker thread for symbol {symbol}: {e}", file=sys.stderr)
         return False
     finally:
+        # Close database session if needed
         if worker_db_instance and hasattr(worker_db_instance, 'close_session') and callable(worker_db_instance.close_session):
             try:
                 print(f"Worker thread for {symbol}: Closing DB session...", file=sys.stderr)
-                asyncio.run(worker_db_instance.close_session())
+                if loop and not loop.is_closed():
+                    loop.run_until_complete(worker_db_instance.close_session())
                 print(f"Worker thread for {symbol}: DB session closed.", file=sys.stderr)
             except Exception as e_close:
                 print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
+        
+        # Close the event loop
+        if loop and not loop.is_closed():
+            loop.close()
 
 def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Namespace, db_type: str, db_config: str, stock_executor_type: str, max_concurrent: int | None) -> tuple[int, int]:
     """Process all symbols for a single database using the specified executor type for stock-level tasks."""
@@ -365,7 +410,8 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                     args.client_timeout,
                     args.include_volume,
                     args.include_quotes,
-                    args.include_trades
+                    args.include_trades,
+                    args.use_csv
                 )
             else:
                 task = executor.submit(
@@ -378,7 +424,8 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                     args.days_back,
                     args.db_batch_size,
                     args.chunk_size,  # Pass the new parameter
-                    args.client_timeout
+                    args.client_timeout,
+                    args.use_csv
                 )
             stock_tasks.append((task, symbol_to_fetch))
         
@@ -642,6 +689,12 @@ def parse_args():
         type=str,
         help='Save results to file (specify filename, extension determines format)'
     )
+    parser.add_argument(
+        "--use-csv",
+        action="store_true",
+        default=False,
+        help="Save data to CSV files in addition to database. CSV saving is disabled by default."
+    )
     
     # Time interval for fetching market data
     time_group = parser.add_mutually_exclusive_group()
@@ -659,7 +712,7 @@ def parse_args():
 
     # Set default executor type based on other args if not explicitly set
     if args.executor_type is None:
-        if args.db_path and any(':' in path and not path.startswith('postgresql://') for path in args.db_path):
+        if args.db_path and any(':' in path and not path.startswith('postgresql://') and not path.startswith('questdb://') for path in args.db_path):
             args.executor_type = "process"
             print("Info: Remote database detected, defaulting --executor-type to 'process'.", file=sys.stderr)
         else:
@@ -672,8 +725,14 @@ def parse_args():
     if args.db_path:
         for db_path in args.db_path:
             if ':' in db_path:
+                # Check if it's a QuestDB connection string
+                if db_path.startswith('questdb://'):
+                    # QuestDB database - use questdb type
+                    db_type = "questdb"
+                    db_config = db_path
+                    print(f"Configuring workers to use QuestDB database at: {db_config}")
                 # Check if it's a PostgreSQL connection string
-                if db_path.startswith('postgresql://'):
+                elif db_path.startswith('postgresql://'):
                     # PostgreSQL database - use postgresql type
                     db_type = "postgresql"
                     db_config = db_path

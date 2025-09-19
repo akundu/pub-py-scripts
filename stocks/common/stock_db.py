@@ -273,6 +273,7 @@ class StockDBSQLite(StockDBBase):
                     ema_34 REAL,
                     ema_55 REAL,
                     ema_89 REAL,
+                    write_timestamp DATETIME DEFAULT (DATETIME('now')),
                     PRIMARY KEY (ticker, date)
                 )
             """
@@ -287,6 +288,7 @@ class StockDBSQLite(StockDBBase):
                     low REAL,
                     close REAL,
                     volume INTEGER,
+                    write_timestamp DATETIME DEFAULT (DATETIME('now')),
                     PRIMARY KEY (ticker, datetime)
                 )
             ''')
@@ -368,7 +370,18 @@ class StockDBSQLite(StockDBBase):
             date_col = 'date' if interval == 'daily' else 'datetime'
             if 'index' in df_copy.columns and date_col not in df_copy.columns:
                 df_copy.rename(columns={'index': date_col}, inplace=True)
-            required_cols = ['ticker', date_col, 'open', 'high', 'low', 'close', 'volume']
+            # Add write_timestamp column with current UTC time
+            from datetime import datetime, timezone as _tz
+            df_copy['write_timestamp'] = datetime.now(_tz.utc)
+
+            # Ensure table has write_timestamp column
+            try:
+                with conn:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN write_timestamp TIMESTAMP")
+            except Exception:
+                pass
+
+            required_cols = ['ticker', date_col, 'open', 'high', 'low', 'close', 'volume', 'write_timestamp']
             df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
 
             if date_col not in df_copy.columns:
@@ -789,6 +802,7 @@ class StockDBDuckDB(StockDBBase):
                     ema_34 DOUBLE,
                     ema_55 DOUBLE,
                     ema_89 DOUBLE,
+                    write_timestamp TIMESTAMP DEFAULT NOW(),
                     PRIMARY KEY (ticker, date)
                 )
             """
@@ -803,6 +817,7 @@ class StockDBDuckDB(StockDBBase):
                     low DOUBLE,
                     close DOUBLE,
                     volume BIGINT,
+                    write_timestamp TIMESTAMP DEFAULT NOW(),
                     PRIMARY KEY (ticker, datetime)
                 )
             ''')
@@ -884,7 +899,17 @@ class StockDBDuckDB(StockDBBase):
             if 'index' in df_copy.columns and date_col not in df_copy.columns:
                 df_copy.rename(columns={"index": date_col}, inplace=True)
 
-            required_cols = ['ticker', date_col, 'open', 'high', 'low', 'close', 'volume']
+            # Add write_timestamp column with current UTC time
+            from datetime import datetime, timezone as _tz
+            df_copy['write_timestamp'] = datetime.now(_tz.utc)
+
+            # Ensure table has write_timestamp column
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN write_timestamp TIMESTAMP")
+            except Exception:
+                pass
+
+            required_cols = ['ticker', date_col, 'open', 'high', 'low', 'close', 'volume', 'write_timestamp']
             df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
 
             if date_col not in df_copy.columns:
@@ -1438,6 +1463,10 @@ class StockDBClient(StockDBBase):
         # Server expects list of records and index_col hint
         df_reset = df.reset_index()
         index_col_name = df.index.name or ('timestamp' if 'timestamp' in df.columns else 'date') # Default index name
+
+        # Add write_timestamp column with current UTC time
+        from datetime import datetime, timezone as _tz
+        df_reset['write_timestamp'] = datetime.now(_tz.utc)
 
         # Ensure datetime columns are stringified in ISO format for JSON
         for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:

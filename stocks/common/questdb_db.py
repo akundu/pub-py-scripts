@@ -173,7 +173,18 @@ class StockQuestDB(StockDBBase):
             if 'index' in df_copy.columns and date_col not in df_copy.columns:
                 df_copy.rename(columns={'index': date_col}, inplace=True)
                 
-            required_cols = ['ticker', date_col, 'open', 'high', 'low', 'close', 'volume']
+            # Add write_timestamp column with current UTC time
+            from datetime import datetime, timezone as _tz
+            df_copy['write_timestamp'] = datetime.now(_tz.utc)
+
+            # Ensure table has write_timestamp column
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute(f"ALTER TABLE {table} ADD COLUMN write_timestamp TIMESTAMP")
+            except Exception:
+                pass
+
+            required_cols = ['ticker', date_col, 'open', 'high', 'low', 'close', 'volume', 'write_timestamp']
             df_copy = df_copy[[col for col in required_cols if col in df_copy.columns]]
 
             if date_col not in df_copy.columns:
@@ -203,6 +214,17 @@ class StockQuestDB(StockDBBase):
 
             # Convert to QuestDB-optimized format
             df_copy[date_col] = df_copy[date_col].dt.strftime('%Y-%m-%d %H:%M:%S')
+            # Convert write_timestamp to naive datetime for QuestDB compatibility
+            if 'write_timestamp' in df_copy.columns:
+                # Handle both pandas datetime and Python datetime objects
+                if hasattr(df_copy['write_timestamp'], 'dt'):
+                    # Pandas datetime series
+                    df_copy['write_timestamp'] = df_copy['write_timestamp'].dt.tz_localize(None)
+                else:
+                    # Python datetime objects - convert to naive UTC
+                    df_copy['write_timestamp'] = df_copy['write_timestamp'].apply(
+                        lambda x: x.replace(tzinfo=None) if x and hasattr(x, 'replace') else x
+                    )
             
             # Prepare data for bulk insert
             records = []
@@ -214,7 +236,8 @@ class StockQuestDB(StockDBBase):
                     'high': row.get('high', 0.0),
                     'low': row.get('low', 0.0),
                     'close': row.get('close', 0.0),
-                    'volume': int(row.get('volume', 0))
+                    'volume': int(row.get('volume', 0)),
+                    'write_timestamp': row.get('write_timestamp')
                 }
                 
                 # Add MA values for daily data
@@ -258,24 +281,59 @@ class StockQuestDB(StockDBBase):
             row_values = []
             for col in columns:
                 value = record.get(col)
-                if col in ['date', 'datetime', 'timestamp', 'write_timestamp'] and isinstance(value, str):
-                    # Convert string timestamps to datetime objects for asyncpg
-                    try:
-                        if value:
-                            row_values.append(date_parser.parse(value))
-                        else:
+                if col in ['date', 'datetime', 'timestamp', 'write_timestamp']:
+                    if isinstance(value, str):
+                        # Convert string timestamps to datetime objects for asyncpg
+                        try:
+                            if value:
+                                row_values.append(date_parser.parse(value))
+                            else:
+                                row_values.append(None)
+                        except Exception as e:
+                            self.logger.warning(f"Failed to parse date '{value}' for column '{col}': {e}")
                             row_values.append(None)
-                    except Exception as e:
-                        self.logger.warning(f"Failed to parse date '{value}' for column '{col}': {e}")
-                        row_values.append(None)
+                    elif hasattr(value, 'to_pydatetime'):
+                        # Convert pandas Timestamp to datetime
+                        row_values.append(value.to_pydatetime())
+                    else:
+                        # Already a datetime object
+                        row_values.append(value)
                 else:
                     row_values.append(value)
             values.append(tuple(row_values))
         
         # Execute bulk insert - QuestDB will handle deduplication automatically
         try:
-            await conn.executemany(insert_sql, values)
-            self.logger.info(f"Inserted {len(records)} {interval} records for {records[0]['ticker']} (deduplication handled by QuestDB)")
+            # Debug: Log the first record to see what's being inserted
+            if records:
+                first_record = records[0]
+                self.logger.info(f"Inserting {interval} record for {first_record['ticker']}: write_timestamp={first_record.get('write_timestamp')}")
+            
+            # Use individual inserts to ensure UPSERT works properly
+            for i, record in enumerate(records):
+                record_values = []
+                for col in columns:
+                    value = record.get(col)
+                    if col in ['date', 'datetime', 'timestamp', 'write_timestamp']:
+                        if isinstance(value, str):
+                            try:
+                                if value:
+                                    record_values.append(date_parser.parse(value))
+                                else:
+                                    record_values.append(None)
+                            except Exception as e:
+                                self.logger.warning(f"Failed to parse date '{value}' for column '{col}': {e}")
+                                record_values.append(None)
+                        elif hasattr(value, 'to_pydatetime'):
+                            record_values.append(value.to_pydatetime())
+                        else:
+                            record_values.append(value)
+                    else:
+                        record_values.append(value)
+                
+                await conn.execute(insert_sql, *record_values)
+            
+            self.logger.info(f"Inserted {len(records)} {interval} records for {records[0]['ticker']} (individual inserts for proper UPSERT)")
         except Exception as e:
             self.logger.error(f"Error inserting {interval} data: {e}")
             raise
@@ -1001,7 +1059,8 @@ class StockQuestDB(StockDBBase):
         ema_21 DOUBLE,
         ema_34 DOUBLE,
         ema_55 DOUBLE,
-        ema_89 DOUBLE
+        ema_89 DOUBLE,
+        write_timestamp TIMESTAMP
     ) TIMESTAMP(date) PARTITION BY MONTH WAL
     DEDUP UPSERT KEYS(date, ticker);
     """
@@ -1013,7 +1072,8 @@ class StockQuestDB(StockDBBase):
         high DOUBLE,
         low DOUBLE,
         close DOUBLE,
-        volume LONG
+        volume LONG,
+        write_timestamp TIMESTAMP
     ) TIMESTAMP(datetime) PARTITION BY MONTH WAL
     DEDUP UPSERT KEYS(datetime, ticker);
     """
