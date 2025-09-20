@@ -926,7 +926,22 @@ class StockQuestDB(StockDBBase):
                     if col in historical_df.columns and col in df_copy.columns:
                         # Use the dtype from df_copy as the target
                         target_dtype = df_copy[col].dtype
-                        historical_df[col] = historical_df[col].astype(target_dtype)
+                        
+                        # Handle timezone-aware datetime columns specially
+                        if pd.api.types.is_datetime64_any_dtype(target_dtype) and pd.api.types.is_datetime64_any_dtype(historical_df[col].dtype):
+                            # Check if target is timezone-aware but historical is not
+                            if hasattr(target_dtype, 'tz') and target_dtype.tz is not None and historical_df[col].dt.tz is None:
+                                # Convert timezone-naive to timezone-aware
+                                historical_df[col] = historical_df[col].dt.tz_localize('UTC')
+                            elif hasattr(target_dtype, 'tz') and target_dtype.tz is None and historical_df[col].dt.tz is not None:
+                                # Convert timezone-aware to timezone-naive
+                                historical_df[col] = historical_df[col].dt.tz_localize(None)
+                            else:
+                                # Both have same timezone awareness, use astype
+                                historical_df[col] = historical_df[col].astype(target_dtype)
+                        else:
+                            # Non-datetime columns, use astype normally
+                            historical_df[col] = historical_df[col].astype(target_dtype)
                 
                 # Select only common columns
                 historical_df = historical_df[common_cols].copy()
