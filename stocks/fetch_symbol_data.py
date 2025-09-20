@@ -717,7 +717,9 @@ async def fetch_and_save_data(
     db_save_batch_size: int = 1000,  # New parameter with default
     data_source: str = "polygon",  # New parameter for data source selection
     chunk_size: str = "monthly",  # New parameter for chunk size
-    use_csv: bool = False  # New parameter for CSV usage control
+    use_csv: bool = False,  # New parameter for CSV usage control
+    fetch_daily: bool = True,  # New parameter to control daily data fetching
+    fetch_hourly: bool = True  # New parameter to control hourly data fetching
 ) -> bool:
     if data_source == "polygon":
         API_KEY = os.getenv('POLYGON_API_KEY')
@@ -770,71 +772,77 @@ async def fetch_and_save_data(
         start_date_hourly_api_str = start_date_hourly.isoformat()
         end_date_hourly_api_str = end_date_hourly.isoformat()
 
-        # Fetch daily data
-        print(f"Fetching daily data for {symbol} from {start_date_daily_api_str} to {end_date_api_str} via {data_source}...", file=sys.stderr)
-        if data_source == "polygon":
-            new_daily_bars = await fetch_polygon_data(
-                symbol, "daily", start_date_daily_api_str, end_date_api_str, API_KEY, chunk_size
-            )
-        else:  # alpaca
-            new_daily_bars = await fetch_bars_single_aiohttp_all_pages(
-                symbol, TimeFrame.Day, start_date_daily_api_str, end_date_api_str, API_KEY, API_SECRET
-            )
+        # Fetch daily data (if requested)
+        if fetch_daily:
+            print(f"Fetching daily data for {symbol} from {start_date_daily_api_str} to {end_date_api_str} via {data_source}...", file=sys.stderr)
+            if data_source == "polygon":
+                new_daily_bars = await fetch_polygon_data(
+                    symbol, "daily", start_date_daily_api_str, end_date_api_str, API_KEY, chunk_size
+                )
+            else:  # alpaca
+                new_daily_bars = await fetch_bars_single_aiohttp_all_pages(
+                    symbol, TimeFrame.Day, start_date_daily_api_str, end_date_api_str, API_KEY, API_SECRET
+                )
 
-        final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, symbol, 'daily', data_dir, use_csv)
+            final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, symbol, 'daily', data_dir, use_csv)
 
-        # Use the passed db_save_batch_size parameter
-        if not final_daily_bars.empty:
-            num_daily_batches = (len(final_daily_bars) - 1) // db_save_batch_size + 1
-            print(f"Saving daily data for {symbol} to database in {num_daily_batches} batch(es) of up to {db_save_batch_size} rows each...", file=sys.stderr)
-            for i in range(0, len(final_daily_bars), db_save_batch_size):
-                batch_df = final_daily_bars.iloc[i:i + db_save_batch_size]
-                current_batch_num = (i // db_save_batch_size) + 1
-                print(f"  Saving daily batch {current_batch_num}/{num_daily_batches} ({len(batch_df)} rows) for {symbol}...", file=sys.stderr)
-                try:
-                    await stock_db_instance.save_stock_data(batch_df, symbol, interval='daily')
-                except Exception as e_save_daily:
-                    print(f"    Error saving daily batch {current_batch_num} for {symbol}: {e_save_daily}", file=sys.stderr)
-                    # Optionally, re-raise, or log and continue to hourly, or skip remaining daily batches
-                    # For now, we'll let it fail the symbol fetch if a batch fails.
-                    raise
-            print(f"Daily data for {symbol} processed for database.", file=sys.stderr)
-        elif new_daily_bars.empty: # Check if new data was fetched before merging
-            print(f"No new daily data for {symbol} to process for database.", file=sys.stderr)
-        else: # new_daily_bars was not empty, but final_daily_bars is (e.g. all old data)
-            print(f"No data in final_daily_bars for {symbol} to save to database (possibly all old data or merge issue).", file=sys.stderr)
+            # Use the passed db_save_batch_size parameter
+            if not final_daily_bars.empty:
+                num_daily_batches = (len(final_daily_bars) - 1) // db_save_batch_size + 1
+                print(f"Saving daily data for {symbol} to database in {num_daily_batches} batch(es) of up to {db_save_batch_size} rows each...", file=sys.stderr)
+                for i in range(0, len(final_daily_bars), db_save_batch_size):
+                    batch_df = final_daily_bars.iloc[i:i + db_save_batch_size]
+                    current_batch_num = (i // db_save_batch_size) + 1
+                    print(f"  Saving daily batch {current_batch_num}/{num_daily_batches} ({len(batch_df)} rows) for {symbol}...", file=sys.stderr)
+                    try:
+                        await stock_db_instance.save_stock_data(batch_df, symbol, interval='daily')
+                    except Exception as e_save_daily:
+                        print(f"    Error saving daily batch {current_batch_num} for {symbol}: {e_save_daily}", file=sys.stderr)
+                        # Optionally, re-raise, or log and continue to hourly, or skip remaining daily batches
+                        # For now, we'll let it fail the symbol fetch if a batch fails.
+                        raise
+                print(f"Daily data for {symbol} processed for database.", file=sys.stderr)
+            elif new_daily_bars.empty: # Check if new data was fetched before merging
+                print(f"No new daily data for {symbol} to process for database.", file=sys.stderr)
+            else: # new_daily_bars was not empty, but final_daily_bars is (e.g. all old data)
+                print(f"No data in final_daily_bars for {symbol} to save to database (possibly all old data or merge issue).", file=sys.stderr)
+        else:
+            print(f"Daily data fetch skipped for {symbol}.", file=sys.stderr)
 
-        # Fetch hourly data
-        print(f"Fetching hourly data for {symbol} from {start_date_hourly_api_str} to {end_date_hourly_api_str} via {data_source}...", file=sys.stderr)
-        if data_source == "polygon":
-            new_hourly_bars = await fetch_polygon_data(
-                symbol, "hourly", start_date_hourly_api_str, end_date_hourly_api_str, API_KEY, chunk_size
-            )
-        else:  # alpaca
-            new_hourly_bars = await fetch_bars_single_aiohttp_all_pages(
-                symbol, TimeFrame.Hour, start_date_hourly_api_str, end_date_hourly_api_str, API_KEY, API_SECRET
-            )
+        # Fetch hourly data (if requested)
+        if fetch_hourly:
+            print(f"Fetching hourly data for {symbol} from {start_date_hourly_api_str} to {end_date_hourly_api_str} via {data_source}...", file=sys.stderr)
+            if data_source == "polygon":
+                new_hourly_bars = await fetch_polygon_data(
+                    symbol, "hourly", start_date_hourly_api_str, end_date_hourly_api_str, API_KEY, chunk_size
+                )
+            else:  # alpaca
+                new_hourly_bars = await fetch_bars_single_aiohttp_all_pages(
+                    symbol, TimeFrame.Hour, start_date_hourly_api_str, end_date_hourly_api_str, API_KEY, API_SECRET
+                )
 
-        final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, symbol, 'hourly', data_dir, use_csv)
+            final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, symbol, 'hourly', data_dir, use_csv)
 
-        # Use the passed db_save_batch_size parameter
-        if not final_hourly_bars.empty:
-            num_hourly_batches = (len(final_hourly_bars) - 1) // db_save_batch_size + 1
-            print(f"Saving hourly data for {symbol} to database in {num_hourly_batches} batch(es) of up to {db_save_batch_size} rows each...", file=sys.stderr)
-            for i in range(0, len(final_hourly_bars), db_save_batch_size):
-                batch_df = final_hourly_bars.iloc[i:i + db_save_batch_size]
-                current_batch_num = (i // db_save_batch_size) + 1
-                print(f"  Saving hourly batch {current_batch_num}/{num_hourly_batches} ({len(batch_df)} rows) for {symbol}...", file=sys.stderr)
-                try:
-                    await stock_db_instance.save_stock_data(batch_df, symbol, interval='hourly')
-                except Exception as e_save_hourly:
-                    print(f"    Error saving hourly batch {current_batch_num} for {symbol}: {e_save_hourly}", file=sys.stderr)
-                    raise # Fail the symbol fetch if a batch fails
-            print(f"Hourly data for {symbol} processed for database.", file=sys.stderr)
-        elif new_hourly_bars.empty: # Check if new data was fetched before merging
-            print(f"No new hourly data for {symbol} to process for database.", file=sys.stderr)
-        else: # new_hourly_bars was not empty, but final_hourly_bars is
-            print(f"No data in final_hourly_bars for {symbol} to save to database (possibly all old data or merge issue).", file=sys.stderr)
+            # Use the passed db_save_batch_size parameter
+            if not final_hourly_bars.empty:
+                num_hourly_batches = (len(final_hourly_bars) - 1) // db_save_batch_size + 1
+                print(f"Saving hourly data for {symbol} to database in {num_hourly_batches} batch(es) of up to {db_save_batch_size} rows each...", file=sys.stderr)
+                for i in range(0, len(final_hourly_bars), db_save_batch_size):
+                    batch_df = final_hourly_bars.iloc[i:i + db_save_batch_size]
+                    current_batch_num = (i // db_save_batch_size) + 1
+                    print(f"  Saving hourly batch {current_batch_num}/{num_hourly_batches} ({len(batch_df)} rows) for {symbol}...", file=sys.stderr)
+                    try:
+                        await stock_db_instance.save_stock_data(batch_df, symbol, interval='hourly')
+                    except Exception as e_save_hourly:
+                        print(f"    Error saving hourly batch {current_batch_num} for {symbol}: {e_save_hourly}", file=sys.stderr)
+                        raise # Fail the symbol fetch if a batch fails
+                print(f"Hourly data for {symbol} processed for database.", file=sys.stderr)
+            elif new_hourly_bars.empty: # Check if new data was fetched before merging
+                print(f"No new hourly data for {symbol} to process for database.", file=sys.stderr)
+            else: # new_hourly_bars was not empty, but final_hourly_bars is
+                print(f"No data in final_hourly_bars for {symbol} to save to database (possibly all old data or merge issue).", file=sys.stderr)
+        else:
+            print(f"Hourly data fetch skipped for {symbol}.", file=sys.stderr)
 
         return True
     except Exception as e:
@@ -1627,7 +1635,7 @@ async def main() -> None:
             
             print(f"\n--- {args.symbol} Latest ---")
 
-            # Freshness policy: if market is open or afterhours window, refetch when stale
+            # OPTIMIZATION: Fast path - check if we can skip most processing
             session = _get_market_session()
             max_age = None
             if session == 'regular':
@@ -1699,72 +1707,147 @@ async def main() -> None:
             
             print()  # Spacing
             
-            # Log last bar ages for context and check if daily/hourly need refresh
-            h_threshold = 60 if session == 'regular' else 300 if session in ('premarket', 'afterhours') else None
-            d_threshold = 60 if session == 'regular' else 300 if session in ('premarket', 'afterhours') else None
+            # OPTIMIZATION: Skip detailed age checks if we already know we don't need to fetch
+            # This can save significant time when data is fresh
+            skip_detailed_checks = False
+            if not should_refetch_now and session in ('afterhours', 'closed'):
+                # If we're in afterhours/closed and didn't need to refetch realtime data,
+                # historical data is very unlikely to need refreshing
+                skip_detailed_checks = True
+                print("Skipping detailed age checks (afterhours/closed session, no realtime refetch needed)")
             
-            try:
-                h_info = await _get_last_bar_age_seconds(db_instance, args.symbol, 'hourly')
-                d_info = await _get_last_bar_age_seconds(db_instance, args.symbol, 'daily')
+            if not skip_detailed_checks:
+                # Log last bar ages for context and check if daily/hourly need refresh
+                # Use more appropriate thresholds for historical data based on market session:
+                if session == 'regular':
+                    # During regular hours: shorter thresholds for active data
+                    h_threshold = 3600  # 1 hour - hourly bars update during market hours
+                    d_threshold = 86400  # 24 hours - daily bars update once per day
+                elif session in ('premarket', 'afterhours'):
+                    # During premarket/afterhours: much longer thresholds since no new data is generated
+                    h_threshold = 86400  # 24 hours - no new hourly data after market close
+                    d_threshold = 172800  # 48 hours - no new daily data until next trading day
+                else:  # closed (weekend)
+                    # Market closed: very long thresholds
+                    h_threshold = 172800  # 48 hours
+                    d_threshold = 259200  # 72 hours
                 
-                # Show hourly age with threshold
-                if h_info:
-                    h_age = h_info['age_seconds']
-                    h_status = "STALE" if h_threshold and h_age > h_threshold else "FRESH" if h_threshold else "N/A"
-                    print(f"Hourly last bar age: {h_age:.1f}s (ts: {h_info['timestamp']}) | threshold: {h_threshold}s | status: {h_status}")
-                else:
-                    print("Hourly last bar age: unavailable")
+                try:
+                    # OPTIMIZATION: Run all age checks in parallel to reduce database round trips
+                    h_info_task = _get_last_bar_age_seconds(db_instance, args.symbol, 'hourly')
+                    d_info_task = _get_last_bar_age_seconds(db_instance, args.symbol, 'daily')
+                    w_h_task = _get_last_write_age_seconds(db_instance, args.symbol, 'hourly')
+                    w_d_task = _get_last_write_age_seconds(db_instance, args.symbol, 'daily')
+                    
+                    # Wait for all age checks to complete
+                    h_info, d_info, w_h, w_d = await asyncio.gather(h_info_task, d_info_task, w_h_task, w_d_task)
                 
-                # Show daily age with threshold  
-                if d_info:
-                    d_age = d_info['age_seconds']
-                    d_status = "STALE" if d_threshold and d_age > d_threshold else "FRESH" if d_threshold else "N/A"
-                    print(f"Daily last bar age: {d_age:.1f}s (ts: {d_info['timestamp']}) | threshold: {d_threshold}s | status: {d_status}")
-                else:
-                    print("Daily last bar age: unavailable")
-                
-                # Decide fetch based on last write times from DB (write_timestamp column)
-                w_h = await _get_last_write_age_seconds(db_instance, args.symbol, 'hourly')
-                w_d = await _get_last_write_age_seconds(db_instance, args.symbol, 'daily')
-                w_h_age = w_h['age_seconds'] if w_h else None
-                w_d_age = w_d['age_seconds'] if w_d else None
-                print(f"Hourly last write: {w_h['timestamp'] if w_h else 'unknown'} | age: {w_h_age if w_h_age is not None else 'unknown'}s | threshold: {h_threshold}s")
-                print(f"Daily last write: {w_d['timestamp'] if w_d else 'unknown'} | age: {w_d_age if w_d_age is not None else 'unknown'}s | threshold: {d_threshold}s")
-                
-                need_hourly = bool(h_threshold and (w_h_age is None or w_h_age > h_threshold))
-                need_daily = bool(d_threshold and (w_d_age is None or w_d_age > d_threshold))
-                if need_hourly or need_daily:
+                    # Show hourly age with threshold
+                    if h_info:
+                        h_age = h_info['age_seconds']
+                        h_status = "STALE" if h_threshold and h_age > h_threshold else "FRESH" if h_threshold else "N/A"
+                        print(f"Hourly last bar age: {h_age:.1f}s (ts: {h_info['timestamp']}) | threshold: {h_threshold}s | status: {h_status}")
+                    else:
+                        print("Hourly last bar age: unavailable")
+                    
+                    # Show daily age with threshold  
+                    if d_info:
+                        d_age = d_info['age_seconds']
+                        d_status = "STALE" if d_threshold and d_age > d_threshold else "FRESH" if d_threshold else "N/A"
+                        print(f"Daily last bar age: {d_age:.1f}s (ts: {d_info['timestamp']}) | threshold: {d_threshold}s | status: {d_status}")
+                    else:
+                        print("Daily last bar age: unavailable")
+                    
+                    # Decide fetch based on last write times from DB (write_timestamp column)
+                    w_h_age = w_h['age_seconds'] if w_h else None
+                    w_d_age = w_d['age_seconds'] if w_d else None
+                    print(f"Hourly last write: {w_h['timestamp'] if w_h else 'unknown'} | age: {w_h_age if w_h_age is not None else 'unknown'}s | threshold: {h_threshold}s")
+                    print(f"Daily last write: {w_d['timestamp'] if w_d else 'unknown'} | age: {w_d_age if w_d_age is not None else 'unknown'}s | threshold: {d_threshold}s")
+                    
+                    need_hourly = bool(h_threshold and (w_h_age is None or w_h_age > h_threshold))
+                    need_daily = bool(d_threshold and (w_d_age is None or w_d_age > d_threshold))
                     print(f"Fetch decision (by last write): hourly={need_hourly}, daily={need_daily}")
+                except Exception as e:
+                    print(f"Age diagnostics error: {e}")
+                    need_hourly = False
+                    need_daily = False
+            else:
+                # Skip detailed checks - assume no fetching needed
+                need_hourly = False
+                need_daily = False
+                print("Fetch decision (by last write): hourly=False, daily=False (skipped detailed checks)")
+                
+                # Fetch daily and hourly data separately based on their individual needs
+                if need_daily or need_hourly:
                     try:
-                        refreshed = await fetch_and_save_data(
-                            symbol=args.symbol,
-                            data_dir=args.data_dir,
-                            stock_db_instance=db_instance,
-                            start_date=today_str,
-                            end_date=today_str,
-                            db_save_batch_size=args.db_batch_size,
-                            data_source=args.data_source,
-                            chunk_size=args.chunk_size,
-                            use_csv=args.use_csv
-                        )
-                        if refreshed:
-                            print("Fetch by last write: performed.")
+                        # Create separate fetch functions for daily and hourly
+                        daily_success = False
+                        hourly_success = False
+                        
+                        if need_daily:
+                            print("Fetching daily data...")
+                            daily_success = await fetch_and_save_data(
+                                symbol=args.symbol,
+                                data_dir=args.data_dir,
+                                stock_db_instance=db_instance,
+                                start_date=today_str,
+                                end_date=today_str,
+                                db_save_batch_size=args.db_batch_size,
+                                data_source=args.data_source,
+                                chunk_size=args.chunk_size,
+                                use_csv=args.use_csv,
+                                fetch_daily=True,
+                                fetch_hourly=False
+                            )
+                            if daily_success:
+                                print("Daily data fetch: successful.")
+                            else:
+                                print("Daily data fetch: failed.")
+                        
+                        if need_hourly:
+                            print("Fetching hourly data...")
+                            hourly_success = await fetch_and_save_data(
+                                symbol=args.symbol,
+                                data_dir=args.data_dir,
+                                stock_db_instance=db_instance,
+                                start_date=today_str,
+                                end_date=today_str,
+                                db_save_batch_size=args.db_batch_size,
+                                data_source=args.data_source,
+                                chunk_size=args.chunk_size,
+                                use_csv=args.use_csv,
+                                fetch_daily=False,
+                                fetch_hourly=True
+                            )
+                            if hourly_success:
+                                print("Hourly data fetch: successful.")
+                            else:
+                                print("Hourly data fetch: failed.")
+                        
+                        if daily_success or hourly_success:
+                            print("Fetch by last write: completed.")
                         else:
                             print("Fetch by last write: attempted but failed.")
                     except Exception as e:
                         print(f"Fetch by last write error: {e}")
                 else:
                     print("Fetch by last write: skipped (recent enough).")
-            except Exception as e:
-                print(f"Age diagnostics error: {e}")
 
             print()  # Spacing
             
-            # Check for today's daily data first (use inclusive range to catch 04:00 UTC bars)
+            # OPTIMIZATION: Combine all data queries into a single batch
+            # This reduces database round trips from 6+ queries to 2 queries
             from datetime import timedelta
             tomorrow_str = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
-            daily_df = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=tomorrow_str, interval='daily')
             
+            # Fetch both daily and hourly data in parallel
+            daily_task = db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=tomorrow_str, interval='daily')
+            hourly_task = db_instance.get_stock_data(args.symbol, interval='hourly')
+            
+            # Wait for both queries to complete
+            daily_df, hourly_df = await asyncio.gather(daily_task, hourly_task)
+            
+            # Display daily data
             if not daily_df.empty:
                 last_daily = daily_df.tail(1)
                 print("Today's Daily:")
@@ -1772,7 +1855,7 @@ async def main() -> None:
             else:
                 print("No daily row for today in DB.")
                 
-                # Show most recent daily as fallback
+                # Show most recent daily as fallback (only if needed)
                 print("Checking for most recent daily data...")
                 recent_daily_df = await db_instance.get_stock_data(args.symbol, interval='daily')
                 if not recent_daily_df.empty:
@@ -1783,7 +1866,7 @@ async def main() -> None:
                 else:
                     print("No daily data found in DB at all.")
                 
-                # If it's a trading day and most recent daily is before today, try to fetch it
+                # Only attempt fetch if it's a trading day and we don't have today's data
                 if (_is_market_hours() or (not _is_market_hours() and datetime.now().weekday() < 5)) and (not recent_daily_df.empty and last_date < today_str or recent_daily_df.empty):
                     print(f"\nTrading day detected, attempting to fetch today's data for {args.symbol}...")
                     try:
@@ -1820,15 +1903,10 @@ async def main() -> None:
                             print("Failed to fetch today's data.")
                     except Exception as e:
                         print(f"Error fetching today's data: {e}")
-                else:
-                    # If most recent daily is already today, rely on freshness pre-check above (no extra message)
-                    pass
 
             print()  # Spacing
 
-            # Get latest hourly data
-            hourly_df = await db_instance.get_stock_data(args.symbol, interval='hourly')
-            
+            # Display hourly data
             if not hourly_df.empty:
                 # Convert timezone for display
                 hourly_display_df = _convert_dataframe_timezone(hourly_df, args.timezone)
