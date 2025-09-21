@@ -242,22 +242,47 @@ class HistoricalDataFetcher:
                     'type': getattr(contract, 'contract_type', 'N/A'),
                     'strike': getattr(contract, 'strike_price', 'N/A'),
                     'expiration': getattr(contract, 'expiration_date', 'N/A'),
+                    'bid': None,
+                    'ask': None,
+                    'day_close': None,
+                    'fmv': None,
                 }
                 
                 # Fetch snapshot for current pricing and Greeks
                 try:
                     snapshot = self.client.get_snapshot_option(symbol, contract_ticker)
                     if snapshot:
-                        # Try different ways to get bid/ask prices
+                        # Get bid/ask from last_quote if available
                         if hasattr(snapshot, 'last_quote') and snapshot.last_quote:
                             contract_details['bid'] = getattr(snapshot.last_quote, 'bid', None)
                             contract_details['ask'] = getattr(snapshot.last_quote, 'ask', None)
-                        elif hasattr(snapshot, 'last_trade') and snapshot.last_trade:
-                            # Use last trade price if quote not available
+                        
+                        # Get last trade price if available
+                        if hasattr(snapshot, 'last_trade') and snapshot.last_trade:
                             last_price = getattr(snapshot.last_trade, 'price', None)
-                            if last_price:
+                            if last_price and not contract_details['bid']:
                                 contract_details['bid'] = last_price
                                 contract_details['ask'] = last_price
+                        
+                        # Get day close price
+                        if hasattr(snapshot, 'day') and snapshot.day:
+                            day_close = getattr(snapshot.day, 'close', None)
+                            if day_close:
+                                contract_details['day_close'] = day_close
+                                # Use day close as bid/ask if no other pricing available
+                                if not contract_details['bid']:
+                                    contract_details['bid'] = day_close
+                                    contract_details['ask'] = day_close
+                        
+                        # Get fair market value
+                        if hasattr(snapshot, 'fair_market_value') and snapshot.fair_market_value:
+                            fmv = getattr(snapshot.fair_market_value, 'value', None)
+                            if fmv:
+                                contract_details['fmv'] = fmv
+                                # Use FMV as bid/ask if no other pricing available
+                                if not contract_details['bid']:
+                                    contract_details['bid'] = fmv
+                                    contract_details['ask'] = fmv
                         
                         # Get Greeks if available
                         if hasattr(snapshot, 'greeks') and snapshot.greeks:
@@ -346,8 +371,7 @@ class HistoricalDataFetcher:
 
         # --- Options Data ---
         output.append(f"\n--- Options for {symbol} on {target_date} ---")
-        output.append("Note: Prices shown are from current market data (if available) or historical data as fallback.")
-        output.append("Greeks are from current market data when available.")
+        output.append("Note: Bid/Ask from real-time data if available, otherwise from day close. Day Close = daily close price. FMV = Fair Market Value. Greeks from current market data.")
 
         # Add a note about the filters
         filter_notes = []
@@ -424,12 +448,14 @@ class HistoricalDataFetcher:
                             f"${contract.get('strike'):.2f}",
                             f"${contract.get('bid'):.2f}" if contract.get('bid') is not None else 'N/A',
                             f"${contract.get('ask'):.2f}" if contract.get('ask') is not None else 'N/A',
+                            f"${contract.get('day_close'):.2f}" if contract.get('day_close') is not None else 'N/A',
+                            f"${contract.get('fmv'):.2f}" if contract.get('fmv') is not None else 'N/A',
                             f"{contract.get('delta'):.3f}" if contract.get('delta') is not None else 'N/A',
                             f"{contract.get('gamma'):.3f}" if contract.get('gamma') is not None else 'N/A',
                             f"{contract.get('theta'):.3f}" if contract.get('theta') is not None else 'N/A',
                             f"{contract.get('vega'):.3f}" if contract.get('vega') is not None else 'N/A',
                         ])
-                    output.append(tabulate(options_table, headers=['Ticker', 'Type', 'Strike', 'Bid', 'Ask', 'Delta', 'Gamma', 'Theta', 'Vega'], tablefmt='grid'))
+                    output.append(tabulate(options_table, headers=['Ticker', 'Type', 'Strike', 'Bid', 'Ask', 'Day Close', 'FMV', 'Delta', 'Gamma', 'Theta', 'Vega'], tablefmt='grid'))
         else:
             output.append(f"Could not fetch options data: {options_result.get('error', 'Unknown error')}")
             
