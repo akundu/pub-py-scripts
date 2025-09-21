@@ -179,6 +179,23 @@ def _get_et_now() -> datetime:
     et_tz = pytz.timezone('US/Eastern')
     return datetime.now(timezone.utc).astimezone(et_tz)
 
+def _get_last_trading_day(et_now: datetime = None) -> str:
+    """
+    Get the last trading day (Monday-Friday) as a string in YYYY-MM-DD format.
+    If today is a weekday, returns today. If today is weekend, returns the last Friday.
+    """
+    if et_now is None:
+        et_now = _get_et_now()
+    
+    # If it's a weekday (Monday=0, Friday=4), return today
+    if et_now.weekday() < 5:
+        return et_now.strftime('%Y-%m-%d')
+    
+    # If it's weekend, go back to find the last Friday
+    days_back = et_now.weekday() - 4  # Saturday=5->1 day back, Sunday=6->2 days back
+    last_trading_day = et_now - timedelta(days=days_back)
+    return last_trading_day.strftime('%Y-%m-%d')
+
 def _get_market_session(now_et: datetime | None = None) -> str:
     """Return one of: 'regular', 'premarket', 'afterhours', 'closed' based on ET time."""
     if now_et is None:
@@ -657,11 +674,11 @@ async def fetch_bars_single_aiohttp_all_pages(
             
     return all_bars_df
 
-def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: str, data_dir: str, use_csv: bool = False) -> pd.DataFrame:
+def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: str, data_dir: str, save_db_csv: bool = False) -> pd.DataFrame:
     """Helper function to merge new data with existing CSV data and optionally save."""
     if new_data_df.empty:
         # Do not read or merge from CSV unless explicitly enabled
-        if use_csv:
+        if save_db_csv:
             idx_name = 'date' if interval_type == 'daily' else 'datetime'
             csv_path = f'{data_dir}/{interval_type}/{symbol}_{interval_type}.csv'
             if os.path.exists(csv_path):
@@ -680,7 +697,7 @@ def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: s
     
     final_df = new_data_df # Start with new data (guaranteed timezone-naive index)
 
-    if use_csv and os.path.exists(csv_path):
+    if save_db_csv and os.path.exists(csv_path):
         try:
             existing_df = pd.read_csv(csv_path, index_col=idx_name, parse_dates=True)
             # Ensure existing_df.index is timezone-naive for consistent merging
@@ -697,7 +714,7 @@ def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: s
     
     final_df.sort_index(inplace=True)
     
-    if use_csv:
+    if save_db_csv:
         final_df.to_csv(csv_path)
         print(f"{interval_type.capitalize()} data for {symbol} merged/saved to CSV. Total rows: {len(final_df)}", file=sys.stderr)
     else:
@@ -717,7 +734,7 @@ async def fetch_and_save_data(
     db_save_batch_size: int = 1000,  # New parameter with default
     data_source: str = "polygon",  # New parameter for data source selection
     chunk_size: str = "monthly",  # New parameter for chunk size
-    use_csv: bool = False,  # New parameter for CSV usage control
+    save_db_csv: bool = False,  # New parameter for CSV usage control
     fetch_daily: bool = True,  # New parameter to control daily data fetching
     fetch_hourly: bool = True  # New parameter to control hourly data fetching
 ) -> bool:
@@ -784,7 +801,7 @@ async def fetch_and_save_data(
                     symbol, TimeFrame.Day, start_date_daily_api_str, end_date_api_str, API_KEY, API_SECRET
                 )
 
-            final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, symbol, 'daily', data_dir, use_csv)
+            final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, symbol, 'daily', data_dir, save_db_csv)
 
             # Use the passed db_save_batch_size parameter
             if not final_daily_bars.empty:
@@ -821,7 +838,7 @@ async def fetch_and_save_data(
                     symbol, TimeFrame.Hour, start_date_hourly_api_str, end_date_hourly_api_str, API_KEY, API_SECRET
                 )
 
-            final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, symbol, 'hourly', data_dir, use_csv)
+            final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, symbol, 'hourly', data_dir, save_db_csv)
 
             # Use the passed db_save_batch_size parameter
             if not final_hourly_bars.empty:
@@ -867,7 +884,7 @@ async def process_symbol_data(
     db_save_batch_size: int = 1000,  # New parameter with default
     data_source: str = "polygon",  # New parameter for data source selection
     chunk_size: str = "monthly",  # New parameter for chunk size
-    use_csv: bool = False  # New parameter for CSV usage control
+    save_db_csv: bool = False  # New parameter for CSV usage control
 ) -> pd.DataFrame:
     """Processes symbol data: queries DB, fetches if needed, and returns DataFrame."""
 
@@ -894,8 +911,8 @@ async def process_symbol_data(
             # Local database - use specified type
             current_db_instance = get_stock_db(db_type, actual_db_path)
 
-    # Calculate start_date based on days_back_fetch if provided
-    if days_back_fetch is not None:
+    # Calculate start_date based on days_back_fetch if provided and start_date is not already set
+    if days_back_fetch is not None and start_date is None:
         start_date = (datetime.now() - timedelta(days=days_back_fetch)).strftime(
             "%Y-%m-%d"
         )
@@ -967,7 +984,7 @@ async def process_symbol_data(
             db_save_batch_size=db_save_batch_size, # Pass it through
             data_source=data_source,  # Pass the new argument
             chunk_size=chunk_size,  # Pass the new argument
-            use_csv=use_csv  # Pass the new argument
+            save_db_csv=save_db_csv  # Pass the new argument
         ) 
 
         if fetch_success:
@@ -1550,10 +1567,16 @@ async def main() -> None:
         help="Timezone for displaying hourly data. Supports both full names (e.g., 'America/New_York', 'UTC') and abbreviations (e.g., 'EST', 'PST', 'EDT', 'PDT'). Defaults to local system timezone."
     )
     parser.add_argument(
-        "--use-csv",
+        "--save-db-csv",
         action="store_true",
         default=False,
         help="Use CSV files for merging and persistence in addition to the database. Disabled by default."
+    )
+    parser.add_argument(
+        "--csv-file",
+        type=str,
+        default=None,
+        help="Save the output data to a CSV file with the specified filename. Use '-' to print CSV to stdout."
     )
     args = parser.parse_args()
 
@@ -1568,8 +1591,22 @@ async def main() -> None:
     # Handle start-date and end-date logic based on user requirements
     today_str = datetime.now().strftime('%Y-%m-%d')
     
+    # Special case: If --days-back is specified, calculate start_date from end_date
+    if args.days_back is not None:
+        if args.end_date != today_str:
+            # Use the specified end_date and calculate start_date based on days_back
+            end_dt = datetime.strptime(args.end_date, '%Y-%m-%d')
+            start_dt = end_dt - timedelta(days=args.days_back)
+            args.start_date = start_dt.strftime('%Y-%m-%d')
+            print(f"Using --days-back {args.days_back} with end-date {args.end_date}, setting start-date to: {args.start_date}", file=sys.stderr)
+        else:
+            # Use today as end_date and calculate start_date based on days_back
+            end_dt = datetime.now()
+            start_dt = end_dt - timedelta(days=args.days_back)
+            args.start_date = start_dt.strftime('%Y-%m-%d')
+            print(f"Using --days-back {args.days_back} with today as end-date, setting start-date to: {args.start_date}", file=sys.stderr)
     # Case 1: No start-date and no end-date specified -> assume latest price
-    if args.start_date is None and args.end_date == today_str:
+    elif args.start_date is None and args.end_date == today_str:
         # This is the default case - treat as latest price request
         print("No start-date or end-date specified, assuming latest price request.", file=sys.stderr)
         # Set both to None to trigger current price logic
@@ -1670,7 +1707,7 @@ async def main() -> None:
                         db_save_batch_size=args.db_batch_size,
                         data_source=args.data_source,
                         chunk_size=args.chunk_size,
-                        use_csv=args.use_csv
+                        save_db_csv=args.save_db_csv
                     )
                     if fetch_success:
                         print(f"Freshness fetch: performed because realtime age>{max_age}s during {session} session.")
@@ -1795,7 +1832,7 @@ async def main() -> None:
                                 db_save_batch_size=args.db_batch_size,
                                 data_source=args.data_source,
                                 chunk_size=args.chunk_size,
-                                use_csv=args.use_csv,
+                                save_db_csv=args.save_db_csv,
                                 fetch_daily=True,
                                 fetch_hourly=False
                             )
@@ -1815,7 +1852,7 @@ async def main() -> None:
                                 db_save_batch_size=args.db_batch_size,
                                 data_source=args.data_source,
                                 chunk_size=args.chunk_size,
-                                use_csv=args.use_csv,
+                                save_db_csv=args.save_db_csv,
                                 fetch_daily=False,
                                 fetch_hourly=True
                             )
@@ -1837,7 +1874,6 @@ async def main() -> None:
             
             # OPTIMIZATION: Combine all data queries into a single batch
             # This reduces database round trips from 6+ queries to 2 queries
-            from datetime import timedelta
             tomorrow_str = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
             
             # Fetch both daily and hourly data in parallel
@@ -1847,7 +1883,7 @@ async def main() -> None:
             # Wait for both queries to complete
             daily_df, hourly_df = await asyncio.gather(daily_task, hourly_task)
             
-            # Display daily data
+            # Display daily data - check if we have today's data first
             if not daily_df.empty:
                 last_daily = daily_df.tail(1)
                 print("Today's Daily:")
@@ -1866,43 +1902,99 @@ async def main() -> None:
                 else:
                     print("No daily data found in DB at all.")
                 
-                # Only attempt fetch if it's a trading day and we don't have today's data
-                if (_is_market_hours() or (not _is_market_hours() and datetime.now().weekday() < 5)) and (not recent_daily_df.empty and last_date < today_str or recent_daily_df.empty):
-                    print(f"\nTrading day detected, attempting to fetch today's data for {args.symbol}...")
+                # Determine what date to fetch based on current day
+                et_now = _get_et_now()
+                last_trading_day = _get_last_trading_day(et_now)
+                
+                # Only attempt fetch if we don't have data for the last trading day
+                should_fetch = False
+                if recent_daily_df.empty:
+                    # No data at all in database - should fetch last trading day
+                    should_fetch = True
+                    fetch_date = last_trading_day
+                else:
+                    # Have some data, check if we need the last trading day's data
+                    last_date = recent_daily_df.index[-1].strftime('%Y-%m-%d')
+                    if last_date < last_trading_day:
+                        should_fetch = True
+                        fetch_date = last_trading_day
+                
+                if should_fetch:
+                    if fetch_date == today_str:
+                        print(f"\nTrading day detected, attempting to fetch today's data for {args.symbol}...")
+                    else:
+                        print(f"\nWeekend detected, attempting to fetch last trading day's data ({fetch_date}) for {args.symbol}...")
                     try:
-                        # Fetch today's data
+                        # Fetch the appropriate day's data
                         fetch_success = await fetch_and_save_data(
                             symbol=args.symbol,
                             data_dir=args.data_dir,
                             stock_db_instance=db_instance,
-                            start_date=today_str,
-                            end_date=today_str,
+                            start_date=fetch_date,
+                            end_date=fetch_date,
                             db_save_batch_size=args.db_batch_size,
                             data_source=args.data_source,
                             chunk_size=args.chunk_size,
-                            use_csv=args.use_csv
+                            save_db_csv=args.save_db_csv
                         )
                         
                         if fetch_success:
-                            # Try to get the data again (use inclusive range to catch 04:00 UTC bars)
-                            daily_df = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=tomorrow_str, interval='daily')
+                            # Try to get the data again - look for the fetched date
+                            next_day = (datetime.strptime(fetch_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+                            daily_df = await db_instance.get_stock_data(args.symbol, start_date=fetch_date, end_date=next_day, interval='daily')
                             if not daily_df.empty:
                                 last_daily = daily_df.tail(1)
-                                print("Today's Daily (freshly fetched):")
+                                if fetch_date == today_str:
+                                    print("Today's Daily (freshly fetched):")
+                                else:
+                                    print(f"Last Trading Day ({fetch_date}) Daily (freshly fetched):")
                                 print(last_daily[['open','high','low','close','volume']] if 'volume' in last_daily.columns else last_daily[['open','high','low','close']])
                             else:
-                                # As a fallback, accept most recent if it's for today
+                                # As a fallback, accept most recent if it's for the fetch date
                                 recent_daily_df = await db_instance.get_stock_data(args.symbol, interval='daily')
-                                if not recent_daily_df.empty and recent_daily_df.index[-1].strftime('%Y-%m-%d') == today_str:
+                                if not recent_daily_df.empty and recent_daily_df.index[-1].strftime('%Y-%m-%d') == fetch_date:
                                     last_daily = recent_daily_df.tail(1)
-                                    print("Today's Daily (from most recent after fetch):")
+                                    if fetch_date == today_str:
+                                        print("Today's Daily (from most recent after fetch):")
+                                    else:
+                                        print(f"Last Trading Day ({fetch_date}) Daily (from most recent after fetch):")
                                     print(last_daily[['open','high','low','close','volume']] if 'volume' in last_daily.columns else last_daily[['open','high','low','close']])
                                 else:
                                     print("Still no daily data available after fetch attempt.")
+                            
+                            # Also refresh the hourly data after successful fetch
+                            hourly_df = await db_instance.get_stock_data(args.symbol, interval='hourly')
                         else:
-                            print("Failed to fetch today's data.")
+                            if fetch_date == today_str:
+                                print("Failed to fetch today's data.")
+                            else:
+                                print(f"Failed to fetch last trading day's data ({fetch_date}).")
+                            
+                            # Even if fetch failed, try to show the most recent data from DB
+                            print("Checking for most recent data in database...")
+                            recent_daily_df = await db_instance.get_stock_data(args.symbol, interval='daily')
+                            if not recent_daily_df.empty:
+                                last_daily = recent_daily_df.tail(1)
+                                last_date = last_daily.index[0].strftime('%Y-%m-%d')
+                                print(f"Most Recent Daily ({last_date}):")
+                                print(last_daily[['open','high','low','close','volume']] if 'volume' in last_daily.columns else last_daily[['open','high','low','close']])
+                            
+                            # Also refresh hourly data
+                            hourly_df = await db_instance.get_stock_data(args.symbol, interval='hourly')
                     except Exception as e:
                         print(f"Error fetching today's data: {e}")
+                        
+                        # Even if there was an error, try to show the most recent data from DB
+                        print("Checking for most recent data in database...")
+                        recent_daily_df = await db_instance.get_stock_data(args.symbol, interval='daily')
+                        if not recent_daily_df.empty:
+                            last_daily = recent_daily_df.tail(1)
+                            last_date = last_daily.index[0].strftime('%Y-%m-%d')
+                            print(f"Most Recent Daily ({last_date}):")
+                            print(last_daily[['open','high','low','close','volume']] if 'volume' in last_daily.columns else last_daily[['open','high','low','close']])
+                        
+                        # Also refresh hourly data
+                        hourly_df = await db_instance.get_stock_data(args.symbol, interval='hourly')
 
             print()  # Spacing
 
@@ -1956,7 +2048,7 @@ async def main() -> None:
             db_save_batch_size=args.db_batch_size, # Pass the new argument
             data_source=args.data_source,  # Pass the new argument
             chunk_size=args.chunk_size,  # Pass the new argument
-            use_csv=args.use_csv,  # Pass the new argument
+            save_db_csv=args.save_db_csv,  # Pass the new argument
             stock_db_instance=db_instance_for_cleanup  # Pass the instance we created
         )
 
@@ -1965,18 +2057,58 @@ async def main() -> None:
             display_df = _convert_dataframe_timezone(final_df, args.timezone)
             
             print(f"\n--- {args.symbol} ({args.timeframe.capitalize()}) Data ({args.start_date or 'Earliest'} to {args.end_date}) ---")
+            
+            # Determine if we should show complete data (no truncation)
+            show_complete = args.days_back is not None or (args.csv_file == '-')
+            
             if args.show_volume:
                 # Display all columns including volume
-                print(display_df)
+                if show_complete:
+                    # Set pandas display options to show all rows
+                    with pd.option_context('display.max_rows', None, 'display.width', None, 'display.max_columns', None):
+                        print(display_df)
+                else:
+                    print(display_df)
             else:
                 # Display only OHLC columns (exclude volume)
                 display_columns = ['open', 'high', 'low', 'close']
                 available_columns = [col for col in display_columns if col in display_df.columns]
                 if available_columns:
-                    print(display_df[available_columns])
+                    if show_complete:
+                        # Set pandas display options to show all rows
+                        with pd.option_context('display.max_rows', None, 'display.width', None, 'display.max_columns', None):
+                            print(display_df[available_columns])
+                    else:
+                        print(display_df[available_columns])
                 else:
-                    print(display_df)
+                    if show_complete:
+                        # Set pandas display options to show all rows
+                        with pd.option_context('display.max_rows', None, 'display.width', None, 'display.max_columns', None):
+                            print(display_df)
+                    else:
+                        print(display_df)
             
+            # Save to CSV file if requested
+            if args.csv_file:
+                try:
+                    if args.csv_file == '-':
+                        # Print CSV to stdout
+                        print(f"\n--- CSV Output ---")
+                        display_df.to_csv(sys.stdout)
+                        print(f"\n--- End CSV Output ---")
+                    else:
+                        # Save to file
+                        # Ensure the directory exists
+                        csv_dir = os.path.dirname(args.csv_file)
+                        if csv_dir and not os.path.exists(csv_dir):
+                            os.makedirs(csv_dir, exist_ok=True)
+                        
+                        # Save the display DataFrame to CSV
+                        display_df.to_csv(args.csv_file)
+                        print(f"\nData saved to CSV file: {args.csv_file}")
+                        print(f"Total rows saved: {len(display_df)}")
+                except Exception as e:
+                    print(f"Error saving to CSV file {args.csv_file}: {e}", file=sys.stderr)
             
             print(f"--- End of Data ---")
         elif not args.query_only: 
