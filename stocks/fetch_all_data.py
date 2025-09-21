@@ -133,7 +133,7 @@ def fetch_comprehensive_data(
     include_volume: bool = True,
     include_quotes: bool = True,
     include_trades: bool = True,
-    use_csv: bool = False
+    save_db_csv: bool = False
 ) -> dict:
     """Fetch comprehensive data including volume, quotes, and trades."""
     worker_db_instance = None
@@ -157,7 +157,7 @@ def fetch_comprehensive_data(
             days_back_val,
             db_save_batch_size_val,
             chunk_size=chunk_size_val,
-            use_csv=use_csv
+            save_db_csv=save_db_csv
         ))
         
         result = {
@@ -313,7 +313,7 @@ def fetch_price_and_save(
     db_save_batch_size_val: int,
     chunk_size_val: str = "monthly",  # New parameter with default
     client_timeout: float | None = None,
-    use_csv: bool = False
+    save_db_csv: bool = False
 ) -> bool:
     """Creates a DB instance in the worker thread and runs fetch_and_save_data."""
     print(f"{os.getpid()} Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr, flush=True)
@@ -344,7 +344,7 @@ def fetch_price_and_save(
             days_back_val,
             db_save_batch_size_val,
             chunk_size=chunk_size_val,  # Pass the new parameter
-            use_csv=use_csv  # Pass the new parameter
+            save_db_csv=save_db_csv  # Pass the new parameter with correct name
         ))
         return result
     except Exception as e:
@@ -411,7 +411,7 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                     args.include_volume,
                     args.include_quotes,
                     args.include_trades,
-                    args.use_csv
+                    args.save_db_csv
                 )
             else:
                 task = executor.submit(
@@ -425,7 +425,7 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                     args.db_batch_size,
                     args.chunk_size,  # Pass the new parameter
                     args.client_timeout,
-                    args.use_csv
+                    args.save_db_csv
                 )
             stock_tasks.append((task, symbol_to_fetch))
         
@@ -690,7 +690,7 @@ def parse_args():
         help='Save results to file (specify filename, extension determines format)'
     )
     parser.add_argument(
-        "--use-csv",
+        "--save-db-csv",
         action="store_true",
         default=False,
         help="Save data to CSV files in addition to database. CSV saving is disabled by default."
