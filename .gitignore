@@ -30,3 +30,6 @@ data/
 # tmp
 tmp*/
 tmp*
+
+# MDs
+MDs/

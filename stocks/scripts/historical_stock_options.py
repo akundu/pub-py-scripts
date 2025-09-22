@@ -8,6 +8,9 @@ symbol on a specific historical date.
 Usage:
     export POLYGON_API_KEY=YOUR_API_KEY
     python historical_stock_options.py AAPL 2024-06-01
+    python historical_stock_options.py --symbols AAPL MSFT GOOGL --date 2024-06-01
+    python historical_stock_options.py --symbols-list symbols.yaml --date 2024-06-01
+    python historical_stock_options.py --types sp-500 --date 2024-06-01
 """
 
 import os
@@ -17,10 +20,20 @@ import asyncio
 import time
 import csv
 import pandas as pd
+import yaml
 from datetime import datetime, timedelta
 from typing import Dict, List, Any
 from tabulate import tabulate
 from pathlib import Path
+
+# Ensure project root is on sys.path so `common` can be imported when running from any cwd
+CURRENT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = CURRENT_DIR.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# Import common symbol loading functions
+from common.symbol_loader import add_symbol_arguments, fetch_lists_data
 
 try:
     from polygon import RESTClient
@@ -31,12 +44,13 @@ except ImportError:
 class HistoricalDataFetcher:
     """Fetches historical stock and options data from Polygon.io."""
 
-    def __init__(self, api_key: str, data_dir: str = "data"):
+    def __init__(self, api_key: str, data_dir: str = "data", quiet: bool = False):
         if not api_key:
             raise ValueError("Polygon API key is required.")
         self.client = RESTClient(api_key)
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(exist_ok=True)
+        self.quiet = quiet
 
     def _is_market_open(self, dt: datetime = None) -> bool:
         """Check if market is currently open (9:30 AM - 4:00 PM ET, Mon-Fri)."""
@@ -138,7 +152,8 @@ class HistoricalDataFetcher:
                     writer.writeheader()
                 writer.writerows(csv_data)
             
-            print(f"Saved {len(csv_data)} contracts for {symbol} expiration {exp_date} to {csv_path}")
+            if not self.quiet:
+                print(f"Saved {len(csv_data)} contracts for {symbol} expiration {exp_date} to {csv_path}")
 
     def _load_options_from_csv(self, symbol: str, expiration_date: str) -> List[Dict[str, Any]]:
         """Load the most recent options data from CSV file."""
@@ -197,7 +212,8 @@ class HistoricalDataFetcher:
         search_start = (target_date_dt - timedelta(days=7)).strftime('%Y-%m-%d')
         search_end = target_date_str
         
-        print(f"Fetching historical price for {symbol} on or before {target_date_str}...", flush=True)
+        if not self.quiet:
+            print(f"Fetching historical price for {symbol} on or before {target_date_str}...", flush=True)
 
         try:
             # Sort descending and limit to 1 to get the latest trading day on or before the target date
@@ -219,7 +235,8 @@ class HistoricalDataFetcher:
             bar = aggs[0]
             trading_date = datetime.fromtimestamp(bar.timestamp / 1000).strftime('%Y-%m-%d')
             
-            print(f"Found data for trading day: {trading_date} (requested: {target_date_str})")
+            if not self.quiet:
+                print(f"Found data for trading day: {trading_date} (requested: {target_date_str})")
             
             return {"success": True, "data": {
                 'target_date': target_date_str,
@@ -253,7 +270,8 @@ class HistoricalDataFetcher:
         options_data = {"contracts": []}
         target_date_dt = datetime.strptime(target_date_str, '%Y-%m-%d')
         
-        print(f"Fetching options for {symbol} expiring around {target_date_str}...")
+        if not self.quiet:
+            print(f"Fetching options for {symbol} expiring around {target_date_str}...")
         overall_start_time = time.time()
         
         # Check if we should use cached data
@@ -272,7 +290,8 @@ class HistoricalDataFetcher:
                         if cached_contracts:
                             options_data["contracts"].extend(cached_contracts)
                             cache_hit = True
-                            print(f"Loaded {len(cached_contracts)} contracts from cache for {exp_date_str}")
+                            if not self.quiet:
+                                print(f"Loaded {len(cached_contracts)} contracts from cache for {exp_date_str}")
             else:
                 # Check cache for the target date
                 csv_path = self._get_csv_path(symbol, target_date_str)
@@ -281,10 +300,12 @@ class HistoricalDataFetcher:
                     if cached_contracts:
                         options_data["contracts"] = cached_contracts
                         cache_hit = True
-                        print(f"Loaded {len(cached_contracts)} contracts from cache for {target_date_str}")
+                        if not self.quiet:
+                            print(f"Loaded {len(cached_contracts)} contracts from cache for {target_date_str}")
             
             if cache_hit:
-                print(f"Using cached data. Cache duration: {self._get_cache_duration_minutes()} minutes")
+                if not self.quiet:
+                    print(f"Using cached data. Cache duration: {self._get_cache_duration_minutes()} minutes")
                 return {"success": True, "data": options_data}
         
         try:
@@ -300,13 +321,16 @@ class HistoricalDataFetcher:
                 
                 max_date = target_date_dt + timedelta(days=max_days_to_expiry)
                 expiration_date_lte = max_date.strftime('%Y-%m-%d')
-                print(f"  ...searching for expirations between {expiration_date_gte} and {expiration_date_lte}", flush=True)
+                if not self.quiet:
+                    print(f"  ...searching for expirations between {expiration_date_gte} and {expiration_date_lte}", flush=True)
             else:
-                 print(f"  ...searching for expirations on or after {expiration_date_gte}", flush=True)
+                if not self.quiet:
+                    print(f"  ...searching for expirations on or after {expiration_date_gte}", flush=True)
 
 
             # Fetch active contracts that meet the date criteria
-            print("  ...fetching active contracts within date range...", flush=True)
+            if not self.quiet:
+                print("  ...fetching active contracts within date range...", flush=True)
             fetch_active_start = time.time()
             active_contracts_generator = self.client.list_options_contracts(
                 underlying_ticker=symbol,
@@ -319,12 +343,13 @@ class HistoricalDataFetcher:
             # --- Manual iteration for debugging ---
             all_contracts = []
             page_num = 1
-            print("  Iterating through active contract pages from API...", flush=True)
+            if not self.quiet:
+                print("  Iterating through active contract pages from API...", flush=True)
             page_start_time = time.time()
             try:
                 for contract in active_contracts_generator:
                     all_contracts.append(contract)
-                    if len(all_contracts) % 250 == 0: # Print progress every 250 contracts
+                    if len(all_contracts) % 250 == 0 and not self.quiet: # Print progress every 250 contracts
                         page_end_time = time.time()
                         print(f"    ... fetched page {page_num} ({len(all_contracts)} total), took {page_end_time - page_start_time:.2f}s", flush=True)
                         page_start_time = time.time()
@@ -334,12 +359,14 @@ class HistoricalDataFetcher:
             # --- End Manual iteration ---
 
             fetch_active_end = time.time()
-            print(f"  [TIMER] Finished iterating active contracts. Total took {fetch_active_end - fetch_active_start:.2f} seconds.")
+            if not self.quiet:
+                print(f"  [TIMER] Finished iterating active contracts. Total took {fetch_active_end - fetch_active_start:.2f} seconds.")
 
 
             # Conditionally fetch expired contracts if requested
             if include_expired:
-                print("  ...fetching EXPIRED contracts (this may be slow)...", flush=True)
+                if not self.quiet:
+                    print("  ...fetching EXPIRED contracts (this may be slow)...", flush=True)
                 fetch_expired_start = time.time()
                 expired_contracts_generator = self.client.list_options_contracts(
                     underlying_ticker=symbol,
@@ -352,12 +379,13 @@ class HistoricalDataFetcher:
                 # Manual iteration for debugging
                 expired_contracts_list = []
                 page_num = 1
-                print("  Iterating through EXPIRED contract pages from API...", flush=True)
+                if not self.quiet:
+                    print("  Iterating through EXPIRED contract pages from API...", flush=True)
                 page_start_time = time.time()
                 try:
                     for contract in expired_contracts_generator:
                         expired_contracts_list.append(contract)
-                        if len(expired_contracts_list) % 250 == 0:
+                        if len(expired_contracts_list) % 250 == 0 and not self.quiet:
                             page_end_time = time.time()
                             print(f"    ... fetched EXPIRED page {page_num} ({len(expired_contracts_list)} total), took {page_end_time - page_start_time:.2f}s", flush=True)
                             page_start_time = time.time()
@@ -368,9 +396,11 @@ class HistoricalDataFetcher:
                 # --- End Manual iteration ---
 
                 fetch_expired_end = time.time()
-                print(f"  [TIMER] Finished iterating expired contracts. Total took {fetch_expired_end - fetch_expired_start:.2f} seconds.")
+                if not self.quiet:
+                    print(f"  [TIMER] Finished iterating expired contracts. Total took {fetch_expired_end - fetch_expired_start:.2f} seconds.")
 
-            print(f"Found a total of {len(all_contracts)} contracts from API.", flush=True)
+            if not self.quiet:
+                print(f"Found a total of {len(all_contracts)} contracts from API.", flush=True)
 
 
             # The API has already filtered by date, so all returned contracts are relevant.
@@ -384,7 +414,8 @@ class HistoricalDataFetcher:
 
             # 1. Filter by option type
             if option_type != 'all':
-                print(f"Filtering for '{option_type}' options...")
+                if not self.quiet:
+                    print(f"Filtering for '{option_type}' options...")
                 filtered_contracts = [
                     c for c in filtered_contracts
                     if getattr(c, 'contract_type', '').lower() == option_type
@@ -392,7 +423,8 @@ class HistoricalDataFetcher:
 
             # 2. Filter by strike price range
             if strike_range_percent is not None and stock_close_price is not None:
-                print(f"Filtering for strikes within {strike_range_percent}% of close price ${stock_close_price:.2f}...")
+                if not self.quiet:
+                    print(f"Filtering for strikes within {strike_range_percent}% of close price ${stock_close_price:.2f}...")
                 min_strike = stock_close_price * (1 - strike_range_percent / 100)
                 max_strike = stock_close_price * (1 + strike_range_percent / 100)
                 
@@ -402,14 +434,16 @@ class HistoricalDataFetcher:
                 ]
 
             filter_end = time.time()
-            print(f"  [TIMER] Local filtering took {filter_end - filter_start:.2f} seconds.")
+            if not self.quiet:
+                print(f"  [TIMER] Local filtering took {filter_end - filter_start:.2f} seconds.")
 
-            print(f"Found {len(filtered_contracts)} contracts after filtering. Fetching snapshot data for all {len(filtered_contracts)} contracts...", flush=True)
+            if not self.quiet:
+                print(f"Found {len(filtered_contracts)} contracts after filtering. Fetching snapshot data for all {len(filtered_contracts)} contracts...", flush=True)
 
             # --- Fetch snapshot data only for the contracts we will display ---
             processing_start = time.time()
             for i, contract in enumerate(filtered_contracts): # Process all contracts
-                if i > 0 and i % 10 == 0:
+                if i > 0 and i % 10 == 0 and not self.quiet:
                     print(f"  ...processed {i} of {len(filtered_contracts)} contracts...", flush=True)
 
                 contract_ticker = getattr(contract, 'ticker', None)
@@ -471,18 +505,19 @@ class HistoricalDataFetcher:
                             contract_details['vega'] = getattr(snapshot.greeks, 'vega', None)
                         
                         # Debug: print what we got from snapshot
-                        if i < 3:  # Only print first 3 for debugging
+                        if i < 3 and not self.quiet:  # Only print first 3 for debugging
                             print(f"    DEBUG: Snapshot for {contract_ticker}: bid={contract_details.get('bid')}, ask={contract_details.get('ask')}")
                             
                 except Exception as e:
                     # Log the specific error for debugging
-                    if i < 3:  # Only print first 3 errors
+                    if i < 3 and not self.quiet:  # Only print first 3 errors
                         print(f"    DEBUG: Snapshot error for {contract_ticker}: {e}")
                     
                     # Try to get historical option data as fallback
                     try:
                         if i < 3:  # Only try for first 3 contracts to avoid API spam
-                            print(f"    DEBUG: Trying historical data for {contract_ticker}...")
+                            if not self.quiet:
+                                print(f"    DEBUG: Trying historical data for {contract_ticker}...")
                             # Get historical option data for the target date
                             historical_data = self.client.get_aggs(
                                 ticker=contract_ticker,
@@ -498,19 +533,22 @@ class HistoricalDataFetcher:
                                 bar = historical_data[0]
                                 contract_details['bid'] = bar.close
                                 contract_details['ask'] = bar.close
-                                print(f"    DEBUG: Historical price for {contract_ticker}: ${bar.close:.2f}")
+                                if not self.quiet:
+                                    print(f"    DEBUG: Historical price for {contract_ticker}: ${bar.close:.2f}")
                     except Exception as hist_e:
-                        if i < 3:
+                        if i < 3 and not self.quiet:
                             print(f"    DEBUG: Historical data also failed for {contract_ticker}: {hist_e}")
                     pass
 
                 options_data["contracts"].append(contract_details)
 
             processing_end = time.time()
-            print(f"  [TIMER] Processing and fetching snapshots for {len(filtered_contracts)} contracts took {processing_end - processing_start:.2f} seconds.")
+            if not self.quiet:
+                print(f"  [TIMER] Processing and fetching snapshots for {len(filtered_contracts)} contracts took {processing_end - processing_start:.2f} seconds.")
             
             overall_end_time = time.time()
-            print(f"  [TIMER] Total time for get_active_options_for_date: {overall_end_time - overall_start_time:.2f} seconds.")
+            if not self.quiet:
+                print(f"  [TIMER] Total time for get_active_options_for_date: {overall_end_time - overall_start_time:.2f} seconds.")
 
         except Exception as e:
             return self._handle_api_error(e, "options data")
@@ -642,7 +680,8 @@ class HistoricalDataFetcher:
         else:
             output.append(f"Could not fetch options data: {options_result.get('error', 'Unknown error')}")
             
-        print("\n".join(output))
+        if not self.quiet:
+            print("\n".join(output))
 
 async def main():
     """Main function to run the data fetcher."""
@@ -655,8 +694,17 @@ async def main():
         description="Fetch historical stock and options data for a specific date from Polygon.io.",
         epilog="""
 Examples:
-  # Get data for a specific date
+  # Get data for a specific date (single symbol)
   python historical_stock_options.py AAPL --date 2024-06-05
+
+  # Get data for multiple symbols
+  python historical_stock_options.py --symbols AAPL MSFT GOOGL --date 2024-06-05
+
+  # Get data from YAML file
+  python historical_stock_options.py --symbols-list symbols.yaml --date 2024-06-05
+
+  # Get data for S&P 500 stocks
+  python historical_stock_options.py --types sp-500 --date 2024-06-05
 
   # Get data for today (default) and show only calls
   python historical_stock_options.py TSLA --option-type call
@@ -666,9 +714,15 @@ Examples:
 
   # Get historical data for a past date, including expired contracts (can be slow)
   python historical_stock_options.py TQQQ --date 2024-05-01 --max-days-to-expiry 14 --include-expired
+
+  # Quiet mode - suppress output but still save CSV files
+  python historical_stock_options.py --symbols AAPL MSFT --date 2024-06-05 --quiet
 """
     )
-    parser.add_argument('symbol', help="The stock symbol (e.g., AAPL).")
+    
+    # Add symbol input arguments using common library
+    add_symbol_arguments(parser, required=True)
+    
     parser.add_argument(
         '--date',
         default=datetime.now().strftime('%Y-%m-%d'),
@@ -713,6 +767,11 @@ Examples:
         action='store_true',
         help="Force fresh data fetch, bypassing cache."
     )
+    parser.add_argument(
+        '--quiet',
+        action='store_true',
+        help="Suppress output but still save CSV files."
+    )
     
     args = parser.parse_args()
     
@@ -727,38 +786,48 @@ Examples:
         print(f"Error: Invalid date format '{args.date}'. Please use YYYY-MM-DD.", file=sys.stderr)
         sys.exit(1)
 
-    fetcher = HistoricalDataFetcher(api_key, args.data_dir)
-    
-    # Step 1: Fetch stock price first, as it's needed for filtering
-    print(f"--- Starting data fetch for {args.symbol.upper()} on {args.date} ---", flush=True)
-    stock_result = await fetcher.get_stock_price_for_date(args.symbol.upper(), args.date)
+    # Get symbols list using common library
+    symbols_list = await fetch_lists_data(args, args.quiet)
+    if not symbols_list:
+        print("No symbols specified or found. Exiting.", file=sys.stderr)
+        sys.exit(1)
 
-    stock_close_price = None
-    if stock_result.get('success'):
-        stock_close_price = stock_result['data'].get('close')
-
-    # Step 2: Fetch options, passing in the filters
-    options_result = await fetcher.get_active_options_for_date(
-        symbol=args.symbol.upper(),
-        target_date_str=args.date,
-        option_type=args.option_type,
-        stock_close_price=stock_close_price,
-        strike_range_percent=args.strike_range_percent,
-        max_days_to_expiry=args.max_days_to_expiry,
-        include_expired=args.include_expired,
-        use_cache=not args.no_cache
-    )
+    fetcher = HistoricalDataFetcher(api_key, args.data_dir, args.quiet)
     
-    fetcher.format_output(
-        symbol=args.symbol.upper(),
-        target_date=args.date,
-        stock_result=stock_result,
-        options_result=options_result,
-        option_type=args.option_type,
-        strike_range_percent=args.strike_range_percent,
-        options_per_expiry=args.options_per_expiry,
-        max_days_to_expiry=args.max_days_to_expiry
-    )
+    # Process each symbol
+    for symbol in symbols_list:
+        if not args.quiet:
+            print(f"--- Starting data fetch for {symbol} on {args.date} ---", flush=True)
+        
+        # Step 1: Fetch stock price first, as it's needed for filtering
+        stock_result = await fetcher.get_stock_price_for_date(symbol, args.date)
+
+        stock_close_price = None
+        if stock_result.get('success'):
+            stock_close_price = stock_result['data'].get('close')
+
+        # Step 2: Fetch options, passing in the filters
+        options_result = await fetcher.get_active_options_for_date(
+            symbol=symbol,
+            target_date_str=args.date,
+            option_type=args.option_type,
+            stock_close_price=stock_close_price,
+            strike_range_percent=args.strike_range_percent,
+            max_days_to_expiry=args.max_days_to_expiry,
+            include_expired=args.include_expired,
+            use_cache=not args.no_cache
+        )
+        
+        fetcher.format_output(
+            symbol=symbol,
+            target_date=args.date,
+            stock_result=stock_result,
+            options_result=options_result,
+            option_type=args.option_type,
+            strike_range_percent=args.strike_range_percent,
+            options_per_expiry=args.options_per_expiry,
+            max_days_to_expiry=args.max_days_to_expiry
+        )
 
 if __name__ == "__main__":
     try:

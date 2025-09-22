@@ -1,4 +1,4 @@
-from fetch_lists_data import ALL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
+from common.symbol_loader import add_symbol_arguments, fetch_lists_data
 from fetch_symbol_data import fetch_and_save_data, get_current_price, _is_market_hours
 from common.stock_db import get_stock_db, get_default_db_path
 import asyncio
@@ -11,25 +11,6 @@ from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from zoneinfo import ZoneInfo
 import logging
-
-def load_symbols_from_yaml(yaml_file: str) -> list[str]:
-    """Load symbols from a YAML file."""
-    try:
-        with open(yaml_file, 'r') as f:
-            data = yaml.safe_load(f)
-            if isinstance(data, dict) and 'symbols' in data:
-                symbols = data['symbols']
-                if isinstance(symbols, list):
-                    return symbols
-                else:
-                    print(f"Error: 'symbols' in {yaml_file} should be a list.", file=sys.stderr)
-                    return []
-            else:
-                print(f"Error: Invalid YAML format in {yaml_file}. Expected 'symbols' key.", file=sys.stderr)
-                return []
-    except Exception as e:
-        print(f"Error loading symbols from {yaml_file}: {e}", file=sys.stderr)
-        return []
 
 def get_timezone_aware_time(tz_name: str = "America/New_York") -> datetime:
     """Get current time in specified timezone."""
@@ -554,30 +535,13 @@ def parse_args():
     parser.add_argument('--data-dir', default='./data',
                       help='Directory to store data (default: ./data)')
     
-    # Create a mutually exclusive group for symbol input methods
-    symbol_group = parser.add_mutually_exclusive_group()
-    symbol_group.add_argument(
-        '--symbols',
-        nargs='+',
-        help='One or more stock symbols (e.g., AAPL MSFT GOOGL). Mutually exclusive with --types and --symbols-list.'
-    )
-    symbol_group.add_argument(
-        '--symbols-list',
-        type=str,
-        help='Path to a YAML file containing a list of symbols under the \'symbols\' key. Mutually exclusive with --types and --symbols.'
-    )
-    symbol_group.add_argument('--types', nargs='+', 
-                      choices=ALL_AVAILABLE_TYPES + ['all'],
-                      help='Types of symbol lists to process. \'all\' processes all. Used with --fetch-online for network fetch. Mutually exclusive with --symbols and --symbols-list.')
+    # Add symbol input arguments using common library
+    add_symbol_arguments(parser, required=False)
     
-    parser.add_argument('--limit', type=int, default=None,
-                      help='Limit symbols for market data fetch (default: None)')
     parser.add_argument('--max-concurrent', type=int, default=None,
                       help='Max concurrent workers for market data fetches (default: os.cpu_count() for processes, os.cpu_count()*5 for threads)')
     parser.add_argument('--fetch-market-data', action='store_true',
                       help='Fetch historical market data for selected symbols. Disabled by default.')
-    parser.add_argument('--fetch-online', action='store_true', default=False,
-                        help='Force fetch symbol lists from network. Default loads from disk.')
 
     # Database configuration arguments
     parser.add_argument(
@@ -938,39 +902,7 @@ def save_results(results: list, filename: str, format_type: str = "json") -> Non
         with open(filename, 'w') as f:
             f.write(format_results_table(results))
 
-async def fetch_lists_data(args: argparse.Namespace):
-    all_symbols_list = []
-    
-    # Handle explicit symbols provided via command line
-    if args.symbols:
-        all_symbols_list = args.symbols
-        print(f"Using {len(all_symbols_list)} symbols provided via --symbols: {', '.join(all_symbols_list)}")
-    
-    # Handle symbols from YAML file
-    elif args.symbols_list:
-        all_symbols_list = load_symbols_from_yaml(args.symbols_list)
-        if all_symbols_list:
-            print(f"Loaded {len(all_symbols_list)} symbols from YAML file: {args.symbols_list}")
-        else:
-            print(f"Warning: No symbols loaded from YAML file: {args.symbols_list}")
-    
-    # Handle traditional types-based symbol loading
-    elif args.types:
-        if not args.fetch_online:
-            all_symbols_list = load_symbols_from_disk(args) # Assumes args.data_dir is used internally
-            if not all_symbols_list:
-                print(f"Info: Could not load symbols for {args.types} from disk. Use --fetch-online to fetch them.")
-        else:
-            print("Fetching symbol lists from network as --fetch-online was specified.")
-            all_symbols_list = await fetch_types(args) # Assumes args is passed and handled
-    
-    # Apply limit if specified
-    if args.limit and all_symbols_list:
-        original_count = len(all_symbols_list)
-        all_symbols_list = all_symbols_list[:args.limit]
-        print(f"Limited to {len(all_symbols_list)} symbols for market data fetching (from {original_count})")
-    
-    return all_symbols_list
+# The fetch_lists_data function is now imported from common.symbol_loader
 
 # Main function to orchestrate fetching
 async def main():
@@ -995,7 +927,7 @@ async def main():
             os.makedirs(os.path.join(args.data_dir, 'daily'), exist_ok=True)
             os.makedirs(os.path.join(args.data_dir, 'hourly'), exist_ok=True)
 
-    all_symbols_list = await fetch_lists_data(args)
+    all_symbols_list = await fetch_lists_data(args, quiet=False)
 
     if not all_symbols_list:
         print("No symbols specified or found. Skipping market data fetching.")
