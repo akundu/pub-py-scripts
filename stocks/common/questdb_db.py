@@ -57,8 +57,8 @@ class StockQuestDB(StockDBBase):
             
         super().__init__(db_config, logger)
         
-        if original_config.startswith('questdb://'):
-            self.logger.info(f"Converted questdb:// URL to postgresql:// for QuestDB compatibility")
+        # if original_config.startswith('questdb://'):
+        #     self.logger.info(f"Converted questdb:// URL to postgresql:// for QuestDB compatibility")
         
         # QuestDB-specific configuration
         self.pool_max_size = pool_max_size
