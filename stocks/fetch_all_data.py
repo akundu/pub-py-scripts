@@ -791,7 +791,7 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
     
     The function optimizes fetch intervals based on:
     - The actual time taken for the last fetch
-    - Market hours awareness (if enabled)
+    - Market hours awareness (if enabled), with transition-aware scheduling
     """
     print(f"Starting continuous latest data fetch for {len(all_symbols_list)} symbols...")
     print(f"Max runs: {args.continuous_max_runs if args.continuous_max_runs else 'unlimited'}")

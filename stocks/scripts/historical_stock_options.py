@@ -21,10 +21,11 @@ import time
 import csv
 import pandas as pd
 import yaml
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any
 from tabulate import tabulate
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 # Ensure project root is on sys.path so `common` can be imported when running from any cwd
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -43,16 +44,69 @@ except ImportError:
 
 class HistoricalDataFetcher:
     """Fetches historical stock and options data from Polygon.io."""
+    CACHE_DURATION_MINUTES = {
+        'market_open': 30,
+        'market_closed': 360,
+        'post_market': 90,
+    }
 
-    def __init__(self, api_key: str, data_dir: str = "data", quiet: bool = False):
+    @staticmethod
+    def _compute_market_transition_times(now_utc: datetime, tz_name: str = "America/New_York") -> tuple[float | None, float | None]:
+        """Compute time in seconds to next regular market open and close from now.
+
+        - Market hours assumed: 09:30–16:00 local (Mon–Fri). Holidays not considered.
+        - Returns (seconds_to_open, seconds_to_close). Either may be None if not applicable.
+        """
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = ZoneInfo("America/New_York")
+
+        now_local = now_utc.astimezone(tz)
+
+        # Build today's open/close
+        today_open = now_local.replace(hour=9, minute=30, second=0, microsecond=0)
+        today_close = now_local.replace(hour=16, minute=0, second=0, microsecond=0)
+
+        # Helper to advance to next weekday (Mon-Fri)
+        def next_weekday(dt: datetime) -> datetime:
+            d = dt
+            while d.weekday() >= 5:  # 5=Sat, 6=Sun
+                d = d + timedelta(days=1)
+            return d
+
+        seconds_to_open: float | None = None
+        seconds_to_close: float | None = None
+
+        # Compute seconds to next open
+        if now_local < today_open:
+            seconds_to_open = (today_open - now_local).total_seconds()
+        else:
+            # Find next trading day's open
+            next_day = next_weekday((now_local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0))
+            next_open = next_day.replace(hour=9, minute=30, second=0, microsecond=0)
+            seconds_to_open = (next_open - now_local).total_seconds()
+
+        # Compute seconds to close if currently before today's close and it's a weekday
+        if now_local.weekday() < 5 and now_local < today_close:
+            seconds_to_close = (today_close - now_local).total_seconds()
+        else:
+            seconds_to_close = None
+
+        return (seconds_to_open, seconds_to_close)
+
+    def __init__(self, api_key: str, data_dir: str = "data", quiet: bool = False, snapshot_max_concurrent: int = 0):
         if not api_key:
             raise ValueError("Polygon API key is required.")
         self.client = RESTClient(api_key)
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(exist_ok=True)
         self.quiet = quiet
+        # 0 disables per-contract snapshot concurrency; otherwise bounded parallelism
+        self.snapshot_max_concurrent = max(0, int(snapshot_max_concurrent))
 
-    def _is_market_open(self, dt: datetime = None) -> bool:
+    @staticmethod
+    def _is_market_open(dt: datetime = None) -> bool:
         """Check if market is currently open (9:30 AM - 4:00 PM ET, Mon-Fri)."""
         if dt is None:
             dt = datetime.now()
@@ -73,11 +127,11 @@ class HistoricalDataFetcher:
         now = datetime.now()
         
         if self._is_market_open(now):
-            return 5  # 5 minutes during market hours
+            return HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']
         elif now.hour < 9 or now.hour >= 20:  # Before 9 AM or after 8 PM
-            return 60  # 60 minutes when market is closed
+            return HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed']
         else:
-            return 30  # 30 minutes post-market close
+            return HistoricalDataFetcher.CACHE_DURATION_MINUTES['post_market']
 
     def _get_csv_path(self, symbol: str, expiration_date: str) -> Path:
         """Get the CSV file path for a specific symbol and expiration date."""
@@ -442,85 +496,63 @@ class HistoricalDataFetcher:
 
             # --- Fetch snapshot data only for the contracts we will display ---
             processing_start = time.time()
-            for i, contract in enumerate(filtered_contracts): # Process all contracts
-                if i > 0 and i % 10 == 0 and not self.quiet:
-                    print(f"  ...processed {i} of {len(filtered_contracts)} contracts...", flush=True)
-
-                contract_ticker = getattr(contract, 'ticker', None)
-                if not contract_ticker:
-                    continue
-                
-                contract_details = {
-                    'ticker': contract_ticker,
-                    'type': getattr(contract, 'contract_type', 'N/A'),
-                    'strike': getattr(contract, 'strike_price', 'N/A'),
-                    'expiration': getattr(contract, 'expiration_date', 'N/A'),
+            # Helper to fetch snapshot for a single contract
+            def _fetch_snapshot(contract_obj, index_in_list: int) -> dict:
+                contract_ticker_local = getattr(contract_obj, 'ticker', None)
+                if not contract_ticker_local:
+                    return {}
+                details = {
+                    'ticker': contract_ticker_local,
+                    'type': getattr(contract_obj, 'contract_type', 'N/A'),
+                    'strike': getattr(contract_obj, 'strike_price', 'N/A'),
+                    'expiration': getattr(contract_obj, 'expiration_date', 'N/A'),
                     'bid': None,
                     'ask': None,
                     'day_close': None,
                     'fmv': None,
                 }
-                
-                # Fetch snapshot for current pricing and Greeks
                 try:
-                    snapshot = self.client.get_snapshot_option(symbol, contract_ticker)
-                    if snapshot:
-                        # Get bid/ask from last_quote if available
-                        if hasattr(snapshot, 'last_quote') and snapshot.last_quote:
-                            contract_details['bid'] = getattr(snapshot.last_quote, 'bid', None)
-                            contract_details['ask'] = getattr(snapshot.last_quote, 'ask', None)
-                        
-                        # Get last trade price if available
-                        if hasattr(snapshot, 'last_trade') and snapshot.last_trade:
-                            last_price = getattr(snapshot.last_trade, 'price', None)
-                            if last_price and not contract_details['bid']:
-                                contract_details['bid'] = last_price
-                                contract_details['ask'] = last_price
-                        
-                        # Get day close price
-                        if hasattr(snapshot, 'day') and snapshot.day:
-                            day_close = getattr(snapshot.day, 'close', None)
+                    snapshot_local = self.client.get_snapshot_option(symbol, contract_ticker_local)
+                    if snapshot_local:
+                        if hasattr(snapshot_local, 'last_quote') and snapshot_local.last_quote:
+                            details['bid'] = getattr(snapshot_local.last_quote, 'bid', None)
+                            details['ask'] = getattr(snapshot_local.last_quote, 'ask', None)
+                        if hasattr(snapshot_local, 'last_trade') and snapshot_local.last_trade:
+                            last_price = getattr(snapshot_local.last_trade, 'price', None)
+                            if last_price and not details['bid']:
+                                details['bid'] = last_price
+                                details['ask'] = last_price
+                        if hasattr(snapshot_local, 'day') and snapshot_local.day:
+                            day_close = getattr(snapshot_local.day, 'close', None)
                             if day_close:
-                                contract_details['day_close'] = day_close
-                                # Use day close as bid/ask if no other pricing available
-                                if not contract_details['bid']:
-                                    contract_details['bid'] = day_close
-                                    contract_details['ask'] = day_close
-                        
-                        # Get fair market value
-                        if hasattr(snapshot, 'fair_market_value') and snapshot.fair_market_value:
-                            fmv = getattr(snapshot.fair_market_value, 'value', None)
+                                details['day_close'] = day_close
+                                if not details['bid']:
+                                    details['bid'] = day_close
+                                    details['ask'] = day_close
+                        if hasattr(snapshot_local, 'fair_market_value') and snapshot_local.fair_market_value:
+                            fmv = getattr(snapshot_local.fair_market_value, 'value', None)
                             if fmv:
-                                contract_details['fmv'] = fmv
-                                # Use FMV as bid/ask if no other pricing available
-                                if not contract_details['bid']:
-                                    contract_details['bid'] = fmv
-                                    contract_details['ask'] = fmv
-                        
-                        # Get Greeks if available
-                        if hasattr(snapshot, 'greeks') and snapshot.greeks:
-                            contract_details['delta'] = getattr(snapshot.greeks, 'delta', None)
-                            contract_details['gamma'] = getattr(snapshot.greeks, 'gamma', None)
-                            contract_details['theta'] = getattr(snapshot.greeks, 'theta', None)
-                            contract_details['vega'] = getattr(snapshot.greeks, 'vega', None)
-                        
-                        # Debug: print what we got from snapshot
-                        if i < 3 and not self.quiet:  # Only print first 3 for debugging
-                            print(f"    DEBUG: Snapshot for {contract_ticker}: bid={contract_details.get('bid')}, ask={contract_details.get('ask')}")
-                            
-                except Exception as e:
-                    # Log the specific error for debugging
-                    if i < 3 and not self.quiet:  # Only print first 3 errors
-                        print(f"    DEBUG: Snapshot error for {contract_ticker}: {e}")
-                    
-                    # Try to get historical option data as fallback
+                                details['fmv'] = fmv
+                                if not details['bid']:
+                                    details['bid'] = fmv
+                                    details['ask'] = fmv
+                        if hasattr(snapshot_local, 'greeks') and snapshot_local.greeks:
+                            details['delta'] = getattr(snapshot_local.greeks, 'delta', None)
+                            details['gamma'] = getattr(snapshot_local.greeks, 'gamma', None)
+                            details['theta'] = getattr(snapshot_local.greeks, 'theta', None)
+                            details['vega'] = getattr(snapshot_local.greeks, 'vega', None)
+                        if index_in_list < 3 and not self.quiet:
+                            print(f"    DEBUG: Snapshot for {contract_ticker_local}: bid={details.get('bid')}, ask={details.get('ask')}")
+                except Exception as e_local:
+                    if index_in_list < 3 and not self.quiet:
+                        print(f"    DEBUG: Snapshot error for {contract_ticker_local}: {e_local}")
+                    # Fallback to historical for first few only
                     try:
-                        if i < 3:  # Only try for first 3 contracts to avoid API spam
+                        if index_in_list < 3:
                             if not self.quiet:
-                                print(f"    DEBUG: Trying historical data for {contract_ticker}...")
-                            # Get historical option data for the target date
-                            historical_data = self.client.get_aggs(
-                                ticker=contract_ticker,
+                                print(f"    DEBUG: Trying historical data for {contract_ticker_local}...")
+                            historical_data_local = self.client.get_aggs(
+                                ticker=contract_ticker_local,
                                 multiplier=1,
                                 timespan="day",
                                 from_=target_date_str,
@@ -529,18 +561,41 @@ class HistoricalDataFetcher:
                                 sort="desc",
                                 limit=1
                             )
-                            if historical_data:
-                                bar = historical_data[0]
-                                contract_details['bid'] = bar.close
-                                contract_details['ask'] = bar.close
+                            if historical_data_local:
+                                bar_local = historical_data_local[0]
+                                details['bid'] = bar_local.close
+                                details['ask'] = bar_local.close
                                 if not self.quiet:
-                                    print(f"    DEBUG: Historical price for {contract_ticker}: ${bar.close:.2f}")
-                    except Exception as hist_e:
-                        if i < 3 and not self.quiet:
-                            print(f"    DEBUG: Historical data also failed for {contract_ticker}: {hist_e}")
-                    pass
+                                    print(f"    DEBUG: Historical price for {contract_ticker_local}: ${bar_local.close:.2f}")
+                    except Exception as hist_e_local:
+                        if index_in_list < 3 and not self.quiet:
+                            print(f"    DEBUG: Historical data also failed for {contract_ticker_local}: {hist_e_local}")
+                return details
 
-                options_data["contracts"].append(contract_details)
+            if self.snapshot_max_concurrent > 0:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                max_workers = min(self.snapshot_max_concurrent, 32)
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    futures = []
+                    for idx, c in enumerate(filtered_contracts):
+                        futures.append(pool.submit(_fetch_snapshot, c, idx))
+                    processed = 0
+                    for fut in as_completed(futures):
+                        res = fut.result() or {}
+                        if res:
+                            options_data["contracts"].append(res)
+                        processed += 1
+                        if processed % 10 == 0 and not self.quiet:
+                            ticker = res.get('ticker', 'unknown') if res else 'unknown'
+                            print(f"  ...processed {processed} of {len(filtered_contracts)} contracts (latest: {ticker})...", flush=True)
+            else:
+                for i, contract in enumerate(filtered_contracts):
+                    if i > 0 and i % 10 == 0 and not self.quiet:
+                        contract_ticker = getattr(contract, 'ticker', 'unknown')
+                        print(f"  ...processed {i} of {len(filtered_contracts)} contracts (latest: {contract_ticker})...", flush=True)
+                    res = _fetch_snapshot(contract, i)
+                    if res:
+                        options_data["contracts"].append(res)
 
             processing_end = time.time()
             if not self.quiet:
@@ -617,7 +672,7 @@ class HistoricalDataFetcher:
                 stock_close_price = stock_result['data'].get('close')
 
             if not contracts:
-                output.append("No active options contracts found for this date with the specified filters.")
+                output.append(f"No active options contracts found for {symbol} on this date with the specified filters.")
             else:
                 # Group by expiration
                 options_by_expiry = {}
@@ -628,12 +683,12 @@ class HistoricalDataFetcher:
                     options_by_expiry[exp].append(c)
                 
                 # Debug: Print all available expirations
-                print(f"\nDEBUG: Found {len(options_by_expiry)} unique expirations:")
+                print(f"\nDEBUG: Found {len(options_by_expiry)} unique expirations for {symbol}:")
                 for exp in sorted(options_by_expiry.keys()):
                     print(f"  {exp}: {len(options_by_expiry[exp])} contracts")
                 
                 for exp_date in sorted(options_by_expiry.keys())[:20]: # Show first 20 expirations
-                    output.append(f"\nExpiration: {exp_date}")
+                    output.append(f"\nExpiration: {exp_date} (ticker: {symbol})")
                     options_table = []
                     
                     options_for_this_expiry = options_by_expiry[exp_date]
@@ -676,12 +731,50 @@ class HistoricalDataFetcher:
                             f"{contract.get('theta'):.3f}" if contract.get('theta') is not None else 'N/A',
                             f"{contract.get('vega'):.3f}" if contract.get('vega') is not None else 'N/A',
                         ])
-                    output.append(tabulate(options_table, headers=['Ticker', 'Type', 'Strike', 'Bid', 'Ask', 'Day Close', 'FMV', 'Delta', 'Gamma', 'Theta', 'Vega'], tablefmt='grid'))
+                    output.append(tabulate(options_table, headers=[f'Ticker ({symbol})', 'Type', 'Strike', 'Bid', 'Ask', 'Day Close', 'FMV', 'Delta', 'Gamma', 'Theta', 'Vega'], tablefmt='grid'))
         else:
             output.append(f"Could not fetch options data: {options_result.get('error', 'Unknown error')}")
             
+        rendered = "\n".join(output)
         if not self.quiet:
-            print("\n".join(output))
+            print(rendered)
+        return rendered
+
+def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: str) -> str:
+    """Worker task: runs fetch for a single symbol and returns formatted output string."""
+    try:
+        fetcher = HistoricalDataFetcher(
+            api_key,
+            args_namespace.data_dir,
+            args_namespace.quiet,
+            getattr(args_namespace, 'snapshot_max_concurrent', 0)
+        )
+        async def _inner():
+            stock_result = await fetcher.get_stock_price_for_date(symbol, args_namespace.date)
+            stock_close_price = stock_result['data'].get('close') if stock_result.get('success') else None
+            options_result = await fetcher.get_active_options_for_date(
+                symbol=symbol,
+                target_date_str=args_namespace.date,
+                option_type=args_namespace.option_type,
+                stock_close_price=stock_close_price,
+                strike_range_percent=args_namespace.strike_range_percent,
+                max_days_to_expiry=args_namespace.max_days_to_expiry,
+                include_expired=args_namespace.include_expired,
+                use_cache=not args_namespace.no_cache
+            )
+            return fetcher.format_output(
+                symbol=symbol,
+                target_date=args_namespace.date,
+                stock_result=stock_result,
+                options_result=options_result,
+                option_type=args_namespace.option_type,
+                strike_range_percent=args_namespace.strike_range_percent,
+                options_per_expiry=args_namespace.options_per_expiry,
+                max_days_to_expiry=args_namespace.max_days_to_expiry
+            )
+        return asyncio.run(_inner())
+    except Exception as e:
+        return f"Error processing {symbol}: {e}"
 
 async def main():
     """Main function to run the data fetcher."""
@@ -772,6 +865,35 @@ Examples:
         action='store_true',
         help="Suppress output but still save CSV files."
     )
+    parser.add_argument(
+        '--continuous',
+        action='store_true',
+        help="Continuously fetch in a loop, sleeping based on cache duration."
+    )
+    parser.add_argument(
+        '--continuous-max-runs',
+        type=int,
+        default=None,
+        help="Maximum number of continuous runs before stopping (default: unlimited)."
+    )
+    parser.add_argument(
+        '--max-concurrent',
+        type=int,
+        default=None,
+        help="Max number of symbols to process concurrently (default: CPU count for processes, CPU*5 for threads)."
+    )
+    parser.add_argument(
+        '--executor-type',
+        choices=['thread', 'process'],
+        default='thread',
+        help="Executor type for per-symbol concurrency (default: thread)."
+    )
+    parser.add_argument(
+        '--snapshot-max-concurrent',
+        type=int,
+        default=0,
+        help="Max concurrent per-contract snapshot requests within a symbol (0 disables)."
+    )
     
     args = parser.parse_args()
     
@@ -794,40 +916,90 @@ Examples:
 
     fetcher = HistoricalDataFetcher(api_key, args.data_dir, args.quiet)
     
-    # Process each symbol
-    for symbol in symbols_list:
+    async def run_one_batch_and_sleep_once() -> bool:
+        # returns True if should continue, False to stop
+        from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+        exec_type = args.executor_type
+        if args.max_concurrent and args.max_concurrent > 0:
+            max_workers = args.max_concurrent
+        else:
+            max_workers = (os.cpu_count() or 1) if exec_type == 'process' else (os.cpu_count() or 1) * 5
+
         if not args.quiet:
-            print(f"--- Starting data fetch for {symbol} on {args.date} ---", flush=True)
-        
-        # Step 1: Fetch stock price first, as it's needed for filtering
-        stock_result = await fetcher.get_stock_price_for_date(symbol, args.date)
+            print(f"Starting concurrent fetch for {len(symbols_list)} symbols using {exec_type} executor with max_workers={max_workers}")
 
-        stock_close_price = None
-        if stock_result.get('success'):
-            stock_close_price = stock_result['data'].get('close')
+        ExecutorCls = ProcessPoolExecutor if exec_type == 'process' else ThreadPoolExecutor
+        with ExecutorCls(max_workers=max_workers) as pool:
+            futures_map = {pool.submit(_run_for_symbol, symbol, args, api_key): symbol for symbol in symbols_list}
+            for fut in as_completed(futures_map):
+                out = fut.result()
+                if not args.quiet and out:
+                    print(out)
 
-        # Step 2: Fetch options, passing in the filters
-        options_result = await fetcher.get_active_options_for_date(
-            symbol=symbol,
-            target_date_str=args.date,
-            option_type=args.option_type,
-            stock_close_price=stock_close_price,
-            strike_range_percent=args.strike_range_percent,
-            max_days_to_expiry=args.max_days_to_expiry,
-            include_expired=args.include_expired,
-            use_cache=not args.no_cache
-        )
+        # Intelligent sleep based on market transitions
+        now_utc = datetime.now(timezone.utc)
+        seconds_to_open, seconds_to_close = HistoricalDataFetcher._compute_market_transition_times(now_utc, "America/New_York")
+        is_market_open = HistoricalDataFetcher._is_market_open(now_utc.astimezone(ZoneInfo("America/New_York")))
         
-        fetcher.format_output(
-            symbol=symbol,
-            target_date=args.date,
-            stock_result=stock_result,
-            options_result=options_result,
-            option_type=args.option_type,
-            strike_range_percent=args.strike_range_percent,
-            options_per_expiry=args.options_per_expiry,
-            max_days_to_expiry=args.max_days_to_expiry
-        )
+        if is_market_open:
+            # Market is open: prefer staying on open cadence; do not sleep past close
+            base_sleep = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
+            if seconds_to_close is not None:
+                sleep_seconds = max(min(base_sleep, seconds_to_close), 5)
+                if not args.quiet:
+                    print(f"Next run in {sleep_seconds:.0f}s (market open, {HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']}min interval; {seconds_to_close:.0f}s until close) [MARKET OPEN]")
+            else:
+                sleep_seconds = base_sleep
+                if not args.quiet:
+                    print(f"Next run in {sleep_seconds:.0f}s (market open, {HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']}min interval) [MARKET OPEN]")
+        else:
+            # Market is closed: if opening soon, sleep to open; otherwise use closed cadence
+            opening_soon_threshold = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
+            if seconds_to_open is not None and seconds_to_open <= opening_soon_threshold:
+                sleep_seconds = max(seconds_to_open, 5)
+                if not args.quiet:
+                    print(f"Next run in {sleep_seconds:.0f}s (sleeping until market open in {seconds_to_open:.0f}s) [MARKET CLOSED→OPEN]")
+            else:
+                sleep_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed'] * 60
+                msg_extra = f"; {seconds_to_open:.0f}s until open" if seconds_to_open is not None else ""
+                if not args.quiet:
+                    print(f"Next run in {sleep_seconds:.0f}s (markets closed, {HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed']}min interval{msg_extra}) [MARKET CLOSED]")
+        
+        await asyncio.sleep(sleep_seconds)
+        return True
+
+    if args.continuous:
+        run_num = 0
+        while True:
+            run_num += 1
+            if not args.quiet:
+                print(f"\n--- Continuous run #{run_num} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+            should_continue = await run_one_batch_and_sleep_once()
+            if args.continuous_max_runs and run_num >= args.continuous_max_runs:
+                if not args.quiet:
+                    print("Reached maximum runs, stopping continuous mode.")
+                break
+            if not should_continue:
+                break
+        return
+    else:
+        # Single run (no sleep)
+        from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+        exec_type = args.executor_type
+        if args.max_concurrent and args.max_concurrent > 0:
+            max_workers = args.max_concurrent
+        else:
+            max_workers = (os.cpu_count() or 1) if exec_type == 'process' else (os.cpu_count() or 1) * 5
+        if not args.quiet:
+            print(f"Starting concurrent fetch for {len(symbols_list)} symbols using {exec_type} executor with max_workers={max_workers}")
+        ExecutorCls = ProcessPoolExecutor if exec_type == 'process' else ThreadPoolExecutor
+        with ExecutorCls(max_workers=max_workers) as pool:
+            futures_map = {pool.submit(_run_for_symbol, symbol, args, api_key): symbol for symbol in symbols_list}
+            for fut in as_completed(futures_map):
+                out = fut.result()
+                if not args.quiet and out:
+                    print(out)
+        return
 
 if __name__ == "__main__":
     try:
