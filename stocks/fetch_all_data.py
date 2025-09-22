@@ -7,10 +7,54 @@ import argparse
 import sys
 import time
 import yaml
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from zoneinfo import ZoneInfo
 import logging
+
+def _compute_market_transition_times(now_utc: datetime, tz_name: str = "America/New_York") -> tuple[float | None, float | None]:
+    """Compute time in seconds to next regular market open and close from now.
+
+    - Market hours assumed: 09:30–16:00 local (Mon–Fri). Holidays not considered.
+    - Returns (seconds_to_open, seconds_to_close). Either may be None if not applicable.
+    """
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("America/New_York")
+
+    now_local = now_utc.astimezone(tz)
+
+    # Build today's open/close
+    today_open = now_local.replace(hour=9, minute=30, second=0, microsecond=0)
+    today_close = now_local.replace(hour=16, minute=0, second=0, microsecond=0)
+
+    # Helper to advance to next weekday (Mon-Fri)
+    def next_weekday(dt: datetime) -> datetime:
+        d = dt
+        while d.weekday() >= 5:  # 5=Sat, 6=Sun
+            d = d + timedelta(days=1)
+        return d
+
+    seconds_to_open: float | None = None
+    seconds_to_close: float | None = None
+
+    # Compute seconds to next open
+    if now_local < today_open:
+        seconds_to_open = (today_open - now_local).total_seconds()
+    else:
+        # Find next trading day's open
+        next_day = next_weekday((now_local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0))
+        next_open = next_day.replace(hour=9, minute=30, second=0, microsecond=0)
+        seconds_to_open = (next_open - now_local).total_seconds()
+
+    # Compute seconds to close if currently before today's close and it's a weekday
+    if now_local.weekday() < 5 and now_local < today_close:
+        seconds_to_close = (today_close - now_local).total_seconds()
+    else:
+        seconds_to_close = None
+
+    return (seconds_to_open, seconds_to_close)
 
 def get_timezone_aware_time(tz_name: str = "America/New_York") -> datetime:
     """Get current time in specified timezone."""
@@ -786,15 +830,28 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
             
             if args.use_market_hours:
                 is_market_open = _is_market_hours()
+                now_utc = datetime.now(timezone.utc)
+                seconds_to_open, seconds_to_close = _compute_market_transition_times(now_utc, args.timezone)
                 
                 if is_market_open:
-                    # Market hours - fetch every 30 seconds
-                    sleep_time = max(FETCH_INTERVAL_MARKET_OPEN - fetch_duration, 5)  # At least 5 seconds between fetches
-                    print(f"Next fetch in {sleep_time:.1f}s (market open, 30s interval) [MARKET OPEN]")
+                    # Prefer staying on open cadence; do not sleep past close
+                    base_sleep = max(FETCH_INTERVAL_MARKET_OPEN - fetch_duration, 5)
+                    if seconds_to_close is not None:
+                        sleep_time = max(min(base_sleep, seconds_to_close), 1)
+                        print(f"Next fetch in {sleep_time:.1f}s (market open, 30s interval; {seconds_to_close:.1f}s until close) [MARKET OPEN]")
+                    else:
+                        sleep_time = base_sleep
+                        print(f"Next fetch in {sleep_time:.1f}s (market open, 30s interval) [MARKET OPEN]")
                 else:
-                    # Markets closed - use longer intervals
-                    sleep_time = max(FETCH_INTERVAL_MARKET_CLOSED - fetch_duration, 60)  # At least 1 minute between fetches
-                    print(f"Next fetch in {sleep_time:.1f}s (markets closed, 5min interval) [MARKET CLOSED]")
+                    # Closed: if opening soon, sleep to open; otherwise use closed cadence
+                    opening_soon_threshold = FETCH_INTERVAL_MARKET_OPEN  # prefer next open if within open interval
+                    if seconds_to_open is not None and seconds_to_open <= opening_soon_threshold:
+                        sleep_time = max(seconds_to_open - fetch_duration, 1)
+                        print(f"Next fetch in {sleep_time:.1f}s (sleeping until market open in {seconds_to_open:.1f}s) [MARKET CLOSED→OPEN]")
+                    else:
+                        sleep_time = max(FETCH_INTERVAL_MARKET_CLOSED - fetch_duration, 60)
+                        msg_extra = f"; {seconds_to_open:.1f}s until open" if seconds_to_open is not None else ""
+                        print(f"Next fetch in {sleep_time:.1f}s (markets closed, 5min interval{msg_extra}) [MARKET CLOSED]")
             else:
                 # Standard behavior - fetch every 30 seconds
                 sleep_time = max(30 - fetch_duration, 5)  # At least 5 seconds between fetches
