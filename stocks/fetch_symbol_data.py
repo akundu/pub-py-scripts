@@ -2061,32 +2061,26 @@ async def main() -> None:
             # Determine if we should show complete data (no truncation)
             show_complete = args.days_back is not None or (args.csv_file == '-')
             
-            if args.show_volume:
-                # Display all columns including volume
+            # Display data with volume if available, similar to --latest command behavior
+            display_columns = ['open', 'high', 'low', 'close']
+            if 'volume' in display_df.columns:
+                display_columns.append('volume')
+            
+            available_columns = [col for col in display_columns if col in display_df.columns]
+            if available_columns:
+                if show_complete:
+                    # Set pandas display options to show all rows
+                    with pd.option_context('display.max_rows', None, 'display.width', None, 'display.max_columns', None):
+                        print(display_df[available_columns])
+                else:
+                    print(display_df[available_columns])
+            else:
                 if show_complete:
                     # Set pandas display options to show all rows
                     with pd.option_context('display.max_rows', None, 'display.width', None, 'display.max_columns', None):
                         print(display_df)
                 else:
                     print(display_df)
-            else:
-                # Display only OHLC columns (exclude volume)
-                display_columns = ['open', 'high', 'low', 'close']
-                available_columns = [col for col in display_columns if col in display_df.columns]
-                if available_columns:
-                    if show_complete:
-                        # Set pandas display options to show all rows
-                        with pd.option_context('display.max_rows', None, 'display.width', None, 'display.max_columns', None):
-                            print(display_df[available_columns])
-                    else:
-                        print(display_df[available_columns])
-                else:
-                    if show_complete:
-                        # Set pandas display options to show all rows
-                        with pd.option_context('display.max_rows', None, 'display.width', None, 'display.max_columns', None):
-                            print(display_df)
-                    else:
-                        print(display_df)
             
             # Save to CSV file if requested
             if args.csv_file:
