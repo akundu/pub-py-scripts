@@ -15,9 +15,12 @@ import sys
 import argparse
 import asyncio
 import time
+import csv
+import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List, Any
 from tabulate import tabulate
+from pathlib import Path
 
 try:
     from polygon import RESTClient
@@ -28,10 +31,154 @@ except ImportError:
 class HistoricalDataFetcher:
     """Fetches historical stock and options data from Polygon.io."""
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, data_dir: str = "data"):
         if not api_key:
             raise ValueError("Polygon API key is required.")
         self.client = RESTClient(api_key)
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(exist_ok=True)
+
+    def _is_market_open(self, dt: datetime = None) -> bool:
+        """Check if market is currently open (9:30 AM - 4:00 PM ET, Mon-Fri)."""
+        if dt is None:
+            dt = datetime.now()
+        
+        # Convert to ET (assuming system is in ET or adjust as needed)
+        # For simplicity, assuming system timezone is ET
+        weekday = dt.weekday()  # 0 = Monday, 6 = Sunday
+        if weekday >= 5:  # Saturday or Sunday
+            return False
+        
+        market_open = dt.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = dt.replace(hour=16, minute=0, second=0, microsecond=0)
+        
+        return market_open <= dt <= market_close
+
+    def _get_cache_duration_minutes(self) -> int:
+        """Get cache duration in minutes based on market status."""
+        now = datetime.now()
+        
+        if self._is_market_open(now):
+            return 5  # 5 minutes during market hours
+        elif now.hour < 9 or now.hour >= 20:  # Before 9 AM or after 8 PM
+            return 60  # 60 minutes when market is closed
+        else:
+            return 30  # 30 minutes post-market close
+
+    def _get_csv_path(self, symbol: str, expiration_date: str) -> Path:
+        """Get the CSV file path for a specific symbol and expiration date."""
+        options_dir = self.data_dir / "options"
+        symbol_dir = options_dir / symbol.upper()
+        symbol_dir.mkdir(parents=True, exist_ok=True)
+        return symbol_dir / f"{expiration_date}.csv"
+
+    def _should_fetch_fresh_data(self, csv_path: Path) -> bool:
+        """Check if we should fetch fresh data based on cache duration."""
+        if not csv_path.exists():
+            return True
+        
+        file_mtime = datetime.fromtimestamp(csv_path.stat().st_mtime)
+        cache_duration = self._get_cache_duration_minutes()
+        
+        return datetime.now() - file_mtime > timedelta(minutes=cache_duration)
+
+    def _save_options_to_csv(self, symbol: str, options_data: Dict[str, Any]) -> None:
+        """Save options data to CSV files organized by expiration date."""
+        # Handle both data structures: direct contracts or nested in 'data'
+        contracts = options_data.get('contracts', [])
+        if not contracts and 'data' in options_data:
+            contracts = options_data['data'].get('contracts', [])
+        
+        if not contracts:
+            return
+        current_time = datetime.now().isoformat()
+        
+        # Group contracts by expiration date
+        by_expiration = {}
+        for contract in contracts:
+            exp_date = contract.get('expiration', 'unknown')
+            if exp_date not in by_expiration:
+                by_expiration[exp_date] = []
+            by_expiration[exp_date].append(contract)
+        
+        # Save each expiration date to its own CSV file
+        for exp_date, contracts_list in by_expiration.items():
+            if exp_date == 'unknown':
+                continue
+                
+            csv_path = self._get_csv_path(symbol, exp_date)
+            
+            # Prepare data for CSV
+            csv_data = []
+            for contract in contracts_list:
+                csv_data.append({
+                    'timestamp': current_time,
+                    'ticker': contract.get('ticker', ''),
+                    'type': contract.get('type', ''),
+                    'strike': contract.get('strike', ''),
+                    'expiration': contract.get('expiration', ''),
+                    'bid': contract.get('bid', ''),
+                    'ask': contract.get('ask', ''),
+                    'day_close': contract.get('day_close', ''),
+                    'fmv': contract.get('fmv', ''),
+                    'delta': contract.get('delta', ''),
+                    'gamma': contract.get('gamma', ''),
+                    'theta': contract.get('theta', ''),
+                    'vega': contract.get('vega', ''),
+                })
+            
+            # Write to CSV (append mode)
+            file_exists = csv_path.exists()
+            with open(csv_path, 'a', newline='', encoding='utf-8') as csvfile:
+                fieldnames = ['timestamp', 'ticker', 'type', 'strike', 'expiration', 
+                             'bid', 'ask', 'day_close', 'fmv', 'delta', 'gamma', 'theta', 'vega']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerows(csv_data)
+            
+            print(f"Saved {len(csv_data)} contracts for {symbol} expiration {exp_date} to {csv_path}")
+
+    def _load_options_from_csv(self, symbol: str, expiration_date: str) -> List[Dict[str, Any]]:
+        """Load the most recent options data from CSV file."""
+        csv_path = self._get_csv_path(symbol, expiration_date)
+        
+        if not csv_path.exists():
+            return []
+        
+        try:
+            df = pd.read_csv(csv_path)
+            if df.empty:
+                return []
+            
+            # Get the most recent data (last timestamp)
+            latest_timestamp = df['timestamp'].max()
+            latest_data = df[df['timestamp'] == latest_timestamp]
+            
+            # Convert back to list of dicts
+            contracts = []
+            for _, row in latest_data.iterrows():
+                contract = {
+                    'ticker': row['ticker'],
+                    'type': row['type'],
+                    'strike': row['strike'],
+                    'expiration': row['expiration'],
+                    'bid': row['bid'] if pd.notna(row['bid']) else None,
+                    'ask': row['ask'] if pd.notna(row['ask']) else None,
+                    'day_close': row['day_close'] if pd.notna(row['day_close']) else None,
+                    'fmv': row['fmv'] if pd.notna(row['fmv']) else None,
+                    'delta': row['delta'] if pd.notna(row['delta']) else None,
+                    'gamma': row['gamma'] if pd.notna(row['gamma']) else None,
+                    'theta': row['theta'] if pd.notna(row['theta']) else None,
+                    'vega': row['vega'] if pd.notna(row['vega']) else None,
+                }
+                contracts.append(contract)
+            
+            return contracts
+        except Exception as e:
+            print(f"Error loading CSV data: {e}")
+            return []
 
     def _handle_api_error(self, error: Exception, data_type: str) -> Dict[str, Any]:
         """Handles API errors gracefully."""
@@ -95,7 +242,8 @@ class HistoricalDataFetcher:
         stock_close_price: float | None,
         strike_range_percent: int | None,
         max_days_to_expiry: int | None,
-        include_expired: bool
+        include_expired: bool,
+        use_cache: bool = True
     ) -> Dict[str, Any]:
         """
         Fetches all options contracts that were active on a specific date and gets their
@@ -107,6 +255,37 @@ class HistoricalDataFetcher:
         
         print(f"Fetching options for {symbol} expiring around {target_date_str}...")
         overall_start_time = time.time()
+        
+        # Check if we should use cached data
+        if use_cache:
+            # Try to load from cache for each potential expiration date
+            cache_hit = False
+            if max_days_to_expiry is not None:
+                # Check cache for dates within the range
+                for days_offset in range(-max_days_to_expiry, max_days_to_expiry + 1):
+                    check_date = target_date_dt + timedelta(days=days_offset)
+                    exp_date_str = check_date.strftime('%Y-%m-%d')
+                    csv_path = self._get_csv_path(symbol, exp_date_str)
+                    
+                    if not self._should_fetch_fresh_data(csv_path):
+                        cached_contracts = self._load_options_from_csv(symbol, exp_date_str)
+                        if cached_contracts:
+                            options_data["contracts"].extend(cached_contracts)
+                            cache_hit = True
+                            print(f"Loaded {len(cached_contracts)} contracts from cache for {exp_date_str}")
+            else:
+                # Check cache for the target date
+                csv_path = self._get_csv_path(symbol, target_date_str)
+                if not self._should_fetch_fresh_data(csv_path):
+                    cached_contracts = self._load_options_from_csv(symbol, target_date_str)
+                    if cached_contracts:
+                        options_data["contracts"] = cached_contracts
+                        cache_hit = True
+                        print(f"Loaded {len(cached_contracts)} contracts from cache for {target_date_str}")
+            
+            if cache_hit:
+                print(f"Using cached data. Cache duration: {self._get_cache_duration_minutes()} minutes")
+                return {"success": True, "data": options_data}
         
         try:
             # --- Build API query parameters for efficient filtering ---
@@ -336,6 +515,10 @@ class HistoricalDataFetcher:
         except Exception as e:
             return self._handle_api_error(e, "options data")
         
+        # Save to CSV files
+        if options_data["contracts"]:
+            self._save_options_to_csv(symbol, options_data)
+        
         return {"success": True, "data": options_data}
 
     def format_output(
@@ -520,6 +703,16 @@ Examples:
         action='store_true',
         help="Include expired options in the search (can be much slower)."
     )
+    parser.add_argument(
+        '--data-dir',
+        default='data',
+        help="Directory to store CSV data files (default: data)."
+    )
+    parser.add_argument(
+        '--no-cache',
+        action='store_true',
+        help="Force fresh data fetch, bypassing cache."
+    )
     
     args = parser.parse_args()
     
@@ -534,7 +727,7 @@ Examples:
         print(f"Error: Invalid date format '{args.date}'. Please use YYYY-MM-DD.", file=sys.stderr)
         sys.exit(1)
 
-    fetcher = HistoricalDataFetcher(api_key)
+    fetcher = HistoricalDataFetcher(api_key, args.data_dir)
     
     # Step 1: Fetch stock price first, as it's needed for filtering
     print(f"--- Starting data fetch for {args.symbol.upper()} on {args.date} ---", flush=True)
@@ -552,7 +745,8 @@ Examples:
         stock_close_price=stock_close_price,
         strike_range_percent=args.strike_range_percent,
         max_days_to_expiry=args.max_days_to_expiry,
-        include_expired=args.include_expired
+        include_expired=args.include_expired,
+        use_cache=not args.no_cache
     )
     
     fetcher.format_output(
