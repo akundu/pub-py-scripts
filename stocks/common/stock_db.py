@@ -109,6 +109,41 @@ class StockDBBase(metaclass=ABCMeta):
            and return resulting rows if any, with binary data Base64 encoded."""
         pass
 
+    # ---- Options API (abstract) ----
+    @abstractmethod
+    async def save_options_data(self, df: pd.DataFrame, ticker: str) -> None:
+        """Save options snapshot rows. df expected columns: option_ticker, expiration, strike, type,
+        bid, ask, day_close, fmv, price, delta, gamma, theta, vega, implied_volatility, volume, open_interest,
+        last_quote_timestamp. The DB layer will add ticker, write_timestamp, and bucketed timestamp for dedup."""
+        pass
+
+    @abstractmethod
+    async def get_options_data(
+        self,
+        ticker: str,
+        expiration_date: str | None = None,
+        start_datetime: str | None = None,
+        end_datetime: str | None = None,
+        option_tickers: List[str] | None = None,
+    ) -> pd.DataFrame:
+        """Retrieve options rows filtered by ticker/expiration/date range/option tickers."""
+        pass
+
+    @abstractmethod
+    async def get_latest_options_data(
+        self,
+        ticker: str,
+        expiration_date: str | None = None,
+        option_tickers: List[str] | None = None,
+    ) -> pd.DataFrame:
+        """Retrieve latest bucketed snapshot per option_ticker for a ticker (and optional expiration filter)."""
+        pass
+
+    @abstractmethod
+    async def get_option_price_feature(self, ticker: str, option_ticker: str) -> dict[str, Any] | None:
+        """Return latest record with price,bid,ask,day_close,fmv for a specific option ticker."""
+        pass
+
     async def _get_historical_data(
         self,
         ticker: str,

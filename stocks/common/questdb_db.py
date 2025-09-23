@@ -102,6 +102,7 @@ class StockQuestDB(StockDBBase):
             await self._create_daily_prices_table(conn)
             await self._create_hourly_prices_table(conn)
             await self._create_realtime_data_table(conn)
+            await self._create_options_data_table(conn)
             
             # Create indexes for optimal performance
             await self._create_questdb_indexes(conn)
@@ -121,6 +122,10 @@ class StockQuestDB(StockDBBase):
     async def _create_realtime_data_table(self, conn: asyncpg.Connection) -> None:
         """Create realtime_data table with QuestDB optimizations and deduplication."""
         await conn.execute(StockQuestDB.create_table_realtime_data_sql)
+
+    async def _create_options_data_table(self, conn: asyncpg.Connection) -> None:
+        """Create options_data table with QuestDB optimizations and bucketed deduplication."""
+        await conn.execute(StockQuestDB.create_table_options_data_sql)
 
     async def _create_questdb_indexes(self, conn: asyncpg.Connection) -> None:
         """QuestDB indexes are created inline with table definitions."""
@@ -878,6 +883,172 @@ class StockQuestDB(StockDBBase):
                 self.logger.error(f"Error executing raw SQL query: {e}")
                 raise
 
+    # ---------------- Options API ----------------
+    @staticmethod
+    def _get_bucket_minutes(now_utc: datetime) -> int:
+        from zoneinfo import ZoneInfo
+        et = ZoneInfo("America/New_York")
+        now_et = now_utc.astimezone(et)
+        weekday = now_et.weekday()
+        open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        close_time = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        post_close_time = now_et.replace(hour=20, minute=0, second=0, microsecond=0)
+        if weekday < 5 and open_time <= now_et < close_time:
+            return 15
+        if weekday < 5 and close_time <= now_et < post_close_time:
+            return 60
+        return 240
+
+    @staticmethod
+    def _floor_to_bucket(dt_utc: datetime, minutes: int) -> datetime:
+        if dt_utc.tzinfo is None:
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+        dt_utc = dt_utc.astimezone(timezone.utc)
+        total_minutes = (dt_utc.hour * 60) + dt_utc.minute
+        floored_total = (total_minutes // minutes) * minutes
+        floored_hour = floored_total // 60
+        floored_min = floored_total % 60
+        return dt_utc.replace(hour=floored_hour, minute=floored_min, second=0, microsecond=0)
+
+    async def save_options_data(self, df: pd.DataFrame, ticker: str) -> None:
+        if df.empty:
+            return
+        async with self.get_connection() as conn:
+            df_copy = df.copy()
+            df_copy.columns = [c.lower() for c in df_copy.columns]
+            df_copy['ticker'] = ticker
+
+            # Normalize columns
+            rename_map = {'expiration': 'expiration_date', 'strike': 'strike_price', 'type': 'option_type'}
+            df_copy.rename(columns={k: v for k, v in rename_map.items() if k in df_copy.columns}, inplace=True)
+
+            # Required
+            if 'option_ticker' not in df_copy.columns or 'expiration_date' not in df_copy.columns:
+                self.logger.warning("Options save skipped: missing option_ticker or expiration_date")
+                return
+
+            # Parse times
+            if 'last_quote_timestamp' in df_copy.columns:
+                df_copy['last_quote_timestamp'] = pd.to_datetime(df_copy['last_quote_timestamp'], errors='coerce', utc=True)
+
+            now_utc = datetime.now(timezone.utc)
+            bucket_minutes = StockQuestDB._get_bucket_minutes(now_utc)
+            bucket_ts = StockQuestDB._floor_to_bucket(now_utc, bucket_minutes)
+            df_copy['write_timestamp'] = now_utc
+            df_copy['timestamp'] = bucket_ts
+
+            # Cast numerics
+            for c in ['strike_price','price','bid','ask','day_close','fmv','delta','gamma','theta','vega','implied_volatility']:
+                if c in df_copy.columns:
+                    df_copy[c] = pd.to_numeric(df_copy[c], errors='coerce')
+            for c in ['volume','open_interest']:
+                if c in df_copy.columns:
+                    df_copy[c] = pd.to_numeric(df_copy[c], errors='coerce')
+
+            # Insert
+            try:
+                conn.register('df_options_to_insert', df_copy)
+                preferred_cols = [
+                    'ticker','option_ticker','expiration_date','strike_price','option_type','timestamp','write_timestamp',
+                    'last_quote_timestamp','price','bid','ask','day_close','fmv','delta','gamma','theta','vega',
+                    'implied_volatility','volume','open_interest'
+                ]
+                cols_present = [c for c in preferred_cols if c in df_copy.columns]
+                col_list = ", ".join(cols_present)
+                conn.execute(f"INSERT INTO options_data ({col_list}) SELECT {col_list} FROM df_options_to_insert")
+            except Exception as e:
+                self.logger.error(f"Error saving options data: {e}")
+                raise
+
+    async def get_options_data(self, ticker: str, expiration_date: str | None = None, start_datetime: str | None = None, end_datetime: str | None = None, option_tickers: List[str] | None = None) -> pd.DataFrame:
+        async with self.get_connection() as conn:
+            clauses = ["ticker = $1"]
+            params: list[Any] = [ticker]
+            next_param = 2
+            if expiration_date:
+                clauses.append(f"expiration_date = ${next_param}")
+                params.append(date_parser.parse(expiration_date))
+                next_param += 1
+            if start_datetime:
+                clauses.append(f"timestamp >= ${next_param}")
+                params.append(date_parser.parse(start_datetime))
+                next_param += 1
+            if end_datetime:
+                clauses.append(f"timestamp <= ${next_param}")
+                params.append(date_parser.parse(end_datetime))
+                next_param += 1
+            if option_tickers:
+                placeholders = ",".join([f"${i}" for i in range(next_param, next_param + len(option_tickers))])
+                clauses.append(f"option_ticker IN ({placeholders})")
+                params.extend(option_tickers)
+                next_param += len(option_tickers)
+            where = " AND ".join(clauses)
+            query = f"SELECT * FROM options_data WHERE {where} ORDER BY timestamp"
+            try:
+                rows = await conn.fetch(query, *params)
+                if not rows:
+                    return pd.DataFrame()
+                df = pd.DataFrame([dict(r) for r in rows])
+                if 'timestamp' in df.columns:
+                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                    df.set_index('timestamp', inplace=True)
+                    df = df[df.index.notna()]
+                return df
+            except Exception as e:
+                self.logger.error(f"Error retrieving options data: {e}")
+                return pd.DataFrame()
+
+    async def get_latest_options_data(self, ticker: str, expiration_date: str | None = None, option_tickers: List[str] | None = None) -> pd.DataFrame:
+        async with self.get_connection() as conn:
+            clauses = ["ticker = $1"]
+            params: list[Any] = [ticker]
+            next_param = 2
+            if expiration_date:
+                clauses.append(f"expiration_date = ${next_param}")
+                params.append(date_parser.parse(expiration_date))
+                next_param += 1
+            where = " AND ".join(clauses)
+            if option_tickers:
+                placeholders = ",".join([f"${i}" for i in range(next_param, next_param + len(option_tickers))])
+                params.extend(option_tickers)
+                query = (
+                    f"SELECT * FROM ("
+                    f"  SELECT * FROM options_data WHERE {where} AND option_ticker IN ({placeholders})"
+                    f") LATEST ON timestamp PARTITION BY option_ticker"
+                )
+            else:
+                query = (
+                    f"SELECT * FROM ("
+                    f"  SELECT * FROM options_data WHERE {where}"
+                    f") LATEST ON timestamp PARTITION BY option_ticker"
+                )
+            try:
+                rows = await conn.fetch(query, *params)
+                if not rows:
+                    return pd.DataFrame()
+                df = pd.DataFrame([dict(r) for r in rows])
+                if 'timestamp' in df.columns:
+                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                    df.set_index('timestamp', inplace=True)
+                    df = df[df.index.notna()]
+                return df
+            except Exception as e:
+                self.logger.error(f"Error retrieving latest options data: {e}")
+                return pd.DataFrame()
+
+    async def get_option_price_feature(self, ticker: str, option_ticker: str) -> dict[str, Any] | None:
+        df = await self.get_latest_options_data(ticker=ticker, option_tickers=[option_ticker])
+        if df.empty:
+            return None
+        row = df.iloc[0]
+        return {
+            'price': row.get('price'),
+            'bid': row.get('bid'),
+            'ask': row.get('ask'),
+            'day_close': row.get('day_close'),
+            'fmv': row.get('fmv'),
+        }
+
     async def _get_historical_data(
         self,
         ticker: str,
@@ -1104,5 +1275,31 @@ class StockQuestDB(StockDBBase):
         write_timestamp TIMESTAMP
     ) TIMESTAMP(timestamp) PARTITION BY DAY WAL
     DEDUP UPSERT KEYS(timestamp, ticker);
+    """
+
+    create_table_options_data_sql = """
+    CREATE TABLE IF NOT EXISTS options_data (
+        ticker SYMBOL INDEX CAPACITY 256,
+        option_ticker SYMBOL INDEX CAPACITY 4096,
+        expiration_date DATE,
+        strike_price DOUBLE,
+        option_type SYMBOL INDEX CAPACITY 8,
+        timestamp TIMESTAMP,
+        write_timestamp TIMESTAMP,
+        last_quote_timestamp TIMESTAMP,
+        price DOUBLE,
+        bid DOUBLE,
+        ask DOUBLE,
+        day_close DOUBLE,
+        fmv DOUBLE,
+        delta DOUBLE,
+        gamma DOUBLE,
+        theta DOUBLE,
+        vega DOUBLE,
+        implied_volatility DOUBLE,
+        volume LONG,
+        open_interest LONG
+    ) TIMESTAMP(timestamp) PARTITION BY DAY WAL
+    DEDUP UPSERT KEYS(timestamp, ticker, option_ticker);
     """
 
