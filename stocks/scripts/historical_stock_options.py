@@ -823,12 +823,12 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
                 include_expired=args_namespace.include_expired,
                 use_cache=getattr(args_namespace, 'use_csv', False),
                 save_to_csv=getattr(args_namespace, 'use_csv', False),
-                use_db=getattr(args_namespace, 'use_db', False),
-                db_conn=getattr(args_namespace, 'db_conn', None)
+                use_db=bool(getattr(args_namespace, 'use_db', None)),
+                db_conn=getattr(args_namespace, 'use_db', None)
             )
             # Optional: save to QuestDB directly before printing
             try:
-                if getattr(args_namespace, 'use_db', False) and options_result.get('success'):
+                if getattr(args_namespace, 'use_db', None) and options_result.get('success'):
                     contracts = options_result['data'].get('contracts') or []
                     if contracts:
                         import pandas as _pd
@@ -869,7 +869,7 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
                             for req_col in required_cols:
                                 if req_col not in df.columns:
                                     df[req_col] = _pd.NA
-                            db = get_stock_db('questdb', db_config=getattr(args_namespace, 'db_conn', None))
+                            db = get_stock_db('questdb', db_config=getattr(args_namespace, 'use_db', None))
                             await db.save_options_data(df=df, ticker=symbol)
             except Exception as e:
                 if not args_namespace.quiet:
@@ -1020,14 +1020,16 @@ Examples:
     )
     parser.add_argument(
         '--use-db',
-        action='store_true',
-        help="Enable database persistence: write fetched options to QuestDB."
+        type=str,
+        default=None,
+        help="QuestDB connection string to enable DB read/write (e.g., questdb://user:pass@host:8812/db)."
     )
+    # Backward-compatibility (hidden): legacy --db-conn maps to --use-db
     parser.add_argument(
         '--db-conn',
         type=str,
         default=None,
-        help="QuestDB connection string (e.g., questdb://user:pass@host:9009/db). Required if --save-to-db."
+        help=argparse.SUPPRESS
     )
     
     args = parser.parse_args()
@@ -1035,6 +1037,8 @@ Examples:
     # Backward-compatibility: map deprecated flags to new consolidated flags
     if getattr(args, 'use_csv_cache', False) or getattr(args, 'save_to_csv', False):
         args.use_csv = True
+    if getattr(args, 'db_conn', None) and not getattr(args, 'use_db', None):
+        args.use_db = args.db_conn
     
     api_key = os.getenv('POLYGON_API_KEY')
     if not api_key:
