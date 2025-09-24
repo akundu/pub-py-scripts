@@ -301,3 +301,93 @@ def test_get_active_options_for_date_filters_and_snapshot(monkeypatch):
     assert pytest.approx(oc["ask"], rel=1e-6) == 1.2
 
 
+
+def test_db_first_reads_without_hitting_api(monkeypatch):
+    HistoricalDataFetcher = _import_script_module()
+
+    # Build a fake DataFrame that mimics DB latest options schema
+    import pandas as pd
+    df = pd.DataFrame([
+        {
+            'option_ticker': 'O:TEST240621C00180000',
+            'option_type': 'call',
+            'strike_price': 180.0,
+            'expiration_date': '2024-06-21',
+            'bid': 1.23,
+            'ask': 1.30,
+            'day_close': 1.25,
+            'fmv': 1.27,
+            'delta': 0.45,
+            'gamma': 0.02,
+            'theta': -0.01,
+            'vega': 0.10,
+            'rho': None,
+            'implied_volatility': None,
+            'volume': None,
+            'open_interest': None,
+            'last_quote_timestamp': None,
+        },
+        {
+            'option_ticker': 'O:TEST240621P00180000',
+            'option_type': 'put',
+            'strike_price': 180.0,
+            'expiration_date': '2024-06-21',
+            'bid': 1.10,
+            'ask': 1.20,
+            'day_close': 1.15,
+            'fmv': 1.18,
+            'delta': -0.55,
+            'gamma': 0.02,
+            'theta': -0.01,
+            'vega': 0.11,
+            'rho': None,
+            'implied_volatility': None,
+            'volume': None,
+            'open_interest': None,
+            'last_quote_timestamp': None,
+        },
+    ])
+
+    # Fake DB object
+    class FakeDB:
+        async def get_latest_options_data(self, ticker: str):
+            return df
+
+    # Monkeypatch the get_stock_db used inside the script module
+    import scripts.historical_stock_options as hso
+    monkeypatch.setattr(hso, 'get_stock_db', lambda *args, **kwargs: FakeDB())
+
+    # Instantiate fetcher and ensure API methods would raise if called
+    fetcher = HistoricalDataFetcher(api_key="dummy", data_dir="data", quiet=True)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("API should not be called when DB has rows")
+
+    monkeypatch.setattr(fetcher.client, 'list_options_contracts', fail_if_called)
+    monkeypatch.setattr(fetcher.client, 'get_snapshot_option', fail_if_called)
+
+    import asyncio
+    async def run():
+        res = await fetcher.get_active_options_for_date(
+            symbol="TEST",
+            target_date_str="2024-06-21",
+            option_type="all",
+            stock_close_price=180.0,
+            strike_range_percent=None,
+            max_days_to_expiry=None,
+            include_expired=False,
+            use_cache=False,
+            save_to_csv=False,
+            use_db=True,
+            db_conn="questdb://dummy"
+        )
+        return res
+
+    result = asyncio.get_event_loop().run_until_complete(run())
+    assert result["success"] is True
+    out = result["data"]["contracts"]
+    assert isinstance(out, list) and len(out) == 2
+    tickers = {c.get("ticker") for c in out}
+    assert "O:TEST240621C00180000" in tickers
+    assert "O:TEST240621P00180000" in tickers
+

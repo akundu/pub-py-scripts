@@ -945,17 +945,81 @@ class StockQuestDB(StockDBBase):
                 if c in df_copy.columns:
                     df_copy[c] = pd.to_numeric(df_copy[c], errors='coerce')
 
-            # Insert
+            # Insert using executemany
             try:
-                conn.register('df_options_to_insert', df_copy)
-                preferred_cols = [
+                insert_cols = [
                     'ticker','option_ticker','expiration_date','strike_price','option_type','timestamp','write_timestamp',
-                    'last_quote_timestamp','price','bid','ask','day_close','fmv','delta','gamma','theta','vega',
+                    'last_quote_timestamp','price','bid','ask','day_close','fmv','delta','gamma','theta','vega','rho',
                     'implied_volatility','volume','open_interest'
                 ]
-                cols_present = [c for c in preferred_cols if c in df_copy.columns]
-                col_list = ", ".join(cols_present)
-                conn.execute(f"INSERT INTO options_data ({col_list}) SELECT {col_list} FROM df_options_to_insert")
+
+                # Ensure missing columns exist with None
+                for col in insert_cols:
+                    if col not in df_copy.columns:
+                        df_copy[col] = None
+
+                # Parse expiration_date to date/datetime
+                if 'expiration_date' in df_copy.columns:
+                    df_copy['expiration_date'] = pd.to_datetime(df_copy['expiration_date'], errors='coerce')
+
+                def _cast_val(col_name: str, val: Any):
+                    if col_name in ['timestamp','write_timestamp','last_quote_timestamp']:
+                        if pd.isna(val):
+                            return None
+                        # Accept pandas Timestamp or datetime
+                        if isinstance(val, pd.Timestamp):
+                            return self._ensure_timezone_naive_utc(val, f"options {col_name}")
+                        return self._ensure_timezone_naive_utc(val, f"options {col_name}")
+                    if col_name == 'expiration_date':
+                        if pd.isna(val):
+                            return None
+                        if isinstance(val, pd.Timestamp):
+                            # QuestDB DATE accepts date or datetime
+                            return val.to_pydatetime()
+                        return val
+                    if col_name in ['volume','open_interest']:
+                        if pd.isna(val):
+                            return None
+                        try:
+                            return int(val)
+                        except Exception:
+                            return None
+                    if col_name in ['strike_price','price','bid','ask','day_close','fmv','delta','gamma','theta','vega','implied_volatility']:
+                        if pd.isna(val):
+                            return None
+                        try:
+                            return float(val)
+                        except Exception:
+                            return None
+                    if col_name == 'rho':
+                        if pd.isna(val):
+                            return None
+                        try:
+                            return float(val)
+                        except Exception:
+                            return None
+                    return val
+
+                args_seq = []
+                for _, row in df_copy.iterrows():
+                    args_seq.append(tuple(_cast_val(c, row.get(c)) for c in insert_cols))
+
+                placeholders = ', '.join([f"${i+1}" for i in range(len(insert_cols))])
+                insert_sql = f"INSERT INTO options_data ({', '.join(insert_cols)}) VALUES ({placeholders})"
+
+                # Insert rows individually to surface any per-row errors
+                success_count = 0
+                first_error: Exception | None = None
+                for args in args_seq:
+                    try:
+                        await conn.execute(insert_sql, *args)
+                        success_count += 1
+                    except Exception as row_e:
+                        if first_error is None:
+                            first_error = row_e
+                
+                # Log successful insertion
+                self.logger.info(f"Options insert: inserted={success_count} ticker={ticker} bucket={bucket_ts.isoformat()}")
             except Exception as e:
                 self.logger.error(f"Error saving options data: {e}")
                 raise
@@ -1281,7 +1345,7 @@ class StockQuestDB(StockDBBase):
     CREATE TABLE IF NOT EXISTS options_data (
         ticker SYMBOL INDEX CAPACITY 256,
         option_ticker SYMBOL INDEX CAPACITY 4096,
-        expiration_date DATE,
+        expiration_date TIMESTAMP,
         strike_price DOUBLE,
         option_type SYMBOL INDEX CAPACITY 8,
         timestamp TIMESTAMP,
@@ -1296,10 +1360,9 @@ class StockQuestDB(StockDBBase):
         gamma DOUBLE,
         theta DOUBLE,
         vega DOUBLE,
+        rho DOUBLE,
         implied_volatility DOUBLE,
         volume LONG,
         open_interest LONG
-    ) TIMESTAMP(timestamp) PARTITION BY DAY WAL
-    DEDUP UPSERT KEYS(timestamp, ticker, option_ticker);
+    ) TIMESTAMP(timestamp) PARTITION BY MONTH;
     """
-

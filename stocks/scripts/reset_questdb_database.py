@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """
-Reset QuestDB Database Script
+Reset/Update QuestDB Database Script
 
-This script completely resets the QuestDB database by:
-1. Dropping ALL tables (including *_clean tables)
-2. Recreating tables with proper indexes and deduplication
-3. Verifying the setup is correct
+Modes:
+- Full reset (default):
+  1) Drop ALL tables
+  2) Recreate tables with proper indexes and deduplication
+  3) Verify setup
+
+- Update-only:
+  - Create/ensure specific tables exist without dropping others
+  - If no tables specified, ensure all core tables exist
 """
 
 import asyncio
 import sys
 from pathlib import Path
+import argparse
 
 # Add the parent directory to the path so we can import common modules
 sys.path.append(str(Path(__file__).parent.parent))
@@ -84,7 +90,7 @@ async def reset_questdb_database(db_path: str):
             print(f"Final tables: {final_tables}")
             
             # Check each table structure
-            expected_tables = ['daily_prices', 'hourly_prices', 'realtime_data']
+            expected_tables = ['daily_prices', 'hourly_prices', 'realtime_data', 'options_data']
             for table in expected_tables:
                 if table in final_tables:
                     print(f"✓ {table} exists")
@@ -174,28 +180,94 @@ async def test_deduplication(db):
 
 
 async def main():
-    """Main function."""
-    if len(sys.argv) < 2:
-        print("Usage: python scripts/reset_questdb_database.py <db_path>")
-        print("Example: python scripts/reset_questdb_database.py 'questdb://stock_user:stock_password@localhost:8812/stock_data'")
-        sys.exit(1)
-    
-    db_path = sys.argv[1]
-    
-    print("WARNING: This will completely reset your QuestDB database!")
-    print("This will:")
-    print("- Drop ALL tables (including data)")
-    print("- Remove all *_clean tables")
-    print("- Recreate tables with proper indexes and deduplication")
-    print()
-    
-    response = input("Are you sure you want to continue? (yes/no): ")
-    if response.lower() not in ['yes', 'y']:
-        print("Operation cancelled.")
-        sys.exit(0)
-    
-    success = await reset_questdb_database(db_path)
-    sys.exit(0 if success else 1)
+    """Main function with support for full reset or update-only of specific tables."""
+    parser = argparse.ArgumentParser(description="Reset/Update QuestDB tables")
+    parser.add_argument("db_path", help="QuestDB connection string, e.g. questdb://user:pass@host:9009/db")
+    parser.add_argument(
+        "--update-only",
+        action="store_true",
+        help="Do not drop tables; create/ensure tables exist (all or specified via --tables)")
+    parser.add_argument(
+        "--tables",
+        type=str,
+        default=None,
+        help="Comma-separated table names to create/ensure (e.g., options_data). Defaults to all core tables if omitted.")
+
+    args = parser.parse_args()
+
+    if args.update_only:
+        # Update-only path: ensure specified (or all) tables exist
+        logger = get_logger(__name__)
+        print("QuestDB Update-Only Mode")
+        print(f"Database: {args.db_path}")
+        print("=" * 50)
+        try:
+            db = StockQuestDB(args.db_path, pool_max_size=1, connection_timeout_seconds=30)
+
+            # Determine target tables
+            if args.tables:
+                target_tables = [t.strip() for t in args.tables.split(',') if t.strip()]
+            else:
+                target_tables = ['daily_prices', 'hourly_prices', 'realtime_data', 'options_data']
+
+            print(f"Ensuring tables exist: {target_tables}")
+            async with db.get_connection() as conn:
+                # Map table -> DDL
+                ddl_map = {
+                    'daily_prices': StockQuestDB.create_table_daily_prices_sql,
+                    'hourly_prices': StockQuestDB.create_hourly_prices_table_sql,
+                    'realtime_data': StockQuestDB.create_table_realtime_data_sql,
+                    'options_data': StockQuestDB.create_table_options_data_sql,
+                }
+                for table in target_tables:
+                    ddl = ddl_map.get(table)
+                    if not ddl:
+                        print(f"⚠ Unknown table '{table}', skipping")
+                        continue
+                    try:
+                        await conn.execute(ddl)
+                        print(f"✓ Ensured table: {table}")
+                    except Exception as e:
+                        print(f"✗ Error ensuring table {table}: {e}")
+
+                # Verify
+                verify = await conn.fetch("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
+                existing = {row['table_name'] for row in verify}
+                for table in target_tables:
+                    if table in existing:
+                        print(f"✓ Verified exists: {table}")
+                    else:
+                        print(f"✗ Missing after ensure: {table}")
+
+            print("✓ Update-only completed")
+            return 0
+        except Exception as e:
+            print(f"✗ Error in update-only: {e}")
+            import traceback
+            traceback.print_exc()
+            return 1
+        finally:
+            if 'db' in locals():
+                try:
+                    await db.close_session()
+                except Exception:
+                    pass
+    else:
+        # Full reset path with confirmation
+        print("WARNING: This will completely reset your QuestDB database!")
+        print("This will:")
+        print("- Drop ALL tables (including data)")
+        print("- Remove all *_clean tables")
+        print("- Recreate tables with proper indexes and deduplication")
+        print()
+
+        response = input("Are you sure you want to continue? (yes/no): ")
+        if response.lower() not in ['yes', 'y']:
+            print("Operation cancelled.")
+            return 0
+
+        success = await reset_questdb_database(args.db_path)
+        return 0 if success else 1
 
 
 if __name__ == "__main__":
