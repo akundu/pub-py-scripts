@@ -33,7 +33,8 @@ class StockQuestDB(StockDBBase):
                  pool_connection_timeout_minutes: int = 30,
                  connection_timeout_seconds: int = 180,
                  logger: Optional[logging.Logger] = None,
-                 log_level: str = "INFO"):
+                 log_level: str = "INFO",
+                 auto_init: bool = True):
         """
         Initialize QuestDB connection with time-series specific settings.
         
@@ -64,7 +65,13 @@ class StockQuestDB(StockDBBase):
         self.pool_max_size = pool_max_size
         self.pool_connection_timeout_minutes = pool_connection_timeout_minutes
         self.connection_timeout_seconds = connection_timeout_seconds
+        # Maintain a pool per event loop to avoid cross-thread/loop reuse issues
         self._connection_pool = None
+        self._pool_by_loop: dict[int, asyncpg.Pool] = {}
+        self._pool_init_lock = asyncio.Lock()
+
+        # Per-loop, per-table locks to serialize inserts and avoid WAL 'table busy'
+        self._locks_by_loop: dict[int, dict[str, asyncio.Lock]] = {}
         self._tables_ensured = False
         self._tables_ensured_at = None
         
@@ -73,14 +80,15 @@ class StockQuestDB(StockDBBase):
                         f"connection timeout: {connection_timeout_seconds}s")
 
         # Ensure tables exist once during initialization (safe for both sync/async contexts)
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No running loop; run synchronously
-            asyncio.run(self._init_db())
-        else:
-            # Running inside an event loop; schedule task
-            loop.create_task(self._init_db())
+        if auto_init:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop; run synchronously
+                asyncio.run(self._init_db())
+            else:
+                # Running inside an event loop; schedule task
+                loop.create_task(self._init_db())
 
     async def _init_db(self) -> None:
         """Initialize the QuestDB database with required tables."""
@@ -106,6 +114,8 @@ class StockQuestDB(StockDBBase):
             
             # Create indexes for optimal performance
             await self._create_questdb_indexes(conn)
+            # Configure WAL parameters for low-latency visibility in tests and small inserts
+            await self._configure_wal_params(conn)
             
         # Update cache
         self._tables_ensured = True
@@ -133,20 +143,72 @@ class StockQuestDB(StockDBBase):
         # No separate index creation needed
         self.logger.info("QuestDB indexes are created inline with table definitions")
 
+    CONFIGURE_WAL_PARAMS = False
+    async def _configure_wal_params(self, conn: asyncpg.Connection) -> None:
+        """Tune WAL params for immediate read-after-write visibility during tests and small batches.
+        Safe no-ops if running on a QuestDB version without these params.
+        """
+        if StockQuestDB.CONFIGURE_WAL_PARAMS == False:
+            pass
+        try:
+            # Reduce commit lag and uncommitted rows to make inserts visible immediately
+            for table in [
+                'daily_prices',
+                'hourly_prices',
+                'realtime_data',
+                'options_data',
+            ]:
+                try:
+                    await conn.execute(f"ALTER TABLE {table} SET PARAM commitLag=0s")
+                except Exception as e:
+                    # Log at debug; older QuestDB versions may not support this
+                    self.logger.debug(f"commitLag param not applied on {table}: {e}")
+                try:
+                    await conn.execute(f"ALTER TABLE {table} SET PARAM maxUncommittedRows=1")
+                except Exception as e:
+                    self.logger.debug(f"maxUncommittedRows param not applied on {table}: {e}")
+        except Exception as e:
+            # Do not fail initialization if tuning fails
+            self.logger.warning(f"WAL params tuning failed: {e}")
+
     @asynccontextmanager
     async def get_connection(self):
-        """Context manager for safely getting and returning connections."""
-        if self._connection_pool is None:
-            self._connection_pool = await asyncpg.create_pool(
-                self.db_config,
-                min_size=1,
-                max_size=self.pool_max_size,
-                command_timeout=self.pool_connection_timeout_minutes * 60,
-                timeout=self.connection_timeout_seconds
-            )
-        
-        async with self._connection_pool.acquire() as conn:
+        """Context manager for safely getting and returning connections.
+        Ensures a distinct pool per asyncio event loop to be thread-safe.
+        """
+        loop = asyncio.get_running_loop()
+        loop_id = id(loop)
+        pool = self._pool_by_loop.get(loop_id)
+
+        if pool is None:
+            async with self._pool_init_lock:
+                # Double-check inside the lock
+                pool = self._pool_by_loop.get(loop_id)
+                if pool is None:
+                    pool = await asyncpg.create_pool(
+                        self.db_config,
+                        min_size=1,
+                        max_size=self.pool_max_size,
+                        command_timeout=self.pool_connection_timeout_minutes * 60,
+                        timeout=self.connection_timeout_seconds
+                    )
+                    self._pool_by_loop[loop_id] = pool
+
+        async with pool.acquire() as conn:
             yield conn
+
+    def _get_table_lock(self, table: str) -> asyncio.Lock:
+        """Get an asyncio.Lock for a table scoped to the current event loop."""
+        loop_id = id(asyncio.get_running_loop())
+        table_locks = self._locks_by_loop.get(loop_id)
+        if table_locks is None:
+            table_locks = {}
+            self._locks_by_loop[loop_id] = table_locks
+        lock = table_locks.get(table)
+        if lock is None:
+            lock = asyncio.Lock()
+            table_locks[table] = lock
+        return lock
 
     async def save_stock_data(
         self,
@@ -185,7 +247,7 @@ class StockQuestDB(StockDBBase):
             # Ensure table has write_timestamp column
             try:
                 async with conn.cursor() as cur:
-                    await cur.execute(f"ALTER TABLE {table} ADD COLUMN write_timestamp TIMESTAMP")
+                    await cur.execute(f"ALTER TABLE {table} ADD COLUMN write_timestamp TIMESTAMP") if StockQuestDB.CONFIGURE_WAL_PARAMS == False else None
             except Exception:
                 pass
 
@@ -261,7 +323,10 @@ class StockQuestDB(StockDBBase):
                 records.append(record)
 
             if records:
-                # Use QuestDB's optimized bulk insert
+                # Serialize inserts per table to reduce WAL contention
+                # table_lock = self._get_table_lock(table)
+                # async with table_lock:
+                #     await self._bulk_insert_stock_data(conn, table, records, interval)
                 await self._bulk_insert_stock_data(conn, table, records, interval)
 
     async def _bulk_insert_stock_data(self, conn: asyncpg.Connection, table: str, records: List[Dict], interval: str):
@@ -314,7 +379,7 @@ class StockQuestDB(StockDBBase):
                 first_record = records[0]
                 self.logger.info(f"Inserting {interval} record for {first_record['ticker']}: write_timestamp={first_record.get('write_timestamp')}")
             
-            # Use individual inserts to ensure UPSERT works properly
+            # Use individual inserts to ensure UPSERT works properly, with retries
             for i, record in enumerate(records):
                 record_values = []
                 for col in columns:
@@ -335,8 +400,29 @@ class StockQuestDB(StockDBBase):
                             record_values.append(value)
                     else:
                         record_values.append(value)
-                
-                await conn.execute(insert_sql, *record_values)
+
+                # Retry on transient WAL/connection errors
+                max_attempts = 5
+                delay = 0.1
+                attempt = 1
+                while True:
+                    try:
+                        await conn.execute(insert_sql, *record_values)
+                        break
+                    except Exception as e:
+                        message = str(e).lower()
+                        if any(err in message for err in [
+                            'table busy',
+                            'another operation is in progress',
+                            'connection does not exist',
+                            'connection was closed',
+                        ]) and attempt < max_attempts:
+                            await asyncio.sleep(delay)
+                            delay = min(delay * 2, 2.0)
+                            attempt += 1
+                            continue
+                        # Non-retriable or exceeded attempts
+                        raise
             
             self.logger.info(f"Inserted {len(records)} {interval} records for {records[0]['ticker']} (individual inserts for proper UPSERT)")
         except Exception as e:
@@ -421,12 +507,37 @@ class StockQuestDB(StockDBBase):
             else:
                 params.append(start_date)
         if end_date:
-            query += f" AND {date_col} <= ${len(params) + 1}"
-            # Convert string date to datetime object for asyncpg
-            if isinstance(end_date, str):
-                params.append(date_parser.parse(end_date))
+            # For daily data, treat a date-only end_date as exclusive of the next day
+            # so full-day bars (e.g., 04:00 timestamps) are included reliably.
+            # If a full datetime is provided, retain the inclusive behavior.
+            if interval == 'daily':
+                parsed_end = None
+                if isinstance(end_date, str):
+                    try:
+                        parsed_end = date_parser.parse(end_date)
+                    except Exception:
+                        parsed_end = None
+                else:
+                    parsed_end = end_date
+
+                if isinstance(parsed_end, datetime) and (
+                    (isinstance(end_date, str) and len(end_date) == 10) or
+                    (parsed_end.hour == 0 and parsed_end.minute == 0 and parsed_end.second == 0 and parsed_end.microsecond == 0)
+                ):
+                    # Use exclusive upper bound: < end_date + 1 day
+                    query += f" AND {date_col} < ${len(params) + 1}"
+                    params.append(parsed_end + timedelta(days=1))
+                else:
+                    # Fall back to inclusive if a time component was provided
+                    query += f" AND {date_col} <= ${len(params) + 1}"
+                    params.append(parsed_end)
             else:
-                params.append(end_date)
+                query += f" AND {date_col} <= ${len(params) + 1}"
+                # Convert string date to datetime object for asyncpg
+                if isinstance(end_date, str):
+                    params.append(date_parser.parse(end_date))
+                else:
+                    params.append(end_date)
 
         query += f" ORDER BY {date_col}"
 
@@ -1288,9 +1399,15 @@ class StockQuestDB(StockDBBase):
     
     async def close(self):
         """Close the connection pool."""
-        if self._connection_pool:
-            await self._connection_pool.close()
-            self._connection_pool = None
+        # Close all pools we may have created across loops
+        if self._pool_by_loop:
+            for pool in list(self._pool_by_loop.values()):
+                try:
+                    await pool.close()
+                except Exception:
+                    pass
+            self._pool_by_loop.clear()
+        self._connection_pool = None
 
     create_table_daily_prices_sql = """
     CREATE TABLE IF NOT EXISTS daily_prices (
@@ -1314,6 +1431,7 @@ class StockQuestDB(StockDBBase):
     ) TIMESTAMP(date) PARTITION BY MONTH WAL
     DEDUP UPSERT KEYS(date, ticker);
     """
+
     create_hourly_prices_table_sql = """
     CREATE TABLE IF NOT EXISTS hourly_prices (
         ticker SYMBOL INDEX CAPACITY 128,
@@ -1364,5 +1482,6 @@ class StockQuestDB(StockDBBase):
         implied_volatility DOUBLE,
         volume LONG,
         open_interest LONG
-    ) TIMESTAMP(timestamp) PARTITION BY MONTH;
+    ) TIMESTAMP(timestamp) PARTITION BY MONTH WAL
+    DEDUP UPSERT KEYS(timestamp, ticker);
     """

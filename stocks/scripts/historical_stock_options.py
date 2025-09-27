@@ -136,8 +136,12 @@ class HistoricalDataFetcher:
 
     def _get_csv_path(self, symbol: str, expiration_date: str) -> Path:
         """Get the CSV file path for a specific symbol and expiration date."""
+        # Normalize and guard against empty symbol resulting in flat writes
+        norm_symbol = (symbol or "").strip().upper()
+        if not norm_symbol:
+            norm_symbol = "UNKNOWN"
         options_dir = self.data_dir / "options"
-        symbol_dir = options_dir / symbol.upper()
+        symbol_dir = options_dir / norm_symbol
         symbol_dir.mkdir(parents=True, exist_ok=True)
         return symbol_dir / f"{expiration_date}.csv"
 
@@ -176,6 +180,8 @@ class HistoricalDataFetcher:
                 continue
                 
             csv_path = self._get_csv_path(symbol, exp_date)
+            # Ensure directory exists regardless of prior steps
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
             
             # Prepare data for CSV
             csv_data = []
@@ -194,13 +200,15 @@ class HistoricalDataFetcher:
                     'gamma': contract.get('gamma', ''),
                     'theta': contract.get('theta', ''),
                     'vega': contract.get('vega', ''),
+                    'implied_volatility': contract.get('implied_volatility', ''),
+                    'volume': contract.get('volume', ''),
                 })
             
             # Write to CSV (append mode)
             file_exists = csv_path.exists()
             with open(csv_path, 'a', newline='', encoding='utf-8') as csvfile:
                 fieldnames = ['timestamp', 'ticker', 'type', 'strike', 'expiration', 
-                             'bid', 'ask', 'day_close', 'fmv', 'delta', 'gamma', 'theta', 'vega']
+                             'bid', 'ask', 'day_close', 'fmv', 'delta', 'gamma', 'theta', 'vega', 'implied_volatility', 'volume']
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 
                 if not file_exists:
@@ -209,6 +217,9 @@ class HistoricalDataFetcher:
             
             if not self.quiet:
                 print(f"Saved {len(csv_data)} contracts for {symbol} expiration {exp_date} to {csv_path}")
+            else:
+                # In quiet mode, still emit a minimal trace for debugging wrong path issues
+                print(str(csv_path))
 
     def _load_options_from_csv(self, symbol: str, expiration_date: str) -> List[Dict[str, Any]]:
         """Load the most recent options data from CSV file."""
@@ -242,6 +253,8 @@ class HistoricalDataFetcher:
                     'gamma': row['gamma'] if pd.notna(row['gamma']) else None,
                     'theta': row['theta'] if pd.notna(row['theta']) else None,
                     'vega': row['vega'] if pd.notna(row['vega']) else None,
+                    'implied_volatility': row['implied_volatility'] if 'implied_volatility' in row and pd.notna(row['implied_volatility']) else None,
+                    'volume': row['volume'] if 'volume' in row and pd.notna(row['volume']) else None,
                     'last_quote_timestamp': row['last_quote_timestamp'] if 'last_quote_timestamp' in row and pd.notna(row['last_quote_timestamp']) else None,
                 }
                 contracts.append(contract)
@@ -319,7 +332,8 @@ class HistoricalDataFetcher:
         use_cache: bool = False,
         save_to_csv: bool = False,
         use_db: bool = False,
-        db_conn: str | None = None
+        db_conn: str | None = None,
+        force_fresh: bool = False
     ) -> Dict[str, Any]:
         """
         Fetches all options contracts that were active on a specific date and gets their
@@ -333,8 +347,8 @@ class HistoricalDataFetcher:
             print(f"Fetching options for {symbol} expiring around {target_date_str}...")
         overall_start_time = time.time()
         
-        # 1) Prefer DB when enabled: load latest options from QuestDB and return if available
-        if use_db and db_conn:
+        # 1) Prefer DB when enabled: load latest options from QuestDB and return if available (unless force_fresh)
+        if use_db and db_conn and not force_fresh:
             try:
                 db = get_stock_db('questdb', db_config=db_conn)
                 latest_df = await db.get_latest_options_data(ticker=symbol)
@@ -364,12 +378,37 @@ class HistoricalDataFetcher:
 
                     # Apply filters locally to DB-loaded data to match CLI options
                     filtered_contracts = contracts_from_db
+                    # 1) option type
                     if option_type != 'all':
                         filtered_contracts = [c for c in filtered_contracts if (c.get('type') or '').lower() == option_type]
+                    # 2) strike range
                     if strike_range_percent is not None and stock_close_price is not None:
                         min_strike = stock_close_price * (1 - strike_range_percent / 100)
                         max_strike = stock_close_price * (1 + strike_range_percent / 100)
                         filtered_contracts = [c for c in filtered_contracts if min_strike <= (c.get('strike') or -1) <= max_strike]
+                    # 3) expiration date window (±max_days_to_expiry around target_date)
+                    if max_days_to_expiry is not None:
+                        min_date = (target_date_dt - timedelta(days=max_days_to_expiry)).date()
+                        max_date = (target_date_dt + timedelta(days=max_days_to_expiry)).date()
+
+                        def _parse_expiration(exp_value):
+                            # Handles date strings like 'YYYY-MM-DD' or datetime/date objects
+                            try:
+                                if exp_value is None:
+                                    return None
+                                if hasattr(exp_value, 'date'):
+                                    # datetime or pandas Timestamp
+                                    return exp_value.date() if hasattr(exp_value, 'hour') else exp_value
+                                if isinstance(exp_value, str):
+                                    return datetime.strptime(exp_value[:10], '%Y-%m-%d').date()
+                            except Exception:
+                                return None
+                            return None
+
+                        filtered_contracts = [
+                            c for c in filtered_contracts
+                            if (lambda d: d is not None and min_date <= d <= max_date)(_parse_expiration(c.get('expiration')))
+                        ]
 
                     if filtered_contracts:
                         options_data['contracts'] = filtered_contracts
@@ -378,8 +417,8 @@ class HistoricalDataFetcher:
                 # Fall back to CSV/API silently on DB issues
                 pass
 
-        # 2) Check if we should use cached CSV data (only when explicitly enabled)
-        if use_cache:
+        # 2) Check if we should use cached CSV data (only when explicitly enabled and not force_fresh)
+        if use_cache and not force_fresh:
             # Try to load from cache for each potential expiration date
             cache_hit = False
             if max_days_to_expiry is not None:
@@ -561,6 +600,8 @@ class HistoricalDataFetcher:
                     'day_close': None,
                     'fmv': None,
                     'last_quote_timestamp': None,
+                    'implied_volatility': None,
+                    'volume': None,
                 }
                 try:
                     snapshot_local = self.client.get_snapshot_option(symbol, contract_ticker_local)
@@ -601,6 +642,7 @@ class HistoricalDataFetcher:
                                 if not details['bid']:
                                     details['bid'] = day_close
                                     details['ask'] = day_close
+                            details['volume'] = getattr(snapshot_local.day, 'volume', None)
                         if hasattr(snapshot_local, 'fair_market_value') and snapshot_local.fair_market_value:
                             fmv = getattr(snapshot_local.fair_market_value, 'value', None)
                             if fmv:
@@ -613,6 +655,7 @@ class HistoricalDataFetcher:
                             details['gamma'] = getattr(snapshot_local.greeks, 'gamma', None)
                             details['theta'] = getattr(snapshot_local.greeks, 'theta', None)
                             details['vega'] = getattr(snapshot_local.greeks, 'vega', None)
+                            details['implied_volatility'] = getattr(snapshot_local.greeks, 'implied_volatility', None)
                 except Exception as e_local:
                     # Fallback to historical for first few only
                     try:
@@ -710,7 +753,7 @@ class HistoricalDataFetcher:
 
         # --- Options Data ---
         output.append(f"\n--- Options for {symbol} on {target_date} ---")
-        output.append("Note: Bid/Ask from real-time data if available, otherwise from day close. Day Close = daily close price. FMV = Fair Market Value. Greeks from current market data.")
+        output.append("Note: Bid/Ask from real-time data if available, otherwise from day close. Day Close = daily close price. FMV = Fair Market Value. Greeks, IV (Implied Volatility), and Volume from current market data.")
 
         # Add a note about the filters
         filter_notes = []
@@ -793,8 +836,10 @@ class HistoricalDataFetcher:
                             f"{contract.get('gamma'):.3f}" if contract.get('gamma') is not None else 'N/A',
                             f"{contract.get('theta'):.3f}" if contract.get('theta') is not None else 'N/A',
                             f"{contract.get('vega'):.3f}" if contract.get('vega') is not None else 'N/A',
+                            f"{contract.get('implied_volatility'):.3f}" if contract.get('implied_volatility') is not None else 'N/A',
+                            f"{contract.get('volume'):,}" if contract.get('volume') is not None else 'N/A',
                         ])
-                    output.append(tabulate(options_table, headers=[f'Ticker ({symbol})', 'Type', 'Strike', 'Bid', 'Ask', 'Day Close', 'FMV', 'Delta', 'Gamma', 'Theta', 'Vega'], tablefmt='grid'))
+                    output.append(tabulate(options_table, headers=[f'Ticker ({symbol})', 'Type', 'Strike', 'Bid', 'Ask', 'Day Close', 'FMV', 'Delta', 'Gamma', 'Theta', 'Vega', 'IV', 'Volume'], tablefmt='grid'))
         else:
             output.append(f"Could not fetch options data: {options_result.get('error', 'Unknown error')}")
             
@@ -821,10 +866,12 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
                 strike_range_percent=args_namespace.strike_range_percent,
                 max_days_to_expiry=args_namespace.max_days_to_expiry,
                 include_expired=args_namespace.include_expired,
-                use_cache=getattr(args_namespace, 'use_csv', False),
+                # If --fetch-online is set, bypass CSV cache reads even if --use-csv is enabled
+                use_cache=(getattr(args_namespace, 'use_csv', False) and not getattr(args_namespace, 'fetch_online', False)),
                 save_to_csv=getattr(args_namespace, 'use_csv', False),
                 use_db=bool(getattr(args_namespace, 'use_db', None)),
-                db_conn=getattr(args_namespace, 'use_db', None)
+                db_conn=getattr(args_namespace, 'use_db', None),
+                force_fresh=getattr(args_namespace, 'fetch_online', False)
             )
             # Optional: save to QuestDB directly before printing
             try:
