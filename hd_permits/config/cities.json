@@ -1,0 +1,93 @@
+{
+  "nyc": {
+    "name": "New York City",
+    "api_url": "https://data.cityofnewyork.us/resource/ic3t-wcy2.json",
+    "bulk_url": "https://data.cityofnewyork.us/resource/ic3t-wcy2.csv",
+    "documents_url": "https://a810-bisweb.nyc.gov/bisweb/",
+    "date_params": {
+      "start": "from_date",
+      "end": "to_date",
+      "format": "%Y-%m-%d"
+    },
+    "rate_limit": {
+      "delay_seconds": 1.0,
+      "max_retries": 3
+    }
+  },
+  "la": {
+    "name": "Los Angeles",
+    "api_url": "https://data.lacity.org/api/views/b22s-mpz7/rows.json",
+    "bulk_url": "https://data.lacity.org/api/views/b22s-mpz7/rows.csv",
+    "documents_url": "https://www.ladbs.org/",
+    "date_params": {
+      "start": "startDate",
+      "end": "endDate",
+      "format": "%Y-%m-%d"
+    },
+    "rate_limit": {
+      "delay_seconds": 1.0,
+      "max_retries": 3
+    }
+  },
+  "chicago": {
+    "name": "Chicago",
+    "api_url": "https://data.cityofchicago.org/resource/building-permits.json",
+    "bulk_url": "https://data.cityofchicago.org/resource/building-permits.csv",
+    "documents_url": "https://webapps1.chicago.gov/",
+    "date_params": {
+      "start": "startDate",
+      "end": "endDate",
+      "format": "%Y-%m-%d"
+    },
+    "rate_limit": {
+      "delay_seconds": 1.0,
+      "max_retries": 3
+    }
+  },
+  "san_francisco": {
+    "name": "San Francisco",
+    "api_url": "https://data.sfgov.org/resource/p4e4-a5a4.json",
+    "bulk_url": "https://data.sfgov.org/api/views/p4e4-a5a4/rows.csv",
+    "documents_url": "https://sf.gov/",
+    "date_params": {
+      "start": "startDate",
+      "end": "endDate",
+      "format": "%Y-%m-%d"
+    },
+    "rate_limit": {
+      "delay_seconds": 1.0,
+      "max_retries": 3
+    }
+  },
+  "boston": {
+    "name": "Boston",
+    "api_url": "https://data.boston.gov/api/3/action/datastore_search",
+    "bulk_url": "https://data.boston.gov/dataset/building-permits/resource/4f4b-8j9m",
+    "documents_url": "https://boston.gov/",
+    "date_params": {
+      "start": "startDate",
+      "end": "endDate",
+      "format": "%Y-%m-%d"
+    },
+    "rate_limit": {
+      "delay_seconds": 1.0,
+      "max_retries": 3
+    }
+  },
+  "seattle": {
+    "name": "Seattle",
+    "api_url": "https://data.seattle.gov/resource/mags-97de.json",
+    "bulk_url": "https://data.seattle.gov/api/views/mags-97de/rows.csv",
+    "documents_url": "https://seattle.gov/",
+    "date_params": {
+      "start": "startDate",
+      "end": "endDate",
+      "format": "%Y-%m-%d"
+    },
+    "rate_limit": {
+      "delay_seconds": 1.0,
+      "max_retries": 3
+    }
+  }
+}
+
