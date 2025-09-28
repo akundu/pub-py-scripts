@@ -8,10 +8,11 @@ symbols:
 - BND
 - BNDX
 - BSV
-- COWZ
+- CGDV
 - DFAC
 - DGRO
 - DIA
+- DYNF
 - EFA
 - EFV
 - FBTC
@@ -22,12 +23,12 @@ symbols:
 - IEF
 - IEFA
 - IEMG
-- IGSB
 - IJH
 - IJR
 - ITOT
 - IUSB
 - IUSG
+- IUSV
 - IVE
 - IVV
 - IVW
@@ -37,7 +38,6 @@ symbols:
 - IWM
 - IWR
 - IXUS
-- IYW
 - JAAA
 - JEPI
 - JEPQ
@@ -47,6 +47,7 @@ symbols:
 - MDY
 - MGK
 - MUB
+- OEF
 - QQQ
 - QQQM
 - QUAL
@@ -57,7 +58,6 @@ symbols:
 - SCHG
 - SCHX
 - SGOV
-- SHV
 - SHY
 - SMH
 - SPDW

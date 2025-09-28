@@ -1,5 +1,5 @@
 type: sp-500
-count: 503
+count: 504
 symbols:
 - A
 - AAPL
@@ -34,13 +34,13 @@ symbols:
 - AMT
 - AMZN
 - ANET
-- ANSS
 - AON
 - AOS
 - APA
 - APD
 - APH
 - APO
+- APP
 - APTV
 - ARE
 - ATO
@@ -124,12 +124,12 @@ symbols:
 - CTVA
 - CVS
 - CVX
-- CZR
 - D
 - DAL
 - DASH
 - DAY
 - DD
+- DDOG
 - DE
 - DECK
 - DELL
@@ -159,9 +159,9 @@ symbols:
 - EIX
 - EL
 - ELV
+- EME
 - EMN
 - EMR
-- ENPH
 - EOG
 - EPAM
 - EQIX
@@ -221,12 +221,12 @@ symbols:
 - HBAN
 - HCA
 - HD
-- HES
 - HIG
 - HII
 - HLT
 - HOLX
 - HON
+- HOOD
 - HPE
 - HPQ
 - HRL
@@ -236,6 +236,7 @@ symbols:
 - HUBB
 - HUM
 - HWM
+- IBKR
 - IBM
 - ICE
 - IDXX
@@ -260,7 +261,6 @@ symbols:
 - JCI
 - JKHY
 - JNJ
-- JNPR
 - JPM
 - K
 - KDP
@@ -360,7 +360,6 @@ symbols:
 - OTIS
 - OXY
 - PANW
-- PARA
 - PAYC
 - PAYX
 - PCAR
@@ -386,6 +385,7 @@ symbols:
 - PPL
 - PRU
 - PSA
+- PSKY
 - PSX
 - PTC
 - PWR
@@ -453,6 +453,7 @@ symbols:
 - TSLA
 - TSN
 - TT
+- TTD
 - TTWO
 - TXN
 - TXT
@@ -481,7 +482,6 @@ symbols:
 - VZ
 - WAB
 - WAT
-- WBA
 - WBD
 - WDAY
 - WDC
@@ -500,6 +500,7 @@ symbols:
 - XEL
 - XOM
 - XYL
+- XYZ
 - YUM
 - ZBH
 - ZBRA
