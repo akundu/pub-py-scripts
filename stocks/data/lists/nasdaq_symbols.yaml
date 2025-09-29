@@ -230,7 +230,6 @@ symbols:
 - INCY
 - INSM
 - INTC
-- INTR
 - INTU
 - IONS
 - IREN
@@ -470,6 +469,7 @@ symbols:
 - URBN
 - UTHR
 - VCTR
+- VERX
 - VFS
 - VLY
 - VNOM

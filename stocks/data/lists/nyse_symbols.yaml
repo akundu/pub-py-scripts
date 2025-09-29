@@ -392,7 +392,6 @@ symbols:
 - SLB
 - SLF
 - SMFG
-- SN
 - SNA
 - SNN
 - SNOW
@@ -484,6 +483,7 @@ symbols:
 - WM
 - WMB
 - WMT
+- WPC
 - WPM
 - WRB
 - WSM
