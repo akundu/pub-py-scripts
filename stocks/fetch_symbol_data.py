@@ -6,10 +6,15 @@ import asyncio
 import argparse
 import sys # Added for sys.path manipulation
 from pathlib import Path # Added for path manipulation
+import logging
 from common.stock_db import get_stock_db, StockDBBase, get_default_db_path, DEFAULT_DATA_DIR
 import aiohttp # Added for fully async HTTP calls
 import pytz # Added for market hours checking
 # Try to import tzlocal for local timezone detection
+from typing import Any
+from common.market_hours import is_market_hours
+
+logger = None
 try:
     import tzlocal
     TZLOCAL_AVAILABLE = True
@@ -49,29 +54,8 @@ def _get_polygon_timespan(timeframe: str) -> str:
         raise ValueError(f"Unsupported timeframe for Polygon: {timeframe}")
 
 def _is_market_hours(dt: datetime = None) -> bool:
-    """
-    Check if the given datetime (or current time) falls within market hours.
-    US market hours: 9:30 AM - 4:00 PM ET, Monday-Friday
-    """
-    if dt is None:
-        dt = datetime.now(timezone.utc)
-    
-    # Convert to Eastern Time
-    et_tz = pytz.timezone('US/Eastern')
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    
-    et_dt = dt.astimezone(et_tz)
-    
-    # Check if it's a weekday (Monday=0, Sunday=6)
-    if et_dt.weekday() >= 5:  # Saturday (5) or Sunday (6)
-        return False
-    
-    # Check if it's within market hours (9:30 AM - 4:00 PM ET)
-    market_open = et_dt.replace(hour=9, minute=30, second=0, microsecond=0)
-    market_close = et_dt.replace(hour=16, minute=0, second=0, microsecond=0)
-    
-    return market_open <= et_dt <= market_close
+    """Deprecated shim: use common.market_hours.is_market_hours"""
+    return is_market_hours(dt, tz_name="America/New_York")
 
 def _normalize_timezone_string(tz_string: str) -> str:
     """
@@ -423,7 +407,7 @@ async def fetch_polygon_data(
                     all_data.extend(chunk_data)
                     print(f"Fetched {len(chunk_data)} {timespan} records for chunk {chunk_count + 1}", file=sys.stderr)
                 else:
-                    print(f"No data for chunk {chunk_count + 1}", file=sys.stderr)
+                    logging.info(f"No data for chunk {chunk_count + 1}")
                 
                 chunk_count += 1
                 current_start = chunk_end
@@ -437,7 +421,7 @@ async def fetch_polygon_data(
             )
         
         if not all_data:
-            print(f"No {timespan} data returned for {symbol} in the specified date range.", file=sys.stderr)
+            logging.info(f"No {timespan} data returned for {symbol} in the specified date range.")
             return pd.DataFrame()
         
         # Validate that we reached the expected end date or are within 24 hours
@@ -450,11 +434,11 @@ async def fetch_polygon_data(
             date_diff = (expected_end_date - last_date).total_seconds() / (24 * 3600)
             
             if date_diff > 1:  # More than 1 day difference
-                print(f"Warning: Data fetch may be incomplete for {symbol}. Last data point: {last_date.strftime('%Y-%m-%d')}, Expected end: {expected_end_date.strftime('%Y-%m-%d')} (gap: {date_diff:.1f} days)", file=sys.stderr)
+                logging.warning(f"Data fetch may be incomplete for {symbol}. Last data point: {last_date.strftime('%Y-%m-%d')}, Expected end: {expected_end_date.strftime('%Y-%m-%d')} (gap: {date_diff:.1f} days)")
             elif date_diff > 0:  # Within 1 day but not exact
-                print(f"Info: Data fetch completed for {symbol}. Last data point: {last_date.strftime('%Y-%m-%d')}, Expected end: {expected_end_date.strftime('%Y-%m-%d')} (gap: {date_diff:.1f} days)", file=sys.stderr)
+                logging.info(f"Data fetch completed for {symbol}. Last data point: {last_date.strftime('%Y-%m-%d')}, Expected end: {expected_end_date.strftime('%Y-%m-%d')} (gap: {date_diff:.1f} days)")
             else:
-                print(f"Success: Data fetch completed for {symbol}. Reached expected end date: {last_date.strftime('%Y-%m-%d')}", file=sys.stderr)
+                logging.info(f"Data fetch completed for {symbol}. Reached expected end date: {last_date.strftime('%Y-%m-%d')}")
         
         # Convert all collected data to a pandas DataFrame
         df = pd.DataFrame(all_data)
@@ -474,11 +458,11 @@ async def fetch_polygon_data(
         else:
             df.index.name = 'datetime'
             
-        print(f"Successfully fetched {len(df)} {timespan} records of data for {symbol} from Polygon.io (total across all chunks).", file=sys.stderr)
+        logging.info(f"Successfully fetched {len(df)} {timespan} records of data for {symbol} from Polygon.io (total across all chunks).")
         return df
 
     except Exception as e:
-        print(f"Error fetching data from Polygon.io for {symbol}: {e}", file=sys.stderr)
+        logging.error(f"Error fetching data from Polygon.io for {symbol}: {e}")
         raise e
         #return pd.DataFrame()
 
@@ -777,7 +761,7 @@ async def fetch_and_save_data(
                 start_date_hourly = end_date - timedelta(days=730) # Default 2 years for hourly
             else:
                 # This case should ideally not be reached if CLI args are mutually exclusive and one is always effectively set
-                print(f"Warning: No valid time interval specified for {symbol}. Defaulting to all_time behavior.", file=sys.stderr)
+                logging.warning(f"No valid time interval specified for {symbol}. Defaulting to all_time behavior.")
                 start_date_daily = end_date - timedelta(days=5*365)
                 start_date_hourly = end_date - timedelta(days=730)
             
@@ -791,7 +775,7 @@ async def fetch_and_save_data(
 
         # Fetch daily data (if requested)
         if fetch_daily:
-            print(f"Fetching daily data for {symbol} from {start_date_daily_api_str} to {end_date_api_str} via {data_source}...", file=sys.stderr)
+            logging.info(f"Fetching daily data for {symbol} from {start_date_daily_api_str} to {end_date_api_str} via {data_source}...")
             if data_source == "polygon":
                 new_daily_bars = await fetch_polygon_data(
                     symbol, "daily", start_date_daily_api_str, end_date_api_str, API_KEY, chunk_size
@@ -806,29 +790,29 @@ async def fetch_and_save_data(
             # Use the passed db_save_batch_size parameter
             if not final_daily_bars.empty:
                 num_daily_batches = (len(final_daily_bars) - 1) // db_save_batch_size + 1
-                print(f"Saving daily data for {symbol} to database in {num_daily_batches} batch(es) of up to {db_save_batch_size} rows each...", file=sys.stderr)
+                logging.info(f"Saving daily data for {symbol} to database in {num_daily_batches} batch(es) of up to {db_save_batch_size} rows each...")
                 for i in range(0, len(final_daily_bars), db_save_batch_size):
                     batch_df = final_daily_bars.iloc[i:i + db_save_batch_size]
                     current_batch_num = (i // db_save_batch_size) + 1
-                    print(f"  Saving daily batch {current_batch_num}/{num_daily_batches} ({len(batch_df)} rows) for {symbol}...", file=sys.stderr)
+                    logging.info(f"Saving daily batch {current_batch_num}/{num_daily_batches} ({len(batch_df)} rows) for {symbol}...")
                     try:
                         await stock_db_instance.save_stock_data(batch_df, symbol, interval='daily')
                     except Exception as e_save_daily:
-                        print(f"    Error saving daily batch {current_batch_num} for {symbol}: {e_save_daily}", file=sys.stderr)
+                        logging.error(f"Error saving daily batch {current_batch_num} for {symbol}: {e_save_daily}")
                         # Optionally, re-raise, or log and continue to hourly, or skip remaining daily batches
                         # For now, we'll let it fail the symbol fetch if a batch fails.
                         raise
-                print(f"Daily data for {symbol} processed for database.", file=sys.stderr)
+                logging.info(f"Daily data for {symbol} processed for database.")
             elif new_daily_bars.empty: # Check if new data was fetched before merging
-                print(f"No new daily data for {symbol} to process for database.", file=sys.stderr)
+                logging.info(f"No new daily data for {symbol} to process for database.")
             else: # new_daily_bars was not empty, but final_daily_bars is (e.g. all old data)
-                print(f"No data in final_daily_bars for {symbol} to save to database (possibly all old data or merge issue).", file=sys.stderr)
+                logging.info(f"No data in final_daily_bars for {symbol} to save to database (possibly all old data or merge issue).")
         else:
-            print(f"Daily data fetch skipped for {symbol}.", file=sys.stderr)
+            logging.info(f"Daily data fetch skipped for {symbol}.")
 
         # Fetch hourly data (if requested)
         if fetch_hourly:
-            print(f"Fetching hourly data for {symbol} from {start_date_hourly_api_str} to {end_date_hourly_api_str} via {data_source}...", file=sys.stderr)
+            logging.info(f"Fetching hourly data for {symbol} from {start_date_hourly_api_str} to {end_date_hourly_api_str} via {data_source}...")
             if data_source == "polygon":
                 new_hourly_bars = await fetch_polygon_data(
                     symbol, "hourly", start_date_hourly_api_str, end_date_hourly_api_str, API_KEY, chunk_size
@@ -843,27 +827,27 @@ async def fetch_and_save_data(
             # Use the passed db_save_batch_size parameter
             if not final_hourly_bars.empty:
                 num_hourly_batches = (len(final_hourly_bars) - 1) // db_save_batch_size + 1
-                print(f"Saving hourly data for {symbol} to database in {num_hourly_batches} batch(es) of up to {db_save_batch_size} rows each...", file=sys.stderr)
+                logging.info(f"Saving hourly data for {symbol} to database in {num_hourly_batches} batch(es) of up to {db_save_batch_size} rows each...")
                 for i in range(0, len(final_hourly_bars), db_save_batch_size):
                     batch_df = final_hourly_bars.iloc[i:i + db_save_batch_size]
                     current_batch_num = (i // db_save_batch_size) + 1
-                    print(f"  Saving hourly batch {current_batch_num}/{num_hourly_batches} ({len(batch_df)} rows) for {symbol}...", file=sys.stderr)
+                    logging.info(f"Saving hourly batch {current_batch_num}/{num_hourly_batches} ({len(batch_df)} rows) for {symbol}...")
                     try:
                         await stock_db_instance.save_stock_data(batch_df, symbol, interval='hourly')
                     except Exception as e_save_hourly:
-                        print(f"    Error saving hourly batch {current_batch_num} for {symbol}: {e_save_hourly}", file=sys.stderr)
+                        logging.error(f"Error saving hourly batch {current_batch_num} for {symbol}: {e_save_hourly}")
                         raise # Fail the symbol fetch if a batch fails
-                print(f"Hourly data for {symbol} processed for database.", file=sys.stderr)
+                logging.info(f"Hourly data for {symbol} processed for database.")
             elif new_hourly_bars.empty: # Check if new data was fetched before merging
-                print(f"No new hourly data for {symbol} to process for database.", file=sys.stderr)
+                logging.info(f"No new hourly data for {symbol} to process for database.")
             else: # new_hourly_bars was not empty, but final_hourly_bars is
-                print(f"No data in final_hourly_bars for {symbol} to save to database (possibly all old data or merge issue).", file=sys.stderr)
+                logging.info(f"No data in final_hourly_bars for {symbol} to save to database (possibly all old data or merge issue).")
         else:
-            print(f"Hourly data fetch skipped for {symbol}.", file=sys.stderr)
+            logging.info(f"Hourly data fetch skipped for {symbol}.")
 
         return True
     except Exception as e:
-        print(f"Error in fetch_and_save_data for {symbol} ({data_source} method): {e}", file=sys.stderr)
+        logging.error(f"Error in fetch_and_save_data for {symbol} ({data_source} method): {e}")
         import traceback
         traceback.print_exc(file=sys.stderr)
         return False
@@ -884,7 +868,8 @@ async def process_symbol_data(
     db_save_batch_size: int = 1000,  # New parameter with default
     data_source: str = "polygon",  # New parameter for data source selection
     chunk_size: str = "monthly",  # New parameter for chunk size
-    save_db_csv: bool = False  # New parameter for CSV usage control
+    save_db_csv: bool = False,  # New parameter for CSV usage control
+    no_force_today: bool = False
 ) -> pd.DataFrame:
     """Processes symbol data: queries DB, fetches if needed, and returns DataFrame."""
 
@@ -934,21 +919,21 @@ async def process_symbol_data(
     action_taken = "No action"
 
     if not force_fetch:
-        print(
-            f"Attempting to retrieve {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})...", file=sys.stderr
+        logging.info(
+            f"Attempting to retrieve {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})..."
         )
         data_df = await current_db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval=timeframe)
 
         if not data_df.empty:
             action_taken = f"Data for {symbol} ({timeframe}) retrieved from database."
-            print(action_taken, file=sys.stderr)
+            logging.info(action_taken)
 
             min_date_in_df = data_df.index.min().strftime('%Y-%m-%d')
             if start_date and min_date_in_df > start_date:
                 print(f"Note: Data retrieved from DB starts at {min_date_in_df}, after the requested start date {start_date} (e.g., due to non-trading days).", file=sys.stderr)
             
             # Check if we have today's data when end_date is today
-            if end_date == today_str and timeframe == 'daily':
+            if end_date == today_str and timeframe == 'daily' and not no_force_today:
                 max_date_in_df = data_df.index.max().strftime('%Y-%m-%d')
                 if max_date_in_df < today_str:
                     print(f"Note: Latest data in DB is from {max_date_in_df}, but end date is {today_str}. Today's data may not be available yet.", file=sys.stderr)
@@ -1186,9 +1171,9 @@ async def get_current_price(
                         age_info += f", write age: {write_age_seconds:.1f}s, original age: {age_seconds:.1f}s"
                 else:
                     age_info = f"price age: {age_seconds:.1f}s"
-                print(f"Database price for {symbol} is too old ({age_info} > {max_age_seconds}s), fetching fresh data", file=sys.stderr)
+                logging.info(f"Database price for {symbol} is too old ({age_info} > {max_age_seconds}s), fetching fresh data")
     except Exception as e:
-        print(f"Error getting price from database for {symbol}: {e}", file=sys.stderr)
+        logging.error(f"Error getting price from database for {symbol}: {e}")
     
     # If no database price, fetch from API
     if data_source == "polygon":
@@ -1230,10 +1215,10 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
                 try:
 
                     await current_db_instance.save_realtime_data(quote_df, symbol, data_type="quote")
-                    print(f"Saved quote data for {symbol} to realtime table", file=sys.stderr)
+                    logging.info(f"Saved quote data for {symbol} to realtime table")
                     
                 except Exception as e:
-                    print(f"Warning: Failed to save quote data for {symbol} to realtime table: {e}", file=sys.stderr)
+                    logging.warning(f"Failed to save quote data for {symbol} to realtime table: {e}")
             
             return {
                 'symbol': symbol,
@@ -1457,6 +1442,40 @@ async def _get_current_price_alpaca(symbol: str, current_db_instance: StockDBBas
         print(f"Error fetching current price for {symbol} from Alpaca: {e}", file=sys.stderr)
         raise
 
+async def get_financial_ratios(ticker: str, api_key: str) -> dict[str, Any] | None:
+    """Fetch financial ratios (P/E, P/B, etc.) from Polygon.io for a given ticker."""
+    try:
+        import aiohttp
+        url = f"https://api.polygon.io/stocks/financials/v1/ratios"
+        params = {
+            "ticker": ticker,
+            "apiKey": api_key
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get("status") == "OK" and data.get("results"):
+                        results = data["results"]
+                        # Handle case where results is a list - take the first item
+                        if isinstance(results, list) and len(results) > 0:
+                            return results[0]
+                        elif isinstance(results, dict):
+                            return results
+                        else:
+                            logger.warning(f"Unexpected results format for {ticker}: {type(results)}")
+                            return None
+                    else:
+                        logger.warning(f"No financial ratios data available for {ticker}: {data.get('message', 'Unknown error')}")
+                        return None
+                else:
+                    logger.error(f"Failed to fetch financial ratios for {ticker}: HTTP {response.status}")
+                    return None
+    except Exception as e:
+        logger.error(f"Error fetching financial ratios for {ticker}: {e}")
+        return None
+
 def get_stock_price_simple(symbol: str, data_source: str = "polygon", max_age_seconds: int = 600) -> float:
     """
     Simple synchronous wrapper to get current stock price.
@@ -1479,7 +1498,7 @@ def get_stock_price_simple(symbol: str, data_source: str = "polygon", max_age_se
         print(f"Error getting price for {symbol}: {e}", file=sys.stderr)
         return None
 
-async def main() -> None:
+def parse_args():
     parser = argparse.ArgumentParser(description="Fetch, save, and query historical stock data for a specific symbol.")
     parser.add_argument("symbol", help="The stock symbol to process (e.g., AAPL).")
     parser.add_argument(
@@ -1556,6 +1575,11 @@ async def main() -> None:
         help="Show latest records: today's daily bar and most recent hourly bar for the symbol (default when no start/end dates specified)"
     )
     parser.add_argument(
+        "--no-force-today",
+        action="store_true",
+        help="Do not automatically refetch today's daily bar on trading days; serve from DB only"
+    )
+    parser.add_argument(
         "--show-volume",
         action="store_true",
         help="Display volume information in the output (for both current price and historical data)"
@@ -1578,7 +1602,32 @@ async def main() -> None:
         default=None,
         help="Save the output data to a CSV file with the specified filename. Use '-' to print CSV to stdout."
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--fetch-ratios",
+        action="store_true",
+        help="Fetch financial ratios (P/E, P/B, etc.) from Polygon.io for the symbol. Implies --latest mode."
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        default='ERROR',
+        help="Logging level (default: ERROR)"
+    )
+
+    return parser.parse_args()
+
+
+async def main() -> None:
+    args = parse_args()
+
+    # Setup logging
+    global logger
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='\n%Y-%m-%d %H:%M:%S'
+    )
+    logger = logging.getLogger(__name__)
 
     # Check if Polygon is available when selected
     if args.data_source == "polygon" and not POLYGON_AVAILABLE:
@@ -1586,6 +1635,15 @@ async def main() -> None:
         print("Install with: pip install polygon-api-client", file=sys.stderr)
         print("Or use --data-source alpaca to use Alpaca instead.", file=sys.stderr)
         exit(1)
+
+    # Handle --fetch-ratios parameter
+    if args.fetch_ratios:
+        if args.data_source != "polygon":
+            print("Error: --fetch-ratios requires --data-source polygon", file=sys.stderr)
+            exit(1)
+        # Imply --latest mode when fetching ratios
+        args.latest = True
+        print("--fetch-ratios specified, enabling --latest mode", file=sys.stderr)
 
 
     # Handle start-date and end-date logic based on user requirements
@@ -1686,13 +1744,13 @@ async def main() -> None:
             if max_age is not None:
                 rt_info = await _get_last_update_age_seconds(db_instance, args.symbol)
                 if rt_info is None:
-                    print(f"Freshness: realtime not found; will fetch today (threshold {max_age}s, session {session}).")
+                    logging.info(f"Freshness: realtime not found; will fetch today (threshold {max_age}s, session {session}).")
                     should_refetch_now = True
                 else:
                     rt_age = rt_info['age_seconds']
                     rt_src = rt_info['source']
                     rt_ts = rt_info['timestamp']
-                    print(f"Freshness: realtime age {rt_age:.1f}s (from {rt_src} ts: {rt_ts}), threshold {max_age}s, session {session}.")
+                    logging.info(f"Freshness: realtime age {rt_age:.1f}s (from {rt_src} ts: {rt_ts}), threshold {max_age}s, session {session}.")
                     if rt_age > max_age:
                         should_refetch_now = True
 
@@ -1710,16 +1768,16 @@ async def main() -> None:
                         save_db_csv=args.save_db_csv
                     )
                     if fetch_success:
-                        print(f"Freshness fetch: performed because realtime age>{max_age}s during {session} session.")
+                        logging.info(f"Freshness fetch: performed because realtime age>{max_age}s during {session} session.")
                     else:
-                        print("Freshness fetch skipped due to failure.")
+                        logging.warning("Freshness fetch skipped due to failure.")
                 except Exception as e:
-                    print(f"Freshness pre-fetch error: {e}")
+                    logging.error(f"Freshness pre-fetch error: {e}")
             else:
                 if max_age is not None:
-                    print(f"Freshness fetch: skipped (realtime recent enough, age<= {max_age}s for {session} session).")
+                    logging.info(f"Freshness fetch: skipped (realtime recent enough, age<= {max_age}s for {session} session).")
                 else:
-                    print("Freshness fetch: skipped (market closed).")
+                    logging.info("Freshness fetch: skipped (market closed).")
 
             print()  # Spacing
 
@@ -1751,7 +1809,7 @@ async def main() -> None:
                 # If we're in afterhours/closed and didn't need to refetch realtime data,
                 # historical data is very unlikely to need refreshing
                 skip_detailed_checks = True
-                print("Skipping detailed age checks (afterhours/closed session, no realtime refetch needed)")
+                logging.info("Skipping detailed age checks (afterhours/closed session, no realtime refetch needed)")
             
             if not skip_detailed_checks:
                 # Log last bar ages for context and check if daily/hourly need refresh
@@ -1919,7 +1977,8 @@ async def main() -> None:
                         should_fetch = True
                         fetch_date = last_trading_day
                 
-                if should_fetch:
+                # Respect earlier freshness decision: only fetch if daily is needed
+                if should_fetch and need_daily:
                     if fetch_date == today_str:
                         print(f"\nTrading day detected, attempting to fetch today's data for {args.symbol}...")
                     else:
@@ -1995,6 +2054,9 @@ async def main() -> None:
                         
                         # Also refresh hourly data
                         hourly_df = await db_instance.get_stock_data(args.symbol, interval='hourly')
+                elif should_fetch and not need_daily:
+                    # Avoid immediate re-fetch loops when last write is recent enough
+                    print("Skipping daily fetch fallback (last write recent enough by threshold).")
 
             print()  # Spacing
 
@@ -2007,6 +2069,53 @@ async def main() -> None:
                 print(last_hourly[['open','high','low','close','volume']] if 'volume' in last_hourly.columns else last_hourly[['open','high','low','close']])
             else:
                 print("No hourly rows found in DB.")
+            
+            # Display financial ratios if requested
+            if args.fetch_ratios:
+                print()  # Spacing
+                print("Financial Ratios:")
+                try:
+                    # Get API key from environment
+                    api_key = os.getenv('POLYGON_API_KEY')
+                    if not api_key:
+                        print("Error: POLYGON_API_KEY environment variable not set")
+                    else:
+                        ratios = await get_financial_ratios(args.symbol, api_key)
+                        if ratios:
+                            # Add current date to the ratios data
+                            ratios['date'] = datetime.now().strftime('%Y-%m-%d')
+                            
+                            # Save financial info to database
+                            try:
+                                await db_instance.save_financial_info(args.symbol, ratios)
+                                print("Financial info saved to database")
+                            except Exception as save_error:
+                                print(f"Warning: Could not save financial info to database: {save_error}")
+                            
+                            # Display key ratios in a nice format
+                            print("Financial Ratios:")
+                            print(f"P/E Ratio: {ratios.get('price_to_earnings', 'N/A')}")
+                            print(f"P/B Ratio: {ratios.get('price_to_book', 'N/A')}")
+                            print(f"P/S Ratio: {ratios.get('price_to_sales', 'N/A')}")
+                            print(f"PEG Ratio: {ratios.get('peg_ratio', 'N/A')}")
+                            print(f"Debt-to-Equity: {ratios.get('debt_to_equity', 'N/A')}")
+                            print(f"Return on Equity: {ratios.get('return_on_equity', 'N/A')}")
+                            print(f"Return on Assets: {ratios.get('return_on_assets', 'N/A')}")
+                            print(f"Current Ratio: {ratios.get('current', 'N/A')}")
+                            print(f"Quick Ratio: {ratios.get('quick', 'N/A')}")
+                            print(f"Cash Ratio: {ratios.get('cash', 'N/A')}")
+                            print(f"Dividend Yield: {ratios.get('dividend_yield', 'N/A')}")
+                            print(f"Market Cap: {ratios.get('market_cap', 'N/A')}")
+                            print(f"Enterprise Value: {ratios.get('enterprise_value', 'N/A')}")
+                            print(f"Free Cash Flow: {ratios.get('free_cash_flow', 'N/A')}")
+                            print(f"EV to Sales: {ratios.get('ev_to_sales', 'N/A')}")
+                            print(f"EV to EBITDA: {ratios.get('ev_to_ebitda', 'N/A')}")
+                            print(f"Price to Cash Flow: {ratios.get('price_to_cash_flow', 'N/A')}")
+                            print(f"Price to Free Cash Flow: {ratios.get('price_to_free_cash_flow', 'N/A')}")
+                        else:
+                            print("No financial ratios data available")
+                except Exception as e:
+                    print(f"Error fetching financial ratios: {e}")
             
             print()  # Spacing
             print("--- End Latest ---")
@@ -2049,6 +2158,7 @@ async def main() -> None:
             data_source=args.data_source,  # Pass the new argument
             chunk_size=args.chunk_size,  # Pass the new argument
             save_db_csv=args.save_db_csv,  # Pass the new argument
+            no_force_today=getattr(args, 'no_force_today', False),
             stock_db_instance=db_instance_for_cleanup  # Pass the instance we created
         )
 

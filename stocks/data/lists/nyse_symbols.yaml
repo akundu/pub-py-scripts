@@ -181,6 +181,7 @@ symbols:
 - FIS
 - FIX
 - FLUT
+- FMS
 - FMX
 - FNF
 - FNV
@@ -252,7 +253,6 @@ symbols:
 - KEYS
 - KGC
 - KKR
-- KLAR
 - KMI
 - KO
 - KOF
@@ -345,6 +345,7 @@ symbols:
 - PHM
 - PINS
 - PKG
+- PKX
 - PLD
 - PM
 - PNC
@@ -375,7 +376,6 @@ symbols:
 - ROK
 - ROL
 - RPM
-- RS
 - RSG
 - RTX
 - RY
@@ -445,6 +445,7 @@ symbols:
 - TTE
 - TU
 - TWLO
+- TXT
 - TYL
 - U
 - UBER
@@ -478,13 +479,11 @@ symbols:
 - WDS
 - WEC
 - WELL
-- WES
 - WFC
 - WIT
 - WM
 - WMB
 - WMT
-- WPC
 - WPM
 - WRB
 - WSM
@@ -494,6 +493,7 @@ symbols:
 - WY
 - XOM
 - XPEV
+- XPO
 - XYL
 - XYZ
 - YUM

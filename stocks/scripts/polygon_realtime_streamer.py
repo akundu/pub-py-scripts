@@ -362,7 +362,8 @@ class PolygonStreamManager:
         """Run a single connection with retry logic."""
         retry_count = 0
         
-        while retry_count < self.max_retries and not shutdown_flag:
+        # while retry_count < self.max_retries and not shutdown_flag:
+        while True:
             try:
                 logger.info(f"Connection {connection_id}: Starting (attempt {retry_count + 1}/{self.max_retries})")
                 logger.info(f"Connection {connection_id}: Symbols: {', '.join(symbols)}")

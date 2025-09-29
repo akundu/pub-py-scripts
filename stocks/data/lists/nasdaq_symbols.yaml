@@ -95,6 +95,7 @@ symbols:
 - CIGI
 - CINF
 - CLBT
+- CLSK
 - CMCSA
 - CME
 - COIN
@@ -112,7 +113,6 @@ symbols:
 - CROX
 - CRSP
 - CRUS
-- CRVL
 - CRWD
 - CRWV
 - CSCO
@@ -249,6 +249,7 @@ symbols:
 - KRYS
 - KSPI
 - KTOS
+- KYMR
 - LAMR
 - LAUR
 - LBRDA
@@ -365,12 +366,12 @@ symbols:
 - PSKY
 - PTC
 - PTCT
-- PTGX
 - PYPL
 - QCOM
 - QLYS
 - QMMM
 - QRVO
+- QURE
 - RDNT
 - REG
 - REGN
@@ -426,7 +427,6 @@ symbols:
 - SNY
 - SOFI
 - SOUN
-- SPSC
 - SRAD
 - SSNC
 - SSRM

@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 import os
 import yaml
+import sys
 
 
 # Define all available concrete types
@@ -78,7 +79,9 @@ async def fetch_data_by_type(data_type):
     elif data_type == "crypto":
         return []
     else:
-        print(f"Unknown data type: {data_type}")
+        # Types like 'stocks_to_track' are disk-only curated lists; they should be loaded from disk
+        # by the fetch_types() coordinator, even when --fetch-online is specified.
+        # We return an empty list here and let fetch_types() handle disk-only types explicitly.
         return []
 
 async def fetch_types(args):
@@ -127,11 +130,37 @@ async def fetch_types(args):
     os.makedirs(args.data_dir, exist_ok=True)
     os.makedirs(f'{args.data_dir}/lists', exist_ok=True) # For YAML lists
 
-    fetch_tasks = [fetch_data_by_type(data_type) for data_type in current_types_for_fetching]
-    symbol_lists = await asyncio.gather(*fetch_tasks)
+    # Separate disk-only curated types vs. network-fetchable types
+    disk_only_types = { 'stocks_to_track' }
+    network_types = [t for t in current_types_for_fetching if t not in disk_only_types]
+
+    # 1) Handle disk-only types even when --fetch-online is used
+    list_dir_path = os.path.join(args.data_dir, 'lists')
+    for data_type in current_types_for_fetching:
+        if data_type in disk_only_types:
+            yaml_file = os.path.join(list_dir_path, f'{data_type}_symbols.yaml')
+            try:
+                with open(yaml_file, 'r') as f:
+                    data = yaml.safe_load(f)
+                    if data and 'symbols' in data and isinstance(data['symbols'], list):
+                        symbols_from_file = data['symbols']
+                        all_symbols.update(symbols_from_file)
+                        print(f"Loaded {len(symbols_from_file)} symbols for {data_type} from {yaml_file}", file=sys.stderr)
+                    else:
+                        print(f"Warning: No symbols found or malformed data in {yaml_file} for type {data_type}.")
+            except FileNotFoundError:
+                print(f"Warning: File {yaml_file} not found for type {data_type}. Skipping.")
+            except yaml.YAMLError as e:
+                print(f"Error parsing YAML file {yaml_file}: {e}")
+            except Exception as e:
+                print(f"Error loading {yaml_file} for type {data_type}: {e}")
+
+    # 2) Fetch network types as before
+    fetch_tasks = [fetch_data_by_type(data_type) for data_type in network_types]
+    symbol_lists = await asyncio.gather(*fetch_tasks) if fetch_tasks else []
     
     # Combine all symbol lists and save individual YAML files
-    for symbols, data_type in zip(symbol_lists, current_types_for_fetching):
+    for symbols, data_type in zip(symbol_lists, network_types):
         if symbols: # Ensure symbols list is not empty
             all_symbols.update(symbols)
             print(f"Fetched {len(symbols)} symbols for {data_type}")
@@ -188,7 +217,7 @@ def load_symbols_from_disk(args):
                 if data and 'symbols' in data and isinstance(data['symbols'], list):
                     symbols_from_file = data['symbols']
                     all_symbols.update(symbols_from_file)
-                    print(f"Loaded {len(symbols_from_file)} symbols for {data_type} from {yaml_file}")
+                    print(f"Loaded {len(symbols_from_file)} symbols for {data_type} from {yaml_file}", file=sys.stderr)
                 else:
                     print(f"Warning: No symbols found or malformed data in {yaml_file} for type {data_type}.")
         except FileNotFoundError:
@@ -200,8 +229,8 @@ def load_symbols_from_disk(args):
     
     all_symbols_list = sorted(list(all_symbols))
     if all_symbols_list:
-        print(f"Total unique symbols loaded from disk for specified types: {len(all_symbols_list)}")
+        print(f"Total unique symbols loaded from disk for specified types: {len(all_symbols_list)}", file=sys.stderr)
     else:
         if args.types: # Only print this if types were specified but nothing loaded
-            print("No symbols were loaded from disk for the specified types.")
+            print("No symbols were loaded from disk for the specified types.", file=sys.stderr)
     return all_symbols_list

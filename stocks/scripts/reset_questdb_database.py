@@ -147,7 +147,7 @@ async def reset_questdb_database(db_path: str, target_tables: list = None):
                 
                 # Check each table structure
                 structure_start = time.time()
-                expected_tables = ['daily_prices', 'hourly_prices', 'realtime_data', 'options_data']
+                expected_tables = ['daily_prices', 'hourly_prices', 'realtime_data', 'options_data', 'financial_info']
                 for table in expected_tables:
                     if table in final_tables:
                         print(f"✓ {table} exists")
@@ -238,6 +238,7 @@ async def create_tables_using_questdb(conn, db, target_tables=None, force_recrea
         ('hourly_prices', db._create_hourly_prices_table),
         ('realtime_data', db._create_realtime_data_table),
         ('options_data', db._create_options_data_table),
+        ('financial_info', db._create_financial_info_table),
     ]
     
     total_table_time = 0
@@ -343,7 +344,7 @@ async def main():
             if args.tables:
                 target_tables = [t.strip() for t in args.tables.split(',') if t.strip()]
             else:
-                target_tables = ['daily_prices', 'hourly_prices', 'realtime_data', 'options_data']
+                target_tables = ['daily_prices', 'hourly_prices', 'realtime_data', 'options_data', 'financial_info']
 
             print(f"Ensuring tables exist using questdb_db.py methods...")
             

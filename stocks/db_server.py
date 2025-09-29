@@ -1476,6 +1476,46 @@ async def handle_db_command(request: web.Request) -> web.Response:
                 result_data = await db_instance.execute_raw_sql(sql_query, tuple(query_params))
                 return web.json_response({"message": "Raw SQL query executed.", "data": result_data})
 
+        elif command == "save_financial_info":
+            ticker = params.get("ticker")
+            financial_data = params.get("financial_data")
+            
+            if not ticker or not financial_data:
+                return web.json_response({"error": "Missing 'ticker' or 'financial_data' for save_financial_info"}, status=400)
+            
+            if not isinstance(financial_data, dict):
+                return web.json_response({"error": "'financial_data' must be a dictionary"}, status=400)
+            
+            try:
+                await db_instance.save_financial_info(ticker, financial_data)
+                return web.json_response({"message": f"Financial info saved successfully for {ticker}"})
+            except Exception as e:
+                logger.error(f"Error saving financial info for {ticker}: {e}", exc_info=True)
+                return web.json_response({"error": f"Failed to save financial info: {str(e)}"}, status=500)
+
+        elif command == "get_financial_info":
+            ticker = params.get("ticker")
+            start_date = params.get("start_date")
+            end_date = params.get("end_date")
+            
+            if not ticker:
+                return web.json_response({"error": "Missing 'ticker' for get_financial_info"}, status=400)
+            
+            try:
+                df = await db_instance.get_financial_info(ticker, start_date, end_date)
+                if df.empty:
+                    return web.json_response({"message": "No financial info found", "data": []})
+                
+                # Reset index and format datetime columns
+                df_reset = df.reset_index()
+                for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
+                    df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                
+                return web.json_response({"data": df_reset.to_dict(orient='records')})
+            except Exception as e:
+                logger.error(f"Error getting financial info for {ticker}: {e}", exc_info=True)
+                return web.json_response({"error": f"Failed to get financial info: {str(e)}"}, status=500)
+
         else:
             return web.json_response({"error": f"Unknown command: {command}"}, status=400)
 

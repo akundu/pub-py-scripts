@@ -111,6 +111,7 @@ class StockQuestDB(StockDBBase):
             await self._create_hourly_prices_table(conn)
             await self._create_realtime_data_table(conn)
             await self._create_options_data_table(conn)
+            await self._create_financial_info_table(conn)
             
             # Create indexes for optimal performance
             await self._create_questdb_indexes(conn)
@@ -136,6 +137,10 @@ class StockQuestDB(StockDBBase):
     async def _create_options_data_table(self, conn: asyncpg.Connection) -> None:
         """Create options_data table with QuestDB optimizations and bucketed deduplication."""
         await conn.execute(StockQuestDB.create_table_options_data_sql)
+
+    async def _create_financial_info_table(self, conn: asyncpg.Connection) -> None:
+        """Create financial_info table with QuestDB optimizations for storing financial ratios."""
+        await conn.execute(StockQuestDB.create_table_financial_info_sql)
 
     async def _create_questdb_indexes(self, conn: asyncpg.Connection) -> None:
         """QuestDB indexes are created inline with table definitions."""
@@ -648,7 +653,7 @@ class StockQuestDB(StockDBBase):
         if isinstance(dt_obj, pd.Timestamp):
             if dt_obj.tz is None:
                 # Already timezone-naive, assume it's UTC
-                self.logger.warning(f"Assuming timezone-naive pd.Timestamp is UTC in {context}")
+                # self.logger.warning(f"Assuming timezone-naive pd.Timestamp is UTC in {context}")
                 return dt_obj.to_pydatetime()
             else:
                 # Convert to UTC and remove timezone info
@@ -659,7 +664,7 @@ class StockQuestDB(StockDBBase):
         elif isinstance(dt_obj, datetime):
             if dt_obj.tzinfo is None:
                 # Already timezone-naive, assume it's UTC
-                self.logger.warning(f"Assuming timezone-naive datetime is UTC in {context}")
+                # self.logger.warning(f"Assuming timezone-naive datetime is UTC in {context}")
                 return dt_obj
             else:
                 # Convert to UTC and remove timezone info
@@ -819,76 +824,84 @@ class StockQuestDB(StockDBBase):
 
     async def get_latest_price(self, ticker: str) -> float | None:
         """Get the most recent price for a ticker from QuestDB."""
-        async with self.get_connection() as conn:
-            try:
-                # Try realtime_data first
-                row = await conn.fetchrow(
-                    "SELECT price FROM realtime_data WHERE ticker = $1 AND type = 'quote' ORDER BY timestamp DESC LIMIT 1",
-                    ticker
-                )
-                if row:
-                    return row['price']
-
-                # Try hourly_prices
-                row = await conn.fetchrow(
-                    "SELECT close FROM hourly_prices WHERE ticker = $1 ORDER BY datetime DESC LIMIT 1",
-                    ticker
-                )
-                if row:
-                    return row['close']
-
-                # Try daily_prices
-                row = await conn.fetchrow(
-                    "SELECT close FROM daily_prices WHERE ticker = $1 ORDER BY date DESC LIMIT 1",
-                    ticker
-                )
-                if row:
-                    return row['close']
-
-            except Exception as e:
-                self.logger.error(f"Error getting latest price for {ticker}: {e}")
-
-        return None
-
-    async def get_latest_prices(self, tickers: List[str]) -> Dict[str, float | None]:
-        """Get the most recent prices for multiple tickers from QuestDB."""
-        result = {}
-        
-        async with self.get_connection() as conn:
-            for ticker in tickers:
+        try:
+            async def fetch_realtime():
                 try:
-                    # Try realtime_data first
-                    row = await conn.fetchrow(
-                        "SELECT price FROM realtime_data WHERE ticker = $1 AND type = 'quote' ORDER BY timestamp DESC LIMIT 1",
-                        ticker
-                    )
-                    if row:
-                        result[ticker] = row['price']
-                        continue
+                    async with self.get_connection() as conn:
+                        row = await conn.fetchrow(
+                            "SELECT timestamp, price FROM realtime_data WHERE ticker = $1 AND type = 'quote' LATEST ON timestamp PARTITION BY ticker",
+                            ticker
+                        )
+                        if row and row.get('timestamp') is not None:
+                            return ('realtime', row['timestamp'], float(row['price']))
+                except Exception as e:
+                    self.logger.debug(f"Realtime fetch failed for {ticker}: {e}")
+                return None
 
-                    # Try hourly_prices
-                    row = await conn.fetchrow(
-                        "SELECT close FROM hourly_prices WHERE ticker = $1 ORDER BY datetime DESC LIMIT 1",
-                        ticker
-                    )
-                    if row:
-                        result[ticker] = row['close']
-                        continue
+            async def fetch_hourly():
+                try:
+                    async with self.get_connection() as conn:
+                        row = await conn.fetchrow(
+                            "SELECT datetime, close FROM hourly_prices WHERE ticker = $1 LATEST ON datetime PARTITION BY ticker",
+                            ticker
+                        )
+                        if row and row.get('datetime') is not None:
+                            return ('hourly', row['datetime'], float(row['close']))
+                except Exception as e:
+                    self.logger.debug(f"Hourly fetch failed for {ticker}: {e}")
+                return None
 
-                    # Try daily_prices
-                    row = await conn.fetchrow(
-                        "SELECT close FROM daily_prices WHERE ticker = $1 ORDER BY date DESC LIMIT 1",
-                        ticker
-                    )
-                    if row:
-                        result[ticker] = row['close']
-                    else:
-                        result[ticker] = None
+            async def fetch_daily():
+                try:
+                    async with self.get_connection() as conn:
+                        row = await conn.fetchrow(
+                            "SELECT date, close FROM daily_prices WHERE ticker = $1 LATEST ON date PARTITION BY ticker",
+                            ticker
+                        )
+                        if row and row.get('date') is not None:
+                            return ('daily', row['date'], float(row['close']))
+                except Exception as e:
+                    self.logger.debug(f"Daily fetch failed for {ticker}: {e}")
+                return None
 
+            # Run all three fetches concurrently (separate connections)
+            rt_task = asyncio.create_task(fetch_realtime())
+            hr_task = asyncio.create_task(fetch_hourly())
+            dy_task = asyncio.create_task(fetch_daily())
+            results = await asyncio.gather(rt_task, hr_task, dy_task, return_exceptions=False)
+
+            # Filter out None and choose the one with the most recent timestamp
+            valid_results = [r for r in results if r is not None]
+            if not valid_results:
+                return None
+
+            # Each tuple is (source, timestamp, price)
+            latest = max(valid_results, key=lambda r: r[1])
+            return latest[2]
+
+        except Exception as e:
+            self.logger.error(f"Error getting latest price for {ticker}: {e}")
+            return None
+
+    async def get_latest_prices(self, tickers: List[str], num_simultaneous: int = 25) -> Dict[str, float | None]:
+        """Get the most recent prices for multiple tickers using bounded concurrency."""
+        result: Dict[str, float | None] = {}
+
+        semaphore = asyncio.Semaphore(max(1, int(num_simultaneous)))
+
+        async def fetch_one(ticker: str) -> tuple[str, float | None]:
+            async with semaphore:
+                try:
+                    price = await self.get_latest_price(ticker)
+                    return (ticker, price)
                 except Exception as e:
                     self.logger.error(f"Error getting latest price for {ticker}: {e}")
-                    result[ticker] = None
-        
+                    return (ticker, None)
+
+        tasks = [asyncio.create_task(fetch_one(t)) for t in tickers]
+        for ticker, price in await asyncio.gather(*tasks, return_exceptions=False):
+            result[ticker] = price
+
         return result
 
     async def get_previous_close_prices(self, tickers: List[str]) -> Dict[str, float | None]:
@@ -903,7 +916,7 @@ class StockQuestDB(StockDBBase):
                 try:
                     # Get the most recent close price that is NOT from today
                     row = await conn.fetchrow(
-                        "SELECT close FROM daily_prices WHERE ticker = $1 AND date < $2 ORDER BY date DESC LIMIT 1",
+                        "SELECT close FROM daily_prices WHERE ticker = $1 AND date < $2 LATEST ON date PARTITION BY ticker",
                         ticker, today
                     )
                     if row:
@@ -911,7 +924,7 @@ class StockQuestDB(StockDBBase):
                     else:
                         # Fallback: if no previous day data, get the most recent available
                         row = await conn.fetchrow(
-                            "SELECT close FROM daily_prices WHERE ticker = $1 ORDER BY date DESC LIMIT 1",
+                            "SELECT close FROM daily_prices WHERE ticker = $1 LATEST ON date PARTITION BY ticker",
                             ticker
                         )
                         if row:
@@ -936,7 +949,7 @@ class StockQuestDB(StockDBBase):
                 try:
                     # Get today's opening price
                     row = await conn.fetchrow(
-                        "SELECT open FROM daily_prices WHERE ticker = $1 AND date = $2 ORDER BY date DESC LIMIT 1",
+                        "SELECT open FROM daily_prices WHERE ticker = $1 AND date = $2 LATEST ON date PARTITION BY ticker",
                         ticker, today
                     )
                     if row:
@@ -1365,6 +1378,103 @@ class StockQuestDB(StockDBBase):
                             result_df.loc[i, ema_key] = calc_record[ema_key]
                     break
         return result_df
+
+    async def save_financial_info(self, ticker: str, financial_data: dict) -> None:
+        """Save financial ratios data to QuestDB."""
+        if not financial_data:
+            return
+            
+        async with self.get_connection() as conn:
+            # Prepare the record for insertion
+            record = {
+                'ticker': ticker,
+                'date': financial_data.get('date'),
+                'price': financial_data.get('price'),
+                'market_cap': financial_data.get('market_cap'),
+                'earnings_per_share': financial_data.get('earnings_per_share'),
+                'price_to_earnings': financial_data.get('price_to_earnings'),
+                'price_to_book': financial_data.get('price_to_book'),
+                'price_to_sales': financial_data.get('price_to_sales'),
+                'price_to_cash_flow': financial_data.get('price_to_cash_flow'),
+                'price_to_free_cash_flow': financial_data.get('price_to_free_cash_flow'),
+                'dividend_yield': financial_data.get('dividend_yield'),
+                'return_on_assets': financial_data.get('return_on_assets'),
+                'return_on_equity': financial_data.get('return_on_equity'),
+                'debt_to_equity': financial_data.get('debt_to_equity'),
+                'current_ratio': financial_data.get('current'),
+                'quick_ratio': financial_data.get('quick'),
+                'cash_ratio': financial_data.get('cash'),
+                'ev_to_sales': financial_data.get('ev_to_sales'),
+                'ev_to_ebitda': financial_data.get('ev_to_ebitda'),
+                'enterprise_value': financial_data.get('enterprise_value'),
+                'free_cash_flow': financial_data.get('free_cash_flow'),
+                'write_timestamp': datetime.now(timezone.utc)
+            }
+            
+            # Convert date string to datetime if needed
+            if record['date'] and isinstance(record['date'], str):
+                record['date'] = date_parser.parse(record['date'])
+            
+            # Convert datetime objects to naive UTC for QuestDB
+            if record['date']:
+                record['date'] = self._ensure_timezone_naive_utc(record['date'], "financial_info date")
+            if record['write_timestamp']:
+                record['write_timestamp'] = self._ensure_timezone_naive_utc(record['write_timestamp'], "financial_info write_timestamp")
+            
+            # Build insert statement
+            columns = list(record.keys())
+            placeholders = [f'${i+1}' for i in range(len(columns))]
+            
+            insert_sql = f"""
+            INSERT INTO financial_info ({', '.join(columns)})
+            VALUES ({', '.join(placeholders)})
+            """
+            
+            # Prepare values
+            values = []
+            for col in columns:
+                value = record.get(col)
+                if col in ['date', 'write_timestamp']:
+                    values.append(self._ensure_timezone_naive_utc(value, f"financial_info {col}"))
+                else:
+                    values.append(value)
+            
+            try:
+                await conn.execute(insert_sql, *values)
+                self.logger.info(f"Saved financial info for {ticker}")
+            except Exception as e:
+                self.logger.error(f"Error saving financial info for {ticker}: {e}")
+                raise
+
+    async def get_financial_info(self, ticker: str, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
+        """Retrieve financial info data from QuestDB."""
+        async with self.get_connection() as conn:
+            query = "SELECT * FROM financial_info WHERE ticker = $1"
+            params = [ticker]
+
+            if start_date:
+                query += " AND date >= $2"
+                params.append(date_parser.parse(start_date))
+            if end_date:
+                query += f" AND date <= ${len(params) + 1}"
+                params.append(date_parser.parse(end_date))
+
+            query += " LATEST ON date PARTITION BY ticker"
+
+            try:
+                rows = await conn.fetch(query, *params)
+                if rows:
+                    df = pd.DataFrame([dict(row) for row in rows])
+                    if 'date' in df.columns:
+                        df['date'] = pd.to_datetime(df['date'])
+                        df.set_index('date', inplace=True)
+                    return df
+                else:
+                    return pd.DataFrame()
+            except Exception as e:
+                self.logger.error(f"Error retrieving financial info for {ticker}: {e}")
+                return pd.DataFrame()
+
     def _calculate_moving_average(self, ticker: str, records: List[Dict], period: int, price_col: str) -> List[Dict]:
         """Calculate moving average for a given period."""
         if len(records) < period:
@@ -1482,6 +1592,33 @@ class StockQuestDB(StockDBBase):
         implied_volatility DOUBLE,
         volume LONG,
         open_interest LONG
-    ) TIMESTAMP(timestamp) PARTITION BY MONTH WAL
-    DEDUP UPSERT KEYS(timestamp, ticker);
+    ) TIMESTAMP(timestamp) PARTITION BY MONTH WAL;
+    """
+
+    create_table_financial_info_sql = """
+    CREATE TABLE IF NOT EXISTS financial_info (
+        ticker SYMBOL INDEX CAPACITY 128,
+        date TIMESTAMP,
+        price DOUBLE,
+        market_cap LONG,
+        earnings_per_share DOUBLE,
+        price_to_earnings DOUBLE,
+        price_to_book DOUBLE,
+        price_to_sales DOUBLE,
+        price_to_cash_flow DOUBLE,
+        price_to_free_cash_flow DOUBLE,
+        dividend_yield DOUBLE,
+        return_on_assets DOUBLE,
+        return_on_equity DOUBLE,
+        debt_to_equity DOUBLE,
+        current_ratio DOUBLE,
+        quick_ratio DOUBLE,
+        cash_ratio DOUBLE,
+        ev_to_sales DOUBLE,
+        ev_to_ebitda DOUBLE,
+        enterprise_value LONG,
+        free_cash_flow LONG,
+        write_timestamp TIMESTAMP
+    ) TIMESTAMP(date) PARTITION BY MONTH WAL
+    DEDUP UPSERT KEYS(date, ticker);
     """

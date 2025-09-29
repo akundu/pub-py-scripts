@@ -1,5 +1,5 @@
 type: sp-500
-count: 504
+count: 503
 symbols:
 - A
 - AAPL
@@ -310,7 +310,6 @@ symbols:
 - MGM
 - MHK
 - MKC
-- MKTX
 - MLM
 - MMC
 - MMM

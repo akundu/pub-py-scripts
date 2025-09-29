@@ -1,5 +1,6 @@
 from common.symbol_loader import add_symbol_arguments, fetch_lists_data
-from fetch_symbol_data import fetch_and_save_data, get_current_price, _is_market_hours
+from fetch_symbol_data import fetch_and_save_data, get_current_price, get_financial_ratios
+from common.market_hours import is_market_hours, compute_market_transition_times
 from common.stock_db import get_stock_db, get_default_db_path
 import asyncio
 import os
@@ -12,49 +13,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 from zoneinfo import ZoneInfo
 import logging
 
-def _compute_market_transition_times(now_utc: datetime, tz_name: str = "America/New_York") -> tuple[float | None, float | None]:
-    """Compute time in seconds to next regular market open and close from now.
-
-    - Market hours assumed: 09:30–16:00 local (Mon–Fri). Holidays not considered.
-    - Returns (seconds_to_open, seconds_to_close). Either may be None if not applicable.
-    """
-    try:
-        tz = ZoneInfo(tz_name)
-    except Exception:
-        tz = ZoneInfo("America/New_York")
-
-    now_local = now_utc.astimezone(tz)
-
-    # Build today's open/close
-    today_open = now_local.replace(hour=9, minute=30, second=0, microsecond=0)
-    today_close = now_local.replace(hour=16, minute=0, second=0, microsecond=0)
-
-    # Helper to advance to next weekday (Mon-Fri)
-    def next_weekday(dt: datetime) -> datetime:
-        d = dt
-        while d.weekday() >= 5:  # 5=Sat, 6=Sun
-            d = d + timedelta(days=1)
-        return d
-
-    seconds_to_open: float | None = None
-    seconds_to_close: float | None = None
-
-    # Compute seconds to next open
-    if now_local < today_open:
-        seconds_to_open = (today_open - now_local).total_seconds()
-    else:
-        # Find next trading day's open
-        next_day = next_weekday((now_local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0))
-        next_open = next_day.replace(hour=9, minute=30, second=0, microsecond=0)
-        seconds_to_open = (next_open - now_local).total_seconds()
-
-    # Compute seconds to close if currently before today's close and it's a weekday
-    if now_local.weekday() < 5 and now_local < today_close:
-        seconds_to_close = (today_close - now_local).total_seconds()
-    else:
-        seconds_to_close = None
-
-    return (seconds_to_open, seconds_to_close)
+# moved to common.market_hours.compute_market_transition_times
 
 def get_timezone_aware_time(tz_name: str = "America/New_York") -> datetime:
     """Get current time in specified timezone."""
@@ -240,7 +199,70 @@ def fetch_comprehensive_data(
         if loop and not loop.is_closed():
             loop.close()
 
-# Synchronous wrapper function to get current price for a single symbol
+def fetch_financial_info(
+    symbol: str,
+    db_type_for_worker: str,
+    db_config_for_worker: str,
+    client_timeout: float | None = None
+) -> dict:
+    """Fetch financial ratios for a single symbol."""
+    worker_db_instance = None
+    loop = None
+    try:
+        if client_timeout is not None:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout)
+        else:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
+        
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Get API key from environment
+        api_key = os.getenv('POLYGON_API_KEY')
+        if not api_key:
+            return {"symbol": symbol, "error": "POLYGON_API_KEY environment variable not set"}
+        
+        # Fetch financial ratios
+        ratios = loop.run_until_complete(get_financial_ratios(symbol, api_key))
+        if ratios:
+            # Add current date to the ratios data
+            ratios['date'] = datetime.now().strftime('%Y-%m-%d')
+            
+            # Save financial info to database
+            try:
+                loop.run_until_complete(worker_db_instance.save_financial_info(symbol, ratios))
+                return {
+                    "symbol": symbol,
+                    "success": True,
+                    "financial_info": ratios,
+                    "timestamp": get_timezone_aware_time().isoformat(),
+                    "timezone": "America/New_York"
+                }
+            except Exception as save_error:
+                return {
+                    "symbol": symbol,
+                    "success": False,
+                    "error": f"Failed to save financial info: {save_error}",
+                    "financial_info": ratios
+                }
+        else:
+            return {"symbol": symbol, "success": False, "error": "No financial ratios data available"}
+        
+    except Exception as e:
+        return {"symbol": symbol, "success": False, "error": str(e)}
+    finally:
+        if worker_db_instance and hasattr(worker_db_instance, 'close_session') and callable(worker_db_instance.close_session):
+            try:
+                if loop and not loop.is_closed():
+                    loop.run_until_complete(worker_db_instance.close_session())
+            except Exception as e_close:
+                print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
+        
+        # Close the event loop
+        if loop and not loop.is_closed():
+            loop.close()
+
 def fetch_latest_data(
     symbol: str,
     data_source: str,
@@ -410,8 +432,10 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
     with executor_class(max_workers=max_workers) as executor:
         # Level 2: Split by stock symbols
         stock_tasks = []
+        financial_tasks = []
         for symbol_to_fetch in all_symbols_list:
             if should_get_latest:
+                # Fetch latest data
                 task = executor.submit(
                     fetch_latest_data,
                     symbol_to_fetch,
@@ -421,6 +445,18 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                     args.data_dir,
                     args.client_timeout
                 )
+                stock_tasks.append((task, symbol_to_fetch))
+                
+                # Also fetch financial info if --fetch-ratios is specified
+                if args.fetch_ratios:
+                    financial_task = executor.submit(
+                        fetch_financial_info,
+                        symbol_to_fetch,
+                        db_type,
+                        db_config,
+                        args.client_timeout
+                    )
+                    financial_tasks.append((financial_task, symbol_to_fetch))
             elif should_get_comprehensive:
                 task = executor.submit(
                     fetch_comprehensive_data,
@@ -459,6 +495,7 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
         failure_count = 0
         results = []  # Store results for output formatting
         
+        # Process stock data tasks
         for task, symbol_to_fetch in stock_tasks:
             try:
                 result = task.result()  # This blocks until the task completes
@@ -523,8 +560,36 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                 print(f"{os.getpid()} Unexpected error processing symbol {symbol_to_fetch} for database {db_config}: {e}", file=sys.stderr, flush=True)
                 failure_count += 1
                 results.append({"symbol": symbol_to_fetch, "error": str(e)})
+        
+        # Process financial info tasks
+        financial_success_count = 0
+        financial_failure_count = 0
+        for task, symbol_to_fetch in financial_tasks:
+            try:
+                result = task.result()  # This blocks until the task completes
+                if isinstance(result, Exception):
+                    print(f"{os.getpid()} Error processing financial info for symbol {symbol_to_fetch} for database {db_config}: {result}", file=sys.stderr, flush=True)
+                    financial_failure_count += 1
+                    results.append({"symbol": symbol_to_fetch, "financial_error": str(result)})
+                elif isinstance(result, dict) and result.get("success", False):
+                    financial_success_count += 1
+                    symbol = result.get('symbol', symbol_to_fetch)
+                    print(f"{os.getpid()} Successfully fetched financial info for {symbol}", file=sys.stderr, flush=True)
+                    results.append(result)
+                elif isinstance(result, dict) and "error" in result:
+                    print(f"{os.getpid()} Error processing financial info for symbol {symbol_to_fetch} for database {db_config}: {result['error']}", file=sys.stderr, flush=True)
+                    financial_failure_count += 1
+                    results.append(result)
+                else:
+                    print(f"{os.getpid()} Financial info fetching failed or returned unexpected result for symbol {symbol_to_fetch} for database {db_config}: {result}", file=sys.stderr, flush=True)
+                    financial_failure_count += 1
+                    results.append({"symbol": symbol_to_fetch, "financial_error": "Unexpected result format"})
+            except Exception as e:
+                print(f"{os.getpid()} Unexpected error processing financial info for symbol {symbol_to_fetch} for database {db_config}: {e}", file=sys.stderr, flush=True)
+                financial_failure_count += 1
+                results.append({"symbol": symbol_to_fetch, "financial_error": str(e)})
     
-    print(f"{os.getpid()} Completed processing for database {db_config}: {success_count} successes, {failure_count} failures", file=sys.stderr, flush=True)
+    print(f"{os.getpid()} Completed processing for database {db_config}: {success_count} stock successes, {failure_count} stock failures, {financial_success_count} financial successes, {financial_failure_count} financial failures", file=sys.stderr, flush=True)
     return (success_count, failure_count)
 
 async def process_symbols(all_symbols_list: list[str], args: argparse.Namespace, db_configs_for_workers: list[tuple[str, str]]):
@@ -683,8 +748,8 @@ def parse_args():
     parser.add_argument(
         "--log-level",
         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
-        default='INFO',
-        help='Logging level (default: INFO)'
+        default='ERROR',
+        help='Logging level (default: ERROR)'
     )
     parser.add_argument(
         "--output-format",
@@ -703,6 +768,11 @@ def parse_args():
         default=False,
         help="Save data to CSV files in addition to database. CSV saving is disabled by default."
     )
+    parser.add_argument(
+        "--fetch-ratios",
+        action="store_true",
+        help="Fetch financial ratios (P/E, P/B, etc.) from Polygon.io for the symbols. Requires --data-source polygon."
+    )
     
     # Time interval for fetching market data
     time_group = parser.add_mutually_exclusive_group()
@@ -712,6 +782,11 @@ def parse_args():
                             help='Number of days back to fetch historical market data.')
     
     args = parser.parse_args()
+
+    # Validate --fetch-ratios parameter
+    if args.fetch_ratios and args.data_source != "polygon":
+        print("Error: --fetch-ratios requires --data-source polygon", file=sys.stderr)
+        sys.exit(1)
 
     # Set default symbol type if no symbol input method is specified
     if not args.symbols and not args.symbols_list and not args.types:
@@ -804,7 +879,7 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
         start_time = time.time()
         
         if args.use_market_hours:
-            is_market_open_start = _is_market_hours()
+            is_market_open_start = is_market_hours()
             market_status = "MARKET OPEN" if is_market_open_start else "MARKET CLOSED"
             print(f"\n--- Run #{run_count} at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} [{market_status}] ---")
         else:
@@ -829,9 +904,9 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
             # Use intelligent intervals based on market hours and fetch duration
             
             if args.use_market_hours:
-                is_market_open = _is_market_hours()
+                is_market_open = is_market_hours()
                 now_utc = datetime.now(timezone.utc)
-                seconds_to_open, seconds_to_close = _compute_market_transition_times(now_utc, args.timezone)
+                seconds_to_open, seconds_to_close = compute_market_transition_times(now_utc, args.timezone)
                 
                 if is_market_open:
                     # Prefer staying on open cadence; do not sleep past close

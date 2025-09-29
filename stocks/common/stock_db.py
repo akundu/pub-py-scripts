@@ -144,6 +144,18 @@ class StockDBBase(metaclass=ABCMeta):
         """Return latest record with price,bid,ask,day_close,fmv for a specific option ticker."""
         pass
 
+
+    # ---- Financial Info Storage API (abstract) ----
+    @abstractmethod
+    async def save_financial_info(self, ticker: str, financial_data: dict) -> None:
+        """Save financial ratios data to the database."""
+        pass
+
+    @abstractmethod
+    async def get_financial_info(self, ticker: str, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
+        """Retrieve financial info data from the database."""
+        pass
+
     async def _get_historical_data(
         self,
         ticker: str,
@@ -806,6 +818,16 @@ class StockDBSQLite(StockDBBase):
                 return results
         return await asyncio.get_event_loop().run_in_executor(None, _run_sync)
 
+    async def save_financial_info(self, ticker: str, financial_data: dict) -> None:
+        """Save financial ratios data to SQLite (not implemented)."""
+        self.logger.warning("Financial info storage not implemented for SQLite")
+        pass
+
+    async def get_financial_info(self, ticker: str, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
+        """Retrieve financial info data from SQLite (not implemented)."""
+        self.logger.warning("Financial info retrieval not implemented for SQLite")
+        return pd.DataFrame()
+
 class StockDBDuckDB(StockDBBase):
     """
     A class to manage stock data storage and retrieval in a DuckDB database.
@@ -1245,6 +1267,16 @@ class StockDBDuckDB(StockDBBase):
                 return results
         return await asyncio.get_event_loop().run_in_executor(None, _run_sync)
 
+    async def save_financial_info(self, ticker: str, financial_data: dict) -> None:
+        """Save financial ratios data to DuckDB (not implemented)."""
+        self.logger.warning("Financial info storage not implemented for DuckDB")
+        pass
+
+    async def get_financial_info(self, ticker: str, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
+        """Retrieve financial info data from DuckDB (not implemented)."""
+        self.logger.warning("Financial info retrieval not implemented for DuckDB")
+        return pd.DataFrame()
+
 class StockDBClient(StockDBBase):
     """
     Network client that sends database requests to a StockDBServer over a network.
@@ -1621,6 +1653,122 @@ class StockDBClient(StockDBBase):
         # Expects server to return a list of dicts under "data" key now
         return response.get("data", []) 
 
+
+    # ---- Options API (client → server passthrough) ----
+    async def save_options_data(self, df: pd.DataFrame, ticker: str) -> None:
+        """Send options snapshot rows to the server for persistence.
+        Accepts a DataFrame with expected option columns; serializes and posts.
+        """
+        if df is None or df.empty:
+            return
+        df_reset = df.reset_index()
+        # Convert datetime-like columns to ISO strings for JSON
+        for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
+            df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+        params = {
+            "ticker": ticker,
+            "data": df_reset.to_dict(orient="records"),
+        }
+        response = await self._make_request("save_options_data", params)
+        if response.get("error"):
+            raise Exception(f"Server error saving options data: {response['error']}")
+
+    async def get_options_data(
+        self,
+        ticker: str,
+        expiration_date: str | None = None,
+        start_datetime: str | None = None,
+        end_datetime: str | None = None,
+        option_tickers: List[str] | None = None,
+    ) -> pd.DataFrame:
+        params = {
+            "ticker": ticker,
+            "expiration_date": expiration_date,
+            "start_datetime": start_datetime,
+            "end_datetime": end_datetime,
+            "option_tickers": option_tickers,
+        }
+        response = await self._make_request("get_options_data", params)
+        if response.get("error"):
+            raise Exception(f"Server error getting options data: {response['error']}")
+        records = response.get("data", [])
+        return pd.DataFrame.from_records(records)
+
+    async def get_latest_options_data(
+        self,
+        ticker: str,
+        expiration_date: str | None = None,
+        option_tickers: List[str] | None = None,
+    ) -> pd.DataFrame:
+        params = {
+            "ticker": ticker,
+            "expiration_date": expiration_date,
+            "option_tickers": option_tickers,
+        }
+        response = await self._make_request("get_latest_options_data", params)
+        if response.get("error"):
+            raise Exception(f"Server error getting latest options data: {response['error']}")
+        records = response.get("data", [])
+        return pd.DataFrame.from_records(records)
+
+    async def get_option_price_feature(self, ticker: str, option_ticker: str) -> dict[str, Any] | None:
+        params = {"ticker": ticker, "option_ticker": option_ticker}
+        response = await self._make_request("get_option_price_feature", params)
+        if response.get("error"):
+            raise Exception(f"Server error getting option price feature: {response['error']}")
+        return response.get("data")
+
+    async def save_financial_info(self, ticker: str, financial_data: dict) -> None:
+        """Save financial ratios data via remote server."""
+        if not financial_data:
+            return
+            
+        # Prepare the financial data for transmission
+        # Convert datetime objects to ISO strings for JSON serialization
+        prepared_data = financial_data.copy()
+        
+        # Handle date conversion if present
+        if 'date' in prepared_data and prepared_data['date']:
+            if hasattr(prepared_data['date'], 'isoformat'):
+                prepared_data['date'] = prepared_data['date'].isoformat()
+            elif hasattr(prepared_data['date'], 'strftime'):
+                prepared_data['date'] = prepared_data['date'].strftime('%Y-%m-%d')
+        
+        params = {
+            "ticker": ticker,
+            "financial_data": prepared_data
+        }
+        
+        response = await self._make_request("save_financial_info", params)
+        if response.get("error"):
+            raise Exception(f"Server error saving financial info: {response['error']}")
+
+    async def get_financial_info(self, ticker: str, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
+        """Retrieve financial info data via remote server."""
+        params = {
+            "ticker": ticker,
+            "start_date": start_date,
+            "end_date": end_date
+        }
+        
+        response = await self._make_request("get_financial_info", params)
+        if response.get("error"):
+            raise Exception(f"Server error getting financial info: {response['error']}")
+        
+        # Parse the response data into a DataFrame
+        records = response.get("data", [])
+        if not records:
+            return pd.DataFrame()
+            
+        df = pd.DataFrame.from_records(records)
+        
+        # Convert date column to datetime and set as index if present
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'])
+            df.set_index('date', inplace=True)
+            df = df[df.index.notna()]
+        
+        return df
 
 class StockDBSessionManager:
     """Manages aiohttp client sessions with connection pooling and retry logic."""

@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Optional
 
 
-def get_logger(name: str, logger: Optional[logging.Logger] = None, level: str = "INFO") -> logging.Logger:
+def get_logger(name: str, logger: Optional[logging.Logger] = None, level: Optional[str] = None) -> logging.Logger:
     """
     Get or create a logger with consistent formatting.
     
@@ -23,17 +23,32 @@ def get_logger(name: str, logger: Optional[logging.Logger] = None, level: str = 
         Configured logger instance
     """
     if logger is not None:
+        # Ensure provided logger aligns with the desired/ambient level if specified/available
+        if level is not None:
+            logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+        else:
+            ambient_level = logging.getLogger().getEffectiveLevel()
+            logger.setLevel(ambient_level)
         return logger
     
     # Create new logger
     log = logging.getLogger(name)
     
-    # Avoid duplicate handlers
+    # If logger already has handlers, still sync its level to the provided or ambient level
     if log.handlers:
+        if level is not None:
+            log_level = getattr(logging, level.upper(), logging.INFO)
+            log.setLevel(log_level)
+        else:
+            ambient_level = logging.getLogger().getEffectiveLevel()
+            log.setLevel(ambient_level)
         return log
     
-    # Set level
-    log_level = getattr(logging, level.upper(), logging.INFO)
+    # Set level: if explicit level provided, use it; otherwise inherit root's effective level
+    if level is not None:
+        log_level = getattr(logging, level.upper(), logging.INFO)
+    else:
+        log_level = logging.getLogger().getEffectiveLevel()
     log.setLevel(log_level)
     
     # Create formatter with timestamp and PID
