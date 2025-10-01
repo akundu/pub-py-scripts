@@ -36,6 +36,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # Import common symbol loading functions
 from common.symbol_loader import add_symbol_arguments, fetch_lists_data
 from common.stock_db import get_stock_db
+from common.market_hours import is_market_hours as common_is_market_hours, compute_market_transition_times as common_compute_market_transition_times
 
 try:
     from polygon import RESTClient
@@ -107,32 +108,27 @@ class HistoricalDataFetcher:
         self.snapshot_max_concurrent = max(0, int(snapshot_max_concurrent))
 
     @staticmethod
-    def _is_market_open(dt: datetime = None) -> bool:
-        """Check if market is currently open (9:30 AM - 4:00 PM ET, Mon-Fri)."""
-        if dt is None:
-            dt = datetime.now()
-        
-        # Convert to ET (assuming system is in ET or adjust as needed)
-        # For simplicity, assuming system timezone is ET
-        weekday = dt.weekday()  # 0 = Monday, 6 = Sunday
-        if weekday >= 5:  # Saturday or Sunday
-            return False
-        
-        market_open = dt.replace(hour=9, minute=30, second=0, microsecond=0)
-        market_close = dt.replace(hour=16, minute=0, second=0, microsecond=0)
-        
-        return market_open <= dt <= market_close
+    def _is_market_open(dt: datetime | None = None) -> bool:
+        # Delegate to shared implementation (America/New_York)
+        return common_is_market_hours(dt, "America/New_York")
 
     def _get_cache_duration_minutes(self) -> int:
         """Get cache duration in minutes based on market status."""
-        now = datetime.now()
+        now_utc = datetime.now(timezone.utc)
         
-        if self._is_market_open(now):
+        if self._is_market_open(now_utc):
             return HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']
-        elif now.hour < 9 or now.hour >= 20:  # Before 9 AM or after 8 PM
-            return HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed']
+        
+        # Market is closed: choose the smaller of (time until next open) vs (closed cadence)
+        seconds_to_open, _seconds_to_close = common_compute_market_transition_times(now_utc, "America/New_York")
+        closed_cadence_secs = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed'] * 60
+        if seconds_to_open is None:
+            sleep_secs = closed_cadence_secs
         else:
-            return HistoricalDataFetcher.CACHE_DURATION_MINUTES['post_market']
+            sleep_secs = min(max(seconds_to_open, 0), closed_cadence_secs)
+        # Return minutes, rounded up to avoid waking too early, minimum 1 minute
+        minutes = max(1, int((sleep_secs + 59) // 60))
+        return minutes
 
     def _get_csv_path(self, symbol: str, expiration_date: str) -> Path:
         """Get the CSV file path for a specific symbol and expiration date."""
@@ -1042,6 +1038,12 @@ Examples:
         help="Continuously fetch in a loop, sleeping based on cache duration."
     )
     parser.add_argument(
+        '--interval-multiplier',
+        type=float,
+        default=1.0,
+        help="Multiplier for cadence-based intervals (e.g., 0.5 twice as fast, 2.0 half as often)."
+    )
+    parser.add_argument(
         '--continuous-max-runs',
         type=int,
         default=None,
@@ -1128,8 +1130,8 @@ Examples:
 
         # Intelligent sleep based on market transitions
         now_utc = datetime.now(timezone.utc)
-        seconds_to_open, seconds_to_close = HistoricalDataFetcher._compute_market_transition_times(now_utc, "America/New_York")
-        is_market_open = HistoricalDataFetcher._is_market_open(now_utc.astimezone(ZoneInfo("America/New_York")))
+        seconds_to_open, seconds_to_close = common_compute_market_transition_times(now_utc, "America/New_York")
+        is_market_open = HistoricalDataFetcher._is_market_open(now_utc)
         
         if is_market_open:
             # Market is open: prefer staying on open cadence; do not sleep past close
@@ -1155,7 +1157,13 @@ Examples:
                 if not args.quiet:
                     print(f"Next run in {sleep_seconds:.0f}s (markets closed, {HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed']}min interval{msg_extra}) [MARKET CLOSED]")
         
-        await asyncio.sleep(sleep_seconds)
+        # Apply interval multiplier to cadence-based sleeps; do not shorten sleep-until-open
+        if not is_market_open and seconds_to_open is not None and seconds_to_open <= HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60:
+            adjusted_sleep = sleep_seconds
+        else:
+            multiplier = args.interval_multiplier if getattr(args, 'interval_multiplier', None) and args.interval_multiplier > 0 else 1.0
+            adjusted_sleep = max(int(sleep_seconds * multiplier), 1)
+        await asyncio.sleep(adjusted_sleep)
         return True
 
     if args.continuous:
