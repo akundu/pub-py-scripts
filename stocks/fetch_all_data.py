@@ -717,6 +717,12 @@ def parse_args():
         action="store_true",
         help="Use market hours awareness to adjust fetch intervals (longer intervals when markets are closed). Off by default."
     )
+    parser.add_argument(
+        "--interval-multiplier",
+        type=float,
+        default=1.0,
+        help="Multiplier for cadence-based fetch intervals (e.g., 0.5 twice as fast, 2.0 half as often)."
+    )
     
     # Enhanced data fetching options
     parser.add_argument(
@@ -911,6 +917,8 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
                 if is_market_open:
                     # Prefer staying on open cadence; do not sleep past close
                     base_sleep = max(FETCH_INTERVAL_MARKET_OPEN - fetch_duration, 5)
+                    # Apply interval multiplier to cadence-based sleep
+                    base_sleep = max(base_sleep * (args.interval_multiplier if args.interval_multiplier and args.interval_multiplier > 0 else 1.0), 1)
                     if seconds_to_close is not None:
                         sleep_time = max(min(base_sleep, seconds_to_close), 1)
                         print(f"Next fetch in {sleep_time:.1f}s (market open, 30s interval; {seconds_to_close:.1f}s until close) [MARKET OPEN]")
@@ -924,12 +932,15 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
                         sleep_time = max(seconds_to_open - fetch_duration, 1)
                         print(f"Next fetch in {sleep_time:.1f}s (sleeping until market open in {seconds_to_open:.1f}s) [MARKET CLOSED→OPEN]")
                     else:
-                        sleep_time = max(FETCH_INTERVAL_MARKET_CLOSED - fetch_duration, 60)
+                        base_sleep = max(FETCH_INTERVAL_MARKET_CLOSED - fetch_duration, 60)
+                        # Apply interval multiplier to cadence-based sleep
+                        sleep_time = max(base_sleep * (args.interval_multiplier if args.interval_multiplier and args.interval_multiplier > 0 else 1.0), 1)
                         msg_extra = f"; {seconds_to_open:.1f}s until open" if seconds_to_open is not None else ""
                         print(f"Next fetch in {sleep_time:.1f}s (markets closed, 5min interval{msg_extra}) [MARKET CLOSED]")
             else:
                 # Standard behavior - fetch every 30 seconds
-                sleep_time = max(30 - fetch_duration, 5)  # At least 5 seconds between fetches
+                base_sleep = max(30 - fetch_duration, 5)
+                sleep_time = max(base_sleep * (args.interval_multiplier if args.interval_multiplier and args.interval_multiplier > 0 else 1.0), 1)
                 print(f"Next fetch in {sleep_time:.1f}s (30s interval)")
             
             # Sleep until next fetch
