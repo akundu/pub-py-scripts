@@ -109,7 +109,6 @@ symbols:
 - CPB
 - CPRT
 - CRDO
-- CRNX
 - CROX
 - CRSP
 - CRUS
@@ -230,6 +229,7 @@ symbols:
 - INCY
 - INSM
 - INTC
+- INTR
 - INTU
 - IONS
 - IREN
@@ -341,6 +341,7 @@ symbols:
 - OPEN
 - ORLY
 - OS
+- OSIS
 - OTEX
 - OZK
 - PAA
@@ -365,6 +366,7 @@ symbols:
 - PSKY
 - PTC
 - PTCT
+- PTGX
 - PYPL
 - QCOM
 - QLYS
@@ -469,7 +471,6 @@ symbols:
 - URBN
 - UTHR
 - VCTR
-- VERX
 - VFS
 - VLY
 - VNOM
@@ -492,7 +493,6 @@ symbols:
 - WTW
 - WULF
 - WWD
-- WYNN
 - XEL
 - XP
 - Z

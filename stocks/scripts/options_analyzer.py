@@ -176,30 +176,58 @@ class FilterParser:
         'option_premium': float,
         'option_premium_percentage': float,
         'premium_above_diff_percentage': float,
-        'days_to_expiry': int
+        'days_to_expiry': int,
+        'delta': float,
+        'theta': float
     }
     
     # Supported operators
     SUPPORTED_OPERATORS = ['>', '>=', '<', '<=', '==', '!=', 'exists', 'not_exists']
     
     @classmethod
+    def resolve_field_name(cls, name: str) -> str:
+        """Resolve a field name by exact or case-insensitive substring match against SUPPORTED_FIELDS.
+        Raises ValueError on zero or multiple matches."""
+        if name in cls.SUPPORTED_FIELDS:
+            return name
+        lowered = name.lower()
+        matches = [f for f in cls.SUPPORTED_FIELDS.keys() if lowered in f.lower()]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) == 0:
+            raise ValueError(f"Unknown field: {name}. Supported fields: {list(cls.SUPPORTED_FIELDS.keys())}")
+        raise ValueError(f"Ambiguous field '{name}' matches: {matches}. Please be more specific.")
+
+    @classmethod
+    def _normalize_expression(cls, expression: str) -> str:
+        """Replace identifiers in an expression with resolved full field names using substring matching."""
+        token_pattern = r"\b([A-Za-z_][A-Za-z0-9_]*)\b"
+        tokens = set(re.findall(token_pattern, expression))
+        normalized = expression
+        # Sort tokens by length descending to avoid partial replacement issues
+        for tok in sorted(tokens, key=len, reverse=True):
+            try:
+                resolved = cls.resolve_field_name(tok)
+            except ValueError:
+                # Leave non-field tokens (e.g., functions) as-is
+                continue
+            # Replace whole-word occurrences only
+            normalized = re.sub(rf"\b{re.escape(tok)}\b", resolved, normalized)
+        return normalized
+
+    @classmethod
     def parse_expression(cls, expression: str) -> FilterExpression:
         """Parse a single filter expression like 'pe_ratio > 20'."""
         expression = expression.strip()
+
         
         # Handle special cases
-        if expression == 'pe_ratio exists':
-            return FilterExpression('pe_ratio', 'exists', None)
-        elif expression == 'pe_ratio not_exists':
-            return FilterExpression('pe_ratio', 'not_exists', None)
-        elif expression == 'market_cap exists':
-            return FilterExpression('market_cap', 'exists', None)
-        elif expression == 'market_cap not_exists':
-            return FilterExpression('market_cap', 'not_exists', None)
-        elif expression == 'volume exists':
-            return FilterExpression('volume', 'exists', None)
-        elif expression == 'volume not_exists':
-            return FilterExpression('volume', 'not_exists', None)
+        # Support generic '<field> exists' and '<field> not_exists' with substring field resolution
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+(exists|not_exists)$", expression, re.IGNORECASE)
+        if m:
+            raw_field, op = m.group(1), m.group(2).lower()
+            field = cls.resolve_field_name(raw_field)
+            return FilterExpression(field, 'exists' if op == 'exists' else 'not_exists', None)
         
         # Parse comparison expressions
         for op in ['>=', '<=', '==', '!=', '>', '<']:
@@ -213,24 +241,33 @@ class FilterParser:
                         raise ValueError(f"Unsupported operator: {op}. Supported operators: {cls.SUPPORTED_OPERATORS}")
                     
                     # Check if this is a field-to-field comparison
-                    if value_str in cls.SUPPORTED_FIELDS:
+                    # Try resolving value_str as a field name (with substring support)
+                    value_field_resolved = None
+                    try:
+                        value_field_resolved = cls.resolve_field_name(value_str)
+                    except ValueError:
+                        value_field_resolved = None
+                    
+                    if value_field_resolved is not None:
                         # This is a field-to-field comparison
                         # Check if field_expr contains mathematical operations
                         if cls._has_math_operations(field_expr):
-                            return FilterExpression('', op, value_str, is_field_comparison=True, field_expression=field_expr)
+                            return FilterExpression('', op, value_field_resolved, is_field_comparison=True, field_expression=field_expr)
                         else:
-                            if field_expr not in cls.SUPPORTED_FIELDS:
-                                raise ValueError(f"Unsupported field: {field_expr}. Supported fields: {list(cls.SUPPORTED_FIELDS.keys())}")
-                            return FilterExpression(field_expr, op, value_str, is_field_comparison=True)
+                            # Resolve left-hand field name as well
+                            field_left = cls.resolve_field_name(field_expr)
+                            return FilterExpression(field_left, op, value_field_resolved, is_field_comparison=True)
                     elif cls._has_math_operations(value_str):
                         # This is a field-to-mathematical-expression comparison
                         # Check if field_expr contains mathematical operations
                         if cls._has_math_operations(field_expr):
-                            return FilterExpression('', op, '', is_field_comparison=True, field_expression=f"{field_expr} {op} {value_str}")
+                            expr_norm = cls._normalize_expression(f"{field_expr} {op} {value_str}")
+                            return FilterExpression('', op, '', is_field_comparison=True, field_expression=expr_norm)
                         else:
-                            if field_expr not in cls.SUPPORTED_FIELDS:
-                                raise ValueError(f"Unsupported field: {field_expr}. Supported fields: {list(cls.SUPPORTED_FIELDS.keys())}")
-                            return FilterExpression('', op, '', is_field_comparison=True, field_expression=f"{field_expr} {op} {value_str}")
+                            # Resolve left-hand field name
+                            field_left = cls.resolve_field_name(field_expr)
+                            expr_norm = cls._normalize_expression(f"{field_left} {op} {value_str}")
+                            return FilterExpression('', op, '', is_field_comparison=True, field_expression=expr_norm)
                     else:
                         # This is a value comparison
                         # Check if field_expr contains mathematical operations
@@ -251,23 +288,24 @@ class FilterParser:
                             except ValueError:
                                 raise ValueError(f"Invalid value for {field_expr}: {value_str}. Expected {value_type.__name__}")
                             
-                            return FilterExpression('', op, value, is_field_comparison=False, field_expression=field_expr)
+                            expr_norm = cls._normalize_expression(field_expr)
+                            return FilterExpression('', op, value, is_field_comparison=False, field_expression=expr_norm)
                         else:
                             # Simple field comparison
-                            if field_expr not in cls.SUPPORTED_FIELDS:
-                                raise ValueError(f"Unsupported field: {field_expr}. Supported fields: {list(cls.SUPPORTED_FIELDS.keys())}")
+                            # Resolve left-hand field name (with substring support)
+                            field_left = cls.resolve_field_name(field_expr)
                             
-                            value_type = cls.SUPPORTED_FIELDS[field_expr]
+                            value_type = cls.SUPPORTED_FIELDS[field_left]
                             try:
                                 # Handle market_cap with B/M/T suffixes
-                                if field_expr == 'market_cap':
+                                if field_left == 'market_cap':
                                     value = cls._parse_market_cap_value(value_str)
                                 else:
                                     value = value_type(value_str)
                             except ValueError:
-                                raise ValueError(f"Invalid value for {field_expr}: {value_str}. Expected {value_type.__name__}")
+                                raise ValueError(f"Invalid value for {field_left}: {value_str}. Expected {value_type.__name__}")
                             
-                            return FilterExpression(field_expr, op, value, is_field_comparison=False)
+                            return FilterExpression(field_left, op, value, is_field_comparison=False)
         
         raise ValueError(f"Could not parse expression: {expression}")
     
@@ -334,8 +372,10 @@ class FilterParser:
         """Parse multiple filter expressions from a list of strings."""
         filters = []
         for filter_str in filter_strings:
+            # Remove all extra whitespace within the string for robust parsing
+            compact = ' '.join(filter_str.split())
             # Split by comma and parse each expression
-            expressions = [expr.strip() for expr in filter_str.split(',') if expr.strip()]
+            expressions = [expr.strip() for expr in compact.split(',') if expr.strip()]
             for expr in expressions:
                 filters.append(cls.parse_expression(expr))
         return filters
@@ -390,12 +430,16 @@ class OptionsAnalyzer:
             'option_premium': 'PREM',
             'option_premium_percentage': 'PREM%',
             'premium_above_diff_percentage': 'DIFF%',
+            'delta': 'DEL',
+            'theta': 'TH',
             'volume': 'VOL',
             'num_contracts': 'CNT',
             'potential_premium': 'POT_PREM',
             'daily_premium': 'DAY_PREM',
-            'expiration_date': 'EXP',
+            'expiration_date': 'EXP (UTC)',
             'days_to_expiry': 'DAYS',
+            'last_quote_timestamp': 'LQUOTE_TS',
+            'write_timestamp': 'WRITE_TS (EST)',
             'option_ticker': 'OPT_TKR'
         }
         
@@ -582,9 +626,11 @@ class OptionsAnalyzer:
                 ROUND(o.bid, 2) AS bid,
                 ROUND(o.ask, 2) AS ask,
                 ROUND(o.delta, 2) AS delta,
+                ROUND(o.theta, 2) AS theta,
                 COALESCE(ROUND(o.implied_volatility, 2), 0.00) AS implied_volatility,
                 o.volume,
                 o.expiration_date,
+                o.write_timestamp,
                 o.last_quote_timestamp,
                 ROUND(o.strike_price - l.current_price, 2) AS price_above_current,
                 CAST((o.expiration_date - cast(date_trunc('day', now()) as timestamp)) / 86400000000L AS INT) AS days_to_expiry,
@@ -629,9 +675,11 @@ class OptionsAnalyzer:
                 ask,
                 bid,
                 delta,
+                theta,
                 implied_volatility,
                 expiration_date,
                 days_to_expiry,
+                write_timestamp,
                 last_quote_timestamp,
                 option_ticker,
                 -- contracts possible for specified position size
@@ -654,11 +702,14 @@ class OptionsAnalyzer:
                 price_above_current,
                 option_premium,
                 MAX(volume) AS volume,
+                MAX(delta) AS delta,
+                MAX(theta) AS theta,
                 num_contracts,
                 potential_premium,
                 daily_premium,
                 expiration_date,
                 days_to_expiry,
+                MAX(write_timestamp) AS write_timestamp,
                 MAX(last_quote_timestamp) AS last_quote_timestamp,
                 option_ticker
             FROM with_premium
@@ -681,6 +732,8 @@ class OptionsAnalyzer:
             strike_price,
             price_above_current,
             option_premium,
+            delta,
+            theta,
             volume,
             num_contracts,
             potential_premium,
@@ -688,6 +741,7 @@ class OptionsAnalyzer:
             expiration_date,
             days_to_expiry,
             last_quote_timestamp,
+            write_timestamp,
             option_ticker
         FROM deduplicated
         WHERE potential_premium >= ${premium_param}
@@ -702,6 +756,8 @@ class OptionsAnalyzer:
                     df['expiration_date'] = pd.to_datetime(df['expiration_date'])
                 if 'last_quote_timestamp' in df.columns:
                     df['last_quote_timestamp'] = pd.to_datetime(df['last_quote_timestamp'])
+                if 'write_timestamp' in df.columns:
+                    df['write_timestamp'] = pd.to_datetime(df['write_timestamp'])
                 
                 # Replace current_price with latest from DB and recompute dependent fields
                 try:
@@ -779,22 +835,25 @@ class OptionsAnalyzer:
         
         # Map integer columns to expected names based on the query structure
         # Query columns: ticker, current_price, strike_price, price_above_current, option_premium, 
-        # volume, num_contracts, potential_premium, daily_premium, expiration_date, days_to_expiry, 
-        # last_quote_timestamp, option_ticker
+        # delta, theta, volume, num_contracts, potential_premium, daily_premium, expiration_date, days_to_expiry, 
+        # last_quote_timestamp, write_timestamp, option_ticker
         column_mapping = {
             0: 'ticker',
             1: 'current_price', 
             2: 'strike_price',
             3: 'price_above_current',
             4: 'option_premium',
-            5: 'volume',
-            6: 'num_contracts',
-            7: 'potential_premium',
-            8: 'daily_premium',
-            9: 'expiration_date',
-            10: 'days_to_expiry',
-            11: 'last_quote_timestamp',
-            12: 'option_ticker'
+            5: 'delta',
+            6: 'theta',
+            7: 'volume',
+            8: 'num_contracts',
+            9: 'potential_premium',
+            10: 'daily_premium',
+            11: 'expiration_date',
+            12: 'days_to_expiry',
+            13: 'last_quote_timestamp',
+            14: 'write_timestamp',
+            15: 'option_ticker'
         }
         
         # Rename columns
@@ -810,11 +869,40 @@ class OptionsAnalyzer:
             * 100
         ).round(2)
         
+        # Convert timestamps to EST/EDT (America/New_York) for display, except expiration_date which should be UTC
+        try:
+            # Handle expiration_date (UTC)
+            if 'expiration_date' in df_renamed.columns:
+                ser = pd.to_datetime(df_renamed['expiration_date'], errors='coerce')
+                # Ensure timezone-aware UTC
+                if getattr(ser.dt, 'tz', None) is None:
+                    ser = ser.dt.tz_localize('UTC')
+                else:
+                    ser = ser.dt.tz_convert('UTC')
+                df_renamed['expiration_date'] = ser.dt.strftime('%Y-%m-%d %H:%M:%S')
+
+            # Handle other timestamps in America/New_York
+            for ts_col in ['last_quote_timestamp', 'write_timestamp']:
+                if ts_col in df_renamed.columns:
+                    ser = pd.to_datetime(df_renamed[ts_col], errors='coerce')
+                    # Localize naive timestamps to UTC, then convert to America/New_York
+                    if getattr(ser.dt, 'tz', None) is None:
+                        ser = ser.dt.tz_localize('UTC')
+                    ser = ser.dt.tz_convert('America/New_York')
+                    # Format as string for clean table output
+                    df_renamed[ts_col] = ser.dt.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            # If conversion fails, leave as-is
+            pass
+        
         # Reorder columns for better display
         display_columns = [
-            'ticker', 'current_price', 'pe_ratio', 'market_cap', 'market_cap_b', 'strike_price', 
-            'price_above_current', 'option_premium', 'option_premium_percentage', 'premium_above_diff_percentage', 'volume', 'num_contracts', 
-            'potential_premium', 'daily_premium', 'expiration_date', 'days_to_expiry', 'option_ticker'
+            'ticker', 'pe_ratio', 'market_cap_b', 'current_price', 'strike_price',
+            'price_above_current', 'option_premium', 'option_premium_percentage', 'premium_above_diff_percentage',
+            'delta', 'theta',
+            'potential_premium', 'daily_premium', 'expiration_date', 'days_to_expiry',
+            #'volume', 'num_contracts', 'last_quote_timestamp', 'write_timestamp', 'option_ticker'
+            'volume', 'num_contracts', 'write_timestamp', 'option_ticker'
         ]
         
         # Only include columns that exist in the dataframe
@@ -825,9 +913,21 @@ class OptionsAnalyzer:
         if filters:
             df_display = FilterParser.apply_filters(df_display, filters, filter_logic)
         
-        # Apply sorting if specified
-        if sort_by and sort_by in df_display.columns:
-            df_display = df_display.sort_values(by=sort_by, ascending=False)
+        # Apply sorting if specified (supports full names and abbreviated headers)
+        if sort_by:
+            # Map abbreviated headers back to full column names
+            header_reverse_map = {v: k for k, v in self._create_compact_headers(df_display).items()}
+            sort_key = sort_by
+            if sort_by in header_reverse_map:
+                sort_key = header_reverse_map[sort_by]
+            # Also support substring resolution for field names
+            if sort_key not in df_display.columns:
+                # try case-insensitive substring match
+                candidates = [c for c in df_display.columns if sort_key.lower() in str(c).lower()]
+                if len(candidates) == 1:
+                    sort_key = candidates[0]
+            if sort_key in df_display.columns:
+                df_display = df_display.sort_values(by=sort_key, ascending=False)
         
         if group_by == 'ticker':
             # Group by ticker and show results per ticker
@@ -855,12 +955,13 @@ class OptionsAnalyzer:
                         if col in ticker_data_formatted.columns:
                             ticker_data_formatted[col] = ticker_data_formatted[col].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
                     
-                    # Create compact headers
+                    # Create compact headers and rename columns to ensure alignment
                     compact_headers = self._create_compact_headers(ticker_data_formatted)
+                    ticker_data_formatted = ticker_data_formatted.rename(columns=compact_headers)
                     
                     table = tabulate(
                         ticker_data_formatted,
-                        headers=list(compact_headers.values()),
+                        headers='keys',
                         tablefmt='grid',
                         showindex=False
                     )
@@ -889,12 +990,13 @@ class OptionsAnalyzer:
                     if col in df_formatted.columns:
                         df_formatted[col] = df_formatted[col].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
                 
-                # Create compact headers
+                # Create compact headers and rename columns to ensure alignment
                 compact_headers = self._create_compact_headers(df_formatted)
+                df_formatted = df_formatted.rename(columns=compact_headers)
                 
                 output_lines = [tabulate(
                     df_formatted,
-                    headers=list(compact_headers.values()),
+                    headers='keys',
                     tablefmt='grid',
                     showindex=False
                 )]
@@ -924,12 +1026,12 @@ Examples:
   python options_analyzer.py --db-conn questdb://user:pass@host:8812/db
 
   # Analyze specific symbols with 14-day expiry window
-  python options_analyzer.py --symbols AAPL,MSFT,GOOGL --days 14 --output csv
+  python options_analyzer.py --symbols AAPL MSFT GOOGL --days 14 --output csv
 
-  # Analyze S&P 500 stocks, sorted by daily premium
+  # Analyze S&P 500 stocks sorted by daily premium
   python options_analyzer.py --types sp-500 --sort daily_premium --group-by ticker
 
-  # Filter by volume and max days, save to file
+  # Filter by volume and max days save to file
   python options_analyzer.py --min-volume 1000 --max-days 30 --output results.csv
 
   # Show only high-premium opportunities
@@ -939,7 +1041,7 @@ Examples:
   python options_analyzer.py --filter "pe_ratio > 20" --filter "market_cap < 1B"
 
   # Filter with OR logic
-  python options_analyzer.py --filter "pe_ratio > 30,market_cap > 5B" --filter-logic OR
+  python options_analyzer.py --filter "pe_ratio > 30" --filter "market_cap > 5B" --filter-logic OR
 
   # Filter for options with volume data
   python options_analyzer.py --filter "volume exists" --filter "pe_ratio exists"
@@ -968,7 +1070,7 @@ Examples:
         '--db-conn',
         type=str,
         required=True,
-        help="QuestDB connection string (e.g., questdb://user:pass@host:8812/db)."
+        help="QuestDB connection string (e.g. questdb://user:pass@host:8812/db)."
     )
     
     # Analysis parameters
@@ -976,7 +1078,7 @@ Examples:
         '--days',
         type=int,
         default=None,
-        help="Number of days to expiry window (e.g., 14 for ±14 days around target). If not specified, analyze all available expirations."
+        help="Number of days to expiry window (e.g. 14 for ±14 days around target). If not specified analyze all available expirations."
     )
     parser.add_argument(
         '--max-days',
@@ -1014,14 +1116,14 @@ Examples:
         action='append',
         type=str,
         help="Filter expressions (can be used multiple times). Format: 'field operator value' or 'field operator field' or 'field exists/not_exists' or 'field*multiplier operator value'. "
-             "Supported fields: pe_ratio, market_cap, volume, num_contracts, potential_premium, daily_premium, current_price, strike_price, price_above_current, option_premium, option_premium_percentage, premium_above_diff_percentage, days_to_expiry. "
-             "Supported operators: >, >=, <, <=, ==, !=, exists, not_exists. "
-             "Mathematical operations: +, -, *, / (e.g., 'num_contracts*0.1 > volume', 'potential_premium+1000 > daily_premium'). "
+             "Supported fields: pe_ratio market_cap volume num_contracts potential_premium daily_premium current_price strike_price price_above_current option_premium option_premium_percentage premium_above_diff_percentage days_to_expiry. "
+             "Supported operators: > >= < <= == != exists not_exists. "
+             "Mathematical operations: + - * / (e.g. 'num_contracts*0.1 > volume' 'potential_premium+1000 > daily_premium'). "
              "Derived fields: option_premium_percentage = (option_premium / current_price) * 100; "
              "premium_above_diff_percentage = ((option_premium - price_above_current) / price_above_current) * 100. "
-             "Market cap values support T (trillion), B (billion), and M (million) suffixes. "
-             "Examples: 'pe_ratio > 20', 'market_cap < 3.5T', 'num_contracts > volume', 'num_contracts*0.1 > volume', 'potential_premium > daily_premium', 'volume exists', "
-             "'option_premium_percentage >= 10', 'premium_above_diff_percentage > 0'. "
+             "Market cap values support T (trillion) B (billion) and M (million) suffixes. "
+             "Examples: 'pe_ratio > 20' or 'market_cap < 3.5T' or 'num_contracts > volume' or 'num_contracts*0.1 > volume' or 'potential_premium > daily_premium' or 'volume exists' or "
+             "'option_premium_percentage >= 10' or 'premium_above_diff_percentage > 0'. "
              "Multiple expressions in one --filter can be comma-separated."
     )
     parser.add_argument(
@@ -1036,7 +1138,7 @@ Examples:
         '--output',
         type=str,
         default='table',
-        help="Output format: 'table', 'csv', or filename (e.g., 'results.csv')."
+        help="Output format: 'table' 'csv' or filename (e.g. 'results.csv')."
     )
     parser.add_argument(
         '--group-by',
@@ -1046,12 +1148,12 @@ Examples:
     )
     parser.add_argument(
         '--sort',
-        choices=['daily_premium', 'potential_premium', 'ticker', 'days_to_expiry', 'option_premium_percentage', 'premium_above_diff_percentage'],
+        type=str,
         default='daily_premium',
         help=(
-            "Sort criteria (default: daily_premium). You can also sort by the derived %% fields: "
-            "'option_premium_percentage' (option_premium/current_price*100) and "
-            "'premium_above_diff_percentage' ((option_premium - price_above_current)/price_above_current*100)."
+            "Sort by any displayed field (full or abbreviated header). "
+            "Examples: daily_premium potential_premium ticker days_to_expiry option_premium_percentage premium_above_diff_percentage "
+            "or abbreviations like TKR PRC STRK PREM%% DIFF%% POT_PREM DAY_PREM."
         )
     )
     parser.add_argument(
@@ -1087,7 +1189,9 @@ Examples:
     filters = []
     if hasattr(args, 'filter') and args.filter:
         try:
-            filters = FilterParser.parse_filters(args.filter)
+            # Normalize whitespace in each filter input (collapse internal spaces)
+            normalized_filters = [' '.join(f.split()) for f in args.filter]
+            filters = FilterParser.parse_filters(normalized_filters)
             if not args.quiet and filters:
                 print(f"Applied {len(filters)} filter(s) with {args.filter_logic} logic:")
                 for i, f in enumerate(filters, 1):
@@ -1125,6 +1229,10 @@ Examples:
         else:
             output_format = 'table'
     
+    # Normalize sort input by stripping all whitespace characters
+    import re as _re
+    sort_arg = _re.sub(r"\s+", "", args.sort) if hasattr(args, 'sort') and args.sort else None
+
     # Format and display results
     result = analyzer.format_output(
         df=df,
@@ -1132,7 +1240,7 @@ Examples:
         output_format=output_format,
         group_by=args.group_by,
         output_file=output_file,
-        sort_by=args.sort,
+        sort_by=sort_arg,
         filters=filters,
         filter_logic=args.filter_logic
     )

@@ -1,5 +1,5 @@
 type: sp-500
-count: 503
+count: 502
 symbols:
 - A
 - AAPL
@@ -495,7 +495,6 @@ symbols:
 - WST
 - WTW
 - WY
-- WYNN
 - XEL
 - XOM
 - XYL
