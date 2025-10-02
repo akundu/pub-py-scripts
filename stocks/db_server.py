@@ -177,7 +177,8 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
                               heartbeat_interval: float = 1.0, max_body_mb: int = 10,
                               shutdown_event = None, log_level: str = "INFO",
                               prebound_sock: socket.socket | None = None,
-                              questdb_connection_timeout: int = 180):
+                              questdb_connection_timeout: int = 180,
+                              enable_access_log: bool = False):
     """Server runner for individual worker processes."""
     global ws_manager
     
@@ -196,6 +197,8 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
 
     app = web.Application(middlewares=[logging_middleware])
     app['db_instance'] = app_db_instance
+    app['enable_access_log'] = enable_access_log
+    
     
     # Set client_max_size
     max_size_bytes = max_body_mb * 1024 * 1024
@@ -321,7 +324,8 @@ class ForkingServer:
                  child_stagger_ms: int = 100,
                  bind_retries: int = 5,
                  bind_retry_delay_ms: int = 200,
-                 questdb_connection_timeout: int = 180):
+                 questdb_connection_timeout: int = 180,
+                 enable_access_log: bool = False):
         self.workers = max(1, int(workers))
         self.port = port
         self.db_file = db_file
@@ -342,6 +346,7 @@ class ForkingServer:
         self.child_backoff_until: dict[int, float] = {i: 0.0 for i in range(self.workers)}
         self.shutting_down = False
         self.shutdown_start_time: float = 0.0
+        self.enable_access_log = enable_access_log
 
         # Ignore SIGPIPE in parent
         try:
@@ -446,6 +451,7 @@ class ForkingServer:
                     log_level=self.log_level,
                     prebound_sock=self.bound_socket,
                     questdb_connection_timeout=self.questdb_connection_timeout,
+                    enable_access_log=self.enable_access_log,
                 ))
             except Exception as e:
                 logger.error(f"Child {index} crashed: {e}", exc_info=True)
@@ -741,31 +747,46 @@ async def logging_middleware(request: web.Request, handler):
         "response_size": 0 # Default
     }
 
+    # Check if access logging is enabled
+    enable_access_log = request.app.get('enable_access_log', False)
+
     try:
         response = await handler(request)
         extra_log_info["status_code"] = response.status
         extra_log_info["response_size"] = response.body_length if hasattr(response, 'body_length') else len(response.body) if response.body else 0
-        # For general messages not specific to a request field, we add it directly
-        # Reduce log noise for health checks and static resource requests
-        if request.path in ["/", "/health", "/healthz", "/ready", "/live"] or request.path.endswith(('.js', '.css', '.ico', '.png', '.jpg', '.jpeg', '.gif')):
-            logger.debug(f"Request handled for {request.path}", extra=extra_log_info)
+        
+        # Log based on access log setting
+        if enable_access_log:
+            # Full access logging when enabled
+            access_log_msg = f"Access: {client_ip} - \"{request_line}\" {response.status} {extra_log_info['response_size']} \"{user_agent}\""
+            logger.warning(f"ACCESS: {access_log_msg}")
         else:
-            logger.info(f"Request handled for {request.path}", extra=extra_log_info)
+            # Reduced logging for health checks and static resources
+            if request.path in ["/", "/health", "/healthz", "/ready", "/live"] or request.path.endswith(('.js', '.css', '.ico', '.png', '.jpg', '.jpeg', '.gif')):
+                logger.warning(f"Request handled for {request.path}", extra=extra_log_info)
+            else:
+                logger.warning(f"Request handled for {request.path}", extra=extra_log_info)
         return response
     except web.HTTPException as ex: # Catch HTTP exceptions to log them correctly
         extra_log_info["status_code"] = ex.status_code
         extra_log_info["response_size"] = ex.body.tell() if ex.body and hasattr(ex.body, 'tell') else (len(ex.body) if ex.body else 0)
-        # Reduce log noise for common health check and static resource errors
-        if request.path in ["/", "/health", "/healthz", "/ready", "/live"] or request.path.endswith(('.js', '.css', '.ico', '.png', '.jpg', '.jpeg', '.gif')):
-            logger.debug(f"HTTP Exception: {ex.reason}", extra=extra_log_info, exc_info=False)
+        
+        # Log based on access log setting
+        if enable_access_log:
+            logger.error(f"Access: {client_ip} - \"{request_line}\" {ex.status_code} {extra_log_info['response_size']} \"{user_agent}\" - {ex.reason}", extra=extra_log_info, exc_info=False)
         else:
-            logger.error(f"HTTP Exception: {ex.reason}", extra=extra_log_info, exc_info=False) # Don't print full stack for HTTP errors unless debug
+            # Reduced logging for health checks and static resources
+            if request.path in ["/", "/health", "/healthz", "/ready", "/live"] or request.path.endswith(('.js', '.css', '.ico', '.png', '.jpg', '.jpeg', '.gif')):
+                logger.warning(f"HTTP Exception: {ex.reason}", extra=extra_log_info, exc_info=False)
+            else:
+                logger.error(f"HTTP Exception: {ex.reason}", extra=extra_log_info, exc_info=False)
         raise
     except Exception as e: # Catch all other exceptions
         extra_log_info["status_code"] = 500
-        logger.error(f"Unhandled exception during request: {str(e)}", extra=extra_log_info, exc_info=True)
-        # Re-raise as a generic 500 error or let it propagate if that's preferred
-        # For now, let it propagate to be caught by the main error handler or aiohttp's default
+        if enable_access_log:
+            logger.error(f"Access: {client_ip} - \"{request_line}\" 500 0 \"{user_agent}\" - Unhandled exception: {str(e)}", extra=extra_log_info, exc_info=True)
+        else:
+            logger.error(f"Unhandled exception during request: {str(e)}", extra=extra_log_info, exc_info=True)
         raise
 
 async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
@@ -1142,6 +1163,9 @@ async def handle_db_command(request: web.Request) -> web.Response:
 
     if not command:
         return web.json_response({"error": "Missing 'command' in payload"}, status=400)
+    
+    # Debug logging
+    logger.info(f"Received command: '{command}' with params keys: {list(params.keys())}")
 
     try:
         # No need for explicit loop.run_in_executor here as DB methods are now async
@@ -1516,6 +1540,55 @@ async def handle_db_command(request: web.Request) -> web.Response:
                 logger.error(f"Error getting financial info for {ticker}: {e}", exc_info=True)
                 return web.json_response({"error": f"Failed to get financial info: {str(e)}"}, status=500)
 
+        elif command == "save_options_data":
+            logger.info(f"Processing save_options_data command for ticker: {params.get('ticker')} - NEW CODE VERSION")
+            ticker = params.get("ticker")
+            data_records = params.get("data")
+            index_col = params.get("index_col", "expiration_date")
+            
+            if not all([ticker, data_records]):
+                return web.json_response({"error": "Missing 'ticker' or 'data' for save_options_data"}, status=400)
+            if not isinstance(data_records, list) or not data_records:
+                return web.json_response({"error": "'data' must be a non-empty list"}, status=400)
+
+            try:
+                df_to_save = pd.DataFrame.from_records(data_records)
+                logger.info(f"Options DataFrame shape: {df_to_save.shape}")
+                logger.info(f"Options DataFrame columns: {list(df_to_save.columns)}")
+                if not df_to_save.empty:
+                    logger.info(f"First row sample: {df_to_save.iloc[0].to_dict()}")
+                
+                # Check if required columns exist
+                required_cols = ['option_ticker', 'expiration_date']
+                missing_cols = [col for col in required_cols if col not in df_to_save.columns]
+                if missing_cols:
+                    return web.json_response({
+                        "error": f"Missing required columns: {missing_cols}. Available columns: {list(df_to_save.columns)}"
+                    }, status=400)
+                
+                # Check if index column exists
+                if index_col not in df_to_save.columns:
+                    return web.json_response({"error": f"Index column '{index_col}' not found"}, status=400)
+                
+                # Convert index column to datetime if it's not already
+                df_to_save[index_col] = pd.to_datetime(df_to_save[index_col])
+                
+                # Create a copy for QuestDB that keeps the expiration_date as a column
+                df_for_questdb = df_to_save.copy()
+                df_for_questdb.set_index(index_col, inplace=True)
+                
+                # Reset index to keep expiration_date as a column for QuestDB
+                df_for_questdb = df_for_questdb.reset_index()
+                
+                
+                # Save options data
+                await db_instance.save_options_data(df_for_questdb, ticker)
+                
+                return web.json_response({"message": f"Options data saved successfully for {ticker}"})
+            except Exception as e:
+                logger.error(f"Error saving options data for {ticker}: {e}", exc_info=True)
+                return web.json_response({"error": f"Failed to save options data: {str(e)}"}, status=500)
+
         else:
             return web.json_response({"error": f"Unknown command: {command}"}, status=400)
 
@@ -1583,8 +1656,13 @@ async def main_server_runner():
         "--questdb-connection-timeout", type=int, default=180,
         help="QuestDB connection establishment timeout in seconds (default: 180)."
     )
+    parser.add_argument(
+        "--enable-access-log", action="store_true",
+        help="Enable detailed access logging for all HTTP requests (default: False)."
+    )
     
     args = parser.parse_args()
+    
     
     # Handle auto-detection of workers
     if args.workers == 0:
@@ -1614,6 +1692,7 @@ async def main_server_runner():
         logger.info(f"Workers: {args.workers}")
         logger.info(f"Maximum request body size: {args.max_body_mb}MB")
         logger.info(f"WebSocket heartbeat interval: {args.heartbeat_interval}s")
+        logger.info(f"Access logging: {'Enabled' if args.enable_access_log else 'Disabled'}")
         logger.info(f"Startup delay: {args.startup_delay}s; Child stagger: {args.child_stagger_ms}ms; Bind retries: {args.bind_retries} (delay {args.bind_retry_delay_ms}ms)")
         logger.info("Press Ctrl+C to stop the server.")
 
@@ -1630,6 +1709,7 @@ async def main_server_runner():
             bind_retries=args.bind_retries,
             bind_retry_delay_ms=args.bind_retry_delay_ms,
             questdb_connection_timeout=args.questdb_connection_timeout,
+            enable_access_log=args.enable_access_log,
         )
         forking_server.run()
         return
@@ -1653,6 +1733,8 @@ async def main_server_runner():
 
     app = web.Application(middlewares=[logging_middleware])
     app['db_instance'] = app_db_instance
+    app['enable_access_log'] = args.enable_access_log
+    
     
     # Set client_max_size on the application object
     # This is a common way to try and influence the default server factory
@@ -1692,6 +1774,7 @@ async def main_server_runner():
     else:
         logger.info(f"Using database file: {os.path.abspath(args.db_file)}")
     logger.info(f"Maximum request body size set to: {args.max_body_mb}MB ({max_size_bytes} bytes)")
+    logger.info(f"Access logging: {'Enabled' if args.enable_access_log else 'Disabled'}")
     logger.info("Listening for POST requests on /db_command")
     logger.info(f"WebSocket endpoint available at ws://localhost:{args.port}/ws?symbol=SYMBOL")
     logger.info(f"WebSocket heartbeat interval: {args.heartbeat_interval}s")

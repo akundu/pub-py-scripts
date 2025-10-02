@@ -741,6 +741,11 @@ async def fetch_and_save_data(
             start_dt = pd.to_datetime(start_date)
             end_dt = pd.to_datetime(end_date)
             
+            # If a single-day inclusive request is made (start == end),
+            # extend end by +1 day for API ranges that are end-exclusive
+            if start_dt.normalize() == end_dt.normalize():
+                end_dt = end_dt + timedelta(days=1)
+
             # For daily data, use the full range
             start_date_daily = start_dt
             end_date_daily = end_dt
@@ -1575,6 +1580,13 @@ def parse_args():
         help="Show latest records: today's daily bar and most recent hourly bar for the symbol (default when no start/end dates specified)"
     )
     parser.add_argument(
+        "--only-fetch",
+        type=str,
+        choices=["realtime", "daily", "hourly"],
+        default=None,
+        help="When used with --latest, restrict actions/output to only one of realtime|daily|hourly"
+    )
+    parser.add_argument(
         "--no-force-today",
         action="store_true",
         help="Do not automatically refetch today's daily bar on trading days; serve from DB only"
@@ -1782,7 +1794,7 @@ async def main() -> None:
             print()  # Spacing
 
             # Realtime section when market is not closed
-            if session in ('regular', 'premarket', 'afterhours'):
+            if session in ('regular', 'premarket', 'afterhours') and (args.only_fetch in (None, 'realtime')):
                 try:
                     rt_age_limit = 60 if session == 'regular' else 300
                     price_info = await get_current_price(
@@ -1811,7 +1823,7 @@ async def main() -> None:
                 skip_detailed_checks = True
                 logging.info("Skipping detailed age checks (afterhours/closed session, no realtime refetch needed)")
             
-            if not skip_detailed_checks:
+            if not skip_detailed_checks and (args.only_fetch in (None, 'daily', 'hourly')):
                 # Log last bar ages for context and check if daily/hourly need refresh
                 # Use more appropriate thresholds for historical data based on market session:
                 if session == 'regular':
@@ -1861,7 +1873,7 @@ async def main() -> None:
                     
                     need_hourly = bool(h_threshold and (w_h_age is None or w_h_age > h_threshold))
                     need_daily = bool(d_threshold and (w_d_age is None or w_d_age > d_threshold))
-                    print(f"Fetch decision (by last write): hourly={need_hourly}, daily={need_daily}")
+                    logging.info(f"Fetch decision (by last write): hourly={need_hourly}, daily={need_daily}")
                 except Exception as e:
                     print(f"Age diagnostics error: {e}")
                     need_hourly = False
@@ -1870,16 +1882,16 @@ async def main() -> None:
                 # Skip detailed checks - assume no fetching needed
                 need_hourly = False
                 need_daily = False
-                print("Fetch decision (by last write): hourly=False, daily=False (skipped detailed checks)")
+                logging.info("Fetch decision (by last write): hourly=False, daily=False (skipped detailed checks)")
                 
                 # Fetch daily and hourly data separately based on their individual needs
-                if need_daily or need_hourly:
+                if (args.only_fetch in (None, 'daily') and need_daily) or (args.only_fetch in (None, 'hourly') and need_hourly):
                     try:
                         # Create separate fetch functions for daily and hourly
                         daily_success = False
                         hourly_success = False
                         
-                        if need_daily:
+                        if need_daily and (args.only_fetch in (None, 'daily')):
                             print("Fetching daily data...")
                             daily_success = await fetch_and_save_data(
                                 symbol=args.symbol,
@@ -1899,7 +1911,7 @@ async def main() -> None:
                             else:
                                 print("Daily data fetch: failed.")
                         
-                        if need_hourly:
+                        if need_hourly and (args.only_fetch in (None, 'hourly')):
                             print("Fetching hourly data...")
                             hourly_success = await fetch_and_save_data(
                                 symbol=args.symbol,
@@ -1926,7 +1938,7 @@ async def main() -> None:
                     except Exception as e:
                         print(f"Fetch by last write error: {e}")
                 else:
-                    print("Fetch by last write: skipped (recent enough).")
+                    logging.info("Fetch by last write: skipped (recent enough or not requested by only-fetch).")
 
             print()  # Spacing
             
@@ -1934,19 +1946,19 @@ async def main() -> None:
             # This reduces database round trips from 6+ queries to 2 queries
             tomorrow_str = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
             
-            # Fetch both daily and hourly data in parallel
-            daily_task = db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=tomorrow_str, interval='daily')
-            hourly_task = db_instance.get_stock_data(args.symbol, interval='hourly')
+            # Fetch both daily and hourly data in parallel (filtered by only_fetch)
+            daily_task = db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=tomorrow_str, interval='daily') if args.only_fetch in (None, 'daily') else asyncio.create_task(asyncio.sleep(0, result=pd.DataFrame()))
+            hourly_task = db_instance.get_stock_data(args.symbol, interval='hourly') if args.only_fetch in (None, 'hourly') else asyncio.create_task(asyncio.sleep(0, result=pd.DataFrame()))
             
             # Wait for both queries to complete
             daily_df, hourly_df = await asyncio.gather(daily_task, hourly_task)
             
             # Display daily data - check if we have today's data first
-            if not daily_df.empty:
+            if args.only_fetch in (None, 'daily') and not daily_df.empty:
                 last_daily = daily_df.tail(1)
                 print("Today's Daily:")
                 print(last_daily[['open','high','low','close','volume']] if 'volume' in last_daily.columns else last_daily[['open','high','low','close']])
-            else:
+            elif args.only_fetch in (None, 'daily'):
                 print("No daily row for today in DB.")
                 
                 # Show most recent daily as fallback (only if needed)
@@ -1978,7 +1990,7 @@ async def main() -> None:
                         fetch_date = last_trading_day
                 
                 # Respect earlier freshness decision: only fetch if daily is needed
-                if should_fetch and need_daily:
+                if should_fetch and need_daily and (args.only_fetch in (None, 'daily')):
                     if fetch_date == today_str:
                         print(f"\nTrading day detected, attempting to fetch today's data for {args.symbol}...")
                     else:
@@ -2022,7 +2034,8 @@ async def main() -> None:
                                     print("Still no daily data available after fetch attempt.")
                             
                             # Also refresh the hourly data after successful fetch
-                            hourly_df = await db_instance.get_stock_data(args.symbol, interval='hourly')
+                            if args.only_fetch in (None, 'hourly'):
+                                hourly_df = await db_instance.get_stock_data(args.symbol, interval='hourly')
                         else:
                             if fetch_date == today_str:
                                 print("Failed to fetch today's data.")
@@ -2039,7 +2052,8 @@ async def main() -> None:
                                 print(last_daily[['open','high','low','close','volume']] if 'volume' in last_daily.columns else last_daily[['open','high','low','close']])
                             
                             # Also refresh hourly data
-                            hourly_df = await db_instance.get_stock_data(args.symbol, interval='hourly')
+                            if args.only_fetch in (None, 'hourly'):
+                                hourly_df = await db_instance.get_stock_data(args.symbol, interval='hourly')
                     except Exception as e:
                         print(f"Error fetching today's data: {e}")
                         
@@ -2053,7 +2067,8 @@ async def main() -> None:
                             print(last_daily[['open','high','low','close','volume']] if 'volume' in last_daily.columns else last_daily[['open','high','low','close']])
                         
                         # Also refresh hourly data
-                        hourly_df = await db_instance.get_stock_data(args.symbol, interval='hourly')
+                        if args.only_fetch in (None, 'hourly'):
+                            hourly_df = await db_instance.get_stock_data(args.symbol, interval='hourly')
                 elif should_fetch and not need_daily:
                     # Avoid immediate re-fetch loops when last write is recent enough
                     print("Skipping daily fetch fallback (last write recent enough by threshold).")
@@ -2067,7 +2082,7 @@ async def main() -> None:
                 last_hourly = hourly_display_df.tail(1)
                 print("Most Recent Hourly:")
                 print(last_hourly[['open','high','low','close','volume']] if 'volume' in last_hourly.columns else last_hourly[['open','high','low','close']])
-            else:
+            elif args.only_fetch in (None, 'hourly'):
                 print("No hourly rows found in DB.")
             
             # Display financial ratios if requested

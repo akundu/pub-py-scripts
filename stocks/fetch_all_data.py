@@ -360,7 +360,9 @@ def fetch_price_and_save(
     db_save_batch_size_val: int,
     chunk_size_val: str = "monthly",  # New parameter with default
     client_timeout: float | None = None,
-    save_db_csv: bool = False
+    save_db_csv: bool = False,
+    start_date: str | None = None,
+    end_date: str | None = None
 ) -> bool:
     """Creates a DB instance in the worker thread and runs fetch_and_save_data."""
     print(f"{os.getpid()} Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr, flush=True)
@@ -389,6 +391,8 @@ def fetch_price_and_save(
             worker_db_instance,
             all_time_flag,
             days_back_val,
+            start_date,
+            end_date,
             db_save_batch_size_val,
             chunk_size=chunk_size_val,  # Pass the new parameter
             save_db_csv=save_db_csv  # Pass the new parameter with correct name
@@ -425,8 +429,7 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
     # Create the appropriate executor for stock-level tasks
     executor_class = ProcessPoolExecutor if stock_executor_type == "process" else ThreadPoolExecutor
     
-    # Determine if we should get latest data (explicit or implicit)
-    should_get_latest = args.latest or (not args.all_time and args.days_back is None and not args.fetch_market_data)
+    # Determine fetch mode: latest mode removed; choose between comprehensive or standard historical fetch
     should_get_comprehensive = args.comprehensive_data
     
     with executor_class(max_workers=max_workers) as executor:
@@ -434,8 +437,8 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
         stock_tasks = []
         financial_tasks = []
         for symbol_to_fetch in all_symbols_list:
-            if should_get_latest:
-                # Fetch latest data
+            # When a special per-iteration flag requests latest-only, use the light latest path
+            if getattr(args, '_latest_only', False):
                 task = executor.submit(
                     fetch_latest_data,
                     symbol_to_fetch,
@@ -445,9 +448,6 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                     args.data_dir,
                     args.client_timeout
                 )
-                stock_tasks.append((task, symbol_to_fetch))
-                
-                # Also fetch financial info if --fetch-ratios is specified
                 if args.fetch_ratios:
                     financial_task = executor.submit(
                         fetch_financial_info,
@@ -486,7 +486,9 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                     args.db_batch_size,
                     args.chunk_size,  # Pass the new parameter
                     args.client_timeout,
-                    args.save_db_csv
+                    args.save_db_csv,
+                    getattr(args, 'start_date', None),
+                    getattr(args, 'end_date', None)
                 )
             stock_tasks.append((task, symbol_to_fetch))
         
@@ -511,31 +513,29 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                     failure_count += 1
                     results.append(result)
                 elif isinstance(result, dict) and ("daily" in result or "hourly" in result):
-                    # Latest data fetch successful
+                    # Latest-only fetch successful (continuous or special iteration mode)
                     success_count += 1
                     symbol = result.get('symbol', symbol_to_fetch)
-                    timestamp = result.get('timestamp', 'N/A')
-                    timezone = result.get('timezone', 'N/A')
-                    
                     daily_info = result.get('daily')
                     hourly_info = result.get('hourly')
-                    
+
                     if daily_info:
                         daily_str = f"Daily({daily_info['date']}): O:{daily_info['open']:.2f} H:{daily_info['high']:.2f} L:{daily_info['low']:.2f} C:{daily_info['close']:.2f}"
                         if daily_info.get('volume'):
                             daily_str += f" V:{daily_info['volume']:,}"
                     else:
                         daily_str = "Daily: N/A"
-                    
+
                     if hourly_info:
                         hourly_str = f"Hourly({hourly_info['datetime']}): O:{hourly_info['open']:.2f} H:{hourly_info['high']:.2f} L:{hourly_info['low']:.2f} C:{hourly_info['close']:.2f}"
                         if hourly_info.get('volume'):
                             hourly_str += f" V:{hourly_info['volume']:,}"
                     else:
                         hourly_str = "Hourly: N/A"
-                    
+
                     print(f"{os.getpid()} Successfully got latest data for {symbol}: {daily_str} | {hourly_str}", file=sys.stderr, flush=True)
                     results.append(result)
+                
                 elif isinstance(result, dict) and "success" in result:
                     # Comprehensive data fetch
                     if result.get("success", False):
@@ -690,16 +690,24 @@ def parse_args():
         default="monthly",
         help="Chunk size for fetching large datasets (auto: smart selection, daily: 1-day chunks, weekly: 1-week chunks, monthly: 1-month chunks). Defaults to 'monthly'."
     )
-    parser.add_argument(
-        "--latest",
-        action="store_true",
-        help="Get latest data (today's daily and most recent hourly) for symbols instead of historical data. Also triggered automatically when no time parameters are specified."
-    )
+    # Removed --latest feature; always perform historical fetches
     parser.add_argument(
         "--data-source",
         choices=["polygon", "alpaca"],
         default="polygon",
         help="Data source to use for fetching data (default: polygon)."
+    )
+    parser.add_argument(
+        "--start-date",
+        type=str,
+        default=None,
+        help="Start date for historical fetch (YYYY-MM-DD). If omitted and --end-date is provided with --days-back, start-date is computed as end-date - days-back."
+    )
+    parser.add_argument(
+        "--end-date",
+        type=str,
+        default=None,
+        help="End date for historical fetch (YYYY-MM-DD). If omitted in continuous mode and no start-date is provided, each iteration fetches only the current latest price."
     )
     parser.add_argument(
         "--continuous",
@@ -892,8 +900,36 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
             print(f"\n--- Run #{run_count} at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} ---")
         
         try:
-            # Run the current price fetch
-            (success_count, failure_count) = await process_symbols(all_symbols_list, args, db_configs_for_workers)
+            # Prepare per-iteration date window behavior
+            # If no start-date and no end-date are provided: fetch only current latest price each loop
+            # If end-date is provided with days-back: compute start-date = end-date - days-back each loop
+            # Else: pass through provided start/end as-is
+            iteration_args = argparse.Namespace(**vars(args))
+            # If user did not provide any date window hints, default each iteration to today's window
+            # by setting end_date to today and days_back to 0. This ensures active fetching during
+            # continuous mode without requiring manual flags. If user supplied either end_date,
+            # days_back, or start_date, do not override.
+            if (
+                getattr(iteration_args, 'start_date', None) is None and
+                getattr(iteration_args, 'end_date', None) is None and
+                getattr(iteration_args, 'days_back', None) in (None,)
+            ):
+                today_str = datetime.now().strftime('%Y-%m-%d')
+                iteration_args.end_date = today_str
+                iteration_args.days_back = 0
+                # Ensure we do NOT use the latest-only path
+                if hasattr(iteration_args, '_latest_only'):
+                    delattr(iteration_args, '_latest_only')
+            elif iteration_args.end_date and iteration_args.days_back:
+                try:
+                    end_dt = datetime.strptime(iteration_args.end_date, '%Y-%m-%d')
+                    start_dt = end_dt - timedelta(days=iteration_args.days_back)
+                    iteration_args.start_date = start_dt.strftime('%Y-%m-%d')
+                except Exception:
+                    pass
+
+            # Run the fetch with iteration-specific dates
+            (success_count, failure_count) = await process_symbols(all_symbols_list, iteration_args, db_configs_for_workers)
             
             # Calculate how long this fetch took
             fetch_duration = time.time() - start_time
@@ -918,7 +954,7 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
                     # Prefer staying on open cadence; do not sleep past close
                     base_sleep = max(FETCH_INTERVAL_MARKET_OPEN - fetch_duration, 5)
                     # Apply interval multiplier to cadence-based sleep
-                    base_sleep = max(base_sleep * (args.interval_multiplier if args.interval_multiplier and args.interval_multiplier > 0 else 1.0), 1)
+                    base_sleep = max(base_sleep * (args.interval_multiplier if args.interval_multiplier else 1.0), 1)
                     if seconds_to_close is not None:
                         sleep_time = max(min(base_sleep, seconds_to_close), 1)
                         print(f"Next fetch in {sleep_time:.1f}s (market open, 30s interval; {seconds_to_close:.1f}s until close) [MARKET OPEN]")
@@ -1078,7 +1114,8 @@ async def main():
     elif not db_configs_for_workers: # Should not happen with current logic if fetch_market_data is True
         print("Error: Database configuration is missing for workers. Cannot fetch market data.", file=sys.stderr)
     else:
-        if args.continuous and args.latest:
+        # Latest mode removed; continuous mode now just repeats the standard processing
+        if args.continuous:
             await run_continuous_latest_fetch(all_symbols_list, args, db_configs_for_workers)
         else:
             print(f"Fetching market data for {len(all_symbols_list)} symbols using {args.executor_type} pool...")

@@ -143,6 +143,7 @@ symbols:
 - DXCM
 - EA
 - EBAY
+- ENLT
 - ENPH
 - ENSG
 - ENTG
@@ -172,10 +173,10 @@ symbols:
 - FITB
 - FIVE
 - FLEX
-- FLY
 - FOX
 - FOXA
 - FRHC
+- FRMI
 - FROG
 - FSLR
 - FSV
@@ -229,7 +230,6 @@ symbols:
 - INCY
 - INSM
 - INTC
-- INTR
 - INTU
 - IONS
 - IREN
@@ -248,7 +248,6 @@ symbols:
 - KRYS
 - KSPI
 - KTOS
-- KYMR
 - LAMR
 - LAUR
 - LBRDA
@@ -493,6 +492,7 @@ symbols:
 - WTW
 - WULF
 - WWD
+- WYNN
 - XEL
 - XP
 - Z

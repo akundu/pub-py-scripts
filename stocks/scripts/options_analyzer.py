@@ -603,8 +603,8 @@ class OptionsAnalyzer:
         
         # Build the main analysis query based on q8d.sql
         ticker_placeholders = ','.join([f'${i+1}' for i in range(len(tickers_upper))])
-        volume_param = len(tickers_upper) + 1
-        premium_param = len(tickers_upper) + 2
+        # With no SQL-side volume or OTM filtering, only min_premium follows tickers
+        premium_param = len(tickers_upper) + 1
         
         # Base query structure - using column indices since QuestDB returns them as integers
         query = f"""
@@ -641,12 +641,11 @@ class OptionsAnalyzer:
                 LATEST ON timestamp PARTITION BY option_ticker
             ) o
             JOIN latest_stock_prices l ON o.ticker = l.ticker
-            WHERE o.strike_price > l.current_price
-              AND o.volume >= ${volume_param}
+            WHERE 1=1
         """
         
-        
-        params = list(tickers_upper) + [min_volume, min_premium]
+        # Only ticker params + min_premium are passed to the query now
+        params = list(tickers_upper) + [min_premium]
         
         # Add expiration date filters
         if days_to_expiry is not None:

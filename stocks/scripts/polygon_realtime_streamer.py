@@ -383,11 +383,11 @@ class PolygonStreamManager:
                     
             retry_count += 1
             
-            if retry_count < self.max_retries and not shutdown_flag:
+            if self.max_retries == 0 or retry_count < self.max_retries and not shutdown_flag:
                 logger.info(f"Connection {connection_id}: Retrying in {self.retry_delay} seconds...")
                 await asyncio.sleep(self.retry_delay)
                 
-        if retry_count >= self.max_retries:
+        if retry_count >= self.max_retries and self.max_retries > 0:
             logger.error(f"Connection {connection_id}: Max retries exceeded")
         else:
             logger.info(f"Connection {connection_id}: Stopped")
@@ -764,8 +764,8 @@ def parse_args():
     parser.add_argument(
         '--max-retries',
         type=int,
-        default=3,
-        help='Maximum connection retry attempts (default: 3)'
+        default=0,
+        help='Maximum connection retry attempts (default: 0)'
     )
     
     parser.add_argument(

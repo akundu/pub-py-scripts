@@ -15,6 +15,7 @@ from .stock_db import StockDBBase
 from .logging_utils import get_logger
 import pytz
 from dateutil import parser as date_parser
+from .market_hours import is_market_hours
 
 
 class StockQuestDB(StockDBBase):
@@ -823,8 +824,15 @@ class StockQuestDB(StockDBBase):
                 return pd.DataFrame()
 
     async def get_latest_price(self, ticker: str) -> float | None:
-        """Get the most recent price for a ticker from QuestDB."""
+        """Get the most recent price for a ticker from QuestDB.
+        
+        If market is closed, returns the most recent daily close price.
+        If market is open, returns the most recent price from any available source.
+        """
         try:
+            # Check if market is currently open
+            market_is_open = is_market_hours()
+            
             async def fetch_realtime():
                 try:
                     async with self.get_connection() as conn:
@@ -864,20 +872,36 @@ class StockQuestDB(StockDBBase):
                     self.logger.debug(f"Daily fetch failed for {ticker}: {e}")
                 return None
 
-            # Run all three fetches concurrently (separate connections)
-            rt_task = asyncio.create_task(fetch_realtime())
-            hr_task = asyncio.create_task(fetch_hourly())
-            dy_task = asyncio.create_task(fetch_daily())
-            results = await asyncio.gather(rt_task, hr_task, dy_task, return_exceptions=False)
+            if market_is_open:
+                # Market is open - get the most recent price from any source
+                self.logger.debug(f"Market is open, fetching most recent price for {ticker}")
+                
+                # Run all three fetches concurrently (separate connections)
+                rt_task = asyncio.create_task(fetch_realtime())
+                hr_task = asyncio.create_task(fetch_hourly())
+                dy_task = asyncio.create_task(fetch_daily())
+                results = await asyncio.gather(rt_task, hr_task, dy_task, return_exceptions=False)
 
-            # Filter out None and choose the one with the most recent timestamp
-            valid_results = [r for r in results if r is not None]
-            if not valid_results:
-                return None
+                # Filter out None and choose the one with the most recent timestamp
+                valid_results = [r for r in results if r is not None]
+                if not valid_results:
+                    return None
 
-            # Each tuple is (source, timestamp, price)
-            latest = max(valid_results, key=lambda r: r[1])
-            return latest[2]
+                # Each tuple is (source, timestamp, price)
+                latest = max(valid_results, key=lambda r: r[1])
+                self.logger.debug(f"Market open: returning {latest[0]} price {latest[2]} for {ticker}")
+                return latest[2]
+            else:
+                # Market is closed - return daily close price only
+                self.logger.debug(f"Market is closed, fetching daily close price for {ticker}")
+                
+                daily_result = await fetch_daily()
+                if daily_result:
+                    self.logger.debug(f"Market closed: returning daily close price {daily_result[2]} for {ticker}")
+                    return daily_result[2]
+                else:
+                    self.logger.warning(f"No daily price data available for {ticker} while market is closed")
+                    return None
 
         except Exception as e:
             self.logger.error(f"Error getting latest price for {ticker}: {e}")
@@ -1036,20 +1060,30 @@ class StockQuestDB(StockDBBase):
 
     async def save_options_data(self, df: pd.DataFrame, ticker: str) -> None:
         if df.empty:
-            return
+            error_msg = f"Options save failed: empty DataFrame for {ticker}"
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)
         async with self.get_connection() as conn:
             df_copy = df.copy()
             df_copy.columns = [c.lower() for c in df_copy.columns]
             df_copy['ticker'] = ticker
 
-            # Normalize columns
+            # Debug: Log the columns we received
+            self.logger.info(f"Options data columns for {ticker}: {list(df_copy.columns)}")
+            self.logger.info(f"Options data shape for {ticker}: {df_copy.shape}")
+            if not df_copy.empty:
+                self.logger.info(f"First row sample for {ticker}: {df_copy.iloc[0].to_dict()}")
+
+            # Normalize columns - handle both 'expiration' and 'expiration_date' cases
             rename_map = {'expiration': 'expiration_date', 'strike': 'strike_price', 'type': 'option_type'}
             df_copy.rename(columns={k: v for k, v in rename_map.items() if k in df_copy.columns}, inplace=True)
+            
 
             # Required
             if 'option_ticker' not in df_copy.columns or 'expiration_date' not in df_copy.columns:
-                self.logger.warning("Options save skipped: missing option_ticker or expiration_date")
-                return
+                error_msg = f"Options save failed: missing required columns. Required: option_ticker, expiration_date. Available: {list(df_copy.columns)}"
+                self.logger.error(error_msg)
+                raise ValueError(error_msg)
 
             # Parse times
             if 'last_quote_timestamp' in df_copy.columns:

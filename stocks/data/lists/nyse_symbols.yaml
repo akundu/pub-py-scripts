@@ -157,7 +157,6 @@ symbols:
 - ENB
 - EOG
 - EPD
-- EQH
 - EQNR
 - EQR
 - EQT
@@ -375,10 +374,10 @@ symbols:
 - ROK
 - ROL
 - RPM
+- RS
 - RSG
 - RTX
 - RY
-- RYAN
 - SAN
 - SAP
 - SBS
@@ -478,6 +477,7 @@ symbols:
 - WDS
 - WEC
 - WELL
+- WES
 - WFC
 - WIT
 - WM
