@@ -12,7 +12,6 @@ symbols:
 - AEM
 - AER
 - AFL
-- AGI
 - AIG
 - AJG
 - ALC
@@ -141,6 +140,7 @@ symbols:
 - DOV
 - DOW
 - DRI
+- DT
 - DTE
 - DUK
 - DVN
@@ -245,6 +245,7 @@ symbols:
 - JBL
 - JCI
 - JNJ
+- JOBY
 - JPM
 - K
 - KB
@@ -253,6 +254,7 @@ symbols:
 - KEYS
 - KGC
 - KKR
+- KLAR
 - KMI
 - KO
 - KOF
@@ -325,7 +327,6 @@ symbols:
 - O
 - OKE
 - OKLO
-- OMC
 - ORCL
 - OTIS
 - OWL
@@ -477,7 +478,6 @@ symbols:
 - WDS
 - WEC
 - WELL
-- WES
 - WFC
 - WIT
 - WM
