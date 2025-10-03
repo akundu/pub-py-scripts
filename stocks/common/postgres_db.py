@@ -273,7 +273,11 @@ class StockDBPostgreSQL(StockDBBase):
             
             # No valid connection available, create a new one
             try:
-                conn = await asyncpg.connect(self.db_config)
+                conn = await asyncpg.connect(
+                    self.db_config,
+                    # Disable prepared statements when using pgbouncer to avoid "duplicate statement" errors
+                    statement_cache_size=0
+                )
                 
                 # Set session-level timeout settings to prevent query timeouts
                 await self._set_connection_timeouts(conn)

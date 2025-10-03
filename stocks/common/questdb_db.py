@@ -196,7 +196,9 @@ class StockQuestDB(StockDBBase):
                         min_size=1,
                         max_size=self.pool_max_size,
                         command_timeout=self.pool_connection_timeout_minutes * 60,
-                        timeout=self.connection_timeout_seconds
+                        timeout=self.connection_timeout_seconds,
+                        # Disable prepared statements when using pgbouncer to avoid "duplicate statement" errors
+                        statement_cache_size=0
                     )
                     self._pool_by_loop[loop_id] = pool
 
