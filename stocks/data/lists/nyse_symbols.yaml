@@ -12,6 +12,7 @@ symbols:
 - AEM
 - AER
 - AFL
+- AGI
 - AIG
 - AJG
 - ALC
@@ -157,6 +158,7 @@ symbols:
 - ENB
 - EOG
 - EPD
+- EQH
 - EQNR
 - EQR
 - EQT
@@ -343,7 +345,6 @@ symbols:
 - PHM
 - PINS
 - PKG
-- PKX
 - PLD
 - PM
 - PNC
@@ -434,7 +435,6 @@ symbols:
 - TPR
 - TRGP
 - TRP
-- TRU
 - TRV
 - TS
 - TSM
