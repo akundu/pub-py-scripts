@@ -683,12 +683,12 @@ class OptionsAnalyzer:
                 option_ticker,
                 -- contracts possible for specified position size
                 ROUND(floor({position_size} / (current_price * 100)), 0) AS num_contracts,
-                -- potential premium earned using fallback option_premium
-                ROUND(floor({position_size} / (current_price * 100)) * (COALESCE(ask, bid, 0.01) * 100), 2) AS potential_premium,
-                -- daily premium (amortized)
+                -- potential premium earned using corrected formula: (position_size / stock_price) * (100 * option_premium)
+                ROUND(({position_size} / current_price) * (COALESCE(ask, bid, 0.01)), 2) AS potential_premium,
+                -- daily premium (amortized) using corrected formula
                 CASE 
                     WHEN CAST((expiration_date - cast(date_trunc('day', now()) as timestamp)) / 86400000000L AS INT) > 0 
-                    THEN ROUND(floor({position_size} / (current_price * 100)) * (COALESCE(ask, bid, 0.01) * 100) / CAST((expiration_date - cast(date_trunc('day', now()) as timestamp)) / 86400000000L AS INT), 2)
+                    THEN ROUND(({position_size} / current_price) * (COALESCE(ask, bid, 0.01)) / CAST((expiration_date - cast(date_trunc('day', now()) as timestamp)) / 86400000000L AS INT), 2)
                     ELSE 0
                 END AS daily_premium
             FROM filtered_options
