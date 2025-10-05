@@ -140,7 +140,6 @@ symbols:
 - DOV
 - DOW
 - DRI
-- DT
 - DTE
 - DUK
 - DVN
@@ -327,6 +326,7 @@ symbols:
 - O
 - OKE
 - OKLO
+- OMC
 - ORCL
 - OTIS
 - OWL
@@ -375,11 +375,10 @@ symbols:
 - RMD
 - ROK
 - ROL
-- RPM
-- RS
 - RSG
 - RTX
 - RY
+- RYAN
 - SAN
 - SAP
 - SBS
@@ -436,6 +435,7 @@ symbols:
 - TPR
 - TRGP
 - TRP
+- TRU
 - TRV
 - TS
 - TSM

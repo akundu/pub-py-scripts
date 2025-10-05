@@ -825,15 +825,15 @@ class StockQuestDB(StockDBBase):
                 self.logger.error(f"Error retrieving realtime data for {ticker}: {e}")
                 return pd.DataFrame()
 
-    async def get_latest_price(self, ticker: str) -> float | None:
+    async def get_latest_price(self, ticker: str, use_market_time: bool = True) -> float | None:
         """Get the most recent price for a ticker from QuestDB.
         
         If market is closed, returns the most recent daily close price.
         If market is open, returns the most recent price from any available source.
         """
         try:
-            # Check if market is currently open
-            market_is_open = is_market_hours()
+            # Check if market is currently open; allow override via use_market_time
+            market_is_open = is_market_hours() if use_market_time else True
             
             async def fetch_realtime():
                 try:
@@ -909,7 +909,7 @@ class StockQuestDB(StockDBBase):
             self.logger.error(f"Error getting latest price for {ticker}: {e}")
             return None
 
-    async def get_latest_prices(self, tickers: List[str], num_simultaneous: int = 25) -> Dict[str, float | None]:
+    async def get_latest_prices(self, tickers: List[str], num_simultaneous: int = 25, use_market_time: bool = True) -> Dict[str, float | None]:
         """Get the most recent prices for multiple tickers using bounded concurrency."""
         result: Dict[str, float | None] = {}
 
@@ -918,7 +918,7 @@ class StockQuestDB(StockDBBase):
         async def fetch_one(ticker: str) -> tuple[str, float | None]:
             async with semaphore:
                 try:
-                    price = await self.get_latest_price(ticker)
+                    price = await self.get_latest_price(ticker, use_market_time=use_market_time)
                     return (ticker, price)
                 except Exception as e:
                     self.logger.error(f"Error getting latest price for {ticker}: {e}")

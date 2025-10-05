@@ -79,12 +79,12 @@ class StockDBBase(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    async def get_latest_price(self, ticker: str) -> float | None:
+    async def get_latest_price(self, ticker: str, use_market_time: bool = True) -> float | None:
         """Get the most recent price for a ticker from any available data (realtime, hourly, daily)."""
         pass
 
     @abstractmethod
-    async def get_latest_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+    async def get_latest_prices(self, tickers: List[str], use_market_time: bool = True) -> Dict[str, float | None]:
         """Get the most recent prices for multiple tickers from any available data (realtime, hourly, daily)."""
         pass
 
@@ -649,7 +649,7 @@ class StockDBSQLite(StockDBBase):
             df = df[df.index.notna()]
         return df
 
-    async def get_latest_price(self, ticker: str) -> float | None:
+    async def get_latest_price(self, ticker: str, use_market_time: bool = True) -> float | None:
         """Get the most recent price for a ticker (realtime -> hourly -> daily)."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -683,7 +683,7 @@ class StockDBSQLite(StockDBBase):
 
         return latest_price
 
-    async def get_latest_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+    async def get_latest_prices(self, tickers: List[str], use_market_time: bool = True) -> Dict[str, float | None]:
         """Get the most recent prices for multiple tickers (realtime -> hourly -> daily)."""
         result = {}
         
@@ -1112,7 +1112,7 @@ class StockDBDuckDB(StockDBBase):
             df = df[df.index.notna()]
         return df
 
-    async def get_latest_price(self, ticker: str) -> float | None:
+    async def get_latest_price(self, ticker: str, use_market_time: bool = True) -> float | None:
         """Get the most recent price for a ticker (realtime -> hourly -> daily) from DuckDB."""
         with duckdb.connect(database=self.db_path, read_only=True) as conn:
             latest_price = None
@@ -1141,7 +1141,7 @@ class StockDBDuckDB(StockDBBase):
 
         return latest_price
 
-    async def get_latest_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+    async def get_latest_prices(self, tickers: List[str], use_market_time: bool = True) -> Dict[str, float | None]:
         """Get the most recent prices for multiple tickers (realtime -> hourly -> daily) from DuckDB."""
         result = {}
         
@@ -1599,16 +1599,16 @@ class StockDBClient(StockDBBase):
             raise Exception(f"Server error getting realtime data: {response['error']}")
         return self._parse_df_from_response(response.get("data", []), 'timestamp')
 
-    async def get_latest_price(self, ticker: str) -> float | None:
-        params = {"ticker": ticker}
+    async def get_latest_price(self, ticker: str, use_market_time: bool = True) -> float | None:
+        params = {"ticker": ticker, "use_market_time": use_market_time}
         response = await self._make_request("get_latest_price", params)
         if response.get("error"):
             raise Exception(f"Server error getting latest price: {response['error']}")
         return response.get("latest_price")
 
-    async def get_latest_prices(self, tickers: List[str]) -> Dict[str, float | None]:
+    async def get_latest_prices(self, tickers: List[str], use_market_time: bool = True) -> Dict[str, float | None]:
         """Get the most recent prices for multiple tickers from the server."""
-        params = {"tickers": tickers}
+        params = {"tickers": tickers, "use_market_time": use_market_time}
         response = await self._make_request("get_latest_prices", params)
         if response.get("error"):
             raise Exception(f"Server error getting latest prices: {response['error']}")
