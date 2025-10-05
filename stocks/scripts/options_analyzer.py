@@ -451,6 +451,67 @@ class OptionsAnalyzer:
                 compact_headers[col] = col[:8] if len(col) > 8 else col
         
         return compact_headers
+    
+    def _format_csv_output(
+        self, 
+        df: pd.DataFrame, 
+        delimiter: str = ',', 
+        quoting: str = 'minimal', 
+        group_by: str = 'overall',
+        output_file: Optional[str] = None
+    ) -> str:
+        """Format DataFrame as CSV with proper formatting."""
+        import csv
+        
+        # Convert quoting string to csv module constant
+        quoting_map = {
+            'minimal': csv.QUOTE_MINIMAL,
+            'all': csv.QUOTE_ALL,
+            'none': csv.QUOTE_NONE,
+            'nonnumeric': csv.QUOTE_NONNUMERIC
+        }
+        csv_quoting = quoting_map.get(quoting, csv.QUOTE_MINIMAL)
+        
+        # Create a copy for CSV formatting
+        df_csv = df.copy()
+        
+        # Format numeric columns for CSV (remove $ symbols and % symbols for cleaner data)
+        for col in ['current_price', 'strike_price', 'price_above_current', 'option_premium', 'potential_premium', 'daily_premium']:
+            if col in df_csv.columns:
+                df_csv[col] = df_csv[col].apply(lambda x: float(x.replace('$', '').replace(',', '')) if isinstance(x, str) and '$' in str(x) else x)
+        
+        for col in ['pe_ratio', 'market_cap_b']:
+            if col in df_csv.columns:
+                df_csv[col] = df_csv[col].apply(lambda x: float(x.replace(',', '')) if isinstance(x, str) and ',' in str(x) else x)
+        
+        for col in ['option_premium_percentage', 'premium_above_diff_percentage']:
+            if col in df_csv.columns:
+                df_csv[col] = df_csv[col].apply(lambda x: float(x.replace('%', '').replace(',', '')) if isinstance(x, str) and '%' in str(x) else x)
+        
+        # Handle grouping
+        if group_by == 'ticker':
+            # For CSV, we'll create a single CSV with all data but add a grouping column
+            df_csv['group'] = df_csv['ticker']
+            # Sort by ticker first, then by the original sort order
+            df_csv = df_csv.sort_values(['ticker'])
+        
+        # Generate CSV content
+        csv_content = df_csv.to_csv(
+            index=False, 
+            sep=delimiter, 
+            quoting=csv_quoting,
+            na_rep='',
+            float_format='%.2f'
+        )
+        
+        # Save to file if specified
+        if output_file:
+            with open(output_file, 'w', newline='', encoding='utf-8') as f:
+                f.write(csv_content)
+            if not self.quiet:
+                print(f"CSV results saved to {output_file}")
+        
+        return csv_content
         
     async def initialize(self):
         """Initialize database connection."""
@@ -818,7 +879,10 @@ class OptionsAnalyzer:
         output_file: Optional[str] = None,
         sort_by: Optional[str] = None,
         filters: Optional[List[FilterExpression]] = None,
-        filter_logic: str = 'AND'
+        filter_logic: str = 'AND',
+        csv_delimiter: str = ',',
+        csv_quoting: str = 'minimal',
+        csv_columns: Optional[List[str]] = None
     ) -> str:
         """Format the analysis results for output."""
         if df.empty:
@@ -928,6 +992,17 @@ class OptionsAnalyzer:
             if sort_key in df_display.columns:
                 df_display = df_display.sort_values(by=sort_key, ascending=False)
         
+        # Handle CSV column selection
+        if csv_columns and output_format == 'csv':
+            # Filter to only include specified columns
+            available_csv_columns = [col for col in csv_columns if col in df_display.columns]
+            if available_csv_columns:
+                df_display = df_display[available_csv_columns]
+        
+        # Handle CSV formatting
+        if output_format == 'csv':
+            return self._format_csv_output(df_display, csv_delimiter, csv_quoting, group_by, output_file)
+        
         if group_by == 'ticker':
             # Group by ticker and show results per ticker
             output_lines = []
@@ -966,7 +1041,7 @@ class OptionsAnalyzer:
                     )
                     output_lines.append(table)
                 else:
-                    # CSV format
+                    # CSV format - this should not be reached with new logic
                     output_lines.append(ticker_data.to_csv(index=False))
         else:
             # Overall ranking
@@ -1000,7 +1075,7 @@ class OptionsAnalyzer:
                     showindex=False
                 )]
             else:
-                # CSV format
+                # CSV format - this should not be reached with new logic
                 output_lines = [df_display.to_csv(index=False)]
         
         result = "\n".join(output_lines)
@@ -1032,6 +1107,12 @@ Examples:
 
   # Filter by volume and max days save to file
   python options_analyzer.py --min-volume 1000 --max-days 30 --output results.csv
+
+  # CSV with custom formatting
+  python options_analyzer.py --symbols AAPL --output results.csv --csv-delimiter ";" --csv-quoting all
+
+  # CSV with specific columns only
+  python options_analyzer.py --symbols AAPL --output results.csv --csv-columns "ticker,current_price,strike_price,potential_premium,daily_premium"
 
   # Show only high-premium opportunities
   python options_analyzer.py --min-premium 5000 --sort potential_premium
@@ -1161,6 +1242,25 @@ Examples:
         help="Suppress progress output."
     )
     
+    # CSV formatting options
+    parser.add_argument(
+        '--csv-delimiter',
+        type=str,
+        default=',',
+        help="CSV delimiter character (default: ',')."
+    )
+    parser.add_argument(
+        '--csv-quoting',
+        choices=['minimal', 'all', 'none', 'nonnumeric'],
+        default='minimal',
+        help="CSV quoting style: minimal (default), all, none, nonnumeric."
+    )
+    parser.add_argument(
+        '--csv-columns',
+        type=str,
+        help="Comma-separated list of columns to include in CSV output. If not specified, all columns are included."
+    )
+    
     # If help is requested, print and exit early to avoid running any analysis code
     if any(flag in sys.argv for flag in ("-h", "--help")):
         parser.print_help()
@@ -1232,6 +1332,11 @@ Examples:
     import re as _re
     sort_arg = _re.sub(r"\s+", "", args.sort) if hasattr(args, 'sort') and args.sort else None
 
+    # Parse CSV columns if specified
+    csv_columns = None
+    if hasattr(args, 'csv_columns') and args.csv_columns:
+        csv_columns = [col.strip() for col in args.csv_columns.split(',')]
+
     # Format and display results
     result = analyzer.format_output(
         df=df,
@@ -1241,7 +1346,10 @@ Examples:
         output_file=output_file,
         sort_by=sort_arg,
         filters=filters,
-        filter_logic=args.filter_logic
+        filter_logic=args.filter_logic,
+        csv_delimiter=args.csv_delimiter,
+        csv_quoting=args.csv_quoting,
+        csv_columns=csv_columns
     )
     
     if not args.quiet or output_file is None:
