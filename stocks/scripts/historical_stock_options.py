@@ -47,9 +47,9 @@ except ImportError:
 class HistoricalDataFetcher:
     """Fetches historical stock and options data from Polygon.io."""
     CACHE_DURATION_MINUTES = {
-        'market_open': 30,
+        'market_open': 20,
         'market_closed': 360,
-        'post_market': 90,
+        'post_market': 60,
     }
 
     @staticmethod
@@ -1415,6 +1415,7 @@ Examples:
         seconds_to_open, seconds_to_close = common_compute_market_transition_times(now_utc, "America/New_York")
         is_market_open = HistoricalDataFetcher._is_market_open(now_utc)
         
+        sleep_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
         print_string = ""
         if is_market_open:
             # Market is open: prefer staying on open cadence; do not sleep past close
@@ -1430,22 +1431,12 @@ Examples:
         else:
             # Market is closed: if opening soon, sleep to open; otherwise use closed cadence
             opening_soon_threshold = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
-            if seconds_to_open is not None and seconds_to_open <= opening_soon_threshold:
-                sleep_seconds = max(seconds_to_open, 5)
-                if not args.quiet:
-                    print_string = (f"(sleeping until market open in {seconds_to_open:.0f}s) [MARKET CLOSED→OPEN]")
-            else:
-                sleep_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed'] * 60
-                msg_extra = f"; {seconds_to_open:.0f}s until open" if seconds_to_open is not None else ""
-                if not args.quiet:
-                    print_string = (f"(markets closed, {HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed']}min interval{msg_extra}) [MARKET CLOSED]")
+            if not args.quiet:
+                print(f"opening_soon_threshold: {opening_soon_threshold}, seconds_to_open: {seconds_to_open}", file=sys.stderr)
+            sleep_seconds = min(seconds_to_open, opening_soon_threshold)
         
         # Apply interval multiplier to cadence-based sleeps; do not shorten sleep-until-open
-        if not is_market_open and seconds_to_open is not None and seconds_to_open <= HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60:
-            adjusted_sleep = sleep_seconds
-        else:
-            multiplier = args.interval_multiplier if getattr(args, 'interval_multiplier', None) else 1.0
-            adjusted_sleep = max(int(sleep_seconds * multiplier), 1)
+        adjusted_sleep = sleep_seconds * (args.interval_multiplier if getattr(args, 'interval_multiplier', None) else 1.0)
         if not args.quiet:
             print(f"Next run in {adjusted_sleep:.0f}s {print_string}")
         await asyncio.sleep(adjusted_sleep)
