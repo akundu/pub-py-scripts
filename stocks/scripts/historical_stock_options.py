@@ -1415,7 +1415,7 @@ Examples:
         seconds_to_open, seconds_to_close = common_compute_market_transition_times(now_utc, "America/New_York")
         is_market_open = HistoricalDataFetcher._is_market_open(now_utc)
         
-        sleep_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
+        sleep_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed'] * 60
         print_string = ""
         if is_market_open:
             # Market is open: prefer staying on open cadence; do not sleep past close
@@ -1430,10 +1430,17 @@ Examples:
                     print(f"Next run in {sleep_seconds:.0f}s (market open, {HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']}min interval) [MARKET OPEN]")
         else:
             # Market is closed: if opening soon, sleep to open; otherwise use closed cadence
+            #sleep_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed'] * 60
             opening_soon_threshold = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
             if not args.quiet:
                 print(f"opening_soon_threshold: {opening_soon_threshold}, seconds_to_open: {seconds_to_open}", file=sys.stderr)
-            sleep_seconds = min(seconds_to_open, opening_soon_threshold)
+            if seconds_to_open is not None and seconds_to_open <= sleep_seconds:
+                sleep_seconds = min(seconds_to_open, opening_soon_threshold)
+                if not args.quiet:
+                    print(f"Next run in {sleep_seconds:.0f}s (sleeping until market open in {seconds_to_open:.0f}s) [MARKET CLOSED→OPEN]")
+            else:
+                if not args.quiet:
+                    print(f"Next run in {sleep_seconds:.0f}s (markets closed, {HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed']}min interval) [MARKET CLOSED]")
         
         # Apply interval multiplier to cadence-based sleeps; do not shorten sleep-until-open
         adjusted_sleep = sleep_seconds * (args.interval_multiplier if getattr(args, 'interval_multiplier', None) else 1.0)
