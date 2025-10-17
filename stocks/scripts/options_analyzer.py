@@ -638,7 +638,10 @@ class OptionsAnalyzer:
         min_premium: float = 0.0,
         position_size: float = 1000000.0,
         filters: Optional[List[FilterExpression]] = None,
-        filter_logic: str = 'AND'
+        filter_logic: str = 'AND',
+        use_market_time: bool = True,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
     ) -> pd.DataFrame:
         """
         Analyze covered call opportunities for the given tickers.
@@ -647,11 +650,14 @@ class OptionsAnalyzer:
             tickers: List of ticker symbols to analyze
             days_to_expiry: Number of days to expiry (if None, analyze all available)
             min_volume: Minimum volume filter
-            max_days: Maximum days to expiry filter
+            max_days: Maximum days from today for expiration (convenience param that sets end_date, overrides end_date if both provided)
             min_premium: Minimum potential premium filter
             position_size: Position size in dollars for calculations
             filters: List of FilterExpression objects to apply
             filter_logic: Logic to combine filters ('AND' or 'OR')
+            use_market_time: Whether to use market hours logic for price fetching
+            start_date: Start date for option expiration filtering (YYYY-MM-DD format, defaults to today)
+            end_date: End date for option expiration filtering (YYYY-MM-DD format, defaults to None, overridden by max_days)
             
         Returns:
             DataFrame with analysis results
@@ -662,10 +668,23 @@ class OptionsAnalyzer:
         # Convert tickers to uppercase for database compatibility
         tickers_upper = [ticker.upper() for ticker in tickers]
         
+        # Default start_date to today if not specified
+        if start_date is None:
+            from datetime import date
+            start_date = date.today().strftime('%Y-%m-%d')
+        
+        # If max_days is set, calculate end_date from today (overrides explicit end_date)
+        if max_days is not None:
+            from datetime import date, timedelta
+            end_date = (date.today() + timedelta(days=max_days)).strftime('%Y-%m-%d')
+            if not self.quiet:
+                print(f"Using max_days={max_days}: filtering options expiring through {end_date}")
+        
         # Build the main analysis query based on q8d.sql
         ticker_placeholders = ','.join([f'${i+1}' for i in range(len(tickers_upper))])
-        # With no SQL-side volume or OTM filtering, only min_premium follows tickers
-        premium_param = len(tickers_upper) + 1
+        # Params order: tickers, start_date, end_date (if provided), min_premium
+        params = list(tickers_upper)
+        next_param_idx = len(params) + 1
         
         # Base query structure - using column indices since QuestDB returns them as integers
         query = f"""
@@ -674,10 +693,12 @@ class OptionsAnalyzer:
                 ticker,
                 ROUND(close, 2) AS current_price
             FROM (
-                SELECT ticker, close, date
+                SELECT ticker, close, date,
+                       ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) as rn
                 FROM daily_prices
                 WHERE ticker IN ({ticker_placeholders})
-            ) LATEST ON date PARTITION BY ticker
+            ) ranked
+            WHERE rn = 1
         ),
         filtered_options AS (
             SELECT
@@ -697,29 +718,53 @@ class OptionsAnalyzer:
                 CAST((o.expiration_date - cast(date_trunc('day', now()) as timestamp)) / 86400000000L AS INT) AS days_to_expiry,
                 l.current_price
             FROM (
-                (SELECT * FROM options_data
-                 WHERE option_type = 'call')
-                LATEST ON timestamp PARTITION BY option_ticker
+                SELECT *,
+                       ROW_NUMBER() OVER (PARTITION BY option_ticker ORDER BY timestamp DESC) as rn
+                FROM options_data
+                WHERE option_type = 'call'
             ) o
             JOIN latest_stock_prices l ON o.ticker = l.ticker
-            WHERE 1=1
+            WHERE o.rn = 1
         """
         
-        # Only ticker params + min_premium are passed to the query now
-        params = list(tickers_upper) + [min_premium]
+        # Add date range filtering for options expiration_date
+        # Filter in the inner subquery (before the alias 'o' exists)
+        inner_date_filter = ""
+        if start_date:
+            inner_date_filter += f" AND expiration_date >= ${next_param_idx}"
+            # Convert string date to datetime object for asyncpg
+            from datetime import datetime, timedelta
+            start_date_obj = datetime.strptime(start_date, '%Y-%m-%d')
+            params.append(start_date_obj)
+            next_param_idx += 1
+        if end_date:
+            # Use exclusive upper bound for end date (< end_date + 1 day)
+            from datetime import datetime, timedelta
+            end_date_obj = datetime.strptime(end_date, '%Y-%m-%d')
+            end_date_exclusive = end_date_obj + timedelta(days=1)
+            inner_date_filter += f" AND expiration_date < ${next_param_idx}"
+            # Pass datetime object, not string
+            params.append(end_date_exclusive)
+            next_param_idx += 1
         
-        # Add expiration date filters
+        # Add days_to_expiry filter (specific expiration window around a target date)
         if days_to_expiry is not None:
-            query += f"""
-              AND o.expiration_date BETWEEN 
+            inner_date_filter += f"""
+              AND expiration_date BETWEEN 
                   date_trunc('day', cast(now() as timestamp)) + {days_to_expiry - 1} * 24 * 60 * 60 * 1000000L
                   AND date_trunc('day', cast(now() as timestamp)) + {days_to_expiry + 1} * 24 * 60 * 60 * 1000000L
             """
         
-        if max_days is not None:
-            query += f"""
-              AND CAST((o.expiration_date - cast(date_trunc('day', now()) as timestamp)) / 86400000000L AS INT) <= {max_days}
-            """
+        # Insert date filter into the inner subquery WHERE clause
+        if inner_date_filter:
+            query = query.replace(
+                "WHERE option_type = 'call'",
+                f"WHERE option_type = 'call'{inner_date_filter}"
+            )
+        
+        # Add min_premium parameter
+        params.append(min_premium)
+        premium_param = next_param_idx
         
         query += f"""
         ),
@@ -835,7 +880,7 @@ class OptionsAnalyzer:
                     latest_prices: Dict[str, Optional[float]] = {}
                     for t in unique_tickers:
                         try:
-                            latest_prices[t] = await self.db.get_latest_price(t)
+                            latest_prices[t] = await self.db.get_latest_price(t, use_market_time=use_market_time)
                         except Exception:
                             latest_prices[t] = None
 
@@ -1105,8 +1150,8 @@ Examples:
   # Analyze S&P 500 stocks sorted by daily premium
   python options_analyzer.py --types sp-500 --sort daily_premium --group-by ticker
 
-  # Filter by volume and max days save to file
-  python options_analyzer.py --min-volume 1000 --max-days 30 --output results.csv
+  # Filter by volume and max days (options expiring within 30 days), save to file
+  python options_analyzer.py --symbols AAPL MSFT --min-volume 1000 --max-days 30 --output results.csv
 
   # CSV with custom formatting
   python options_analyzer.py --symbols AAPL --output results.csv --csv-delimiter ";" --csv-quoting all
@@ -1116,6 +1161,24 @@ Examples:
 
   # Show only high-premium opportunities
   python options_analyzer.py --min-premium 5000 --sort potential_premium
+
+  # Filter by expiration date range (show only options expiring in January 2024)
+  python options_analyzer.py --start-date 2024-01-01 --end-date 2024-01-31
+  
+  # Show only options expiring within 30 days from today
+  python options_analyzer.py --symbols AAPL --max-days 30
+  
+  # Show only options expiring today or later (default behavior)
+  python options_analyzer.py --symbols AAPL
+  
+  # Show options expiring from a specific date onwards
+  python options_analyzer.py --start-date 2024-02-15
+  
+  # Show all options including those already expired
+  python options_analyzer.py --start-date 2020-01-01
+  
+  # max-days overrides end-date (shows options expiring within 60 days, not through 2024-12-31)
+  python options_analyzer.py --symbols AAPL --end-date 2024-12-31 --max-days 60
 
   # Filter by P/E ratio and market cap (using B/M suffixes)
   python options_analyzer.py --filter "pe_ratio > 20" --filter "market_cap < 1B"
@@ -1164,7 +1227,19 @@ Examples:
         '--max-days',
         type=int,
         default=None,
-        help="Maximum days to expiry filter."
+        help="Maximum days from today for option expiration (convenience parameter that sets end-date to today + max-days, overrides --end-date if both are provided)."
+    )
+    parser.add_argument(
+        '--start-date',
+        type=str,
+        default=None,
+        help="Start date for option expiration filtering in YYYY-MM-DD format (defaults to today to show only options expiring today or later)."
+    )
+    parser.add_argument(
+        '--end-date',
+        type=str,
+        default=None,
+        help="End date for option expiration filtering in YYYY-MM-DD format (defaults to None for no upper bound, overridden by --max-days if both are provided)."
     )
     parser.add_argument(
         '--min-volume',
@@ -1188,6 +1263,12 @@ Examples:
         '--data-dir',
         default='data',
         help="Directory to store data files (default: data)."
+    )
+    
+    parser.add_argument(
+        '--no-market-time',
+        action='store_true',
+        help="Disable market-hours logic (gets latest stock price from any source regardless of market open/closed).",
     )
     
     # Filter options
@@ -1308,7 +1389,10 @@ Examples:
         min_premium=args.min_premium,
         position_size=args.position_size,
         filters=filters,
-        filter_logic=args.filter_logic
+        filter_logic=args.filter_logic,
+        use_market_time=not args.no_market_time,
+        start_date=args.start_date,
+        end_date=args.end_date
     )
     
     if df.empty:
