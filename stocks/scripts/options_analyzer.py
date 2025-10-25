@@ -644,7 +644,8 @@ class OptionsAnalyzer:
         end_date: Optional[str] = None,
         max_concurrent: int = 10,
         batch_size: int = 50,
-        timestamp_lookback_days: int = 7
+        timestamp_lookback_days: int = 7,
+        max_workers: int = 4
     ) -> pd.DataFrame:
         """
         Analyze covered call opportunities for the given tickers.
@@ -664,6 +665,7 @@ class OptionsAnalyzer:
             max_concurrent: Maximum concurrent queries per batch (lower = less memory)
             batch_size: Number of tickers per batch (lower = less memory)
             timestamp_lookback_days: Days to look back for option timestamp data (default: 7, lower = less memory but may miss data)
+            max_workers: Number of worker processes for multiprocessing (default: 4, typically CPU count)
             
         Returns:
             DataFrame with analysis results
@@ -688,15 +690,31 @@ class OptionsAnalyzer:
         
         # Use memory-efficient batch fetching instead of single large query
         try:
-            # Fetch latest options data using the new batch method
-            options_df = await self.db.get_latest_options_data_batch(
-                tickers=tickers_upper,
-                start_datetime=start_date,
-                end_datetime=end_date,
-                max_concurrent=max_concurrent,
-                batch_size=batch_size,
-                timestamp_lookback_days=timestamp_lookback_days
-            )
+            # Choose between asyncio-only or hybrid asyncio+multiprocess based on max_workers
+            if max_workers > 1:
+                if not self.quiet:
+                    print(f"Using multiprocess mode with {max_workers} workers")
+                # Use hybrid asyncio + multiprocessing
+                options_df = await self.db.get_latest_options_data_batch_multiprocess(
+                    tickers=tickers_upper,
+                    start_datetime=start_date,
+                    end_datetime=end_date,
+                    batch_size=batch_size,
+                    max_workers=max_workers,
+                    timestamp_lookback_days=timestamp_lookback_days
+                )
+            else:
+                # Use asyncio-only (single process)
+                if not self.quiet:
+                    print("Using single-process mode")
+                options_df = await self.db.get_latest_options_data_batch(
+                    tickers=tickers_upper,
+                    start_datetime=start_date,
+                    end_datetime=end_date,
+                    max_concurrent=max_concurrent,
+                    batch_size=batch_size,
+                    timestamp_lookback_days=timestamp_lookback_days
+                )
             
             if options_df.empty:
                 return pd.DataFrame()
@@ -1048,6 +1066,9 @@ Examples:
   
   # max-days overrides end-date (shows options expiring within 60 days, not through 2024-12-31)
   python options_analyzer.py --symbols AAPL --end-date 2024-12-31 --max-days 60
+  
+  # Use multiprocessing with 8 workers (automatically enabled when max-workers > 1)
+  python options_analyzer.py --symbols AAPL --max-workers 8
 
   # Filter by P/E ratio and market cap (using B/M suffixes)
   python options_analyzer.py --filter "pe_ratio > 20" --filter "market_cap < 1B"
@@ -1075,7 +1096,7 @@ Examples:
     )
     
     # Add symbol input arguments using common library
-    add_symbol_arguments(parser, required=False)
+    add_symbol_arguments(parser, required=True)
     
     # Database connection
     parser.add_argument(
@@ -1146,6 +1167,13 @@ Examples:
         type=int,
         default=7,
         help="Number of days to look back for option timestamp data (default: 7). Lower values use less memory but may miss older data. Increase if you see missing options."
+    )
+    
+    parser.add_argument(
+        '--max-workers',
+        type=int,
+        default=4,
+        help="Number of worker processes for multiprocessing (default: 4, typically set to CPU count). Multiprocessing is automatically enabled when max-workers > 1."
     )
     
     # Filter options
@@ -1270,12 +1298,17 @@ Examples:
         use_market_time=not args.no_market_time,
         start_date=args.start_date,
         end_date=args.end_date,
-        timestamp_lookback_days=args.timestamp_lookback_days
+        timestamp_lookback_days=args.timestamp_lookback_days,
+        max_workers=args.max_workers
     )
     
     if df.empty:
         print("No options data found matching the criteria.")
         return
+    
+    # Print multiprocess statistics if using multiprocessing
+    if args.max_workers > 1 and hasattr(analyzer.db, 'print_process_statistics'):
+        analyzer.db.print_process_statistics(quiet=args.quiet)
     
     # Determine output format and file
     output_format = 'table'

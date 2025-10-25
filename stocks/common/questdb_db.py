@@ -8,14 +8,77 @@ import pandas as pd
 from datetime import datetime, timezone, timedelta
 import asyncio
 import asyncpg
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import logging
+import sys
 from contextlib import asynccontextmanager
 from .stock_db import StockDBBase
 from .logging_utils import get_logger
 import pytz
 from dateutil import parser as date_parser
 from .market_hours import is_market_hours
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
+
+
+def _process_ticker_options(args: Tuple) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Process a single ticker's options data in a separate process.
+    Must be at module level for pickling by multiprocessing.
+    
+    Args:
+        args: (ticker, db_config, expiration_date, start_datetime, 
+               end_datetime, option_tickers, timestamp_lookback_days)
+    
+    Returns:
+        Tuple of (DataFrame with processed options, statistics dict)
+    """
+    import asyncio
+    import time
+    import os
+    from .stock_db import get_stock_db
+    
+    # Unpack arguments
+    (ticker, db_config, expiration_date, start_datetime, 
+     end_datetime, option_tickers, timestamp_lookback_days) = args
+    
+    # Track process statistics
+    process_id = os.getpid()
+    start_time = time.time()
+    
+    async def _async_process():
+        # Create new DB connection in this process
+        db = get_stock_db('questdb', db_config=db_config)
+        await db._init_db()
+        
+        # Fetch options data for this ticker
+        df = await db.get_latest_options_data(
+            ticker=ticker,
+            expiration_date=expiration_date,
+            start_datetime=start_datetime,
+            end_datetime=end_datetime,
+            option_tickers=option_tickers,
+            timestamp_lookback_days=timestamp_lookback_days
+        )
+        
+        # Close DB connection
+        await db.close()
+        return df
+    
+    # Run async function in this process
+    df = asyncio.run(_async_process())
+    
+    # Calculate statistics
+    end_time = time.time()
+    stats = {
+        'process_id': process_id,
+        'ticker': ticker,
+        'processing_time': end_time - start_time,
+        'rows_returned': len(df),
+        'memory_mb': df.memory_usage(deep=True).sum() / 1024 / 1024 if not df.empty else 0
+    }
+    
+    return df, stats
 
 
 class StockQuestDB(StockDBBase):
@@ -838,12 +901,15 @@ class StockQuestDB(StockDBBase):
             async def fetch_realtime():
                 try:
                     async with self.get_connection() as conn:
-                        row = await conn.fetchrow(
-                            "SELECT timestamp, price FROM realtime_data WHERE ticker = $1 AND type = 'quote' LATEST ON timestamp PARTITION BY ticker",
-                            ticker
+                        # Only consider realtime data from the last 24 hours to avoid stale data
+                        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+                        rows = await conn.fetch(
+                            #"SELECT timestamp, price FROM realtime_data WHERE ticker = $1 AND type = 'quote' AND timestamp >= $2 LATEST ON timestamp PARTITION BY ticker",
+                            "SELECT timestamp, price FROM realtime_data WHERE ticker = $1 AND type = 'quote' AND timestamp >= $2 ORDER BY timestamp DESC LIMIT 1",
+                            ticker, cutoff.replace(tzinfo=None)
                         )
-                        if row and row.get('timestamp') is not None:
-                            return ('realtime', row['timestamp'], float(row['price']))
+                        if rows and rows[0].get('timestamp') is not None:
+                            return ('realtime', rows[0]['timestamp'], float(rows[0]['price']))
                 except Exception as e:
                     self.logger.debug(f"Realtime fetch failed for {ticker}: {e}")
                 return None
@@ -851,12 +917,15 @@ class StockQuestDB(StockDBBase):
             async def fetch_hourly():
                 try:
                     async with self.get_connection() as conn:
-                        row = await conn.fetchrow(
-                            "SELECT datetime, close FROM hourly_prices WHERE ticker = $1 LATEST ON datetime PARTITION BY ticker",
-                            ticker
+                        # Only consider hourly data from the last 7 days to avoid stale data
+                        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+                        rows = await conn.fetch(
+                            #"SELECT datetime, close FROM hourly_prices WHERE ticker = $1 AND datetime >= $2 LATEST ON datetime PARTITION BY ticker",
+                            "SELECT datetime, close FROM hourly_prices WHERE ticker = $1 AND datetime >= $2 ORDER BY datetime DESC LIMIT 1",
+                            ticker, cutoff.replace(tzinfo=None)
                         )
-                        if row and row.get('datetime') is not None:
-                            return ('hourly', row['datetime'], float(row['close']))
+                        if rows and rows[0].get('datetime') is not None:
+                            return ('hourly', rows[0]['datetime'], float(rows[0]['close']))
                 except Exception as e:
                     self.logger.debug(f"Hourly fetch failed for {ticker}: {e}")
                 return None
@@ -864,12 +933,15 @@ class StockQuestDB(StockDBBase):
             async def fetch_daily():
                 try:
                     async with self.get_connection() as conn:
-                        row = await conn.fetchrow(
-                            "SELECT date, close FROM daily_prices WHERE ticker = $1 LATEST ON date PARTITION BY ticker",
-                            ticker
+                        # Only consider daily data from the last 30 days to avoid stale data
+                        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+                        rows = await conn.fetch(
+                            #"SELECT date, close FROM daily_prices WHERE ticker = $1 AND date >= $2 LATEST ON date PARTITION BY ticker",
+                            "SELECT date, close FROM daily_prices WHERE ticker = $1 AND date >= $2 ORDER BY date DESC LIMIT 1",
+                            ticker, cutoff.replace(tzinfo=None)
                         )
-                        if row and row.get('date') is not None:
-                            return ('daily', row['date'], float(row['close']))
+                        if rows and rows[0].get('date') is not None:
+                            return ('daily', rows[0]['date'], float(rows[0]['close']))
                 except Exception as e:
                     self.logger.debug(f"Daily fetch failed for {ticker}: {e}")
                 return None
@@ -937,24 +1009,30 @@ class StockQuestDB(StockDBBase):
         async with self.get_connection() as conn:
             # Get today's date in EST timezone (market timezone)
             today = datetime.now(pytz.timezone('US/Eastern')).date()
+            # Use a day range [today_start, ...) in UTC-naive to match stored TIMESTAMP
+            et = pytz.timezone('US/Eastern')
+            today_start_et = et.localize(datetime(today.year, today.month, today.day))
+            # Convert to UTC and then drop tzinfo to make it timezone-naive (QuestDB expects naive via asyncpg)
+            today_start = today_start_et.astimezone(timezone.utc).replace(tzinfo=None)
             
             for ticker in tickers:
                 try:
                     # Get the most recent close price that is NOT from today
-                    row = await conn.fetchrow(
-                        "SELECT close FROM daily_prices WHERE ticker = $1 AND date < $2 LATEST ON date PARTITION BY ticker",
-                        ticker, today
+                    # Use a simpler query approach similar to how fetch_symbol_data.py works
+                    rows = await conn.fetch(
+                        "SELECT date, close FROM daily_prices WHERE ticker = $1 AND date < $2 ORDER BY date DESC LIMIT 1",
+                        ticker, today_start
                     )
-                    if row:
-                        result[ticker] = row['close']
+                    if rows:
+                        result[ticker] = rows[0]['close']
                     else:
                         # Fallback: if no previous day data, get the most recent available
-                        row = await conn.fetchrow(
-                            "SELECT close FROM daily_prices WHERE ticker = $1 LATEST ON date PARTITION BY ticker",
+                        rows = await conn.fetch(
+                            "SELECT date, close FROM daily_prices WHERE ticker = $1 ORDER BY date DESC LIMIT 1",
                             ticker
                         )
-                        if row:
-                            result[ticker] = row['close']
+                        if rows:
+                            result[ticker] = rows[0]['close']
                         else:
                             result[ticker] = None
                 except Exception as e:
@@ -970,16 +1048,24 @@ class StockQuestDB(StockDBBase):
         async with self.get_connection() as conn:
             # Get today's date in EST timezone (market timezone)
             today = datetime.now(pytz.timezone('US/Eastern')).date()
+            # Use a day range [today_start, tomorrow_start) in UTC-naive to match stored TIMESTAMP
+            et = pytz.timezone('US/Eastern')
+            today_start_et = et.localize(datetime(today.year, today.month, today.day))
+            tomorrow_start_et = today_start_et + timedelta(days=1)
+            # Convert to UTC and then drop tzinfo to make them timezone-naive (QuestDB expects naive via asyncpg)
+            today_start = today_start_et.astimezone(timezone.utc).replace(tzinfo=None)
+            tomorrow_start = tomorrow_start_et.astimezone(timezone.utc).replace(tzinfo=None)
             
             for ticker in tickers:
                 try:
-                    # Get today's opening price
-                    row = await conn.fetchrow(
-                        "SELECT open FROM daily_prices WHERE ticker = $1 AND date = $2 LATEST ON date PARTITION BY ticker",
-                        ticker, today
+                    # Get today's opening price using a date range (QuestDB stores TIMESTAMP, not DATE-only)
+                    rows = await conn.fetch(
+                        #"SELECT open FROM daily_prices WHERE ticker = $1 AND date >= $2 AND date < $3 LATEST ON date PARTITION BY ticker",
+                        "SELECT date, open FROM daily_prices WHERE ticker = $1 AND date >= $2 AND date < $3 ORDER BY date DESC LIMIT 1",
+                        ticker, today_start, tomorrow_start
                     )
-                    if row:
-                        result[ticker] = row['open']
+                    if rows:
+                        result[ticker] = rows[0]['open']
                     else:
                         result[ticker] = None
                 except Exception as e:
@@ -1185,6 +1271,23 @@ class StockQuestDB(StockDBBase):
                 raise
 
     async def get_options_data(self, ticker: str, expiration_date: str | None = None, start_datetime: str | None = None, end_datetime: str | None = None, option_tickers: List[str] | None = None) -> pd.DataFrame:
+        """Get options data for a ticker, with optional date filtering.
+        
+        Args:
+            ticker: The stock ticker symbol
+            expiration_date: Filter by exact expiration date (YYYY-MM-DD format)
+            start_datetime: Start date for expiration date filtering (YYYY-MM-DD format, defaults to today to show only options expiring today or later)
+            end_datetime: End date for expiration date filtering (YYYY-MM-DD format)
+            option_tickers: List of specific option tickers to fetch
+            
+        Returns:
+            DataFrame with options data
+        """
+        # Default start_datetime to today if not specified
+        if start_datetime is None:
+            from datetime import date
+            start_datetime = date.today().strftime('%Y-%m-%d')
+            
         async with self.get_connection() as conn:
             clauses = ["ticker = $1"]
             params: list[Any] = [ticker]
@@ -1194,12 +1297,16 @@ class StockQuestDB(StockDBBase):
                 params.append(date_parser.parse(expiration_date))
                 next_param += 1
             if start_datetime:
-                clauses.append(f"timestamp >= ${next_param}")
+                clauses.append(f"expiration_date >= ${next_param}")
                 params.append(date_parser.parse(start_datetime))
                 next_param += 1
             if end_datetime:
-                clauses.append(f"timestamp <= ${next_param}")
-                params.append(date_parser.parse(end_datetime))
+                # Use exclusive upper bound for end date (< end_date + 1 day)
+                # Add 1 day in Python instead of SQL for better compatibility
+                end_dt = date_parser.parse(end_datetime)
+                end_dt_exclusive = end_dt + timedelta(days=1)
+                clauses.append(f"expiration_date < ${next_param}")
+                params.append(end_dt_exclusive)
                 next_param += 1
             if option_tickers:
                 placeholders = ",".join([f"${i}" for i in range(next_param, next_param + len(option_tickers))])
@@ -1222,7 +1329,35 @@ class StockQuestDB(StockDBBase):
                 self.logger.error(f"Error retrieving options data: {e}")
                 return pd.DataFrame()
 
-    async def get_latest_options_data(self, ticker: str, expiration_date: str | None = None, option_tickers: List[str] | None = None) -> pd.DataFrame:
+    async def get_latest_options_data(
+        self, 
+        ticker: str, 
+        expiration_date: str | None = None, 
+        option_tickers: List[str] | None = None, 
+        start_datetime: str | None = None, 
+        end_datetime: str | None = None,
+        timestamp_lookback_days: int = 7
+    ) -> pd.DataFrame:
+        """Get latest options data for a ticker, with optional date filtering.
+        
+        Args:
+            ticker: The stock ticker symbol
+            expiration_date: Filter by exact expiration date (YYYY-MM-DD format)
+            option_tickers: List of specific option tickers to fetch
+            start_datetime: Start date for expiration date filtering (YYYY-MM-DD format, defaults to today to show only options expiring today or later)
+            end_datetime: End date for expiration date filtering (YYYY-MM-DD format)
+            timestamp_lookback_days: Number of days to look back for timestamp data (default: 7, controls memory usage)
+            
+        Returns:
+            DataFrame with latest options data per option_ticker
+        """
+        # Import datetime utilities at the start
+        from datetime import date, datetime, timedelta
+        
+        # Default start_datetime to today if not specified
+        if start_datetime is None:
+            start_datetime = date.today().strftime('%Y-%m-%d')
+            
         async with self.get_connection() as conn:
             clauses = ["ticker = $1"]
             params: list[Any] = [ticker]
@@ -1231,34 +1366,275 @@ class StockQuestDB(StockDBBase):
                 clauses.append(f"expiration_date = ${next_param}")
                 params.append(date_parser.parse(expiration_date))
                 next_param += 1
+            if start_datetime:
+                clauses.append(f"expiration_date >= ${next_param}")
+                params.append(date_parser.parse(start_datetime))
+                next_param += 1
+            if end_datetime:
+                # Use exclusive upper bound for end date (< end_date + 1 day)
+                # Add 1 day in Python instead of SQL for better compatibility
+                end_dt = date_parser.parse(end_datetime)
+                end_dt_exclusive = end_dt + timedelta(days=1)
+                clauses.append(f"expiration_date < ${next_param}")
+                params.append(end_dt_exclusive)
+                next_param += 1
             where = " AND ".join(clauses)
+            
+            # Add a time constraint to limit data fetched
+            # This dramatically reduces memory usage by only fetching recent timestamp data
+            # QuestDB expects timezone-naive timestamps in UTC
+            lookback_date = datetime.now(timezone.utc) - timedelta(days=timestamp_lookback_days)
+            lookback_date = lookback_date.replace(tzinfo=None)  # Remove timezone for QuestDB
+            clauses.append(f"timestamp >= ${next_param}")
+            params.append(lookback_date)
+            where = " AND ".join(clauses)
+            
+            # Simple query - fetch recent data and deduplicate in pandas
+            # This is memory-safe because we're limiting to last N days (configurable)
             if option_tickers:
-                placeholders = ",".join([f"${i}" for i in range(next_param, next_param + len(option_tickers))])
+                placeholders = ",".join([f"${i}" for i in range(next_param + 1, next_param + 1 + len(option_tickers))])
                 params.extend(option_tickers)
                 query = (
-                    f"SELECT * FROM ("
-                    f"  SELECT * FROM options_data WHERE {where} AND option_ticker IN ({placeholders})"
-                    f") LATEST ON timestamp PARTITION BY option_ticker"
+                    f"SELECT * FROM options_data "
+                    f"WHERE {where} AND option_ticker IN ({placeholders}) "
+                    f"ORDER BY timestamp DESC"
                 )
             else:
                 query = (
-                    f"SELECT * FROM ("
-                    f"  SELECT * FROM options_data WHERE {where}"
-                    f") LATEST ON timestamp PARTITION BY option_ticker"
+                    f"SELECT * FROM options_data "
+                    f"WHERE {where} "
+                    f"ORDER BY timestamp DESC"
                 )
+            
             try:
                 rows = await conn.fetch(query, *params)
                 if not rows:
                     return pd.DataFrame()
                 df = pd.DataFrame([dict(r) for r in rows])
+                
+                # Deduplicate: keep first (latest) per option_ticker since ordered by timestamp DESC
+                if 'option_ticker' in df.columns and not df.empty:
+                    df = df.drop_duplicates(subset=['option_ticker'], keep='first')
+                
                 if 'timestamp' in df.columns:
                     df['timestamp'] = pd.to_datetime(df['timestamp'])
                     df.set_index('timestamp', inplace=True)
                     df = df[df.index.notna()]
                 return df
             except Exception as e:
-                self.logger.error(f"Error retrieving latest options data: {e}")
+                self.logger.error(f"Error retrieving latest options data for {ticker}: {e}")
                 return pd.DataFrame()
+
+    async def get_latest_options_data_batch(
+        self, 
+        tickers: List[str], 
+        expiration_date: str | None = None,
+        start_datetime: str | None = None,
+        end_datetime: str | None = None,
+        option_tickers: List[str] | None = None,
+        max_concurrent: int = 10,
+        batch_size: int = 50,
+        timestamp_lookback_days: int = 7
+    ) -> pd.DataFrame:
+        """Get latest options data for multiple tickers in parallel with memory-efficient batching.
+        
+        This method fetches options data for each ticker separately,
+        processes them in small batches, and combines results. This is highly memory-efficient
+        even for thousands of tickers.
+        
+        Args:
+            tickers: List of ticker symbols
+            expiration_date: Optional exact expiration date filter
+            start_datetime: Start date for expiration date filtering
+            end_datetime: End date for expiration date filtering  
+            option_tickers: Optional list of specific option tickers
+            max_concurrent: Maximum number of concurrent queries per batch (default: 10, lower = less memory)
+            batch_size: Number of tickers to process per batch (default: 50, lower = less memory)
+            timestamp_lookback_days: Number of days to look back for timestamp data (default: 7, controls memory usage)
+            
+        Returns:
+            Combined DataFrame with all tickers' latest options data
+        """
+        if not tickers:
+            return pd.DataFrame()
+        
+        all_results = []
+        
+        # Process tickers in small batches to avoid memory spikes
+        for batch_start in range(0, len(tickers), batch_size):
+            batch_tickers = tickers[batch_start:batch_start + batch_size]
+            
+            semaphore = asyncio.Semaphore(max_concurrent)
+            
+            async def fetch_one(ticker: str) -> pd.DataFrame:
+                async with semaphore:
+                    try:
+                        return await self.get_latest_options_data(
+                            ticker, 
+                            expiration_date=expiration_date,
+                            start_datetime=start_datetime,
+                            end_datetime=end_datetime,
+                            option_tickers=option_tickers,
+                            timestamp_lookback_days=timestamp_lookback_days
+                        )
+                    except Exception as e:
+                        self.logger.error(f"Error fetching options for {ticker}: {e}")
+                        return pd.DataFrame()
+            
+            # Create tasks for this batch
+            tasks = [asyncio.create_task(fetch_one(t)) for t in batch_tickers]
+            batch_results = await asyncio.gather(*tasks, return_exceptions=False)
+            
+            # Filter out empty DataFrames
+            non_empty = [df for df in batch_results if not df.empty]
+            if non_empty:
+                # Concatenate this batch and add to results
+                batch_df = pd.concat(non_empty, ignore_index=True)
+                all_results.append(batch_df)
+                
+                # Force garbage collection after each batch to free memory
+                import gc
+                gc.collect()
+        
+        # Combine all batches
+        if not all_results:
+            return pd.DataFrame()
+        
+        return pd.concat(all_results, ignore_index=True)
+
+    async def get_latest_options_data_batch_multiprocess(
+        self, 
+        tickers: List[str], 
+        expiration_date: str | None = None,
+        start_datetime: str | None = None,
+        end_datetime: str | None = None,
+        option_tickers: List[str] | None = None,
+        batch_size: int = 50,
+        max_workers: int = 4,
+        timestamp_lookback_days: int = 7
+    ) -> pd.DataFrame:
+        """Get latest options data using hybrid asyncio + multiprocessing.
+        
+        This method uses asyncio for I/O-bound DB queries and ProcessPoolExecutor
+        for CPU-bound pandas operations. Each process gets its own DB connection.
+        
+        Args:
+            tickers: List of ticker symbols
+            expiration_date: Optional exact expiration date filter
+            start_datetime: Start date for expiration date filtering
+            end_datetime: End date for expiration date filtering  
+            option_tickers: Optional list of specific option tickers
+            batch_size: Number of tickers to process per batch (default: 50)
+            max_workers: Number of worker processes (default: 4, typically CPU count)
+            timestamp_lookback_days: Number of days to look back for timestamp data
+            
+        Returns:
+            Combined DataFrame with all tickers' latest options data
+        """
+        if not tickers:
+            return pd.DataFrame()
+        
+        all_results = []
+        
+        # Create a single persistent process pool for the entire job
+        loop = asyncio.get_event_loop()
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Process tickers in batches
+            for batch_start in range(0, len(tickers), batch_size):
+                batch_tickers = tickers[batch_start:batch_start + batch_size]
+                
+                # Prepare arguments for each ticker
+                process_args = []
+                for ticker in batch_tickers:
+                    args = (
+                        ticker,
+                        self.db_config,  # Pass connection string
+                        expiration_date,
+                        start_datetime,
+                        end_datetime,
+                        option_tickers,
+                        timestamp_lookback_days
+                    )
+                    process_args.append(args)
+                
+                # Submit all tickers in this batch to the persistent process pool
+                futures = [
+                    loop.run_in_executor(executor, _process_ticker_options, args)
+                    for args in process_args
+                ]
+                
+                # Wait for all processes to complete
+                batch_results = await asyncio.gather(*futures, return_exceptions=False)
+                
+                # Separate DataFrames and statistics
+                batch_dfs = []
+                batch_stats = []
+                for result in batch_results:
+                    df, stats = result
+                    batch_stats.append(stats)
+                    if not df.empty:
+                        batch_dfs.append(df)
+                
+                # Store statistics for later reporting
+                if not hasattr(self, '_process_stats'):
+                    self._process_stats = []
+                self._process_stats.extend(batch_stats)
+                
+                # Concatenate this batch and add to results
+                if batch_dfs:
+                    batch_df = pd.concat(batch_dfs, ignore_index=True)
+                    all_results.append(batch_df)
+                    
+                    # Force garbage collection after each batch to free memory
+                    import gc
+                    gc.collect()
+        
+        # Combine all batches
+        if not all_results:
+            return pd.DataFrame()
+        
+        return pd.concat(all_results, ignore_index=True)
+    
+    def get_process_statistics(self) -> List[Dict[str, Any]]:
+        """Get statistics from multiprocess operations."""
+        return getattr(self, '_process_stats', [])
+    
+    def print_process_statistics(self, quiet: bool = False):
+        """Print per-process statistics to stderr."""
+        stats = self.get_process_statistics()
+        if not stats or quiet:
+            return
+        
+        print("\n=== Multiprocess Statistics ===", file=sys.stderr)
+        
+        # Group by process ID
+        process_groups = {}
+        for stat in stats:
+            pid = stat['process_id']
+            if pid not in process_groups:
+                process_groups[pid] = []
+            process_groups[pid].append(stat)
+        
+        # Print per-process summary
+        for pid, process_stats in process_groups.items():
+            total_time = sum(s['processing_time'] for s in process_stats)
+            total_rows = sum(s['rows_returned'] for s in process_stats)
+            total_memory = sum(s['memory_mb'] for s in process_stats)
+            tickers_processed = len(process_stats)
+            
+            print(f"Process {pid}: {tickers_processed} tickers, {total_rows} rows, "
+                  f"{total_time:.2f}s, {total_memory:.1f}MB", file=sys.stderr)
+        
+        # Print overall summary
+        total_processes = len(process_groups)
+        total_tickers = len(stats)
+        total_time = sum(s['processing_time'] for s in stats)
+        total_rows = sum(s['rows_returned'] for s in stats)
+        total_memory = sum(s['memory_mb'] for s in stats)
+        
+        print(f"Overall: {total_processes} processes, {total_tickers} tickers, "
+              f"{total_rows} rows, {total_time:.2f}s, {total_memory:.1f}MB", file=sys.stderr)
+        print("===============================\n", file=sys.stderr)
 
     async def get_option_price_feature(self, ticker: str, option_ticker: str) -> dict[str, Any] | None:
         df = await self.get_latest_options_data(ticker=ticker, option_tickers=[option_ticker])
@@ -1495,7 +1871,7 @@ class StockQuestDB(StockDBBase):
                 query += f" AND date <= ${len(params) + 1}"
                 params.append(date_parser.parse(end_date))
 
-            query += " LATEST ON date PARTITION BY ticker"
+            query += " ORDER BY date DESC LIMIT 1"
 
             try:
                 rows = await conn.fetch(query, *params)
