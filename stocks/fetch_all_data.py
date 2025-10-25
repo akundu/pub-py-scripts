@@ -965,7 +965,8 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
                     # Closed: if opening soon, sleep to open; otherwise use closed cadence
                     opening_soon_threshold = FETCH_INTERVAL_MARKET_OPEN  # prefer next open if within open interval
                     if seconds_to_open is not None and seconds_to_open <= opening_soon_threshold:
-                        sleep_time = max(seconds_to_open - fetch_duration, 1)
+                        #sleep_time = max(seconds_to_open - fetch_duration, 1)
+                        sleep_time = min(seconds_to_open, opening_soon_threshold)
                         print(f"Next fetch in {sleep_time:.1f}s (sleeping until market open in {seconds_to_open:.1f}s) [MARKET CLOSED→OPEN]")
                     else:
                         base_sleep = max(FETCH_INTERVAL_MARKET_CLOSED - fetch_duration, 60)
