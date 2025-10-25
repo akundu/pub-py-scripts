@@ -63,7 +63,6 @@ symbols:
 - BMY
 - BN
 - BNS
-- BNT
 - BP
 - BR
 - BRK.A
@@ -140,6 +139,7 @@ symbols:
 - DOV
 - DOW
 - DRI
+- DT
 - DTE
 - DUK
 - DVN
@@ -152,12 +152,12 @@ symbols:
 - EIX
 - EL
 - ELV
+- EMA
 - EME
 - EMR
 - ENB
 - EOG
 - EPD
-- EQH
 - EQNR
 - EQR
 - EQT
@@ -182,6 +182,7 @@ symbols:
 - FLUT
 - FMS
 - FMX
+- FN
 - FNF
 - FNV
 - FTI
@@ -243,8 +244,8 @@ symbols:
 - J
 - JBL
 - JCI
+- JLL
 - JNJ
-- JOBY
 - JPM
 - K
 - KB
@@ -252,8 +253,8 @@ symbols:
 - KEY
 - KEYS
 - KGC
+- KIM
 - KKR
-- KLAR
 - KMI
 - KO
 - KOF
@@ -272,11 +273,11 @@ symbols:
 - LOW
 - LUV
 - LVS
-- LYB
 - LYG
 - LYV
 - MA
 - MAA
+- MAS
 - MCD
 - MCK
 - MCO
@@ -346,6 +347,7 @@ symbols:
 - PHM
 - PINS
 - PKG
+- PKX
 - PLD
 - PM
 - PNC
@@ -378,7 +380,6 @@ symbols:
 - RSG
 - RTX
 - RY
-- RYAN
 - SAN
 - SAP
 - SBS
@@ -451,6 +452,7 @@ symbols:
 - UBS
 - UI
 - UL
+- ULS
 - UMC
 - UNH
 - UNP
@@ -487,8 +489,6 @@ symbols:
 - WPM
 - WRB
 - WSM
-- WSO
-- WSO.B
 - WST
 - WY
 - XOM

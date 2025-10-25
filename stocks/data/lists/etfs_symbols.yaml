@@ -1,7 +1,6 @@
 type: etfs
 count: 100
 symbols:
-- ACWI
 - AGG
 - BIL
 - BIV
@@ -14,11 +13,13 @@ symbols:
 - DYNF
 - EFA
 - EFV
-- FBTC
+- GDX
 - GLD
+- GLDM
 - GOVT
 - IAU
 - IBIT
+- IDEV
 - IEF
 - IEFA
 - IEMG
@@ -68,7 +69,6 @@ symbols:
 - TLT
 - TQQQ
 - USHY
-- USMV
 - VB
 - VBR
 - VCIT

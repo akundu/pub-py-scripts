@@ -21,6 +21,7 @@ symbols:
 - AGNC
 - AGNCM
 - AKAM
+- AKRO
 - ALAB
 - ALGM
 - ALGN
@@ -50,7 +51,6 @@ symbols:
 - AXON
 - AXSM
 - AZN
-- BANF
 - BBIO
 - BCPC
 - BGC
@@ -147,6 +147,7 @@ symbols:
 - ENPH
 - ENSG
 - ENTG
+- EOSE
 - EQIX
 - ERIC
 - ERIE
@@ -173,6 +174,7 @@ symbols:
 - FITB
 - FIVE
 - FLEX
+- FLY
 - FOX
 - FOXA
 - FRHC
@@ -213,7 +215,6 @@ symbols:
 - HON
 - HOOD
 - HQY
-- HSAI
 - HSIC
 - HST
 - HTHT
@@ -240,7 +241,6 @@ symbols:
 - JBHT
 - JD
 - JKHY
-- KC
 - KDP
 - KHC
 - KLAC
@@ -308,6 +308,7 @@ symbols:
 - MTSR
 - MU
 - MZTI
+- NAMS
 - NBIS
 - NBIX
 - NDAQ
@@ -345,7 +346,6 @@ symbols:
 - OTEX
 - OZK
 - PAA
-- PAGP
 - PANW
 - PAYX
 - PCAR
@@ -358,21 +358,21 @@ symbols:
 - PFG
 - PI
 - PLTR
-- PLUG
 - PNFP
 - PODD
 - PONY
 - POOL
+- POWL
 - PPC
 - PSKY
 - PTC
 - PTCT
+- PTGX
 - PYPL
 - QCOM
 - QLYS
 - QMMM
 - QRVO
-- QUBT
 - RDNT
 - REG
 - REGN
@@ -394,7 +394,6 @@ symbols:
 - RPRX
 - RRR
 - RUN
-- RUSHB
 - RVMD
 - RYAAY
 - RYTM
@@ -426,6 +425,7 @@ symbols:
 - SNY
 - SOFI
 - SOUN
+- SPSC
 - SRAD
 - SSNC
 - SSRM
@@ -469,11 +469,11 @@ symbols:
 - URBN
 - UTHR
 - VCTR
+- VERX
 - VFS
 - VLY
 - VNOM
 - VOD
-- VRNA
 - VRNS
 - VRSK
 - VRSN
