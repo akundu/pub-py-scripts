@@ -115,7 +115,7 @@ class StocksAnalyzer:
 
             pe_ratio = fin.get(t, {}).get('pe_ratio')
             market_cap = fin.get(t, {}).get('market_cap')
-            market_cap_b = round(market_cap / 1e9, 2) if isinstance(market_cap, (int, float)) and market_cap is not None else None
+            market_cap_b = round(market_cap / 1e9, 2) if market_cap is not None and pd.notna(market_cap) else None
 
             rows.append({
                 'ticker': t,

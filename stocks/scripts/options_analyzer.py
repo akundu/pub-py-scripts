@@ -641,7 +641,10 @@ class OptionsAnalyzer:
         filter_logic: str = 'AND',
         use_market_time: bool = True,
         start_date: Optional[str] = None,
-        end_date: Optional[str] = None
+        end_date: Optional[str] = None,
+        max_concurrent: int = 10,
+        batch_size: int = 50,
+        timestamp_lookback_days: int = 7
     ) -> pd.DataFrame:
         """
         Analyze covered call opportunities for the given tickers.
@@ -658,6 +661,9 @@ class OptionsAnalyzer:
             use_market_time: Whether to use market hours logic for price fetching
             start_date: Start date for option expiration filtering (YYYY-MM-DD format, defaults to today)
             end_date: End date for option expiration filtering (YYYY-MM-DD format, defaults to None, overridden by max_days)
+            max_concurrent: Maximum concurrent queries per batch (lower = less memory)
+            batch_size: Number of tickers per batch (lower = less memory)
+            timestamp_lookback_days: Days to look back for option timestamp data (default: 7, lower = less memory but may miss data)
             
         Returns:
             DataFrame with analysis results
@@ -680,234 +686,121 @@ class OptionsAnalyzer:
             if not self.quiet:
                 print(f"Using max_days={max_days}: filtering options expiring through {end_date}")
         
-        # Build the main analysis query based on q8d.sql
-        ticker_placeholders = ','.join([f'${i+1}' for i in range(len(tickers_upper))])
-        # Params order: tickers, start_date, end_date (if provided), min_premium
-        params = list(tickers_upper)
-        next_param_idx = len(params) + 1
-        
-        # Base query structure - using column indices since QuestDB returns them as integers
-        query = f"""
-        WITH latest_stock_prices AS (
-            SELECT
-                ticker,
-                ROUND(close, 2) AS current_price
-            FROM (
-                SELECT ticker, close, date,
-                       ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) as rn
-                FROM daily_prices
-                WHERE ticker IN ({ticker_placeholders})
-            ) ranked
-            WHERE rn = 1
-        ),
-        filtered_options AS (
-            SELECT
-                o.ticker,
-                o.option_ticker,
-                ROUND(o.strike_price, 2) AS strike_price,
-                ROUND(o.bid, 2) AS bid,
-                ROUND(o.ask, 2) AS ask,
-                ROUND(o.delta, 2) AS delta,
-                ROUND(o.theta, 2) AS theta,
-                COALESCE(ROUND(o.implied_volatility, 2), 0.00) AS implied_volatility,
-                o.volume,
-                o.expiration_date,
-                o.write_timestamp,
-                o.last_quote_timestamp,
-                ROUND(o.strike_price - l.current_price, 2) AS price_above_current,
-                CAST((o.expiration_date - cast(date_trunc('day', now()) as timestamp)) / 86400000000L AS INT) AS days_to_expiry,
-                l.current_price
-            FROM (
-                SELECT *,
-                       ROW_NUMBER() OVER (PARTITION BY option_ticker ORDER BY timestamp DESC) as rn
-                FROM options_data
-                WHERE option_type = 'call'
-            ) o
-            JOIN latest_stock_prices l ON o.ticker = l.ticker
-            WHERE o.rn = 1
-        """
-        
-        # Add date range filtering for options expiration_date
-        # Filter in the inner subquery (before the alias 'o' exists)
-        inner_date_filter = ""
-        if start_date:
-            inner_date_filter += f" AND expiration_date >= ${next_param_idx}"
-            # Convert string date to datetime object for asyncpg
-            from datetime import datetime, timedelta
-            start_date_obj = datetime.strptime(start_date, '%Y-%m-%d')
-            params.append(start_date_obj)
-            next_param_idx += 1
-        if end_date:
-            # Use exclusive upper bound for end date (< end_date + 1 day)
-            from datetime import datetime, timedelta
-            end_date_obj = datetime.strptime(end_date, '%Y-%m-%d')
-            end_date_exclusive = end_date_obj + timedelta(days=1)
-            inner_date_filter += f" AND expiration_date < ${next_param_idx}"
-            # Pass datetime object, not string
-            params.append(end_date_exclusive)
-            next_param_idx += 1
-        
-        # Add days_to_expiry filter (specific expiration window around a target date)
-        if days_to_expiry is not None:
-            inner_date_filter += f"""
-              AND expiration_date BETWEEN 
-                  date_trunc('day', cast(now() as timestamp)) + {days_to_expiry - 1} * 24 * 60 * 60 * 1000000L
-                  AND date_trunc('day', cast(now() as timestamp)) + {days_to_expiry + 1} * 24 * 60 * 60 * 1000000L
-            """
-        
-        # Insert date filter into the inner subquery WHERE clause
-        if inner_date_filter:
-            query = query.replace(
-                "WHERE option_type = 'call'",
-                f"WHERE option_type = 'call'{inner_date_filter}"
-            )
-        
-        # Add min_premium parameter
-        params.append(min_premium)
-        premium_param = next_param_idx
-        
-        query += f"""
-        ),
-        with_premium AS (
-            SELECT
-                ticker,
-                current_price,
-                strike_price,
-                price_above_current,
-                -- fallback logic: ask -> bid -> 0.01 (minimal fallback)
-                ROUND(COALESCE(ask, bid, 0.01), 2) AS option_premium,
-                volume,
-                ask,
-                bid,
-                delta,
-                theta,
-                implied_volatility,
-                expiration_date,
-                days_to_expiry,
-                write_timestamp,
-                last_quote_timestamp,
-                option_ticker,
-                -- contracts possible for specified position size
-                ROUND(floor({position_size} / (current_price * 100)), 0) AS num_contracts,
-                -- potential premium earned using corrected formula: (position_size / stock_price) * (100 * option_premium)
-                ROUND(({position_size} / current_price) * (COALESCE(ask, bid, 0.01)), 2) AS potential_premium,
-                -- daily premium (amortized) using corrected formula
-                CASE 
-                    WHEN CAST((expiration_date - cast(date_trunc('day', now()) as timestamp)) / 86400000000L AS INT) > 0 
-                    THEN ROUND(({position_size} / current_price) * (COALESCE(ask, bid, 0.01)) / CAST((expiration_date - cast(date_trunc('day', now()) as timestamp)) / 86400000000L AS INT), 2)
-                    ELSE 0
-                END AS daily_premium
-            FROM filtered_options
-        ),
-        deduplicated AS (
-            SELECT
-                ticker,
-                current_price,
-                strike_price,
-                price_above_current,
-                option_premium,
-                MAX(volume) AS volume,
-                MAX(delta) AS delta,
-                MAX(theta) AS theta,
-                num_contracts,
-                potential_premium,
-                daily_premium,
-                expiration_date,
-                days_to_expiry,
-                MAX(write_timestamp) AS write_timestamp,
-                MAX(last_quote_timestamp) AS last_quote_timestamp,
-                option_ticker
-            FROM with_premium
-            GROUP BY 
-                ticker,
-                current_price,
-                strike_price,
-                price_above_current,
-                option_premium,
-                num_contracts,
-                potential_premium,
-                daily_premium,
-                expiration_date,
-                days_to_expiry,
-                option_ticker
-        )
-        SELECT
-            ticker,
-            ROUND(current_price, 2) AS current_price,
-            strike_price,
-            price_above_current,
-            option_premium,
-            delta,
-            theta,
-            volume,
-            num_contracts,
-            potential_premium,
-            daily_premium,
-            expiration_date,
-            days_to_expiry,
-            last_quote_timestamp,
-            write_timestamp,
-            option_ticker
-        FROM deduplicated
-        WHERE potential_premium >= ${premium_param}
-        """
-        
+        # Use memory-efficient batch fetching instead of single large query
         try:
-            df = await self.db.execute_select_sql(query, tuple(params))
+            # Fetch latest options data using the new batch method
+            options_df = await self.db.get_latest_options_data_batch(
+                tickers=tickers_upper,
+                start_datetime=start_date,
+                end_datetime=end_date,
+                max_concurrent=max_concurrent,
+                batch_size=batch_size,
+                timestamp_lookback_days=timestamp_lookback_days
+            )
             
-            if not df.empty:
-                # Convert timestamp columns
-                if 'expiration_date' in df.columns:
-                    df['expiration_date'] = pd.to_datetime(df['expiration_date'])
-                if 'last_quote_timestamp' in df.columns:
-                    df['last_quote_timestamp'] = pd.to_datetime(df['last_quote_timestamp'])
-                if 'write_timestamp' in df.columns:
-                    df['write_timestamp'] = pd.to_datetime(df['write_timestamp'])
-                
-                # Replace current_price with latest from DB and recompute dependent fields
+            if options_df.empty:
+                return pd.DataFrame()
+            
+            # Filter for call options only
+            if 'option_type' in options_df.columns:
+                options_df = options_df[options_df['option_type'] == 'call']
+            
+            if options_df.empty:
+                return pd.DataFrame()
+            
+            # Get latest stock prices for all tickers
+            stock_prices = {}
+            for ticker in tickers_upper:
                 try:
-                    ticker_col = df.columns[0]
-                    current_price_col = 1
-                    strike_price_col = 2
-                    price_above_current_col = 3
-                    option_premium_col = 4
-                    num_contracts_col = 6
-                    potential_premium_col = 7
-                    daily_premium_col = 8
-                    days_to_expiry_col = 10
-
-                    unique_tickers = list(pd.unique(df[ticker_col]))
-                    latest_prices: Dict[str, Optional[float]] = {}
-                    for t in unique_tickers:
-                        try:
-                            latest_prices[t] = await self.db.get_latest_price(t, use_market_time=use_market_time)
-                        except Exception:
-                            latest_prices[t] = None
-
-                    # Update current_price where we have a latest value
-                    mapped_prices = df[ticker_col].map(lambda x: latest_prices.get(x))
-                    # Preserve original where latest is None
-                    df[current_price_col] = mapped_prices.combine_first(df[current_price_col])
-
-                    # Recompute dependent fields
-                    df[price_above_current_col] = (df[strike_price_col] - df[current_price_col]).round(2)
-
-                    # num_contracts = floor(position_size / (current_price * 100))
-                    df[num_contracts_col] = df[current_price_col].apply(lambda cp: 0 if pd.isna(cp) or cp <= 0 else math.floor(position_size / (cp * 100)))
-
-                    # potential_premium = num_contracts * (option_premium * 100)
-                    df[potential_premium_col] = (df[num_contracts_col] * (df[option_premium_col] * 100)).round(2)
-
-                    # daily_premium = potential_premium / days_to_expiry (if > 0)
-                    def _daily(row):
-                        days = row[days_to_expiry_col]
-                        return 0 if pd.isna(days) or days <= 0 else round(row[potential_premium_col] / days, 2)
-                    df[daily_premium_col] = df.apply(_daily, axis=1)
-                except Exception as _:
-                    # If any recompute step fails, continue with original values
-                    pass
-                
-                # Note: Filters will be applied after financial data is added in format_output
+                    price = await self.db.get_latest_price(ticker, use_market_time=use_market_time)
+                    if price:
+                        stock_prices[ticker] = price
+                except Exception as e:
+                    if not self.quiet:
+                        print(f"Warning: Could not fetch price for {ticker}: {e}", file=sys.stderr)
+            
+            if not stock_prices:
+                return pd.DataFrame()
+            
+            # Build the analysis DataFrame
+            df = options_df.copy()
+            
+            # Map stock prices to each option row
+            df['current_price'] = df['ticker'].map(stock_prices)
+            
+            # Filter out rows where we don't have a stock price
+            df = df[df['current_price'].notna()]
+            
+            if df.empty:
+                return pd.DataFrame()
+            
+            # Calculate derived fields
+            df['strike_price'] = df['strike_price'].round(2)
+            df['price_above_current'] = (df['strike_price'] - df['current_price']).round(2)
+            
+            # Option premium: use ask, fallback to bid, fallback to 0.01
+            df['option_premium'] = df.apply(
+                lambda row: round(row['ask'] if pd.notna(row.get('ask')) else (row['bid'] if pd.notna(row.get('bid')) else 0.01), 2),
+                axis=1
+            )
+            
+            # Calculate days to expiry
+            df['expiration_date'] = pd.to_datetime(df['expiration_date'])
+            # Ensure expiration_date is timezone-aware UTC
+            if df['expiration_date'].dt.tz is None:
+                df['expiration_date'] = df['expiration_date'].dt.tz_localize('UTC')
+            today = pd.Timestamp.now(tz='UTC').normalize()
+            df['days_to_expiry'] = ((df['expiration_date'] - today).dt.total_seconds() / 86400).astype(int)
+            
+            # Apply days_to_expiry filter if specified
+            if days_to_expiry is not None:
+                df = df[
+                    (df['days_to_expiry'] >= days_to_expiry - 1) &
+                    (df['days_to_expiry'] <= days_to_expiry + 1)
+                ]
+            
+            # Calculate position metrics
+            df['num_contracts'] = df['current_price'].apply(
+                lambda cp: 0 if pd.isna(cp) or cp <= 0 else math.floor(position_size / (cp * 100))
+            )
+            
+            # Potential premium = num_contracts * (option_premium * 100)
+            df['potential_premium'] = (df['num_contracts'] * (df['option_premium'] * 100)).round(2)
+            
+            # Daily premium = potential_premium / days_to_expiry
+            df['daily_premium'] = df.apply(
+                lambda row: 0 if row['days_to_expiry'] <= 0 else round(row['potential_premium'] / row['days_to_expiry'], 2),
+                axis=1
+            )
+            
+            # Apply filters
+            if min_volume > 0:
+                df = df[df['volume'] >= min_volume]
+            
+            if min_premium > 0.0:
+                df = df[df['potential_premium'] >= min_premium]
+            
+            # Round numeric columns
+            for col in ['bid', 'ask', 'delta', 'theta']:
+                if col in df.columns:
+                    df[col] = df[col].round(2)
+            
+            # Convert timestamps
+            for ts_col in ['last_quote_timestamp', 'write_timestamp']:
+                if ts_col in df.columns:
+                    df[ts_col] = pd.to_datetime(df[ts_col])
+            
+            # Select and order columns for output
+            output_cols = [
+                'ticker', 'current_price', 'strike_price', 'price_above_current',
+                'option_premium', 'delta', 'theta', 'volume', 'num_contracts',
+                'potential_premium', 'daily_premium', 'expiration_date', 'days_to_expiry',
+                'last_quote_timestamp', 'write_timestamp', 'option_ticker'
+            ]
+            
+            # Only include columns that exist
+            available_cols = [col for col in output_cols if col in df.columns]
+            df = df[available_cols]
             
             return df
         except Exception as e:
@@ -934,38 +827,14 @@ class OptionsAnalyzer:
             return "No options data found matching the criteria."
         
         # Add financial information to the dataframe
-        # QuestDB returns columns as integers, so we need to map them
-        # Based on the query: Column 0 = ticker, Column 1 = current_price, etc.
-        ticker_col = df.columns[0]  # First column should be ticker
-        df['pe_ratio'] = df[ticker_col].map(lambda x: financial_data.get(x, {}).get('pe_ratio'))
-        df['market_cap'] = df[ticker_col].map(lambda x: financial_data.get(x, {}).get('market_cap'))
-        df['market_cap_b'] = df['market_cap'].apply(lambda x: round(x / 1e9, 2) if pd.notna(x) and x is not None else None)
+        # DataFrame already has named columns from the new batch method
+        if 'ticker' not in df.columns:
+            return "Error: DataFrame missing 'ticker' column"
         
-        # Map integer columns to expected names based on the query structure
-        # Query columns: ticker, current_price, strike_price, price_above_current, option_premium, 
-        # delta, theta, volume, num_contracts, potential_premium, daily_premium, expiration_date, days_to_expiry, 
-        # last_quote_timestamp, write_timestamp, option_ticker
-        column_mapping = {
-            0: 'ticker',
-            1: 'current_price', 
-            2: 'strike_price',
-            3: 'price_above_current',
-            4: 'option_premium',
-            5: 'delta',
-            6: 'theta',
-            7: 'volume',
-            8: 'num_contracts',
-            9: 'potential_premium',
-            10: 'daily_premium',
-            11: 'expiration_date',
-            12: 'days_to_expiry',
-            13: 'last_quote_timestamp',
-            14: 'write_timestamp',
-            15: 'option_ticker'
-        }
-        
-        # Rename columns
-        df_renamed = df.rename(columns=column_mapping)
+        df_renamed = df.copy()
+        df_renamed['pe_ratio'] = df_renamed['ticker'].map(lambda x: financial_data.get(x, {}).get('pe_ratio'))
+        df_renamed['market_cap'] = df_renamed['ticker'].map(lambda x: financial_data.get(x, {}).get('market_cap'))
+        df_renamed['market_cap_b'] = df_renamed['market_cap'].apply(lambda x: round(x / 1e9, 2) if pd.notna(x) and x is not None else None)
         
         # Add option premium percentage calculation
         df_renamed['option_premium_percentage'] = (df_renamed['option_premium'] / df_renamed['current_price'] * 100).round(2)
@@ -1271,6 +1140,14 @@ Examples:
         help="Disable market-hours logic (gets latest stock price from any source regardless of market open/closed).",
     )
     
+    # Performance tuning options
+    parser.add_argument(
+        '--timestamp-lookback-days',
+        type=int,
+        default=7,
+        help="Number of days to look back for option timestamp data (default: 7). Lower values use less memory but may miss older data. Increase if you see missing options."
+    )
+    
     # Filter options
     parser.add_argument(
         '--filter',
@@ -1392,7 +1269,8 @@ Examples:
         filter_logic=args.filter_logic,
         use_market_time=not args.no_market_time,
         start_date=args.start_date,
-        end_date=args.end_date
+        end_date=args.end_date,
+        timestamp_lookback_days=args.timestamp_lookback_days
     )
     
     if df.empty:
