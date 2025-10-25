@@ -60,6 +60,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 try:
     from fetch_lists_data import ALL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
+    from common.stock_db import get_stock_db
 except ImportError as e:
     print(f"Error importing required modules: {e}", file=sys.stderr)
     sys.exit(1)
@@ -625,11 +626,12 @@ class WebSocketClient:
 class DisplayManager:
     """Manages the rich terminal display for real-time data."""
     
-    def __init__(self, symbols: List[str], db_client: DatabaseClient):
+    def __init__(self, symbols: List[str], db_client: DatabaseClient, stock_db_api=None):
         self.symbols = symbols
         self.db_client = db_client
         self.console = Console()
         self.stock_data: Dict[str, StockData] = {}
+        self.stock_db_api = stock_db_api
         
         # Initialize stock data for all symbols
         for symbol in symbols:
@@ -643,58 +645,123 @@ class DisplayManager:
         """Initialize stock data with latest database values."""
         logger.info("Fetching initial data from database...")
         
-        # Fetch latest quote/trade per symbol
-        for symbol in self.symbols:
+        def _is_latest_map_suspicious(symbols: List[str], latest_map: Dict[str, float | int | None]) -> bool:
             try:
-                logger.debug(f"Fetching latest data for {symbol}...")
-                quotes = await self.db_client.fetch_latest_data(symbol, "quote", 1)
-                trades = await self.db_client.fetch_latest_data(symbol, "trade", 1)
-                logger.debug(f"{symbol}: Got {len(quotes)} quotes, {len(trades)} trades")
-                
-                if quotes:
-                    self.stock_data[symbol].update_from_db_data(quotes[0], "quote")
-                    logger.debug(f"Updated {symbol} from quote: {quotes[0]}")
-                if trades:
-                    self.stock_data[symbol].update_from_db_data(trades[0], "trade")
-                    logger.debug(f"Updated {symbol} from trade: {trades[0]}")
-            except Exception as e:
-                logger.error(f"Error fetching latest for {symbol}: {e}")
+                values = [float(v) for v in (latest_map or {}).values() if v is not None and float(v) > 0]
+            except Exception:
+                return True
+            if not values:
+                return True
+            unique_vals = set(round(v, 2) for v in values)
+            # Heuristic: if many symbols collapse to 1-2 identical values, consider it suspicious
+            if len(symbols) >= 6 and len(unique_vals) <= 2:
+                return True
+            return False
 
-        # Batch fetch previous close and today's open
-        try:
-            logger.info("Fetching previous close prices...")
-            prev_close_map = await self.db_client.fetch_previous_close_batch(self.symbols)
-            logger.info(f"Fetched {len(prev_close_map)} previous close prices")
-            
-            logger.info("Fetching today's opening prices...")
-            open_map = await self.db_client.fetch_today_open_batch(self.symbols)
-            logger.info(f"Fetched {len(open_map)} opening prices: {open_map}")
-            
-            logger.info("Fetching today's volume data...")
-            volume_map = await self.db_client.fetch_today_volume_batch(self.symbols)
-            logger.info(f"Fetched {len(volume_map)} volume records: {volume_map}")
-            
-            for symbol in self.symbols:
-                prev_close_val = prev_close_map.get(symbol)
-                if prev_close_val is not None:
-                    try:
-                        self.stock_data[symbol].set_prev_close(float(prev_close_val))
-                        logger.debug(f"Set {symbol} prev close: {prev_close_val}")
-                    except Exception as e:
-                        logger.debug(f"Failed to set {symbol} prev close: {e}")
+        # Prefer unified StockDB API for correctness per ticker (and batching)
+        if self.stock_db_api is not None:
+            try:
+                # 1) Latest prices (market-aware resolution inside DB layer)
+                latest_map = await self.stock_db_api.get_latest_prices(self.symbols, use_market_time=True)
+                suspicious = _is_latest_map_suspicious(self.symbols, latest_map)
+                if not suspicious:
+                    for symbol in self.symbols:
+                        latest_price = (latest_map or {}).get(symbol)
+                        if latest_price is not None and float(latest_price) > 0:
+                            self.stock_data[symbol].current_price = float(latest_price)
+                            self.stock_data[symbol].last_update = datetime.now()
                 
-                open_val = open_map.get(symbol)
-                if open_val is not None:
-                    try:
+                # 2) Previous close prices
+                prev_close_map = await self.stock_db_api.get_previous_close_prices(self.symbols)
+                for symbol, prev_close_val in (prev_close_map or {}).items():
+                    if prev_close_val is not None and float(prev_close_val) > 0:
+                        self.stock_data[symbol].set_prev_close(float(prev_close_val))
+                
+                # 3) Today's opening prices (best-effort)
+                try:
+                    open_map = await self.stock_db_api.get_today_opening_prices(self.symbols)
+                except Exception:
+                    open_map = {}
+                for symbol, open_val in (open_map or {}).items():
+                    if open_val is not None and float(open_val) > 0:
                         self.stock_data[symbol].set_open(float(open_val))
-                        logger.debug(f"Set {symbol} open: {open_val}")
-                    except Exception as e:
-                        logger.debug(f"Failed to set {symbol} open: {e}")
-                else:
-                    logger.debug(f"No opening price found for {symbol}")
-                    
+                # If latest map looked suspicious or missing, fallback per-symbol using HTTP client
+                if suspicious:
+                    for symbol in self.symbols:
+                        try:
+                            quotes = await self.db_client.fetch_latest_data(symbol, "quote", 1)
+                            trades = await self.db_client.fetch_latest_data(symbol, "trade", 1)
+                            price = None
+                            if trades:
+                                price = float(trades[0].get('price', 0) or 0)
+                            if (price is None or price <= 0) and quotes:
+                                price = float(quotes[0].get('price', 0) or 0)
+                            if price is not None and price > 0:
+                                self.stock_data[symbol].current_price = price
+                                self.stock_data[symbol].last_update = datetime.now()
+                        except Exception:
+                            pass
+
+            except Exception as e:
+                logger.error(f"Unified API initialization failed, falling back to HTTP client: {e}")
+                # Fallback per-symbol via HTTP client
+                for symbol in self.symbols:
+                    try:
+                        quotes = await self.db_client.fetch_latest_data(symbol, "quote", 1)
+                        trades = await self.db_client.fetch_latest_data(symbol, "trade", 1)
+                        price = None
+                        if trades:
+                            price = float(trades[0].get('price', 0) or 0)
+                        if (price is None or price <= 0) and quotes:
+                            price = float(quotes[0].get('price', 0) or 0)
+                        if price is not None and price > 0:
+                            self.stock_data[symbol].current_price = price
+                            self.stock_data[symbol].last_update = datetime.now()
+                    except Exception as e_sym:
+                        logger.error(f"Error initializing (fallback) for {symbol}: {e_sym}")
+        else:
+            # No StockDB API; fallback to HTTP client per symbol
+            for symbol in self.symbols:
+                try:
+                    quotes = await self.db_client.fetch_latest_data(symbol, "quote", 1)
+                    trades = await self.db_client.fetch_latest_data(symbol, "trade", 1)
+                    price = None
+                    if trades:
+                        price = float(trades[0].get('price', 0) or 0)
+                    if (price is None or price <= 0) and quotes:
+                        price = float(quotes[0].get('price', 0) or 0)
+                    if price is not None and price > 0:
+                        self.stock_data[symbol].current_price = price
+                        self.stock_data[symbol].last_update = datetime.now()
+                except Exception as e:
+                    logger.error(f"Error initializing latest for {symbol}: {e}")
+
+        # Batch fetch using HTTP client only for data not provided by unified API
+        try:
+            missing_prev_close = [s for s in self.symbols if self.stock_data[s].prev_close is None]
+            if missing_prev_close:
+                prev_close_map = await self.db_client.fetch_previous_close_batch(missing_prev_close)
+                for symbol, prev_close_val in (prev_close_map or {}).items():
+                    if prev_close_val is not None and float(prev_close_val) > 0:
+                        self.stock_data[symbol].set_prev_close(float(prev_close_val))
+            
+            missing_open = [s for s in self.symbols if self.stock_data[s].open_price is None]
+            if missing_open:
+                open_map = await self.db_client.fetch_today_open_batch(missing_open)
+                for symbol, open_val in (open_map or {}).items():
+                    if open_val is not None and float(open_val) > 0:
+                        self.stock_data[symbol].set_open(float(open_val))
+            
+            # Volume best-effort
+            volume_map = await self.db_client.fetch_today_volume_batch(self.symbols)
+            for symbol, vol in (volume_map or {}).items():
+                try:
+                    if vol is not None and int(vol) >= 0:
+                        self.stock_data[symbol].volume = int(vol)
+                except Exception:
+                    pass
         except Exception as e:
-            logger.error(f"Batch fetch for prev close/open failed: {e}")
+            logger.error(f"Supplemental batch fetch (HTTP) failed: {e}")
                 
         logger.info("Initial data fetch completed")
         
@@ -1047,7 +1114,13 @@ async def main():
     
     # Create database client and display manager
     async with DatabaseClient(args.db_server, args.db_timeout) as db_client:
-        display_manager = DisplayManager(all_symbols, db_client)
+        # Initialize Stock DB API client for latest price resolution
+        try:
+            stock_db_api = get_stock_db('remote', db_config=args.db_server)
+        except Exception as e:
+            logger.warning(f"Failed to initialize stock DB API client, falling back: {e}")
+            stock_db_api = None
+        display_manager = DisplayManager(all_symbols, db_client, stock_db_api=stock_db_api)
         
         # Add test mode timer if specified
         test_timer_task = None
