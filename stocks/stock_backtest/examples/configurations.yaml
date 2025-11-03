@@ -1,0 +1,448 @@
+# Example Configuration Files for Stock Backtesting Framework
+
+## Basic Markov Chain Strategy Configuration
+
+```yaml
+# backtest_config.yaml
+backtest:
+  start_date: "2020-01-01"
+  end_date: "2024-01-01"
+  initial_capital: 100000.0
+  commission_per_trade: 1.0
+  slippage_pct: 0.1
+  max_position_size: 100.0
+  allow_shorting: false
+  benchmark_ticker: "SPY"
+  risk_free_rate: 2.0
+
+processing:
+  max_workers: 4
+  use_multiprocessing: true
+  use_async_io: true
+  chunk_size: 10
+  cache_data: true
+  timeout: 30.0
+
+strategies:
+  - type: "markov"
+    name: "MarkovChain"
+    parameters:
+      lookback_period: 252
+      prediction_horizon: 5
+      state_bins: 5
+      momentum_periods: [5, 10, 20]
+      volatility_period: 20
+      exponential_decay: 0.95
+      min_state_frequency: 5
+  
+  - type: "buy_hold"
+    name: "BuyHold"
+    parameters: {}
+  
+  - type: "sma"
+    name: "SMA_20_50"
+    parameters:
+      short_period: 20
+      long_period: 50
+  
+  - type: "rsi"
+    name: "RSI_14"
+    parameters:
+      rsi_period: 14
+      oversold_threshold: 30.0
+      overbought_threshold: 70.0
+
+data:
+  source: "database"
+  db_config: "sqlite:./data/stock_data.db"
+
+output:
+  format: ["csv", "png", "json"]
+  directory: "./results"
+```
+
+## Advanced Multi-Strategy Configuration
+
+```yaml
+# advanced_config.yaml
+backtest:
+  start_date: "2018-01-01"
+  end_date: "2024-01-01"
+  initial_capital: 500000.0
+  commission_per_trade: 0.5
+  slippage_pct: 0.05
+  max_position_size: 50.0
+  allow_shorting: true
+  benchmark_ticker: "QQQ"
+  risk_free_rate: 1.5
+
+processing:
+  max_workers: 8
+  use_multiprocessing: true
+  use_async_io: true
+  chunk_size: 20
+  cache_data: true
+  timeout: 60.0
+
+strategies:
+  - type: "markov"
+    name: "MarkovChain_Advanced"
+    parameters:
+      lookback_period: 500
+      prediction_horizon: 10
+      state_bins: 7
+      momentum_periods: [3, 7, 14, 21]
+      volatility_period: 30
+      exponential_decay: 0.98
+      min_state_frequency: 10
+  
+  - type: "markov"
+    name: "MarkovChain_Conservative"
+    parameters:
+      lookback_period: 1000
+      prediction_horizon: 3
+      state_bins: 3
+      momentum_periods: [10, 20]
+      volatility_period: 50
+      exponential_decay: 0.99
+      min_state_frequency: 20
+  
+  - type: "sma"
+    name: "SMA_Fast"
+    parameters:
+      short_period: 10
+      long_period: 30
+  
+  - type: "sma"
+    name: "SMA_Slow"
+    parameters:
+      short_period: 50
+      long_period: 200
+  
+  - type: "rsi"
+    name: "RSI_Aggressive"
+    parameters:
+      rsi_period: 7
+      oversold_threshold: 20.0
+      overbought_threshold: 80.0
+  
+  - type: "rsi"
+    name: "RSI_Conservative"
+    parameters:
+      rsi_period: 21
+      oversold_threshold: 35.0
+      overbought_threshold: 65.0
+
+data:
+  source: "database"
+  db_config: "questdb:localhost:9000"
+
+output:
+  format: ["csv", "png", "html", "json"]
+  directory: "./advanced_results"
+```
+
+## Portfolio Analysis Configuration
+
+```yaml
+# portfolio_config.yaml
+backtest:
+  start_date: "2020-01-01"
+  end_date: "2024-01-01"
+  initial_capital: 1000000.0
+  commission_per_trade: 1.0
+  slippage_pct: 0.1
+  max_position_size: 25.0
+  allow_shorting: false
+  benchmark_ticker: "SPY"
+  risk_free_rate: 2.0
+
+processing:
+  max_workers: 12
+  use_multiprocessing: true
+  use_async_io: true
+  chunk_size: 25
+  cache_data: true
+  timeout: 120.0
+
+tickers:
+  - "AAPL"
+  - "MSFT"
+  - "GOOGL"
+  - "AMZN"
+  - "TSLA"
+  - "NVDA"
+  - "META"
+  - "NFLX"
+  - "AMD"
+  - "INTC"
+
+strategies:
+  - type: "markov"
+    name: "MarkovChain_Portfolio"
+    parameters:
+      lookback_period: 252
+      prediction_horizon: 5
+      state_bins: 5
+      momentum_periods: [5, 10, 20]
+      volatility_period: 20
+      exponential_decay: 0.95
+      min_state_frequency: 5
+  
+  - type: "buy_hold"
+    name: "BuyHold_Portfolio"
+    parameters: {}
+
+data:
+  source: "database"
+  db_config: "timescaledb:localhost:5432"
+
+output:
+  format: ["csv", "png", "html"]
+  directory: "./portfolio_results"
+```
+
+## Risk Management Configuration
+
+```yaml
+# risk_management_config.yaml
+backtest:
+  start_date: "2020-01-01"
+  end_date: "2024-01-01"
+  initial_capital: 100000.0
+  commission_per_trade: 1.0
+  slippage_pct: 0.1
+  max_position_size: 20.0
+  allow_shorting: false
+  benchmark_ticker: "SPY"
+  risk_free_rate: 2.0
+  
+  # Risk management parameters
+  max_portfolio_risk: 0.02  # 2% max portfolio risk
+  stop_loss_pct: 0.05       # 5% stop loss
+  take_profit_pct: 0.10     # 10% take profit
+  min_trade_amount: 100.0   # Minimum trade amount
+  max_leverage: 1.0         # Maximum leverage
+  margin_requirement: 0.5   # Margin requirement for shorting
+
+processing:
+  max_workers: 4
+  use_multiprocessing: false
+  use_async_io: true
+  chunk_size: 10
+  cache_data: true
+  timeout: 30.0
+
+strategies:
+  - type: "markov"
+    name: "MarkovChain_RiskManaged"
+    parameters:
+      lookback_period: 252
+      prediction_horizon: 5
+      state_bins: 5
+      momentum_periods: [5, 10, 20]
+      volatility_period: 20
+      exponential_decay: 0.95
+      min_state_frequency: 5
+
+data:
+  source: "database"
+  db_config: "sqlite:./data/stock_data.db"
+
+output:
+  format: ["csv", "png"]
+  directory: "./risk_managed_results"
+```
+
+## High-Frequency Trading Configuration
+
+```yaml
+# hft_config.yaml
+backtest:
+  start_date: "2024-01-01"
+  end_date: "2024-01-31"
+  initial_capital: 100000.0
+  commission_per_trade: 0.1
+  slippage_pct: 0.01
+  max_position_size: 100.0
+  allow_shorting: true
+  benchmark_ticker: "SPY"
+  risk_free_rate: 2.0
+
+processing:
+  max_workers: 16
+  use_multiprocessing: true
+  use_async_io: true
+  chunk_size: 50
+  cache_data: true
+  timeout: 300.0
+
+strategies:
+  - type: "markov"
+    name: "MarkovChain_HFT"
+    parameters:
+      lookback_period: 100
+      prediction_horizon: 1
+      state_bins: 3
+      momentum_periods: [1, 3, 5]
+      volatility_period: 10
+      exponential_decay: 0.9
+      min_state_frequency: 3
+  
+  - type: "rsi"
+    name: "RSI_HFT"
+    parameters:
+      rsi_period: 5
+      oversold_threshold: 25.0
+      overbought_threshold: 75.0
+
+data:
+  source: "database"
+  db_config: "questdb:localhost:9000"
+
+output:
+  format: ["csv", "json"]
+  directory: "./hft_results"
+```
+
+## Example Usage Commands
+
+```bash
+# Single stock backtest with Markov chain strategy
+python -m stock_backtest.cli.main \
+  --ticker AAPL \
+  --strategy markov \
+  --compare buy_hold,spy \
+  --start 2020-01-01 \
+  --end 2024-01-01 \
+  --capital 100000 \
+  --output-dir results/aapl_backtest
+
+# Multi-stock analysis
+python -m stock_backtest.cli.main \
+  --tickers AAPL,MSFT,GOOGL,TSLA \
+  --strategy markov \
+  --compare buy_hold,qqq \
+  --start 2020-01-01 \
+  --end 2024-01-01 \
+  --workers 4 \
+  --output-format csv,png \
+  --output-dir results/tech_stocks
+
+# Using configuration file
+python -m stock_backtest.cli.main \
+  --config backtest_config.yaml \
+  --ticker AAPL
+
+# High-frequency trading setup
+python -m stock_backtest.cli.main \
+  --config hft_config.yaml \
+  --ticker AAPL \
+  --workers 8 \
+  --multiprocessing
+
+# Portfolio analysis
+python -m stock_backtest.cli.main \
+  --config portfolio_config.yaml \
+  --ticker-file tech_stocks.txt \
+  --workers 12 \
+  --output-dir results/portfolio_analysis
+```
+
+## Jupyter Notebook Examples
+
+```python
+# Basic usage in Jupyter notebook
+from stock_backtest.notebooks.integration import quick_backtest, plot_equity_curve, display_metrics_table
+
+# Quick backtest
+results = quick_backtest('AAPL', 'markov', days=365)
+
+# Display results
+display_metrics_table(results)
+plot_equity_curve(results)
+
+# Interactive interface
+from stock_backtest.notebooks.integration import create_backtest_interface
+
+interface = create_backtest_interface()
+control_panel = interface.create_control_panel()
+display(control_panel)
+```
+
+## Database Configuration Examples
+
+```yaml
+# SQLite configuration
+data:
+  source: "database"
+  db_config: "sqlite:./data/stock_data.db"
+
+# DuckDB configuration
+data:
+  source: "database"
+  db_config: "duckdb:./data/stock_data.duckdb"
+
+# PostgreSQL configuration
+data:
+  source: "database"
+  db_config: "postgresql:user:password@localhost:5432/stockdb"
+
+# TimescaleDB configuration
+data:
+  source: "database"
+  db_config: "timescaledb:user:password@localhost:5432/stockdb"
+
+# QuestDB configuration
+data:
+  source: "database"
+  db_config: "questdb:localhost:9000"
+
+# Remote database configuration
+data:
+  source: "database"
+  db_config: "remote:localhost:8080"
+```
+
+## Strategy Parameter Tuning Examples
+
+```yaml
+# Conservative Markov Chain
+strategies:
+  - type: "markov"
+    name: "MarkovChain_Conservative"
+    parameters:
+      lookback_period: 1000
+      prediction_horizon: 3
+      state_bins: 3
+      momentum_periods: [10, 20]
+      volatility_period: 50
+      exponential_decay: 0.99
+      min_state_frequency: 20
+
+# Aggressive Markov Chain
+strategies:
+  - type: "markov"
+    name: "MarkovChain_Aggressive"
+    parameters:
+      lookback_period: 100
+      prediction_horizon: 10
+      state_bins: 7
+      momentum_periods: [3, 7, 14]
+      volatility_period: 10
+      exponential_decay: 0.9
+      min_state_frequency: 3
+
+# Balanced Markov Chain
+strategies:
+  - type: "markov"
+    name: "MarkovChain_Balanced"
+    parameters:
+      lookback_period: 252
+      prediction_horizon: 5
+      state_bins: 5
+      momentum_periods: [5, 10, 20]
+      volatility_period: 20
+      exponential_decay: 0.95
+      min_state_frequency: 5
+```

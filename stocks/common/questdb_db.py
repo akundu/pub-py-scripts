@@ -139,7 +139,7 @@ class StockQuestDB(StockDBBase):
         self._tables_ensured = False
         self._tables_ensured_at = None
         
-        self.logger.info(f"QuestDB initialized with pool size: {pool_max_size}, "
+        self.logger.debug(f"QuestDB initialized with pool size: {pool_max_size}, "
                         f"command timeout: {pool_connection_timeout_minutes} minutes, "
                         f"connection timeout: {connection_timeout_seconds}s")
 
@@ -167,7 +167,7 @@ class StockQuestDB(StockDBBase):
                 self.logger.debug("Tables existence already verified (cached)")
                 return
 
-        self.logger.info("Creating QuestDB tables and optimizations...")
+        self.logger.debug("Creating QuestDB tables and optimizations...")
         
         async with self.get_connection() as conn:
             # Create tables with QuestDB optimizations
@@ -210,7 +210,7 @@ class StockQuestDB(StockDBBase):
         """QuestDB indexes are created inline with table definitions."""
         # QuestDB creates indexes inline with SYMBOL columns using INDEX CAPACITY syntax
         # No separate index creation needed
-        self.logger.info("QuestDB indexes are created inline with table definitions")
+        self.logger.debug("QuestDB indexes are created inline with table definitions")
 
     CONFIGURE_WAL_PARAMS = False
     async def _configure_wal_params(self, conn: asyncpg.Connection) -> None:
