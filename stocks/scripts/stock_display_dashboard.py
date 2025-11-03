@@ -29,7 +29,7 @@ import yaml
 import json
 import websockets
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Set, Optional, Tuple
 import pandas as pd
 import logging
@@ -641,6 +641,10 @@ class DisplayManager:
         self.websocket_client = None
         self.last_update_time = time.time()
         
+        # Track current market state for periodic refetching
+        self.current_market_state = None
+        self.last_open_close_refetch = 0.0
+        
     async def initialize_data(self):
         """Initialize stock data with latest database values."""
         logger.info("Fetching initial data from database...")
@@ -678,13 +682,39 @@ class DisplayManager:
                         self.stock_data[symbol].set_prev_close(float(prev_close_val))
                 
                 # 3) Today's opening prices (best-effort)
-                try:
-                    open_map = await self.stock_db_api.get_today_opening_prices(self.symbols)
-                except Exception:
-                    open_map = {}
-                for symbol, open_val in (open_map or {}).items():
-                    if open_val is not None and float(open_val) > 0:
-                        self.stock_data[symbol].set_open(float(open_val))
+                # If in pre-open, fetch previous day's open using date-based query
+                current_state_init = get_market_state()
+                if current_state_init == 'pre-open':
+                    try:
+                        now_et_init = datetime.now(ZoneInfo("America/New_York"))
+                    except Exception:
+                        now_et_init = datetime.now()
+                    prev_trading_day_init = get_previous_trading_day_date(now_et_init)
+                    # Fetch previous day's open prices using get_stock_data
+                    for symbol in self.symbols:
+                        try:
+                            df = await self.stock_db_api.get_stock_data(
+                                symbol, 
+                                start_date=prev_trading_day_init,
+                                end_date=prev_trading_day_init,
+                                interval="daily"
+                            )
+                            if not df.empty and 'open' in df.columns:
+                                prev_open = float(df['open'].iloc[0])
+                                if prev_open > 0:
+                                    self.stock_data[symbol].set_open(prev_open)
+                                    logger.debug(f"Initialized previous day's open for {symbol}: {prev_open} from {prev_trading_day_init}")
+                        except Exception as e:
+                            logger.debug(f"Error initializing previous day's open for {symbol} using date {prev_trading_day_init}: {e}")
+                else:
+                    # Not in pre-open, use today's opening prices
+                    try:
+                        open_map = await self.stock_db_api.get_today_opening_prices(self.symbols)
+                    except Exception:
+                        open_map = {}
+                    for symbol, open_val in (open_map or {}).items():
+                        if open_val is not None and float(open_val) > 0:
+                            self.stock_data[symbol].set_open(float(open_val))
                 # If latest map looked suspicious or missing, fallback per-symbol using HTTP client
                 if suspicious:
                     for symbol in self.symbols:
@@ -764,6 +794,124 @@ class DisplayManager:
             logger.error(f"Supplemental batch fetch (HTTP) failed: {e}")
                 
         logger.info("Initial data fetch completed")
+        
+        # Initialize market state tracking
+        self.current_market_state = get_market_state()
+        self.last_open_close_refetch = time.time()
+    
+    async def refetch_open_close_prices(self, force: bool = False):
+        """Refetch open and close prices based on current market state.
+        
+        Market state logic:
+        - pre-open: Previous day's close and previous day's open (could be from previous week)
+        - open: Previous day's close and current day's open
+        - after-hours: Current day's open and close
+        - closed: Current day's open and close
+        """
+        current_state = get_market_state()
+        current_time = time.time()
+        
+        # Check if we should refetch (every 5 minutes or on state change)
+        should_refetch = force or (
+            current_state != self.current_market_state or
+            (current_time - self.last_open_close_refetch) >= 300  # 5 minutes
+        )
+        
+        if not should_refetch:
+            return
+        
+        logger.info(f"Refetching open/close prices for market state: {current_state}")
+        
+        try:
+            # Get previous trading day date for date-based queries
+            try:
+                now_et = datetime.now(ZoneInfo("America/New_York"))
+            except Exception:
+                now_et = datetime.now()
+            prev_trading_day = get_previous_trading_day_date(now_et)
+            
+            # For pre-open: use previous day's close and previous day's open
+            # For open: use previous day's close and current day's open
+            # For after-hours and closed: use current day's open and close
+            
+            if self.stock_db_api is not None:
+                try:
+                    # Always fetch previous close (which handles previous day's close)
+                    prev_close_map = await self.stock_db_api.get_previous_close_prices(self.symbols)
+                    for symbol, prev_close_val in (prev_close_map or {}).items():
+                        if prev_close_val is not None and float(prev_close_val) > 0:
+                            self.stock_data[symbol].set_prev_close(float(prev_close_val))
+                    
+                    # For previous day's open price (needed during pre-open)
+                    # Use date-based query to get the previous trading day's open
+                    if current_state == 'pre-open':
+                        # Query daily_prices for the previous trading day using get_stock_data
+                        for symbol in self.symbols:
+                            try:
+                                df = await self.stock_db_api.get_stock_data(
+                                    symbol, 
+                                    start_date=prev_trading_day,
+                                    end_date=prev_trading_day,
+                                    interval="daily"
+                                )
+                                if not df.empty and 'open' in df.columns:
+                                    prev_open = float(df['open'].iloc[0])
+                                    if prev_open > 0:
+                                        self.stock_data[symbol].set_open(prev_open)
+                                        logger.debug(f"Fetched previous day's open for {symbol}: {prev_open} from {prev_trading_day}")
+                            except Exception as e:
+                                logger.debug(f"Error fetching previous day's open for {symbol} using date {prev_trading_day}: {e}")
+                    
+                    # For open price:
+                    # - pre-open: already handled above
+                    # - open/after-hours/closed: use today's open
+                    if current_state != 'pre-open':
+                        try:
+                            open_map = await self.stock_db_api.get_today_opening_prices(self.symbols)
+                            for symbol, open_val in (open_map or {}).items():
+                                if open_val is not None and float(open_val) > 0:
+                                    self.stock_data[symbol].set_open(float(open_val))
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.error(f"Error refetching open/close via unified API: {e}")
+                    # Fallback to HTTP client
+                    try:
+                        prev_close_map = await self.db_client.fetch_previous_close_batch(self.symbols)
+                        for symbol, prev_close_val in (prev_close_map or {}).items():
+                            if prev_close_val is not None and float(prev_close_val) > 0:
+                                self.stock_data[symbol].set_prev_close(float(prev_close_val))
+                        
+                        open_map = await self.db_client.fetch_today_open_batch(self.symbols)
+                        for symbol, open_val in (open_map or {}).items():
+                            if open_val is not None and float(open_val) > 0:
+                                self.stock_data[symbol].set_open(float(open_val))
+                    except Exception as e2:
+                        logger.error(f"Error refetching open/close via HTTP client: {e2}")
+            else:
+                # No unified API, use HTTP client
+                try:
+                    prev_close_map = await self.db_client.fetch_previous_close_batch(self.symbols)
+                    for symbol, prev_close_val in (prev_close_map or {}).items():
+                        if prev_close_val is not None and float(prev_close_val) > 0:
+                            self.stock_data[symbol].set_prev_close(float(prev_close_val))
+                    
+                    open_map = await self.db_client.fetch_today_open_batch(self.symbols)
+                    for symbol, open_val in (open_map or {}).items():
+                        if open_val is not None and float(open_val) > 0:
+                            self.stock_data[symbol].set_open(float(open_val))
+                except Exception as e:
+                    logger.error(f"Error refetching open/close via HTTP client: {e}")
+            
+            # Update tracking
+            self.current_market_state = current_state
+            self.last_open_close_refetch = current_time
+            logger.info(f"Open/close prices refetched successfully (state: {current_state})")
+            
+        except Exception as e:
+            logger.error(f"Error in refetch_open_close_prices: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
         
     async def setup_websocket(self, server_url: str):
         """Setup WebSocket connection for real-time data."""
@@ -1083,10 +1231,67 @@ def is_market_open() -> bool:
     current_minutes = now_et.hour * 60 + now_et.minute
     return market_start_minutes <= current_minutes <= market_end_minutes
 
+def get_market_state() -> str:
+    """Get detailed market state: 'pre-open', 'open', 'after-hours', or 'closed'."""
+    try:
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        now_et = datetime.now()
+    
+    # Weekend is closed
+    if now_et.weekday() >= 5:
+        return 'closed'
+    
+    day = now_et.replace(second=0, microsecond=0)
+    pre_open = day.replace(hour=4, minute=0)
+    reg_open = day.replace(hour=9, minute=30)
+    reg_close = day.replace(hour=16, minute=0)
+    aft_close = day.replace(hour=20, minute=0)
+    
+    if reg_open <= now_et < reg_close:
+        return 'open'
+    if pre_open <= now_et < reg_open:
+        return 'pre-open'
+    if reg_close <= now_et < aft_close:
+        return 'after-hours'
+    return 'closed'
+
+def get_previous_trading_day_date(now_et: Optional[datetime] = None) -> str:
+    """Get the previous trading day (Monday-Friday) as a string in YYYY-MM-DD format.
+    If today is a weekday and before market open, returns yesterday.
+    If today is weekend, returns the last Friday.
+    """
+    try:
+        if now_et is None:
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        if now_et is None:
+            now_et = datetime.now()
+    
+    # If it's a weekday (Monday=0, Friday=4)
+    if now_et.weekday() < 5:
+        # If it's Monday or before market hours on a weekday, go back to previous day
+        # For simplicity, always go back one day and check if it's a trading day
+        prev_day = now_et - timedelta(days=1)
+        # If previous day was a weekend, go back further
+        while prev_day.weekday() >= 5:
+            prev_day = prev_day - timedelta(days=1)
+        return prev_day.strftime('%Y-%m-%d')
+    
+    # If it's weekend, go back to find the last Friday
+    days_back = now_et.weekday() - 4  # Saturday=5->1 day back, Sunday=6->2 days back
+    last_trading_day = now_et - timedelta(days=days_back)
+    return last_trading_day.strftime('%Y-%m-%d')
+
 def get_session_status() -> str:
     """Get current session status."""
-    if is_market_open():
+    market_state = get_market_state()
+    if market_state == 'open':
         return "LIVE"
+    elif market_state == 'pre-open':
+        return "PRE-OPEN"
+    elif market_state == 'after-hours':
+        return "AFTER-HOURS"
     else:
         return "CLOSED"
 
@@ -1193,6 +1398,9 @@ async def _run_live_display(display_manager: DisplayManager,
     with Live(console=console, refresh_per_second=refresh_rate, screen=True) as live:
         while not shutdown_flag:
             try:
+                # Periodically refetch open/close prices based on market state
+                await display_manager.refetch_open_close_prices()
+                
                 # Render the display and update the live display
                 table = display_manager.render_display()
                 live.update(table)
