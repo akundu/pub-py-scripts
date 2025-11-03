@@ -818,6 +818,40 @@ class StockDBSQLite(StockDBBase):
                 return results
         return await asyncio.get_event_loop().run_in_executor(None, _run_sync)
 
+    # ---- Options API (stub implementations) ----
+    async def save_options_data(self, df: pd.DataFrame, ticker: str) -> None:
+        """Save options snapshot rows to SQLite (not implemented)."""
+        self.logger.warning("Options data storage not implemented for SQLite")
+        pass
+
+    async def get_options_data(
+        self,
+        ticker: str,
+        expiration_date: str | None = None,
+        start_datetime: str | None = None,
+        end_datetime: str | None = None,
+        option_tickers: List[str] | None = None,
+    ) -> pd.DataFrame:
+        """Retrieve options data from SQLite (not implemented)."""
+        self.logger.warning("Options data retrieval not implemented for SQLite")
+        return pd.DataFrame()
+
+    async def get_latest_options_data(
+        self,
+        ticker: str,
+        expiration_date: str | None = None,
+        option_tickers: List[str] | None = None,
+    ) -> pd.DataFrame:
+        """Retrieve latest options data from SQLite (not implemented)."""
+        self.logger.warning("Latest options data retrieval not implemented for SQLite")
+        return pd.DataFrame()
+
+    async def get_option_price_feature(self, ticker: str, option_ticker: str) -> dict[str, Any] | None:
+        """Get option price feature from SQLite (not implemented)."""
+        self.logger.warning("Option price feature retrieval not implemented for SQLite")
+        return None
+
+    # ---- Financial Info API ----
     async def save_financial_info(self, ticker: str, financial_data: dict) -> None:
         """Save financial ratios data to SQLite (not implemented)."""
         self.logger.warning("Financial info storage not implemented for SQLite")
