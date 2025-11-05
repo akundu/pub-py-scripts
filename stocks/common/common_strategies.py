@@ -163,6 +163,92 @@ def add_multiple_exponential_moving_averages(
     return result_records
 
 
+def add_rsi(
+    symbol: str,
+    records: List[Dict[str, Any]],
+    rsi_period: int = 14,
+    price_field: str = "price",
+    output_field_prefix: str = "rsi_",
+) -> List[Dict[str, Any]]:
+    """
+    Compute Relative Strength Index (RSI) over a list of records and add it per record.
+
+    Args:
+        symbol: Stock symbol (for reference/logging)
+        records: List of dicts with at least a date and price field
+        rsi_period: RSI lookback period (default: 14)
+        price_field: Field name used as price (default: 'price')
+        output_field_prefix: Output field name prefix (default: 'rsi_')
+
+    Returns:
+        List of records with computed RSI values placed in key f"{output_field_prefix}{rsi_period}"
+    """
+    if not records or rsi_period <= 0:
+        return records
+
+    # Sort by date to ensure order
+    sorted_records = sorted(records, key=lambda x: x.get("date", ""))
+
+    prices: List[Optional[float]] = []
+    for r in sorted_records:
+        val = r.get(price_field)
+        prices.append(float(val) if val is not None else None)
+
+    # Compute deltas
+    deltas: List[Optional[float]] = [None]
+    for i in range(1, len(prices)):
+        if prices[i] is None or prices[i - 1] is None:
+            deltas.append(None)
+        else:
+            deltas.append(prices[i] - prices[i - 1])
+
+    # Rolling average gains and losses (simple mean over window)
+    gains: List[Optional[float]] = [None] * len(deltas)
+    losses: List[Optional[float]] = [None] * len(deltas)
+
+    for i in range(len(deltas)):
+        if i < rsi_period:
+            continue
+        window = deltas[i - rsi_period + 1 : i + 1]
+        pos = [d for d in window if d is not None and d > 0]
+        neg = [(-d) for d in window if d is not None and d < 0]
+        avg_gain = (sum(pos) / rsi_period) if len(window) == rsi_period else None
+        avg_loss = (sum(neg) / rsi_period) if len(window) == rsi_period else None
+        gains[i] = avg_gain
+        losses[i] = avg_loss
+
+    # Compute RSI
+    out_field = f"{output_field_prefix}{rsi_period}"
+    for i in range(len(sorted_records)):
+        rsi_value: Optional[float] = None
+        if i >= rsi_period and gains[i] is not None and losses[i] is not None:
+            if losses[i] == 0:
+                rsi_value = 100.0
+            else:
+                rs = gains[i] / losses[i]
+                rsi_value = 100.0 - (100.0 / (1.0 + rs))
+        if rsi_value is not None:
+            sorted_records[i][out_field] = round(rsi_value, 2)
+
+    return sorted_records
+
+
+def compute_rsi_series(prices: "pd.Series", window: int = 14) -> "pd.Series":
+    """
+    Compute RSI for a pandas Series of prices. This is provided for convenience
+    when working with DataFrames elsewhere in the codebase.
+    """
+    # Local import to avoid hard dependency when pandas is not used
+    import pandas as pd  # type: ignore
+
+    delta = prices.diff()
+    gain = delta.where(delta > 0, 0.0).rolling(window=window, min_periods=window).mean()
+    loss = (-delta.where(delta < 0, 0.0)).rolling(window=window, min_periods=window).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+
 # Example usage and testing functions
 def example_usage():
     """
