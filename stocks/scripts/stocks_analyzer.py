@@ -32,6 +32,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from common.symbol_loader import add_symbol_arguments, fetch_lists_data
 from common.stock_db import get_stock_db
+from common.common_strategies import compute_rsi_series
 
 
 class StocksAnalyzer:
@@ -75,6 +76,8 @@ class StocksAnalyzer:
         self,
         tickers: List[str],
         use_market_time: bool = True,
+        rsi_periods: Optional[List[int]] = None,
+        debug: bool = False,
     ) -> pd.DataFrame:
         if not tickers:
             return pd.DataFrame()
@@ -90,6 +93,84 @@ class StocksAnalyzer:
         latest_prices, prev_close, today_open, fin = await asyncio.gather(
             latest_prices_task, prev_close_task, today_open_task, financial_task
         )
+
+        # Fetch historical closes for RSI if requested
+        periods = [14]
+        if rsi_periods and len(rsi_periods) > 0:
+            periods = sorted(set(int(p) for p in rsi_periods if int(p) > 0))
+
+        need_rsi = bool(periods)
+        hist_df = pd.DataFrame()
+        if need_rsi:
+            max_period = max(periods) if periods else 14
+            # Fetch a little extra history to be safe
+            lookback = max_period + 5
+            # QuestDB may choke on very large IN lists; fetch in batches
+            batch_size = 150
+            hist_parts: List[pd.DataFrame] = []
+            for i in range(0, len(tickers_upper), batch_size):
+                batch = tickers_upper[i:i+batch_size]
+                in_list = ",".join([f"'{t}'" for t in batch])
+                sql = (
+                    f"SELECT ticker, date, close FROM daily_prices "
+                    f"WHERE ticker IN ({in_list}) "
+                    f"ORDER BY ticker, date ASC"
+                )
+                try:
+                    part = await self.db.execute_select_sql(sql)
+                    if part is not None and not part.empty:
+                        # Normalize columns per part to be resilient to unnamed columns
+                        cols = [str(c).lower() for c in part.columns]
+                        part.columns = cols
+                        # If expected names missing but exactly 3 columns, assign by position
+                        if not any(name in part.columns for name in ('ticker', 'symbol')) or 'close' not in part.columns:
+                            if part.shape[1] >= 3:
+                                part = part.copy()
+                                part.rename(columns={cols[0]: 'ticker', cols[1]: 'date', cols[2]: 'close'}, inplace=True)
+                        hist_parts.append(part)
+                except Exception:
+                    continue
+
+            if hist_parts:
+                hist_df = pd.concat(hist_parts, ignore_index=True)
+            else:
+                hist_df = pd.DataFrame()
+
+            if not hist_df.empty:
+                # Normalize column names to lowercase and reconcile timestamp/date names
+                hist_df.columns = [str(c).lower() for c in hist_df.columns]
+                # Handle unnamed numeric columns from concatenation if any
+                if not {'ticker','date','close'}.issubset(set(hist_df.columns)) and hist_df.shape[1] >= 3:
+                    # Attempt to map first three columns to expected names
+                    current_cols = list(hist_df.columns)
+                    rename_map = {current_cols[0]: 'ticker', current_cols[1]: 'date', current_cols[2]: 'close'}
+                    hist_df = hist_df.rename(columns=rename_map)
+                if 'date' not in hist_df.columns:
+                    # Try common alternatives
+                    if 'timestamp' in hist_df.columns:
+                        hist_df['date'] = hist_df['timestamp']
+                    elif 'ts' in hist_df.columns:
+                        hist_df['date'] = hist_df['ts']
+                if 'close' not in hist_df.columns:
+                    # Try alternative casing
+                    for alt in ['closing_price', 'adj_close', 'price']:
+                        if alt in hist_df.columns:
+                            hist_df['close'] = hist_df[alt]
+                            break
+                if 'ticker' not in hist_df.columns and 'symbol' in hist_df.columns:
+                    hist_df['ticker'] = hist_df['symbol']
+
+                # Ensure required columns exist before proceeding
+                required_cols = {'ticker', 'date', 'close'}
+                if required_cols.issubset(set(hist_df.columns)):
+                    hist_df['date'] = pd.to_datetime(hist_df['date'])
+                    # Keep the last N rows per ticker (avoid deprecated apply)
+                    hist_df = hist_df.sort_values(['ticker', 'date']).groupby('ticker', group_keys=False).tail(lookback)
+                else:
+                    # If columns are missing, skip RSI computation
+                    if not self.quiet:
+                        print("Skipping RSI: historical data missing required columns", file=sys.stderr)
+                    hist_df = pd.DataFrame()
 
         rows: List[Dict[str, Any]] = []
         for t in tickers_upper:
@@ -117,7 +198,7 @@ class StocksAnalyzer:
             market_cap = fin.get(t, {}).get('market_cap')
             market_cap_b = round(market_cap / 1e9, 2) if market_cap is not None and pd.notna(market_cap) else None
 
-            rows.append({
+            base_row: Dict[str, Any] = {
                 'ticker': t,
                 'current_price': cur,
                 'prev_close': pc,
@@ -129,7 +210,43 @@ class StocksAnalyzer:
                 'pe_ratio': pe_ratio,
                 'market_cap': market_cap,
                 'market_cap_b': market_cap_b,
-            })
+            }
+
+            if need_rsi:
+                for p in periods:
+                    base_row.setdefault(f'rsi_{p}', None)
+
+            # Compute current RSI values for requested periods
+            if need_rsi and not hist_df.empty:
+                sub = hist_df[hist_df['ticker'] == t]
+                if not sub.empty:
+                    series = sub['close'].astype(float)
+                    for p in periods:
+                        # Compute RSI and optionally print debug details
+                        rsi_series = compute_rsi_series(series, window=p)
+                        val = rsi_series.iloc[-1] if not rsi_series.empty else None
+                        base_row[f'rsi_{p}'] = round(float(val), 2) if pd.notna(val) else None
+
+                        if debug:
+                            # Derive intermediate values for transparency
+                            delta = series.diff()
+                            gain = delta.where(delta > 0, 0.0).rolling(window=p, min_periods=p).mean()
+                            loss = (-delta.where(delta < 0, 0.0)).rolling(window=p, min_periods=p).mean()
+                            rs = gain / loss
+                            # Build compact debug snapshot
+                            closes_dbg = series.tail(p + 1).round(4).tolist()
+                            deltas_dbg = delta.tail(p + 1).round(4).tolist()
+                            avg_gain = float(gain.iloc[-1]) if pd.notna(gain.iloc[-1]) else None
+                            avg_loss = float(loss.iloc[-1]) if pd.notna(loss.iloc[-1]) else None
+                            rs_last = float(rs.iloc[-1]) if pd.notna(rs.iloc[-1]) else None
+                            rsi_last = float(val) if pd.notna(val) else None
+                            print(
+                                f"[DEBUG][{t}] RSI_{p}: closes={closes_dbg} deltas={deltas_dbg} "
+                                f"avg_gain={avg_gain} avg_loss={avg_loss} rs={rs_last} rsi={rsi_last}",
+                                file=sys.stderr,
+                            )
+
+            rows.append(base_row)
 
         df = pd.DataFrame(rows)
         return df
@@ -180,6 +297,9 @@ class StocksAnalyzer:
             return "No stock data available."
 
         # Sorting (support substring match)
+        # Map generic 'rsi' sort to default 'rsi_14'
+        if sort_by == 'rsi' and 'rsi_14' in df.columns:
+            sort_by = 'rsi_14'
         if sort_by and sort_by not in df.columns:
             candidates = [c for c in df.columns if sort_by.lower() in str(c).lower()]
             if len(candidates) == 1:
@@ -192,6 +312,9 @@ class StocksAnalyzer:
             'ticker', 'pe_ratio', 'market_cap_b', 'current_price', 'prev_close', 'today_open',
             'diff_close', 'diff_close_pct', 'diff_open', 'diff_open_pct',
         ]
+        # Include RSI columns if present
+        rsi_cols = [c for c in df.columns if str(c).startswith('rsi_')]
+        display_columns = ['ticker'] + rsi_cols + [c for c in display_columns if c != 'ticker']
         cols = [c for c in display_columns if c in df.columns]
         df_display = df[cols].copy()
 
@@ -210,6 +333,8 @@ class StocksAnalyzer:
         for col in ['diff_close_pct', 'diff_open_pct']:
             if col in df_fmt.columns:
                 df_fmt[col] = df_fmt[col].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
+        for col in [c for c in df_fmt.columns if str(c).startswith('rsi_')]:
+            df_fmt[col] = df_fmt[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
 
         table = tabulate(df_fmt, headers='keys', tablefmt='grid', showindex=False)
         if output_file and output_format != 'csv':
@@ -268,10 +393,22 @@ Examples:
         default='diff_close_pct',
         help="Sort by any displayed column (e.g., diff_close_pct diff_open_pct ticker current_price).",
     )
+    # RSI options
+    parser.add_argument(
+        '--rsi-periods',
+        type=str,
+        default='14',
+        help="Comma or space separated RSI periods to compute (default: 14)",
+    )
     parser.add_argument(
         '--quiet',
         action='store_true',
         help="Suppress progress output.",
+    )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help="Enable debug output for RSI computations (prints to stderr).",
     )
 
     # CSV formatting options
@@ -302,7 +439,21 @@ Examples:
     if not args.quiet:
         print(f"Analyzing {len(symbols_list)} tickers...")
 
-    df = await analyzer.analyze(symbols_list, use_market_time=not args.no_market_time)
+    # Parse RSI periods
+    rsi_periods: List[int] = []
+    if getattr(args, 'rsi_periods', None):
+        raw = args.rsi_periods.replace(',', ' ').split()
+        try:
+            rsi_periods = [int(x) for x in raw if int(x) > 0]
+        except Exception:
+            rsi_periods = [14]
+
+    df = await analyzer.analyze(
+        symbols_list,
+        use_market_time=not args.no_market_time,
+        rsi_periods=rsi_periods,
+        debug=bool(getattr(args, 'debug', False)),
+    )
     if df.empty:
         print("No stock data available.")
         return

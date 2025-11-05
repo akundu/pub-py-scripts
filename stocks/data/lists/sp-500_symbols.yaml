@@ -1,5 +1,5 @@
 type: sp-500
-count: 503
+count: 502
 symbols:
 - A
 - AAPL
@@ -272,7 +272,6 @@ symbols:
 - KLAC
 - KMB
 - KMI
-- KMX
 - KO
 - KR
 - KVUE

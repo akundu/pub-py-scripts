@@ -47,7 +47,6 @@ symbols:
 - AUR
 - AVAV
 - AVGO
-- AVT
 - AXON
 - AXSM
 - AZN
@@ -77,7 +76,7 @@ symbols:
 - CART
 - CASY
 - CBSH
-- CCCS
+- CCC
 - CCEP
 - CDNS
 - CDW
@@ -95,7 +94,6 @@ symbols:
 - CIFR
 - CIGI
 - CINF
-- CLBT
 - CLSK
 - CMCSA
 - CME
@@ -128,13 +126,11 @@ symbols:
 - DASH
 - DBX
 - DDOG
-- DJT
 - DKNG
 - DLO
 - DLTR
 - DOCU
 - DOOO
-- DORM
 - DOX
 - DPZ
 - DRS
@@ -144,10 +140,8 @@ symbols:
 - EA
 - EBAY
 - ENLT
-- ENPH
 - ENSG
 - ENTG
-- EOSE
 - EQIX
 - ERIC
 - ERIE
@@ -165,7 +159,6 @@ symbols:
 - FAST
 - FCFS
 - FCNCA
-- FCNCO
 - FELE
 - FER
 - FFIN
@@ -174,7 +167,6 @@ symbols:
 - FITB
 - FIVE
 - FLEX
-- FLY
 - FOX
 - FOXA
 - FRHC
@@ -197,6 +189,7 @@ symbols:
 - GH
 - GILD
 - GLBE
+- GLNG
 - GLPI
 - GLXY
 - GMAB
@@ -228,9 +221,11 @@ symbols:
 - IEP
 - IESC
 - ILMN
+- IMVT
 - INCY
 - INSM
 - INTC
+- INTR
 - INTU
 - IONS
 - IREN
@@ -257,6 +252,7 @@ symbols:
 - LECO
 - LEGN
 - LFUS
+- LGN
 - LI
 - LIF
 - LIN
@@ -309,6 +305,7 @@ symbols:
 - MU
 - MZTI
 - NAMS
+- NAVN
 - NBIS
 - NBIX
 - NDAQ
@@ -316,6 +313,7 @@ symbols:
 - NFLX
 - NICE
 - NMRK
+- NOVT
 - NTAP
 - NTES
 - NTNX
@@ -346,6 +344,7 @@ symbols:
 - OTEX
 - OZK
 - PAA
+- PAGP
 - PANW
 - PAYX
 - PCAR
@@ -364,6 +363,7 @@ symbols:
 - POOL
 - POWL
 - PPC
+- PRAX
 - PSKY
 - PTC
 - PTCT
@@ -413,7 +413,6 @@ symbols:
 - SIGI
 - SIRI
 - SITM
-- SKYW
 - SLAB
 - SLM
 - SMCI
@@ -424,8 +423,8 @@ symbols:
 - SNPS
 - SNY
 - SOFI
+- SOLS
 - SOUN
-- SPSC
 - SRAD
 - SSNC
 - SSRM
@@ -444,6 +443,7 @@ symbols:
 - TGTX
 - TIGO
 - TLN
+- TMDX
 - TMUS
 - TPG
 - TRI
@@ -469,7 +469,6 @@ symbols:
 - URBN
 - UTHR
 - VCTR
-- VERX
 - VFS
 - VLY
 - VNOM
@@ -485,6 +484,7 @@ symbols:
 - WDAY
 - WDC
 - WFRD
+- WGS
 - WING
 - WIX
 - WMG

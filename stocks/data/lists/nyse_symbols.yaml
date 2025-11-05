@@ -16,7 +16,6 @@ symbols:
 - AJG
 - ALC
 - ALL
-- ALLE
 - AMCR
 - AME
 - AMP
@@ -25,6 +24,7 @@ symbols:
 - ANET
 - AON
 - APD
+- APG
 - APH
 - APO
 - APTV
@@ -54,6 +54,7 @@ symbols:
 - BE
 - BEKE
 - BEP
+- BEPC
 - BG
 - BHP
 - BIP
@@ -87,12 +88,11 @@ symbols:
 - CFG
 - CHD
 - CHT
-- CHWY
 - CI
+- CIB
 - CIEN
 - CL
 - CLS
-- CLX
 - CM
 - CMG
 - CMI
@@ -113,6 +113,7 @@ symbols:
 - CRCL
 - CRH
 - CRM
+- CRS
 - CTRA
 - CTVA
 - CUK
@@ -121,12 +122,12 @@ symbols:
 - CVS
 - CVX
 - CW
+- CX
 - D
 - DAL
 - DB
 - DD
 - DE
-- DECK
 - DELL
 - DEO
 - DG
@@ -152,7 +153,6 @@ symbols:
 - EIX
 - EL
 - ELV
-- EMA
 - EME
 - EMR
 - ENB
@@ -180,7 +180,6 @@ symbols:
 - FIS
 - FIX
 - FLUT
-- FMS
 - FMX
 - FN
 - FNF
@@ -238,13 +237,13 @@ symbols:
 - IR
 - IRM
 - IT
+- ITT
 - ITUB
 - ITW
 - IX
 - J
 - JBL
 - JCI
-- JLL
 - JNJ
 - JPM
 - K
@@ -253,7 +252,6 @@ symbols:
 - KEY
 - KEYS
 - KGC
-- KIM
 - KKR
 - KMI
 - KO
@@ -273,11 +271,11 @@ symbols:
 - LOW
 - LUV
 - LVS
+- LYB
 - LYG
 - LYV
 - MA
 - MAA
-- MAS
 - MCD
 - MCK
 - MCO
@@ -310,6 +308,7 @@ symbols:
 - NI
 - NIO
 - NKE
+- NLY
 - NMR
 - NOC
 - NOK
@@ -327,12 +326,10 @@ symbols:
 - O
 - OKE
 - OKLO
-- OMC
 - ORCL
 - OTIS
 - OWL
 - OXY
-- PAAS
 - PBA
 - PBR
 - PBR.A
@@ -360,6 +357,7 @@ symbols:
 - PSX
 - PUK
 - PWR
+- Q
 - QSR
 - RACE
 - RBA
@@ -377,9 +375,11 @@ symbols:
 - RMD
 - ROK
 - ROL
+- RS
 - RSG
 - RTX
 - RY
+- RYAN
 - SAN
 - SAP
 - SBS
@@ -445,7 +445,6 @@ symbols:
 - TTE
 - TU
 - TWLO
-- TXT
 - TYL
 - U
 - UBER
@@ -496,6 +495,7 @@ symbols:
 - XPO
 - XYL
 - XYZ
+- YPF
 - YUM
 - YUMC
 - ZBH
