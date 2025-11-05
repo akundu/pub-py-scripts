@@ -1485,8 +1485,8 @@ class StockQuestDB(StockDBBase):
             tasks = [asyncio.create_task(fetch_one(t)) for t in batch_tickers]
             batch_results = await asyncio.gather(*tasks, return_exceptions=False)
             
-            # Filter out empty DataFrames
-            non_empty = [df for df in batch_results if not df.empty]
+            # Filter out empty DataFrames and DataFrames with all-NA values
+            non_empty = [df for df in batch_results if not df.empty and not df.isna().all().all()]
             if non_empty:
                 # Concatenate this batch and add to results
                 batch_df = pd.concat(non_empty, ignore_index=True)
@@ -1500,7 +1500,12 @@ class StockQuestDB(StockDBBase):
         if not all_results:
             return pd.DataFrame()
         
-        return pd.concat(all_results, ignore_index=True)
+        # Filter out any empty or all-NA DataFrames before final concat
+        valid_results = [df for df in all_results if not df.empty and not df.isna().all().all()]
+        if not valid_results:
+            return pd.DataFrame()
+        
+        return pd.concat(valid_results, ignore_index=True)
 
     async def get_latest_options_data_batch_multiprocess(
         self, 
@@ -1572,7 +1577,8 @@ class StockQuestDB(StockDBBase):
                 for result in batch_results:
                     df, stats = result
                     batch_stats.append(stats)
-                    if not df.empty:
+                    # Filter out empty DataFrames and DataFrames with all-NA values
+                    if not df.empty and not df.isna().all().all():
                         batch_dfs.append(df)
                 
                 # Store statistics for later reporting
@@ -1593,7 +1599,12 @@ class StockQuestDB(StockDBBase):
         if not all_results:
             return pd.DataFrame()
         
-        return pd.concat(all_results, ignore_index=True)
+        # Filter out any empty or all-NA DataFrames before final concat
+        valid_results = [df for df in all_results if not df.empty and not df.isna().all().all()]
+        if not valid_results:
+            return pd.DataFrame()
+        
+        return pd.concat(valid_results, ignore_index=True)
     
     def get_process_statistics(self) -> List[Dict[str, Any]]:
         """Get statistics from multiprocess operations."""
