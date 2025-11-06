@@ -1186,6 +1186,9 @@ Examples:
 
   # Quiet mode - suppress output but still save CSV files
   python historical_stock_options.py --symbols AAPL MSFT --date 2024-06-05 --quiet
+
+  # Fetch once before waiting for market open (useful since option prices don't change during non-market hours)
+  python historical_stock_options.py AAPL --fetch-once-before-wait --continuous
 """
     )
     
@@ -1307,6 +1310,11 @@ Examples:
         default=500,
         help="Maximum number of records to send in a single database request when using HTTP server (default: 500). Large datasets will be automatically split into batches."
     )
+    parser.add_argument(
+        '--fetch-once-before-wait',
+        action='store_true',
+        help="If market is closed, fetch once immediately before waiting for market open. Useful since option prices don't change during non-market hours."
+    )
     # Backward-compatibility (hidden): legacy --db-conn maps to --use-db
     parser.add_argument(
         '--db-conn',
@@ -1376,7 +1384,80 @@ Examples:
         print("No symbols specified or found. Exiting.", file=sys.stderr)
         sys.exit(1)
 
-    fetcher = HistoricalDataFetcher(api_key, args.data_dir, args.quiet)
+    # Check market status and wait if needed
+    now_utc = datetime.now(timezone.utc)
+    is_market_open = common_is_market_hours(now_utc, "America/New_York")
+    seconds_to_open, _ = common_compute_market_transition_times(now_utc, "America/New_York")
+    
+    if not is_market_open and seconds_to_open is not None:
+        # Market is closed - handle based on fetch-once-before-wait flag
+        if getattr(args, 'fetch_once_before_wait', False):
+            # Fetch once immediately before waiting
+            if not args.quiet:
+                print(f"Market is closed. Fetching once immediately before waiting for market open...")
+            
+            # Run a single fetch
+            from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+            exec_type = args.executor_type
+            if args.max_concurrent and args.max_concurrent > 0:
+                max_workers = args.max_concurrent
+            else:
+                max_workers = (os.cpu_count() or 1) if exec_type == 'process' else (os.cpu_count() or 1) * 5
+            
+            if not args.quiet:
+                print(f"Fetching data for {len(symbols_list)} symbols (one-time fetch before waiting)...")
+            
+            ExecutorCls = ProcessPoolExecutor if exec_type == 'process' else ThreadPoolExecutor
+            with ExecutorCls(max_workers=max_workers) as pool:
+                futures_map = {pool.submit(_run_for_symbol, symbol, args, api_key): symbol for symbol in symbols_list}
+                db_save_tasks = []
+                for fut in as_completed(futures_map):
+                    result = fut.result()
+                    if isinstance(result, dict) and 'formatted_output' in result:
+                        if not args.quiet and result['formatted_output']:
+                            print(result['formatted_output'])
+                        if result.get('db_save_data'):
+                            db_save_tasks.append(result['db_save_data'])
+                    elif not args.quiet and result:
+                        print(result)
+                
+                # Save all database data
+                if db_save_tasks and getattr(args, 'use_db', None):
+                    await save_options_to_database(db_save_tasks, args)
+            
+            # Now wait for market open
+            if not args.quiet:
+                hours_to_wait = seconds_to_open / 3600
+                print(f"One-time fetch completed. Waiting {hours_to_wait:.2f} hours ({seconds_to_open:.0f} seconds) until market opens...")
+            
+            await asyncio.sleep(seconds_to_open)
+            
+            # Re-check market status after waiting
+            now_utc = datetime.now(timezone.utc)
+            is_market_open = common_is_market_hours(now_utc, "America/New_York")
+            if not args.quiet:
+                if is_market_open:
+                    print("Market is now open. Proceeding with normal operation...")
+                else:
+                    print("Warning: Market is still not open after waiting. Proceeding anyway...")
+        else:
+            # Wait for market open before starting
+            if not args.quiet:
+                hours_to_wait = seconds_to_open / 3600
+                print(f"Market is closed. Waiting {hours_to_wait:.2f} hours ({seconds_to_open:.0f} seconds) until market opens before starting...")
+            
+            await asyncio.sleep(seconds_to_open)
+            
+            # Re-check market status after waiting
+            now_utc = datetime.now(timezone.utc)
+            is_market_open = common_is_market_hours(now_utc, "America/New_York")
+            if not args.quiet:
+                if is_market_open:
+                    print("Market is now open. Starting data fetch...")
+                else:
+                    print("Warning: Market is still not open after waiting. Proceeding anyway...")
+
+    fetcher = HistoricalDataFetcher(api_key, args.data_dir, args.quiet, getattr(args, 'snapshot_max_concurrent', 0))
     
     async def run_one_batch_and_sleep_once() -> bool:
         # returns True if should continue, False to stop
