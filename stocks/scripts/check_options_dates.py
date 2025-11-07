@@ -4,7 +4,10 @@ Quick diagnostic script to check what option expiration dates exist in the datab
 """
 import sys
 import asyncio
+import traceback
 from pathlib import Path
+from datetime import datetime, timezone
+import pandas as pd
 
 # Add project root to path
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -13,6 +16,42 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from common.stock_db import get_stock_db
+
+def format_timestamp_local(ts):
+    """Convert timestamp to local timezone and format for display."""
+    if ts is None:
+        return None
+    
+    try:
+        # Get local timezone from system
+        # Use UTC-aware datetime to get local timezone
+        local_tz = datetime.now(timezone.utc).astimezone().tzinfo
+        
+        # Handle pandas Timestamp
+        if isinstance(ts, pd.Timestamp):
+            # Convert to datetime object
+            dt = ts.to_pydatetime()
+            # If timezone-naive, assume UTC
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            # Convert to local timezone
+            dt_local = dt.astimezone(local_tz)
+            return dt_local.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Handle datetime objects
+        if isinstance(ts, datetime):
+            # If timezone-naive, assume UTC
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            # Convert to local timezone
+            ts_local = ts.astimezone(local_tz)
+            return ts_local.strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        # If timezone conversion fails, return as string
+        return str(ts)
+    
+    # Fallback: return as string
+    return str(ts)
 
 async def check_dates(db_conn: str, tickers: list):
     """Check available option expiration dates in the database."""
@@ -37,9 +76,15 @@ async def check_dates(db_conn: str, tickers: list):
             
             df = await db.execute_select_sql(query)
             
-            # Normalize column names to lowercase for QuestDB compatibility
+            # QuestDB may return columns as numeric indices, so map them to proper names
             if not df.empty:
-                df.columns = [str(c).lower() for c in df.columns]
+                # Check if columns are numeric indices (QuestDB behavior)
+                if len(df.columns) > 0 and str(df.columns[0]).isdigit():
+                    # Map based on SELECT order: expiration_date, option_type, last_update
+                    df.columns = ['expiration_date', 'option_type', 'last_update']
+                else:
+                    # Normalize column names to lowercase for QuestDB compatibility
+                    df.columns = [str(c).lower() for c in df.columns]
             
             # Also get the overall last update time for this ticker
             overall_query = f"""
@@ -51,45 +96,42 @@ async def check_dates(db_conn: str, tickers: list):
             
             overall_df = await db.execute_select_sql(overall_query)
             
-            # Normalize column names to lowercase for QuestDB compatibility
+            # QuestDB may return columns as numeric indices, so map them to proper names
             if not overall_df.empty:
-                overall_df.columns = [str(c).lower() for c in overall_df.columns]
+                # Check if columns are numeric indices (QuestDB behavior)
+                if len(overall_df.columns) > 0 and str(overall_df.columns[0]).isdigit():
+                    # Map based on SELECT order: last_update
+                    overall_df.columns = ['last_update']
+                else:
+                    # Normalize column names to lowercase for QuestDB compatibility
+                    overall_df.columns = [str(c).lower() for c in overall_df.columns]
             
             if df.empty:
                 print(f"{ticker}: No options data found")
             else:
-                # Debug: print available columns if needed
-                if 'expiration_date' not in df.columns:
-                    print(f"DEBUG: Available columns: {list(df.columns)}")
-                    print(f"DEBUG: First row: {df.iloc[0].to_dict()}")
-                
                 print(f"{ticker}: Found {len(df)} unique expiration dates")
-                
-                # Access columns safely
-                exp_date_col = 'expiration_date' if 'expiration_date' in df.columns else df.columns[0]
-                last_update_col = 'last_update' if 'last_update' in df.columns else None
-                
-                print(f"  Earliest: {df.iloc[0][exp_date_col]}")
-                print(f"  Latest:   {df.iloc[-1][exp_date_col]}")
+                print(f"  Earliest: {df.iloc[0]['expiration_date']}")
+                print(f"  Latest:   {df.iloc[-1]['expiration_date']}")
                 
                 # Print overall last update time
                 if not overall_df.empty and 'last_update' in overall_df.columns:
                     last_update = overall_df.iloc[0]['last_update']
                     if last_update is not None:
-                        print(f"  Last overall update: {last_update}")
+                        last_update_local = format_timestamp_local(last_update)
+                        print(f"  Last overall update: {last_update_local}")
                 
                 print(f"  All dates with last update times:")
                 for idx, row in df.iterrows():
-                    expiration_date = row[exp_date_col]
-                    last_update = row.get(last_update_col) if last_update_col else None
+                    expiration_date = row['expiration_date']
+                    last_update = row.get('last_update')
                     if last_update is not None:
-                        print(f"    - {expiration_date} (last updated: {last_update})")
+                        last_update_local = format_timestamp_local(last_update)
+                        print(f"    - {expiration_date} (last updated: {last_update_local})")
                     else:
                         print(f"    - {expiration_date} (last updated: N/A)")
             print()
             
         except Exception as e:
-            import traceback
             print(f"Error checking {ticker}: {e}")
             print(f"Traceback: {traceback.format_exc()}\n")
 
