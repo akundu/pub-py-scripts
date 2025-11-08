@@ -19,6 +19,17 @@ from dateutil import parser as date_parser
 from .market_hours import is_market_hours
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
+import json
+import hashlib
+import os
+
+# Try to import redis, but don't fail if it's not available
+try:
+    import redis.asyncio as redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+    redis = None
 
 
 def _process_ticker_options(args: Tuple) -> Tuple[pd.DataFrame, Dict[str, Any]]:
@@ -28,7 +39,7 @@ def _process_ticker_options(args: Tuple) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     
     Args:
         args: (ticker, db_config, expiration_date, start_datetime, 
-               end_datetime, option_tickers, timestamp_lookback_days)
+               end_datetime, option_tickers, timestamp_lookback_days, enable_cache)
     
     Returns:
         Tuple of (DataFrame with processed options, statistics dict)
@@ -36,11 +47,18 @@ def _process_ticker_options(args: Tuple) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     import asyncio
     import time
     import os
+    import pandas as pd
     from .stock_db import get_stock_db
     
-    # Unpack arguments
-    (ticker, db_config, expiration_date, start_datetime, 
-     end_datetime, option_tickers, timestamp_lookback_days) = args
+    # Unpack arguments - handle both old format (without enable_cache) and new format
+    if len(args) == 8:
+        (ticker, db_config, expiration_date, start_datetime, 
+         end_datetime, option_tickers, timestamp_lookback_days, enable_cache) = args
+    else:
+        # Old format - default to cache enabled for backward compatibility
+        (ticker, db_config, expiration_date, start_datetime, 
+         end_datetime, option_tickers, timestamp_lookback_days) = args
+        enable_cache = True
     
     # Track process statistics
     process_id = os.getpid()
@@ -48,18 +66,64 @@ def _process_ticker_options(args: Tuple) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     
     async def _async_process():
         # Create new DB connection in this process
-        db = get_stock_db('questdb', db_config=db_config)
+        # Skip table existence check in worker processes (tables should already exist)
+        # Use the same cache setting as the main process
+        db = get_stock_db('questdb', db_config=db_config, enable_cache=enable_cache, ensure_tables=False)
         await db._init_db()
         
         # Fetch options data for this ticker
-        df = await db.get_latest_options_data(
-            ticker=ticker,
-            expiration_date=expiration_date,
-            start_datetime=start_datetime,
-            end_datetime=end_datetime,
-            option_tickers=option_tickers,
-            timestamp_lookback_days=timestamp_lookback_days
-        )
+        # If option_tickers is specified, fetch each one individually
+        if option_tickers:
+            # Fetch each option_ticker individually and combine
+            all_dfs = []
+            for option_ticker in option_tickers:
+                df = await db.get_latest_options_data(
+                    ticker=ticker,
+                    option_ticker=option_ticker,
+                    expiration_date=expiration_date,
+                    start_datetime=start_datetime,
+                    end_datetime=end_datetime,
+                    timestamp_lookback_days=timestamp_lookback_days
+                )
+                if not df.empty:
+                    all_dfs.append(df)
+            
+            if all_dfs:
+                # Filter out empty DataFrames and DataFrames with all-NA columns before concatenation to avoid deprecation warning
+                non_empty_dfs = []
+                for df in all_dfs:
+                    # Skip empty DataFrames
+                    if df.empty:
+                        continue
+                    # Skip DataFrames where all columns are all-NA
+                    if df.isna().all().all():
+                        continue
+                    # Skip DataFrames where all rows are all-NA
+                    if df.isna().all(axis=1).all():
+                        continue
+                    # Check if DataFrame has at least one non-NA value anywhere
+                    if df.notna().any().any():
+                        non_empty_dfs.append(df)
+                
+                if non_empty_dfs:
+                    # Additional safety check: filter out any DataFrames that somehow slipped through
+                    final_dfs = [df for df in non_empty_dfs if not df.empty and df.notna().any().any()]
+                    if final_dfs:
+                        df = pd.concat(final_dfs, ignore_index=True)
+                    else:
+                        df = pd.DataFrame()
+                else:
+                    df = pd.DataFrame()
+            else:
+                df = pd.DataFrame()
+        else:
+            # No specific option_tickers - fetch all options using get_options_data
+            df = await db.get_options_data(
+                ticker=ticker,
+                expiration_date=expiration_date,
+                start_datetime=start_datetime,
+                end_datetime=end_datetime
+            )
         
         # Close DB connection
         await db.close()
@@ -98,7 +162,10 @@ class StockQuestDB(StockDBBase):
                  connection_timeout_seconds: int = 180,
                  logger: Optional[logging.Logger] = None,
                  log_level: str = "INFO",
-                 auto_init: bool = True):
+                 auto_init: bool = True,
+                 redis_url: Optional[str] = None,
+                 enable_cache: bool = True,
+                 ensure_tables: bool = False):
         """
         Initialize QuestDB connection with time-series specific settings.
         
@@ -109,6 +176,10 @@ class StockQuestDB(StockDBBase):
             connection_timeout_seconds: Connection establishment timeout in seconds
             logger: Optional logger instance
             log_level: Logging level
+            auto_init: Whether to initialize database connection automatically (default: True)
+            redis_url: Redis connection URL (defaults to redis://localhost:6379/0 or REDIS_URL env var)
+            enable_cache: Whether to enable Redis caching (default: True)
+            ensure_tables: Whether to check/create tables on initialization (default: False, set to True to ensure tables exist)
         """
         # Convert questdb:// URLs to postgresql:// for QuestDB's PostgreSQL wire protocol
         original_config = db_config
@@ -121,6 +192,15 @@ class StockQuestDB(StockDBBase):
                 db_config += '&sslmode=disable'
             
         super().__init__(db_config, logger)
+        
+        # Configure logger level based on log_level parameter
+        if logger is None:
+            # If no logger provided, ensure it's set to the specified level
+            self.logger = get_logger("questdb_db", logger=None, level=log_level)
+        else:
+            # If logger provided, set its level
+            log_level_int = getattr(logging, log_level.upper(), logging.INFO)
+            self.logger.setLevel(log_level_int)
         
         # if original_config.startswith('questdb://'):
         #     self.logger.info(f"Converted questdb:// URL to postgresql:// for QuestDB compatibility")
@@ -138,6 +218,35 @@ class StockQuestDB(StockDBBase):
         self._locks_by_loop: dict[int, dict[str, asyncio.Lock]] = {}
         self._tables_ensured = False
         self._tables_ensured_at = None
+        self._ensure_tables = ensure_tables
+        
+        # Redis cache configuration
+        self.enable_cache = enable_cache and REDIS_AVAILABLE
+        if self.enable_cache:
+            # Get Redis URL from parameter, env var, or default
+            self.redis_url = redis_url or os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+            self._redis_by_loop: dict[int, redis.Redis] = {}
+            self._redis_init_lock = asyncio.Lock()
+            self.logger.debug(f"Redis cache enabled: {self.redis_url}")
+        else:
+            self.redis_url = None
+            if enable_cache and not REDIS_AVAILABLE:
+                self.logger.warning("Redis caching requested but redis package not available. Install with: pip install redis")
+            elif not enable_cache:
+                self.logger.debug("Redis cache disabled")
+        
+        # Cache statistics tracking
+        self._cache_stats = {
+            'hits': 0,
+            'misses': 0,
+            'sets': 0,
+            'invalidations': 0,
+            'errors': 0
+        }
+        
+        # Database query tracking
+        self._db_query_count = 0
+        self._db_query_details = []  # List of (method_name, ticker, timestamp) tuples
         
         self.logger.debug(f"QuestDB initialized with pool size: {pool_max_size}, "
                         f"command timeout: {pool_connection_timeout_minutes} minutes, "
@@ -156,7 +265,10 @@ class StockQuestDB(StockDBBase):
 
     async def _init_db(self) -> None:
         """Initialize the QuestDB database with required tables."""
-        await self._ensure_tables_exist()
+        if self._ensure_tables:
+            await self._ensure_tables_exist()
+        else:
+            self.logger.debug("Skipping table existence check (ensure_tables=False)")
 
     async def _ensure_tables_exist(self) -> None:
         """Create tables if they don't exist in QuestDB."""
@@ -241,10 +353,25 @@ class StockQuestDB(StockDBBase):
             self.logger.warning(f"WAL params tuning failed: {e}")
 
     @asynccontextmanager
-    async def get_connection(self):
+    async def get_connection(self, query_type: str = "unknown"):
         """Context manager for safely getting and returning connections.
         Ensures a distinct pool per asyncio event loop to be thread-safe.
+        
+        Args:
+            query_type: Type of query being performed (for logging purposes)
         """
+        import inspect
+        # Get the calling function name for better logging
+        frame = inspect.currentframe()
+        try:
+            caller_frame = frame.f_back.f_back  # Skip context manager wrapper
+            if caller_frame:
+                caller_name = caller_frame.f_code.co_name
+            else:
+                caller_name = "unknown"
+        except:
+            caller_name = query_type
+        
         loop = asyncio.get_running_loop()
         loop_id = id(loop)
         pool = self._pool_by_loop.get(loop_id)
@@ -265,6 +392,18 @@ class StockQuestDB(StockDBBase):
                     )
                     self._pool_by_loop[loop_id] = pool
 
+        # Track database query
+        self._db_query_count += 1
+        
+        # Only log significant queries, not every connection acquisition
+        # Log queries that are likely to be expensive or important to track
+        significant_queries = ['get_latest_options_data', 'get_latest_price', 'get_latest_prices', 
+                              'get_previous_close_prices', 'get_today_opening_prices', 
+                              'get_financial_info', 'get_stock_data', 'get_realtime_data']
+        
+        if caller_name in significant_queries or 'options' in caller_name.lower() or 'price' in caller_name.lower():
+            self.logger.debug(f"[DB CONNECTION] Acquired connection for query: {caller_name} (total queries: {self._db_query_count})")
+        
         async with pool.acquire() as conn:
             yield conn
 
@@ -280,6 +419,889 @@ class StockQuestDB(StockDBBase):
             lock = asyncio.Lock()
             table_locks[table] = lock
         return lock
+
+    async def _get_redis_client(self) -> Optional[redis.Redis]:
+        """Get Redis client for the current event loop, creating if needed.
+        
+        For twemproxy compatibility, we create connections on-demand and don't cache them
+        since twemproxy may close connections immediately.
+        """
+        if not self.enable_cache:
+            return None
+        
+        try:
+            loop = asyncio.get_running_loop()
+            loop_id = id(loop)
+            
+            # For twemproxy: create connections on-demand instead of caching
+            # Twemproxy closes connections immediately, so caching doesn't help
+            # Try using connection pool for better reliability
+            try:
+                # Configure for twemproxy compatibility - use basic connection settings
+                # Twemproxy doesn't support INFO command, so we need to avoid it
+                # Note: redis.asyncio doesn't support no_ready_check, so we'll handle errors gracefully
+                client = redis.from_url(
+                    self.redis_url,
+                    encoding="utf-8",
+                    decode_responses=False,  # We'll handle encoding ourselves
+                    socket_keepalive=True,
+                    retry_on_timeout=True,
+                    socket_connect_timeout=10,  # Increased for twemproxy
+                    socket_timeout=10,  # Increased for twemproxy
+                    # Don't use health_check_interval with twemproxy
+                    # health_check_interval can cause issues with proxies
+                    # Use single connection (no pool) for twemproxy
+                    max_connections=1,
+                )
+                # Don't test with PING - twemproxy closes connections immediately
+                # Connection will be tested on first actual use
+                self.logger.debug(f"Redis client created for loop {loop_id} (twemproxy - on-demand, single connection)")
+                return client
+            except Exception as e:
+                self.logger.debug(f"Failed to create Redis client: {e}")
+                self._cache_stats['errors'] += 1
+                return None
+            
+        except Exception as e:
+            self.logger.debug(f"Error getting Redis client: {e}")
+            self._cache_stats['errors'] += 1
+            return None
+
+    def _make_cache_key(self, table_or_type: str, parts: Dict[str, Any]) -> str:
+        """Generate a cache key from table/data type and parameters.
+        
+        Args:
+            table_or_type: Table name (e.g., 'daily_prices', 'options_data') or 
+                          logical type (e.g., 'realtime_data:quote' for type-specific queries)
+            parts: Dictionary of parameters that affect the query result
+        """
+        # Sort parts for consistent key generation
+        sorted_parts = sorted(parts.items())
+        # Create a stable hash of the parameters
+        param_str = json.dumps(sorted_parts, sort_keys=True, default=str)
+        param_hash = hashlib.sha1(param_str.encode()).hexdigest()[:16]
+        
+        # Build key: stocks:{table_or_type}:{ticker}:{hash}
+        key_parts = ['stocks', table_or_type]
+        
+        # Always include ticker if present (for easier invalidation)
+        if 'ticker' in parts:
+            key_parts.append(str(parts['ticker']).upper())
+        
+        # Add hash of all parameters
+        key_parts.append(param_hash)
+        return ':'.join(key_parts)
+
+    def _make_date_cache_key(self, table_or_type: str, ticker: str, date_str: str) -> str:
+        """Generate a cache key for a specific date/hour.
+        
+        Args:
+            table_or_type: Table name (e.g., 'daily_prices', 'hourly_prices')
+            ticker: Stock ticker symbol
+            date_str: Date string in YYYY-MM-DD format (for daily) or YYYY-MM-DD HH:MM:SS (for hourly)
+        """
+        # Build key: stocks:{table_or_type}:{ticker}:date:{date_str}
+        return f"stocks:{table_or_type}:{ticker.upper()}:date:{date_str}"
+    
+    def _make_simple_cache_key(self, table_or_type: str, ticker: str) -> str:
+        """Generate a simple cache key without hash (for data that doesn't need parameter-based caching).
+        
+        Args:
+            table_or_type: Table name or logical type (e.g., 'financial_info')
+            ticker: Stock ticker symbol
+        """
+        # Build key: stocks:{table_or_type}:{ticker}
+        return f"stocks:{table_or_type}:{ticker.upper()}"
+    
+    def _make_options_cache_key(self, ticker: str, option_ticker: str) -> str:
+        """Generate a cache key for options data from ticker and option_ticker.
+        
+        Args:
+            ticker: Stock ticker symbol
+            option_ticker: Option ticker symbol (required)
+        
+        Returns:
+            Cache key in format: stocks:options_data:{TICKER}:{OPTION_TICKER}
+        """
+        return f"stocks:options_data:{ticker.upper()}:{option_ticker}"
+    
+    async def _get_all_cached_options_for_ticker(self, ticker: str) -> pd.DataFrame:
+        """Get all cached options for a ticker by querying DB for option_tickers list, then fetching each from cache.
+        
+        This avoids SCAN issues with twemproxy by querying the database once to get the list of option_tickers,
+        then fetching each one individually from cache (or DB if cache miss).
+        
+        Args:
+            ticker: Stock ticker symbol
+            
+        Returns:
+            DataFrame with all cached options for the ticker, or empty DataFrame if none found
+        """
+        if not self.enable_cache:
+            return pd.DataFrame()
+        
+        # Query database once to get all option_tickers for this ticker
+        # Cache this list so we only query once per ticker
+        option_tickers_cache_key = f"stocks:options_data:{ticker.upper()}:option_tickers_list"
+        cached_option_tickers_list = await self._cache_get_value(option_tickers_cache_key)
+        
+        if cached_option_tickers_list is None:
+            # Query DB to get list of option_tickers for this ticker
+            async with self.get_connection() as conn:
+                try:
+                    query = "SELECT DISTINCT option_ticker FROM options_data WHERE ticker = $1 ORDER BY option_ticker"
+                    rows = await conn.fetch(query, ticker)
+                    if rows:
+                        option_tickers_list = [row['option_ticker'] for row in rows if row.get('option_ticker')]
+                        # Cache the list (no TTL - invalidated on save)
+                        await self._cache_set_value(option_tickers_cache_key, option_tickers_list)
+                        self.logger.debug(f"[CACHE] Queried DB for {len(option_tickers_list)} option_tickers for {ticker}, cached list")
+                    else:
+                        # Cache empty list to avoid repeated queries
+                        await self._cache_set_value(option_tickers_cache_key, [])
+                        self.logger.debug(f"[CACHE] No option_tickers found in DB for {ticker}, cached empty list")
+                        return pd.DataFrame()
+                except Exception as e:
+                    self.logger.debug(f"Error querying option_tickers list for {ticker}: {e}")
+                    return pd.DataFrame()
+        else:
+            option_tickers_list = cached_option_tickers_list
+            if not option_tickers_list:
+                return pd.DataFrame()
+            self.logger.debug(f"[CACHE] Using cached option_tickers list for {ticker} ({len(option_tickers_list)} options)")
+        
+        # Now fetch option_tickers from cache in batches (or DB if cache miss)
+        all_dfs = []
+        cache_hits = 0
+        cache_misses = 0
+        
+        # Batch size for Redis MGET operations
+        BATCH_SIZE = 500
+        
+        # Process option_tickers in batches
+        for batch_start in range(0, len(option_tickers_list), BATCH_SIZE):
+            batch_end = min(batch_start + BATCH_SIZE, len(option_tickers_list))
+            batch_option_tickers = option_tickers_list[batch_start:batch_end]
+            
+            # Build cache keys for this batch
+            batch_cache_keys = [self._make_options_cache_key(ticker, option_ticker) for option_ticker in batch_option_tickers]
+            
+            # Fetch all keys in this batch at once using MGET
+            cached_results = await self._cache_get_df_batch(batch_cache_keys)
+            
+            # Process results for this batch
+            for i, option_ticker in enumerate(batch_option_tickers):
+                cache_key = batch_cache_keys[i]
+                cached_df = cached_results.get(cache_key)
+                
+                if cached_df is not None and not cached_df.empty:
+                    cache_hits += 1
+                    # Reset index if timestamp is the index
+                    if cached_df.index.name == 'timestamp' or (cached_df.index.names and 'timestamp' in cached_df.index.names):
+                        cached_df = cached_df.reset_index()
+                    all_dfs.append(cached_df)
+                else:
+                    cache_misses += 1
+                    # Cache miss - fetch from DB and cache it
+                    try:
+                        async with self.get_connection() as conn:
+                            query = "SELECT * FROM options_data WHERE ticker = $1 AND option_ticker = $2 ORDER BY timestamp DESC"
+                            rows = await conn.fetch(query, ticker, option_ticker)
+                            if rows:
+                                df = pd.DataFrame([dict(r) for r in rows])
+                                # Deduplicate by option_ticker
+                                if 'option_ticker' in df.columns and not df.empty:
+                                    df = df.drop_duplicates(subset=['option_ticker'], keep='first')
+                                # Set timestamp index if available
+                                if 'timestamp' in df.columns:
+                                    df['timestamp'] = pd.to_datetime(df['timestamp'])
+                                    df.set_index('timestamp', inplace=True)
+                                    df = df[df.index.notna()]
+                                
+                                # Cache it
+                                if 'option_ticker' in df.columns and not df.empty:
+                                    option_df = df[df['option_ticker'] == option_ticker].copy()
+                                    if not option_df.empty:
+                                        await self._cache_set_df(cache_key, option_df)  # No TTL
+                                
+                                # Reset index for combining
+                                if df.index.name == 'timestamp' or (df.index.names and 'timestamp' in df.index.names):
+                                    df = df.reset_index()
+                                all_dfs.append(df)
+                    except Exception as e:
+                        self.logger.debug(f"Error fetching option_ticker {option_ticker} from DB: {e}")
+                        continue
+        
+        if not all_dfs:
+            return pd.DataFrame()
+        
+        # Filter out empty DataFrames and DataFrames with all-NA columns before concatenation to avoid deprecation warning
+        non_empty_dfs = []
+        for df in all_dfs:
+            # Skip empty DataFrames
+            if df.empty:
+                continue
+            # Skip DataFrames where all columns are all-NA
+            if df.isna().all().all():
+                continue
+            # Skip DataFrames where all rows are all-NA
+            if df.isna().all(axis=1).all():
+                continue
+            # Check if DataFrame has at least one non-NA value anywhere (positive check)
+            if not df.notna().any().any():
+                continue
+            # DataFrame has valid data
+            non_empty_dfs.append(df)
+        
+        if not non_empty_dfs:
+            return pd.DataFrame()
+        
+        # Combine all DataFrames - ensure we only concatenate DataFrames with actual data
+        # Additional safety check: filter out any DataFrames that somehow slipped through
+        # Drop all-NA columns from each DataFrame before concatenation to avoid deprecation warning
+        final_dfs = []
+        for df in non_empty_dfs:
+            if df.empty:
+                continue
+            # Drop all-NA columns and rows, then check if anything remains
+            # This ensures the DataFrame has actual data, not just all-NA columns/rows
+            df_cleaned = df.dropna(axis=1, how='all').dropna(axis=0, how='all')
+            if df_cleaned.empty:
+                continue
+            # Drop all-NA columns from the DataFrame before concatenation to avoid deprecation warning
+            # Keep the cleaned version (without all-NA columns) for concatenation
+            final_dfs.append(df_cleaned)
+        
+        if not final_dfs:
+            return pd.DataFrame()
+        
+        combined_df = pd.concat(final_dfs, ignore_index=True)
+        
+        # Deduplicate by option_ticker (keep latest)
+        if 'option_ticker' in combined_df.columns and not combined_df.empty:
+            combined_df = combined_df.drop_duplicates(subset=['option_ticker'], keep='first')
+        
+        # Sort by timestamp DESC (matching database query behavior)
+        if 'timestamp' in combined_df.columns:
+            combined_df = combined_df.sort_values('timestamp', ascending=False)
+        
+        self.logger.debug(f"[CACHE] Fetched {len(all_dfs)} options for {ticker} (cache hits: {cache_hits}, misses: {cache_misses}), combined into {len(combined_df)} unique options")
+        return combined_df
+
+    def _df_to_cache(self, df: pd.DataFrame) -> bytes:
+        """Serialize DataFrame to bytes for Redis storage."""
+        if df.empty:
+            return json.dumps({'empty': True}).encode('utf-8')
+        # Use split orientation for efficient storage
+        # Convert datetime index to ISO format strings to preserve type information
+        df_copy = df.copy()
+        if pd.api.types.is_datetime64_any_dtype(df_copy.index):
+            # Convert datetime index to ISO format strings for better deserialization
+            df_copy.index = df_copy.index.strftime('%Y-%m-%dT%H:%M:%S.%f')
+        json_str = df_copy.to_json(orient='split', date_format='iso')
+        # Store index name separately to help with deserialization
+        index_name = df.index.name if df.index.name else None
+        cache_data = {
+            'empty': False,
+            'data': json_str,
+            'index_name': index_name,
+            'index_is_datetime': pd.api.types.is_datetime64_any_dtype(df.index) if hasattr(df, 'index') else False
+        }
+        return json.dumps(cache_data).encode('utf-8')
+
+    def _df_from_cache(self, data: bytes) -> Optional[pd.DataFrame]:
+        """Deserialize DataFrame from Redis bytes."""
+        try:
+            from io import StringIO
+            decoded = json.loads(data.decode('utf-8'))
+            if decoded.get('empty', False):
+                return pd.DataFrame()
+            
+            # Handle both old format (just 'data') and new format (with metadata)
+            if 'data' in decoded:
+                json_str = decoded["data"]
+                index_name = decoded.get('index_name')
+                index_is_datetime = decoded.get('index_is_datetime', False)
+            else:
+                # Old format - just the JSON string
+                json_str = decoded if isinstance(decoded, str) else decoded.get('data', '')
+                index_name = None
+                index_is_datetime = False
+            
+            df = pd.read_json(StringIO(json_str), orient='split')
+            
+            # Restore index name if it was stored
+            if index_name:
+                df.index.name = index_name
+            
+            # Always ensure index is datetime if it was originally datetime or if index name suggests it
+            should_be_datetime = (
+                index_is_datetime or 
+                df.index.name in ['date', 'datetime', 'timestamp'] or
+                (len(df.index) > 0 and not pd.api.types.is_datetime64_any_dtype(df.index))
+            )
+            
+            if should_be_datetime and len(df.index) > 0:
+                try:
+                    # Try converting index to datetime
+                    if pd.api.types.is_integer_dtype(df.index):
+                        # Might be Unix timestamp - try seconds first, then milliseconds
+                        # First check if it looks like a Unix timestamp (reasonable range)
+                        first_val = df.index[0]
+                        if first_val > 1e10:  # Likely milliseconds (after year 2001)
+                            df.index = pd.to_datetime(df.index, unit='ms', errors='coerce')
+                        elif first_val > 1e9:  # Likely seconds (after year 2001)
+                            df.index = pd.to_datetime(df.index, unit='s', errors='coerce')
+                        else:
+                            # Might be a date in YYYYMMDD format or similar - try general conversion
+                            df.index = pd.to_datetime(df.index, errors='coerce')
+                        # If conversion failed, try the other unit
+                        if df.index.isna().all() or (df.index.isna().any() and df.index.notna().sum() == 0):
+                            if first_val > 1e10:
+                                df.index = pd.to_datetime(df.index, unit='s', errors='coerce')
+                            else:
+                                df.index = pd.to_datetime(df.index, unit='ms', errors='coerce')
+                    elif pd.api.types.is_string_dtype(df.index) or (len(df.index) > 0 and isinstance(df.index[0], str)):
+                        # String index - try to parse as datetime
+                        df.index = pd.to_datetime(df.index, errors='coerce')
+                    else:
+                        # Try general conversion
+                        df.index = pd.to_datetime(df.index, errors='coerce')
+                    
+                    # Remove any NaT values that couldn't be converted
+                    if df.index.isna().any():
+                        df = df[df.index.notna()]
+                except Exception as e:
+                    self.logger.debug(f"Error converting index to datetime in cache deserialization: {e}")
+                    # Last resort: try to convert the entire index
+                    try:
+                        df.index = pd.to_datetime(df.index, errors='coerce')
+                        if df.index.isna().any():
+                            df = df[df.index.notna()]
+                    except Exception:
+                        pass
+            
+            return df
+        except Exception as e:
+            self.logger.debug(f"Error deserializing DataFrame from cache: {e}")
+            return None
+
+    async def _cache_get_df_batch(self, keys: List[str]) -> Dict[str, Optional[pd.DataFrame]]:
+        """Get multiple DataFrames from cache in a single batch operation.
+        
+        Args:
+            keys: List of cache keys to fetch
+            
+        Returns:
+            Dictionary mapping keys to DataFrames (or None if not found/failed)
+        """
+        if not self.enable_cache or not keys:
+            return {key: None for key in keys}
+        
+        client = None
+        results = {}
+        try:
+            # Create connection on-demand (twemproxy compatibility)
+            client = await self._get_redis_client()
+            if client is None:
+                # Client creation failed - count all as misses
+                for key in keys:
+                    self._cache_stats['misses'] += 1
+                    results[key] = None
+                return results
+            
+            # Use MGET to fetch all keys at once
+            try:
+                data_list = await client.mget(keys)
+            except Exception as conn_error:
+                error_msg = str(conn_error).lower()
+                if "connection closed" in error_msg or "closed by server" in error_msg or "connection" in error_msg:
+                    # Twemproxy closed the connection - close client and retry once with new connection
+                    self.logger.debug(f"Redis connection closed by twemproxy during MGET, retrying with new connection...")
+                    try:
+                        await client.aclose()
+                    except:
+                        pass
+                    client = None
+                    
+                    # Retry once with new connection
+                    client = await self._get_redis_client()
+                    if client is None:
+                        for key in keys:
+                            self._cache_stats['errors'] += 1
+                            self._cache_stats['misses'] += 1
+                            results[key] = None
+                        return results
+                    try:
+                        data_list = await client.mget(keys)
+                    except Exception as retry_error:
+                        # Second attempt failed - give up
+                        self.logger.debug(f"Cache MGET retry failed for {len(keys)} keys: {retry_error}")
+                        for key in keys:
+                            self._cache_stats['errors'] += 1
+                            self._cache_stats['misses'] += 1
+                            results[key] = None
+                        return results
+                else:
+                    raise
+            
+            # Process results
+            for i, key in enumerate(keys):
+                data = data_list[i] if i < len(data_list) else None
+                if data is None:
+                    self._cache_stats['misses'] += 1
+                    results[key] = None
+                else:
+                    df = self._df_from_cache(data)
+                    if df is not None:
+                        self._cache_stats['hits'] += 1
+                        results[key] = df
+                    else:
+                        self._cache_stats['misses'] += 1
+                        results[key] = None
+            
+            return results
+        except Exception as e:
+            self.logger.debug(f"Cache MGET error for {len(keys)} keys: {e}")
+            for key in keys:
+                self._cache_stats['errors'] += 1
+                self._cache_stats['misses'] += 1
+                results[key] = None
+            return results
+        finally:
+            # Close client after use (twemproxy compatibility - connections are on-demand)
+            if client:
+                try:
+                    await client.aclose()
+                except:
+                    pass
+
+    async def _cache_get_df(self, key: str) -> Optional[pd.DataFrame]:
+        """Get DataFrame from cache."""
+        if not self.enable_cache:
+            return None
+        
+        client = None
+        try:
+            # Create connection on-demand (twemproxy compatibility)
+            client = await self._get_redis_client()
+            if client is None:
+                # Client creation failed - count as miss
+                self._cache_stats['misses'] += 1
+                return None
+            
+            # Handle connection errors gracefully (twemproxy may close connections)
+            try:
+                data = await client.get(key)
+            except Exception as conn_error:
+                error_msg = str(conn_error).lower()
+                if "connection closed" in error_msg or "closed by server" in error_msg or "connection" in error_msg:
+                    # Twemproxy closed the connection - close client and retry once with new connection
+                    self.logger.debug(f"Redis connection closed by twemproxy during GET, retrying with new connection...")
+                    try:
+                        await client.aclose()
+                    except:
+                        pass
+                    client = None
+                    
+                    # Retry once with new connection
+                    client = await self._get_redis_client()
+                    if client is None:
+                        self._cache_stats['errors'] += 1
+                        self._cache_stats['misses'] += 1
+                        return None
+                    try:
+                        data = await client.get(key)
+                    except Exception as retry_error:
+                        # Second attempt failed - give up
+                        self.logger.debug(f"Cache GET retry failed for key {key}: {retry_error}")
+                        self._cache_stats['errors'] += 1
+                        self._cache_stats['misses'] += 1
+                        return None
+                else:
+                    raise
+            
+            if data is None:
+                self._cache_stats['misses'] += 1
+                self.logger.debug(f"[CACHE MISS] DataFrame key: {key[:80]}... - Will query database")
+                return None
+            
+            df = self._df_from_cache(data)
+            if df is not None:
+                self._cache_stats['hits'] += 1
+                self.logger.debug(f"[CACHE HIT] DataFrame key: {key[:80]}... - Returning cached DataFrame")
+            else:
+                self._cache_stats['misses'] += 1
+                self.logger.debug(f"[CACHE MISS] DataFrame key: {key[:80]}... - Deserialization failed, will query database")
+            return df
+        except Exception as e:
+            self.logger.debug(f"Cache GET error for key {key}: {e}")
+            self._cache_stats['errors'] += 1
+            self._cache_stats['misses'] += 1
+            return None
+        finally:
+            # Close client after use (twemproxy compatibility - connections are on-demand)
+            if client:
+                try:
+                    await client.aclose()
+                except:
+                    pass
+
+    async def _cache_set_df(self, key: str, df: pd.DataFrame, ttl_seconds: Optional[int] = None) -> bool:
+        """Store DataFrame in cache with optional TTL.
+        
+        Args:
+            key: Cache key
+            df: DataFrame to cache
+            ttl_seconds: Time to live in seconds (None = infinite cache)
+        """
+        if not self.enable_cache:
+            return False
+        
+        client = None
+        try:
+            # Create connection on-demand (twemproxy compatibility)
+            client = await self._get_redis_client()
+            if client is None:
+                return False
+            
+            data = self._df_to_cache(df)
+            # Handle connection errors gracefully (twemproxy may close connections)
+            try:
+                if ttl_seconds is not None:
+                    await client.setex(key, ttl_seconds, data)
+                else:
+                    await client.set(key, data)
+                self._cache_stats['sets'] += 1
+                self.logger.debug(f"Cache SET successful for key {key[:50]}...")
+                return True
+            except Exception as conn_error:
+                error_msg = str(conn_error).lower()
+                error_type = type(conn_error).__name__
+                self.logger.debug(f"Cache SET error for key {key[:50]}...: {error_type}: {conn_error}")
+                
+                if "connection closed" in error_msg or "closed by server" in error_msg or "connection" in error_msg:
+                    # Twemproxy closed the connection - close client and retry once with new connection
+                    self.logger.debug(f"Redis connection closed by twemproxy during SET, retrying with new connection...")
+                    try:
+                        await client.aclose()
+                    except:
+                        pass
+                    client = None
+                    
+                    # Retry once with new connection
+                    client = await self._get_redis_client()
+                    if client is None:
+                        self.logger.debug(f"Failed to create new Redis client for retry")
+                        self._cache_stats['errors'] += 1
+                        return False
+                    try:
+                        if ttl_seconds is not None:
+                            await client.setex(key, ttl_seconds, data)
+                        else:
+                            await client.set(key, data)
+                        # Success on retry - count as set
+                        self._cache_stats['sets'] += 1
+                        self.logger.debug(f"Cache SET retry successful for key {key[:50]}...")
+                        return True
+                    except Exception as retry_error:
+                        # Second attempt failed - give up
+                        retry_error_type = type(retry_error).__name__
+                        self.logger.debug(f"Cache SET retry failed for key {key[:50]}...: {retry_error_type}: {retry_error}")
+                        self._cache_stats['errors'] += 1
+                        return False
+                else:
+                    # Not a connection error - log and fail
+                    self.logger.debug(f"Cache SET non-connection error for key {key[:50]}...: {error_type}: {conn_error}")
+                    self._cache_stats['errors'] += 1
+                    return False
+        except Exception as e:
+            # Log the actual error for debugging
+            error_msg = str(e).lower()
+            if "connection closed" not in error_msg and "closed by server" not in error_msg:
+                # Only log non-connection errors at debug level
+                self.logger.debug(f"Cache SET error for key {key}: {e}")
+            self._cache_stats['errors'] += 1
+            return False
+        finally:
+            # Close client after use (twemproxy compatibility - connections are on-demand)
+            if client:
+                try:
+                    await client.aclose()
+                except:
+                    pass
+
+    async def _cache_get_value(self, key: str) -> Optional[Any]:
+        """Get scalar value from cache."""
+        if not self.enable_cache:
+            return None
+        
+        client = None
+        try:
+            # Create connection on-demand (twemproxy compatibility)
+            client = await self._get_redis_client()
+            if client is None:
+                # Client creation failed - count as miss
+                self._cache_stats['misses'] += 1
+                return None
+            
+            # Handle connection errors gracefully (twemproxy may close connections)
+            try:
+                data = await client.get(key)
+            except Exception as conn_error:
+                error_msg = str(conn_error).lower()
+                if "connection closed" in error_msg or "closed by server" in error_msg or "connection" in error_msg:
+                    # Twemproxy closed the connection - close client and retry once with new connection
+                    self.logger.debug(f"Redis connection closed by twemproxy during GET, retrying with new connection...")
+                    try:
+                        await client.aclose()
+                    except:
+                        pass
+                    client = None
+                    
+                    # Retry once with new connection
+                    client = await self._get_redis_client()
+                    if client is None:
+                        self._cache_stats['errors'] += 1
+                        self._cache_stats['misses'] += 1
+                        return None
+                    try:
+                        data = await client.get(key)
+                    except Exception as retry_error:
+                        # Second attempt failed - give up
+                        self.logger.debug(f"Cache GET retry failed for key {key}: {retry_error}")
+                        self._cache_stats['errors'] += 1
+                        self._cache_stats['misses'] += 1
+                        return None
+                else:
+                    raise
+            
+            if data is None:
+                self._cache_stats['misses'] += 1
+                self.logger.debug(f"[CACHE MISS] Key: {key[:80]}... - Will query database")
+                return None
+            
+            value = json.loads(data.decode('utf-8'))
+            self._cache_stats['hits'] += 1
+            self.logger.debug(f"[CACHE HIT] Key: {key[:80]}... - Returning cached value")
+            return value
+        except Exception as e:
+            self.logger.debug(f"Cache GET error for key {key}: {e}")
+            self._cache_stats['errors'] += 1
+            self._cache_stats['misses'] += 1
+            return None
+        finally:
+            # Close client after use (twemproxy compatibility - connections are on-demand)
+            if client:
+                try:
+                    await client.aclose()
+                except:
+                    pass
+
+    async def _cache_set_value(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> bool:
+        """Store scalar value in cache with optional TTL.
+        
+        Args:
+            key: Cache key
+            value: Scalar value to cache
+            ttl_seconds: Time to live in seconds (None = infinite cache)
+        """
+        if not self.enable_cache:
+            return False
+        
+        client = None
+        try:
+            # Create connection on-demand (twemproxy compatibility)
+            client = await self._get_redis_client()
+            if client is None:
+                return False
+            
+            data = json.dumps(value).encode('utf-8')
+            # Handle connection errors gracefully (twemproxy may close connections)
+            try:
+                if ttl_seconds is not None:
+                    await client.setex(key, ttl_seconds, data)
+                else:
+                    await client.set(key, data)
+                self._cache_stats['sets'] += 1
+                self.logger.debug(f"Cache SET successful for key {key[:50]}...")
+                return True
+            except Exception as conn_error:
+                error_msg = str(conn_error).lower()
+                error_type = type(conn_error).__name__
+                self.logger.debug(f"Cache SET error for key {key[:50]}...: {error_type}: {conn_error}")
+                
+                if "connection closed" in error_msg or "closed by server" in error_msg or "connection" in error_msg:
+                    # Twemproxy closed the connection - close client and retry once with new connection
+                    self.logger.debug(f"Redis connection closed by twemproxy during SET, retrying with new connection...")
+                    try:
+                        await client.aclose()
+                    except:
+                        pass
+                    client = None
+                    
+                    # Retry once with new connection
+                    client = await self._get_redis_client()
+                    if client is None:
+                        self.logger.debug(f"Failed to create new Redis client for retry")
+                        self._cache_stats['errors'] += 1
+                        return False
+                    try:
+                        if ttl_seconds is not None:
+                            await client.setex(key, ttl_seconds, data)
+                        else:
+                            await client.set(key, data)
+                        # Success on retry - count as set
+                        self._cache_stats['sets'] += 1
+                        self.logger.debug(f"Cache SET retry successful for key {key[:50]}...")
+                        return True
+                    except Exception as retry_error:
+                        # Second attempt failed - give up
+                        retry_error_type = type(retry_error).__name__
+                        self.logger.debug(f"Cache SET retry failed for key {key[:50]}...: {retry_error_type}: {retry_error}")
+                        self._cache_stats['errors'] += 1
+                        return False
+                else:
+                    # Not a connection error - log and fail
+                    self.logger.debug(f"Cache SET non-connection error for key {key[:50]}...: {error_type}: {conn_error}")
+                    self._cache_stats['errors'] += 1
+                    return False
+        except Exception as e:
+            # Log the actual error for debugging
+            error_msg = str(e).lower()
+            if "connection closed" not in error_msg and "closed by server" not in error_msg:
+                # Only log non-connection errors at debug level
+                self.logger.debug(f"Cache SET error for key {key}: {e}")
+            self._cache_stats['errors'] += 1
+            return False
+        finally:
+            # Close client after use (twemproxy compatibility - connections are on-demand)
+            if client:
+                try:
+                    await client.aclose()
+                except:
+                    pass
+
+    async def _invalidate_cache_pattern(self, pattern: str) -> int:
+        """Invalidate cache keys matching a pattern. Returns number of keys deleted.
+        
+        Note: Uses SCAN which works with twemproxy if keys hash to the same backend.
+        If SCAN fails (e.g., keys distributed across backends), errors are handled gracefully.
+        """
+        if not self.enable_cache:
+            return 0
+        
+        client = None
+        try:
+            # Create connection on-demand (twemproxy compatibility)
+            client = await self._get_redis_client()
+            if client is None:
+                return 0
+            
+            deleted_count = 0
+            cursor = 0
+            max_iterations = 100  # Limit iterations to avoid blocking
+            
+            try:
+                while max_iterations > 0:
+                    # SCAN works with twemproxy if keys are on the same backend
+                    # If keys are distributed, this may not find all keys, but that's acceptable
+                    cursor, keys = await client.scan(cursor, match=pattern, count=100)
+                    if keys:
+                        # DELETE is supported by twemproxy
+                        await client.delete(*keys)
+                        deleted_count += len(keys)
+                    
+                    if cursor == 0:
+                        break
+                    max_iterations -= 1
+            except Exception as scan_error:
+                # SCAN might fail with twemproxy if keys are distributed
+                # Log but don't fail - cache will be invalidated on next write anyway
+                self.logger.debug(f"SCAN failed for pattern {pattern} (may be twemproxy limitation): {scan_error}")
+                # Try to delete keys individually if we have a pattern match
+                # For now, just log - keys will be overwritten on next cache set
+            
+            if deleted_count > 0:
+                self._cache_stats['invalidations'] += deleted_count
+            
+            return deleted_count
+        except Exception as e:
+            self.logger.debug(f"Cache invalidation error for pattern {pattern}: {e}")
+            self._cache_stats['errors'] += 1
+            return 0
+        finally:
+            # Close client after use (twemproxy compatibility - connections are on-demand)
+            if client:
+                try:
+                    await client.aclose()
+                except:
+                    pass
+
+    async def _invalidate_ticker_cache(self, ticker: str) -> int:
+        """Invalidate all cache entries for a specific ticker."""
+        if not self.enable_cache:
+            return 0
+        
+        ticker_upper = ticker.upper()
+        patterns = [
+            # Note: price keys removed - get_latest_price no longer caches directly
+            f"stocks:daily_prices:{ticker_upper}:*",  # Old query-based keys
+            f"stocks:daily_prices:{ticker_upper}:date:*",  # New per-date keys
+            f"stocks:hourly_prices:{ticker_upper}:*",  # Old query-based keys
+            f"stocks:hourly_prices:{ticker_upper}:date:*",  # New per-hour keys
+            f"stocks:realtime_data:*:{ticker_upper}:*",  # Realtime data keys (no date filters)
+            f"stocks:options_data:{ticker_upper}",  # Options data without option_ticker
+            f"stocks:options_data:{ticker_upper}:*",  # Options data with option_ticker or hash
+            f"stocks:financial_info:{ticker_upper}",  # Simple key without hash (exact match)
+            f"stocks:financial_info:{ticker_upper}:*",  # Old hash-based keys (for backward compatibility)
+        ]
+        
+        total_deleted = 0
+        for pattern in patterns:
+            deleted = await self._invalidate_cache_pattern(pattern)
+            total_deleted += deleted
+        
+        # Also invalidate the option_tickers_list cache
+        option_tickers_list_key = f"stocks:options_data:{ticker_upper}:option_tickers_list"
+        try:
+            client = await self._get_redis_client()
+            if client:
+                try:
+                    await client.delete(option_tickers_list_key)
+                    total_deleted += 1
+                except:
+                    pass
+                finally:
+                    await client.aclose()
+        except:
+            pass
+        
+        return total_deleted
+
+    def get_cache_statistics(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        stats = self._cache_stats.copy()
+        total_requests = stats['hits'] + stats['misses']
+        if total_requests > 0:
+            stats['hit_rate'] = stats['hits'] / total_requests
+        else:
+            stats['hit_rate'] = 0.0
+        stats['total_requests'] = total_requests
+        stats['enabled'] = self.enable_cache
+        # Add database query statistics
+        stats['db_query_count'] = getattr(self, '_db_query_count', 0)
+        return stats
+
+    def reset_cache_statistics(self) -> None:
+        """Reset cache statistics."""
+        self._cache_stats = {
+            'hits': 0,
+            'misses': 0,
+            'sets': 0,
+            'invalidations': 0,
+            'errors': 0
+        }
 
     async def save_stock_data(
         self,
@@ -350,6 +1372,13 @@ class StockQuestDB(StockDBBase):
                     conn,
                 )
 
+            # Save a copy for caching before converting dates to strings
+            cache_df = df_copy.copy()
+            cache_df.set_index(date_col, inplace=True)
+            # Ensure index is datetime type
+            if not pd.api.types.is_datetime64_any_dtype(cache_df.index):
+                cache_df.index = pd.to_datetime(cache_df.index)
+
             # Convert to QuestDB-optimized format
             df_copy[date_col] = df_copy[date_col].dt.strftime('%Y-%m-%d %H:%M:%S')
             # Convert write_timestamp to naive datetime for QuestDB compatibility
@@ -399,6 +1428,51 @@ class StockQuestDB(StockDBBase):
                 # async with table_lock:
                 #     await self._bulk_insert_stock_data(conn, table, records, interval)
                 await self._bulk_insert_stock_data(conn, table, records, interval)
+                
+                # Write to cache after successful save (not just invalidate)
+                # This ensures cache is immediately updated with the new data
+                if self.enable_cache:
+                    try:
+                        # Use the cache_df we prepared before date conversion
+                        # Cache each date/hour individually (same as get_stock_data does)
+                        if not cache_df.empty:
+                            cached_dates = 0
+                            for idx, row in cache_df.iterrows():
+                                # Normalize the index to get the date string
+                                if interval == 'daily':
+                                    # For daily data, use just the date part (YYYY-MM-DD)
+                                    if isinstance(idx, pd.Timestamp):
+                                        date_str = idx.date().strftime('%Y-%m-%d')
+                                    elif hasattr(idx, 'strftime'):
+                                        date_str = idx.strftime('%Y-%m-%d')
+                                    else:
+                                        date_str = str(idx)[:10]
+                                else:
+                                    # For hourly data, use date and hour (YYYY-MM-DD HH:00:00)
+                                    if isinstance(idx, pd.Timestamp):
+                                        date_str = idx.strftime('%Y-%m-%d %H:00:00')
+                                    elif hasattr(idx, 'strftime'):
+                                        date_str = idx.strftime('%Y-%m-%d %H:00:00')
+                                    else:
+                                        date_str = str(idx)[:16]
+                                
+                                # Create single-row DataFrame for this date/hour
+                                date_df = pd.DataFrame([row], index=[idx])
+                                date_df.index.name = date_col
+                                # Ensure index is datetime type
+                                if not pd.api.types.is_datetime64_any_dtype(date_df.index):
+                                    date_df.index = pd.to_datetime(date_df.index)
+                                cache_key = self._make_date_cache_key(table, ticker, date_str)
+                                await self._cache_set_df(cache_key, date_df)
+                                cached_dates += 1
+                            self.logger.info(f"[CACHE] Cached {cached_dates} {interval} dates for {ticker} after save")
+                    except Exception as e:
+                        self.logger.warning(f"[CACHE] Error caching {interval} data after save for {ticker}: {e}")
+                        # Fall back to invalidation if caching fails
+                        await self._invalidate_ticker_cache(ticker)
+                else:
+                    # If cache is disabled, just invalidate
+                    await self._invalidate_ticker_cache(ticker)
 
     async def _bulk_insert_stock_data(self, conn: asyncpg.Connection, table: str, records: List[Dict], interval: str):
         """Bulk insert stock data using QuestDB's optimized insert with built-in deduplication."""
@@ -551,9 +1625,33 @@ class StockQuestDB(StockDBBase):
         """Retrieve aggregated (daily/hourly) stock data from QuestDB."""
         if conn is None:
             async with self.get_connection() as conn:
-                return await self._get_stock_data(conn, ticker, start_date, end_date, interval)
+                df = await self._get_stock_data(conn, ticker, start_date, end_date, interval)
         else:
-            return await self._get_stock_data(conn, ticker, start_date, end_date, interval)
+            df = await self._get_stock_data(conn, ticker, start_date, end_date, interval)
+        
+        # Final safety check: ensure index is always datetime
+        if not df.empty and not pd.api.types.is_datetime64_any_dtype(df.index):
+            try:
+                if pd.api.types.is_integer_dtype(df.index):
+                    first_val = df.index[0]
+                    if first_val > 1e10:  # Likely milliseconds
+                        df.index = pd.to_datetime(df.index, unit='ms', errors='coerce')
+                    else:  # Likely seconds
+                        df.index = pd.to_datetime(df.index, unit='s', errors='coerce')
+                else:
+                    df.index = pd.to_datetime(df.index, errors='coerce')
+                if df.index.isna().any():
+                    df = df[df.index.notna()]
+            except Exception as e:
+                self.logger.debug(f"Error in final index conversion: {e}")
+                try:
+                    df.index = pd.to_datetime(df.index, errors='coerce')
+                    if df.index.isna().any():
+                        df = df[df.index.notna()]
+                except Exception:
+                    pass
+        
+        return df
 
     async def _get_stock_data(
         self,
@@ -563,7 +1661,305 @@ class StockQuestDB(StockDBBase):
         end_date: str | None = None,
         interval: str = "daily",
     ) -> pd.DataFrame:
-        """Internal method to retrieve stock data from QuestDB."""
+        """Internal method to retrieve stock data from QuestDB using per-date/hour caching."""
+        table = 'daily_prices' if interval == 'daily' else 'hourly_prices'
+        date_col = 'date' if interval == 'daily' else 'datetime'
+        
+        # If no date range specified, query all data (fallback to old behavior)
+        if not start_date and not end_date:
+            return await self._get_stock_data_no_cache(conn, ticker, start_date, end_date, interval)
+        
+        # Parse date range
+        if isinstance(start_date, str):
+            start_dt = date_parser.parse(start_date)
+        elif start_date is None:
+            # If no start_date, we can't do per-date caching efficiently
+            return await self._get_stock_data_no_cache(conn, ticker, start_date, end_date, interval)
+        else:
+            start_dt = start_date
+        
+        if isinstance(end_date, str):
+            end_dt = date_parser.parse(end_date)
+        elif end_date is None:
+            # If no end_date, we can't do per-date caching efficiently
+            return await self._get_stock_data_no_cache(conn, ticker, start_date, end_date, interval)
+        else:
+            end_dt = end_date
+        
+        # For daily data, treat date-only end_date as exclusive of next day
+        if interval == 'daily' and isinstance(end_date, str) and len(end_date) == 10:
+            end_dt = end_dt + timedelta(days=1)
+        
+        # Generate list of dates/hours to check
+        dates_to_check = []
+        current = start_dt
+        if interval == 'daily':
+            # For daily, check each day
+            while current < end_dt:
+                date_str = current.strftime('%Y-%m-%d')
+                dates_to_check.append((current, date_str))
+                current += timedelta(days=1)
+        else:
+            # For hourly, check each hour
+            while current <= end_dt:
+                date_str = current.strftime('%Y-%m-%d %H:00:00')
+                dates_to_check.append((current, date_str))
+                current += timedelta(hours=1)
+        
+        # Check cache for each date/hour
+        cached_dfs = []
+        missing_dates = []
+        
+        for dt, date_str in dates_to_check:
+            cache_key = self._make_date_cache_key(table, ticker, date_str)
+            cached_df = await self._cache_get_df(cache_key)
+            if cached_df is not None and not cached_df.empty:
+                # Ensure index is datetime type (may be lost during cache serialization)
+                if not pd.api.types.is_datetime64_any_dtype(cached_df.index):
+                    try:
+                        # Try to convert index to datetime
+                        if pd.api.types.is_integer_dtype(cached_df.index):
+                            # Might be Unix timestamp
+                            first_val = cached_df.index[0]
+                            if first_val > 1e10:  # Likely milliseconds
+                                cached_df.index = pd.to_datetime(cached_df.index, unit='ms', errors='coerce')
+                            else:  # Likely seconds
+                                cached_df.index = pd.to_datetime(cached_df.index, unit='s', errors='coerce')
+                        else:
+                            cached_df.index = pd.to_datetime(cached_df.index, errors='coerce')
+                        # Remove any NaT values
+                        if cached_df.index.isna().any():
+                            cached_df = cached_df[cached_df.index.notna()]
+                    except Exception as e:
+                        self.logger.debug(f"Error converting cached_df index to datetime: {e}")
+                        # Last resort conversion
+                        try:
+                            cached_df.index = pd.to_datetime(cached_df.index, errors='coerce')
+                            if cached_df.index.isna().any():
+                                cached_df = cached_df[cached_df.index.notna()]
+                        except Exception:
+                            pass
+                # Ensure index name is set (may be lost during cache serialization)
+                if cached_df.index.name is None or cached_df.index.name != date_col:
+                    cached_df.index.name = date_col
+                # Since we cache by normalized date string, we can use the cached data directly
+                cached_dfs.append(cached_df)
+            else:
+                missing_dates.append((dt, date_str))
+        
+        # If all dates are cached, combine and return
+        if not missing_dates:
+            if cached_dfs:
+                # Filter out empty DataFrames and DataFrames with all-NA columns before concatenation to avoid deprecation warning
+                non_empty_cached_dfs = []
+                for df in cached_dfs:
+                    # Skip empty DataFrames
+                    if df.empty:
+                        continue
+                    # Skip DataFrames where all columns are all-NA
+                    if df.isna().all().all():
+                        continue
+                    # Skip DataFrames where all rows are all-NA
+                    if df.isna().all(axis=1).all():
+                        continue
+                    # DataFrame has valid data
+                    non_empty_cached_dfs.append(df)
+                if non_empty_cached_dfs:
+                    result_df = pd.concat(non_empty_cached_dfs, ignore_index=False)
+                else:
+                    return pd.DataFrame()
+                result_df = result_df.sort_index()
+                # Ensure index is datetime type
+                if not pd.api.types.is_datetime64_any_dtype(result_df.index):
+                    result_df.index = pd.to_datetime(result_df.index)
+                # Filter to requested range
+                if date_col in result_df.index.names or result_df.index.name == date_col:
+                    result_df = result_df[(result_df.index >= start_dt) & (result_df.index < end_dt)]
+                return result_df
+            else:
+                # All dates checked but all were empty - return empty DataFrame
+                return pd.DataFrame()
+        
+        # Query DB for missing dates
+        if missing_dates:
+            # Build query for missing date range
+            missing_start = min(dt for dt, _ in missing_dates)
+            missing_end = max(dt for dt, _ in missing_dates)
+            if interval == 'daily':
+                missing_end = missing_end + timedelta(days=1)  # Exclusive end
+            else:
+                missing_end = missing_end + timedelta(hours=1)  # Exclusive end for hourly
+            
+            query = f"SELECT * FROM {table} WHERE ticker = $1"
+            params = [ticker]
+            
+            query += f" AND {date_col} >= ${len(params) + 1}"
+            params.append(missing_start.replace(tzinfo=None) if missing_start.tzinfo else missing_start)
+            
+            query += f" AND {date_col} < ${len(params) + 1}"
+            params.append(missing_end.replace(tzinfo=None) if missing_end.tzinfo else missing_end)
+            
+            query += f" ORDER BY {date_col}"
+            
+            try:
+                rows = await conn.fetch(query, *params)
+                if rows:
+                    # Convert asyncpg records to DataFrame
+                    columns = list(rows[0].keys()) if rows else []
+                    data = [dict(row) for row in rows]
+                    db_df = pd.DataFrame(data, columns=columns)
+                    
+                    # Convert date column to datetime and set as index
+                    if date_col in db_df.columns:
+                        db_df[date_col] = pd.to_datetime(db_df[date_col])
+                        db_df.set_index(date_col, inplace=True)
+                    # Ensure index is datetime type
+                    if not pd.api.types.is_datetime64_any_dtype(db_df.index):
+                        db_df.index = pd.to_datetime(db_df.index)
+                    # Ensure index name is set
+                    if db_df.index.name != date_col:
+                        db_df.index.name = date_col
+                    
+                    # Cache each date/hour individually and track which dates we got
+                    found_dates = set()
+                    for idx, row in db_df.iterrows():
+                        # Normalize the index to get the date string
+                        if interval == 'daily':
+                            # For daily data, use just the date part (YYYY-MM-DD)
+                            if isinstance(idx, pd.Timestamp):
+                                date_str = idx.date().strftime('%Y-%m-%d')
+                            elif hasattr(idx, 'strftime'):
+                                date_str = idx.strftime('%Y-%m-%d')
+                            else:
+                                # Extract date part from string
+                                date_str = str(idx)[:10]
+                        else:
+                            # For hourly data, use date and hour (YYYY-MM-DD HH:00:00)
+                            if isinstance(idx, pd.Timestamp):
+                                date_str = idx.strftime('%Y-%m-%d %H:00:00')
+                            elif hasattr(idx, 'strftime'):
+                                date_str = idx.strftime('%Y-%m-%d %H:00:00')
+                            else:
+                                # Extract date and hour from string
+                                date_str = str(idx)[:16]
+                        
+                        found_dates.add(date_str)
+                        
+                        # Create single-row DataFrame for this date/hour
+                        # Ensure index is datetime and preserve index name
+                        date_df = pd.DataFrame([row], index=[idx])
+                        date_df.index.name = date_col  # Preserve index name for proper deserialization
+                        # Ensure index is datetime type
+                        if not pd.api.types.is_datetime64_any_dtype(date_df.index):
+                            date_df.index = pd.to_datetime(date_df.index)
+                        cache_key = self._make_date_cache_key(table, ticker, date_str)
+                        await self._cache_set_df(cache_key, date_df)
+                    
+                    # Filter db_df to only include dates we were looking for
+                    # (in case DB returned data for dates outside our requested range)
+                    if interval == 'daily':
+                        requested_dates = {dt.strftime('%Y-%m-%d') for dt, _ in missing_dates}
+                    else:
+                        requested_dates = {dt.strftime('%Y-%m-%d %H:00:00') for dt, _ in missing_dates}
+                    
+                    # Filter DataFrame to only include requested dates
+                    if not db_df.empty:
+                        # Create a mask for dates we requested
+                        if interval == 'daily':
+                            mask = db_df.index.to_series().apply(
+                                lambda x: x.date().strftime('%Y-%m-%d') if hasattr(x, 'date') else str(x)[:10]
+                            ).isin(requested_dates)
+                        else:
+                            mask = db_df.index.to_series().apply(
+                                lambda x: x.strftime('%Y-%m-%d %H:00:00') if hasattr(x, 'strftime') else str(x)[:16]
+                            ).isin(requested_dates)
+                        
+                        db_df = db_df[mask]
+                        if not db_df.empty:
+                            cached_dfs.append(db_df)
+                    
+                    # Cache empty results for dates we requested but didn't get
+                    for dt, date_str in missing_dates:
+                        if date_str not in found_dates:
+                            empty_df = pd.DataFrame()
+                            cache_key = self._make_date_cache_key(table, ticker, date_str)
+                            await self._cache_set_df(cache_key, empty_df)
+                else:
+                    # No data found for missing dates - cache empty results
+                    for dt, date_str in missing_dates:
+                        empty_df = pd.DataFrame()
+                        cache_key = self._make_date_cache_key(table, ticker, date_str)
+                        await self._cache_set_df(cache_key, empty_df)
+            except Exception as e:
+                self.logger.error(f"Error retrieving {interval} data for {ticker}: {e}")
+                # Fall back to querying all data
+                return await self._get_stock_data_no_cache(conn, ticker, start_date, end_date, interval)
+        
+        # Combine cached and DB results
+        if cached_dfs:
+            # Filter out empty DataFrames and DataFrames with all-NA columns before concatenation to avoid deprecation warning
+            non_empty_cached_dfs = []
+            for df in cached_dfs:
+                if not df.empty:
+                    # Check if DataFrame has any non-NA columns (not all columns are all-NA)
+                    has_valid_data = False
+                    for col in df.columns:
+                        if not df[col].isna().all():
+                            has_valid_data = True
+                            break
+                    if has_valid_data:
+                        non_empty_cached_dfs.append(df)
+            if non_empty_cached_dfs:
+                result_df = pd.concat(non_empty_cached_dfs, ignore_index=False)
+            else:
+                return pd.DataFrame()
+            result_df = result_df.sort_index()
+            # Ensure index is datetime type - be very aggressive about this
+            if not pd.api.types.is_datetime64_any_dtype(result_df.index):
+                try:
+                    # Try to convert index to datetime
+                    if pd.api.types.is_integer_dtype(result_df.index):
+                        # Might be Unix timestamp
+                        first_val = result_df.index[0]
+                        if first_val > 1e10:  # Likely milliseconds
+                            result_df.index = pd.to_datetime(result_df.index, unit='ms', errors='coerce')
+                        else:  # Likely seconds
+                            result_df.index = pd.to_datetime(result_df.index, unit='s', errors='coerce')
+                    else:
+                        result_df.index = pd.to_datetime(result_df.index, errors='coerce')
+                    # Remove any NaT values
+                    if result_df.index.isna().any():
+                        result_df = result_df[result_df.index.notna()]
+                except Exception as e:
+                    self.logger.debug(f"Error converting result_df index to datetime: {e}")
+                    # Last resort: try general conversion
+                    try:
+                        result_df.index = pd.to_datetime(result_df.index, errors='coerce')
+                        if result_df.index.isna().any():
+                            result_df = result_df[result_df.index.notna()]
+                    except Exception:
+                        pass
+            # Ensure index name is set
+            if result_df.index.name != date_col:
+                result_df.index.name = date_col
+            # Remove duplicates (in case of overlap)
+            result_df = result_df[~result_df.index.duplicated(keep='first')]
+            # Filter to requested range
+            if result_df.index.name == date_col or date_col in result_df.index.names:
+                result_df = result_df[(result_df.index >= start_dt) & (result_df.index < end_dt)]
+            return result_df
+        else:
+            return pd.DataFrame()
+    
+    async def _get_stock_data_no_cache(
+        self,
+        conn: asyncpg.Connection,
+        ticker: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        interval: str = "daily",
+    ) -> pd.DataFrame:
+        """Internal method to retrieve stock data from QuestDB without per-date caching (fallback)."""
         table = 'daily_prices' if interval == 'daily' else 'hourly_prices'
         date_col = 'date' if interval == 'daily' else 'datetime'
 
@@ -624,6 +2020,9 @@ class StockQuestDB(StockDBBase):
                 if date_col in df.columns:
                     df[date_col] = pd.to_datetime(df[date_col])
                     df.set_index(date_col, inplace=True)
+                    # Ensure index is datetime type
+                    if not pd.api.types.is_datetime64_any_dtype(df.index):
+                        df.index = pd.to_datetime(df.index)
                 else:
                     self.logger.warning(f"Expected date column '{date_col}' not found in results. Available columns: {list(df.columns)}")
                 return df
@@ -709,6 +2108,37 @@ class StockQuestDB(StockDBBase):
 
             if records:
                 await self._bulk_insert_realtime_data(conn, records)
+                
+                # Write to cache after successful save (not just invalidate)
+                # This ensures cache is immediately updated with the new data
+                if self.enable_cache:
+                    try:
+                        # Prepare the data for caching (same format as get_realtime_data)
+                        cache_df = df_copy.copy()
+                        if 'timestamp' in cache_df.columns:
+                            cache_df['timestamp'] = pd.to_datetime(cache_df['timestamp'])
+                            cache_df.set_index('timestamp', inplace=True)
+                            # Ensure index is datetime type
+                            if not pd.api.types.is_datetime64_any_dtype(cache_df.index):
+                                cache_df.index = pd.to_datetime(cache_df.index)
+                        
+                        # Cache using the same key format as get_realtime_data
+                        # Use table:type format for type-specific queries
+                        table_type = f'realtime_data:{data_type}'
+                        cache_key = self._make_cache_key(table_type, {
+                            'ticker': ticker,
+                            'data_type': data_type
+                        })
+                        # Cache with 15 minute TTL (same as get_realtime_data)
+                        await self._cache_set_df(cache_key, cache_df, ttl_seconds=15 * 60)
+                        self.logger.info(f"[CACHE] Cached realtime data for {ticker} (type: {data_type}) after save (15 min TTL)")
+                    except Exception as e:
+                        self.logger.warning(f"[CACHE] Error caching realtime data after save for {ticker}: {e}")
+                        # Fall back to invalidation if caching fails
+                        await self._invalidate_ticker_cache(ticker)
+                else:
+                    # If cache is disabled, just invalidate
+                    await self._invalidate_ticker_cache(ticker)
 
     def _ensure_timezone_naive_utc(self, dt_obj, context="unknown"):
         """Convert any datetime object to timezone-naive UTC (what QuestDB expects)."""
@@ -831,6 +2261,33 @@ class StockQuestDB(StockDBBase):
 
     async def get_realtime_data(self, ticker: str, start_datetime: str | None = None, end_datetime: str | None = None, data_type: str = "quote") -> pd.DataFrame:
         """Retrieve realtime (tick) stock data from QuestDB."""
+        # Check cache first - key only includes ticker and data_type (no date filters)
+        # Use table:type format for type-specific queries
+        table_type = f'realtime_data:{data_type}'
+        cache_key = self._make_cache_key(table_type, {
+            'ticker': ticker,
+            'data_type': data_type
+        })
+        cached_df = await self._cache_get_df(cache_key)
+        if cached_df is not None:
+            # If we have date filters, filter the cached data
+            if start_datetime or end_datetime:
+                if 'timestamp' in cached_df.columns or cached_df.index.name == 'timestamp':
+                    timestamp_col = 'timestamp' if 'timestamp' in cached_df.columns else cached_df.index
+                    if start_datetime:
+                        start_dt = date_parser.parse(start_datetime) if isinstance(start_datetime, str) else start_datetime
+                        if isinstance(timestamp_col, str):
+                            cached_df = cached_df[cached_df[timestamp_col] >= start_dt]
+                        else:
+                            cached_df = cached_df[cached_df.index >= start_dt]
+                    if end_datetime:
+                        end_dt = date_parser.parse(end_datetime) if isinstance(end_datetime, str) else end_datetime
+                        if isinstance(timestamp_col, str):
+                            cached_df = cached_df[cached_df[timestamp_col] <= end_dt]
+                        else:
+                            cached_df = cached_df[cached_df.index <= end_dt]
+            return cached_df
+        
         async with self.get_connection() as conn:
             # If we have date filters, we can't use LATEST BY efficiently, so fall back to regular query
             if start_datetime or end_datetime:
@@ -874,16 +2331,21 @@ class StockQuestDB(StockDBBase):
                         df['timestamp'] = pd.to_datetime(df['timestamp'])
                         df.set_index('timestamp', inplace=True)
                     if 'write_timestamp' in df.columns:
-                        df['write_timestamp'] = pd.to_datetime(df['write_timestamp'])
+                        df['write_timestamp'] = pd.to_datetime(df['write_timestamp'], utc=True)
                     
                     # Since we ordered by write_timestamp DESC, the FIRST row should be the most recent
                     # Ensure proper ordering in the DataFrame as well
                     if 'write_timestamp' in df.columns:
                         df = df.sort_values('write_timestamp', ascending=False)
                     
+                    # Cache the result with 15 minute TTL (realtime data expires quickly)
+                    await self._cache_set_df(cache_key, df, ttl_seconds=15 * 60)
                     return df
                 else:
-                    return pd.DataFrame()
+                    empty_df = pd.DataFrame()
+                    # Cache empty result too with 15 minute TTL
+                    await self._cache_set_df(cache_key, empty_df, ttl_seconds=15 * 60)
+                    return empty_df
             except Exception as e:
                 self.logger.error(f"Error retrieving realtime data for {ticker}: {e}")
                 return pd.DataFrame()
@@ -893,88 +2355,156 @@ class StockQuestDB(StockDBBase):
         
         If market is closed, returns the most recent daily close price.
         If market is open, returns the most recent price from any available source.
+        
+        This method checks cache from various data sources first, then queries DB only for missing data.
         """
         try:
             # Check if market is currently open; allow override via use_market_time
             market_is_open = is_market_hours() if use_market_time else True
             
-            async def fetch_realtime():
+            async def fetch_realtime_from_cache():
+                """Try to get latest realtime price from cache first."""
+                try:
+                    # Check cache for realtime data
+                    realtime_df = await self.get_realtime_data(ticker, data_type="quote")
+                    if not realtime_df.empty:
+                        # Get the most recent price from cached data
+                        if 'timestamp' in realtime_df.columns:
+                            realtime_df = realtime_df.sort_values('timestamp', ascending=False)
+                            latest_row = realtime_df.iloc[0]
+                            if 'price' in latest_row:
+                                return ('realtime', latest_row['timestamp'], float(latest_row['price']))
+                        elif realtime_df.index.name == 'timestamp':
+                            realtime_df = realtime_df.sort_index(ascending=False)
+                            latest_row = realtime_df.iloc[0]
+                            if 'price' in latest_row:
+                                return ('realtime', realtime_df.index[0], float(latest_row['price']))
+                except Exception as e:
+                    self.logger.debug(f"Realtime cache fetch failed for {ticker}: {e}")
+                return None
+            
+            async def fetch_realtime_from_db():
+                """Fetch realtime price from database if not in cache."""
                 try:
                     async with self.get_connection() as conn:
                         # Only consider realtime data from the last 24 hours to avoid stale data
                         cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
                         rows = await conn.fetch(
-                            #"SELECT timestamp, price FROM realtime_data WHERE ticker = $1 AND type = 'quote' AND timestamp >= $2 LATEST ON timestamp PARTITION BY ticker",
                             "SELECT timestamp, price FROM realtime_data WHERE ticker = $1 AND type = 'quote' AND timestamp >= $2 ORDER BY timestamp DESC LIMIT 1",
                             ticker, cutoff.replace(tzinfo=None)
                         )
                         if rows and rows[0].get('timestamp') is not None:
                             return ('realtime', rows[0]['timestamp'], float(rows[0]['price']))
                 except Exception as e:
-                    self.logger.debug(f"Realtime fetch failed for {ticker}: {e}")
+                    self.logger.debug(f"Realtime DB fetch failed for {ticker}: {e}")
                 return None
 
-            async def fetch_hourly():
+            async def fetch_hourly_from_cache():
+                """Try to get latest hourly price from cache first."""
+                try:
+                    # Get recent hourly data from cache (last 7 days)
+                    end_date = datetime.now(timezone.utc)
+                    start_date = end_date - timedelta(days=7)
+                    hourly_df = await self.get_stock_data(ticker, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'), interval="hourly")
+                    if not hourly_df.empty:
+                        # Get the most recent close price
+                        if hourly_df.index.name == 'datetime':
+                            hourly_df = hourly_df.sort_index(ascending=False)
+                            latest_row = hourly_df.iloc[0]
+                            if 'close' in latest_row:
+                                return ('hourly', hourly_df.index[0], float(latest_row['close']))
+                except Exception as e:
+                    self.logger.debug(f"Hourly cache fetch failed for {ticker}: {e}")
+                return None
+            
+            async def fetch_hourly_from_db():
+                """Fetch hourly price from database if not in cache."""
                 try:
                     async with self.get_connection() as conn:
-                        # Only consider hourly data from the last 7 days to avoid stale data
                         cutoff = datetime.now(timezone.utc) - timedelta(days=7)
                         rows = await conn.fetch(
-                            #"SELECT datetime, close FROM hourly_prices WHERE ticker = $1 AND datetime >= $2 LATEST ON datetime PARTITION BY ticker",
                             "SELECT datetime, close FROM hourly_prices WHERE ticker = $1 AND datetime >= $2 ORDER BY datetime DESC LIMIT 1",
                             ticker, cutoff.replace(tzinfo=None)
                         )
                         if rows and rows[0].get('datetime') is not None:
                             return ('hourly', rows[0]['datetime'], float(rows[0]['close']))
                 except Exception as e:
-                    self.logger.debug(f"Hourly fetch failed for {ticker}: {e}")
+                    self.logger.debug(f"Hourly DB fetch failed for {ticker}: {e}")
                 return None
 
-            async def fetch_daily():
+            async def fetch_daily_from_cache(max_days: int = 30):
+                """Try to get latest daily price from cache first."""
+                try:
+                    # Get recent daily data from cache
+                    end_date = datetime.now(timezone.utc)
+                    start_date = end_date - timedelta(days=max_days)
+                    daily_df = await self.get_stock_data(ticker, start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'), interval="daily")
+                    if not daily_df.empty:
+                        # Get the most recent close price
+                        if daily_df.index.name == 'date':
+                            daily_df = daily_df.sort_index(ascending=False)
+                            latest_row = daily_df.iloc[0]
+                            if 'close' in latest_row:
+                                return ('daily', daily_df.index[0], float(latest_row['close']))
+                except Exception as e:
+                    self.logger.debug(f"Daily cache fetch failed for {ticker}: {e}")
+                return None
+            
+            async def fetch_daily_from_db(max_days: int = 30):
+                """Fetch daily price from database if not in cache."""
                 try:
                     async with self.get_connection() as conn:
-                        # Only consider daily data from the last 30 days to avoid stale data
-                        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+                        cutoff = datetime.now(timezone.utc) - timedelta(days=max_days)
                         rows = await conn.fetch(
-                            #"SELECT date, close FROM daily_prices WHERE ticker = $1 AND date >= $2 LATEST ON date PARTITION BY ticker",
                             "SELECT date, close FROM daily_prices WHERE ticker = $1 AND date >= $2 ORDER BY date DESC LIMIT 1",
                             ticker, cutoff.replace(tzinfo=None)
                         )
                         if rows and rows[0].get('date') is not None:
                             return ('daily', rows[0]['date'], float(rows[0]['close']))
                 except Exception as e:
-                    self.logger.debug(f"Daily fetch failed for {ticker}: {e}")
+                    self.logger.debug(f"Daily DB fetch failed for {ticker}: {e}")
                 return None
 
             if market_is_open:
-                # Market is open - get the most recent price from any source
-                self.logger.debug(f"Market is open, fetching most recent price for {ticker}")
+                # Market is open - check cache first, then DB
+                self.logger.debug(f"[CACHE CHECK] Market is open, checking cache for realtime/hourly/daily data for {ticker}")
                 
-                # Run all three fetches concurrently (separate connections)
-                rt_task = asyncio.create_task(fetch_realtime())
-                hr_task = asyncio.create_task(fetch_hourly())
-                dy_task = asyncio.create_task(fetch_daily())
-                results = await asyncio.gather(rt_task, hr_task, dy_task, return_exceptions=False)
+                # Check cache first for all sources
+                rt_cache = await fetch_realtime_from_cache()
+                hr_cache = await fetch_hourly_from_cache()
+                dy_cache = await fetch_daily_from_cache(max_days=30)
+                
+                # If we have cached data, use it; otherwise fetch from DB
+                rt_result = rt_cache if rt_cache else await fetch_realtime_from_db()
+                hr_result = hr_cache if hr_cache else await fetch_hourly_from_db()
+                dy_result = dy_cache if dy_cache else await fetch_daily_from_db(max_days=30)
 
                 # Filter out None and choose the one with the most recent timestamp
-                valid_results = [r for r in results if r is not None]
+                valid_results = [r for r in [rt_result, hr_result, dy_result] if r is not None]
                 if not valid_results:
+                    self.logger.debug(f"[DB QUERY] No price data found for {ticker} from any source")
                     return None
 
                 # Each tuple is (source, timestamp, price)
                 latest = max(valid_results, key=lambda r: r[1])
-                self.logger.debug(f"Market open: returning {latest[0]} price {latest[2]} for {ticker}")
-                return latest[2]
+                price = latest[2]
+                source_type = "cache" if latest in [rt_cache, hr_cache, dy_cache] else "database"
+                self.logger.debug(f"[{source_type.upper()}] Found price for {ticker}: ${price:.2f} from {latest[0]} table")
+                return price
             else:
-                # Market is closed - return daily close price only
-                self.logger.debug(f"Market is closed, fetching daily close price for {ticker}")
+                # Market is closed - check cache first, then DB for daily data only
+                self.logger.debug(f"[CACHE CHECK] Market is closed, checking cache for daily data for {ticker}")
                 
-                daily_result = await fetch_daily()
+                daily_cache = await fetch_daily_from_cache(max_days=90)
+                daily_result = daily_cache if daily_cache else await fetch_daily_from_db(max_days=90)
+                
                 if daily_result:
-                    self.logger.debug(f"Market closed: returning daily close price {daily_result[2]} for {ticker}")
-                    return daily_result[2]
+                    price = daily_result[2]
+                    source_type = "cache" if daily_cache else "database"
+                    self.logger.debug(f"[{source_type.upper()}] Found daily close price for {ticker}: ${price:.2f}")
+                    return price
                 else:
-                    self.logger.warning(f"No daily price data available for {ticker} while market is closed")
+                    self.logger.warning(f"No daily price data available for {ticker} while market is closed (checked last 90 days)")
                     return None
 
         except Exception as e:
@@ -1266,6 +2796,82 @@ class StockQuestDB(StockDBBase):
                 
                 # Log successful insertion
                 self.logger.info(f"Options insert: inserted={success_count} ticker={ticker} bucket={bucket_ts.isoformat()}")
+                
+                # Write to cache after successful save (not just invalidate)
+                # This ensures cache is immediately updated with the new data
+                if self.enable_cache and success_count > 0:
+                    try:
+                        # Prepare the data for caching (same format as get_options_data)
+                        # Reset index if timestamp is the index
+                        cache_df = df_copy.copy()
+                        if 'timestamp' in cache_df.columns:
+                            cache_df['timestamp'] = pd.to_datetime(cache_df['timestamp'])
+                            cache_df.set_index('timestamp', inplace=True)
+                            cache_df = cache_df[cache_df.index.notna()]
+                        
+                        # Cache each option individually (same as get_options_data does)
+                        if 'option_ticker' in cache_df.columns and not cache_df.empty:
+                            save_option_tickers = set(cache_df['option_ticker'].unique())
+                            cached_count = 0
+                            failed_caches = []
+                            for option_ticker in save_option_tickers:
+                                option_df = cache_df[cache_df['option_ticker'] == option_ticker].copy()
+                                if not option_df.empty:
+                                    cache_key = self._make_options_cache_key(ticker, option_ticker)
+                                    cache_success = await self._cache_set_df(cache_key, option_df)  # No TTL - cache indefinitely
+                                    if cache_success:
+                                        cached_count += 1
+                                    else:
+                                        failed_caches.append(option_ticker)
+                            
+                            self.logger.info(f"[CACHE] Cached {cached_count}/{len(save_option_tickers)} options for {ticker} after save (no TTL)")
+                            if failed_caches:
+                                self.logger.warning(f"[CACHE] Failed to cache {len(failed_caches)} options: {failed_caches[:10]}{'...' if len(failed_caches) > 10 else ''}")
+                            
+                            # Validate cache after saving - check if all keys are actually in cache
+                            # Use direct cache GET instead of SCAN to avoid twemproxy issues
+                            self.logger.info(f"[CACHE] Validating cache after save for {ticker}...")
+                            validated_cached_count = 0
+                            validated_cached_tickers = set()
+                            failed_validations = []
+                            
+                            for option_ticker in save_option_tickers:
+                                cache_key = self._make_options_cache_key(ticker, option_ticker)
+                                cached_test = await self._cache_get_df(cache_key)
+                                if cached_test is not None and not cached_test.empty:
+                                    validated_cached_count += 1
+                                    validated_cached_tickers.add(option_ticker)
+                                else:
+                                    failed_validations.append(option_ticker)
+                            
+                            missing_in_cache = save_option_tickers - validated_cached_tickers
+                            
+                            if missing_in_cache:
+                                self.logger.warning(f"[CACHE] VALIDATION FAILED: {len(missing_in_cache)} options saved but missing from cache after save: {list(missing_in_cache)[:20]}{'...' if len(missing_in_cache) > 20 else ''}")
+                                # Try to identify why they're missing
+                                for missing_ticker in list(missing_in_cache)[:10]:  # Check first 10
+                                    missing_df = cache_df[cache_df['option_ticker'] == missing_ticker]
+                                    if missing_df.empty:
+                                        self.logger.warning(f"[CACHE]   {missing_ticker}: Not in cache_df DataFrame")
+                                    else:
+                                        cache_key = self._make_options_cache_key(ticker, missing_ticker)
+                                        # Try to get from cache to see if it exists
+                                        cached_test = await self._cache_get_df(cache_key)
+                                        if cached_test is None or cached_test.empty:
+                                            self.logger.warning(f"[CACHE]   {missing_ticker}: Cache key {cache_key} not found in cache (cache write may have failed)")
+                            else:
+                                self.logger.info(f"[CACHE] VALIDATION PASSED: All {len(save_option_tickers)} options successfully cached and verified after save")
+                            
+                            # Update the option_tickers list cache with the new list
+                            option_tickers_cache_key = f"stocks:options_data:{ticker.upper()}:option_tickers_list"
+                            await self._cache_set_value(option_tickers_cache_key, list(save_option_tickers))  # No TTL - invalidated on save
+                    except Exception as e:
+                        self.logger.warning(f"[CACHE] Error caching options after save for {ticker}: {e}")
+                        # Fall back to invalidation if caching fails
+                        await self._invalidate_ticker_cache(ticker)
+                else:
+                    # If cache is disabled or no data saved, just invalidate
+                    await self._invalidate_ticker_cache(ticker)
             except Exception as e:
                 self.logger.error(f"Error saving options data: {e}")
                 raise
@@ -1287,69 +2893,212 @@ class StockQuestDB(StockDBBase):
         if start_datetime is None:
             from datetime import date
             start_datetime = date.today().strftime('%Y-%m-%d')
+        
+        # Check cache first - try to get all cached options for this ticker
+        # We query DB once to get the list of option_tickers, then fetch each from cache (or DB if miss)
+        if self.enable_cache and option_tickers is None:
+            # Try to get all cached options for this ticker
+            cached_all_df = await self._get_all_cached_options_for_ticker(ticker)
+            
+            if cached_all_df is not None and not cached_all_df.empty:
+                # Note: We no longer check for cache freshness or completeness because:
+                # 1. We fetch the option_tickers list from the DB first
+                # 2. Then we fetch each option_ticker from cache (or DB if miss)
+                # 3. This ensures we have all the data that exists in the DB
+                # Cache is invalidated explicitly when new data is saved, so no need for time-based checks
+                
+                self.logger.debug(f"[CACHE HIT] Found cached options for {ticker} - filtering in memory")
+                df = cached_all_df.copy()
+                
+                # Reset index if timestamp is the index (to make it a regular column for filtering)
+                if df.index.name == 'timestamp' or (df.index.names and 'timestamp' in df.index.names):
+                    df = df.reset_index()
+                
+                # Apply date filters in memory
+                if 'expiration_date' in df.columns:
+                    # Convert expiration_date to datetime if needed
+                    if not pd.api.types.is_datetime64_any_dtype(df['expiration_date']):
+                        df['expiration_date'] = pd.to_datetime(df['expiration_date'])
+                    
+                    if expiration_date:
+                        exp_date = date_parser.parse(expiration_date)
+                        df = df[df['expiration_date'].dt.date == exp_date.date()]
+                    
+                    if start_datetime:
+                        start_dt = date_parser.parse(start_datetime)
+                        df = df[df['expiration_date'] >= start_dt]
+                    
+                    if end_datetime:
+                        end_dt = date_parser.parse(end_datetime)
+                        end_dt_exclusive = end_dt + timedelta(days=1)
+                        df = df[df['expiration_date'] < end_dt_exclusive]
+                
+                # Apply option_tickers filter if needed (shouldn't happen here, but just in case)
+                if option_tickers and 'option_ticker' in df.columns:
+                    df = df[df['option_ticker'].isin(option_tickers)]
+                
+                # Deduplicate by option_ticker
+                if 'option_ticker' in df.columns and not df.empty:
+                    df = df.drop_duplicates(subset=['option_ticker'], keep='first')
+                
+                # Sort by timestamp DESC (matching database query behavior)
+                if 'timestamp' in df.columns:
+                    df = df.sort_values('timestamp', ascending=False)
+                
+                self.logger.debug(f"[CACHE] Filtered cached data: {len(df)} options match filters (from {len(cached_all_df)} total cached)")
+                return df
+            else:
+                self.logger.debug(f"[CACHE MISS] No cached options found for {ticker} - will query database")
             
         async with self.get_connection() as conn:
-            clauses = ["ticker = $1"]
-            params: list[Any] = [ticker]
-            next_param = 2
-            if expiration_date:
-                clauses.append(f"expiration_date = ${next_param}")
-                params.append(date_parser.parse(expiration_date))
-                next_param += 1
-            if start_datetime:
-                clauses.append(f"expiration_date >= ${next_param}")
-                params.append(date_parser.parse(start_datetime))
-                next_param += 1
-            if end_datetime:
-                # Use exclusive upper bound for end date (< end_date + 1 day)
-                # Add 1 day in Python instead of SQL for better compatibility
-                end_dt = date_parser.parse(end_datetime)
-                end_dt_exclusive = end_dt + timedelta(days=1)
-                clauses.append(f"expiration_date < ${next_param}")
-                params.append(end_dt_exclusive)
-                next_param += 1
-            if option_tickers:
-                placeholders = ",".join([f"${i}" for i in range(next_param, next_param + len(option_tickers))])
-                clauses.append(f"option_ticker IN ({placeholders})")
-                params.extend(option_tickers)
-                next_param += len(option_tickers)
-            where = " AND ".join(clauses)
-            query = f"SELECT * FROM options_data WHERE {where} ORDER BY timestamp"
-            try:
-                rows = await conn.fetch(query, *params)
-                if not rows:
+            # For cache efficiency, query all options for this ticker (without date filters)
+            # and filter in memory. This allows subsequent calls to use cache.
+            # Only apply date filters in SQL if we're not using cache or if option_tickers is specified
+            if self.enable_cache and option_tickers is None:
+                # Query all options for this ticker (no date filters) to maximize cache reuse
+                all_clauses = ["ticker = $1"]
+                all_params = [ticker]
+                all_where = " AND ".join(all_clauses)
+                all_query = f"SELECT * FROM options_data WHERE {all_where} ORDER BY timestamp DESC"
+                
+                try:
+                    all_rows = await conn.fetch(all_query, *all_params)
+                    if not all_rows:
+                        return pd.DataFrame()
+                    
+                    all_df = pd.DataFrame([dict(r) for r in all_rows])
+                    
+                    # Deduplicate by option_ticker
+                    if 'option_ticker' in all_df.columns and not all_df.empty:
+                        all_df = all_df.drop_duplicates(subset=['option_ticker'], keep='first')
+                    
+                    # Set timestamp index if available
+                    if 'timestamp' in all_df.columns:
+                        all_df['timestamp'] = pd.to_datetime(all_df['timestamp'])
+                        all_df.set_index('timestamp', inplace=True)
+                        all_df = all_df[all_df.index.notna()]
+                    
+                    # Cache each option individually (for future cache hits via SCAN)
+                    # This allows us to use _get_all_cached_options_for_ticker() on subsequent calls
+                    # No TTL - cache indefinitely (invalidated on save)
+                    if 'option_ticker' in all_df.columns and not all_df.empty and self.enable_cache:
+                        for option_ticker in all_df['option_ticker'].unique():
+                            option_df = all_df[all_df['option_ticker'] == option_ticker].copy()
+                            if not option_df.empty:
+                                cache_key = self._make_options_cache_key(ticker, option_ticker)
+                                await self._cache_set_df(cache_key, option_df)  # No TTL - cache indefinitely
+                        self.logger.debug(f"[CACHE] Cached {len(all_df['option_ticker'].unique())} individual options for {ticker} (no TTL)")
+                    
+                    # Now filter in memory by date
+                    df = all_df.copy()
+                    
+                    # Apply date filters in memory
+                    if 'expiration_date' in df.columns:
+                        # Convert expiration_date to datetime if needed
+                        if not pd.api.types.is_datetime64_any_dtype(df['expiration_date']):
+                            df['expiration_date'] = pd.to_datetime(df['expiration_date'])
+                        
+                        if expiration_date:
+                            exp_date = date_parser.parse(expiration_date)
+                            df = df[df['expiration_date'].dt.date == exp_date.date()]
+                        
+                        if start_datetime:
+                            start_dt = date_parser.parse(start_datetime)
+                            df = df[df['expiration_date'] >= start_dt]
+                        
+                        if end_datetime:
+                            end_dt = date_parser.parse(end_datetime)
+                            end_dt_exclusive = end_dt + timedelta(days=1)
+                            df = df[df['expiration_date'] < end_dt_exclusive]
+                    
+                    return df
+                except Exception as e:
+                    self.logger.error(f"Error retrieving options data: {e}")
                     return pd.DataFrame()
-                df = pd.DataFrame([dict(r) for r in rows])
-                if 'timestamp' in df.columns:
-                    df['timestamp'] = pd.to_datetime(df['timestamp'])
-                    df.set_index('timestamp', inplace=True)
-                    df = df[df.index.notna()]
-                return df
-            except Exception as e:
-                self.logger.error(f"Error retrieving options data: {e}")
-                return pd.DataFrame()
+            else:
+                # Original query logic for when cache is disabled or option_tickers is specified
+                clauses = ["ticker = $1"]
+                params: list[Any] = [ticker]
+                next_param = 2
+                if expiration_date:
+                    clauses.append(f"expiration_date = ${next_param}")
+                    params.append(date_parser.parse(expiration_date))
+                    next_param += 1
+                if start_datetime:
+                    clauses.append(f"expiration_date >= ${next_param}")
+                    params.append(date_parser.parse(start_datetime))
+                    next_param += 1
+                if end_datetime:
+                    # Use exclusive upper bound for end date (< end_date + 1 day)
+                    # Add 1 day in Python instead of SQL for better compatibility
+                    end_dt = date_parser.parse(end_datetime)
+                    end_dt_exclusive = end_dt + timedelta(days=1)
+                    clauses.append(f"expiration_date < ${next_param}")
+                    params.append(end_dt_exclusive)
+                    next_param += 1
+                if option_tickers:
+                    placeholders = ",".join([f"${i}" for i in range(next_param, next_param + len(option_tickers))])
+                    clauses.append(f"option_ticker IN ({placeholders})")
+                    params.extend(option_tickers)
+                    next_param += len(option_tickers)
+                where = " AND ".join(clauses)
+                query = f"SELECT * FROM options_data WHERE {where} ORDER BY timestamp DESC"
+                self.logger.debug(f"[DB QUERY] get_options_data query: {query}")
+                self.logger.debug(f"[DB QUERY] get_options_data params: {params}")
+                try:
+                    rows = await conn.fetch(query, *params)
+                    self.logger.info(f"[DB QUERY] get_options_data for {ticker} returned {len(rows) if rows else 0} rows")
+                    if not rows:
+                        return pd.DataFrame()
+                    df = pd.DataFrame([dict(r) for r in rows])
+                    self.logger.debug(f"[DB QUERY] After DataFrame creation: {len(df)} rows, columns: {list(df.columns)}")
+                    
+                    # Deduplicate by option_ticker to avoid processing the same option multiple times
+                    # Keep the latest entry per option_ticker (ordered by timestamp DESC in query)
+                    if 'option_ticker' in df.columns and not df.empty:
+                        df = df.drop_duplicates(subset=['option_ticker'], keep='first')
+                    
+                    if 'timestamp' in df.columns:
+                        df['timestamp'] = pd.to_datetime(df['timestamp'])
+                        df.set_index('timestamp', inplace=True)
+                        df = df[df.index.notna()]
+                    
+                    # Cache each option individually (for backward compatibility)
+                    # No TTL - cache indefinitely (invalidated on save)
+                    if 'option_ticker' in df.columns and not df.empty and self.enable_cache:
+                        for option_ticker in df['option_ticker'].unique():
+                            option_df = df[df['option_ticker'] == option_ticker].copy()
+                            if not option_df.empty:
+                                cache_key = self._make_options_cache_key(ticker, option_ticker)
+                                await self._cache_set_df(cache_key, option_df)  # No TTL - cache indefinitely
+                                self.logger.debug(f"[CACHE] Cached data for key: {cache_key} (from get_options_data, no TTL)")
+                    
+                    return df
+                except Exception as e:
+                    self.logger.error(f"Error retrieving options data: {e}")
+                    return pd.DataFrame()
 
     async def get_latest_options_data(
         self, 
         ticker: str, 
+        option_ticker: str,
         expiration_date: str | None = None, 
-        option_tickers: List[str] | None = None, 
         start_datetime: str | None = None, 
         end_datetime: str | None = None,
         timestamp_lookback_days: int = 7
     ) -> pd.DataFrame:
-        """Get latest options data for a ticker, with optional date filtering.
+        """Get latest options data for a specific ticker and option_ticker combination.
         
         Args:
             ticker: The stock ticker symbol
+            option_ticker: The specific option ticker symbol (required)
             expiration_date: Filter by exact expiration date (YYYY-MM-DD format)
-            option_tickers: List of specific option tickers to fetch
             start_datetime: Start date for expiration date filtering (YYYY-MM-DD format, defaults to today to show only options expiring today or later)
             end_datetime: End date for expiration date filtering (YYYY-MM-DD format)
             timestamp_lookback_days: Number of days to look back for timestamp data (default: 7, controls memory usage)
             
         Returns:
-            DataFrame with latest options data per option_ticker
+            DataFrame with latest options data for the specified option_ticker
         """
         # Import datetime utilities at the start
         from datetime import date, datetime, timedelta
@@ -1357,18 +3106,85 @@ class StockQuestDB(StockDBBase):
         # Default start_datetime to today if not specified
         if start_datetime is None:
             start_datetime = date.today().strftime('%Y-%m-%d')
+        
+        # Check cache first - cache key requires ticker + option_ticker combination
+        # NOTE: Cache key doesn't include start_datetime, end_datetime, or timestamp_lookback_days
+        # This means cached data might not match the query parameters, so we filter in memory
+        cache_key = self._make_options_cache_key(ticker, option_ticker)
+        self.logger.debug(f"[CACHE] Checking cache for key: {cache_key}")
+        self.logger.debug(f"[CACHE] Query params: start_datetime={start_datetime}, end_datetime={end_datetime}, timestamp_lookback_days={timestamp_lookback_days}")
+        
+        cached_df = None
+        if self.enable_cache:
+            cached_df = await self._cache_get_df(cache_key)
+            if cached_df is not None:
+                self.logger.debug(f"[CACHE HIT] Found cached data with {len(cached_df)} rows")
+            
+            if cached_df is not None:
+                # Note: Cached data was fetched with potentially different timestamp_lookback_days
+                # We can't filter by timestamp in memory easily, but we can filter by expiration_date
+                # If timestamp_lookback_days > 7, the cached data might not have all the options we need,
+                # but we'll still check it and query DB if needed
+                
+                # If we have date filters, filter the cached data by expiration_date
+                if start_datetime or end_datetime:
+                    if 'expiration_date' in cached_df.columns:
+                        # Ensure expiration_date is datetime type before comparison
+                        if not pd.api.types.is_datetime64_any_dtype(cached_df['expiration_date']):
+                            cached_df['expiration_date'] = pd.to_datetime(cached_df['expiration_date'], errors='coerce')
+                        
+                        before_filter = len(cached_df)
+                        if start_datetime:
+                            start_dt = date_parser.parse(start_datetime) if isinstance(start_datetime, str) else start_datetime
+                            if isinstance(start_dt, str):
+                                start_dt = date_parser.parse(start_dt)
+                            cached_df = cached_df[cached_df['expiration_date'] >= start_dt]
+                            self.logger.debug(f"[CACHE] After start_datetime filter: {len(cached_df)} rows (was {before_filter})")
+                        if end_datetime:
+                            end_dt = date_parser.parse(end_datetime) if isinstance(end_datetime, str) else end_datetime
+                            if isinstance(end_dt, str):
+                                end_dt = date_parser.parse(end_dt)
+                            before_filter = len(cached_df)
+                            cached_df = cached_df[cached_df['expiration_date'] <= end_dt]
+                            self.logger.debug(f"[CACHE] After end_datetime filter: {len(cached_df)} rows (was {before_filter})")
+                
+                # Verify the cached data matches the requested option_ticker
+                if 'option_ticker' in cached_df.columns:
+                    before_filter = len(cached_df)
+                    cached_df = cached_df[cached_df['option_ticker'] == option_ticker]
+                    self.logger.debug(f"[CACHE] After option_ticker filter: {len(cached_df)} rows (was {before_filter})")
+                
+                if len(cached_df) > 0:
+                    self.logger.debug(f"[CACHE HIT] Options data for {ticker}/{option_ticker} - Returning {len(cached_df)} rows from cached DataFrame")
+                    return cached_df
+                else:
+                    self.logger.debug(f"[CACHE] Cached data filtered to 0 rows - will query database")
+            else:
+                self.logger.debug(f"[CACHE MISS] No cached data found for key: {cache_key}")
+        else:
+            self.logger.debug(f"[CACHE] Cache disabled - will query database directly")
+        
+        # Cache miss - log that we're querying the database
+        if self.enable_cache:
+            self.logger.debug(f"[DB QUERY] get_latest_options_data for {ticker} - Cache miss")
+        else:
+            self.logger.debug(f"[DB QUERY] get_latest_options_data for {ticker} - Cache disabled")
             
         async with self.get_connection() as conn:
-            clauses = ["ticker = $1"]
-            params: list[Any] = [ticker]
-            next_param = 2
+            clauses = ["ticker = $1", "option_ticker = $2"]
+            params: list[Any] = [ticker, option_ticker]
+            next_param = 3
             if expiration_date:
+                parsed_exp = date_parser.parse(expiration_date)
                 clauses.append(f"expiration_date = ${next_param}")
-                params.append(date_parser.parse(expiration_date))
+                params.append(parsed_exp)
+                self.logger.debug(f"[DB QUERY] Adding expiration_date filter: {expiration_date} -> {parsed_exp}")
                 next_param += 1
             if start_datetime:
+                parsed_start = date_parser.parse(start_datetime)
                 clauses.append(f"expiration_date >= ${next_param}")
-                params.append(date_parser.parse(start_datetime))
+                params.append(parsed_start)
+                self.logger.debug(f"[DB QUERY] Adding start_datetime filter: {start_datetime} -> {parsed_start}")
                 next_param += 1
             if end_datetime:
                 # Use exclusive upper bound for end date (< end_date + 1 day)
@@ -1377,37 +3193,78 @@ class StockQuestDB(StockDBBase):
                 end_dt_exclusive = end_dt + timedelta(days=1)
                 clauses.append(f"expiration_date < ${next_param}")
                 params.append(end_dt_exclusive)
+                self.logger.debug(f"[DB QUERY] Adding end_datetime filter: {end_datetime} -> {end_dt_exclusive} (exclusive upper bound)")
                 next_param += 1
             where = " AND ".join(clauses)
             
             # Add a time constraint to limit data fetched
             # This dramatically reduces memory usage by only fetching recent timestamp data
+            # However, if we're looking for options expiring in the future, we need to look back further
+            # in timestamp history since options data might have been written days/weeks ago
             # QuestDB expects timezone-naive timestamps in UTC
-            lookback_date = datetime.now(timezone.utc) - timedelta(days=timestamp_lookback_days)
+            today = datetime.now(timezone.utc).date()
+            
+            # If we have an end_datetime, check how far in the future it is
+            # If looking for options expiring far in the future, increase lookback window
+            max_lookback_days = timestamp_lookback_days
+            if end_datetime:
+                try:
+                    end_date = date_parser.parse(end_datetime).date()
+                    days_ahead = (end_date - today).days
+                    # If looking for options expiring more than 30 days ahead, increase lookback
+                    # Options data might have been written weeks ago but still be valid
+                    if days_ahead > 30:
+                        max_lookback_days = max(timestamp_lookback_days, min(90, days_ahead + 30))
+                        self.logger.debug(f"[DB QUERY] Options expiring {days_ahead} days ahead, increasing timestamp lookback to {max_lookback_days} days")
+                except:
+                    pass
+            
+            lookback_date = datetime.now(timezone.utc) - timedelta(days=max_lookback_days)
             lookback_date = lookback_date.replace(tzinfo=None)  # Remove timezone for QuestDB
             clauses.append(f"timestamp >= ${next_param}")
             params.append(lookback_date)
             where = " AND ".join(clauses)
+            self.logger.debug(f"[DB QUERY] Adding timestamp filter: timestamp >= {lookback_date} (lookback: {max_lookback_days} days, original: {timestamp_lookback_days} days)")
             
-            # Simple query - fetch recent data and deduplicate in pandas
-            # This is memory-safe because we're limiting to last N days (configurable)
-            if option_tickers:
-                placeholders = ",".join([f"${i}" for i in range(next_param + 1, next_param + 1 + len(option_tickers))])
-                params.extend(option_tickers)
-                query = (
-                    f"SELECT * FROM options_data "
-                    f"WHERE {where} AND option_ticker IN ({placeholders}) "
-                    f"ORDER BY timestamp DESC"
-                )
-            else:
-                query = (
-                    f"SELECT * FROM options_data "
-                    f"WHERE {where} "
-                    f"ORDER BY timestamp DESC"
-                )
+            # Query for specific option_ticker
+            query = (
+                f"SELECT * FROM options_data "
+                f"WHERE {where} "
+                f"ORDER BY timestamp DESC"
+            )
+            
+            # Log query for debugging
+            self.logger.debug(f"[DB QUERY] get_latest_options_data for {ticker}")
+            self.logger.debug(f"[DB QUERY] Final query: {query}")
+            self.logger.debug(f"[DB QUERY] Final params: {params}")
+            self.logger.debug(f"[DB QUERY] Param types: {[type(p).__name__ for p in params]}")
             
             try:
                 rows = await conn.fetch(query, *params)
+                self.logger.debug(f"[DB QUERY] get_latest_options_data returned {len(rows) if rows else 0} rows")
+                if rows and len(rows) > 0:
+                    # Log sample of returned data
+                    sample_row = dict(rows[0])
+                    self.logger.debug(f"[DB QUERY] Sample row: ticker={sample_row.get('ticker')}, expiration_date={sample_row.get('expiration_date')}, timestamp={sample_row.get('timestamp')}")
+                    # Log expiration date range of returned data
+                    expiration_dates = [dict(r).get('expiration_date') for r in rows if dict(r).get('expiration_date')]
+                    if expiration_dates:
+                        self.logger.debug(f"[DB QUERY] Expiration date range in results: min={min(expiration_dates)}, max={max(expiration_dates)}")
+                else:
+                    self.logger.debug(f"[DB QUERY] No rows returned from database query")
+                    # Try a simpler query to see if data exists at all
+                    test_query = f"SELECT COUNT(*) as cnt FROM options_data WHERE ticker = $1"
+                    test_rows = await conn.fetch(test_query, ticker)
+                    if test_rows:
+                        count = dict(test_rows[0]).get('cnt', 0)
+                        self.logger.debug(f"[DB QUERY] Total options in database for {ticker}: {count}")
+                        if count > 0:
+                            # Check what expiration dates exist
+                            date_query = f"SELECT DISTINCT expiration_date FROM options_data WHERE ticker = $1 ORDER BY expiration_date"
+                            date_rows = await conn.fetch(date_query, ticker)
+                            if date_rows:
+                                dates = [dict(r).get('expiration_date') for r in date_rows]
+                                self.logger.debug(f"[DB QUERY] Available expiration dates for {ticker}: {dates[:10]}{'...' if len(dates) > 10 else ''}")
                 if not rows:
                     return pd.DataFrame()
                 df = pd.DataFrame([dict(r) for r in rows])
@@ -1420,6 +3277,14 @@ class StockQuestDB(StockDBBase):
                     df['timestamp'] = pd.to_datetime(df['timestamp'])
                     df.set_index('timestamp', inplace=True)
                     df = df[df.index.notna()]
+                
+                # Cache the result - cache key is ticker + option_ticker
+                # No TTL - cache indefinitely (invalidated on save)
+                if 'option_ticker' in df.columns and not df.empty:
+                    cache_key = self._make_options_cache_key(ticker, option_ticker)
+                    await self._cache_set_df(cache_key, df)  # No TTL - cache indefinitely
+                    self.logger.debug(f"[CACHE] Cached data for key: {cache_key} (no TTL)")
+                
                 return df
             except Exception as e:
                 self.logger.error(f"Error retrieving latest options data for {ticker}: {e}")
@@ -1447,7 +3312,7 @@ class StockQuestDB(StockDBBase):
             expiration_date: Optional exact expiration date filter
             start_datetime: Start date for expiration date filtering
             end_datetime: End date for expiration date filtering  
-            option_tickers: Optional list of specific option tickers
+            option_tickers: Optional list of specific option tickers (if None, fetches all options for each ticker)
             max_concurrent: Maximum number of concurrent queries per batch (default: 10, lower = less memory)
             batch_size: Number of tickers to process per batch (default: 50, lower = less memory)
             timestamp_lookback_days: Number of days to look back for timestamp data (default: 7, controls memory usage)
@@ -1460,26 +3325,67 @@ class StockQuestDB(StockDBBase):
         
         all_results = []
         
-        # Process tickers in small batches to avoid memory spikes
-        for batch_start in range(0, len(tickers), batch_size):
-            batch_tickers = tickers[batch_start:batch_start + batch_size]
+        # If option_tickers is specified, fetch each ticker+option_ticker combination individually
+        if option_tickers:
+            # Create all ticker+option_ticker combinations
+            tasks = []
+            for ticker in tickers:
+                for option_ticker in option_tickers:
+                    tasks.append((ticker, option_ticker))
             
             semaphore = asyncio.Semaphore(max_concurrent)
             
-            async def fetch_one(ticker: str) -> pd.DataFrame:
+            async def fetch_one(ticker: str, option_ticker: str) -> pd.DataFrame:
                 async with semaphore:
                     try:
                         return await self.get_latest_options_data(
-                            ticker, 
+                            ticker=ticker,
+                            option_ticker=option_ticker,
                             expiration_date=expiration_date,
                             start_datetime=start_datetime,
                             end_datetime=end_datetime,
-                            option_tickers=option_tickers,
                             timestamp_lookback_days=timestamp_lookback_days
                         )
                     except Exception as e:
-                        self.logger.error(f"Error fetching options for {ticker}: {e}")
+                        self.logger.error(f"Error fetching options for {ticker}/{option_ticker}: {e}")
                         return pd.DataFrame()
+            
+            # Process in batches
+            for batch_start in range(0, len(tasks), batch_size):
+                batch_tasks = tasks[batch_start:batch_start + batch_size]
+                fetch_tasks = [asyncio.create_task(fetch_one(t, ot)) for t, ot in batch_tasks]
+                batch_results = await asyncio.gather(*fetch_tasks, return_exceptions=False)
+                
+                # Filter out empty DataFrames
+                non_empty = [df for df in batch_results if not df.empty and not df.isna().all().all()]
+                if non_empty:
+                    batch_df = pd.concat(non_empty, ignore_index=True)
+                    all_results.append(batch_df)
+        else:
+            # No specific option_tickers - fetch all options for each ticker
+            # Process tickers in small batches to avoid memory spikes
+            for batch_start in range(0, len(tickers), batch_size):
+                batch_tickers = tickers[batch_start:batch_start + batch_size]
+                
+                semaphore = asyncio.Semaphore(max_concurrent)
+                
+                async def fetch_one(ticker: str) -> pd.DataFrame:
+                    async with semaphore:
+                        try:
+                            # Fetch all options for this ticker using get_options_data
+                            df = await self.get_options_data(
+                                ticker=ticker,
+                                expiration_date=expiration_date,
+                                start_datetime=start_datetime,
+                                end_datetime=end_datetime
+                            )
+                            # Reset index to avoid issues with duplicate indices
+                            if not df.empty:
+                                df = df.reset_index(drop=True)
+                            return df
+                        except Exception as e:
+                            self.logger.error(f"Error fetching options for {ticker}: {e}")
+                            return pd.DataFrame()
             
             # Create tasks for this batch
             tasks = [asyncio.create_task(fetch_one(t)) for t in batch_tickers]
@@ -1544,56 +3450,118 @@ class StockQuestDB(StockDBBase):
         # Create a single persistent process pool for the entire job
         loop = asyncio.get_event_loop()
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # Process tickers in batches
-            for batch_start in range(0, len(tickers), batch_size):
-                batch_tickers = tickers[batch_start:batch_start + batch_size]
+            # If option_tickers is specified, create tasks for each ticker+option_ticker combination
+            # Otherwise, create tasks for each ticker
+            if option_tickers:
+                # Create all ticker+option_ticker combinations
+                all_combinations = []
+                for ticker in tickers:
+                    for option_ticker in option_tickers:
+                        all_combinations.append((ticker, option_ticker))
                 
-                # Prepare arguments for each ticker
-                process_args = []
-                for ticker in batch_tickers:
-                    args = (
-                        ticker,
-                        self.db_config,  # Pass connection string
-                        expiration_date,
-                        start_datetime,
-                        end_datetime,
-                        option_tickers,
-                        timestamp_lookback_days
-                    )
-                    process_args.append(args)
-                
-                # Submit all tickers in this batch to the persistent process pool
-                futures = [
-                    loop.run_in_executor(executor, _process_ticker_options, args)
-                    for args in process_args
-                ]
-                
-                # Wait for all processes to complete
-                batch_results = await asyncio.gather(*futures, return_exceptions=False)
-                
-                # Separate DataFrames and statistics
-                batch_dfs = []
-                batch_stats = []
-                for result in batch_results:
-                    df, stats = result
-                    batch_stats.append(stats)
-                    # Filter out empty DataFrames and DataFrames with all-NA values
-                    if not df.empty and not df.isna().all().all():
-                        batch_dfs.append(df)
-                
-                # Store statistics for later reporting
-                if not hasattr(self, '_process_stats'):
-                    self._process_stats = []
-                self._process_stats.extend(batch_stats)
-                
-                # Concatenate this batch and add to results
-                if batch_dfs:
-                    batch_df = pd.concat(batch_dfs, ignore_index=True)
-                    all_results.append(batch_df)
+                # Process in batches
+                for batch_start in range(0, len(all_combinations), batch_size):
+                    batch_combinations = all_combinations[batch_start:batch_start + batch_size]
                     
-                    # Force garbage collection after each batch to free memory
-                    import gc
-                    gc.collect()
+                    # Prepare arguments for each ticker+option_ticker combination
+                    process_args = []
+                    for ticker, option_ticker in batch_combinations:
+                        args = (
+                            ticker,
+                            self.db_config,  # Pass connection string
+                            expiration_date,
+                            start_datetime,
+                            end_datetime,
+                            [option_ticker],  # Pass as list with single item for _process_ticker_options
+                            timestamp_lookback_days,
+                            self.enable_cache  # Pass cache setting to worker
+                        )
+                        process_args.append(args)
+                    
+                    # Submit all ticker+option_ticker combinations in this batch
+                    futures = [
+                        loop.run_in_executor(executor, _process_ticker_options, args)
+                        for args in process_args
+                    ]
+                    
+                    # Wait for all processes to complete
+                    batch_results = await asyncio.gather(*futures, return_exceptions=False)
+                    
+                    # Separate DataFrames and statistics
+                    batch_dfs = []
+                    batch_stats = []
+                    for result in batch_results:
+                        df, stats = result
+                        batch_stats.append(stats)
+                        # Filter out empty DataFrames and DataFrames with all-NA values
+                        if not df.empty and not df.isna().all().all():
+                            batch_dfs.append(df)
+                    
+                    # Store statistics for later reporting
+                    if not hasattr(self, '_process_stats'):
+                        self._process_stats = []
+                    self._process_stats.extend(batch_stats)
+                    
+                    # Concatenate this batch and add to results
+                    if batch_dfs:
+                        batch_df = pd.concat(batch_dfs, ignore_index=True)
+                        all_results.append(batch_df)
+                        
+                        # Force garbage collection after each batch to free memory
+                        import gc
+                        gc.collect()
+            else:
+                # Process tickers in batches
+                for batch_start in range(0, len(tickers), batch_size):
+                    batch_tickers = tickers[batch_start:batch_start + batch_size]
+                    
+                    # Prepare arguments for each ticker
+                    process_args = []
+                    for ticker in batch_tickers:
+                        args = (
+                            ticker,
+                            self.db_config,  # Pass connection string
+                            expiration_date,
+                            start_datetime,
+                            end_datetime,
+                            None,  # No specific option_tickers
+                            timestamp_lookback_days,
+                            self.enable_cache  # Pass cache setting to worker
+                        )
+                        process_args.append(args)
+                    
+                    # Submit all tickers in this batch to the persistent process pool
+                    futures = [
+                        loop.run_in_executor(executor, _process_ticker_options, args)
+                        for args in process_args
+                    ]
+                    
+                    # Wait for all processes to complete
+                    batch_results = await asyncio.gather(*futures, return_exceptions=False)
+                    
+                    # Separate DataFrames and statistics
+                    batch_dfs = []
+                    batch_stats = []
+                    for result in batch_results:
+                        df, stats = result
+                        batch_stats.append(stats)
+                        # Filter out empty DataFrames and DataFrames with all-NA values
+                        if not df.empty and not df.isna().all().all():
+                            batch_dfs.append(df)
+                    
+                    # Store statistics for later reporting
+                    if not hasattr(self, '_process_stats'):
+                        self._process_stats = []
+                    self._process_stats.extend(batch_stats)
+                    
+                    # Concatenate this batch and add to results
+                    if batch_dfs:
+                        batch_df = pd.concat(batch_dfs, ignore_index=True)
+                        all_results.append(batch_df)
+                        
+                        # Force garbage collection after each batch to free memory
+                        import gc
+                        gc.collect()
         
         # Combine all batches
         if not all_results:
@@ -1648,7 +3616,7 @@ class StockQuestDB(StockDBBase):
         print("===============================\n", file=sys.stderr)
 
     async def get_option_price_feature(self, ticker: str, option_ticker: str) -> dict[str, Any] | None:
-        df = await self.get_latest_options_data(ticker=ticker, option_tickers=[option_ticker])
+        df = await self.get_latest_options_data(ticker=ticker, option_ticker=option_ticker)
         if df.empty:
             return None
         row = df.iloc[0]
@@ -1865,12 +3833,52 @@ class StockQuestDB(StockDBBase):
             try:
                 await conn.execute(insert_sql, *values)
                 self.logger.info(f"Saved financial info for {ticker}")
+                
+                # Write to cache after successful save (not just invalidate)
+                # This ensures cache is immediately updated with the new data
+                if self.enable_cache:
+                    try:
+                        # Prepare the data for caching (same format as get_financial_info)
+                        # Create DataFrame from the record
+                        cache_df = pd.DataFrame([record])
+                        if 'date' in cache_df.columns:
+                            cache_df['date'] = pd.to_datetime(cache_df['date'])
+                            cache_df.set_index('date', inplace=True)
+                            # Ensure index is datetime type
+                            if not pd.api.types.is_datetime64_any_dtype(cache_df.index):
+                                cache_df.index = pd.to_datetime(cache_df.index)
+                        
+                        # Cache using the same key format as get_financial_info
+                        cache_key = self._make_simple_cache_key('financial_info', ticker)
+                        # Cache with 1 hour TTL (same as get_financial_info)
+                        await self._cache_set_df(cache_key, cache_df, ttl_seconds=60 * 60)
+                        self.logger.info(f"[CACHE] Cached financial info for {ticker} after save (1 hour TTL)")
+                    except Exception as e:
+                        self.logger.warning(f"[CACHE] Error caching financial info after save for {ticker}: {e}")
+                        # Fall back to invalidation if caching fails
+                        await self._invalidate_ticker_cache(ticker)
+                else:
+                    # If cache is disabled, just invalidate
+                    await self._invalidate_ticker_cache(ticker)
             except Exception as e:
                 self.logger.error(f"Error saving financial info for {ticker}: {e}")
                 raise
 
     async def get_financial_info(self, ticker: str, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
         """Retrieve financial info data from QuestDB."""
+        # Check cache first - use simple key without hash (one key per ticker)
+        cache_key = self._make_simple_cache_key('financial_info', ticker)
+        cached_df = await self._cache_get_df(cache_key)
+        if cached_df is not None:
+            self.logger.debug(f"[CACHE HIT] Financial info for {ticker} - Returning cached DataFrame")
+            return cached_df
+        
+        # Cache miss - log that we're querying the database
+        if self.enable_cache:
+            self.logger.debug(f"[DB QUERY] get_financial_info for {ticker} - Cache miss")
+        else:
+            self.logger.debug(f"[DB QUERY] get_financial_info for {ticker} - Cache disabled")
+        
         async with self.get_connection() as conn:
             query = "SELECT * FROM financial_info WHERE ticker = $1"
             params = [ticker]
@@ -1891,9 +3899,14 @@ class StockQuestDB(StockDBBase):
                     if 'date' in df.columns:
                         df['date'] = pd.to_datetime(df['date'])
                         df.set_index('date', inplace=True)
+                    # Cache the result with 1 hour TTL
+                    await self._cache_set_df(cache_key, df, ttl_seconds=60 * 60)
                     return df
                 else:
-                    return pd.DataFrame()
+                    empty_df = pd.DataFrame()
+                    # Cache empty result too with 1 hour TTL
+                    await self._cache_set_df(cache_key, empty_df, ttl_seconds=60 * 60)
+                    return empty_df
             except Exception as e:
                 self.logger.error(f"Error retrieving financial info for {ticker}: {e}")
                 return pd.DataFrame()
@@ -1931,7 +3944,7 @@ class StockQuestDB(StockDBBase):
         await self.close()
     
     async def close(self):
-        """Close the connection pool."""
+        """Close the connection pool and Redis clients."""
         # Close all pools we may have created across loops
         if self._pool_by_loop:
             for pool in list(self._pool_by_loop.values()):
@@ -1941,6 +3954,16 @@ class StockQuestDB(StockDBBase):
                     pass
             self._pool_by_loop.clear()
         self._connection_pool = None
+        
+        # Close all Redis clients (if any were cached)
+        # Note: With twemproxy, we use on-demand connections, so this may be empty
+        if self.enable_cache and self._redis_by_loop:
+            for client in list(self._redis_by_loop.values()):
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+            self._redis_by_loop.clear()
 
     create_table_daily_prices_sql = """
     CREATE TABLE IF NOT EXISTS daily_prices (

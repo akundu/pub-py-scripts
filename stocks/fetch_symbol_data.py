@@ -1695,8 +1695,8 @@ async def main() -> None:
         args.end_date = end_dt.strftime('%Y-%m-%d')
         print(f"Start-date specified ({args.start_date}) but no end-date, setting end-date to 30 days after: {args.end_date}", file=sys.stderr)
     # Case 4: Both start-date and end-date are explicitly set -> use as-is
-    elif args.start_date is not None and args.end_date != today_str:
-        print(f"Both start-date ({args.start_date}) and end-date ({args.end_date}) explicitly specified.", file=sys.stderr)
+    # elif args.start_date is not None and args.end_date != today_str:
+    #     print(f"Both start-date ({args.start_date}) and end-date ({args.end_date}) explicitly specified.", file=sys.stderr)
     # Case 5: Fallback for other cases - default to --latest if no dates specified
     else:
         if args.start_date is None and args.end_date is None:

@@ -140,7 +140,6 @@ symbols:
 - DOV
 - DOW
 - DRI
-- DT
 - DTE
 - DUK
 - DVN
@@ -204,6 +203,7 @@ symbols:
 - GSK
 - GWRE
 - GWW
+- H
 - HAL
 - HCA
 - HD
@@ -271,7 +271,6 @@ symbols:
 - LOW
 - LUV
 - LVS
-- LYB
 - LYG
 - LYV
 - MA
@@ -375,7 +374,6 @@ symbols:
 - RMD
 - ROK
 - ROL
-- RS
 - RSG
 - RTX
 - RY
@@ -394,7 +392,6 @@ symbols:
 - SLF
 - SMFG
 - SNA
-- SNN
 - SNOW
 - SO
 - SONY
@@ -445,10 +442,12 @@ symbols:
 - TTE
 - TU
 - TWLO
+- TXT
 - TYL
 - U
 - UBER
 - UBS
+- UHS
 - UI
 - UL
 - ULS
@@ -479,6 +478,7 @@ symbols:
 - WDS
 - WEC
 - WELL
+- WES
 - WFC
 - WIT
 - WM

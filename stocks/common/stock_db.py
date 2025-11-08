@@ -1528,26 +1528,51 @@ class StockDBClient(StockDBBase):
             return pd.DataFrame()
         df = pd.DataFrame.from_records(response_data)
         if index_col in df.columns:
-            # Try to parse with explicit format first, then fall back to flexible parsing
-            try:
-                # Try ISO format first (most common for our timestamps)
-                df[index_col] = pd.to_datetime(df[index_col], format='ISO8601', errors='coerce')
-            except (ValueError, TypeError):
+            # Check if the index column is already an integer (Unix timestamp)
+            if pd.api.types.is_integer_dtype(df[index_col]):
+                # Try to convert integer to datetime (Unix timestamp)
+                first_val = df[index_col].iloc[0] if len(df) > 0 else 0
+                if first_val > 1e10:  # Likely milliseconds
+                    df[index_col] = pd.to_datetime(df[index_col], unit='ms', errors='coerce')
+                elif first_val > 1e9:  # Likely seconds
+                    df[index_col] = pd.to_datetime(df[index_col], unit='s', errors='coerce')
+                else:
+                    # Try general conversion
+                    df[index_col] = pd.to_datetime(df[index_col], errors='coerce')
+            else:
+                # Try to parse with explicit format first, then fall back to flexible parsing
                 try:
-                    # Try specific ISO format patterns
-                    df[index_col] = pd.to_datetime(df[index_col], format='%Y-%m-%dT%H:%M:%S.%fZ', errors='coerce')
+                    # Try ISO format first (most common for our timestamps)
+                    df[index_col] = pd.to_datetime(df[index_col], format='ISO8601', errors='coerce')
                 except (ValueError, TypeError):
                     try:
-                        # Try without microseconds
-                        df[index_col] = pd.to_datetime(df[index_col], format='%Y-%m-%dT%H:%M:%SZ', errors='coerce')
+                        # Try specific ISO format patterns
+                        df[index_col] = pd.to_datetime(df[index_col], format='%Y-%m-%dT%H:%M:%S.%fZ', errors='coerce')
                     except (ValueError, TypeError):
-                        # Fall back to flexible parsing but suppress the warning
-                        import warnings
-                        with warnings.catch_warnings():
-                            warnings.filterwarnings('ignore', category=UserWarning, message='Could not infer format')
-                            df[index_col] = pd.to_datetime(df[index_col], errors='coerce')
+                        try:
+                            # Try without microseconds
+                            df[index_col] = pd.to_datetime(df[index_col], format='%Y-%m-%dT%H:%M:%SZ', errors='coerce')
+                        except (ValueError, TypeError):
+                            # Fall back to flexible parsing but suppress the warning
+                            import warnings
+                            with warnings.catch_warnings():
+                                warnings.filterwarnings('ignore', category=UserWarning, message='Could not infer format')
+                                df[index_col] = pd.to_datetime(df[index_col], errors='coerce')
             
             df.set_index(index_col, inplace=True)
+            # Ensure index is datetime type after setting as index
+            if not pd.api.types.is_datetime64_any_dtype(df.index):
+                try:
+                    if pd.api.types.is_integer_dtype(df.index):
+                        first_val = df.index[0] if len(df) > 0 else 0
+                        if first_val > 1e10:  # Likely milliseconds
+                            df.index = pd.to_datetime(df.index, unit='ms', errors='coerce')
+                        else:  # Likely seconds
+                            df.index = pd.to_datetime(df.index, unit='s', errors='coerce')
+                    else:
+                        df.index = pd.to_datetime(df.index, errors='coerce')
+                except Exception:
+                    pass
             df = df[df.index.notna()]
         return df
 
@@ -1859,7 +1884,7 @@ class StockDBSessionManager:
             self._connector = None
 
 
-def get_stock_db(db_type: str, db_config: str | None = None, logger: logging.Logger = None, log_level: str = "INFO", timeout: float = None, historical_batch_size: int = 25, questdb_connection_timeout_seconds: int = 180) -> StockDBBase:
+def get_stock_db(db_type: str, db_config: str | None = None, logger: logging.Logger = None, log_level: str = "INFO", timeout: float = None, historical_batch_size: int = 25, questdb_connection_timeout_seconds: int = 180, enable_cache: bool = True, redis_url: str | None = None, ensure_tables: bool = False) -> StockDBBase:
     actual_db_config = db_config
     if actual_db_config is None:
         actual_db_config = get_default_db_path(db_type)
@@ -1878,7 +1903,8 @@ def get_stock_db(db_type: str, db_config: str | None = None, logger: logging.Log
     elif db_type_lower == "questdb":
         from .questdb_db import StockQuestDB
         return StockQuestDB(actual_db_config, logger=logger, log_level=log_level, 
-                           connection_timeout_seconds=questdb_connection_timeout_seconds)
+                           connection_timeout_seconds=questdb_connection_timeout_seconds,
+                           enable_cache=enable_cache, redis_url=redis_url, ensure_tables=ensure_tables)
     elif db_type_lower == "remote":
         if timeout is not None:
             return StockDBClient(actual_db_config, logger, response_timeout=timeout)

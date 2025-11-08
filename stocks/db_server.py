@@ -1179,9 +1179,34 @@ async def handle_db_command(request: web.Request) -> web.Response:
                 params.get("interval", "daily")
             )
             if df.empty: return web.json_response({"message": "No data found", "data": []})
+            # Ensure index is datetime before resetting
+            if not df.empty and not pd.api.types.is_datetime64_any_dtype(df.index):
+                try:
+                    if pd.api.types.is_integer_dtype(df.index):
+                        first_val = df.index[0] if len(df) > 0 else 0
+                        if first_val > 1e10:  # Likely milliseconds
+                            df.index = pd.to_datetime(df.index, unit='ms', errors='coerce')
+                        else:  # Likely seconds
+                            df.index = pd.to_datetime(df.index, unit='s', errors='coerce')
+                    else:
+                        df.index = pd.to_datetime(df.index, errors='coerce')
+                    if df.index.isna().any():
+                        df = df[df.index.notna()]
+                except Exception:
+                    pass
             df_reset = df.reset_index()
+            # Convert datetime64 columns to strings
             for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
                 df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+            # Also check object columns for Timestamp objects (can happen after reset_index)
+            for col_name in df_reset.select_dtypes(include=['object']).columns:
+                if df_reset[col_name].notna().any():
+                    # Check if the column contains Timestamp objects
+                    sample_val = df_reset[col_name].dropna().iloc[0] if not df_reset[col_name].dropna().empty else None
+                    if isinstance(sample_val, pd.Timestamp):
+                        df_reset[col_name] = df_reset[col_name].apply(
+                            lambda x: x.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if pd.notna(x) and isinstance(x, pd.Timestamp) else x
+                        )
             return web.json_response({"data": df_reset.to_dict(orient='records')})
 
         elif command == "save_stock_data":
@@ -1267,8 +1292,18 @@ async def handle_db_command(request: web.Request) -> web.Response:
             )
             if df.empty: return web.json_response({"message": "No realtime data found", "data": []})
             df_reset = df.reset_index()
+            # Convert datetime64 columns to strings
             for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
                 df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+            # Also check object columns for Timestamp objects (can happen after reset_index)
+            for col_name in df_reset.select_dtypes(include=['object']).columns:
+                if df_reset[col_name].notna().any():
+                    # Check if the column contains Timestamp objects
+                    sample_val = df_reset[col_name].dropna().iloc[0] if not df_reset[col_name].dropna().empty else None
+                    if isinstance(sample_val, pd.Timestamp):
+                        df_reset[col_name] = df_reset[col_name].apply(
+                            lambda x: x.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if pd.notna(x) and isinstance(x, pd.Timestamp) else x
+                        )
             return web.json_response({"data": df_reset.to_dict(orient='records')})
 
         elif command == "get_latest_price":
@@ -1371,8 +1406,18 @@ async def handle_db_command(request: web.Request) -> web.Response:
                 
                 # Reset index and format datetime columns
                 df_reset = df.reset_index()
+                # Convert datetime64 columns to strings
                 for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
                     df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                # Also check object columns for Timestamp objects (can happen after reset_index)
+                for col_name in df_reset.select_dtypes(include=['object']).columns:
+                    if df_reset[col_name].notna().any():
+                        # Check if the column contains Timestamp objects
+                        sample_val = df_reset[col_name].dropna().iloc[0] if not df_reset[col_name].dropna().empty else None
+                        if isinstance(sample_val, pd.Timestamp):
+                            df_reset[col_name] = df_reset[col_name].apply(
+                                lambda x: x.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if pd.notna(x) and isinstance(x, pd.Timestamp) else x
+                            )
                 
                 # Apply limit and convert to records
                 result_data = df_reset.tail(limit).to_dict(orient='records')
@@ -1400,8 +1445,18 @@ async def handle_db_command(request: web.Request) -> web.Response:
                 
                 # Reset index and format datetime columns
                 df_reset = df.reset_index()
+                # Convert datetime64 columns to strings
                 for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
                     df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                # Also check object columns for Timestamp objects (can happen after reset_index)
+                for col_name in df_reset.select_dtypes(include=['object']).columns:
+                    if df_reset[col_name].notna().any():
+                        # Check if the column contains Timestamp objects
+                        sample_val = df_reset[col_name].dropna().iloc[0] if not df_reset[col_name].dropna().empty else None
+                        if isinstance(sample_val, pd.Timestamp):
+                            df_reset[col_name] = df_reset[col_name].apply(
+                                lambda x: x.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if pd.notna(x) and isinstance(x, pd.Timestamp) else x
+                            )
                 
                 result_data = df_reset.to_dict(orient='records')
                 return web.json_response({"data": result_data})
@@ -1532,8 +1587,18 @@ async def handle_db_command(request: web.Request) -> web.Response:
                 
                 # Reset index and format datetime columns
                 df_reset = df.reset_index()
+                # Convert datetime64 columns to strings
                 for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
                     df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                # Also check object columns for Timestamp objects (can happen after reset_index)
+                for col_name in df_reset.select_dtypes(include=['object']).columns:
+                    if df_reset[col_name].notna().any():
+                        # Check if the column contains Timestamp objects
+                        sample_val = df_reset[col_name].dropna().iloc[0] if not df_reset[col_name].dropna().empty else None
+                        if isinstance(sample_val, pd.Timestamp):
+                            df_reset[col_name] = df_reset[col_name].apply(
+                                lambda x: x.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if pd.notna(x) and isinstance(x, pd.Timestamp) else x
+                            )
                 
                 return web.json_response({"data": df_reset.to_dict(orient='records')})
             except Exception as e:

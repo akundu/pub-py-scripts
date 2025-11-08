@@ -185,6 +185,7 @@ class FilterParser:
         'long_days_to_expiry': int,
         'long_delta': float,
         'long_theta': float,
+        'premium_diff': float,
         'short_premium_total': float,
         'short_daily_premium': float,
         'long_premium_total': float,
@@ -419,11 +420,12 @@ class FilterParser:
 class OptionsAnalyzer:
     """Analyzes covered call opportunities across all strike prices and tickers."""
     
-    def __init__(self, db_conn: str, quiet: bool = False, debug: bool = False):
+    def __init__(self, db_conn: str, quiet: bool = False, debug: bool = False, enable_cache: bool = True):
         """Initialize the options analyzer with database connection."""
         self.db_conn = db_conn
         self.quiet = quiet
         self.debug = debug
+        self.enable_cache = enable_cache
         self.db = None
     
     def _create_compact_headers(self, df: pd.DataFrame) -> Dict[str, str]:
@@ -462,6 +464,7 @@ class OptionsAnalyzer:
             'long_delta': 'L_DEL',
             'long_theta': 'L_TH',
             'long_volume': 'L_VOL',
+            'premium_diff': 'PREM_DIFF',
             'short_premium_total': 'S_PREM_TOT',
             'short_daily_premium': 'S_DAY_PREM',
             'long_premium_total': 'L_PREM_TOT',
@@ -503,7 +506,7 @@ class OptionsAnalyzer:
         
         # Format numeric columns for CSV (remove $ symbols and % symbols for cleaner data)
         for col in ['current_price', 'strike_price', 'price_above_current', 'option_premium', 'potential_premium', 'daily_premium',
-                    'long_strike_price', 'long_option_premium', 'short_premium_total', 'short_daily_premium', 'long_premium_total', 'net_premium', 'net_daily_premium']:
+                    'long_strike_price', 'long_option_premium', 'premium_diff', 'short_premium_total', 'short_daily_premium', 'long_premium_total', 'net_premium', 'net_daily_premium']:
             if col in df_csv.columns:
                 df_csv[col] = df_csv[col].apply(lambda x: float(x.replace('$', '').replace(',', '')) if isinstance(x, str) and '$' in str(x) else x)
         
@@ -543,9 +546,12 @@ class OptionsAnalyzer:
     async def initialize(self):
         """Initialize database connection."""
         try:
-            self.db = get_stock_db('questdb', db_config=self.db_conn)
+            # Set log level based on quiet mode - INFO for non-quiet, WARNING for quiet
+            log_level = "WARNING" if self.quiet else "INFO"
+            self.db = get_stock_db('questdb', db_config=self.db_conn, enable_cache=self.enable_cache, log_level=log_level)
             if not self.quiet:
-                print("Database connection established successfully.", file=sys.stderr)
+                cache_status = "enabled" if self.enable_cache else "disabled"
+                print(f"Database connection established successfully (cache: {cache_status}).", file=sys.stderr)
         except Exception as e:
             print(f"Error connecting to database: {e}", file=sys.stderr)
             sys.exit(1)
@@ -553,6 +559,8 @@ class OptionsAnalyzer:
     async def get_available_tickers(self) -> List[str]:
         """Get all available tickers from the daily_prices table."""
         try:
+            if self.debug or not self.quiet:
+                print("DEBUG: Checking daily_prices table for available tickers", file=sys.stderr)
             # First, let's check if the table exists and has data
             check_query = """
             SELECT COUNT(*) as row_count 
@@ -615,29 +623,31 @@ class OptionsAnalyzer:
         """Get financial information (P/E, market_cap) for the given tickers."""
         financial_data = {}
         
+        if self.debug or not self.quiet:
+            print(f"DEBUG: Fetching financial info for {len(tickers)} tickers", file=sys.stderr)
+        
         for ticker in tickers:
             try:
-                # Get latest financial info for each ticker
-                query = """
-                SELECT 
-                    price_to_earnings as pe_ratio,
-                    market_cap,
-                    price
-                FROM financial_info 
-                WHERE ticker = $1 
-                ORDER BY date DESC 
-                LIMIT 1
-                """
-                df = await self.db.execute_select_sql(query, (ticker,))
+                # Use the cached get_financial_info method instead of direct SQL
+                df = await self.db.get_financial_info(ticker)
                 
                 if not df.empty:
-                    # QuestDB returns columns as integers, so we need to map them
-                    # Based on debug output: Column 5 = price_to_earnings, Column 3 = market_cap, Column 2 = price
+                    # Map column names to expected fields
                     row = df.iloc[0]
+                    # Try different possible column names
+                    pe_ratio = None
+                    if 'price_to_earnings' in df.columns:
+                        pe_ratio = row['price_to_earnings']
+                    elif 'pe_ratio' in df.columns:
+                        pe_ratio = row['pe_ratio']
+                    
+                    market_cap = row['market_cap'] if 'market_cap' in df.columns else None
+                    price = row['price'] if 'price' in df.columns else None
+                    
                     financial_data[ticker] = {
-                        'pe_ratio': row.iloc[0] if len(row) > 0 else None,  # First column should be pe_ratio
-                        'market_cap': row.iloc[1] if len(row) > 1 else None,  # Second column should be market_cap
-                        'price': row.iloc[2] if len(row) > 2 else None  # Third column should be price
+                        'pe_ratio': pe_ratio,
+                        'market_cap': market_cap,
+                        'price': price
                     }
                 else:
                     financial_data[ticker] = {
@@ -676,7 +686,9 @@ class OptionsAnalyzer:
         spread_mode: bool = False,
         spread_strike_tolerance: float = 0.0,
         spread_long_days: int = 90,
-        spread_long_days_tolerance: int = 14
+        spread_long_days_tolerance: int = 14,
+        spread_long_min_days: Optional[int] = None,
+        min_write_timestamp: Optional[str] = None
     ) -> pd.DataFrame:
         """
         Analyze covered call opportunities for the given tickers.
@@ -699,8 +711,10 @@ class OptionsAnalyzer:
             max_workers: Number of worker processes for multiprocessing (default: 4, typically CPU count)
             spread_mode: Enable calendar spread analysis (sell short-term, buy long-term)
             spread_strike_tolerance: Percentage tolerance for matching strike prices (e.g., 5.0 for ±5%)
-            spread_long_days: Target days to expiry for long-term options to buy
-            spread_long_days_tolerance: Days tolerance for long option expiration window (default: 14, searches ±14 days around target)
+            spread_long_days: Maximum/target days to expiry for long-term options to buy
+            spread_long_days_tolerance: Days tolerance for long option expiration window (default: 14, searches ±14 days around target, ignored if spread_long_min_days is set)
+            spread_long_min_days: Minimum days to expiry for long options (if set, searches from min to spread_long_days instead of using tolerance)
+            min_write_timestamp: Minimum write timestamp for options (EST format like '2025-11-05 10:00:00', filters out older options)
             
         Returns:
             DataFrame with analysis results
@@ -725,6 +739,11 @@ class OptionsAnalyzer:
         
         # Use memory-efficient batch fetching instead of single large query
         try:
+            if self.debug or not self.quiet:
+                print(f"DEBUG: Starting options fetch for {len(tickers_upper)} tickers", file=sys.stderr)
+                print(f"DEBUG: Date range: {start_date} to {end_date}", file=sys.stderr)
+                print(f"DEBUG: Tickers: {tickers_upper[:10]}{'...' if len(tickers_upper) > 10 else ''}", file=sys.stderr)
+            
             # Choose between asyncio-only or hybrid asyncio+multiprocess based on max_workers
             if max_workers > 1:
                 if not self.quiet:
@@ -751,14 +770,40 @@ class OptionsAnalyzer:
                     timestamp_lookback_days=timestamp_lookback_days
                 )
             
+            if self.debug or not self.quiet:
+                print(f"DEBUG: Fetched {len(options_df)} total options from database", file=sys.stderr)
+                if not options_df.empty:
+                    print(f"DEBUG: Options columns: {list(options_df.columns)}", file=sys.stderr)
+                    if 'ticker' in options_df.columns:
+                        unique_tickers = options_df['ticker'].unique().tolist()
+                        print(f"DEBUG: Options tickers: {unique_tickers[:10]}{'...' if len(unique_tickers) > 10 else ''}", file=sys.stderr)
+                    if 'option_type' in options_df.columns:
+                        option_types = options_df['option_type'].unique().tolist()
+                        print(f"DEBUG: Option types found: {option_types}", file=sys.stderr)
+                else:
+                    print("DEBUG: No options data returned from database", file=sys.stderr)
+            
             if options_df.empty:
+                if not self.quiet:
+                    print("DEBUG: Empty options DataFrame after fetch. Possible reasons:", file=sys.stderr)
+                    print("  1. No options data in database for these tickers", file=sys.stderr)
+                    print(f"  2. No options expiring between {start_date} and {end_date}", file=sys.stderr)
+                    print(f"  3. Options exist but outside timestamp_lookback_days={timestamp_lookback_days} window", file=sys.stderr)
                 return pd.DataFrame()
             
             # Filter for call options only
+            before_call_filter = len(options_df)
             if 'option_type' in options_df.columns:
                 options_df = options_df[options_df['option_type'] == 'call']
+                if self.debug or not self.quiet:
+                    print(f"DEBUG: After call filter: {len(options_df)} options (was {before_call_filter})", file=sys.stderr)
+            else:
+                if self.debug or not self.quiet:
+                    print("DEBUG: Warning: 'option_type' column not found in options DataFrame", file=sys.stderr)
             
             if options_df.empty:
+                if not self.quiet:
+                    print("DEBUG: No call options found after filtering", file=sys.stderr)
                 return pd.DataFrame()
             
             # Get latest stock prices for all tickers
@@ -772,7 +817,15 @@ class OptionsAnalyzer:
                     if not self.quiet:
                         print(f"Warning: Could not fetch price for {ticker}: {e}", file=sys.stderr)
             
+            if self.debug or not self.quiet:
+                print(f"DEBUG: Fetched stock prices for {len(stock_prices)}/{len(tickers_upper)} tickers", file=sys.stderr)
+                if stock_prices:
+                    sample_prices = list(stock_prices.items())[:5]
+                    print(f"DEBUG: Sample prices: {sample_prices}", file=sys.stderr)
+            
             if not stock_prices:
+                if not self.quiet:
+                    print("DEBUG: No stock prices fetched. Cannot calculate option metrics.", file=sys.stderr)
                 return pd.DataFrame()
             
             # Build the analysis DataFrame
@@ -782,9 +835,15 @@ class OptionsAnalyzer:
             df['current_price'] = df['ticker'].map(stock_prices)
             
             # Filter out rows where we don't have a stock price
+            before_price_filter = len(df)
             df = df[df['current_price'].notna()]
             
+            if self.debug or not self.quiet:
+                print(f"DEBUG: After price mapping: {len(df)} options (was {before_price_filter})", file=sys.stderr)
+            
             if df.empty:
+                if not self.quiet:
+                    print("DEBUG: No options remaining after price mapping", file=sys.stderr)
                 return pd.DataFrame()
             
             # Calculate derived fields
@@ -807,10 +866,13 @@ class OptionsAnalyzer:
             
             # Apply days_to_expiry filter if specified
             if days_to_expiry is not None:
+                before_days_filter = len(df)
                 df = df[
                     (df['days_to_expiry'] >= days_to_expiry - 1) &
                     (df['days_to_expiry'] <= days_to_expiry + 1)
                 ]
+                if self.debug or not self.quiet:
+                    print(f"DEBUG: After days_to_expiry filter ({days_to_expiry}): {len(df)} options (was {before_days_filter})", file=sys.stderr)
             
             # Calculate position metrics
             df['num_contracts'] = df['current_price'].apply(
@@ -828,10 +890,45 @@ class OptionsAnalyzer:
             
             # Apply filters
             if min_volume > 0:
+                before_volume_filter = len(df)
                 df = df[df['volume'] >= min_volume]
+                if self.debug or not self.quiet:
+                    print(f"DEBUG: After min_volume filter ({min_volume}): {len(df)} options (was {before_volume_filter})", file=sys.stderr)
             
             if min_premium > 0.0:
+                before_premium_filter = len(df)
                 df = df[df['potential_premium'] >= min_premium]
+                if self.debug or not self.quiet:
+                    print(f"DEBUG: After min_premium filter ({min_premium}): {len(df)} options (was {before_premium_filter})", file=sys.stderr)
+            
+            # Apply write timestamp filter if specified
+            if min_write_timestamp:
+                try:
+                    # Parse EST timestamp and convert to UTC for comparison
+                    import pytz
+                    est = pytz.timezone('America/New_York')
+                    # Parse the input timestamp (assume EST)
+                    min_ts = pd.to_datetime(min_write_timestamp)
+                    # If timezone-naive, localize to EST
+                    if min_ts.tz is None:
+                        min_ts = est.localize(min_ts)
+                    # Convert to UTC for comparison
+                    min_ts_utc = min_ts.astimezone(pytz.UTC)
+                    
+                    # Ensure write_timestamp column is datetime and timezone-aware
+                    if 'write_timestamp' in df.columns:
+                        df['write_timestamp'] = pd.to_datetime(df['write_timestamp'])
+                        # If timezone-naive, assume UTC
+                        if df['write_timestamp'].dt.tz is None:
+                            df['write_timestamp'] = df['write_timestamp'].dt.tz_localize('UTC')
+                        # Filter
+                        df = df[df['write_timestamp'] >= min_ts_utc]
+                        if not self.quiet:
+                            print(f"Filtered options to those written after {min_write_timestamp} EST ({min_ts_utc} UTC)")
+                except Exception as e:
+                    if not self.quiet:
+                        print(f"Warning: Could not apply write timestamp filter: {e}", file=sys.stderr)
+
             
             # Round numeric columns
             for col in ['bid', 'ask', 'delta', 'theta']:
@@ -864,6 +961,12 @@ class OptionsAnalyzer:
                         print(f"Short-term tickers: {df['ticker'].unique().tolist()}")
                         print(f"Short-term strike range: ${df['strike_price'].min():.2f} to ${df['strike_price'].max():.2f}")
                         print(f"Short-term days to expiry: {df['days_to_expiry'].min()} to {df['days_to_expiry'].max()}")
+                if self.debug:
+                    print(f"DEBUG: Spread mode parameters:", file=sys.stderr)
+                    print(f"  spread_strike_tolerance: {spread_strike_tolerance}%", file=sys.stderr)
+                    print(f"  spread_long_days: {spread_long_days}", file=sys.stderr)
+                    print(f"  spread_long_min_days: {spread_long_min_days}", file=sys.stderr)
+                    print(f"  spread_long_days_tolerance: {spread_long_days_tolerance}", file=sys.stderr)
                 
                 df = await self._create_spread_analysis(
                     df_short=df,
@@ -871,19 +974,27 @@ class OptionsAnalyzer:
                     spread_strike_tolerance=spread_strike_tolerance,
                     spread_long_days=spread_long_days,
                     spread_long_days_tolerance=spread_long_days_tolerance,
+                    spread_long_min_days=spread_long_min_days,
                     start_date=start_date,
                     end_date=end_date,
                     max_concurrent=max_concurrent,
                     batch_size=batch_size,
-                    timestamp_lookback_days=timestamp_lookback_days,
-                    max_workers=max_workers,
-                    position_size=position_size
-                )
+                timestamp_lookback_days=timestamp_lookback_days,
+                max_workers=max_workers,
+                position_size=position_size,
+                min_write_timestamp=min_write_timestamp
+            )
+            
+            if self.debug or not self.quiet:
+                print(f"DEBUG: Final options count before spread/filtering: {len(df)}", file=sys.stderr)
             
             return df
         except Exception as e:
             if not self.quiet:
                 print(f"Error analyzing options: {e}", file=sys.stderr)
+            import traceback
+            if self.debug:
+                traceback.print_exc()
             return pd.DataFrame()
     
     async def _create_spread_analysis(
@@ -893,14 +1004,16 @@ class OptionsAnalyzer:
         spread_strike_tolerance: float,
         spread_long_days: int,
         spread_long_days_tolerance: int,
-        start_date: Optional[str],
-        end_date: Optional[str],
-        max_concurrent: int,
-        batch_size: int,
-        timestamp_lookback_days: int,
-        max_workers: int,
-        position_size: float
-    ) -> pd.DataFrame:
+            spread_long_min_days: Optional[int],
+            start_date: Optional[str],
+            end_date: Optional[str],
+            max_concurrent: int,
+            batch_size: int,
+            timestamp_lookback_days: int,
+            max_workers: int,
+            position_size: float,
+            min_write_timestamp: Optional[str]
+        ) -> pd.DataFrame:
         """
         Match short-term options with long-term options to create calendar spread analysis.
         
@@ -908,8 +1021,9 @@ class OptionsAnalyzer:
             df_short: DataFrame with short-term option analysis
             tickers: List of tickers to analyze
             spread_strike_tolerance: Percentage tolerance for strike matching
-            spread_long_days: Target days to expiry for long options
-            spread_long_days_tolerance: Days tolerance for long option expiration window (e.g., ±14 days)
+            spread_long_days: Maximum/target days to expiry for long options
+            spread_long_days_tolerance: Days tolerance for long option expiration window (e.g., ±14 days, ignored if spread_long_min_days is set)
+            spread_long_min_days: Minimum days to expiry for long options (if set, searches from min to max instead of using tolerance)
             Other args: Same as analyze_options
             
         Returns:
@@ -921,13 +1035,25 @@ class OptionsAnalyzer:
         # Calculate the target date range for long options (around spread_long_days from today)
         from datetime import date, timedelta
         today = date.today()
-        # Allow ±N days window around the target long expiry (configurable)
-        long_start_date = (today + timedelta(days=spread_long_days - spread_long_days_tolerance)).strftime('%Y-%m-%d')
-        long_end_date = (today + timedelta(days=spread_long_days + spread_long_days_tolerance)).strftime('%Y-%m-%d')
         
-        if not self.quiet:
-            print(f"Fetching long-term options expiring around {spread_long_days} days (±{spread_long_days_tolerance} days)")
-            print(f"  Date range: {long_start_date} to {long_end_date}")
+        # If spread_long_min_days is set, use it as the lower bound; otherwise use tolerance-based approach
+        if spread_long_min_days is not None:
+            long_start_date = (today + timedelta(days=spread_long_min_days)).strftime('%Y-%m-%d')
+            long_end_date = (today + timedelta(days=spread_long_days)).strftime('%Y-%m-%d')
+            if not self.quiet:
+                print(f"Fetching long-term options expiring between {spread_long_min_days} and {spread_long_days} days")
+                print(f"  Date range: {long_start_date} to {long_end_date}")
+            if self.debug:
+                print(f"DEBUG: Calculated long-term date range: {long_start_date} to {long_end_date} (from today {today})", file=sys.stderr)
+        else:
+            # Allow ±N days window around the target long expiry (configurable)
+            long_start_date = (today + timedelta(days=spread_long_days - spread_long_days_tolerance)).strftime('%Y-%m-%d')
+            long_end_date = (today + timedelta(days=spread_long_days + spread_long_days_tolerance)).strftime('%Y-%m-%d')
+            if not self.quiet:
+                print(f"Fetching long-term options expiring around {spread_long_days} days (±{spread_long_days_tolerance} days)")
+                print(f"  Date range: {long_start_date} to {long_end_date}")
+            if self.debug:
+                print(f"DEBUG: Calculated long-term date range: {long_start_date} to {long_end_date} (from today {today})", file=sys.stderr)
         
         if self.debug:
             print(f"DEBUG: Tickers to fetch: {tickers}")
@@ -938,7 +1064,21 @@ class OptionsAnalyzer:
                 print(f"  Max expiration: {df_short['expiration_date'].max()}")
         
         # Fetch long-term options data
+        # Use a much larger timestamp lookback for long-term options since they may have been
+        # written weeks or months ago but are still valid. Use at least 180 days to catch options
+        # that were written when they were first listed (which could be months before expiration)
+        long_timestamp_lookback_days = max(timestamp_lookback_days, 180)  # At least 180 days for long-term options
+        if self.debug or not self.quiet:
+            print(f"DEBUG: Using timestamp_lookback_days={long_timestamp_lookback_days} for long-term options (vs {timestamp_lookback_days} for short-term)", file=sys.stderr)
+        
         try:
+            if self.debug:
+                print(f"DEBUG: Calling get_latest_options_data_batch with:", file=sys.stderr)
+                print(f"  tickers: {tickers}", file=sys.stderr)
+                print(f"  start_datetime: {long_start_date}", file=sys.stderr)
+                print(f"  end_datetime: {long_end_date}", file=sys.stderr)
+                print(f"  timestamp_lookback_days: {long_timestamp_lookback_days}", file=sys.stderr)
+            
             if max_workers > 1:
                 long_options_df = await self.db.get_latest_options_data_batch_multiprocess(
                     tickers=tickers,
@@ -946,7 +1086,7 @@ class OptionsAnalyzer:
                     end_datetime=long_end_date,
                     batch_size=batch_size,
                     max_workers=max_workers,
-                    timestamp_lookback_days=timestamp_lookback_days
+                    timestamp_lookback_days=long_timestamp_lookback_days
                 )
             else:
                 long_options_df = await self.db.get_latest_options_data_batch(
@@ -955,17 +1095,54 @@ class OptionsAnalyzer:
                     end_datetime=long_end_date,
                     max_concurrent=max_concurrent,
                     batch_size=batch_size,
-                    timestamp_lookback_days=timestamp_lookback_days
+                    timestamp_lookback_days=long_timestamp_lookback_days
                 )
+            
+            if self.debug:
+                print(f"DEBUG: Batch fetch returned {len(long_options_df)} rows", file=sys.stderr)
             
             if self.debug:
                 print(f"DEBUG: Fetched {len(long_options_df)} total options from database")
                 if not long_options_df.empty:
                     print(f"DEBUG: Long options columns: {list(long_options_df.columns)}")
                     if 'ticker' in long_options_df.columns:
-                        print(f"DEBUG: Long options tickers: {long_options_df['ticker'].unique().tolist()}")
+                        unique_tickers = long_options_df['ticker'].unique().tolist()
+                        print(f"DEBUG: Long options tickers: {unique_tickers}")
+                        # Show count per ticker
+                        for ticker in unique_tickers:
+                            count = len(long_options_df[long_options_df['ticker'] == ticker])
+                            print(f"DEBUG:   {ticker}: {count} options")
                     if 'option_type' in long_options_df.columns:
                         print(f"DEBUG: Option types: {long_options_df['option_type'].unique().tolist()}")
+                else:
+                    print(f"DEBUG: No long-term options found in database for date range {long_start_date} to {long_end_date}")
+            
+            # Apply write timestamp filter to long options if specified
+            if min_write_timestamp and not long_options_df.empty:
+                try:
+                    import pytz
+                    est = pytz.timezone('America/New_York')
+                    min_ts = pd.to_datetime(min_write_timestamp)
+                    if min_ts.tz is None:
+                        min_ts = est.localize(min_ts)
+                    min_ts_utc = min_ts.astimezone(pytz.UTC)
+                    
+                    if 'write_timestamp' in long_options_df.columns:
+                        long_options_df['write_timestamp'] = pd.to_datetime(long_options_df['write_timestamp'])
+                        if long_options_df['write_timestamp'].dt.tz is None:
+                            long_options_df['write_timestamp'] = long_options_df['write_timestamp'].dt.tz_localize('UTC')
+                        
+                        before_count = len(long_options_df)
+                        long_options_df = long_options_df[long_options_df['write_timestamp'] >= min_ts_utc]
+                        after_count = len(long_options_df)
+                        
+                        if not self.quiet:
+                            print(f"Filtered long options by write timestamp: {before_count} -> {after_count} options")
+                        if self.debug:
+                            print(f"DEBUG: Applied write timestamp filter >= {min_ts_utc} UTC")
+                except Exception as e:
+                    if not self.quiet:
+                        print(f"Warning: Could not apply write timestamp filter to long options: {e}", file=sys.stderr)
             
             if long_options_df.empty:
                 if not self.quiet:
@@ -1004,6 +1181,16 @@ class OptionsAnalyzer:
             # Match short options with long options
             spread_results = []
             
+            # Reset index to avoid issues with duplicate indices that could cause infinite loops
+            df_short = df_short.reset_index(drop=True)
+            
+            # Deduplicate by option_ticker to avoid processing the same option multiple times
+            if 'option_ticker' in df_short.columns:
+                before_dedup = len(df_short)
+                df_short = df_short.drop_duplicates(subset=['option_ticker'], keep='first')
+                if self.debug and len(df_short) < before_dedup:
+                    print(f"DEBUG: Deduplicated df_short: {before_dedup} -> {len(df_short)} rows (removed {before_dedup - len(df_short)} duplicates)", file=sys.stderr)
+            
             for idx, short_row in df_short.iterrows():
                 ticker = short_row['ticker']
                 short_strike = short_row['strike_price']
@@ -1038,8 +1225,11 @@ class OptionsAnalyzer:
                 
                 if matching_long.empty:
                     if self.debug:
-                        available_strikes = ticker_long_options['strike_price'].unique()
-                        print(f"DEBUG:   No matches. Available strikes for {ticker}: {sorted(available_strikes)[:10]}..." if len(available_strikes) > 10 else f"DEBUG:   No matches. Available strikes for {ticker}: {sorted(available_strikes)}")
+                        if not ticker_long_options.empty:
+                            available_strikes = ticker_long_options['strike_price'].unique()
+                            print(f"DEBUG:   No matches. Available strikes for {ticker}: {sorted(available_strikes)[:10]}..." if len(available_strikes) > 10 else f"DEBUG:   No matches. Available strikes for {ticker}: {sorted(available_strikes)}")
+                        else:
+                            print(f"DEBUG:   No long options available for ticker {ticker} in the database")
                     continue
                 
                 # Pick the best matching long option (closest strike, then closest to target days)
@@ -1063,6 +1253,7 @@ class OptionsAnalyzer:
                 
                 # Calculate premiums based on spread position sizing
                 short_premium = short_row['option_premium']
+                premium_diff = round(long_premium - short_premium, 2)  # Long - Short
                 short_premium_total = round(num_contracts * short_premium * 100, 2)
                 long_premium_total = round(num_contracts * long_premium * 100, 2)
                 net_premium = round(short_premium_total - long_premium_total, 2)
@@ -1084,6 +1275,7 @@ class OptionsAnalyzer:
                     'long_delta': round(float(best_long.get('delta', 0)), 2) if pd.notna(best_long.get('delta')) else None,
                     'long_theta': round(float(best_long.get('theta', 0)), 2) if pd.notna(best_long.get('theta')) else None,
                     'long_volume': int(best_long.get('volume', 0)) if pd.notna(best_long.get('volume')) else 0,
+                    'premium_diff': premium_diff,
                     'short_premium_total': short_premium_total,
                     'short_daily_premium': short_daily_premium,
                     'long_premium_total': long_premium_total,
@@ -1136,7 +1328,11 @@ class OptionsAnalyzer:
         top_n: Optional[int] = None
     ) -> str:
         """Format the analysis results for output."""
+        if self.debug or not self.quiet:
+            print(f"DEBUG: format_output called with {len(df)} rows", file=sys.stderr)
         if df.empty:
+            if not self.quiet:
+                print("DEBUG: DataFrame is empty in format_output", file=sys.stderr)
             return "No options data found matching the criteria."
         
         # Add financial information to the dataframe
@@ -1199,6 +1395,8 @@ class OptionsAnalyzer:
                 # Long option details
                 'long_strike_price', 'long_option_premium', 'long_delta', 'long_theta',
                 'long_expiration_date', 'long_days_to_expiry', 'long_premium_total',
+                # Premium comparison
+                'premium_diff',
                 # Net spread calculations
                 'net_premium', 'net_daily_premium',
                 # Additional details
@@ -1220,7 +1418,10 @@ class OptionsAnalyzer:
         
         # Apply filters if provided (after financial data is added)
         if filters:
+            before_filter_count = len(df_display)
             df_display = FilterParser.apply_filters(df_display, filters, filter_logic)
+            if self.debug or not self.quiet:
+                print(f"DEBUG: After filter application: {len(df_display)} rows (was {before_filter_count})", file=sys.stderr)
         
         # Apply sorting if specified (supports full names and abbreviated headers)
         if sort_by:
@@ -1236,10 +1437,13 @@ class OptionsAnalyzer:
                 if len(candidates) == 1:
                     sort_key = candidates[0]
             if sort_key in df_display.columns:
-                df_display = df_display.sort_values(by=sort_key, ascending=False)
+                # Sort premium_diff ascending (lower is better for spreads), others descending
+                ascending = (sort_key == 'premium_diff')
+                df_display = df_display.sort_values(by=sort_key, ascending=ascending)
         
         # Apply top-n limit per ticker if specified
         if top_n is not None and top_n > 0:
+            before_topn = len(df_display)
             if 'ticker' in df_display.columns:
                 # Keep top N per ticker (after sorting)
                 df_display = df_display.groupby('ticker', group_keys=False).head(top_n)
@@ -1248,6 +1452,8 @@ class OptionsAnalyzer:
             else:
                 # If no ticker column, just take top N overall
                 df_display = df_display.head(top_n)
+            if self.debug or not self.quiet:
+                print(f"DEBUG: After top-n filter ({top_n}): {len(df_display)} rows (was {before_topn})", file=sys.stderr)
         
         # Handle CSV column selection
         if csv_columns and output_format == 'csv':
@@ -1271,7 +1477,7 @@ class OptionsAnalyzer:
                     # Format numeric columns for better display
                     ticker_data_formatted = ticker_data.copy()
                     for col in ['current_price', 'strike_price', 'price_above_current', 'option_premium', 'potential_premium', 'daily_premium', 
-                                'long_strike_price', 'long_option_premium', 'short_premium_total', 'short_daily_premium', 'long_premium_total', 'net_premium', 'net_daily_premium']:
+                                'long_strike_price', 'long_option_premium', 'premium_diff', 'short_premium_total', 'short_daily_premium', 'long_premium_total', 'net_premium', 'net_daily_premium']:
                         if col in ticker_data_formatted.columns:
                             ticker_data_formatted[col] = ticker_data_formatted[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
                     
@@ -1307,7 +1513,7 @@ class OptionsAnalyzer:
                 # Format numeric columns for better display
                 df_formatted = df_display.copy()
                 for col in ['current_price', 'strike_price', 'price_above_current', 'option_premium', 'potential_premium', 'daily_premium',
-                            'long_strike_price', 'long_option_premium', 'short_premium_total', 'short_daily_premium', 'long_premium_total', 'net_premium', 'net_daily_premium']:
+                            'long_strike_price', 'long_option_premium', 'premium_diff', 'short_premium_total', 'short_daily_premium', 'long_premium_total', 'net_premium', 'net_daily_premium']:
                     if col in df_formatted.columns:
                         df_formatted[col] = df_formatted[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
                 
@@ -1394,6 +1600,9 @@ Examples:
   # max-days overrides end-date (shows options expiring within 60 days, not through 2024-12-31)
   python options_analyzer.py --symbols AAPL --end-date 2024-12-31 --max-days 60
   
+  # Filter options by write timestamp (only show options written after specified time in EST)
+  python options_analyzer.py --symbols AAPL --min-write-timestamp "2025-11-05 10:00:00"
+  
   # Use multiprocessing with 8 workers (automatically enabled when max-workers > 1)
   python options_analyzer.py --symbols AAPL --max-workers 8
 
@@ -1426,6 +1635,9 @@ Examples:
 
   # Spread with 5% strike tolerance (allows ±5% difference in strikes)
   python options_analyzer.py --symbols AAPL MSFT --spread --spread-strike-tolerance 5.0 --spread-long-days 120
+
+  # Spread with explicit min/max days range
+  python options_analyzer.py --symbols AAPL --spread --spread-long-min-days 60 --spread-long-days 120
 
   # Spread with filters on net premium
   python options_analyzer.py --symbols AAPL --spread --filter "net_daily_premium > 100" --filter "net_premium > 1000"
@@ -1507,6 +1719,19 @@ Examples:
         help="Disable market-hours logic (gets latest stock price from any source regardless of market open/closed).",
     )
     
+    parser.add_argument(
+        '--no-cache',
+        action='store_true',
+        help="Disable Redis cache (all queries will go directly to the database). Useful for performance comparison.",
+    )
+    
+    parser.add_argument(
+        '--min-write-timestamp',
+        type=str,
+        default=None,
+        help="Minimum write timestamp for options in EST format (e.g., '2025-11-05 10:00:00'). Filters out options written before this time. Useful for getting only fresh options data.",
+    )
+    
     # Spread analysis options
     parser.add_argument(
         '--spread',
@@ -1529,7 +1754,13 @@ Examples:
         '--spread-long-days-tolerance',
         type=int,
         default=14,
-        help="Days tolerance for long option expiration window in spread mode (default: 14, searches ±14 days around target). Increase if options aren't found.",
+        help="Days tolerance for long option expiration window in spread mode (default: 14, searches ±14 days around target). Ignored if --spread-long-min-days is specified.",
+    )
+    parser.add_argument(
+        '--spread-long-min-days',
+        type=int,
+        default=None,
+        help="Minimum days to expiry for long options in spread mode. If set, searches from this min to --spread-long-days (ignores tolerance). Example: --spread-long-min-days 60 --spread-long-days 120 searches 60-120 day window.",
     )
     
     # Performance tuning options
@@ -1554,14 +1785,14 @@ Examples:
         type=str,
         help="Filter expressions (can be used multiple times). Format: 'field operator value' or 'field operator field' or 'field exists/not_exists' or 'field*multiplier operator value'. "
              "Supported fields: pe_ratio market_cap volume num_contracts potential_premium daily_premium current_price strike_price price_above_current option_premium option_premium_percentage premium_above_diff_percentage days_to_expiry delta theta "
-             "long_strike_price long_option_premium long_days_to_expiry long_delta long_theta short_premium_total short_daily_premium long_premium_total net_premium net_daily_premium. "
+             "long_strike_price long_option_premium long_days_to_expiry long_delta long_theta premium_diff short_premium_total short_daily_premium long_premium_total net_premium net_daily_premium. "
              "Supported operators: > >= < <= == != exists not_exists. "
              "Mathematical operations: + - * / (e.g. 'num_contracts*0.1 > volume' 'potential_premium+1000 > daily_premium'). "
              "Derived fields: option_premium_percentage = (option_premium / current_price) * 100; "
              "premium_above_diff_percentage = ((option_premium - price_above_current) / price_above_current) * 100. "
-             "Spread fields (when --spread is enabled): num_contracts = position_size / (long_premium * 100); short_premium_total = short_premium * num_contracts * 100; "
-             "short_daily_premium = short_premium_total / short_days_to_expiry; long_premium_total = long_premium * num_contracts * 100; "
-             "net_premium = short_premium_total - long_premium_total; net_daily_premium = net_premium / short_days_to_expiry. "
+             "Spread fields (when --spread is enabled): premium_diff = long_premium - short_premium; num_contracts = position_size / (long_premium * 100); "
+             "short_premium_total = short_premium * num_contracts * 100; short_daily_premium = short_premium_total / short_days_to_expiry; "
+             "long_premium_total = long_premium * num_contracts * 100; net_premium = short_premium_total - long_premium_total; net_daily_premium = net_premium / short_days_to_expiry. "
              "Market cap values support T (trillion) B (billion) and M (million) suffixes. "
              "Examples: 'pe_ratio > 20' or 'market_cap < 3.5T' or 'num_contracts > volume' or 'num_contracts*0.1 > volume' or 'potential_premium > daily_premium' or 'volume exists' or "
              "'option_premium_percentage >= 10' or 'premium_above_diff_percentage > 0' or 'net_daily_premium > 100'. "
@@ -1594,8 +1825,8 @@ Examples:
         help=(
             "Sort by any displayed field (full or abbreviated header). "
             "Examples: daily_premium potential_premium ticker days_to_expiry option_premium_percentage premium_above_diff_percentage "
-            "net_daily_premium net_premium short_premium_total short_daily_premium long_premium_total long_strike_price long_days_to_expiry "
-            "or abbreviations like TKR PRC STRK PREM%% DIFF%% POT_PREM DAY_PREM NET_DAY NET_PREM S_PREM_TOT S_DAY_PREM L_PREM_TOT L_STRK L_DAYS."
+            "net_daily_premium net_premium premium_diff short_premium_total short_daily_premium long_premium_total long_strike_price long_days_to_expiry "
+            "or abbreviations like TKR PRC STRK PREM%% DIFF%% POT_PREM DAY_PREM NET_DAY NET_PREM PREM_DIFF S_PREM_TOT S_DAY_PREM L_PREM_TOT L_STRK L_DAYS."
         )
     )
     parser.add_argument(
@@ -1634,6 +1865,12 @@ Examples:
         help="Comma-separated list of columns to include in CSV output. If not specified, all columns are included."
     )
     
+    parser.add_argument(
+        '--stats',
+        action='store_true',
+        help="Display cache statistics at the end of the output (cache hit rate, etc.)."
+    )
+    
     # If help is requested, print and exit early to avoid running any analysis code
     if any(flag in sys.argv for flag in ("-h", "--help")):
         parser.print_help()
@@ -1641,8 +1878,28 @@ Examples:
 
     args = parser.parse_args()
     
+    # Log parsed arguments for debugging
+    if args.debug or not args.quiet:
+        print("DEBUG: Parsed arguments:", file=sys.stderr)
+        print(f"  symbols: {getattr(args, 'symbols', None)}", file=sys.stderr)
+        print(f"  types: {getattr(args, 'types', None)}", file=sys.stderr)
+        print(f"  max_days: {args.max_days}", file=sys.stderr)
+        print(f"  start_date: {args.start_date}", file=sys.stderr)
+        print(f"  end_date: {args.end_date}", file=sys.stderr)
+        print(f"  spread: {args.spread}", file=sys.stderr)
+        print(f"  spread_strike_tolerance: {args.spread_strike_tolerance}", file=sys.stderr)
+        print(f"  spread_long_days: {args.spread_long_days}", file=sys.stderr)
+        print(f"  spread_long_min_days: {args.spread_long_min_days}", file=sys.stderr)
+        print(f"  spread_long_days_tolerance: {args.spread_long_days_tolerance}", file=sys.stderr)
+        print(f"  position_size: {args.position_size}", file=sys.stderr)
+        print(f"  top_n: {args.top_n}", file=sys.stderr)
+        print(f"  sort: {args.sort}", file=sys.stderr)
+        print(f"  timestamp_lookback_days: {args.timestamp_lookback_days}", file=sys.stderr)
+        print(f"  max_workers: {args.max_workers}", file=sys.stderr)
+    
     # Initialize analyzer
-    analyzer = OptionsAnalyzer(args.db_conn, args.quiet, args.debug)
+    enable_cache = not args.no_cache
+    analyzer = OptionsAnalyzer(args.db_conn, args.quiet, args.debug, enable_cache=enable_cache)
     await analyzer.initialize()
     
     # Get symbols list using common library
@@ -1653,6 +1910,9 @@ Examples:
     
     if not args.quiet:
         print(f"Analyzing {len(symbols_list)} tickers...")
+    
+    if args.debug or not args.quiet:
+        print(f"DEBUG: Symbols list: {symbols_list[:10]}{'...' if len(symbols_list) > 10 else ''}", file=sys.stderr)
     
     # Get financial information
     financial_data = await analyzer.get_financial_info(symbols_list)
@@ -1690,16 +1950,43 @@ Examples:
         spread_mode=args.spread,
         spread_strike_tolerance=args.spread_strike_tolerance,
         spread_long_days=args.spread_long_days,
-        spread_long_days_tolerance=args.spread_long_days_tolerance
+        spread_long_days_tolerance=args.spread_long_days_tolerance,
+        spread_long_min_days=args.spread_long_min_days,
+        min_write_timestamp=args.min_write_timestamp
     )
     
     if df.empty:
+        if not args.quiet:
+            print("DEBUG: DataFrame is empty after analysis. Check debug output above for details.", file=sys.stderr)
         print("No options data found matching the criteria.")
         return
     
     # Print multiprocess statistics if using multiprocessing
     if args.max_workers > 1 and hasattr(analyzer.db, 'print_process_statistics'):
         analyzer.db.print_process_statistics(quiet=args.quiet)
+    
+    # Print cache statistics if requested
+    if args.stats and hasattr(analyzer.db, 'get_cache_statistics'):
+        cache_stats = analyzer.db.get_cache_statistics()
+        if not args.quiet:
+            print("\n=== Cache Statistics ===", file=sys.stderr)
+            if cache_stats.get('enabled', False):
+                print(f"Cache Status: ENABLED", file=sys.stderr)
+                print(f"Total Requests: {cache_stats.get('total_requests', 0)}", file=sys.stderr)
+                print(f"Cache Hits: {cache_stats.get('hits', 0)}", file=sys.stderr)
+                print(f"Cache Misses: {cache_stats.get('misses', 0)}", file=sys.stderr)
+                hit_rate = cache_stats.get('hit_rate', 0.0)
+                print(f"Hit Rate: {hit_rate:.2%}", file=sys.stderr)
+                print(f"Cache Sets: {cache_stats.get('sets', 0)}", file=sys.stderr)
+                print(f"Cache Invalidations: {cache_stats.get('invalidations', 0)}", file=sys.stderr)
+                print(f"Cache Errors: {cache_stats.get('errors', 0)}", file=sys.stderr)
+            else:
+                print(f"Cache Status: DISABLED", file=sys.stderr)
+            # Database query statistics
+            db_query_count = cache_stats.get('db_query_count', 0)
+            print(f"\n=== Database Query Statistics ===", file=sys.stderr)
+            print(f"Total Database Queries: {db_query_count}", file=sys.stderr)
+            print("===================================\n", file=sys.stderr)
     
     # Determine output format and file
     output_format = 'table'
