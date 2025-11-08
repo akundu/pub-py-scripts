@@ -419,11 +419,13 @@ class FilterParser:
 class OptionsAnalyzer:
     """Analyzes covered call opportunities across all strike prices and tickers."""
     
-    def __init__(self, db_conn: str, quiet: bool = False, debug: bool = False):
+    def __init__(self, db_conn: str, quiet: bool = False, debug: bool = False, enable_cache: bool = True, redis_url: str | None = None):
         """Initialize the options analyzer with database connection."""
         self.db_conn = db_conn
         self.quiet = quiet
         self.debug = debug
+        self.enable_cache = enable_cache
+        self.redis_url = redis_url
         self.db = None
     
     def _create_compact_headers(self, df: pd.DataFrame) -> Dict[str, str]:
@@ -543,7 +545,7 @@ class OptionsAnalyzer:
     async def initialize(self):
         """Initialize database connection."""
         try:
-            self.db = get_stock_db('questdb', db_config=self.db_conn)
+            self.db = get_stock_db('questdb', db_config=self.db_conn, enable_cache=self.enable_cache, redis_url=self.redis_url)
             if not self.quiet:
                 print("Database connection established successfully.", file=sys.stderr)
         except Exception as e:
@@ -1506,6 +1508,11 @@ Examples:
         action='store_true',
         help="Disable market-hours logic (gets latest stock price from any source regardless of market open/closed).",
     )
+    parser.add_argument(
+        '--no-cache',
+        action='store_true',
+        help="Disable Redis caching for QuestDB operations (default: cache enabled)"
+    )
     
     # Spread analysis options
     parser.add_argument(
@@ -1641,8 +1648,12 @@ Examples:
 
     args = parser.parse_args()
     
+    # Determine cache settings
+    enable_cache = not args.no_cache
+    redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
+    
     # Initialize analyzer
-    analyzer = OptionsAnalyzer(args.db_conn, args.quiet, args.debug)
+    analyzer = OptionsAnalyzer(args.db_conn, args.quiet, args.debug, enable_cache=enable_cache, redis_url=redis_url)
     await analyzer.initialize()
     
     # Get symbols list using common library

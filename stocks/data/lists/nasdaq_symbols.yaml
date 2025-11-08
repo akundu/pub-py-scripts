@@ -58,6 +58,7 @@ symbols:
 - BILI
 - BKNG
 - BKR
+- BLLN
 - BMRN
 - BNTX
 - BOKF
@@ -131,6 +132,7 @@ symbols:
 - DLTR
 - DOCU
 - DOOO
+- DORM
 - DOX
 - DPZ
 - DRS
@@ -142,6 +144,7 @@ symbols:
 - ENLT
 - ENSG
 - ENTG
+- EOSE
 - EQIX
 - ERIC
 - ERIE
@@ -167,6 +170,7 @@ symbols:
 - FITB
 - FIVE
 - FLEX
+- FORM
 - FOX
 - FOXA
 - FRHC
@@ -175,7 +179,6 @@ symbols:
 - FSLR
 - FSV
 - FTAI
-- FTDR
 - FTNT
 - FUTU
 - FWONA
@@ -189,7 +192,6 @@ symbols:
 - GH
 - GILD
 - GLBE
-- GLNG
 - GLPI
 - GLXY
 - GMAB
@@ -252,7 +254,6 @@ symbols:
 - LECO
 - LEGN
 - LFUS
-- LGN
 - LI
 - LIF
 - LIN
@@ -313,7 +314,6 @@ symbols:
 - NFLX
 - NICE
 - NMRK
-- NOVT
 - NTAP
 - NTES
 - NTNX
@@ -323,6 +323,7 @@ symbols:
 - NUVL
 - NVDA
 - NVMI
+- NWE
 - NWS
 - NWSA
 - NXPI
@@ -393,7 +394,6 @@ symbols:
 - ROST
 - RPRX
 - RRR
-- RUN
 - RVMD
 - RYAAY
 - RYTM
@@ -465,11 +465,11 @@ symbols:
 - UFPI
 - ULTA
 - UMBF
-- UPST
 - URBN
 - UTHR
 - VCTR
 - VFS
+- VKTX
 - VLY
 - VNOM
 - VOD
