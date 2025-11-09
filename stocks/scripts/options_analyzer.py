@@ -420,13 +420,14 @@ class FilterParser:
 class OptionsAnalyzer:
     """Analyzes covered call opportunities across all strike prices and tickers."""
     
-    def __init__(self, db_conn: str, quiet: bool = False, debug: bool = False, enable_cache: bool = True, redis_url: str | None = None):
+    def __init__(self, db_conn: str, quiet: bool = False, debug: bool = False, enable_cache: bool = True, redis_url: str | None = None, log_level: str = "INFO"):
         """Initialize the options analyzer with database connection."""
         self.db_conn = db_conn
         self.quiet = quiet
         self.debug = debug
         self.enable_cache = enable_cache
         self.redis_url = redis_url
+        self.log_level = log_level
         self.db = None
     
     def _create_compact_headers(self, df: pd.DataFrame) -> Dict[str, str]:
@@ -547,7 +548,7 @@ class OptionsAnalyzer:
     async def initialize(self):
         """Initialize database connection."""
         try:
-            self.db = get_stock_db('questdb', db_config=self.db_conn, enable_cache=self.enable_cache, redis_url=self.redis_url)
+            self.db = get_stock_db('questdb', db_config=self.db_conn, enable_cache=self.enable_cache, redis_url=self.redis_url, log_level=self.log_level)
             if not self.quiet:
                 cache_status = "enabled" if self.enable_cache else "disabled"
                 print(f"Database connection established successfully (cache: {cache_status}).", file=sys.stderr)
@@ -1724,12 +1725,6 @@ Examples:
     )
     
     parser.add_argument(
-        '--no-cache',
-        action='store_true',
-        help="Disable Redis cache (all queries will go directly to the database). Useful for performance comparison.",
-    )
-    
-    parser.add_argument(
         '--min-write-timestamp',
         type=str,
         default=None,
@@ -1904,141 +1899,144 @@ Examples:
     # Initialize analyzer
     enable_cache = not args.no_cache
     redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
+    log_level = "DEBUG" if args.debug else "INFO"
     
     # Initialize analyzer
-    analyzer = OptionsAnalyzer(args.db_conn, args.quiet, args.debug, enable_cache=enable_cache, redis_url=redis_url)
+    analyzer = OptionsAnalyzer(args.db_conn, args.quiet, args.debug, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
     await analyzer.initialize()
     
-    # Get symbols list using common library
-    symbols_list = await fetch_lists_data(args, args.quiet)
-    if not symbols_list:
-        print("No symbols specified or found. Exiting.", file=sys.stderr)
-        sys.exit(1)
-    
-    if not args.quiet:
-        print(f"Analyzing {len(symbols_list)} tickers...")
-    
-    if args.debug or not args.quiet:
-        print(f"DEBUG: Symbols list: {symbols_list[:10]}{'...' if len(symbols_list) > 10 else ''}", file=sys.stderr)
-    
-    # Get financial information
-    financial_data = await analyzer.get_financial_info(symbols_list)
-    
-    # Parse filters
-    filters = []
-    if hasattr(args, 'filter') and args.filter:
-        try:
-            # Normalize whitespace in each filter input (collapse internal spaces)
-            normalized_filters = [' '.join(f.split()) for f in args.filter]
-            filters = FilterParser.parse_filters(normalized_filters)
-            if not args.quiet and filters:
-                print(f"Applied {len(filters)} filter(s) with {args.filter_logic} logic:")
-                for i, f in enumerate(filters, 1):
-                    print(f"  {i}. {f}")
-        except Exception as e:
-            print(f"Error parsing filters: {e}", file=sys.stderr)
+    # Use async context manager to ensure close() is always called
+    async with analyzer.db:
+        # Get symbols list using common library
+        symbols_list = await fetch_lists_data(args, args.quiet)
+        if not symbols_list:
+            print("No symbols specified or found. Exiting.", file=sys.stderr)
             sys.exit(1)
-    
-    # Analyze options
-    df = await analyzer.analyze_options(
-        tickers=symbols_list,
-        days_to_expiry=args.days,
-        min_volume=args.min_volume,
-        max_days=args.max_days,
-        min_premium=args.min_premium,
-        position_size=args.position_size,
-        filters=filters,
-        filter_logic=args.filter_logic,
-        use_market_time=not args.no_market_time,
-        start_date=args.start_date,
-        end_date=args.end_date,
-        timestamp_lookback_days=args.timestamp_lookback_days,
-        max_workers=args.max_workers,
-        spread_mode=args.spread,
-        spread_strike_tolerance=args.spread_strike_tolerance,
-        spread_long_days=args.spread_long_days,
-        spread_long_days_tolerance=args.spread_long_days_tolerance,
-        spread_long_min_days=args.spread_long_min_days,
-        min_write_timestamp=args.min_write_timestamp
-    )
-    
-    if df.empty:
+        
         if not args.quiet:
-            print("DEBUG: DataFrame is empty after analysis. Check debug output above for details.", file=sys.stderr)
-        print("No options data found matching the criteria.")
-        return
-    
-    # Print multiprocess statistics if using multiprocessing
-    if args.max_workers > 1 and hasattr(analyzer.db, 'print_process_statistics'):
-        analyzer.db.print_process_statistics(quiet=args.quiet)
-    
-    # Print cache statistics if requested
-    if args.stats and hasattr(analyzer.db, 'get_cache_statistics'):
-        cache_stats = analyzer.db.get_cache_statistics()
-        if not args.quiet:
-            print("\n=== Cache Statistics ===", file=sys.stderr)
-            if cache_stats.get('enabled', False):
-                print(f"Cache Status: ENABLED", file=sys.stderr)
-                print(f"Total Requests: {cache_stats.get('total_requests', 0)}", file=sys.stderr)
-                print(f"Cache Hits: {cache_stats.get('hits', 0)}", file=sys.stderr)
-                print(f"Cache Misses: {cache_stats.get('misses', 0)}", file=sys.stderr)
-                hit_rate = cache_stats.get('hit_rate', 0.0)
-                print(f"Hit Rate: {hit_rate:.2%}", file=sys.stderr)
-                print(f"Cache Sets: {cache_stats.get('sets', 0)}", file=sys.stderr)
-                print(f"Cache Invalidations: {cache_stats.get('invalidations', 0)}", file=sys.stderr)
-                print(f"Cache Errors: {cache_stats.get('errors', 0)}", file=sys.stderr)
-            else:
-                print(f"Cache Status: DISABLED", file=sys.stderr)
-            # Database query statistics
-            db_query_count = cache_stats.get('db_query_count', 0)
-            print(f"\n=== Database Query Statistics ===", file=sys.stderr)
-            print(f"Total Database Queries: {db_query_count}", file=sys.stderr)
-            print("===================================\n", file=sys.stderr)
-    
-    # Determine output format and file
-    output_format = 'table'
-    output_file = None
-    
-    if args.output.lower() == 'csv':
-        output_format = 'csv'
-    elif args.output.lower() != 'table':
-        output_file = args.output
-        if args.output.endswith('.csv'):
+            print(f"Analyzing {len(symbols_list)} tickers...")
+        
+        if args.debug or not args.quiet:
+            print(f"DEBUG: Symbols list: {symbols_list[:10]}{'...' if len(symbols_list) > 10 else ''}", file=sys.stderr)
+        
+        # Get financial information
+        financial_data = await analyzer.get_financial_info(symbols_list)
+        
+        # Parse filters
+        filters = []
+        if hasattr(args, 'filter') and args.filter:
+            try:
+                # Normalize whitespace in each filter input (collapse internal spaces)
+                normalized_filters = [' '.join(f.split()) for f in args.filter]
+                filters = FilterParser.parse_filters(normalized_filters)
+                if not args.quiet and filters:
+                    print(f"Applied {len(filters)} filter(s) with {args.filter_logic} logic:")
+                    for i, f in enumerate(filters, 1):
+                        print(f"  {i}. {f}")
+            except Exception as e:
+                print(f"Error parsing filters: {e}", file=sys.stderr)
+                sys.exit(1)
+        
+        # Analyze options
+        df = await analyzer.analyze_options(
+            tickers=symbols_list,
+            days_to_expiry=args.days,
+            min_volume=args.min_volume,
+            max_days=args.max_days,
+            min_premium=args.min_premium,
+            position_size=args.position_size,
+            filters=filters,
+            filter_logic=args.filter_logic,
+            use_market_time=not args.no_market_time,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            timestamp_lookback_days=args.timestamp_lookback_days,
+            max_workers=args.max_workers,
+            spread_mode=args.spread,
+            spread_strike_tolerance=args.spread_strike_tolerance,
+            spread_long_days=args.spread_long_days,
+            spread_long_days_tolerance=args.spread_long_days_tolerance,
+            spread_long_min_days=args.spread_long_min_days,
+            min_write_timestamp=args.min_write_timestamp
+        )
+        
+        if df.empty:
+            if not args.quiet:
+                print("DEBUG: DataFrame is empty after analysis. Check debug output above for details.", file=sys.stderr)
+            print("No options data found matching the criteria.")
+            return
+        
+        # Print multiprocess statistics if using multiprocessing
+        if args.max_workers > 1 and hasattr(analyzer.db, 'print_process_statistics'):
+            analyzer.db.print_process_statistics(quiet=args.quiet)
+        
+        # Print cache statistics if requested
+        if args.stats and hasattr(analyzer.db, 'get_cache_statistics'):
+            cache_stats = analyzer.db.get_cache_statistics()
+            if not args.quiet:
+                print("\n=== Cache Statistics ===", file=sys.stderr)
+                if cache_stats.get('enabled', False):
+                    print(f"Cache Status: ENABLED", file=sys.stderr)
+                    print(f"Total Requests: {cache_stats.get('total_requests', 0)}", file=sys.stderr)
+                    print(f"Cache Hits: {cache_stats.get('hits', 0)}", file=sys.stderr)
+                    print(f"Cache Misses: {cache_stats.get('misses', 0)}", file=sys.stderr)
+                    hit_rate = cache_stats.get('hit_rate', 0.0)
+                    print(f"Hit Rate: {hit_rate:.2%}", file=sys.stderr)
+                    print(f"Cache Sets: {cache_stats.get('sets', 0)}", file=sys.stderr)
+                    print(f"Cache Invalidations: {cache_stats.get('invalidations', 0)}", file=sys.stderr)
+                    print(f"Cache Errors: {cache_stats.get('errors', 0)}", file=sys.stderr)
+                else:
+                    print(f"Cache Status: DISABLED", file=sys.stderr)
+                # Database query statistics
+                db_query_count = cache_stats.get('db_query_count', 0)
+                print(f"\n=== Database Query Statistics ===", file=sys.stderr)
+                print(f"Total Database Queries: {db_query_count}", file=sys.stderr)
+                print("===================================\n", file=sys.stderr)
+        
+        # Determine output format and file
+        output_format = 'table'
+        output_file = None
+        
+        if args.output.lower() == 'csv':
             output_format = 'csv'
-        else:
-            output_format = 'table'
-    
-    # Normalize sort input by stripping all whitespace characters
-    import re as _re
-    sort_arg = _re.sub(r"\s+", "", args.sort) if hasattr(args, 'sort') and args.sort else None
-    
-    # If in spread mode and user didn't specify a sort, default to net_daily_premium
-    if args.spread and args.sort == 'daily_premium':  # daily_premium is the default
-        sort_arg = 'net_daily_premium'
+        elif args.output.lower() != 'table':
+            output_file = args.output
+            if args.output.endswith('.csv'):
+                output_format = 'csv'
+            else:
+                output_format = 'table'
+        
+        # Normalize sort input by stripping all whitespace characters
+        import re as _re
+        sort_arg = _re.sub(r"\s+", "", args.sort) if hasattr(args, 'sort') and args.sort else None
+        
+        # If in spread mode and user didn't specify a sort, default to net_daily_premium
+        if args.spread and args.sort == 'daily_premium':  # daily_premium is the default
+            sort_arg = 'net_daily_premium'
 
-    # Parse CSV columns if specified
-    csv_columns = None
-    if hasattr(args, 'csv_columns') and args.csv_columns:
-        csv_columns = [col.strip() for col in args.csv_columns.split(',')]
+        # Parse CSV columns if specified
+        csv_columns = None
+        if hasattr(args, 'csv_columns') and args.csv_columns:
+            csv_columns = [col.strip() for col in args.csv_columns.split(',')]
 
-    # Format and display results
-    result = analyzer.format_output(
-        df=df,
-        financial_data=financial_data,
-        output_format=output_format,
-        group_by=args.group_by,
-        output_file=output_file,
-        sort_by=sort_arg,
-        filters=filters,
-        filter_logic=args.filter_logic,
-        csv_delimiter=args.csv_delimiter,
-        csv_quoting=args.csv_quoting,
-        csv_columns=csv_columns,
-        top_n=args.top_n
-    )
-    
-    if not args.quiet or output_file is None:
-        print(result)
+        # Format and display results
+        result = analyzer.format_output(
+            df=df,
+            financial_data=financial_data,
+            output_format=output_format,
+            group_by=args.group_by,
+            output_file=output_file,
+            sort_by=sort_arg,
+            filters=filters,
+            filter_logic=args.filter_logic,
+            csv_delimiter=args.csv_delimiter,
+            csv_quoting=args.csv_quoting,
+            csv_columns=csv_columns,
+            top_n=args.top_n
+        )
+        
+        if not args.quiet or output_file is None:
+            print(result)
 
 
 if __name__ == "__main__":

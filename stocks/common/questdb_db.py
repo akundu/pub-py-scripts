@@ -57,13 +57,15 @@ def _process_ticker_options(args: Tuple) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     
     # Unpack arguments
     (ticker, db_config, expiration_date, start_datetime, 
-     end_datetime, option_tickers, timestamp_lookback_days, enable_cache) = args
+     end_datetime, option_tickers, timestamp_lookback_days, enable_cache, redis_url, log_level) = args
     
     process_id = os.getpid()
     start_time = time.time()
     
     async def _async_process():
-        db = get_stock_db('questdb', db_config=db_config, enable_cache=enable_cache, ensure_tables=False)
+        import logging
+        log_level_str = logging.getLevelName(log_level) if isinstance(log_level, int) else log_level
+        db = get_stock_db('questdb', db_config=db_config, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level_str)
         await db._init_db()
         
         df = await db.get_latest_options_data(
@@ -299,14 +301,13 @@ class CacheKeyGenerator:
         
         Args:
             ticker: Stock ticker symbol
-            date: Optional date in YYYY-MM-DD format (if None, uses current date)
+            date: Optional date in YYYY-MM-DD format (ignored, kept for backward compatibility)
         
         Returns:
-            Cache key: stocks:financial_info:{ticker}:{date}
+            Cache key: stocks:financial_info:{ticker}
         """
-        if date is None:
-            date = datetime.now().strftime('%Y-%m-%d')
-        return f"stocks:financial_info:{ticker}:{date}"
+        # Financial info cache key doesn't include date - it's always the latest
+        return f"stocks:financial_info:{ticker}"
 
 
 class RedisCache:
@@ -1100,7 +1101,7 @@ class OptionsDataRepository(BaseRepository):
     async def get(self, ticker: str, expiration_date: Optional[str] = None,
                  start_datetime: Optional[str] = None, end_datetime: Optional[str] = None,
                  option_tickers: Optional[List[str]] = None) -> pd.DataFrame:
-        """Get options data."""
+        """Get options data using window function to get latest per option."""
         if start_datetime is None:
             start_datetime = date.today().strftime('%Y-%m-%d')
         
@@ -1121,19 +1122,29 @@ class OptionsDataRepository(BaseRepository):
             
             if end_datetime:
                 end_dt = date_parser.parse(end_datetime)
-                end_dt_exclusive = end_dt + timedelta(days=1)
-                clauses.append(f"expiration_date < ${next_param}")
-                params.append(end_dt_exclusive)
+                # Use <= for end_datetime to match user's example
+                clauses.append(f"expiration_date <= ${next_param}")
+                params.append(end_dt)
                 next_param += 1
+            
+            where = " AND ".join(clauses)
             
             if option_tickers:
                 placeholders = ",".join([f"${i}" for i in range(next_param, next_param + len(option_tickers))])
-                clauses.append(f"option_ticker IN ({placeholders})")
                 params.extend(option_tickers)
-                next_param += len(option_tickers)
+                inner_where = f"{where} AND option_ticker IN ({placeholders})"
+            else:
+                inner_where = where
             
-            where = " AND ".join(clauses)
-            query = f"SELECT * FROM options_data WHERE {where} ORDER BY timestamp"
+            # Build the window function query
+            query = f"""SELECT * FROM (
+  SELECT *, 
+         ROW_NUMBER() OVER (PARTITION BY option_ticker, expiration_date, strike_price, option_type 
+                           ORDER BY write_timestamp DESC) as rn
+  FROM options_data
+  WHERE {inner_where}
+)
+WHERE rn = 1"""
             
             # Debug: Log the query and parameters
             self.logger.debug(f"[DB QUERY] options data for {ticker}")
@@ -1146,6 +1157,11 @@ class OptionsDataRepository(BaseRepository):
                 if not rows:
                     return pd.DataFrame()
                 df = pd.DataFrame([dict(r) for r in rows])
+                
+                # Remove the rn column if it exists
+                if 'rn' in df.columns:
+                    df = df.drop(columns=['rn'])
+                
                 if 'timestamp' in df.columns:
                     df['timestamp'] = pd.to_datetime(df['timestamp'])
                     df.set_index('timestamp', inplace=True)
@@ -1159,7 +1175,11 @@ class OptionsDataRepository(BaseRepository):
                         start_datetime: Optional[str] = None, end_datetime: Optional[str] = None,
                         option_tickers: Optional[List[str]] = None,
                         timestamp_lookback_days: int = 7) -> pd.DataFrame:
-        """Get latest options data per option_ticker."""
+        """Get latest options data per option_ticker using window function.
+        
+        Uses ROW_NUMBER() window function to get the latest row per 
+        (option_ticker, expiration_date, strike_price, option_type) combination.
+        """
         if start_datetime is None:
             start_datetime = date.today().strftime('%Y-%m-%d')
         
@@ -1180,9 +1200,9 @@ class OptionsDataRepository(BaseRepository):
             
             if end_datetime:
                 end_dt = date_parser.parse(end_datetime)
-                end_dt_exclusive = end_dt + timedelta(days=1)
-                clauses.append(f"expiration_date < ${next_param}")
-                params.append(end_dt_exclusive)
+                # Use <= for end_datetime to match user's example
+                clauses.append(f"expiration_date <= ${next_param}")
+                params.append(end_dt)
                 next_param += 1
             
             lookback_date = datetime.now(timezone.utc) - timedelta(days=timestamp_lookback_days)
@@ -1191,12 +1211,23 @@ class OptionsDataRepository(BaseRepository):
             params.append(lookback_date)
             where = " AND ".join(clauses)
             
+            # Build the window function query
+            # Use write_timestamp for ordering as per user's example
             if option_tickers:
                 placeholders = ",".join([f"${i}" for i in range(next_param + 1, next_param + 1 + len(option_tickers))])
                 params.extend(option_tickers)
-                query = f"SELECT * FROM options_data WHERE {where} AND option_ticker IN ({placeholders}) ORDER BY timestamp DESC"
+                inner_where = f"{where} AND option_ticker IN ({placeholders})"
             else:
-                query = f"SELECT * FROM options_data WHERE {where} ORDER BY timestamp DESC"
+                inner_where = where
+            
+            query = f"""SELECT * FROM (
+  SELECT *, 
+         ROW_NUMBER() OVER (PARTITION BY option_ticker, expiration_date, strike_price, option_type 
+                           ORDER BY write_timestamp DESC) as rn
+  FROM options_data
+  WHERE {inner_where}
+)
+WHERE rn = 1"""
             
             # Debug: Log the query and parameters
             self.logger.debug(f"[DB QUERY] latest options data for {ticker}")
@@ -1210,8 +1241,9 @@ class OptionsDataRepository(BaseRepository):
                     return pd.DataFrame()
                 df = pd.DataFrame([dict(r) for r in rows])
                 
-                if 'option_ticker' in df.columns and not df.empty:
-                    df = df.drop_duplicates(subset=['option_ticker'], keep='first')
+                # Remove the rn column if it exists
+                if 'rn' in df.columns:
+                    df = df.drop(columns=['rn'])
                 
                 if 'timestamp' in df.columns:
                     df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -1750,22 +1782,132 @@ class OptionsDataService:
                         start_datetime: Optional[str] = None, end_datetime: Optional[str] = None,
                         option_tickers: Optional[List[str]] = None,
                         timestamp_lookback_days: int = 7) -> pd.DataFrame:
-        """Get latest options data with caching."""
-        cache_key = CacheKeyGenerator.latest_options_data(ticker, expiration_date, start_datetime, end_datetime, option_tickers, timestamp_lookback_days)
+        """Get latest options data with per-option caching.
         
-        cached_df = await self.cache.get(cache_key)
-        if cached_df is not None:
-            self.logger.debug(f"[DB] Returning cached latest options data for {ticker}")
-            return cached_df
+        Flow:
+        1. Always query DB to get all option_tickers and their expiration_dates for the date range (if not provided)
+        2. Generate cache keys using actual expiration_date for each option_ticker
+        3. Batch fetch from cache (using get_batch with large batch size, e.g., 500+)
+        4. For cache misses, fetch from DB using get_latest()
+        5. Cache newly fetched options
+        6. Combine cached and newly fetched data, deduplicate to get latest per option_ticker
+        """
+        # Always query DB to get all option_tickers and their expiration_dates for the date range
+        option_ticker_exp_map = {}
+        if not option_tickers:
+            # Query DB to get all option_tickers and their expiration_dates for this expiration date range
+            temp_df = await self.options_repo.get(ticker, expiration_date=expiration_date, start_datetime=start_datetime, end_datetime=end_datetime)
+            if not temp_df.empty and 'option_ticker' in temp_df.columns:
+                # Get unique (option_ticker, expiration_date) pairs
+                for idx, row in temp_df.iterrows():
+                    opt_ticker = row['option_ticker']
+                    exp_date = row.get('expiration_date')
+                    if exp_date:
+                        if isinstance(exp_date, (datetime, pd.Timestamp)):
+                            exp_date_str = exp_date.strftime('%Y-%m-%d')
+                        else:
+                            exp_date_str = str(exp_date)[:10]
+                        option_ticker_exp_map[opt_ticker] = exp_date_str
+                option_tickers = list(option_ticker_exp_map.keys())
+            else:
+                return pd.DataFrame()
+        else:
+            # option_tickers provided, but we still need their expiration_dates for cache keys
+            # Always query DB to get expiration_dates for the provided option_tickers
+            temp_df = await self.options_repo.get(ticker, expiration_date=expiration_date, start_datetime=start_datetime, end_datetime=end_datetime, option_tickers=option_tickers)
+            if not temp_df.empty and 'option_ticker' in temp_df.columns and 'expiration_date' in temp_df.columns:
+                for idx, row in temp_df.iterrows():
+                    opt_ticker = row['option_ticker']
+                    exp_date = row.get('expiration_date')
+                    if exp_date:
+                        if isinstance(exp_date, (datetime, pd.Timestamp)):
+                            exp_date_str = exp_date.strftime('%Y-%m-%d')
+                        else:
+                            exp_date_str = str(exp_date)[:10]
+                        option_ticker_exp_map[opt_ticker] = exp_date_str
         
-        self.logger.debug(f"[DB] Fetching latest options data from database: {ticker}")
-        df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, option_tickers, timestamp_lookback_days)
-        self.logger.debug(f"[DB] Fetched {len(df)} rows from database for {ticker} latest options")
+        if not option_tickers:
+            # No option_tickers found, fetch from DB directly
+            df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, option_tickers, timestamp_lookback_days)
+            return df
         
-        # Cache the result (including empty DataFrames to avoid repeated DB queries)
-        await self.cache.set(cache_key, df)
+        # Generate cache keys using actual expiration_dates
+        cache_keys = []
+        for opt_ticker in option_tickers:
+            exp_date_str = option_ticker_exp_map.get(opt_ticker)
+            if exp_date_str:
+                cache_keys.append(CacheKeyGenerator.options_data(ticker, exp_date_str, opt_ticker))
+            elif expiration_date:
+                # Fallback to provided expiration_date if we don't have it in the map
+                exp_date_str = expiration_date if isinstance(expiration_date, str) else expiration_date.strftime('%Y-%m-%d')
+                cache_keys.append(CacheKeyGenerator.options_data(ticker, exp_date_str, opt_ticker))
         
-        return df
+        # Batch fetch from cache using large batch size (500+ keys at once)
+        cached_data = {}
+        if cache_keys:
+            cached_results = await self.cache.get_batch(cache_keys, batch_size=500)
+            cached_data = {k: v for k, v in cached_results.items() if v is not None and not v.empty}
+            self.logger.debug(f"[CACHE] Found {len(cached_data)}/{len(cache_keys)} options in cache for {ticker}")
+        
+        # Determine which options need DB fetch (cache misses)
+        missing_option_tickers = []
+        if cache_keys:
+            missing_keys = [k for k in cache_keys if k not in cached_data]
+            # Extract option_tickers from missing keys
+            for key in missing_keys:
+                # Key format: stocks:options_data:{ticker}:{expiration_date}:{option_ticker}
+                # Note: option_ticker may contain colons (e.g., "O:AAPL251214C00190000"),
+                # so we need to split and rejoin from index 4 onwards
+                parts = key.split(':')
+                if len(parts) >= 5:
+                    # Join parts[4:] to handle option_tickers that contain colons
+                    missing_option_tickers.append(':'.join(parts[4:]))
+        else:
+            # No cache keys generated, fetch all from DB
+            missing_option_tickers = option_tickers
+        
+        # Fetch missing options from DB and cache them
+        if missing_option_tickers:
+            self.logger.debug(f"[DB] Fetching {len(missing_option_tickers)} options from database (cache misses) for {ticker}")
+            df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, missing_option_tickers, timestamp_lookback_days)
+            self.logger.debug(f"[DB] Fetched {len(df)} rows from database for {ticker} latest options")
+            
+            # Cache each newly fetched option individually (cache on read)
+            if not df.empty:
+                for idx, row in df.iterrows():
+                    if 'option_ticker' in row and 'expiration_date' in row:
+                        opt_ticker = row['option_ticker']
+                        exp_date = row['expiration_date']
+                        exp_date_str = exp_date.strftime('%Y-%m-%d') if isinstance(exp_date, (datetime, pd.Timestamp)) else str(exp_date)[:10]
+                        cache_key = CacheKeyGenerator.options_data(ticker, exp_date_str, opt_ticker)
+                        row_df = pd.DataFrame([row]).set_index(pd.Index([idx]))
+                        self.cache.set_fire_and_forget(cache_key, row_df)
+                        self.logger.debug(f"[CACHE SET] Cached latest options data on read (fire-and-forget): {cache_key} (rows: 1)")
+                        cached_data[cache_key] = row_df
+        else:
+            df = pd.DataFrame()
+            self.logger.debug(f"[CACHE] All {len(option_tickers)} options found in cache for {ticker}")
+        
+        # Combine all cached data (from cache hits and newly fetched)
+        # Filter out empty DataFrames (negative cache) from the final result
+        if cached_data:
+            non_empty_data = {k: v for k, v in cached_data.items() if not v.empty}
+            if non_empty_data:
+                dfs = list(non_empty_data.values())
+                combined_df = pd.concat(dfs).sort_index()
+                
+                # Deduplicate to get latest per option_ticker (same logic as repository's get_latest)
+                # Sort by timestamp descending first to ensure we keep the latest
+                if 'timestamp' in combined_df.columns:
+                    combined_df = combined_df.sort_values('timestamp', ascending=False)
+                if 'option_ticker' in combined_df.columns and not combined_df.empty:
+                    combined_df = combined_df.drop_duplicates(subset=['option_ticker'], keep='first')
+                
+                return combined_df
+            else:
+                return pd.DataFrame()
+        else:
+            return df
 
 
 class FinancialDataService:
@@ -1782,15 +1924,8 @@ class FinancialDataService:
         
         # Cache financial info (cache on write)
         date_str = financial_data.get('date')
-        if date_str:
-            if isinstance(date_str, (datetime, pd.Timestamp)):
-                date_str = date_str.strftime('%Y-%m-%d')
-            elif isinstance(date_str, str) and len(date_str) > 10:
-                date_str = date_str[:10]
-        else:
-            date_str = datetime.now().strftime('%Y-%m-%d')
-        
-        cache_key = CacheKeyGenerator.financial_info(ticker, date_str)
+        # Financial info cache key doesn't include date
+        cache_key = CacheKeyGenerator.financial_info(ticker)
         # Convert financial_data dict to DataFrame for caching
         df = pd.DataFrame([financial_data])
         self.cache.set_fire_and_forget(cache_key, df, ttl=3600)  # 1 hour TTL for financial info
@@ -1799,9 +1934,8 @@ class FinancialDataService:
     async def get(self, ticker: str, start_date: Optional[str] = None,
                  end_date: Optional[str] = None) -> pd.DataFrame:
         """Get financial info with caching (1 hour TTL)."""
-        # Use current date or start_date for cache key
-        date_str = start_date if start_date else datetime.now().strftime('%Y-%m-%d')
-        cache_key = CacheKeyGenerator.financial_info(ticker, date_str)
+        # Financial info cache key doesn't include date
+        cache_key = CacheKeyGenerator.financial_info(ticker)
         
         cached_df = await self.cache.get(cache_key)
         if cached_df is not None:
@@ -2264,11 +2398,18 @@ class StockQuestDB(StockDBBase):
                 
                 process_args = []
                 for ticker in batch_tickers:
+                    # Get log level from logger (convert int to string if needed)
+                    import logging
+                    logger_level = self.logger.getEffectiveLevel() if hasattr(self.logger, 'getEffectiveLevel') else (self.logger.level if hasattr(self.logger, 'level') else logging.INFO)
+                    log_level_str = logging.getLevelName(logger_level) if isinstance(logger_level, int) else str(logger_level)
+                    
                     args = (
                         ticker, self._config.db_config,
                         expiration_date, start_datetime, end_datetime,
                         option_tickers, timestamp_lookback_days,
-                        self.cache.enable_cache
+                        self.cache.enable_cache,
+                        self.cache.redis_url,
+                        log_level_str
                     )
                     process_args.append(args)
                 
@@ -2366,7 +2507,15 @@ class StockQuestDB(StockDBBase):
     
     def get_cache_statistics(self) -> Dict[str, Any]:
         """Get cache statistics."""
-        return self.cache.get_statistics()
+        stats = self.cache.get_statistics()
+        stats['enabled'] = self.cache.enable_cache
+        total_requests = stats.get('hits', 0) + stats.get('misses', 0)
+        stats['total_requests'] = total_requests
+        if total_requests > 0:
+            stats['hit_rate'] = stats.get('hits', 0) / total_requests
+        else:
+            stats['hit_rate'] = 0.0
+        return stats
     
     async def close_session(self):
         """Close session."""
@@ -2376,6 +2525,16 @@ class StockQuestDB(StockDBBase):
         """Close all connections."""
         await self.connection.close()
         await self.cache.close()
+    
+    async def __aenter__(self):
+        """Async context manager entry."""
+        await self._init_db()
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit - ensures close() is always called."""
+        await self.close()
+        return False  # Don't suppress exceptions
     
     # Table creation SQL
     create_table_daily_prices_sql = """
