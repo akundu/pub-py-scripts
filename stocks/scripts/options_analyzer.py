@@ -197,6 +197,9 @@ class FilterParser:
         'long_days_to_expiry': int,
         'long_delta': float,
         'long_theta': float,
+        'long_expiration_date': str,
+        'long_option_ticker': str,
+        'long_volume': int,
         'premium_diff': float,
         'short_premium_total': float,
         'short_daily_premium': float,
@@ -725,7 +728,7 @@ class OptionsAnalyzer:
         min_volume: int = 0,
         max_days: Optional[int] = None,
         min_premium: float = 0.0,
-        position_size: float = 1000000.0,
+        position_size: float = 100000.0,
         filters: Optional[List[FilterExpression]] = None,
         filter_logic: str = 'AND',
         use_market_time: bool = True,
@@ -1530,7 +1533,7 @@ class OptionsAnalyzer:
         csv_delimiter: str = ',',
         csv_quoting: str = 'minimal',
         csv_columns: Optional[List[str]] = None,
-        top_n: Optional[int] = None
+        top_n: Optional[int] = 1
     ) -> str:
         """Format the analysis results for output."""
         if self.debug or not self.quiet:
@@ -1909,8 +1912,8 @@ Examples:
     parser.add_argument(
         '--position-size',
         type=float,
-        default=1000000.0,
-        help="Position size in dollars for premium calculations (default: 1000000.0 = $1M)."
+        default=100000.0,
+        help="Position size in dollars for premium calculations (default: 100000.0 = $100K)."
     )
     parser.add_argument(
         '--data-dir',
@@ -1989,7 +1992,7 @@ Examples:
         type=str,
         help="Filter expressions (can be used multiple times). Format: 'field operator value' or 'field operator field' or 'field exists/not_exists' or 'field*multiplier operator value'. "
              "Supported fields: pe_ratio market_cap volume num_contracts potential_premium daily_premium current_price strike_price price_above_current option_premium option_premium_percentage premium_above_diff_percentage days_to_expiry delta theta "
-             "long_strike_price long_option_premium long_days_to_expiry long_delta long_theta premium_diff short_premium_total short_daily_premium long_premium_total net_premium net_daily_premium. "
+             "long_strike_price long_option_premium long_days_to_expiry long_delta long_theta long_expiration_date long_option_ticker long_volume premium_diff short_premium_total short_daily_premium long_premium_total net_premium net_daily_premium. "
              "Supported operators: > >= < <= == != exists not_exists. "
              "Mathematical operations: + - * / (e.g. 'num_contracts*0.1 > volume' 'potential_premium+1000 > daily_premium'). "
              "Derived fields: option_premium_percentage = (option_premium / current_price) * 100; "
@@ -2049,8 +2052,8 @@ Examples:
     parser.add_argument(
         '--top-n',
         type=int,
-        default=None,
-        help="Limit results to top N options per ticker (based on sort order). Example: --top-n 10 shows only the best 10 options for each ticker. Applied after sorting and filtering."
+        default=1,
+        help="Limit results to top N options per ticker (based on sort order). Example: --top-n 10 shows only the best 10 options for each ticker. Applied after sorting and filtering. Default: 1."
     )
     
     # CSV formatting options
