@@ -618,7 +618,7 @@ class RedisCache:
                 self.logger.debug(f"Waiting for {len(pending_tasks)} pending cache writes before closing...")
                 try:
                     # Wait up to 5 seconds for pending writes
-                    await asyncio.wait_for(asyncio.gather(*pending_tasks, return_exceptions=True), timeout=5.0)
+                    await asyncio.wait_for(asyncio.gather(*pending_tasks, return_exceptions=True), timeout=10.0)
                     self.logger.debug(f"All {len(pending_tasks)} pending cache writes completed")
                 except asyncio.TimeoutError:
                     self.logger.warning(f"Timeout waiting for {len(pending_tasks)} pending cache writes, closing anyway")
@@ -1142,14 +1142,13 @@ class OptionsDataRepository(BaseRepository):
             
             # Build the window function query
             query = f"""SELECT * FROM (
-  SELECT *, 
-         ROW_NUMBER() OVER (PARTITION BY option_ticker, expiration_date, strike_price, option_type 
-                           ORDER BY write_timestamp DESC) as rn
-  FROM options_data
-  WHERE {inner_where}
-)
-WHERE rn = 1"""
-            
+                            SELECT *, ROW_NUMBER() 
+                                        OVER (
+                                           PARTITION BY option_ticker, expiration_date, strike_price, 
+                                                        option_type ORDER BY write_timestamp DESC
+                                        ) as rn FROM options_data WHERE {inner_where}
+                        ) WHERE rn = 1"""
+                                            
             # Debug: Log the query and parameters
             self.logger.debug(f"[DB QUERY] options data for {ticker}")
             self.logger.debug(f"[DB QUERY] SQL: {query}")
