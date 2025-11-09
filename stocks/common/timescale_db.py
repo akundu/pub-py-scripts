@@ -76,7 +76,7 @@ class StockDBTimescale(StockDBPostgreSQL):
 
         self.logger.info("Creating TimescaleDB hypertables and optimizations...")
         
-        async with self.get_connection() as conn:
+        async with self._get_connection_direct() as conn:
             # First, ensure TimescaleDB extension is enabled
             await self._ensure_timescaledb_extension(conn)
             
@@ -92,9 +92,87 @@ class StockDBTimescale(StockDBPostgreSQL):
             await self._create_continuous_aggregates(conn)
             await self._create_timescale_indexes(conn)
             
+<<<<<<< Updated upstream
         # Update cache
         self._tables_ensured = True
         self._tables_ensured_at = datetime.now()
+=======
+            # Ensure unique constraints exist (for ON CONFLICT to work)
+            await self._ensure_unique_constraints(conn)
+            
+        # Start materialized view refresh task (for any remaining PostgreSQL MVs)
+        try:
+            await self._start_mv_refresh_task()
+        except Exception as e:
+            self.logger.warning(f"Could not start MV refresh task: {e}")
+        
+        self.logger.info("TimescaleDB hypertables and optimizations created successfully (ONE-TIME SETUP COMPLETE)")
+
+    async def _ensure_tables_exist_once_with_parent_connection(self) -> None:
+        """
+        Create tables and convert them to TimescaleDB hypertables using parent class connection.
+        This avoids the circular dependency issue.
+        """
+        self.logger.info("Creating TimescaleDB hypertables and optimizations (ONE-TIME SETUP)...")
+        
+        # Use parent class connection method directly to avoid circular dependency
+        conn = await super()._get_connection()
+        try:
+            # First, ensure TimescaleDB extension is enabled
+            await self._ensure_timescaledb_extension(conn)
+            
+            # Create regular tables first
+            await self._create_base_tables(conn)
+            
+            # Convert to hypertables (TimescaleDB magic!)
+            await self._create_hypertables(conn)
+            
+            # Set up TimescaleDB-specific optimizations
+            # await self._setup_compression_policies(conn)
+            # await self._setup_retention_policies(conn)
+            await self._create_continuous_aggregates(conn)
+            await self._create_timescale_indexes(conn)
+            
+            # Ensure unique constraints exist (for ON CONFLICT to work)
+            await self._ensure_unique_constraints(conn)
+        finally:
+            # Return the connection to the pool
+            await super()._return_connection(conn)
+            
+        # Start materialized view refresh task (for any remaining PostgreSQL MVs)
+        try:
+            await self._start_mv_refresh_task()
+        except Exception as e:
+            self.logger.warning(f"Could not start MV refresh task: {e}")
+        
+        self.logger.info("TimescaleDB hypertables and optimizations created successfully (ONE-TIME SETUP COMPLETE)")
+
+    async def _ensure_tables_exist_once_with_connection(self, conn: asyncpg.Connection) -> None:
+        """
+        Create tables and convert them to TimescaleDB hypertables using an existing connection.
+        This avoids the circular dependency issue.
+        """
+        self.logger.info("Creating TimescaleDB hypertables and optimizations (ONE-TIME SETUP)...")
+        
+        # Use the provided connection directly
+        # First, ensure TimescaleDB extension is enabled
+        await self._ensure_timescaledb_extension(conn)
+        
+        # Create regular tables first
+        await self._create_base_tables(conn)
+        
+        # Convert to hypertables (TimescaleDB magic!)
+        await self._create_hypertables(conn)
+        
+        # Set up TimescaleDB-specific optimizations
+        # await self._setup_compression_policies(conn)
+        # await self._setup_retention_policies(conn)
+        await self._create_continuous_aggregates(conn)
+        await self._create_timescale_indexes(conn)
+        
+        # Ensure unique constraints exist (for ON CONFLICT to work)
+        await self._ensure_unique_constraints(conn)
+>>>>>>> Stashed changes
         
         # Start materialized view refresh task (for any remaining PostgreSQL MVs)
         await self._start_mv_refresh_task()
@@ -110,6 +188,29 @@ class StockDBTimescale(StockDBPostgreSQL):
             self.logger.error(f"Failed to enable TimescaleDB extension: {e}")
             raise RuntimeError("TimescaleDB extension not available. Ensure TimescaleDB is installed.")
 
+<<<<<<< Updated upstream
+=======
+    async def get_connection(self):
+        """Override to add initialization check and ensure tables exist."""
+        # Get connection from parent class first
+        conn = await super()._get_connection()
+        
+        # If tables aren't initialized yet, initialize them using this connection
+        if not self._tables_initialized and not self._tables_initialization_failed:
+            try:
+                await self._ensure_tables_exist_with_connection(conn)
+            except Exception as e:
+                self.logger.error(f"Failed to initialize tables with connection: {e}")
+                # Don't fail the connection request, just log the error
+                # Tables will be initialized on the next request
+        
+        return conn
+
+    async def _get_connection_direct(self):
+        """Get a connection directly from parent class without triggering table initialization."""
+        return await super()._get_connection()
+
+>>>>>>> Stashed changes
     async def _create_base_tables(self, conn: asyncpg.Connection) -> None:
         """Create the base tables before converting to hypertables."""
         self.logger.debug("Creating base tables for TimescaleDB...")
@@ -375,7 +476,15 @@ class StockDBTimescale(StockDBPostgreSQL):
     
     async def get_table_count_fast(self, table_name: str) -> int:
         """Get fast approximate row count using TimescaleDB native function."""
+<<<<<<< Updated upstream
         async with self.get_connection() as conn:
+=======
+        if not self.is_initialized():
+            raise RuntimeError("TimescaleDB not properly initialized - cannot perform operations")
+            
+        conn = await self._get_connection_direct()
+        try:
+>>>>>>> Stashed changes
             try:
                 # Use TimescaleDB's fast approximate count
                 result = await conn.fetchval(
@@ -387,6 +496,8 @@ class StockDBTimescale(StockDBPostgreSQL):
                 # Fallback to exact count if approximate fails
                 result = await conn.fetchval(f"SELECT COUNT(*) FROM {table_name}")
                 return int(result) if result is not None else 0
+        finally:
+            await super()._return_connection(conn)
 
     async def get_all_table_counts_fast(self) -> Dict[str, int]:
         """Get fast counts for all tables using TimescaleDB functions."""
@@ -398,7 +509,8 @@ class StockDBTimescale(StockDBPostgreSQL):
 
     async def get_hypertable_stats(self) -> Dict[str, Any]:
         """Get TimescaleDB-specific hypertable statistics."""
-        async with self.get_connection() as conn:
+        conn = await self._get_connection_direct()
+        try:
             stats = {}
             
             tables = ['daily_prices', 'hourly_prices', 'realtime_data']
@@ -442,6 +554,8 @@ class StockDBTimescale(StockDBPostgreSQL):
                     stats[table] = {'error': str(e)}
             
             return stats
+        finally:
+            await super()._return_connection(conn)
 
     # TimescaleDB-Specific Query Methods
     
@@ -459,7 +573,22 @@ class StockDBTimescale(StockDBPostgreSQL):
             start_time: Start time (ISO format)
             end_time: End time (ISO format)
         """
+<<<<<<< Updated upstream
         async with self.get_connection() as conn:
+=======
+        conn = await self._get_connection_direct()
+        try:
+            # Convert bucket_interval to PostgreSQL interval format
+            interval_map = {
+                "1 hour": "hour",
+                "15 minutes": "15 minutes",
+                "1 day": "day",
+                "1 week": "week",
+                "1 month": "month"
+            }
+            trunc_unit = interval_map.get(bucket_interval, "hour")
+            
+>>>>>>> Stashed changes
             query = """
                 SELECT 
                     time_bucket($1, datetime) as bucket_time,
@@ -498,6 +627,8 @@ class StockDBTimescale(StockDBPostgreSQL):
             df.set_index('bucket_time', inplace=True)
             
             return df
+        finally:
+            await super()._return_connection(conn)
 
     async def get_continuous_aggregate_data(self, 
                                           aggregate_view: str,
@@ -610,3 +741,415 @@ class StockDBTimescale(StockDBPostgreSQL):
             
             return result or 0
 
+<<<<<<< Updated upstream
+=======
+    async def _start_mv_refresh_task(self) -> None:
+        """Start the materialized view refresh task with TimescaleDB-specific logic."""
+        # Only start if tables are properly initialized
+        if self._tables_initialization_failed:
+            self.logger.error("Cannot start MV refresh task - tables initialization failed")
+            return
+            
+        if not self._tables_initialized:
+            self.logger.error("Cannot start MV refresh task - tables not yet initialized")
+            return
+            
+        # Check if we're in a context where we can start background tasks
+        try:
+            loop = asyncio.get_running_loop()
+            # If we're in Gunicorn or similar, be more careful about starting background tasks
+            if hasattr(self, '_mv_refresh_task') and self._mv_refresh_task is not None and not self._mv_refresh_task.done():
+                return  # Task already running
+                
+            self._mv_refresh_task = asyncio.create_task(self._periodic_timescale_refresh())
+            self.logger.info(f"Started TimescaleDB materialized view refresh task (interval: {self.mv_refresh_interval_minutes} minutes)")
+        except RuntimeError:
+            # No event loop running, skip background task creation
+            self.logger.debug("No event loop running, skipping MV refresh task creation")
+        except Exception as e:
+            self.logger.warning(f"Could not start MV refresh task: {e}")
+
+    async def _periodic_timescale_refresh(self) -> None:
+        """Background task to periodically refresh TimescaleDB materialized views and optimizations."""
+        while not getattr(self, '_shutdown', False):
+            try:
+                # Wait for the refresh interval
+                await asyncio.sleep(self.mv_refresh_interval_minutes * 10)
+                
+                self.logger.info(f"Starting periodic TimescaleDB refresh (interval: {self.mv_refresh_interval_minutes} minutes)")
+                
+                # Check if optimizations are available before refreshing
+                if await self._check_optimizations_available():
+                    # Refresh based on data frequency and priority
+                    await self._smart_refresh_strategy()
+                else:
+                    self.logger.warning("Database optimizations not available, skipping refresh")
+                    # Wait longer before checking again
+                    await asyncio.sleep(300)  # Wait 5 more minutes
+                    
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"Error in TimescaleDB refresh task: {e}", exc_info=True)
+                # Continue running even if refresh fails
+                await asyncio.sleep(60)  # Wait 1 minute before retrying
+
+    async def _smart_refresh_strategy(self) -> None:
+        """Smart refresh strategy based on data update patterns and TimescaleDB best practices."""
+        try:
+            # Get current time to determine refresh strategy
+            now = datetime.now()
+            current_hour = now.hour
+            current_minute = now.minute
+            
+            # High-frequency refresh for realtime data (every refresh cycle)
+            self.logger.debug("Refreshing realtime views (highest frequency)")
+            await self.refresh_realtime_views()
+            
+            # Medium-frequency refresh for hourly data (every hour)
+            if current_minute < 5:  # Refresh in first 5 minutes of each hour
+                self.logger.debug("Refreshing hourly views (medium frequency)")
+                await self.refresh_hourly_views()
+            
+            # Low-frequency refresh for daily data (once per day, early morning)
+            if current_hour == 6 and current_minute < 10:  # 6:00-6:10 AM
+                self.logger.debug("Refreshing daily views (low frequency)")
+                await self.refresh_daily_views()
+                
+                # Also refresh all views completely once per day
+                self.logger.info("Performing complete materialized view refresh")
+                await self.refresh_all_materialized_views()
+            
+            # Verify count accuracy periodically
+            if current_minute % 30 == 0:  # Every 30 minutes
+                accuracy = await self.verify_count_accuracy()
+                inaccurate_tables = [table for table, accurate in accuracy.items() if not accurate]
+                if inaccurate_tables:
+                    self.logger.warning(f"Count accuracy issues detected for: {inaccurate_tables}")
+                    # Force refresh of inaccurate views
+                    await self.refresh_count_materialized_views()
+            
+            # Get and log materialized view status
+            view_status = await self.get_materialized_view_status()
+            refresh_needed = [view['view_name'] for view in view_status if view.get('refresh_needed', False)]
+            if refresh_needed:
+                self.logger.info(f"Views needing refresh: {refresh_needed}")
+            
+            self.logger.info("TimescaleDB periodic refresh completed successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Error in smart refresh strategy: {e}", exc_info=True)
+
+    async def _check_optimizations_available(self) -> bool:
+        """Check if TimescaleDB optimizations and materialized views are available."""
+        try:
+            conn = await self._get_connection_direct()
+            try:
+                # Check if the stock_data schema exists
+                schema_exists = await conn.fetchval("""
+                    SELECT EXISTS(
+                        SELECT 1 FROM information_schema.schemata 
+                        WHERE schema_name = 'stock_data'
+                    )
+                """)
+                
+                if not schema_exists:
+                    return False
+                
+                # Check if key materialized views exist
+                views_exist = await conn.fetchval("""
+                    SELECT EXISTS(
+                        SELECT 1 FROM information_schema.tables 
+                        WHERE table_schema = 'stock_data' 
+                        AND table_name IN ('mv_hourly_prices_count', 'mv_daily_prices_count', 'mv_realtime_data_count')
+                    )
+                """)
+                
+                # Check if TimescaleDB extension is enabled
+                timescale_enabled = await conn.fetchval("""
+                    SELECT EXISTS(
+                        SELECT 1 FROM pg_extension 
+                        WHERE extname = 'timescaledb'
+                    )
+                """)
+                
+                return views_exist and timescale_enabled
+            finally:
+                await super()._return_connection(conn)
+                
+        except Exception as e:
+            self.logger.warning(f"Could not check optimizations availability: {e}")
+            return False
+
+    async def stop_refresh_task(self) -> None:
+        """Stop the materialized view refresh task."""
+        if hasattr(self, '_mv_refresh_task') and self._mv_refresh_task is not None and not self._mv_refresh_task.done():
+            self._mv_refresh_task.cancel()
+            try:
+                await self._mv_refresh_task
+            except asyncio.CancelledError:
+                pass
+            self.logger.info("TimescaleDB materialized view refresh task stopped")
+
+    async def get_refresh_task_status(self) -> Dict[str, Any]:
+        """Get the status of the materialized view refresh task."""
+        status = {
+            'task_running': False,
+            'last_refresh': None,
+            'next_refresh_in_minutes': None,
+            'refresh_interval_minutes': self.mv_refresh_interval_minutes,
+            'optimizations_available': False
+        }
+        
+        if hasattr(self, '_mv_refresh_task') and self._mv_refresh_task is not None:
+            status['task_running'] = not self._mv_refresh_task.done()
+        
+        # Check if optimizations are available
+        status['optimizations_available'] = await self._check_optimizations_available()
+        
+        # Get materialized view status
+        try:
+            view_status = await self.get_materialized_view_status()
+            status['view_status'] = view_status
+            
+            # Find the most recent refresh
+            last_refreshes = []
+            for view in view_status:
+                if view.get('last_refresh') and view['last_refresh'] != 'Never refreshed':
+                    try:
+                        last_refresh = datetime.fromisoformat(view['last_refresh'].replace('Z', '+00:00'))
+                        last_refreshes.append(last_refresh)
+                    except:
+                        pass
+            
+            if last_refreshes:
+                status['last_refresh'] = max(last_refreshes).isoformat()
+        
+        except Exception as e:
+            self.logger.warning(f"Could not get view status: {e}")
+        
+        return status
+
+    # Manual refresh triggers for immediate needs
+    
+    async def force_refresh_all(self) -> str:
+        """Force refresh all materialized views immediately."""
+        try:
+            self.logger.info("Force refreshing all materialized views...")
+            await self.refresh_all_materialized_views()
+            return "All materialized views refreshed successfully"
+        except Exception as e:
+            error_msg = f"Failed to force refresh all views: {e}"
+            self.logger.error(error_msg)
+            return error_msg
+
+    async def force_refresh_realtime(self) -> str:
+        """Force refresh realtime materialized views immediately."""
+        try:
+            self.logger.info("Force refreshing realtime materialized views...")
+            await self.refresh_realtime_views()
+            return "Realtime materialized views refreshed successfully"
+        except Exception as e:
+            error_msg = f"Failed to force refresh realtime views: {e}"
+            self.logger.error(error_msg)
+            return error_msg
+
+    async def force_refresh_hourly(self) -> str:
+        """Force refresh hourly materialized views immediately."""
+        try:
+            self.logger.info("Force refreshing hourly materialized views...")
+            await self.refresh_hourly_views()
+            return "Hourly materialized views refreshed successfully"
+        except Exception as e:
+            error_msg = f"Failed to force refresh hourly views: {e}"
+            self.logger.error(error_msg)
+            return error_msg
+
+    async def force_refresh_daily(self) -> str:
+        """Force refresh daily materialized views immediately."""
+        try:
+            self.logger.info("Force refreshing daily materialized views...")
+            await self.refresh_daily_views()
+            return "Daily materialized views refreshed successfully"
+        except Exception as e:
+            error_msg = f"Failed to force refresh daily views: {e}"
+            self.logger.error(error_msg)
+            return error_msg
+
+    # Monitoring and diagnostics
+    
+    async def get_refresh_performance_metrics(self) -> Dict[str, Any]:
+        """Get performance metrics for materialized view refreshes."""
+        try:
+            async with self._get_connection_direct() as conn:
+                metrics = {}
+                
+                # Get table sizes
+                table_sizes = await conn.fetch("""
+                    SELECT 
+                        schemaname,
+                        tablename,
+                        pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) as size,
+                        pg_total_relation_size(schemaname||'.'||tablename) as size_bytes
+                    FROM pg_tables 
+                    WHERE schemaname = 'stock_data' 
+                    AND tablename IN ('mv_hourly_prices_count', 'mv_daily_prices_count', 'mv_realtime_data_count', 'daily_ohlcv_agg', 'hourly_volume_agg')
+                    ORDER BY tablename
+                """)
+                
+                metrics['table_sizes'] = [dict(row) for row in table_sizes]
+                
+                # Get refresh statistics
+                refresh_stats = await conn.fetch("""
+                    SELECT 
+                        schemaname,
+                        tablename,
+                        last_vacuum,
+                        last_autovacuum,
+                        vacuum_count,
+                        autovacuum_count
+                    FROM pg_stat_user_tables 
+                    WHERE schemaname = 'stock_data' 
+                    AND (tablename LIKE '%mv_%' OR tablename LIKE '%_agg')
+                    ORDER BY tablename
+                """)
+                
+                metrics['refresh_stats'] = [dict(row) for row in refresh_stats]
+                
+                # Get TimescaleDB hypertable stats
+                try:
+                    timescale_stats = await self.get_hypertable_stats()
+                    metrics['timescale_stats'] = timescale_stats
+                except Exception as e:
+                    self.logger.warning(f"Could not get TimescaleDB stats: {e}")
+                
+                return metrics
+                
+        except Exception as e:
+            self.logger.error(f"Failed to get refresh performance metrics: {e}")
+            return {'error': str(e)}
+
+    async def diagnose_refresh_issues(self) -> Dict[str, Any]:
+        """Diagnose potential issues with materialized view refreshes."""
+        try:
+            diagnosis = {
+                'issues_found': [],
+                'recommendations': [],
+                'status': 'healthy'
+            }
+            
+            # Check if optimizations are available
+            optimizations_available = await self._check_optimizations_available()
+            if not optimizations_available:
+                diagnosis['issues_found'].append("Database optimizations not available")
+                diagnosis['recommendations'].append("Run TimescaleDB optimization scripts")
+                diagnosis['status'] = 'needs_setup'
+            
+            # Check materialized view status
+            view_status = await self.get_materialized_view_status()
+            refresh_needed = [view for view in view_status if view.get('refresh_needed', False)]
+            if refresh_needed:
+                diagnosis['issues_found'].append(f"Views need refresh: {[v['view_name'] for v in refresh_needed]}")
+                diagnosis['recommendations'].append("Run manual refresh or check automatic refresh task")
+                diagnosis['status'] = 'needs_refresh'
+            
+            # Check count accuracy
+            accuracy = await self.verify_count_accuracy()
+            inaccurate_tables = [table for table, accurate in accuracy.items() if not accurate]
+            if inaccurate_tables:
+                diagnosis['issues_found'].append(f"Count accuracy issues: {inaccurate_tables}")
+                diagnosis['recommendations'].append("Refresh count materialized views")
+                diagnosis['status'] = 'needs_refresh'
+            
+            # Check constraints
+            try:
+                constraint_result = await self.ensure_constraints()
+                if "Error:" in constraint_result:
+                    diagnosis['issues_found'].append(f"Constraint issues: {constraint_result}")
+                    diagnosis['recommendations'].append("Fix database constraints manually")
+                    diagnosis['status'] = 'needs_fixes'
+            except Exception as e:
+                diagnosis['issues_found'].append(f"Constraint check failed: {e}")
+                diagnosis['recommendations'].append("Check database permissions and constraints")
+                diagnosis['status'] = 'needs_investigation'
+            
+            # Check refresh task status
+            task_status = await self.get_refresh_task_status()
+            if not task_status.get('task_running', False):
+                diagnosis['issues_found'].append("Materialized view refresh task not running")
+                diagnosis['recommendations'].append("Restart the database connection or check task initialization")
+                diagnosis['status'] = 'needs_restart'
+            
+            return diagnosis
+            
+        except Exception as e:
+            self.logger.error(f"Failed to diagnose refresh issues: {e}")
+            return {
+                'error': str(e),
+                'status': 'diagnosis_failed'
+            }
+
+    async def optimize_refresh_schedule(self) -> Dict[str, Any]:
+        """Optimize the refresh schedule based on current database usage patterns."""
+        try:
+            optimization = {
+                'current_schedule': {
+                    'refresh_interval_minutes': self.mv_refresh_interval_minutes,
+                    'realtime_frequency': 'every_cycle',
+                    'hourly_frequency': 'every_hour',
+                    'daily_frequency': 'once_per_day'
+                },
+                'recommendations': [],
+                'optimized_schedule': {}
+            }
+            
+            # Get current database usage patterns
+            async with self._get_connection_direct() as conn:
+                # Check realtime data insertion rate
+                realtime_count_1h = await conn.fetchval("""
+                    SELECT COUNT(*) FROM stock_data.realtime_data 
+                    WHERE write_timestamp >= NOW() - INTERVAL '1 hour'
+                """)
+                
+                realtime_count_24h = await conn.fetchval("""
+                    SELECT COUNT(*) FROM stock_data.realtime_data 
+                    WHERE write_timestamp >= NOW() - INTERVAL '24 hours'
+                """)
+                
+                # Check hourly data insertion rate
+                hourly_count_24h = await conn.fetchval("""
+                    SELECT COUNT(*) FROM stock_data.hourly_prices 
+                    WHERE datetime >= NOW() - INTERVAL '24 hours'
+                """)
+                
+                # Analyze patterns and make recommendations
+                if realtime_count_1h > 10000:  # High-frequency realtime data
+                    optimization['recommendations'].append("High realtime data volume detected - consider increasing refresh frequency")
+                    optimization['optimized_schedule']['realtime_frequency'] = 'every_30_minutes'
+                elif realtime_count_1h < 100:  # Low-frequency realtime data
+                    optimization['recommendations'].append("Low realtime data volume - can reduce refresh frequency")
+                    optimization['optimized_schedule']['realtime_frequency'] = 'every_2_hours'
+                
+                if hourly_count_24h > 1000:  # High-frequency hourly data
+                    optimization['recommendations'].append("High hourly data volume - maintain hourly refresh schedule")
+                else:
+                    optimization['recommendations'].append("Low hourly data volume - can reduce to twice daily")
+                    optimization['optimized_schedule']['hourly_frequency'] = 'twice_daily'
+                
+                # Recommend optimal refresh interval
+                if realtime_count_24h > 100000:
+                    optimization['recommendations'].append("Very high data volume - consider 15-minute refresh interval")
+                    optimization['optimized_schedule']['refresh_interval_minutes'] = 15
+                elif realtime_count_24h < 1000:
+                    optimization['recommendations'].append("Low data volume - can use 2-hour refresh interval")
+                    optimization['optimized_schedule']['refresh_interval_minutes'] = 120
+                else:
+                    optimization['recommendations'].append("Moderate data volume - current 1-hour interval is appropriate")
+            
+            return optimization
+            
+        except Exception as e:
+            self.logger.error(f"Failed to optimize refresh schedule: {e}")
+            return {'error': str(e)}
+
+>>>>>>> Stashed changes

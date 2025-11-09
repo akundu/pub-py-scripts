@@ -6,6 +6,7 @@ import sqlalchemy
 from sqlalchemy import create_engine
 from typing import List, Dict, Any, Optional
 import pytz
+import time
 from .common_strategies import (
     calculate_moving_average,
     calculate_exponential_moving_average,
@@ -26,12 +27,13 @@ class StockDBPostgreSQL(StockDBBase):
     def __init__(self, 
                  db_config: str, 
                  tables_cache_timeout_minutes: int = 10,
-                 pool_max_size: int = 10,
-                 pool_connection_timeout_minutes: int = 30,
+                 pool_max_size: int = 100,  # Increased for high-concurrency workloads
+                 pool_connection_timeout_minutes: int = 60,  # Increased timeout
                  mv_refresh_interval_minutes: int = 5,
                  logger: Optional[logging.Logger] = None,
                  log_level: str = "INFO",
                  batch_size: int = 1000,
+                 historical_batch_size: int = 25,
                  statement_timeout_seconds: int = 300,
                  idle_timeout_seconds: int = 600,
                  lock_timeout_seconds: int = 60):
@@ -65,6 +67,7 @@ class StockDBPostgreSQL(StockDBBase):
         
         # Timeout and batch configuration
         self.batch_size = batch_size
+        self.historical_batch_size = historical_batch_size
         self.statement_timeout_seconds = statement_timeout_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
         self.lock_timeout_seconds = lock_timeout_seconds
@@ -85,6 +88,10 @@ class StockDBPostgreSQL(StockDBBase):
         
         # Register cleanup on instance deletion
         weakref.finalize(self, self._cleanup_pool_sync)
+        
+        # Initialize price cache
+        self._price_cache = {}
+        self._price_cache_cleanup_time = time.time()
 
     def _init_db(self) -> None:
         """Initialize the PostgreSQL database with required tables if they don't exist."""
@@ -92,6 +99,15 @@ class StockDBPostgreSQL(StockDBBase):
         # This avoids the asyncio.run() issue in the event loop
         pass
 
+<<<<<<< Updated upstream
+=======
+    def _get_table_name(self, table_name: str) -> str:
+        """Get fully qualified table name with schema."""
+        full_name = f"{self.schema}.{table_name}"
+        self.logger.debug(f"_get_table_name: {table_name} -> {full_name} (schema: {self.schema})")
+        return full_name
+
+>>>>>>> Stashed changes
     async def _ensure_tables_exist(self) -> None:
         """Ensure all required tables exist in the PostgreSQL database.
         Uses caching to avoid repeated database calls within the configured timeout period.
@@ -104,13 +120,42 @@ class StockDBPostgreSQL(StockDBBase):
             # Cache is still valid, skip database operations
             return
         
+<<<<<<< Updated upstream
         # Start cleanup task if not already running
         await self._start_cleanup_task()
+=======
+        # Log the schema we're working with
+        self.logger.info(f"_ensure_tables_exist: Using schema '{self.schema}'")
+        
+        # Start cleanup task if not already running (lazy initialization)
+        try:
+            await self._start_cleanup_task()
+        except Exception as e:
+            self.logger.warning(f"Could not start cleanup task: {e}")
+>>>>>>> Stashed changes
         
         # Start materialized view refresh task if not already running
         await self._start_mv_refresh_task()
         
         async with self.get_connection() as conn:
+            # Create schema if it doesn't exist
+            try:
+                await conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self.schema}")
+                self.logger.info(f"Schema '{self.schema}' ensured")
+            except Exception as e:
+                self.logger.error(f"Failed to create or ensure schema '{self.schema}': {e}")
+                raise RuntimeError(f"Failed to create or ensure schema '{self.schema}': {e}") from e
+            
+            # Log what we're about to create
+            daily_table = self._get_table_name('daily_prices')
+            hourly_table = self._get_table_name('hourly_prices')
+            realtime_table = self._get_table_name('realtime_data')
+            
+            self.logger.info(f"Creating tables in schema '{self.schema}':")
+            self.logger.info(f"  - daily_prices: {daily_table}")
+            self.logger.info(f"  - hourly_prices: {hourly_table}")
+            self.logger.info(f"  - realtime_data: {realtime_table}")
+            
             # Create daily_prices table
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS daily_prices (
@@ -168,6 +213,20 @@ class StockDBPostgreSQL(StockDBBase):
             # Add write_timestamp column to existing realtime_data table if it doesn't exist
             try:
                 await conn.execute("ALTER TABLE realtime_data ADD COLUMN write_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            except (asyncpg.exceptions.DuplicateColumnError, asyncpg.exceptions.InsufficientPrivilegeError):
+                # Column already exists or user doesn't have ALTER privileges
+                pass
+
+            # Add write_timestamp column to existing daily_prices table if it doesn't exist
+            try:
+                await conn.execute(f"ALTER TABLE {self._get_table_name('daily_prices')} ADD COLUMN write_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            except (asyncpg.exceptions.DuplicateColumnError, asyncpg.exceptions.InsufficientPrivilegeError):
+                # Column already exists or user doesn't have ALTER privileges
+                pass
+
+            # Add write_timestamp column to existing hourly_prices table if it doesn't exist
+            try:
+                await conn.execute(f"ALTER TABLE {self._get_table_name('hourly_prices')} ADD COLUMN write_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
             except (asyncpg.exceptions.DuplicateColumnError, asyncpg.exceptions.InsufficientPrivilegeError):
                 # Column already exists or user doesn't have ALTER privileges
                 pass
@@ -234,10 +293,13 @@ class StockDBPostgreSQL(StockDBBase):
     async def _set_connection_timeouts(self, conn: asyncpg.Connection) -> None:
         """Set timeout settings for an existing connection to prevent query timeouts."""
         try:
+            # Set the search path to our schema to ensure all operations use it
+            await conn.execute(f'SET search_path TO {self.schema}, public')
+            
             await conn.execute(f"SET statement_timeout = '{self.statement_timeout_seconds}s'")
             await conn.execute(f"SET idle_in_transaction_session_timeout = '{self.idle_timeout_seconds}s'")
             await conn.execute(f"SET lock_timeout = '{self.lock_timeout_seconds}s'")
-            self.logger.debug("Set timeout settings for existing connection")
+            self.logger.debug(f"Set timeout settings and search_path={self.schema} for existing connection")
         except Exception as e:
             self.logger.warning(f"Failed to set timeout settings: {e}")
 
@@ -278,6 +340,14 @@ class StockDBPostgreSQL(StockDBBase):
                     # Disable prepared statements when using pgbouncer to avoid "duplicate statement" errors
                     statement_cache_size=0
                 )
+                
+                # Set the search path to our schema to ensure all operations use it
+                await conn.execute(f'SET search_path TO {self.schema}, public')
+                self.logger.debug(f"Set search_path to {self.schema}, public for new connection")
+                
+                # Verify the search path was set correctly
+                search_path = await conn.fetchval("SHOW search_path")
+                self.logger.info(f"Connection search_path verified: {search_path}")
                 
                 # Set session-level timeout settings to prevent query timeouts
                 await self._set_connection_timeouts(conn)
@@ -626,7 +696,16 @@ class StockDBPostgreSQL(StockDBBase):
         ema_periods: List[int] = None,
         on_duplicate: str = "ignore",
     ) -> None:
-        """Save aggregated (daily/hourly) stock data to the PostgreSQL database."""
+        """Save aggregated (daily/hourly) stock data to the PostgreSQL database.
+        
+        OPTIMIZATIONS IMPLEMENTED:
+        - Small batch sizes (25 rows) for daily/hourly data to prevent timeouts
+        - Progress tracking for large datasets (>10 batches)
+        - Performance monitoring (logs slow batches >2s)
+        - write_timestamp added to all tables for accurate age calculation
+        - Efficient DELETE operations without LIMIT (PostgreSQL handles large deletes)
+        - Batch-level error handling (continues on batch failures)
+        """
         # Ensure tables are initialized
         await self._ensure_tables_exist()
         
@@ -800,12 +879,38 @@ class StockDBPostgreSQL(StockDBBase):
                     max_date_obj = max_date_obj.astimezone(timezone.utc)
                 max_date_obj = max_date_obj.replace(tzinfo=None)  # Convert to naive UTC
             
-            # Use retry mechanism for DELETE operation
-            await self._execute_with_retry(conn, f'''
-                DELETE FROM {table} 
+            # Smart DELETE with minimal locking - check if data exists first
+            delete_start = time.time()
+            
+            # Check if we need to delete anything (avoid unnecessary locks)
+            check_sql = f'''
+                SELECT COUNT(*) FROM {table} 
                 WHERE ticker = $1 
                 AND {date_col} BETWEEN $2 AND $3
-            ''', ticker, min_date_obj, max_date_obj)
+            '''
+            result = await self._execute_with_retry(conn, check_sql, ticker, min_date_obj, max_date_obj)
+            existing_count = int(result) if result and result.isdigit() else 0
+            
+            deleted_count = 0
+            if existing_count > 0:
+                # Only delete if there's actually data to delete
+                delete_sql = f'''
+                    DELETE FROM {table} 
+                    WHERE ticker = $1 
+                    AND {date_col} BETWEEN $2 AND $3
+                '''
+                self.logger.info(f"DELETE SQL: {delete_sql} (found {existing_count} existing records)")
+                self.logger.info(f"DELETE params: ticker={ticker}, min_date={min_date_obj}, max_date={max_date_obj}")
+                
+                # Execute the delete
+                delete_result = await self._execute_with_retry(conn, delete_sql, ticker, min_date_obj, max_date_obj)
+                deleted_count = int(delete_result.split()[-1]) if delete_result else 0
+                self.logger.info(f"Deleted {deleted_count} existing {interval} records for {ticker}")
+            else:
+                self.logger.info(f"No existing {interval} records found for {ticker} in range, skipping DELETE")
+            
+            delete_duration = time.time() - delete_start
+            self.logger.info(f"DELETE operation took {delete_duration:.3f}s for {ticker} {interval} (checked={existing_count}, deleted={deleted_count})")
 
             # Insert new data with conflict handling
             cols_str = ", ".join([f'"{col}"' for col in sorted(all_columns)])
@@ -829,11 +934,22 @@ class StockDBPostgreSQL(StockDBBase):
                     ON CONFLICT (ticker, {date_col}) DO NOTHING
                 """
             
-            # Batch processing to prevent query timeouts
-            batch_size = self.batch_size  # Use the configured batch size
+            # Use much smaller batch sizes for daily/hourly data to prevent timeouts
+            # Daily/hourly data can be much larger than realtime data and cause timeouts
+            if interval in ['daily', 'hourly']:
+                # For historical data, use very small batches to prevent timeouts
+                batch_size = min(self.historical_batch_size, self.batch_size)  # Use configured historical batch size
+                self.logger.info(f"Using historical batch size {batch_size} for {interval} data to prevent timeouts")
+            else:
+                batch_size = self.batch_size
+            
             total_batches = (len(records_for_insertion) + batch_size - 1) // batch_size
             
-            self.logger.info(f"Inserting {len(records_for_insertion)} records for {ticker} in {total_batches} batches")
+            # For very large datasets, warn the user
+            if len(records_for_insertion) > 1000:
+                self.logger.warning(f"Large dataset detected: {len(records_for_insertion)} {interval} records for {ticker}. This may take a while with {batch_size}-row batches.")
+            
+            self.logger.info(f"Inserting {len(records_for_insertion)} {interval} records for {ticker} in {total_batches} batches of {batch_size}")
             
             successful_inserts = 0
             failed_batches = 0
@@ -843,7 +959,11 @@ class StockDBPostgreSQL(StockDBBase):
                 batch_values = []
                 batch_num = i // batch_size + 1
                 
-                self.logger.debug(f"Processing batch {batch_num}/{total_batches} for {ticker} ({len(batch)} records)")
+                # Progress tracking for large datasets
+                if total_batches > 10:
+                    self.logger.info(f"Processing batch {batch_num}/{total_batches} for {ticker} ({len(batch)} records) - {i+len(batch)}/{len(records_for_insertion)} total")
+                else:
+                    self.logger.debug(f"Processing batch {batch_num}/{total_batches} for {ticker} ({len(batch)} records)")
                 
                 for record in batch:
                     record_values = []
@@ -863,14 +983,28 @@ class StockDBPostgreSQL(StockDBBase):
                                 value = datetime.fromisoformat(value)
                             except ValueError:
                                 pass  # Keep as string if conversion fails
+                        # Set write_timestamp for new records
+                        elif col == 'write_timestamp':
+                            from datetime import datetime, timezone
+                            value = datetime.now(timezone.utc).replace(tzinfo=None)
                         record_values.append(value)
                     batch_values.append(record_values)
                 
                 try:
-                    # Use retry mechanism for batch insertion
+                    # Use retry mechanism for batch insertion with timeout handling
+                    start_time = time.time()
+                    self.logger.info(f"INSERT batch {batch_num}/{total_batches}: {len(batch)} records for {ticker}")
+                    
                     await self._executemany_with_retry(conn, insert_query, batch_values)
+                    
+                    batch_time = time.time() - start_time
                     successful_inserts += len(batch)
-                    self.logger.debug(f"Successfully inserted batch {batch_num}/{total_batches} for {ticker} ({len(batch)} records)")
+                    
+                    if batch_time > 2.0:  # Log slow batches
+                        self.logger.warning(f"Slow batch {batch_num}/{total_batches} for {ticker}: {len(batch)} records in {batch_time:.2f}s")
+                    else:
+                        self.logger.debug(f"Successfully inserted batch {batch_num}/{total_batches} for {ticker} ({len(batch)} records) in {batch_time:.2f}s")
+                        
                 except asyncpg.exceptions.UniqueViolationError:
                     # This should not happen with ON CONFLICT DO NOTHING, but just in case
                     self.logger.warning(f"Duplicate key violation for {ticker} in batch {batch_num}/{total_batches}")
@@ -913,31 +1047,49 @@ class StockDBPostgreSQL(StockDBBase):
             table = 'daily_prices' if interval == 'daily' else 'hourly_prices'
             date_col_name = 'date' if interval == 'daily' else 'datetime' # Name of column in DB
 
-            query = f"SELECT * FROM {table} WHERE ticker = $1"
-            params: list[str | None] = [ticker]
+            # If no date range specified, only get the most recent data (LIMIT 50 for safety)
+            if not start_date and not end_date:
+                query = f"""
+                    SELECT *, write_timestamp FROM {table} 
+                    WHERE ticker = $1 
+                    ORDER BY {date_col_name} DESC 
+                    LIMIT 50
+                """
+                params = [ticker]
+                self.logger.debug(f"Getting most recent {interval} data for {ticker} (no date range specified)")
+            else:
+                # Full date range query
+                query = f"SELECT *, write_timestamp FROM {table} WHERE ticker = $1"
+                params = [ticker]
 
-            if start_date:
-                query += f" AND {date_col_name} >= ${len(params) + 1}"
-                # Convert date string to date object for asyncpg
-                from datetime import date
-                try:
-                    date_obj = date.fromisoformat(start_date)
-                    params.append(date_obj)
-                except ValueError:
-                    # If not a valid date string, pass as is
-                    params.append(start_date)
-            if end_date:
-                query += f" AND {date_col_name} <= ${len(params) + 1}"
-                # Convert date string to date object for asyncpg
-                from datetime import date
-                try:
-                    date_obj = date.fromisoformat(end_date)
-                    params.append(date_obj)
-                except ValueError:
-                    # If not a valid date string, pass as is
-                    params.append(end_date)
+                if start_date:
+                    query += f" AND {date_col_name} >= ${len(params) + 1}"
+                    # Convert date string to date object for asyncpg
+                    from datetime import date
+                    try:
+                        date_obj = date.fromisoformat(start_date)
+                        params.append(date_obj)
+                    except ValueError:
+                        # If not a valid date string, pass as is
+                        params.append(start_date)
+                if end_date:
+                    query += f" AND {date_col_name} <= ${len(params) + 1}"
+                    # Convert date string to date object for asyncpg
+                    from datetime import date
+                    try:
+                        date_obj = date.fromisoformat(end_date)
+                        params.append(date_obj)
+                    except ValueError:
+                        # If not a valid date string, pass as is
+                        params.append(end_date)
 
-            query += f" ORDER BY {date_col_name}"
+                query += f" ORDER BY {date_col_name}"
+                self.logger.debug(f"Getting {interval} data for {ticker} with date range: {start_date} to {end_date}")
+
+            # Log the query being executed
+            self.logger.info(f"QUERY SQL: {query}")
+            self.logger.info(f"QUERY params: {params}")
+            self.logger.info(f"QUERY table: {table} (resolved from {self._get_table_name('daily_prices' if interval == 'daily' else 'hourly_prices')})")
 
             # Use asyncpg to fetch data
             rows = await conn.fetch(query, *params)
@@ -948,8 +1100,15 @@ class StockDBPostgreSQL(StockDBBase):
                 df[date_col_name] = pd.to_datetime(df[date_col_name], errors="coerce")
                 df.set_index(date_col_name, inplace=True)
                 df = df[df.index.notna()]
+                
+                # If we got data without date range, sort by timestamp descending (most recent first)
+                if not start_date and not end_date:
+                    df = df.sort_index(ascending=False)
+                
+                self.logger.debug(f"Retrieved {len(df)} {interval} records for {ticker}")
                 return df
             else:
+                self.logger.debug(f"No {interval} data found for {ticker}")
                 return pd.DataFrame()
 
     async def get_stock_data(
@@ -1040,14 +1199,30 @@ class StockDBPostgreSQL(StockDBBase):
             if 'write_timestamp' not in df_copy.columns:
                 current_time = datetime.now(timezone.utc)
                 df_copy['write_timestamp'] = current_time
+                self.logger.info(f"Added write_timestamp for {ticker}: {current_time}")
+            else:
+                self.logger.info(f"Using existing write_timestamp for {ticker}: {df_copy['write_timestamp'].iloc[0]}")
+            
+            self.logger.info(f"DEBUG: Saving {len(df_copy)} records for {ticker}, timestamp range: {min_ts_val} to {max_ts_val}")
+            self.logger.info(f"DEBUG: write_timestamp range: {df_copy['write_timestamp'].min()} to {df_copy['write_timestamp'].max()}")
 
             # Delete existing data in the range to avoid UNIQUE constraint violations
+<<<<<<< Updated upstream
             await conn.execute('''
                 DELETE FROM realtime_data 
+=======
+            delete_sql = f'''
+                DELETE FROM {self._get_table_name('realtime_data')} 
+>>>>>>> Stashed changes
                 WHERE ticker = $1 
                 AND type = $2
                 AND timestamp BETWEEN $3 AND $4
-            ''', ticker, data_type, min_ts_val, max_ts_val)
+            '''
+            self.logger.info(f"DELETE SQL: {delete_sql}")
+            self.logger.info(f"DELETE params: ticker={ticker}, type={data_type}, min_ts={min_ts_val}, max_ts={max_ts_val}")
+            
+            delete_result = await conn.execute(delete_sql, ticker, data_type, min_ts_val, max_ts_val)
+            self.logger.info(f"DELETE result: {delete_result}")
 
             # Insert new data with conflict handling
             cols_str = ", ".join([f'"{col}"' for col in df_copy.columns])
@@ -1071,6 +1246,13 @@ class StockDBPostgreSQL(StockDBBase):
                     ON CONFLICT (ticker, timestamp, type) DO NOTHING
                 """
             
+            self.logger.info(f"INSERT query: {insert_query}")
+            self.logger.info(f"Columns: {cols_str}")
+            self.logger.info(f"Placeholders: {placeholders}")
+            self.logger.info(f"DataFrame columns: {list(df_copy.columns)}")
+            self.logger.info(f"DataFrame shape: {df_copy.shape}")
+            self.logger.info(f"First record sample: {df_copy.iloc[0].to_dict()}")
+            
             for record in df_copy.to_dict(orient="records"):
                 values = list(record.values())
                 # Convert pandas Timestamps to Python datetime objects for asyncpg
@@ -1085,17 +1267,52 @@ class StockDBPostgreSQL(StockDBBase):
                     else:
                         converted_values.append(value)
                 try:
-                    await conn.execute(insert_query, *converted_values)
+                    insert_result = await conn.execute(insert_query, *converted_values)
+                    self.logger.info(f"Inserted record for {ticker} at {record.get('timestamp', 'unknown')} with write_timestamp {record.get('write_timestamp', 'unknown')}")
+                    self.logger.info(f"Insert result: {insert_result}")
                 except asyncpg.exceptions.UniqueViolationError:
                     # This should not happen with ON CONFLICT DO NOTHING, but just in case
                     self.logger.warning(f"Duplicate key violation for {ticker} at {record.get('timestamp', 'unknown')}")
                     continue
+                except Exception as e:
+                    self.logger.error(f"Error inserting record for {ticker}: {e}")
+                    self.logger.error(f"Record: {record}")
+                    self.logger.error(f"Converted values: {converted_values}")
+                    raise
         finally:
             await self._return_connection(conn)
             
-        # Trigger materialized view refresh if significant realtime data was added
+        # Log summary of save operation
         if len(df_copy) > 0:
-            # Refresh less frequently for realtime data (higher threshold)
+            self.logger.info(f"Successfully saved {len(df_copy)} realtime records for {ticker}")
+            
+            # Verify the data was actually saved by checking the count
+            try:
+                verify_conn = await self._get_connection()
+                try:
+                    count_query = f"SELECT COUNT(*) FROM {self._get_table_name('realtime_data')} WHERE ticker = $1 AND type = $2"
+                    count_result = await verify_conn.fetchval(count_query, ticker, data_type)
+                    self.logger.info(f"Verification: Found {count_result} realtime records for {ticker} in database")
+                    
+                    # Check the most recent record
+                    recent_query = f"""
+                        SELECT timestamp, write_timestamp, price 
+                        FROM {self._get_table_name('realtime_data')} 
+                        WHERE ticker = $1 AND type = $2 
+                        ORDER BY write_timestamp DESC 
+                        LIMIT 1
+                    """
+                    recent_result = await verify_conn.fetchrow(recent_query, ticker, data_type)
+                    if recent_result:
+                        self.logger.info(f"Most recent record: timestamp={recent_result['timestamp']}, write_timestamp={recent_result['write_timestamp']}, price=${recent_result['price']}")
+                    else:
+                        self.logger.warning(f"No recent records found for {ticker} after save operation!")
+                finally:
+                    await self._return_connection(verify_conn)
+            except Exception as e:
+                self.logger.error(f"Error verifying save operation: {e}")
+            
+            # Trigger materialized view refresh if significant realtime data was added
             if await self._check_optimizations_available() and len(df_copy) >= 100:
                 try:
                     await self.refresh_count_materialized_views()
@@ -1110,17 +1327,35 @@ class StockDBPostgreSQL(StockDBBase):
         
         conn = await self._get_connection()
         try:
+<<<<<<< Updated upstream
             query = "SELECT * FROM realtime_data WHERE ticker = $1 AND type = $2"
             params: list[str | None] = [ticker, data_type]
+=======
+            # If no date range specified, only get the most recent data (LIMIT 100 for safety)
+            if not start_datetime and not end_datetime:
+                query = f"""
+                    SELECT * FROM {self._get_table_name('realtime_data')} 
+                    WHERE ticker = $1 AND type = $2 
+                    ORDER BY timestamp DESC 
+                    LIMIT 100
+                """
+                params = [ticker, data_type]
+                self.logger.debug(f"Getting most recent realtime data for {ticker} (no date range specified)")
+            else:
+                # Full date range query
+                query = f"SELECT * FROM {self._get_table_name('realtime_data')} WHERE ticker = $1 AND type = $2"
+                params = [ticker, data_type]
+>>>>>>> Stashed changes
 
-            if start_datetime:
-                query += " AND timestamp >= $3"
-                params.append(start_datetime) # PostgreSQL handles datetime objects
-            if end_datetime:
-                query += " AND timestamp <= $4"
-                params.append(end_datetime)
+                if start_datetime:
+                    query += " AND timestamp >= $3"
+                    params.append(start_datetime)
+                if end_datetime:
+                    query += " AND timestamp <= $4"
+                    params.append(end_datetime)
 
-            query += " ORDER BY timestamp"
+                query += " ORDER BY timestamp"
+                self.logger.debug(f"Getting realtime data for {ticker} with date range: {start_datetime} to {end_datetime}")
             
             # Use asyncpg to fetch data
             rows = await conn.fetch(query, *params)
@@ -1134,8 +1369,15 @@ class StockDBPostgreSQL(StockDBBase):
                     df['write_timestamp'] = pd.to_datetime(df['write_timestamp'], errors='coerce')
                 df.set_index('timestamp', inplace=True)
                 df = df[df.index.notna()]
+                
+                # If we got data without date range, sort by timestamp descending (most recent first)
+                if not start_datetime and not end_datetime:
+                    df = df.sort_index(ascending=False)
+                
+                self.logger.debug(f"Retrieved {len(df)} realtime records for {ticker}")
                 return df
             else:
+                self.logger.debug(f"No realtime data found for {ticker}")
                 return pd.DataFrame()
         finally:
             await self._return_connection(conn)
@@ -1148,31 +1390,224 @@ class StockDBPostgreSQL(StockDBBase):
         conn = await self._get_connection()
         try:
             latest_price = None
-            # 1. Try realtime_data
+            # 1. Try realtime_data - use index-optimized query with LIMIT 1
             try:
+<<<<<<< Updated upstream
                 res_rt = await conn.fetchrow("SELECT price FROM realtime_data WHERE ticker = $1 AND type = $2 ORDER BY timestamp DESC LIMIT 1", ticker, 'quote')
                 if res_rt: latest_price = res_rt['price']
+=======
+                res_rt = await conn.fetchrow(f"""
+                    SELECT price, timestamp 
+                    FROM {self._get_table_name('realtime_data')} 
+                    WHERE ticker = $1 AND type = $2 
+                    ORDER BY timestamp DESC 
+                    LIMIT 1
+                """, ticker, 'quote')
+                if res_rt: 
+                    latest_price = res_rt['price']
+                    self.logger.debug(f"Found latest price for {ticker} in realtime_data: ${latest_price}")
+                    return latest_price  # Early return if we found realtime data
+>>>>>>> Stashed changes
             except Exception as e:
                 self.logger.error(f"PostgreSQL error (realtime_data for {ticker}): {e}", exc_info=True)
 
-            # 2. Try hourly_prices
+            # 2. Try hourly_prices - only if no realtime data found
             if latest_price is None:
                 try:
+<<<<<<< Updated upstream
                     res_h = await conn.fetchrow("SELECT close FROM hourly_prices WHERE ticker = $1 ORDER BY datetime DESC LIMIT 1", ticker)
                     if res_h: latest_price = res_h['close']
+=======
+                    res_h = await conn.fetchrow(f"""
+                        SELECT close, datetime 
+                        FROM {self._get_table_name('hourly_prices')} 
+                        WHERE ticker = $1 
+                        ORDER BY datetime DESC 
+                        LIMIT 1
+                    """, ticker)
+                    if res_h: 
+                        latest_price = res_h['close']
+                        self.logger.debug(f"Found latest price for {ticker} in hourly_prices: ${latest_price}")
+                        return latest_price  # Early return if we found hourly data
+>>>>>>> Stashed changes
                 except Exception as e:
                     self.logger.error(f"PostgreSQL error (hourly_prices for {ticker}): {e}", exc_info=True)
 
-            # 3. Try daily_prices
+            # 3. Try daily_prices - only if no other data found
             if latest_price is None:
                 try:
+<<<<<<< Updated upstream
                     res_d = await conn.fetchrow("SELECT close FROM daily_prices WHERE ticker = $1 ORDER BY date DESC LIMIT 1", ticker)
                     if res_d: latest_price = res_d['close']
+=======
+                    res_d = await conn.fetchrow(f"""
+                        SELECT close, date 
+                        FROM {self._get_table_name('daily_prices')} 
+                        WHERE ticker = $1 
+                        ORDER BY date DESC 
+                        LIMIT 1
+                    """, ticker)
+                    if res_d: 
+                        latest_price = res_d['close']
+                        self.logger.debug(f"Found latest price for {ticker} in daily_prices: ${latest_price}")
+>>>>>>> Stashed changes
                 except Exception as e:
                     self.logger.error(f"PostgreSQL error (daily_prices for {ticker}): {e}", exc_info=True)
         finally:
             await self._return_connection(conn)
         return latest_price
+
+    async def get_latest_price_with_age(self, ticker: str) -> Dict[str, Any]:
+        """Get the most recent price for a ticker along with its age information.
+        This is optimized for current price checks and only fetches minimal data."""
+        # Ensure tables are initialized
+        await self._ensure_tables_exist()
+        
+        # Add caching to avoid repeated database calls for the same ticker
+        cache_key = f"latest_price_{ticker}"
+        if hasattr(self, '_price_cache') and cache_key in self._price_cache:
+            cached_result = self._price_cache[cache_key]
+            # Check if cache is still valid (less than 5 seconds old)
+            if time.time() - cached_result.get('cache_time', 0) < 5:
+                self.logger.debug(f"Using cached price for {ticker}")
+                return {k: v for k, v in cached_result.items() if k != 'cache_time'}
+        
+        # Clean up old cache entries
+        self._cleanup_price_cache()
+        
+        conn = await self._get_connection()
+        try:
+            latest_data = None
+            data_source = None
+            
+            # 1. Try realtime_data first - most recent
+            try:
+                res_rt = await conn.fetchrow(f"""
+                    SELECT price, timestamp, write_timestamp 
+                    FROM {self._get_table_name('realtime_data')} 
+                    WHERE ticker = $1 AND type = $2 
+                    ORDER BY timestamp DESC 
+                    LIMIT 1
+                """, ticker, 'quote')
+                if res_rt: 
+                    latest_data = res_rt
+                    data_source = 'realtime_data'
+                    self.logger.debug(f"Found latest price for {ticker} in realtime_data: ${res_rt['price']}")
+            except Exception as e:
+                self.logger.error(f"PostgreSQL error (realtime_data for {ticker}): {e}", exc_info=True)
+
+            # 2. Try hourly_prices if no realtime data
+            if latest_data is None:
+                try:
+                    res_h = await conn.fetchrow(f"""
+                        SELECT close as price, datetime as timestamp, write_timestamp
+                        FROM {self._get_table_name('hourly_prices')} 
+                        WHERE ticker = $1 
+                        ORDER BY datetime DESC 
+                        LIMIT 1
+                    """, ticker)
+                    if res_h: 
+                        latest_data = res_h
+                        data_source = 'hourly_prices'
+                        self.logger.debug(f"Found latest price for {ticker} in hourly_prices: ${res_h['price']}")
+                except Exception as e:
+                    self.logger.error(f"PostgreSQL error (hourly_prices for {ticker}): {e}", exc_info=True)
+
+            # 3. Try daily_prices if no other data found
+            if latest_data is None:
+                try:
+                    res_d = await conn.fetchrow(f"""
+                        SELECT close as price, date as timestamp, write_timestamp
+                        FROM {self._get_table_name('daily_prices')} 
+                        WHERE ticker = $1 
+                        ORDER BY date DESC 
+                        LIMIT 1
+                    """, ticker)
+                    if res_d: 
+                        latest_data = res_d
+                        data_source = 'daily_prices'
+                        self.logger.debug(f"Found latest price for {ticker} in daily_prices: ${res_d['price']}")
+                except Exception as e:
+                    self.logger.error(f"PostgreSQL error (daily_prices for {ticker}): {e}", exc_info=True)
+
+            if latest_data:
+                # Calculate age in seconds
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                
+                # For realtime data, use write_timestamp to determine freshness
+                # For historical data, use the data timestamp
+                if data_source == 'realtime_data' and latest_data.get('write_timestamp'):
+                    # Use write_timestamp for realtime data (when it was saved to DB)
+                    age_timestamp = latest_data['write_timestamp']
+                    self.logger.debug(f"Using write_timestamp for age calculation: {age_timestamp}")
+                else:
+                    # Use data timestamp for historical data
+                    age_timestamp = latest_data['timestamp']
+                    self.logger.debug(f"Using data timestamp for age calculation: {age_timestamp}")
+                
+                # Handle different timestamp formats
+                if isinstance(age_timestamp, str):
+                    timestamp = pd.to_datetime(age_timestamp)
+                else:
+                    timestamp = age_timestamp
+                
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=timezone.utc)
+                
+                age_seconds = (now - timestamp).total_seconds()
+                
+                result = {
+                    'price': latest_data['price'],
+                    'timestamp': latest_data['timestamp'].isoformat() if hasattr(latest_data['timestamp'], 'isoformat') else str(latest_data['timestamp']),
+                    'write_timestamp': latest_data.get('write_timestamp', latest_data['timestamp']),
+                    'age_seconds': age_seconds,
+                    'data_source': data_source,
+                    'ticker': ticker
+                }
+                
+                # Update cache
+                if not hasattr(self, '_price_cache'):
+                    self._price_cache = {}
+                self._price_cache[cache_key] = {**result, 'cache_time': time.time()}
+                
+                self.logger.info(f"DEBUG: {ticker} - price: ${latest_data['price']}, age: {age_seconds:.1f}s, source: {data_source}")
+                self.logger.info(f"DEBUG: {ticker} - timestamp: {latest_data['timestamp']}, write_timestamp: {latest_data.get('write_timestamp')}")
+                
+                return result
+            else:
+                result = {
+                    'price': None,
+                    'timestamp': None,
+                    'age_seconds': None,
+                    'data_source': None,
+                    'ticker': ticker
+                }
+                
+                # Update cache even for None results to avoid repeated DB calls
+                if not hasattr(self, '_price_cache'):
+                    self._price_cache = {}
+                self._price_cache[cache_key] = {**result, 'cache_time': time.time()}
+                
+                return result
+        finally:
+            await self._return_connection(conn)
+
+    def _cleanup_price_cache(self):
+        """Clean up old cache entries to prevent memory leaks."""
+        if hasattr(self, '_price_cache') and hasattr(self, '_price_cache_cleanup_time'):
+            now = time.time()
+            # Clean up cache every 60 seconds
+            if now - self._price_cache_cleanup_time > 60:
+                # Remove entries older than 30 seconds
+                cutoff_time = now - 30
+                old_keys = [k for k, v in self._price_cache.items() 
+                           if v.get('cache_time', 0) < cutoff_time]
+                for key in old_keys:
+                    del self._price_cache[key]
+                
+                self._price_cache_cleanup_time = now
+                self.logger.debug(f"Cleaned up {len(old_keys)} old cache entries")
 
     async def get_latest_prices(self, tickers: List[str]) -> Dict[str, float | None]:
         """Get the most recent prices for multiple tickers (realtime -> hourly -> daily) from PostgreSQL.
@@ -1619,6 +2054,122 @@ class StockDBPostgreSQL(StockDBBase):
             await self._return_connection(conn)
         return result
 
+    async def get_latest_prices_with_age_optimized(self, tickers: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Get latest prices with age information using optimized queries.
+        This is the most efficient method for current price checks."""
+        if not tickers:
+            return {}
+        
+        await self._ensure_tables_exist()
+        
+        result = {}
+        for ticker in tickers:
+            result[ticker] = {
+                'price': None,
+                'timestamp': None,
+                'age_seconds': None,
+                'data_source': None,
+                'ticker': ticker
+            }
+        
+        conn = await self._get_connection()
+        try:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            
+            # Use optimized queries with indexes for better performance
+            placeholders = ','.join([f'${i+1}' for i in range(len(tickers))])
+            
+            # Try realtime_data first (most recent) - uses (ticker, timestamp) index
+            try:
+                query = f"""
+                    SELECT DISTINCT ON (ticker) ticker, price, timestamp, write_timestamp
+                    FROM {self._get_table_name('realtime_data')} 
+                    WHERE ticker IN ({placeholders}) AND type = 'quote'
+                    ORDER BY ticker, timestamp DESC
+                """
+                rows = await conn.fetch(query, *tickers)
+                for row in rows:
+                    ticker = row['ticker']
+                    # For realtime data, use write_timestamp for age calculation
+                    age_timestamp = row.get('write_timestamp', row['timestamp'])
+                    if age_timestamp.tzinfo is None:
+                        age_timestamp = age_timestamp.replace(tzinfo=timezone.utc)
+                    age_seconds = (now - age_timestamp).total_seconds()
+                    
+                    result[ticker].update({
+                        'price': row['price'],
+                        'timestamp': row['timestamp'].isoformat() if hasattr(row['timestamp'], 'isoformat') else str(row['timestamp']),
+                        'write_timestamp': row.get('write_timestamp', row['timestamp']),
+                        'age_seconds': age_seconds,
+                        'data_source': 'realtime_data'
+                    })
+            except Exception as e:
+                self.logger.error(f"PostgreSQL error (realtime_data for multiple tickers): {e}", exc_info=True)
+
+            # Try hourly_prices for missing tickers - uses (ticker, datetime) index
+            missing_tickers = [ticker for ticker in tickers if result[ticker]['price'] is None]
+            if missing_tickers:
+                placeholders = ','.join([f'${i+1}' for i in range(len(missing_tickers))])
+                try:
+                    query = f"""
+                        SELECT DISTINCT ON (ticker) ticker, close as price, datetime as timestamp, write_timestamp
+                        FROM {self._get_table_name('hourly_prices')} 
+                        WHERE ticker IN ({placeholders})
+                        ORDER BY ticker, datetime DESC
+                    """
+                    rows = await conn.fetch(query, *missing_tickers)
+                    for row in rows:
+                        ticker = row['ticker']
+                        # For hourly data, use write_timestamp for age calculation if available
+                        age_timestamp = row.get('write_timestamp', row['timestamp'])
+                        if age_timestamp.tzinfo is None:
+                            age_timestamp = age_timestamp.replace(tzinfo=timezone.utc)
+                        age_seconds = (now - age_timestamp).total_seconds()
+                        
+                        result[ticker].update({
+                            'price': row['price'],
+                            'timestamp': row['timestamp'].isoformat() if hasattr(row['timestamp'], 'isoformat') else str(row['timestamp']),
+                            'write_timestamp': row.get('write_timestamp', row['timestamp']),
+                            'age_seconds': age_seconds,
+                            'data_source': 'hourly_prices'
+                        })
+                except Exception as e:
+                    self.logger.error(f"PostgreSQL error (hourly_prices for multiple tickers): {e}", exc_info=True)
+
+            # Try daily_prices for remaining missing tickers - uses (ticker, date) index
+            missing_tickers = [ticker for ticker in tickers if result[ticker]['price'] is None]
+            if missing_tickers:
+                placeholders = ','.join([f'${i+1}' for i in range(len(missing_tickers))])
+                try:
+                    query = f"""
+                        SELECT DISTINCT ON (ticker) ticker, close as price, date as timestamp, write_timestamp
+                        FROM {self._get_table_name('daily_prices')} 
+                        WHERE ticker IN ({placeholders})
+                        ORDER BY ticker, date DESC
+                    """
+                    rows = await conn.fetch(query, *missing_tickers)
+                    for row in rows:
+                        ticker = row['ticker']
+                        # For daily data, use write_timestamp for age calculation if available
+                        age_timestamp = row.get('write_timestamp', row['timestamp'])
+                        if age_timestamp.tzinfo is None:
+                            age_timestamp = age_timestamp.replace(tzinfo=timezone.utc)
+                        age_seconds = (now - age_timestamp).total_seconds()
+                        
+                        result[ticker].update({
+                            'price': row['price'],
+                            'timestamp': row['timestamp'].isoformat() if hasattr(row['timestamp'], 'isoformat') else str(row['timestamp']),
+                            'write_timestamp': row.get('write_timestamp', row['timestamp']),
+                            'age_seconds': age_seconds,
+                            'data_source': 'daily_prices'
+                        })
+                except Exception as e:
+                    self.logger.error(f"PostgreSQL error (daily_prices for multiple tickers): {e}", exc_info=True)
+        finally:
+            await self._return_connection(conn)
+        return result
+
     async def get_database_stats(self) -> Dict[str, Any]:
         """Get comprehensive database statistics using optimized methods."""
         await self._ensure_tables_exist()
@@ -1800,4 +2351,87 @@ class StockDBPostgreSQL(StockDBBase):
                 raise
         
         # This should never be reached, but just in case
-        raise RuntimeError(f"Failed to execute batch query after {max_retries} attempts") 
+        raise RuntimeError(f"Failed to execute batch query after {max_retries} attempts")
+    
+    async def debug_database_state(self) -> Dict[str, Any]:
+        """Debug method to check current database state and schema usage."""
+        try:
+            conn = await self._get_connection()
+            try:
+                # Check current search path
+                search_path = await conn.fetchval("SHOW search_path")
+                
+                # Check what tables exist in our schema
+                tables_in_schema = await conn.fetch(f"""
+                    SELECT table_name, table_type 
+                    FROM information_schema.tables 
+                    WHERE table_schema = $1
+                    ORDER BY table_name
+                """, self.schema)
+                
+                # Check what tables exist in public schema
+                tables_in_public = await conn.fetch(f"""
+                    SELECT table_name, table_type 
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                    ORDER BY table_name
+                """)
+                
+                # Check if our specific tables exist in both schemas
+                daily_in_schema = await conn.fetchval(f"""
+                    SELECT COUNT(*) FROM information_schema.tables 
+                    WHERE table_schema = $1 AND table_name = 'daily_prices'
+                """, self.schema)
+                
+                daily_in_public = await conn.fetchval(f"""
+                    SELECT COUNT(*) FROM information_schema.tables 
+                    WHERE table_schema = 'public' AND table_name = 'daily_prices'
+                """)
+                
+                # Check recent realtime data for debugging
+                recent_realtime = await conn.fetch(f"""
+                    SELECT ticker, price, timestamp, write_timestamp, 
+                           EXTRACT(EPOCH FROM (NOW() - write_timestamp)) as age_seconds
+                    FROM {self._get_table_name('realtime_data')} 
+                    WHERE type = 'quote' 
+                    ORDER BY write_timestamp DESC 
+                    LIMIT 5
+                """)
+                
+                # Convert datetime objects to strings for JSON serialization
+                recent_realtime_serializable = []
+                for row in recent_realtime:
+                    row_dict = dict(row)
+                    if row_dict.get('timestamp'):
+                        row_dict['timestamp'] = str(row_dict['timestamp'])
+                    if row_dict.get('write_timestamp'):
+                        row_dict['write_timestamp'] = str(row_dict['write_timestamp'])
+                    if row_dict.get('age_seconds'):
+                        row_dict['age_seconds'] = float(row_dict['age_seconds'])
+                    recent_realtime_serializable.append(row_dict)
+                
+                # Convert all datetime objects to strings for JSON serialization
+                tables_in_schema_serializable = []
+                for t in tables_in_schema:
+                    t_dict = dict(t)
+                    tables_in_schema_serializable.append(t_dict)
+                
+                tables_in_public_serializable = []
+                for t in tables_in_public:
+                    t_dict = dict(t)
+                    tables_in_public_serializable.append(t_dict)
+                
+                return {
+                    "current_schema": self.schema,
+                    "search_path": str(search_path),
+                    "tables_in_schema": tables_in_schema_serializable,
+                    "table_name_method": {
+                        "daily_prices": self._get_table_name('daily_prices'),
+                        "hourly_prices": self._get_table_name('hourly_prices')
+                    },
+                    "recent_realtime_data": recent_realtime_serializable
+                }
+            finally:
+                await self._return_connection(conn)
+        except Exception as e:
+            return {"error": str(e)} 
