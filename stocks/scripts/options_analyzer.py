@@ -27,6 +27,18 @@ import json
 import re
 import math
 
+# Black-Scholes option pricing
+try:
+    from scipy.stats import norm
+    from scipy import special
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    # Fallback to basic normal CDF approximation
+    def norm_cdf(x):
+        """Approximate cumulative normal distribution."""
+        return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
 # Ensure project root is on sys.path so `common` can be imported when running from any cwd
 CURRENT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_DIR.parent
@@ -420,7 +432,7 @@ class FilterParser:
 class OptionsAnalyzer:
     """Analyzes covered call opportunities across all strike prices and tickers."""
     
-    def __init__(self, db_conn: str, quiet: bool = False, debug: bool = False, enable_cache: bool = True, redis_url: str | None = None, log_level: str = "INFO"):
+    def __init__(self, db_conn: str, quiet: bool = False, debug: bool = False, enable_cache: bool = True, redis_url: str | None = None, log_level: str = "INFO", risk_free_rate: float = 0.05):
         """Initialize the options analyzer with database connection."""
         self.db_conn = db_conn
         self.quiet = quiet
@@ -429,6 +441,46 @@ class OptionsAnalyzer:
         self.redis_url = redis_url
         self.log_level = log_level
         self.db = None
+        self.risk_free_rate = risk_free_rate  # Annual risk-free rate (default 5%)
+    
+    def _black_scholes_call(self, S: float, K: float, T: float, r: float, sigma: float) -> float:
+        """
+        Calculate Black-Scholes call option price.
+        
+        Args:
+            S: Current stock price
+            K: Strike price
+            T: Time to expiration (in years)
+            r: Risk-free rate (annual)
+            sigma: Implied volatility (annual)
+        
+        Returns:
+            Call option price
+        """
+        if T <= 0:
+            # Option expired, intrinsic value only
+            return max(S - K, 0)
+        
+        if sigma <= 0:
+            # No volatility, return intrinsic value
+            return max(S - K, 0)
+        
+        # Calculate d1 and d2
+        d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+        d2 = d1 - sigma * math.sqrt(T)
+        
+        # Calculate cumulative normal distribution
+        if SCIPY_AVAILABLE:
+            N_d1 = norm.cdf(d1)
+            N_d2 = norm.cdf(d2)
+        else:
+            N_d1 = norm_cdf(d1)
+            N_d2 = norm_cdf(d2)
+        
+        # Black-Scholes formula for call option
+        call_price = S * N_d1 - K * math.exp(-r * T) * N_d2
+        
+        return max(call_price, 0)  # Ensure non-negative
     
     def _create_compact_headers(self, df: pd.DataFrame) -> Dict[str, str]:
         """Create compact headers that are at most 4 characters longer than the data width."""
@@ -901,6 +953,12 @@ class OptionsAnalyzer:
             # Build the analysis DataFrame
             df = options_df.copy()
             
+            # Ensure ticker column exists
+            if 'ticker' not in df.columns:
+                if not self.quiet:
+                    print(f"Error: DataFrame missing 'ticker' column. Available columns: {list(df.columns)}", file=sys.stderr)
+                return pd.DataFrame()
+            
             # Map stock prices to each option row
             df['current_price'] = df['ticker'].map(stock_prices)
             
@@ -1355,14 +1413,59 @@ class OptionsAnalyzer:
                 
                 # Calculate premiums based on spread position sizing
                 short_premium = short_row['option_premium']
-                premium_diff = round(long_premium - short_premium, 2)  # Long - Short
-                short_premium_total = round(num_contracts * short_premium * 100, 2)
-                long_premium_total = round(num_contracts * long_premium * 100, 2)
-                net_premium = round(short_premium_total - long_premium_total, 2)
+                premium_diff = round(long_premium - short_premium, 2)  # Long - Short (per contract)
+                short_premium_total = round(num_contracts * short_premium * 100, 2)  # Total received from selling short-term options
+                long_premium_total = round(num_contracts * long_premium * 100, 2)  # Total paid for buying long-term options
+                
+                # Calculate Black-Scholes based long option value at short expiration
+                # This estimates what the long option will be worth when the short expires
+                current_price = short_row.get('current_price')
+                long_strike = float(best_long['strike_price'])
+                short_days = short_row['days_to_expiry']
+                long_days = int(best_long['days_to_expiry'])
+                
+                # Time remaining for long option at short expiration (in years)
+                time_to_long_expiry_at_short_expiry = (long_days - short_days) / 365.0
+                
+                # Get implied volatility from long option data, or use a default
+                implied_vol = best_long.get('implied_volatility')
+                if pd.isna(implied_vol) or implied_vol is None or implied_vol <= 0:
+                    # Default to 0.3 (30% annual volatility) if not available
+                    implied_vol = 0.3
+                else:
+                    implied_vol = float(implied_vol)
+                    # Ensure it's in decimal form (not percentage)
+                    if implied_vol > 1.0:
+                        implied_vol = implied_vol / 100.0
+                
+                # Calculate Black-Scholes long option value at short expiration
+                # Assume stock price stays the same (or use current price as estimate)
+                estimated_stock_price_at_short_expiry = current_price if current_price else long_strike
+                
+                long_option_value_at_short_expiry = 0.0
+                if time_to_long_expiry_at_short_expiry > 0 and current_price:
+                    try:
+                        long_option_value_at_short_expiry = self._black_scholes_call(
+                            S=estimated_stock_price_at_short_expiry,
+                            K=long_strike,
+                            T=time_to_long_expiry_at_short_expiry,
+                            r=self.risk_free_rate,
+                            sigma=implied_vol
+                        )
+                    except Exception as e:
+                        if self.debug:
+                            print(f"DEBUG: Black-Scholes calculation error: {e}", file=sys.stderr)
+                        # Fallback: use current long premium as estimate
+                        long_option_value_at_short_expiry = long_premium
+                
+                # Net premium = short_premium - (current_long_premium - estimated_long_premium_at_short_expiry)
+                # This represents: what you receive - (what you pay now - what the long will be worth later)
+                long_premium_at_short_expiry_total = round(num_contracts * long_option_value_at_short_expiry * 100, 2)
+                net_premium = round(short_premium_total - (long_premium_total - long_premium_at_short_expiry_total), 2)
                 
                 # Daily premium calculations (until short expiration - exit point)
-                short_days = short_row['days_to_expiry']
                 short_daily_premium = round(short_premium_total / short_days, 2) if short_days > 0 else 0
+                # Net daily premium = net premium / days (amortized over short days)
                 net_daily_premium = round(net_premium / short_days, 2) if short_days > 0 else 0
                 
                 # Create spread result row
@@ -1893,7 +1996,10 @@ Examples:
              "premium_above_diff_percentage = ((option_premium - price_above_current) / price_above_current) * 100. "
              "Spread fields (when --spread is enabled): premium_diff = long_premium - short_premium; num_contracts = position_size / (long_premium * 100); "
              "short_premium_total = short_premium * num_contracts * 100; short_daily_premium = short_premium_total / short_days_to_expiry; "
-             "long_premium_total = long_premium * num_contracts * 100; net_premium = short_premium_total - long_premium_total; net_daily_premium = net_premium / short_days_to_expiry. "
+             "long_premium_total = long_premium * num_contracts * 100; "
+             "net_premium = short_premium_total - (long_premium_total - estimated_long_premium_at_short_expiry_total); "
+             "where estimated_long_premium_at_short_expiry is calculated using Black-Scholes model; "
+             "net_daily_premium = net_premium / short_days_to_expiry. "
              "Market cap values support T (trillion) B (billion) and M (million) suffixes. "
              "Examples: 'pe_ratio > 20' or 'market_cap < 3.5T' or 'num_contracts > volume' or 'num_contracts*0.1 > volume' or 'potential_premium > daily_premium' or 'volume exists' or "
              "'option_premium_percentage >= 10' or 'premium_above_diff_percentage > 0' or 'net_daily_premium > 100'. "
