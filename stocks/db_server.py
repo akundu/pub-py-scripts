@@ -178,14 +178,17 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
                               shutdown_event = None, log_level: str = "INFO",
                               prebound_sock: socket.socket | None = None,
                               questdb_connection_timeout: int = 180,
-                              enable_access_log: bool = False):
+                              enable_access_log: bool = False,
+                              enable_cache: bool = True,
+                              redis_url: str | None = None):
     """Server runner for individual worker processes."""
     global ws_manager
     
     try:
         logger.info(f"Worker {worker_id}: Initializing database from file: {db_file}")
         app_db_instance = initialize_database(db_file, log_level, 
-                                               questdb_connection_timeout=questdb_connection_timeout)
+                                               questdb_connection_timeout=questdb_connection_timeout,
+                                               enable_cache=enable_cache, redis_url=redis_url)
         logger.info(f"Worker {worker_id}: Database initialized successfully: {db_file}")
     except Exception as e:
         logger.critical(f"Worker {worker_id}: Fatal Error: Could not initialize database from file '{db_file}': {e}", exc_info=True)
@@ -325,7 +328,9 @@ class ForkingServer:
                  bind_retries: int = 5,
                  bind_retry_delay_ms: int = 200,
                  questdb_connection_timeout: int = 180,
-                 enable_access_log: bool = False):
+                 enable_access_log: bool = False,
+                 enable_cache: bool = True,
+                 redis_url: str | None = None):
         self.workers = max(1, int(workers))
         self.port = port
         self.db_file = db_file
@@ -338,6 +343,8 @@ class ForkingServer:
         self.bind_retries = bind_retries
         self.bind_retry_delay_ms = bind_retry_delay_ms
         self.questdb_connection_timeout = questdb_connection_timeout
+        self.enable_cache = enable_cache
+        self.redis_url = redis_url
 
         self.bound_socket: socket.socket | None = None
         self.child_index_to_pid: dict[int, int] = {}
@@ -452,6 +459,8 @@ class ForkingServer:
                     prebound_sock=self.bound_socket,
                     questdb_connection_timeout=self.questdb_connection_timeout,
                     enable_access_log=self.enable_access_log,
+                    enable_cache=self.enable_cache,
+                    redis_url=self.redis_url,
                 ))
             except Exception as e:
                 logger.error(f"Child {index} crashed: {e}", exc_info=True)
@@ -576,7 +585,7 @@ class ForkingServer:
 
 # This function initializes the database instance.
 # It's called once at server startup.
-def initialize_database(db_file_path: str, log_level: str = "INFO", questdb_connection_timeout: int = 180) -> StockDBBase:
+def initialize_database(db_file_path: str, log_level: str = "INFO", questdb_connection_timeout: int = 180, enable_cache: bool = True, redis_url: str | None = None) -> StockDBBase:
     """
     Initializes and returns a database instance based on the file path and its extension.
     This function is synchronous, but the DB methods it returns will be async.
@@ -651,7 +660,8 @@ def initialize_database(db_file_path: str, log_level: str = "INFO", questdb_conn
         db_config = db_file_path
     
     instance = get_stock_db(db_type=db_type_arg, db_config=db_config, logger=logger, log_level=log_level,
-                           questdb_connection_timeout_seconds=questdb_connection_timeout)
+                           questdb_connection_timeout_seconds=questdb_connection_timeout,
+                           enable_cache=enable_cache, redis_url=redis_url)
     logger.info(f"Database '{db_file_path}' initialized successfully as {db_type_arg}.")
     return instance
 
@@ -1725,6 +1735,10 @@ async def main_server_runner():
         "--enable-access-log", action="store_true",
         help="Enable detailed access logging for all HTTP requests (default: False)."
     )
+    parser.add_argument(
+        "--no-cache", action="store_true",
+        help="Disable Redis caching for QuestDB operations (default: cache enabled)."
+    )
     
     args = parser.parse_args()
     
@@ -1761,6 +1775,10 @@ async def main_server_runner():
         logger.info(f"Startup delay: {args.startup_delay}s; Child stagger: {args.child_stagger_ms}ms; Bind retries: {args.bind_retries} (delay {args.bind_retry_delay_ms}ms)")
         logger.info("Press Ctrl+C to stop the server.")
 
+        # Determine cache settings
+        enable_cache = not args.no_cache
+        redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
+        
         forking_server = ForkingServer(
             workers=args.workers,
             port=args.port,
@@ -1775,6 +1793,8 @@ async def main_server_runner():
             bind_retry_delay_ms=args.bind_retry_delay_ms,
             questdb_connection_timeout=args.questdb_connection_timeout,
             enable_access_log=args.enable_access_log,
+            enable_cache=enable_cache,
+            redis_url=redis_url,
         )
         forking_server.run()
         return
@@ -1783,9 +1803,14 @@ async def main_server_runner():
     logger.info("Starting server in single-process mode")
 
     try:
+        # Determine cache settings
+        enable_cache = not args.no_cache
+        redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
+        
         logger.info(f"Initializing database from file: {args.db_file}")
         app_db_instance = initialize_database(args.db_file, args.log_level,
-                                               questdb_connection_timeout=args.questdb_connection_timeout)
+                                               questdb_connection_timeout=args.questdb_connection_timeout,
+                                               enable_cache=enable_cache, redis_url=redis_url)
         logger.info(f"Database initialized successfully: {args.db_file}")
     except Exception as e:
         logger.critical(f"Fatal Error: Could not initialize database from file '{args.db_file}': {e}", exc_info=True)

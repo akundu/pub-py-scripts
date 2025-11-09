@@ -329,7 +329,9 @@ class HistoricalDataFetcher:
         save_to_csv: bool = False,
         use_db: bool = False,
         db_conn: str | None = None,
-        force_fresh: bool = False
+        force_fresh: bool = False,
+        enable_cache: bool = True,
+        redis_url: str | None = None
     ) -> Dict[str, Any]:
         """
         Fetches all options contracts that were active on a specific date and gets their
@@ -346,7 +348,7 @@ class HistoricalDataFetcher:
         # 1) Prefer DB when enabled: load latest options from QuestDB and return if available (unless force_fresh)
         if use_db and db_conn and not force_fresh:
             try:
-                db = get_stock_db('questdb', db_config=db_conn)
+                db = get_stock_db('questdb', db_config=db_conn, enable_cache=enable_cache, redis_url=redis_url)
                 latest_df = await db.get_latest_options_data(ticker=symbol)
                 if latest_df is not None and not latest_df.empty:
                     # Map DB dataframe to contracts list in script format
@@ -854,6 +856,9 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
         async def _inner():
             stock_result = await fetcher.get_stock_price_for_date(symbol, args_namespace.date)
             stock_close_price = stock_result['data'].get('close') if stock_result.get('success') else None
+            # Determine cache settings
+            enable_cache = not getattr(args_namespace, 'no_cache', False)
+            redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
             options_result = await fetcher.get_active_options_for_date(
                 symbol=symbol,
                 target_date_str=args_namespace.date,
@@ -867,7 +872,9 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
                 save_to_csv=getattr(args_namespace, 'use_csv', False),
                 use_db=bool(getattr(args_namespace, 'use_db', None)),
                 db_conn=getattr(args_namespace, 'use_db', None),
-                force_fresh=getattr(args_namespace, 'fetch_online', False)
+                force_fresh=getattr(args_namespace, 'fetch_online', False),
+                enable_cache=enable_cache,
+                redis_url=redis_url
             )
             # Return data for database saving in main thread
             db_save_data = None
@@ -1093,7 +1100,9 @@ async def save_options_via_direct_db(db_save_tasks: list, db_config: str, args) 
     try:
         # Create database instance directly to avoid async initialization issues
         from common.questdb_db import StockQuestDB
-        db_instance = StockQuestDB(db_config, auto_init=False)
+        enable_cache = not getattr(args, 'no_cache', False)
+        redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
+        db_instance = StockQuestDB(db_config, auto_init=False, enable_cache=enable_cache, redis_url=redis_url)
         
         # Manually initialize the database connection with retry logic
         max_retries = 3
@@ -1314,6 +1323,11 @@ Examples:
         '--fetch-once-before-wait',
         action='store_true',
         help="If market is closed, fetch once immediately before waiting for market open. Useful since option prices don't change during non-market hours."
+    )
+    parser.add_argument(
+        '--no-cache',
+        action='store_true',
+        help="Disable Redis caching for QuestDB operations (default: cache enabled)"
     )
     # Backward-compatibility (hidden): legacy --db-conn maps to --use-db
     parser.add_argument(

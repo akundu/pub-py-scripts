@@ -874,7 +874,9 @@ async def process_symbol_data(
     data_source: str = "polygon",  # New parameter for data source selection
     chunk_size: str = "monthly",  # New parameter for chunk size
     save_db_csv: bool = False,  # New parameter for CSV usage control
-    no_force_today: bool = False
+    no_force_today: bool = False,
+    log_level: str = "INFO",  # New parameter for log level
+    enable_cache: bool = True  # New parameter for cache control
 ) -> pd.DataFrame:
     """Processes symbol data: queries DB, fetches if needed, and returns DataFrame."""
 
@@ -889,17 +891,17 @@ async def process_symbol_data(
             # Check if it's a QuestDB connection string
             if actual_db_path.startswith('questdb://'):
                 # QuestDB database - use questdb type
-                current_db_instance = get_stock_db("questdb", actual_db_path)
+                current_db_instance = get_stock_db("questdb", actual_db_path, log_level=log_level, enable_cache=enable_cache, redis_url=os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None)
             # Check if it's a PostgreSQL connection string
             elif actual_db_path.startswith('postgresql://'):
                 # PostgreSQL database - use postgresql type
-                current_db_instance = get_stock_db("postgresql", actual_db_path)
+                current_db_instance = get_stock_db("postgresql", actual_db_path, log_level=log_level)
             else:
                 # Remote database - use remote type
-                current_db_instance = get_stock_db("remote", actual_db_path)
+                current_db_instance = get_stock_db("remote", actual_db_path, log_level=log_level)
         else:
             # Local database - use specified type
-            current_db_instance = get_stock_db(db_type, actual_db_path)
+            current_db_instance = get_stock_db(db_type, actual_db_path, log_level=log_level)
 
     # Calculate start_date based on days_back_fetch if provided and start_date is not already set
     if days_back_fetch is not None and start_date is None:
@@ -1000,7 +1002,17 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
     """
     try:
         # Try to get realtime data first (most recent)
-        realtime_data = await db_instance.get_realtime_data(symbol, data_type="quote")
+        # Use get_latest_price_with_data() if available to avoid duplicate queries
+        if hasattr(db_instance, 'get_latest_price_with_data'):
+            latest_data = await db_instance.get_latest_price_with_data(symbol, use_market_time=True)
+            if latest_data and latest_data.get('realtime_df') is not None:
+                realtime_data = latest_data['realtime_df']
+            else:
+                # No realtime data from get_latest_price_with_data, try other sources
+                realtime_data = pd.DataFrame()
+        else:
+            # Fallback for non-QuestDB instances
+            realtime_data = await db_instance.get_realtime_data(symbol, data_type="quote")
         
         if not realtime_data.empty:
             # Take the FIRST row (most recent write_timestamp) instead of last
@@ -1074,22 +1086,30 @@ async def get_current_price(
         if actual_db_path is None:
             actual_db_path = get_default_db_path("duckdb") if db_type == 'duckdb' else get_default_db_path("db")
         
+        # Get log level from global logger if available
+        log_level = "INFO"
+        if logger is not None:
+            log_level = logging.getLevelName(logger.level)
+        
+        # For get_current_price, default to cache enabled (can be overridden if needed)
+        enable_cache = True
+        
         # Detect if this is a remote database (contains ':')
         if actual_db_path and ':' in actual_db_path:
             # Check if it's a QuestDB connection string
             if actual_db_path.startswith('questdb://'):
                 # QuestDB database - use questdb type
-                current_db_instance = get_stock_db("questdb", actual_db_path)
+                current_db_instance = get_stock_db("questdb", actual_db_path, log_level=log_level, enable_cache=enable_cache, redis_url=os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None)
             # Check if it's a PostgreSQL connection string
             elif actual_db_path.startswith('postgresql://'):
                 # PostgreSQL database - use postgresql type
-                current_db_instance = get_stock_db("postgresql", actual_db_path)
+                current_db_instance = get_stock_db("postgresql", actual_db_path, log_level=log_level)
             else:
                 # Remote database - use remote type
-                current_db_instance = get_stock_db("remote", actual_db_path)
+                current_db_instance = get_stock_db("remote", actual_db_path, log_level=log_level)
         else:
             # Local database - use specified type
-            current_db_instance = get_stock_db(db_type, actual_db_path)
+            current_db_instance = get_stock_db(db_type, actual_db_path, log_level=log_level)
     
     # First, try to get the latest price from the database
     try:
@@ -1625,6 +1645,11 @@ def parse_args():
         default='ERROR',
         help="Logging level (default: ERROR)"
     )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable Redis caching for QuestDB operations (default: cache enabled)"
+    )
 
     return parser.parse_args()
 
@@ -1726,16 +1751,17 @@ async def main() -> None:
         db_instance = None
         try:
             # Create database instance
+            enable_cache = not args.no_cache
             if args.db_path and ':' in args.db_path:
                 if args.db_path.startswith('questdb://'):
-                    db_instance = get_stock_db("questdb", args.db_path)
+                    db_instance = get_stock_db("questdb", args.db_path, log_level=args.log_level, enable_cache=enable_cache, redis_url=os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None)
                 elif args.db_path.startswith('postgresql://'):
-                    db_instance = get_stock_db("postgresql", args.db_path)
+                    db_instance = get_stock_db("postgresql", args.db_path, log_level=args.log_level)
                 else:
-                    db_instance = get_stock_db("remote", args.db_path)
+                    db_instance = get_stock_db("remote", args.db_path, log_level=args.log_level)
             else:
                 actual_db_path = args.db_path or (get_default_db_path("duckdb") if args.db_type == 'duckdb' else get_default_db_path("db"))
-                db_instance = get_stock_db(args.db_type, actual_db_path)
+                db_instance = get_stock_db(args.db_type, actual_db_path, log_level=args.log_level)
 
             # Today's date in YYYY-MM-DD
             today_str = datetime.now().strftime('%Y-%m-%d')
@@ -1793,26 +1819,87 @@ async def main() -> None:
 
             print()  # Spacing
 
-            # Realtime section when market is not closed
-            if session in ('regular', 'premarket', 'afterhours') and (args.only_fetch in (None, 'realtime')):
+            # Realtime section - use get_latest_price_with_data() which handles realtime, hourly, and daily queries
+            # This returns the price along with the realtime DataFrame (if available) to avoid duplicate queries
+            # Note: We may have already called get_latest_price_with_data() during the freshness check,
+            # but we'll call it again here to ensure we have the latest data for display
+            if args.only_fetch in (None, 'realtime'):
                 try:
-                    rt_age_limit = 60 if session == 'regular' else 300
-                    price_info = await get_current_price(
-                        args.symbol,
-                        data_source=args.data_source,
-                        stock_db_instance=db_instance,
-                        db_type=args.db_type,
-                        db_path=args.db_path,
-                        max_age_seconds=rt_age_limit
-                    )
-                    if price_info:
-                        print("Realtime:")
-                        for line in _format_price_block(price_info, args.timezone or 'America/New_York'):
-                            print(line)
+                    # Get latest price with data (this will query realtime, hourly, and daily tables appropriately)
+                    # This returns price, timestamp, source, and realtime_df (if from realtime)
+                    latest_data = await db_instance.get_latest_price_with_data(args.symbol, use_market_time=True)
+                    
+                    if latest_data:
+                        # Display the price returned by get_latest_price_with_data
+                        # The market hours check is handled in questdb_db.py, so we just display what's returned
+                        if latest_data.get('realtime_df') is not None:
+                            # We have realtime data - display it
+                            realtime_df = latest_data['realtime_df']
+                            latest_row = realtime_df.iloc[0]  # First row is most recent (sorted DESC)
+                            price_info = {
+                                'price': latest_row.get('price') or latest_data.get('price'),
+                                'bid_price': latest_row.get('ask_price'),  # Note: realtime table may not have bid/ask
+                                'ask_price': latest_row.get('ask_price'),
+                                'timestamp': realtime_df.index[0].isoformat() if isinstance(realtime_df.index, pd.DatetimeIndex) else str(realtime_df.index[0]),
+                                'source': 'database',
+                                'data_source': args.data_source
+                            }
+                            print("Realtime:")
+                            for line in _format_price_block(price_info, args.timezone or 'America/New_York'):
+                                print(line)
+                        elif latest_data.get('price') is not None:
+                            # We have a price but no realtime data (e.g., from daily/hourly when market is closed)
+                            # Display the price with the source
+                            source = latest_data.get('source', 'database')
+                            timestamp = latest_data.get('timestamp')
+                            if timestamp:
+                                if isinstance(timestamp, str):
+                                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                                else:
+                                    dt = timestamp
+                                if dt.tzinfo is None:
+                                    dt = dt.replace(tzinfo=timezone.utc)
+                                if args.timezone:
+                                    tzname = _normalize_timezone_string(args.timezone)
+                                    dt_disp = dt.astimezone(pytz.timezone(tzname))
+                                else:
+                                    dt_disp = dt
+                                ts_str = dt_disp.strftime('%Y-%m-%d %H:%M:%S %Z')
+                            else:
+                                ts_str = "N/A"
+                            
+                            price_info = {
+                                'price': latest_data.get('price'),
+                                'bid_price': None,
+                                'ask_price': None,
+                                'timestamp': timestamp.isoformat() if hasattr(timestamp, 'isoformat') else str(timestamp) if timestamp else ts_str,
+                                'source': source,
+                                'data_source': args.data_source
+                            }
+                            print(f"{source.capitalize()}:")
+                            for line in _format_price_block(price_info, args.timezone or 'America/New_York'):
+                                print(line)
+                    elif session in ('regular', 'premarket', 'afterhours') and (not latest_data or latest_data.get('price') is None):
+                        # Only fetch from API if market is open, no DB data, and no price found
+                        rt_age_limit = 60 if session == 'regular' else 300
+                        price_info = await get_current_price(
+                            args.symbol,
+                            data_source=args.data_source,
+                            stock_db_instance=db_instance,
+                            db_type=args.db_type,
+                            db_path=args.db_path,
+                            max_age_seconds=rt_age_limit
+                        )
+                        if price_info:
+                            print("Realtime:")
+                            for line in _format_price_block(price_info, args.timezone or 'America/New_York'):
+                                print(line)
                 except Exception as e:
                     print(f"Realtime fetch/display error: {e}")
             
-            print()  # Spacing
+            # Only show spacing if we're displaying daily/hourly data (DEBUG mode)
+            if args.log_level == "DEBUG":
+                print()  # Spacing
             
             # OPTIMIZATION: Skip detailed age checks if we already know we don't need to fetch
             # This can save significant time when data is fresh
@@ -1849,33 +1936,39 @@ async def main() -> None:
                     # Wait for all age checks to complete
                     h_info, d_info, w_h, w_d = await asyncio.gather(h_info_task, d_info_task, w_h_task, w_d_task)
                 
-                    # Show hourly age with threshold
-                    if h_info:
-                        h_age = h_info['age_seconds']
-                        h_status = "STALE" if h_threshold and h_age > h_threshold else "FRESH" if h_threshold else "N/A"
-                        print(f"Hourly last bar age: {h_age:.1f}s (ts: {h_info['timestamp']}) | threshold: {h_threshold}s | status: {h_status}")
+                    # Show hourly age with threshold (only in DEBUG mode)
+                    if args.log_level == "DEBUG":
+                        if h_info:
+                            h_age = h_info['age_seconds']
+                            h_status = "STALE" if h_threshold and h_age > h_threshold else "FRESH" if h_threshold else "N/A"
+                            print(f"Hourly last bar age: {h_age:.1f}s (ts: {h_info['timestamp']}) | threshold: {h_threshold}s | status: {h_status}")
+                        else:
+                            print("Hourly last bar age: unavailable")
+                        
+                        # Show daily age with threshold  
+                        if d_info:
+                            d_age = d_info['age_seconds']
+                            d_status = "STALE" if d_threshold and d_age > d_threshold else "FRESH" if d_threshold else "N/A"
+                            print(f"Daily last bar age: {d_age:.1f}s (ts: {d_info['timestamp']}) | threshold: {d_threshold}s | status: {d_status}")
+                        else:
+                            print("Daily last bar age: unavailable")
+                        
+                        # Decide fetch based on last write times from DB (write_timestamp column)
+                        w_h_age = w_h['age_seconds'] if w_h else None
+                        w_d_age = w_d['age_seconds'] if w_d else None
+                        print(f"Hourly last write: {w_h['timestamp'] if w_h else 'unknown'} | age: {w_h_age if w_h_age is not None else 'unknown'}s | threshold: {h_threshold}s")
+                        print(f"Daily last write: {w_d['timestamp'] if w_d else 'unknown'} | age: {w_d_age if w_d_age is not None else 'unknown'}s | threshold: {d_threshold}s")
                     else:
-                        print("Hourly last bar age: unavailable")
-                    
-                    # Show daily age with threshold  
-                    if d_info:
-                        d_age = d_info['age_seconds']
-                        d_status = "STALE" if d_threshold and d_age > d_threshold else "FRESH" if d_threshold else "N/A"
-                        print(f"Daily last bar age: {d_age:.1f}s (ts: {d_info['timestamp']}) | threshold: {d_threshold}s | status: {d_status}")
-                    else:
-                        print("Daily last bar age: unavailable")
-                    
-                    # Decide fetch based on last write times from DB (write_timestamp column)
-                    w_h_age = w_h['age_seconds'] if w_h else None
-                    w_d_age = w_d['age_seconds'] if w_d else None
-                    print(f"Hourly last write: {w_h['timestamp'] if w_h else 'unknown'} | age: {w_h_age if w_h_age is not None else 'unknown'}s | threshold: {h_threshold}s")
-                    print(f"Daily last write: {w_d['timestamp'] if w_d else 'unknown'} | age: {w_d_age if w_d_age is not None else 'unknown'}s | threshold: {d_threshold}s")
+                        # Still calculate for fetch decision, just don't print
+                        w_h_age = w_h['age_seconds'] if w_h else None
+                        w_d_age = w_d['age_seconds'] if w_d else None
                     
                     need_hourly = bool(h_threshold and (w_h_age is None or w_h_age > h_threshold))
                     need_daily = bool(d_threshold and (w_d_age is None or w_d_age > d_threshold))
                     logging.info(f"Fetch decision (by last write): hourly={need_hourly}, daily={need_daily}")
                 except Exception as e:
-                    print(f"Age diagnostics error: {e}")
+                    if args.log_level == "DEBUG":
+                        print(f"Age diagnostics error: {e}")
                     need_hourly = False
                     need_daily = False
             else:
@@ -1892,7 +1985,8 @@ async def main() -> None:
                         hourly_success = False
                         
                         if need_daily and (args.only_fetch in (None, 'daily')):
-                            print("Fetching daily data...")
+                            if args.log_level == "DEBUG":
+                                print("Fetching daily data...")
                             daily_success = await fetch_and_save_data(
                                 symbol=args.symbol,
                                 data_dir=args.data_dir,
@@ -1906,13 +2000,15 @@ async def main() -> None:
                                 fetch_daily=True,
                                 fetch_hourly=False
                             )
-                            if daily_success:
-                                print("Daily data fetch: successful.")
-                            else:
-                                print("Daily data fetch: failed.")
+                            if args.log_level == "DEBUG":
+                                if daily_success:
+                                    print("Daily data fetch: successful.")
+                                else:
+                                    print("Daily data fetch: failed.")
                         
                         if need_hourly and (args.only_fetch in (None, 'hourly')):
-                            print("Fetching hourly data...")
+                            if args.log_level == "DEBUG":
+                                print("Fetching hourly data...")
                             hourly_success = await fetch_and_save_data(
                                 symbol=args.symbol,
                                 data_dir=args.data_dir,
@@ -1926,39 +2022,49 @@ async def main() -> None:
                                 fetch_daily=False,
                                 fetch_hourly=True
                             )
-                            if hourly_success:
-                                print("Hourly data fetch: successful.")
-                            else:
-                                print("Hourly data fetch: failed.")
+                            if args.log_level == "DEBUG":
+                                if hourly_success:
+                                    print("Hourly data fetch: successful.")
+                                else:
+                                    print("Hourly data fetch: failed.")
                         
-                        if daily_success or hourly_success:
-                            print("Fetch by last write: completed.")
-                        else:
-                            print("Fetch by last write: attempted but failed.")
+                        if args.log_level == "DEBUG":
+                            if daily_success or hourly_success:
+                                print("Fetch by last write: completed.")
+                            else:
+                                print("Fetch by last write: attempted but failed.")
                     except Exception as e:
-                        print(f"Fetch by last write error: {e}")
+                        if args.log_level == "DEBUG":
+                            print(f"Fetch by last write error: {e}")
                 else:
                     logging.info("Fetch by last write: skipped (recent enough or not requested by only-fetch).")
 
-            print()  # Spacing
+            # Only show spacing if we're displaying daily/hourly data (DEBUG mode)
+            if args.log_level == "DEBUG":
+                print()  # Spacing
             
             # OPTIMIZATION: Combine all data queries into a single batch
             # This reduces database round trips from 6+ queries to 2 queries
-            tomorrow_str = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+            # For daily, query last 7 days (not future dates)
+            # For hourly, query last 3 days to limit data
+            daily_cutoff = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            hourly_cutoff = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%dT%H:%M:%S')
+            hourly_end = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
             
             # Fetch both daily and hourly data in parallel (filtered by only_fetch)
-            daily_task = db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=tomorrow_str, interval='daily') if args.only_fetch in (None, 'daily') else asyncio.create_task(asyncio.sleep(0, result=pd.DataFrame()))
-            hourly_task = db_instance.get_stock_data(args.symbol, interval='hourly') if args.only_fetch in (None, 'hourly') else asyncio.create_task(asyncio.sleep(0, result=pd.DataFrame()))
+            daily_task = db_instance.get_stock_data(args.symbol, start_date=daily_cutoff, end_date=today_str, interval='daily') if args.only_fetch in (None, 'daily') else asyncio.create_task(asyncio.sleep(0, result=pd.DataFrame()))
+            hourly_task = db_instance.get_stock_data(args.symbol, start_date=hourly_cutoff, end_date=hourly_end, interval='hourly') if args.only_fetch in (None, 'hourly') else asyncio.create_task(asyncio.sleep(0, result=pd.DataFrame()))
             
             # Wait for both queries to complete
             daily_df, hourly_df = await asyncio.gather(daily_task, hourly_task)
             
             # Display daily data - check if we have today's data first
-            if args.only_fetch in (None, 'daily') and not daily_df.empty:
+            # Only show in DEBUG mode, otherwise just show realtime price
+            if args.log_level == "DEBUG" and args.only_fetch in (None, 'daily') and not daily_df.empty:
                 last_daily = daily_df.tail(1)
                 print("Today's Daily:")
                 print(last_daily[['open','high','low','close','volume']] if 'volume' in last_daily.columns else last_daily[['open','high','low','close']])
-            elif args.only_fetch in (None, 'daily'):
+            elif args.log_level == "DEBUG" and args.only_fetch in (None, 'daily'):
                 print("No daily row for today in DB.")
                 
                 # Show most recent daily as fallback (only if needed)
@@ -2035,7 +2141,9 @@ async def main() -> None:
                             
                             # Also refresh the hourly data after successful fetch
                             if args.only_fetch in (None, 'hourly'):
-                                hourly_df = await db_instance.get_stock_data(args.symbol, interval='hourly')
+                                hourly_cutoff = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%dT%H:%M:%S')
+                                hourly_end = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+                                hourly_df = await db_instance.get_stock_data(args.symbol, start_date=hourly_cutoff, end_date=hourly_end, interval='hourly')
                         else:
                             if fetch_date == today_str:
                                 print("Failed to fetch today's data.")
@@ -2069,20 +2177,23 @@ async def main() -> None:
                         # Also refresh hourly data
                         if args.only_fetch in (None, 'hourly'):
                             hourly_df = await db_instance.get_stock_data(args.symbol, interval='hourly')
-                elif should_fetch and not need_daily:
+                elif args.log_level == "DEBUG" and should_fetch and not need_daily:
                     # Avoid immediate re-fetch loops when last write is recent enough
                     print("Skipping daily fetch fallback (last write recent enough by threshold).")
 
-            print()  # Spacing
+            # Only show spacing if we're displaying daily/hourly data (DEBUG mode)
+            if args.log_level == "DEBUG":
+                print()  # Spacing
 
             # Display hourly data
-            if not hourly_df.empty:
+            # Only show in DEBUG mode, otherwise just show realtime price
+            if args.log_level == "DEBUG" and not hourly_df.empty:
                 # Convert timezone for display
                 hourly_display_df = _convert_dataframe_timezone(hourly_df, args.timezone)
                 last_hourly = hourly_display_df.tail(1)
                 print("Most Recent Hourly:")
                 print(last_hourly[['open','high','low','close','volume']] if 'volume' in last_hourly.columns else last_hourly[['open','high','low','close']])
-            elif args.only_fetch in (None, 'hourly'):
+            elif args.log_level == "DEBUG" and args.only_fetch in (None, 'hourly'):
                 print("No hourly rows found in DB.")
             
             # Display financial ratios if requested
@@ -2134,6 +2245,28 @@ async def main() -> None:
             
             print()  # Spacing
             print("--- End Latest ---")
+            
+            # Print cache statistics if available and in DEBUG mode
+            if args.log_level == "DEBUG" and db_instance and hasattr(db_instance, 'get_cache_statistics'):
+                try:
+                    cache_stats = db_instance.get_cache_statistics()
+                    if cache_stats and (cache_stats.get('hits', 0) > 0 or cache_stats.get('misses', 0) > 0):
+                        print("\n" + "=" * 80, file=sys.stderr)
+                        print("Cache Statistics", file=sys.stderr)
+                        print("=" * 80, file=sys.stderr)
+                        print(f"Hits:        {cache_stats.get('hits', 0)}", file=sys.stderr)
+                        print(f"Misses:      {cache_stats.get('misses', 0)}", file=sys.stderr)
+                        print(f"Sets:        {cache_stats.get('sets', 0)}", file=sys.stderr)
+                        print(f"Invalidations: {cache_stats.get('invalidations', 0)}", file=sys.stderr)
+                        print(f"Errors:      {cache_stats.get('errors', 0)}", file=sys.stderr)
+                        total = cache_stats.get('hits', 0) + cache_stats.get('misses', 0)
+                        if total > 0:
+                            hit_rate = (cache_stats.get('hits', 0) / total) * 100
+                            print(f"Hit Rate:    {hit_rate:.2f}%", file=sys.stderr)
+                        print("=" * 80 + "\n", file=sys.stderr)
+                except Exception as e:
+                    pass  # Silently ignore if cache stats not available
+            
             return
         finally:
             if db_instance and hasattr(db_instance, 'close_session') and callable(db_instance.close_session):
@@ -2147,16 +2280,17 @@ async def main() -> None:
     try:
         # We need to track the database instance created internally so we can clean it up
         # First, determine what database instance will be created
+        enable_cache = not args.no_cache
         if args.db_path and ':' in args.db_path:
             if args.db_path.startswith('questdb://'):
-                db_instance_for_cleanup = get_stock_db("questdb", args.db_path)
+                db_instance_for_cleanup = get_stock_db("questdb", args.db_path, log_level=args.log_level, enable_cache=enable_cache, redis_url=os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None)
             elif args.db_path.startswith('postgresql://'):
-                db_instance_for_cleanup = get_stock_db("postgresql", args.db_path)
+                db_instance_for_cleanup = get_stock_db("postgresql", args.db_path, log_level=args.log_level)
             else:
-                db_instance_for_cleanup = get_stock_db("remote", args.db_path)
+                db_instance_for_cleanup = get_stock_db("remote", args.db_path, log_level=args.log_level)
         else:
             actual_db_path = args.db_path or (get_default_db_path("duckdb") if args.db_type == 'duckdb' else get_default_db_path("db"))
-            db_instance_for_cleanup = get_stock_db(args.db_type, actual_db_path)
+            db_instance_for_cleanup = get_stock_db(args.db_type, actual_db_path, log_level=args.log_level)
         
         final_df = await process_symbol_data(
             symbol=args.symbol, 
@@ -2174,6 +2308,8 @@ async def main() -> None:
             chunk_size=args.chunk_size,  # Pass the new argument
             save_db_csv=args.save_db_csv,  # Pass the new argument
             no_force_today=getattr(args, 'no_force_today', False),
+            log_level=args.log_level,  # Pass log_level
+            enable_cache=enable_cache,  # Pass enable_cache
             stock_db_instance=db_instance_for_cleanup  # Pass the instance we created
         )
 
@@ -2234,6 +2370,27 @@ async def main() -> None:
             print(f"No data to display for {args.symbol} ({args.timeframe}) with the given parameters after all operations.")
     finally:
         # Clean up database session
+        # Print cache statistics if available and in DEBUG mode
+        if hasattr(args, 'log_level') and args.log_level == "DEBUG" and db_instance_for_cleanup and hasattr(db_instance_for_cleanup, 'get_cache_statistics'):
+            try:
+                cache_stats = db_instance_for_cleanup.get_cache_statistics()
+                if cache_stats and (cache_stats.get('hits', 0) > 0 or cache_stats.get('misses', 0) > 0):
+                    print("\n" + "=" * 80, file=sys.stderr)
+                    print("Cache Statistics", file=sys.stderr)
+                    print("=" * 80, file=sys.stderr)
+                    print(f"Hits:        {cache_stats.get('hits', 0)}", file=sys.stderr)
+                    print(f"Misses:      {cache_stats.get('misses', 0)}", file=sys.stderr)
+                    print(f"Sets:        {cache_stats.get('sets', 0)}", file=sys.stderr)
+                    print(f"Invalidations: {cache_stats.get('invalidations', 0)}", file=sys.stderr)
+                    print(f"Errors:      {cache_stats.get('errors', 0)}", file=sys.stderr)
+                    total = cache_stats.get('hits', 0) + cache_stats.get('misses', 0)
+                    if total > 0:
+                        hit_rate = (cache_stats.get('hits', 0) / total) * 100
+                        print(f"Hit Rate:    {hit_rate:.2f}%", file=sys.stderr)
+                    print("=" * 80 + "\n", file=sys.stderr)
+            except Exception as e:
+                pass  # Silently ignore if cache stats not available
+        
         if db_instance_for_cleanup and hasattr(db_instance_for_cleanup, 'close_session') and callable(db_instance_for_cleanup.close_session):
             try:
                 await db_instance_for_cleanup.close_session()

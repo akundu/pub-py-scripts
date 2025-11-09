@@ -39,16 +39,19 @@ def fetch_latest_data_with_volume(
     db_config_for_worker: str,
     max_age_seconds: int = 60,
     client_timeout: float | None = None,
-    include_volume: bool = True
+    include_volume: bool = True,
+    enable_cache: bool = True,
+    redis_url: str | None = None,
+    log_level: str = "INFO"
 ) -> dict:
     """Fetch latest data including volume for a single symbol."""
     worker_db_instance = None
     loop = None
     try:
         if client_timeout is not None:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout)
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
         else:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
         
         # Create a new event loop for this thread
         loop = asyncio.new_event_loop()
@@ -117,16 +120,19 @@ def fetch_comprehensive_data(
     include_volume: bool = True,
     include_quotes: bool = True,
     include_trades: bool = True,
-    save_db_csv: bool = False
+    save_db_csv: bool = False,
+    enable_cache: bool = True,
+    redis_url: str | None = None,
+    log_level: str = "INFO"
 ) -> dict:
     """Fetch comprehensive data including volume, quotes, and trades."""
     worker_db_instance = None
     loop = None
     try:
         if client_timeout is not None:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout)
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
         else:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
         
         # Create a new event loop for this thread
         loop = asyncio.new_event_loop()
@@ -203,16 +209,19 @@ def fetch_financial_info(
     symbol: str,
     db_type_for_worker: str,
     db_config_for_worker: str,
-    client_timeout: float | None = None
+    client_timeout: float | None = None,
+    enable_cache: bool = True,
+    redis_url: str | None = None,
+    log_level: str = "INFO"
 ) -> dict:
     """Fetch financial ratios for a single symbol."""
     worker_db_instance = None
     loop = None
     try:
         if client_timeout is not None:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout)
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
         else:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
         
         # Create a new event loop for this thread
         loop = asyncio.new_event_loop()
@@ -269,16 +278,19 @@ def fetch_latest_data(
     db_type_for_worker: str,
     db_config_for_worker: str,
     data_dir: str,
-    client_timeout: float | None = None
+    client_timeout: float | None = None,
+    enable_cache: bool = True,
+    redis_url: str | None = None,
+    log_level: str = "INFO"
 ) -> dict:
     """Creates a DB instance in the worker thread and gets latest data for a symbol."""
     worker_db_instance = None
     loop = None
     try:
         if client_timeout is not None:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout)
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
         else:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
         
         # Create a new event loop for this thread
         loop = asyncio.new_event_loop()
@@ -362,7 +374,10 @@ def fetch_price_and_save(
     client_timeout: float | None = None,
     save_db_csv: bool = False,
     start_date: str | None = None,
-    end_date: str | None = None
+    end_date: str | None = None,
+    enable_cache: bool = True,
+    redis_url: str | None = None,
+    log_level: str = "INFO"
 ) -> bool:
     """Creates a DB instance in the worker thread and runs fetch_and_save_data."""
     print(f"{os.getpid()} Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr, flush=True)
@@ -376,9 +391,9 @@ def fetch_price_and_save(
         # Each worker thread creates its own StockDBBase instance.
         print(f"Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr)
         if client_timeout is not None:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout)
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
         else:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker)
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
         
         # Create a new event loop for this thread
         loop = asyncio.new_event_loop()
@@ -432,6 +447,11 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
     # Determine fetch mode: latest mode removed; choose between comprehensive or standard historical fetch
     should_get_comprehensive = args.comprehensive_data
     
+    # Determine cache settings
+    enable_cache = not getattr(args, 'no_cache', False)
+    redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
+    log_level = getattr(args, 'log_level', 'INFO')
+    
     with executor_class(max_workers=max_workers) as executor:
         # Level 2: Split by stock symbols
         stock_tasks = []
@@ -446,7 +466,10 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                     db_type,
                     db_config,
                     args.data_dir,
-                    args.client_timeout
+                    args.client_timeout,
+                    enable_cache,
+                    redis_url,
+                    log_level
                 )
                 if args.fetch_ratios:
                     financial_task = executor.submit(
@@ -454,7 +477,10 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                         symbol_to_fetch,
                         db_type,
                         db_config,
-                        args.client_timeout
+                        args.client_timeout,
+                        enable_cache,
+                        redis_url,
+                        log_level
                     )
                     financial_tasks.append((financial_task, symbol_to_fetch))
             elif should_get_comprehensive:
@@ -472,7 +498,10 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                     args.include_volume,
                     args.include_quotes,
                     args.include_trades,
-                    args.save_db_csv
+                    args.save_db_csv,
+                    enable_cache,
+                    redis_url,
+                    log_level
                 )
             else:
                 task = executor.submit(
@@ -488,7 +517,10 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                     args.client_timeout,
                     args.save_db_csv,
                     getattr(args, 'start_date', None),
-                    getattr(args, 'end_date', None)
+                    getattr(args, 'end_date', None),
+                    enable_cache,
+                    redis_url,
+                    log_level
                 )
             stock_tasks.append((task, symbol_to_fetch))
         
@@ -786,6 +818,11 @@ def parse_args():
         "--fetch-ratios",
         action="store_true",
         help="Fetch financial ratios (P/E, P/B, etc.) from Polygon.io for the symbols. Requires --data-source polygon."
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable Redis caching for QuestDB operations (default: cache enabled)"
     )
     
     # Time interval for fetching market data

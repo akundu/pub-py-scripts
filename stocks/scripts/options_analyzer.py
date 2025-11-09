@@ -420,12 +420,13 @@ class FilterParser:
 class OptionsAnalyzer:
     """Analyzes covered call opportunities across all strike prices and tickers."""
     
-    def __init__(self, db_conn: str, quiet: bool = False, debug: bool = False, enable_cache: bool = True):
+    def __init__(self, db_conn: str, quiet: bool = False, debug: bool = False, enable_cache: bool = True, redis_url: str | None = None):
         """Initialize the options analyzer with database connection."""
         self.db_conn = db_conn
         self.quiet = quiet
         self.debug = debug
         self.enable_cache = enable_cache
+        self.redis_url = redis_url
         self.db = None
     
     def _create_compact_headers(self, df: pd.DataFrame) -> Dict[str, str]:
@@ -546,9 +547,7 @@ class OptionsAnalyzer:
     async def initialize(self):
         """Initialize database connection."""
         try:
-            # Set log level based on quiet mode - INFO for non-quiet, WARNING for quiet
-            log_level = "WARNING" if self.quiet else "INFO"
-            self.db = get_stock_db('questdb', db_config=self.db_conn, enable_cache=self.enable_cache, log_level=log_level)
+            self.db = get_stock_db('questdb', db_config=self.db_conn, enable_cache=self.enable_cache, redis_url=self.redis_url)
             if not self.quiet:
                 cache_status = "enabled" if self.enable_cache else "disabled"
                 print(f"Database connection established successfully (cache: {cache_status}).", file=sys.stderr)
@@ -1718,6 +1717,11 @@ Examples:
         action='store_true',
         help="Disable market-hours logic (gets latest stock price from any source regardless of market open/closed).",
     )
+    parser.add_argument(
+        '--no-cache',
+        action='store_true',
+        help="Disable Redis caching for QuestDB operations (default: cache enabled)"
+    )
     
     parser.add_argument(
         '--no-cache',
@@ -1899,7 +1903,10 @@ Examples:
     
     # Initialize analyzer
     enable_cache = not args.no_cache
-    analyzer = OptionsAnalyzer(args.db_conn, args.quiet, args.debug, enable_cache=enable_cache)
+    redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
+    
+    # Initialize analyzer
+    analyzer = OptionsAnalyzer(args.db_conn, args.quiet, args.debug, enable_cache=enable_cache, redis_url=redis_url)
     await analyzer.initialize()
     
     # Get symbols list using common library

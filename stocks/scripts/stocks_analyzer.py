@@ -38,14 +38,16 @@ from common.common_strategies import compute_rsi_series
 class StocksAnalyzer:
     """Analyzes deviations of current stock price vs previous close and today's open."""
 
-    def __init__(self, db_conn: str, quiet: bool = False):
+    def __init__(self, db_conn: str, quiet: bool = False, enable_cache: bool = True, redis_url: str | None = None):
         self.db_conn = db_conn
         self.quiet = quiet
+        self.enable_cache = enable_cache
+        self.redis_url = redis_url
         self.db = None
 
     async def initialize(self):
         try:
-            self.db = get_stock_db('questdb', db_config=self.db_conn)
+            self.db = get_stock_db('questdb', db_config=self.db_conn, enable_cache=self.enable_cache, redis_url=self.redis_url)
             if not self.quiet:
                 print("Database connection established successfully.", file=sys.stderr)
         except Exception as e:
@@ -145,32 +147,32 @@ class StocksAnalyzer:
                     current_cols = list(hist_df.columns)
                     rename_map = {current_cols[0]: 'ticker', current_cols[1]: 'date', current_cols[2]: 'close'}
                     hist_df = hist_df.rename(columns=rename_map)
-                if 'date' not in hist_df.columns:
-                    # Try common alternatives
-                    if 'timestamp' in hist_df.columns:
-                        hist_df['date'] = hist_df['timestamp']
-                    elif 'ts' in hist_df.columns:
-                        hist_df['date'] = hist_df['ts']
-                if 'close' not in hist_df.columns:
-                    # Try alternative casing
-                    for alt in ['closing_price', 'adj_close', 'price']:
-                        if alt in hist_df.columns:
-                            hist_df['close'] = hist_df[alt]
-                            break
-                if 'ticker' not in hist_df.columns and 'symbol' in hist_df.columns:
-                    hist_df['ticker'] = hist_df['symbol']
+            if 'date' not in hist_df.columns:
+                # Try common alternatives
+                if 'timestamp' in hist_df.columns:
+                    hist_df['date'] = hist_df['timestamp']
+                elif 'ts' in hist_df.columns:
+                    hist_df['date'] = hist_df['ts']
+            if 'close' not in hist_df.columns:
+                # Try alternative casing
+                for alt in ['closing_price', 'adj_close', 'price']:
+                    if alt in hist_df.columns:
+                        hist_df['close'] = hist_df[alt]
+                        break
+            if 'ticker' not in hist_df.columns and 'symbol' in hist_df.columns:
+                hist_df['ticker'] = hist_df['symbol']
 
-                # Ensure required columns exist before proceeding
-                required_cols = {'ticker', 'date', 'close'}
-                if required_cols.issubset(set(hist_df.columns)):
-                    hist_df['date'] = pd.to_datetime(hist_df['date'])
-                    # Keep the last N rows per ticker (avoid deprecated apply)
-                    hist_df = hist_df.sort_values(['ticker', 'date']).groupby('ticker', group_keys=False).tail(lookback)
-                else:
-                    # If columns are missing, skip RSI computation
-                    if not self.quiet:
-                        print("Skipping RSI: historical data missing required columns", file=sys.stderr)
-                    hist_df = pd.DataFrame()
+            # Ensure required columns exist before proceeding
+            required_cols = {'ticker', 'date', 'close'}
+            if required_cols.issubset(set(hist_df.columns)):
+                hist_df['date'] = pd.to_datetime(hist_df['date'])
+                # Keep the last N rows per ticker (avoid deprecated apply)
+                hist_df = hist_df.sort_values(['ticker', 'date']).groupby('ticker', group_keys=False).tail(lookback)
+            else:
+                # If columns are missing, skip RSI computation
+                if not self.quiet:
+                    print("Skipping RSI: historical data missing required columns", file=sys.stderr)
+                hist_df = pd.DataFrame()
 
         rows: List[Dict[str, Any]] = []
         for t in tickers_upper:
@@ -380,6 +382,11 @@ Examples:
         action='store_true',
         help="Disable market-hours logic (gets latest from any source regardless of market open/closed).",
     )
+    parser.add_argument(
+        '--no-cache',
+        action='store_true',
+        help="Disable Redis caching for QuestDB operations (default: cache enabled)"
+    )
 
     parser.add_argument(
         '--output',
@@ -428,7 +435,11 @@ Examples:
 
     args = parser.parse_args()
 
-    analyzer = StocksAnalyzer(args.db_conn, args.quiet)
+    # Determine cache settings
+    enable_cache = not args.no_cache
+    redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
+
+    analyzer = StocksAnalyzer(args.db_conn, args.quiet, enable_cache=enable_cache, redis_url=redis_url)
     await analyzer.initialize()
 
     # Resolve symbols
