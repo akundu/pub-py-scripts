@@ -54,6 +54,7 @@ def _process_ticker_options(args: Tuple) -> Tuple[pd.DataFrame, Dict[str, Any], 
     import asyncio
     import time
     import os
+    import pandas as pd
     from .stock_db import get_stock_db
     
     # Unpack arguments
@@ -63,39 +64,75 @@ def _process_ticker_options(args: Tuple) -> Tuple[pd.DataFrame, Dict[str, Any], 
     process_id = os.getpid()
     start_time = time.time()
     
-    async def _async_process():
-        import logging
-        log_level_str = logging.getLevelName(log_level) if isinstance(log_level, int) else log_level
-        db = get_stock_db('questdb', db_config=db_config, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level_str)
-        await db._init_db()
+    try:
+        async def _async_process():
+            import logging
+            log_level_str = logging.getLevelName(log_level) if isinstance(log_level, int) else log_level
+            db = get_stock_db('questdb', db_config=db_config, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level_str)
+            await db._init_db()
+            
+            df = await db.get_latest_options_data(
+                ticker=ticker,
+                expiration_date=expiration_date,
+                start_datetime=start_datetime,
+                end_datetime=end_datetime,
+                option_tickers=option_tickers,
+                timestamp_lookback_days=timestamp_lookback_days
+            )
+            
+            # Get cache stats before closing
+            cache_stats = db.get_cache_statistics() if hasattr(db, 'get_cache_statistics') else {}
+            
+            await db.close()
+            return df, cache_stats
         
-        df = await db.get_latest_options_data(
-            ticker=ticker,
-            expiration_date=expiration_date,
-            start_datetime=start_datetime,
-            end_datetime=end_datetime,
-            option_tickers=option_tickers,
-            timestamp_lookback_days=timestamp_lookback_days
-        )
+        df, cache_stats = asyncio.run(_async_process())
         
-        # Get cache stats before closing
-        cache_stats = db.get_cache_statistics() if hasattr(db, 'get_cache_statistics') else {}
+        # Ensure DataFrame is properly formatted and handle any Timestamp comparison issues
+        if not isinstance(df, pd.DataFrame):
+            df = pd.DataFrame()
+        elif not df.empty:
+            # Ensure ticker column exists - add it if missing (shouldn't happen, but be safe)
+            if 'ticker' not in df.columns:
+                # The ticker should be in the args, add it to the DataFrame
+                df['ticker'] = ticker
+            
+            # Only convert known timestamp columns to datetime to avoid comparison issues
+            # Check column names that typically contain timestamps
+            timestamp_columns = ['timestamp', 'write_timestamp', 'last_quote_timestamp', 
+                                'expiration_date', 'date', 'datetime', 'time']
+            for col in df.columns:
+                # Only convert if column name suggests it's a timestamp
+                if col.lower() in [tc.lower() for tc in timestamp_columns]:
+                    try:
+                        # Try to convert to datetime
+                        df[col] = pd.to_datetime(df[col])
+                    except (TypeError, ValueError, pd.errors.ParserError):
+                        # If conversion fails, leave the column as-is
+                        pass
         
-        await db.close()
-        return df, cache_stats
-    
-    df, cache_stats = asyncio.run(_async_process())
-    
-    end_time = time.time()
-    stats = {
-        'process_id': process_id,
-        'ticker': ticker,
-        'processing_time': end_time - start_time,
-        'rows_returned': len(df),
-        'memory_mb': df.memory_usage(deep=True).sum() / 1024 / 1024 if not df.empty else 0
-    }
-    
-    return df, stats, cache_stats
+        end_time = time.time()
+        stats = {
+            'process_id': process_id,
+            'ticker': ticker,
+            'processing_time': end_time - start_time,
+            'rows_returned': len(df),
+            'memory_mb': df.memory_usage(deep=True).sum() / 1024 / 1024 if not df.empty else 0
+        }
+        
+        return df, stats, cache_stats
+    except Exception as e:
+        # Return empty DataFrame on error to avoid crashing the entire batch
+        end_time = time.time()
+        stats = {
+            'process_id': process_id,
+            'ticker': ticker,
+            'processing_time': end_time - start_time,
+            'rows_returned': 0,
+            'memory_mb': 0,
+            'error': str(e)
+        }
+        return pd.DataFrame(), stats, {}
 
 
 # ============================================================================
@@ -1328,10 +1365,18 @@ class OptionsDataRepository(BaseRepository):
                 if 'rn' in df.columns:
                     df = df.drop(columns=['rn'])
                 
+                # Ensure ticker column exists - it should be in the query results
+                # If it's missing, add it from the ticker parameter
+                if 'ticker' not in df.columns and not df.empty:
+                    df['ticker'] = ticker
+                
                 if 'timestamp' in df.columns:
                     df['timestamp'] = pd.to_datetime(df['timestamp'])
                     df.set_index('timestamp', inplace=True)
                     df = df[df.index.notna()]
+                    # Ensure ticker column is still present after setting index
+                    if 'ticker' not in df.columns:
+                        df['ticker'] = ticker
                 return df
             except Exception as e:
                 self.logger.error(f"Error retrieving options data: {e}")
@@ -1411,10 +1456,18 @@ WHERE rn = 1"""
                 if 'rn' in df.columns:
                     df = df.drop(columns=['rn'])
                 
+                # Ensure ticker column exists - it should be in the query results
+                # If it's missing, add it from the ticker parameter
+                if 'ticker' not in df.columns and not df.empty:
+                    df['ticker'] = ticker
+                
                 if 'timestamp' in df.columns:
                     df['timestamp'] = pd.to_datetime(df['timestamp'])
                     df.set_index('timestamp', inplace=True)
                     df = df[df.index.notna()]
+                    # Ensure ticker column is still present after setting index
+                    if 'ticker' not in df.columns:
+                        df['ticker'] = ticker
                 return df
             except Exception as e:
                 self.logger.error(f"Error retrieving latest options data for {ticker}: {e}")
@@ -2938,16 +2991,23 @@ class StockQuestDB(StockDBBase):
                     for args in process_args
                 ]
                 
-                batch_results = await asyncio.gather(*futures, return_exceptions=False)
+                batch_results = await asyncio.gather(*futures, return_exceptions=True)
                 
                 batch_dfs = []
                 batch_stats = []
                 batch_cache_stats = []
                 for result in batch_results:
+                    # Handle exceptions from worker processes
+                    if isinstance(result, Exception):
+                        self.logger.warning(f"Worker process error: {result}")
+                        continue
+                    
                     df, stats, cache_stats = result
                     batch_stats.append(stats)
                     batch_cache_stats.append(cache_stats)
-                    if not df.empty and not df.isna().all().all():
+                    # Only filter out truly empty DataFrames
+                    # Don't filter based on all-NA checks as they can cause issues with Timestamp comparisons
+                    if not df.empty:
                         batch_dfs.append(df)
                 
                 self._process_stats.extend(batch_stats)
@@ -2957,15 +3017,56 @@ class StockQuestDB(StockDBBase):
                 self._cache_stats_by_process.extend(batch_cache_stats)
                 
                 if batch_dfs:
-                    batch_df = pd.concat(batch_dfs, ignore_index=True)
-                    all_results.append(batch_df)
+                    # Drop all-NA columns from each DataFrame to avoid FutureWarning
+                    # But preserve the 'ticker' column even if it's all-NA (shouldn't happen, but be safe)
+                    valid_batch_dfs = []
+                    for df in batch_dfs:
+                        if not df.empty:
+                            # Preserve ticker column before dropping all-NA columns
+                            ticker_col = None
+                            if 'ticker' in df.columns:
+                                ticker_col = df['ticker'].copy()
+                            
+                            # Drop columns that are all-NA to avoid FutureWarning
+                            # Only drop columns where ALL values are NA
+                            df_cleaned = df.dropna(axis=1, how='all')
+                            
+                            # Ensure ticker column is preserved
+                            if ticker_col is not None and 'ticker' not in df_cleaned.columns:
+                                df_cleaned['ticker'] = ticker_col
+                            
+                            if not df_cleaned.empty:
+                                valid_batch_dfs.append(df_cleaned)
+                    if valid_batch_dfs:
+                        batch_df = pd.concat(valid_batch_dfs, ignore_index=True)
+                        all_results.append(batch_df)
                     import gc
                     gc.collect()
         
         if not all_results:
             return pd.DataFrame()
         
-        valid_results = [df for df in all_results if not df.empty and not df.isna().all().all()]
+        # Drop all-NA columns from each DataFrame to avoid FutureWarning
+        # But preserve the 'ticker' column even if it's all-NA (shouldn't happen, but be safe)
+        valid_results = []
+        for df in all_results:
+            if not df.empty:
+                # Preserve ticker column before dropping all-NA columns
+                ticker_col = None
+                if 'ticker' in df.columns:
+                    ticker_col = df['ticker'].copy()
+                
+                # Drop columns that are all-NA to avoid FutureWarning
+                # Only drop columns where ALL values are NA
+                df_cleaned = df.dropna(axis=1, how='all')
+                
+                # Ensure ticker column is preserved
+                if ticker_col is not None and 'ticker' not in df_cleaned.columns:
+                    df_cleaned['ticker'] = ticker_col
+                
+                if not df_cleaned.empty:
+                    valid_results.append(df_cleaned)
+        
         if not valid_results:
             return pd.DataFrame()
         
