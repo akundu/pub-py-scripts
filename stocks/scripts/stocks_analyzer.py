@@ -48,6 +48,9 @@ class StocksAnalyzer:
     async def initialize(self):
         try:
             self.db = get_stock_db('questdb', db_config=self.db_conn, enable_cache=self.enable_cache, redis_url=self.redis_url)
+            # Ensure database is initialized (this also initializes the cache)
+            if hasattr(self.db, '_init_db'):
+                await self.db._init_db()
             if not self.quiet:
                 print("Database connection established successfully.", file=sys.stderr)
         except Exception as e:
