@@ -20,6 +20,7 @@ import sys
 import json
 import hashlib
 import os
+import warnings
 from io import StringIO
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -106,7 +107,13 @@ def _process_ticker_options(args: Tuple) -> Tuple[pd.DataFrame, Dict[str, Any], 
                 if col.lower() in [tc.lower() for tc in timestamp_columns]:
                     try:
                         # Try to convert to datetime
-                        df[col] = pd.to_datetime(df[col])
+                        # Use errors='coerce' to handle invalid dates gracefully
+                        # Suppress format inference warnings since we're handling errors gracefully
+                        with warnings.catch_warnings():
+                            # Suppress all UserWarnings in this context (including pandas datetime format inference warnings)
+                            # This is safe since we're using errors='coerce' to handle invalid dates gracefully
+                            warnings.simplefilter('ignore', UserWarning)
+                            df[col] = pd.to_datetime(df[col], errors='coerce')
                     except (TypeError, ValueError, pd.errors.ParserError):
                         # If conversion fails, leave the column as-is
                         pass
@@ -2522,6 +2529,38 @@ class PriceService:
         self.logger.debug(f"[DB] Fetching latest price for {ticker} (use_market_time={use_market_time})")
         market_is_open = is_market_hours() if use_market_time else True
         
+        def normalize_timestamp(ts: Any) -> datetime:
+            """Normalize timestamp to UTC-aware datetime for comparison."""
+            if ts is None:
+                return datetime.min.replace(tzinfo=timezone.utc)
+            
+            if isinstance(ts, pd.Timestamp):
+                if ts.tz is None:
+                    # Assume UTC if timezone-naive
+                    return ts.to_pydatetime().replace(tzinfo=timezone.utc)
+                else:
+                    return ts.tz_convert(timezone.utc).to_pydatetime()
+            
+            if isinstance(ts, datetime):
+                if ts.tzinfo is None:
+                    # Assume UTC if timezone-naive
+                    return ts.replace(tzinfo=timezone.utc)
+                else:
+                    return ts.astimezone(timezone.utc)
+            
+            # Try to parse as string
+            if isinstance(ts, str):
+                try:
+                    parsed = date_parser.parse(ts)
+                    if parsed.tzinfo is None:
+                        return parsed.replace(tzinfo=timezone.utc)
+                    return parsed.astimezone(timezone.utc)
+                except:
+                    pass
+            
+            # Fallback: return min datetime
+            return datetime.min.replace(tzinfo=timezone.utc)
+        
         async def fetch_realtime():
             try:
                 # Always try to get latest realtime data from DB (even when market is closed)
@@ -2586,8 +2625,8 @@ class PriceService:
             if not valid_results:
                 return None
             
-            # Pick the result with the most recent timestamp
-            latest = max(valid_results, key=lambda r: r[1])
+            # Pick the result with the most recent timestamp (normalize to UTC-aware for comparison)
+            latest = max(valid_results, key=lambda r: normalize_timestamp(r[1]))
             source, timestamp, price, realtime_df = latest
             return {
                 'price': price,
