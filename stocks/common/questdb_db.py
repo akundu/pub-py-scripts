@@ -14,7 +14,7 @@ import pandas as pd
 from datetime import datetime, timezone, timedelta, date
 import asyncio
 import asyncpg
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Set
 import logging
 import sys
 import json
@@ -300,6 +300,31 @@ class CacheKeyGenerator:
         return f"stocks:options_data:{ticker}:{expiration_date}:{option_ticker}"
     
     @staticmethod
+    def options_metadata(ticker: str, expiration_date: str) -> str:
+        """Generate cache key for options metadata (set of option_tickers).
+        
+        Args:
+            ticker: Stock ticker symbol
+            expiration_date: Expiration date in YYYY-MM-DD format
+        
+        Returns:
+            Cache key: stocks:options_md:{ticker}:{expiration_date}
+        """
+        return f"stocks:options_md:{ticker}:{expiration_date}"
+    
+    @staticmethod
+    def options_metadata_index(ticker: str) -> str:
+        """Generate cache key for options metadata index (set of expiration_dates).
+        
+        Args:
+            ticker: Stock ticker symbol
+        
+        Returns:
+            Cache key: stocks:options_md_index:{ticker}
+        """
+        return f"stocks:options_md_index:{ticker}"
+    
+    @staticmethod
     def financial_info(ticker: str, date: Optional[str] = None) -> str:
         """Generate cache key for financial info.
         
@@ -412,22 +437,31 @@ class RedisCache:
         Returns:
             Dictionary mapping keys to DataFrames (None if not found)
         """
+        import time
+        method_start = time.time()
+        
         if not self.enable_cache or not keys:
             return {key: None for key in keys}
         
         result: Dict[str, Optional[pd.DataFrame]] = {}
         
         try:
+            client_start = time.time()
             client = await self._get_redis_client()
+            client_elapsed = time.time() - client_start
             if client is None:
                 return {key: None for key in keys}
             
             # Process in batches
             for i in range(0, len(keys), batch_size):
                 batch_keys = keys[i:i + batch_size]
+                batch_num = i // batch_size + 1
                 
                 # Use mget for batch fetching
+                mget_start = time.time()
                 values = await client.mget(batch_keys)
+                mget_elapsed = time.time() - mget_start
+                self.logger.debug(f"[TIMING] Redis MGET batch {batch_num}: {mget_elapsed:.3f}s for {len(batch_keys)} keys")
                 
                 for key, data in zip(batch_keys, values):
                     if data is None:
@@ -454,10 +488,14 @@ class RedisCache:
                         self._stats['misses'] += 1
                         result[key] = None
             
+            total_elapsed = time.time() - method_start
+            self.logger.debug(f"[TIMING] RedisCache.get_batch END: {total_elapsed:.3f}s (client: {client_elapsed:.3f}s), processed {len(keys)} keys, found {sum(1 for v in result.values() if v is not None)}")
             return result
         except Exception as e:
             self.logger.debug(f"Cache batch get error: {e}")
             self._stats['errors'] += 1
+            total_elapsed = time.time() - method_start
+            self.logger.debug(f"[TIMING] RedisCache.get_batch END (error): {total_elapsed:.3f}s")
             return {key: None for key in keys}
     
     async def set(self, key: str, df: pd.DataFrame, ttl: Optional[int] = None):
@@ -603,6 +641,131 @@ class RedisCache:
     def get_statistics(self) -> Dict[str, int]:
         """Get cache statistics."""
         return self._stats.copy()
+    
+    async def smembers(self, key: str) -> Set[str]:
+        """Get all members of a Redis SET.
+        
+        Args:
+            key: Redis SET key
+        
+        Returns:
+            Set of strings (members of the SET), or empty set if key doesn't exist or cache disabled
+        """
+        if not self.enable_cache:
+            return set()
+        
+        try:
+            client = await self._get_redis_client()
+            if client is None:
+                return set()
+            
+            members = await client.smembers(key)
+            if members:
+                # Decode bytes to strings
+                return {m.decode('utf-8') if isinstance(m, bytes) else m for m in members}
+            return set()
+        except Exception as e:
+            self.logger.debug(f"Redis SMEMBERS error for key {key}: {e}")
+            self._stats['errors'] += 1
+            return set()
+    
+    async def sadd(self, key: str, *members: str) -> int:
+        """Add members to a Redis SET.
+        
+        Args:
+            key: Redis SET key
+            *members: Members to add to the SET
+        
+        Returns:
+            Number of members added (0 if cache disabled or error)
+        """
+        if not self.enable_cache or not members:
+            return 0
+        
+        try:
+            client = await self._get_redis_client()
+            if client is None:
+                return 0
+            
+            # Encode strings to bytes if needed
+            encoded_members = [m.encode('utf-8') if isinstance(m, str) else m for m in members]
+            added = await client.sadd(key, *encoded_members)
+            return added
+        except Exception as e:
+            self.logger.debug(f"Redis SADD error for key {key}: {e}")
+            self._stats['errors'] += 1
+            return 0
+    
+    async def expire(self, key: str, seconds: int) -> bool:
+        """Set TTL on a Redis key.
+        
+        Args:
+            key: Redis key
+            seconds: TTL in seconds
+        
+        Returns:
+            True if TTL was set, False otherwise
+        """
+        if not self.enable_cache:
+            return False
+        
+        try:
+            client = await self._get_redis_client()
+            if client is None:
+                return False
+            
+            result = await client.expire(key, seconds)
+            return bool(result)
+        except Exception as e:
+            self.logger.debug(f"Redis EXPIRE error for key {key}: {e}")
+            self._stats['errors'] += 1
+            return False
+    
+    async def scan_metadata_keys(self, pattern: str) -> List[str]:
+        """Scan Redis for keys matching a pattern (e.g., for metadata discovery).
+        
+        Args:
+            pattern: Redis key pattern (e.g., "stocks:options_md:AAPL:*")
+        
+        Returns:
+            List of matching keys
+        """
+        import time
+        scan_start = time.time()
+        
+        if not self.enable_cache:
+            return []
+        
+        try:
+            client = await self._get_redis_client()
+            if client is None:
+                return []
+            
+            keys = []
+            cursor = 0
+            scan_iterations = 0
+            while True:
+                scan_iter_start = time.time()
+                cursor, batch_keys = await client.scan(cursor, match=pattern, count=1000)
+                scan_iter_elapsed = time.time() - scan_iter_start
+                scan_iterations += 1
+                if batch_keys:
+                    # Decode bytes to strings
+                    decoded_keys = [k.decode('utf-8') if isinstance(k, bytes) else k for k in batch_keys]
+                    keys.extend(decoded_keys)
+                    self.logger.debug(f"[TIMING] Redis SCAN iteration {scan_iterations}: {scan_iter_elapsed:.3f}s, found {len(batch_keys)} keys (total: {len(keys)})")
+                if cursor == 0:
+                    break
+            
+            total_elapsed = time.time() - scan_start
+            self.logger.debug(f"[TIMING] RedisCache.scan_metadata_keys END: {total_elapsed:.3f}s, {scan_iterations} iterations, {len(keys)} total keys")
+            return keys
+        except Exception as e:
+            self.logger.debug(f"Redis SCAN error for pattern {pattern}: {e}")
+            self._stats['errors'] += 1
+            total_elapsed = time.time() - scan_start
+            self.logger.debug(f"[TIMING] RedisCache.scan_metadata_keys END (error): {total_elapsed:.3f}s")
+            return []
     
     async def close(self):
         """Close Redis connections and wait for pending writes."""
@@ -1686,6 +1849,381 @@ class OptionsDataService:
         self.cache = cache
         self.logger = logger
     
+    def _get_random_ttl(self, min_ttl:int = 345600, max_ttl:int = 604800) -> int:
+        """Generate random TTL between 4 days and 1 week (in seconds).
+        
+        Returns:
+            Random TTL in seconds (min_ttl to max_ttl)
+        """
+        import random
+        return random.randint(min_ttl, max_ttl)  # 4 days to 1 week
+    
+    async def _get_options_metadata(self, ticker: str, expiration_date: str) -> Optional[Set[str]]:
+        """Get options metadata (set of option_tickers) from Redis SET.
+        
+        Args:
+            ticker: Stock ticker symbol
+            expiration_date: Expiration date in YYYY-MM-DD format
+        
+        Returns:
+            Set of option_tickers if metadata exists, None if not found
+        """
+        import time
+        smembers_start = time.time()
+        metadata_key = CacheKeyGenerator.options_metadata(ticker, expiration_date)
+        option_tickers = await self.cache.smembers(metadata_key)
+        smembers_elapsed = time.time() - smembers_start
+        if smembers_elapsed > 0.1:  # Only log if it takes more than 100ms
+            self.logger.debug(f"[TIMING] Redis SMEMBERS for {metadata_key}: {smembers_elapsed:.3f}s, found {len(option_tickers) if option_tickers else 0} members")
+        if option_tickers:
+            return option_tickers
+        return None
+    
+    async def _set_options_metadata(self, ticker: str, expiration_date: str, option_tickers: Set[str]) -> None:
+        """Set options metadata (set of option_tickers) in Redis SET with random TTL.
+        
+        Also updates the expiration date index for fast discovery.
+        
+        Args:
+            ticker: Stock ticker symbol
+            expiration_date: Expiration date in YYYY-MM-DD format
+            option_tickers: Set of option_tickers to store
+        """
+        if not option_tickers:
+            return
+        
+        metadata_key = CacheKeyGenerator.options_metadata(ticker, expiration_date)
+        ttl = self._get_random_ttl()
+        
+        # Add all option_tickers to the SET
+        await self.cache.sadd(metadata_key, *option_tickers)
+        # Set TTL
+        await self.cache.expire(metadata_key, ttl)
+        
+        # Update expiration date index (for fast discovery without SCAN)
+        index_key = CacheKeyGenerator.options_metadata_index(ticker)
+        await self.cache.sadd(index_key, expiration_date)
+        # Set index TTL to max of metadata TTLs (use same random TTL)
+        await self.cache.expire(index_key, ttl)
+        
+        self.logger.debug(f"[CACHE METADATA] Set metadata for {ticker}:{expiration_date} with {len(option_tickers)} option_tickers (TTL: {ttl}s)")
+    
+    async def _update_options_metadata_on_save(self, ticker: str, df: pd.DataFrame) -> None:
+        """Update options metadata after saving options data.
+        
+        Args:
+            ticker: Stock ticker symbol
+            df: DataFrame with saved options data (must have 'option_ticker' and 'expiration_date' columns)
+        """
+        if df.empty:
+            return
+        
+        # Group by expiration_date
+        expiration_groups = {}
+        for idx, row in df.iterrows():
+            if 'option_ticker' in row and 'expiration_date' in row:
+                opt_ticker = row['option_ticker']
+                exp_date = row['expiration_date']
+                exp_date_str = exp_date.strftime('%Y-%m-%d') if isinstance(exp_date, (datetime, pd.Timestamp)) else str(exp_date)[:10]
+                
+                if exp_date_str not in expiration_groups:
+                    expiration_groups[exp_date_str] = set()
+                expiration_groups[exp_date_str].add(str(opt_ticker))
+        
+        # Update metadata for each expiration_date
+        for exp_date_str, option_tickers in expiration_groups.items():
+            # Get existing metadata (if any)
+            existing = await self._get_options_metadata(ticker, exp_date_str)
+            if existing:
+                # Merge with existing
+                option_tickers = option_tickers.union(existing)
+            
+            # Save updated metadata
+            await self._set_options_metadata(ticker, exp_date_str, option_tickers)
+    
+    async def _get_or_fetch_options_metadata(self, ticker: str, expiration_date: str,
+                                             start_datetime: Optional[str] = None,
+                                             end_datetime: Optional[str] = None) -> Set[str]:
+        """Get options metadata from cache, or fetch from DB if not available.
+        
+        Args:
+            ticker: Stock ticker symbol
+            expiration_date: Expiration date in YYYY-MM-DD format
+            start_datetime: Optional start datetime for DB query
+            end_datetime: Optional end datetime for DB query
+        
+        Returns:
+            Set of option_tickers
+        """
+        # Try to get from cache first
+        metadata = await self._get_options_metadata(ticker, expiration_date)
+        if metadata is not None:
+            return metadata
+        
+        # Metadata not in cache, fetch from DB
+        self.logger.debug(f"[CACHE METADATA] Metadata missing for {ticker}:{expiration_date}, fetching from DB")
+        temp_df = await self.options_repo.get(ticker, expiration_date=expiration_date, start_datetime=start_datetime, end_datetime=end_datetime)
+        
+        option_tickers = set()
+        if not temp_df.empty and 'option_ticker' in temp_df.columns:
+            option_tickers = set(temp_df['option_ticker'].unique().astype(str))
+        
+        # Save metadata to cache
+        if option_tickers:
+            await self._set_options_metadata(ticker, expiration_date, option_tickers)
+        
+        return option_tickers
+    
+    async def _resolve_option_tickers_and_exp_dates(self, ticker: str,
+                                                     expiration_date: Optional[str] = None,
+                                                     start_datetime: Optional[str] = None,
+                                                     end_datetime: Optional[str] = None,
+                                                     option_tickers: Optional[List[str]] = None) -> Tuple[List[str], Dict[str, str]]:
+        """Resolve option_tickers and their expiration_dates from metadata cache or DB.
+        
+        This is shared logic between get() and get_latest() methods.
+        
+        Args:
+            ticker: Stock ticker symbol
+            expiration_date: Optional expiration date in YYYY-MM-DD format
+            start_datetime: Optional start datetime for DB query
+            end_datetime: Optional end datetime for DB query
+            option_tickers: Optional list of option_tickers (if provided, we still need expiration_dates)
+        
+        Returns:
+            Tuple of (option_tickers_list, option_ticker_exp_map) where:
+            - option_tickers_list: List of option_ticker strings
+            - option_ticker_exp_map: Dict mapping option_ticker -> expiration_date (YYYY-MM-DD)
+        """
+        import time
+        start_time = time.time()
+        self.logger.debug(f"[TIMING] _resolve_option_tickers_and_exp_dates START for {ticker}")
+        
+        option_ticker_exp_map = {}
+        
+        if not option_tickers:
+            # Need to get option_tickers from metadata cache or DB
+            if expiration_date:
+                # Single expiration_date: get metadata for it
+                option_tickers_set = await self._get_or_fetch_options_metadata(ticker, expiration_date, start_datetime, end_datetime)
+                if option_tickers_set:
+                    option_tickers = list(option_tickers_set)
+                    # For single expiration_date, all option_tickers have the same expiration_date
+                    for opt_ticker in option_tickers:
+                        option_ticker_exp_map[opt_ticker] = expiration_date
+                else:
+                    return [], {}
+            else:
+                # Date range: discover expiration_dates from metadata cache first
+                # Extract dates from start_datetime/end_datetime if provided
+                start_date_str = None
+                end_date_str = None
+                if start_datetime:
+                    try:
+                        start_date_str = start_datetime[:10] if len(start_datetime) >= 10 else start_datetime
+                    except:
+                        pass
+                if end_datetime:
+                    try:
+                        end_date_str = end_datetime[:10] if len(end_datetime) >= 10 else end_datetime
+                    except:
+                        pass
+                
+                # Discover expiration dates from metadata cache
+                discover_start = time.time()
+                unique_exp_dates = await self._discover_expiration_dates_from_metadata(ticker, start_date_str, end_date_str)
+                discover_elapsed = time.time() - discover_start
+                self.logger.debug(f"[TIMING] _discover_expiration_dates_from_metadata completed for {ticker}: {discover_elapsed:.3f}s, found {len(unique_exp_dates)} dates")
+                
+                if unique_exp_dates:
+                    # Get metadata for each expiration_date found in cache
+                    all_option_tickers = set()
+                    metadata_fetch_start = time.time()
+                    for idx, exp_date_str in enumerate(unique_exp_dates, 1):
+                        # Use _get_options_metadata (not _get_or_fetch) since we know the key exists from SCAN
+                        # If it returns None (key expired), skip it
+                        option_tickers_set = await self._get_options_metadata(ticker, exp_date_str)
+                        if option_tickers_set:
+                            all_option_tickers.update(option_tickers_set)
+                            # Map option_tickers to expiration_date
+                            for opt_ticker in option_tickers_set:
+                                option_ticker_exp_map[opt_ticker] = exp_date_str
+                        if idx % 10 == 0:  # Log progress every 10 expiration dates
+                            elapsed_so_far = time.time() - metadata_fetch_start
+                            self.logger.debug(f"[TIMING] Metadata fetch progress: {idx}/{len(unique_exp_dates)} expiration_dates processed in {elapsed_so_far:.3f}s")
+                    metadata_fetch_elapsed = time.time() - metadata_fetch_start
+                    self.logger.debug(f"[TIMING] Metadata fetch for {len(unique_exp_dates)} expiration_dates: {metadata_fetch_elapsed:.3f}s, found {len(all_option_tickers)} option_tickers")
+                    
+                    if all_option_tickers:
+                        option_tickers = list(all_option_tickers)
+                    else:
+                        # All metadata keys expired, fall back to DB
+                        self.logger.debug(f"[CACHE METADATA] All metadata keys expired for {ticker}, querying DB")
+                        unique_exp_dates = set()  # Reset to trigger DB fallback
+                
+                # Fall back to DB if no metadata found or all expired
+                if not unique_exp_dates or not option_tickers:
+                    # No metadata found in cache, fall back to DB query
+                    if not unique_exp_dates:
+                        self.logger.debug(f"[CACHE METADATA] No metadata index found for {ticker} in date range, querying DB")
+                    temp_df = await self.options_repo.get(ticker, expiration_date=expiration_date, start_datetime=start_datetime, end_datetime=end_datetime)
+                    if not temp_df.empty and 'option_ticker' in temp_df.columns and 'expiration_date' in temp_df.columns:
+                        # Get unique expiration_dates
+                        unique_exp_dates = set()
+                        for idx, row in temp_df.iterrows():
+                            exp_date = row.get('expiration_date')
+                            if exp_date:
+                                if isinstance(exp_date, (datetime, pd.Timestamp)):
+                                    exp_date_str = exp_date.strftime('%Y-%m-%d')
+                                else:
+                                    exp_date_str = str(exp_date)[:10]
+                                unique_exp_dates.add(exp_date_str)
+                        
+                        # Update expiration date index with all discovered dates (for fast future lookups)
+                        if unique_exp_dates:
+                            index_key = CacheKeyGenerator.options_metadata_index(ticker)
+                            # Add all expiration dates to index
+                            await self.cache.sadd(index_key, *unique_exp_dates)
+                            # Set index TTL (use max TTL from random)
+                            max_ttl = self._get_random_ttl()
+                            await self.cache.expire(index_key, max_ttl)
+                            self.logger.debug(f"[CACHE METADATA] Updated index for {ticker} with {len(unique_exp_dates)} expiration_dates (TTL: {max_ttl}s)")
+                        
+                        # Get metadata for each expiration_date and save to cache
+                        all_option_tickers = set()
+                        for exp_date_str in unique_exp_dates:
+                            option_tickers_set = await self._get_or_fetch_options_metadata(ticker, exp_date_str, start_datetime, end_datetime)
+                            if option_tickers_set:
+                                all_option_tickers.update(option_tickers_set)
+                                # Map option_tickers to expiration_date
+                                for opt_ticker in option_tickers_set:
+                                    option_ticker_exp_map[opt_ticker] = exp_date_str
+                        
+                        option_tickers = list(all_option_tickers)
+                    else:
+                        return [], {}
+        else:
+            # option_tickers provided, but we still need their expiration_dates for cache keys
+            # Query DB to get expiration_dates for the provided option_tickers
+            temp_df = await self.options_repo.get(ticker, expiration_date=expiration_date, start_datetime=start_datetime, end_datetime=end_datetime, option_tickers=option_tickers)
+            if not temp_df.empty and 'option_ticker' in temp_df.columns and 'expiration_date' in temp_df.columns:
+                for idx, row in temp_df.iterrows():
+                    opt_ticker = row['option_ticker']
+                    exp_date = row.get('expiration_date')
+                    if exp_date:
+                        if isinstance(exp_date, (datetime, pd.Timestamp)):
+                            exp_date_str = exp_date.strftime('%Y-%m-%d')
+                        else:
+                            exp_date_str = str(exp_date)[:10]
+                        option_ticker_exp_map[opt_ticker] = exp_date_str
+        
+        elapsed = time.time() - start_time
+        self.logger.debug(f"[TIMING] _resolve_option_tickers_and_exp_dates END for {ticker}: {elapsed:.3f}s, found {len(option_tickers)} option_tickers")
+        return option_tickers, option_ticker_exp_map
+    
+    def _generate_cache_keys(self, ticker: str, option_tickers: List[str],
+                            option_ticker_exp_map: Dict[str, str],
+                            expiration_date: Optional[str] = None) -> List[str]:
+        """Generate cache keys for option_tickers.
+        
+        Args:
+            ticker: Stock ticker symbol
+            option_tickers: List of option_ticker strings
+            option_ticker_exp_map: Dict mapping option_ticker -> expiration_date (YYYY-MM-DD)
+            expiration_date: Optional fallback expiration_date if not in map
+        
+        Returns:
+            List of cache keys
+        """
+        cache_keys = []
+        for opt_ticker in option_tickers:
+            exp_date_str = option_ticker_exp_map.get(opt_ticker)
+            if exp_date_str:
+                cache_keys.append(CacheKeyGenerator.options_data(ticker, exp_date_str, opt_ticker))
+            elif expiration_date:
+                # Fallback to provided expiration_date if we don't have it in the map
+                exp_date_str = expiration_date if isinstance(expiration_date, str) else expiration_date.strftime('%Y-%m-%d')
+                cache_keys.append(CacheKeyGenerator.options_data(ticker, exp_date_str, opt_ticker))
+        return cache_keys
+    
+    def _extract_option_tickers_from_cache_keys(self, cache_keys: List[str]) -> List[str]:
+        """Extract option_tickers from cache keys.
+        
+        Args:
+            cache_keys: List of cache keys in format stocks:options_data:{ticker}:{expiration_date}:{option_ticker}
+        
+        Returns:
+            List of option_ticker strings (handles option_tickers that contain colons)
+        """
+        option_tickers = []
+        for key in cache_keys:
+            # Key format: stocks:options_data:{ticker}:{expiration_date}:{option_ticker}
+            # Note: option_ticker may contain colons (e.g., "O:AAPL251214C00190000"),
+            # so we need to split and rejoin from index 4 onwards
+            parts = key.split(':')
+            if len(parts) >= 5:
+                # Join parts[4:] to handle option_tickers that contain colons
+                option_tickers.append(':'.join(parts[4:]))
+        return option_tickers
+    
+    async def _discover_expiration_dates_from_metadata(self, ticker: str, 
+                                                       start_date: Optional[str] = None,
+                                                       end_date: Optional[str] = None) -> Set[str]:
+        """Discover expiration dates from metadata index (Redis SET) instead of SCAN.
+        
+        This is much faster than SCAN because it directly queries a SET of expiration dates
+        instead of scanning through all keys in Redis.
+        
+        Args:
+            ticker: Stock ticker symbol
+            start_date: Optional start date in YYYY-MM-DD format (inclusive)
+            end_date: Optional end date in YYYY-MM-DD format (inclusive)
+        
+        Returns:
+            Set of expiration dates (YYYY-MM-DD format) found in metadata cache
+        """
+        import time
+        start_time = time.time()
+        self.logger.debug(f"[TIMING] _discover_expiration_dates_from_metadata START for {ticker}")
+        
+        # Get expiration dates from index SET (much faster than SCAN)
+        index_key = CacheKeyGenerator.options_metadata_index(ticker)
+        index_start = time.time()
+        expiration_dates_set = await self.cache.smembers(index_key)
+        index_elapsed = time.time() - index_start
+        self.logger.debug(f"[TIMING] Redis SMEMBERS (index) for {ticker}: {index_elapsed:.3f}s, found {len(expiration_dates_set)} expiration_dates")
+        
+        if not expiration_dates_set:
+            elapsed = time.time() - start_time
+            self.logger.debug(f"[TIMING] _discover_expiration_dates_from_metadata END for {ticker}: {elapsed:.3f}s, no index found, returning empty set")
+            return set()
+        
+        # Filter by date range if provided
+        if start_date or end_date:
+            filtered_dates = set()
+            for exp_date_str in expiration_dates_set:
+                try:
+                    exp_date = datetime.strptime(exp_date_str, '%Y-%m-%d').date()
+                    if start_date:
+                        start_dt = datetime.strptime(start_date[:10], '%Y-%m-%d').date()
+                        if exp_date < start_dt:
+                            continue
+                    if end_date:
+                        end_dt = datetime.strptime(end_date[:10], '%Y-%m-%d').date()
+                        if exp_date > end_dt:
+                            continue
+                    filtered_dates.add(exp_date_str)
+                except ValueError:
+                    # Skip invalid date formats
+                    continue
+            elapsed = time.time() - start_time
+            self.logger.debug(f"[TIMING] _discover_expiration_dates_from_metadata END for {ticker}: {elapsed:.3f}s, returning {len(filtered_dates)} dates (filtered from {len(expiration_dates_set)})")
+            return filtered_dates
+        
+        elapsed = time.time() - start_time
+        self.logger.debug(f"[TIMING] _discover_expiration_dates_from_metadata END for {ticker}: {elapsed:.3f}s, returning {len(expiration_dates_set)} dates")
+        return expiration_dates_set
+    
     async def save(self, ticker: str, df: pd.DataFrame) -> None:
         """Save options data with caching on write."""
         await self.options_repo.save(ticker, df)
@@ -1701,43 +2239,72 @@ class OptionsDataService:
                     row_df = pd.DataFrame([row]).set_index(pd.Index([idx]))
                     self.cache.set_fire_and_forget(cache_key, row_df)
                     self.logger.debug(f"[CACHE SET] Cached options data on write (fire-and-forget): {cache_key} (rows: 1)")
+        
+        # Update metadata cache (fire-and-forget)
+        if not df.empty:
+            # Use asyncio.create_task for fire-and-forget metadata update
+            asyncio.create_task(self._update_options_metadata_on_save(ticker, df))
     
     async def get(self, ticker: str, expiration_date: Optional[str] = None,
                  start_datetime: Optional[str] = None, end_datetime: Optional[str] = None,
-                 option_tickers: Optional[List[str]] = None) -> pd.DataFrame:
+                 option_tickers: Optional[List[str]] = None,
+                 timestamp_lookback_days: Optional[int] = None,
+                 use_fire_and_forget: bool = False,
+                 deduplicate: bool = False) -> pd.DataFrame:
         """Get options data with per-option caching.
         
         Flow:
-        1. If expiration_date provided but no option_tickers, query DB to get all available option_tickers
+        1. Get option_tickers and expiration_dates from metadata cache (or DB if missing)
         2. Generate cache keys for each option_ticker
         3. Batch fetch from cache (500 keys at once)
         4. For cache misses (keys not in cache), fetch from DB and cache the results
         5. Combine cached and newly fetched data
+        6. Optionally deduplicate to get latest per option_ticker
+        
+        Args:
+            ticker: Stock ticker symbol
+            expiration_date: Optional expiration date
+            start_datetime: Optional start datetime
+            end_datetime: Optional end datetime
+            option_tickers: Optional list of option_tickers
+            timestamp_lookback_days: Optional timestamp lookback days (if provided, uses get_latest repository method)
+            use_fire_and_forget: If True, use fire-and-forget caching (non-blocking)
+            deduplicate: If True, deduplicate by option_ticker to keep only the latest
         """
-        # First, query DB to get available option_tickers for the expiration_date
-        if expiration_date and not option_tickers:
-            # Query DB to get all option_tickers for this expiration_date
-            temp_df = await self.options_repo.get(ticker, expiration_date=expiration_date, start_datetime=start_datetime, end_datetime=end_datetime)
-            if not temp_df.empty and 'option_ticker' in temp_df.columns:
-                option_tickers = temp_df['option_ticker'].unique().tolist()
-            else:
-                return pd.DataFrame()
+        import time
+        method_start = time.time()
+        self.logger.debug(f"[TIMING] OptionsDataService.get START for {ticker}")
         
+        # Resolve option_tickers and expiration_dates from metadata cache or DB
+        resolve_start = time.time()
+        option_tickers, option_ticker_exp_map = await self._resolve_option_tickers_and_exp_dates(
+            ticker, expiration_date, start_datetime, end_datetime, option_tickers
+        )
+        resolve_elapsed = time.time() - resolve_start
+        self.logger.debug(f"[TIMING] _resolve_option_tickers_and_exp_dates completed for {ticker}: {resolve_elapsed:.3f}s")
+        
+        # If no option_tickers found, fetch from DB directly
         if not option_tickers:
-            # No option_tickers specified, fetch from DB directly
-            df = await self.options_repo.get(ticker, expiration_date, start_datetime, end_datetime, option_tickers)
-            return df
+            if timestamp_lookback_days is not None:
+                return await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, option_tickers, timestamp_lookback_days)
+            else:
+                return await self.options_repo.get(ticker, expiration_date, start_datetime, end_datetime, option_tickers)
         
-        # Generate cache keys for each option
-        cache_keys = []
-        for opt_ticker in option_tickers:
-            if expiration_date:
-                exp_date_str = expiration_date if isinstance(expiration_date, str) else expiration_date.strftime('%Y-%m-%d')
-                cache_keys.append(CacheKeyGenerator.options_data(ticker, exp_date_str, opt_ticker))
+        # Generate cache keys for each option using expiration_date from map or provided expiration_date
+        keygen_start = time.time()
+        cache_keys = self._generate_cache_keys(ticker, option_tickers, option_ticker_exp_map, expiration_date)
+        keygen_elapsed = time.time() - keygen_start
+        self.logger.debug(f"[TIMING] Generated {len(cache_keys)} cache keys for {ticker}: {keygen_elapsed:.3f}s")
         
         # Batch fetch from cache
+        cache_start = time.time()
         cached_results = await self.cache.get_batch(cache_keys, batch_size=500)
+        cache_elapsed = time.time() - cache_start
         cached_data = {k: v for k, v in cached_results.items() if v is not None and not v.empty}
+        self.logger.debug(f"[TIMING] Cache batch get for {ticker}: {cache_elapsed:.3f}s, found {len(cached_data)}/{len(cache_keys)}")
+        
+        if deduplicate:
+            self.logger.debug(f"[CACHE] Found {len(cached_data)}/{len(cache_keys)} options in cache for {ticker}")
         
         # Determine which options need DB fetch (cache misses)
         missing_keys = [k for k in cache_keys if k not in cached_data]
@@ -1745,18 +2312,24 @@ class OptionsDataService:
         # Fetch missing options from DB and cache them
         if missing_keys:
             # Extract option_tickers from missing keys
-            missing_option_tickers = []
-            for key in missing_keys:
-                # Key format: stocks:options_data:{ticker}:{expiration_date}:{option_ticker}
-                parts = key.split(':')
-                if len(parts) >= 5:
-                    missing_option_tickers.append(parts[4])
+            missing_option_tickers = self._extract_option_tickers_from_cache_keys(missing_keys)
             
             # Fetch from DB for cache misses
-            df = await self.options_repo.get(ticker, expiration_date, start_datetime, end_datetime, missing_option_tickers)
+            db_start = time.time()
+            if timestamp_lookback_days is not None:
+                if deduplicate:
+                    self.logger.debug(f"[DB] Fetching {len(missing_option_tickers)} options from database (cache misses) for {ticker}")
+                df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, missing_option_tickers, timestamp_lookback_days)
+                if deduplicate:
+                    self.logger.debug(f"[DB] Fetched {len(df)} rows from database for {ticker} latest options")
+            else:
+                df = await self.options_repo.get(ticker, expiration_date, start_datetime, end_datetime, missing_option_tickers)
+            db_elapsed = time.time() - db_start
+            self.logger.debug(f"[TIMING] DB query for {ticker}: {db_elapsed:.3f}s, returned {len(df)} rows")
             
             if not df.empty:
                 # Cache each option individually
+                cache_write_start = time.time()
                 for idx, row in df.iterrows():
                     if 'option_ticker' in row and 'expiration_date' in row:
                         opt_ticker = row['option_ticker']
@@ -1764,22 +2337,49 @@ class OptionsDataService:
                         exp_date_str = exp_date.strftime('%Y-%m-%d') if isinstance(exp_date, (datetime, pd.Timestamp)) else str(exp_date)[:10]
                         cache_key = CacheKeyGenerator.options_data(ticker, exp_date_str, opt_ticker)
                         row_df = pd.DataFrame([row]).set_index(pd.Index([idx]))
-                        await self.cache.set(cache_key, row_df)
+                        
+                        if use_fire_and_forget:
+                            self.cache.set_fire_and_forget(cache_key, row_df)
+                            if deduplicate:
+                                self.logger.debug(f"[CACHE SET] Cached latest options data on read (fire-and-forget): {cache_key} (rows: 1)")
+                        else:
+                            await self.cache.set(cache_key, row_df)
+                        
                         cached_data[cache_key] = row_df
+                cache_write_elapsed = time.time() - cache_write_start
+                self.logger.debug(f"[TIMING] Cache write for {ticker}: {cache_write_elapsed:.3f}s, cached {len(df)} options")
+        elif deduplicate:
+            self.logger.debug(f"[CACHE] All {len(option_tickers)} options found in cache for {ticker}")
         
         # Combine all cached data (from cache hits and newly fetched)
         # Filter out empty DataFrames (negative cache) from the final result
+        combine_start = time.time()
         if cached_data:
             non_empty_data = {k: v for k, v in cached_data.items() if not v.empty}
             if non_empty_data:
                 dfs = list(non_empty_data.values())
-                df = pd.concat(dfs).sort_index()
+                combined_df = pd.concat(dfs).sort_index()
+                
+                # Deduplicate to get latest per option_ticker if requested
+                if deduplicate:
+                    # Sort by timestamp descending first to ensure we keep the latest
+                    if 'timestamp' in combined_df.columns:
+                        combined_df = combined_df.sort_values('timestamp', ascending=False)
+                    if 'option_ticker' in combined_df.columns and not combined_df.empty:
+                        combined_df = combined_df.drop_duplicates(subset=['option_ticker'], keep='first')
+                
+                combine_elapsed = time.time() - combine_start
+                total_elapsed = time.time() - method_start
+                self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s (combine: {combine_elapsed:.3f}s), returning {len(combined_df)} rows")
+                return combined_df
             else:
-                df = pd.DataFrame()
+                total_elapsed = time.time() - method_start
+                self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s, returning empty DataFrame")
+                return pd.DataFrame()
         else:
-            df = pd.DataFrame()
-        
-        return df
+            total_elapsed = time.time() - method_start
+            self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s, returning empty DataFrame")
+            return pd.DataFrame()
     
     async def get_latest(self, ticker: str, expiration_date: Optional[str] = None,
                         start_datetime: Optional[str] = None, end_datetime: Optional[str] = None,
@@ -1787,130 +2387,21 @@ class OptionsDataService:
                         timestamp_lookback_days: int = 7) -> pd.DataFrame:
         """Get latest options data with per-option caching.
         
-        Flow:
-        1. Always query DB to get all option_tickers and their expiration_dates for the date range (if not provided)
-        2. Generate cache keys using actual expiration_date for each option_ticker
-        3. Batch fetch from cache (using get_batch with large batch size, e.g., 500+)
-        4. For cache misses, fetch from DB using get_latest()
-        5. Cache newly fetched options
-        6. Combine cached and newly fetched data, deduplicate to get latest per option_ticker
+        This is a convenience method that calls get() with:
+        - timestamp_lookback_days: Uses get_latest repository method
+        - use_fire_and_forget: True (non-blocking cache writes)
+        - deduplicate: True (deduplicates by option_ticker to keep only the latest)
         """
-        # Always query DB to get all option_tickers and their expiration_dates for the date range
-        option_ticker_exp_map = {}
-        if not option_tickers:
-            # Query DB to get all option_tickers and their expiration_dates for this expiration date range
-            temp_df = await self.options_repo.get(ticker, expiration_date=expiration_date, start_datetime=start_datetime, end_datetime=end_datetime)
-            if not temp_df.empty and 'option_ticker' in temp_df.columns:
-                # Get unique (option_ticker, expiration_date) pairs
-                for idx, row in temp_df.iterrows():
-                    opt_ticker = row['option_ticker']
-                    exp_date = row.get('expiration_date')
-                    if exp_date:
-                        if isinstance(exp_date, (datetime, pd.Timestamp)):
-                            exp_date_str = exp_date.strftime('%Y-%m-%d')
-                        else:
-                            exp_date_str = str(exp_date)[:10]
-                        option_ticker_exp_map[opt_ticker] = exp_date_str
-                option_tickers = list(option_ticker_exp_map.keys())
-            else:
-                return pd.DataFrame()
-        else:
-            # option_tickers provided, but we still need their expiration_dates for cache keys
-            # Always query DB to get expiration_dates for the provided option_tickers
-            temp_df = await self.options_repo.get(ticker, expiration_date=expiration_date, start_datetime=start_datetime, end_datetime=end_datetime, option_tickers=option_tickers)
-            if not temp_df.empty and 'option_ticker' in temp_df.columns and 'expiration_date' in temp_df.columns:
-                for idx, row in temp_df.iterrows():
-                    opt_ticker = row['option_ticker']
-                    exp_date = row.get('expiration_date')
-                    if exp_date:
-                        if isinstance(exp_date, (datetime, pd.Timestamp)):
-                            exp_date_str = exp_date.strftime('%Y-%m-%d')
-                        else:
-                            exp_date_str = str(exp_date)[:10]
-                        option_ticker_exp_map[opt_ticker] = exp_date_str
-        
-        if not option_tickers:
-            # No option_tickers found, fetch from DB directly
-            df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, option_tickers, timestamp_lookback_days)
-            return df
-        
-        # Generate cache keys using actual expiration_dates
-        cache_keys = []
-        for opt_ticker in option_tickers:
-            exp_date_str = option_ticker_exp_map.get(opt_ticker)
-            if exp_date_str:
-                cache_keys.append(CacheKeyGenerator.options_data(ticker, exp_date_str, opt_ticker))
-            elif expiration_date:
-                # Fallback to provided expiration_date if we don't have it in the map
-                exp_date_str = expiration_date if isinstance(expiration_date, str) else expiration_date.strftime('%Y-%m-%d')
-                cache_keys.append(CacheKeyGenerator.options_data(ticker, exp_date_str, opt_ticker))
-        
-        # Batch fetch from cache using large batch size (500+ keys at once)
-        cached_data = {}
-        if cache_keys:
-            cached_results = await self.cache.get_batch(cache_keys, batch_size=500)
-            cached_data = {k: v for k, v in cached_results.items() if v is not None and not v.empty}
-            self.logger.debug(f"[CACHE] Found {len(cached_data)}/{len(cache_keys)} options in cache for {ticker}")
-        
-        # Determine which options need DB fetch (cache misses)
-        missing_option_tickers = []
-        if cache_keys:
-            missing_keys = [k for k in cache_keys if k not in cached_data]
-            # Extract option_tickers from missing keys
-            for key in missing_keys:
-                # Key format: stocks:options_data:{ticker}:{expiration_date}:{option_ticker}
-                # Note: option_ticker may contain colons (e.g., "O:AAPL251214C00190000"),
-                # so we need to split and rejoin from index 4 onwards
-                parts = key.split(':')
-                if len(parts) >= 5:
-                    # Join parts[4:] to handle option_tickers that contain colons
-                    missing_option_tickers.append(':'.join(parts[4:]))
-        else:
-            # No cache keys generated, fetch all from DB
-            missing_option_tickers = option_tickers
-        
-        # Fetch missing options from DB and cache them
-        if missing_option_tickers:
-            self.logger.debug(f"[DB] Fetching {len(missing_option_tickers)} options from database (cache misses) for {ticker}")
-            df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, missing_option_tickers, timestamp_lookback_days)
-            self.logger.debug(f"[DB] Fetched {len(df)} rows from database for {ticker} latest options")
-            
-            # Cache each newly fetched option individually (cache on read)
-            if not df.empty:
-                for idx, row in df.iterrows():
-                    if 'option_ticker' in row and 'expiration_date' in row:
-                        opt_ticker = row['option_ticker']
-                        exp_date = row['expiration_date']
-                        exp_date_str = exp_date.strftime('%Y-%m-%d') if isinstance(exp_date, (datetime, pd.Timestamp)) else str(exp_date)[:10]
-                        cache_key = CacheKeyGenerator.options_data(ticker, exp_date_str, opt_ticker)
-                        row_df = pd.DataFrame([row]).set_index(pd.Index([idx]))
-                        self.cache.set_fire_and_forget(cache_key, row_df)
-                        self.logger.debug(f"[CACHE SET] Cached latest options data on read (fire-and-forget): {cache_key} (rows: 1)")
-                        cached_data[cache_key] = row_df
-        else:
-            df = pd.DataFrame()
-            self.logger.debug(f"[CACHE] All {len(option_tickers)} options found in cache for {ticker}")
-        
-        # Combine all cached data (from cache hits and newly fetched)
-        # Filter out empty DataFrames (negative cache) from the final result
-        if cached_data:
-            non_empty_data = {k: v for k, v in cached_data.items() if not v.empty}
-            if non_empty_data:
-                dfs = list(non_empty_data.values())
-                combined_df = pd.concat(dfs).sort_index()
-                
-                # Deduplicate to get latest per option_ticker (same logic as repository's get_latest)
-                # Sort by timestamp descending first to ensure we keep the latest
-                if 'timestamp' in combined_df.columns:
-                    combined_df = combined_df.sort_values('timestamp', ascending=False)
-                if 'option_ticker' in combined_df.columns and not combined_df.empty:
-                    combined_df = combined_df.drop_duplicates(subset=['option_ticker'], keep='first')
-                
-                return combined_df
-            else:
-                return pd.DataFrame()
-        else:
-            return df
+        return await self.get(
+            ticker=ticker,
+            expiration_date=expiration_date,
+            start_datetime=start_datetime,
+            end_datetime=end_datetime,
+            option_tickers=option_tickers,
+            timestamp_lookback_days=timestamp_lookback_days,
+            use_fire_and_forget=True,
+            deduplicate=True
+        )
 
 
 class FinancialDataService:
@@ -2154,10 +2645,14 @@ class StockQuestDB(StockDBBase):
     
     async def _init_db(self) -> None:
         """Initialize database tables."""
-        await self._ensure_tables_exist()
+        if not self._config.ensure_tables:
+            self.logger.debug("Tables creation disabled by configuration")
+            return
+        await self.ensure_tables_exist()
     
-    async def _ensure_tables_exist(self) -> None:
+    async def ensure_tables_exist(self) -> None:
         """Create tables if they don't exist."""
+
         if self._tables_ensured and self._tables_ensured_at:
             cache_age = datetime.now() - self._tables_ensured_at
             if cache_age.total_seconds() < 600:
@@ -2342,12 +2837,18 @@ class StockQuestDB(StockDBBase):
                                            max_concurrent: int = 10, batch_size: int = 50,
                                            timestamp_lookback_days: int = 7) -> pd.DataFrame:
         """Get latest options data for multiple tickers."""
+        import time
+        method_start = time.time()
+        self.logger.debug(f"[TIMING] get_latest_options_data_batch START for {len(tickers)} tickers")
+        
         if not tickers:
             return pd.DataFrame()
         
         all_results = []
         for batch_start in range(0, len(tickers), batch_size):
             batch_tickers = tickers[batch_start:batch_start + batch_size]
+            batch_start_time = time.time()
+            self.logger.debug(f"[TIMING] Processing batch {batch_start // batch_size + 1} with {len(batch_tickers)} tickers")
             semaphore = asyncio.Semaphore(max_concurrent)
             
             async def fetch_one(ticker: str) -> pd.DataFrame:
@@ -2363,23 +2864,39 @@ class StockQuestDB(StockDBBase):
                         return pd.DataFrame()
             
             tasks = [asyncio.create_task(fetch_one(t)) for t in batch_tickers]
+            gather_start = time.time()
             batch_results = await asyncio.gather(*tasks, return_exceptions=False)
+            gather_elapsed = time.time() - gather_start
+            self.logger.debug(f"[TIMING] Batch gather completed: {gather_elapsed:.3f}s for {len(batch_tickers)} tickers")
             
             non_empty = [df for df in batch_results if not df.empty and not df.isna().all().all()]
             if non_empty:
+                concat_start = time.time()
                 batch_df = pd.concat(non_empty, ignore_index=True)
+                concat_elapsed = time.time() - concat_start
+                batch_elapsed = time.time() - batch_start_time
+                self.logger.debug(f"[TIMING] Batch {batch_start // batch_size + 1} completed: {batch_elapsed:.3f}s (concat: {concat_elapsed:.3f}s), {len(batch_df)} rows")
                 all_results.append(batch_df)
                 import gc
                 gc.collect()
         
         if not all_results:
+            total_elapsed = time.time() - method_start
+            self.logger.debug(f"[TIMING] get_latest_options_data_batch END: {total_elapsed:.3f}s, no results")
             return pd.DataFrame()
         
+        final_concat_start = time.time()
         valid_results = [df for df in all_results if not df.empty and not df.isna().all().all()]
         if not valid_results:
+            total_elapsed = time.time() - method_start
+            self.logger.debug(f"[TIMING] get_latest_options_data_batch END: {total_elapsed:.3f}s, no valid results")
             return pd.DataFrame()
         
-        return pd.concat(valid_results, ignore_index=True)
+        result_df = pd.concat(valid_results, ignore_index=True)
+        final_concat_elapsed = time.time() - final_concat_start
+        total_elapsed = time.time() - method_start
+        self.logger.debug(f"[TIMING] get_latest_options_data_batch END: {total_elapsed:.3f}s (final concat: {final_concat_elapsed:.3f}s), returning {len(result_df)} rows")
+        return result_df
     
     async def get_latest_options_data_batch_multiprocess(self, tickers: List[str],
                                                          expiration_date: Optional[str] = None,
