@@ -1970,27 +1970,29 @@ Examples:
         if args.max_workers > 1 and hasattr(analyzer.db, 'print_process_statistics'):
             analyzer.db.print_process_statistics(quiet=args.quiet)
         
-        # Print cache statistics if requested
-        if args.stats and hasattr(analyzer.db, 'get_cache_statistics'):
+        # Print cache statistics (always print unless in quiet mode)
+        if not args.quiet and hasattr(analyzer.db, 'get_cache_statistics'):
             cache_stats = analyzer.db.get_cache_statistics()
-            if not args.quiet:
-                print("\n=== Cache Statistics ===", file=sys.stderr)
-                if cache_stats.get('enabled', False):
-                    print(f"Cache Status: ENABLED", file=sys.stderr)
-                    print(f"Total Requests: {cache_stats.get('total_requests', 0)}", file=sys.stderr)
-                    print(f"Cache Hits: {cache_stats.get('hits', 0)}", file=sys.stderr)
-                    print(f"Cache Misses: {cache_stats.get('misses', 0)}", file=sys.stderr)
-                    hit_rate = cache_stats.get('hit_rate', 0.0)
-                    print(f"Hit Rate: {hit_rate:.2%}", file=sys.stderr)
-                    print(f"Cache Sets: {cache_stats.get('sets', 0)}", file=sys.stderr)
-                    print(f"Cache Invalidations: {cache_stats.get('invalidations', 0)}", file=sys.stderr)
-                    print(f"Cache Errors: {cache_stats.get('errors', 0)}", file=sys.stderr)
-                else:
-                    print(f"Cache Status: DISABLED", file=sys.stderr)
-                # Database query statistics
-                db_query_count = cache_stats.get('db_query_count', 0)
+            print("\n=== Cache Statistics ===", file=sys.stderr)
+            if cache_stats.get('enabled', False):
+                print(f"Cache Status: ENABLED", file=sys.stderr)
+                print(f"Total Requests: {cache_stats.get('total_requests', 0)}", file=sys.stderr)
+                print(f"Cache Hits: {cache_stats.get('hits', 0)}", file=sys.stderr)
+                print(f"Cache Misses: {cache_stats.get('misses', 0)}", file=sys.stderr)
+                hit_rate = cache_stats.get('hit_rate', 0.0)
+                print(f"Hit Rate: {hit_rate:.2%}", file=sys.stderr)
+                print(f"Cache Sets: {cache_stats.get('sets', 0)}", file=sys.stderr)
+                print(f"Cache Invalidations: {cache_stats.get('invalidations', 0)}", file=sys.stderr)
+                print(f"Cache Errors: {cache_stats.get('errors', 0)}", file=sys.stderr)
+            else:
+                print(f"Cache Status: DISABLED", file=sys.stderr)
+            # Database query statistics (if available)
+            db_query_count = cache_stats.get('db_query_count')
+            if db_query_count is not None:
                 print(f"\n=== Database Query Statistics ===", file=sys.stderr)
                 print(f"Total Database Queries: {db_query_count}", file=sys.stderr)
+                print("===================================\n", file=sys.stderr)
+            else:
                 print("===================================\n", file=sys.stderr)
         
         # Determine output format and file

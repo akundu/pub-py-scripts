@@ -45,10 +45,11 @@ except ImportError:
 # Multiprocessing helper (must be at module level)
 # ============================================================================
 
-def _process_ticker_options(args: Tuple) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+def _process_ticker_options(args: Tuple) -> Tuple[pd.DataFrame, Dict[str, Any], Dict[str, Any]]:
     """
     Process a single ticker's options data in a separate process.
     Must be at module level for pickling by multiprocessing.
+    Returns: (DataFrame, process_stats, cache_stats)
     """
     import asyncio
     import time
@@ -77,10 +78,13 @@ def _process_ticker_options(args: Tuple) -> Tuple[pd.DataFrame, Dict[str, Any]]:
             timestamp_lookback_days=timestamp_lookback_days
         )
         
+        # Get cache stats before closing
+        cache_stats = db.get_cache_statistics() if hasattr(db, 'get_cache_statistics') else {}
+        
         await db.close()
-        return df
+        return df, cache_stats
     
-    df = asyncio.run(_async_process())
+    df, cache_stats = asyncio.run(_async_process())
     
     end_time = time.time()
     stats = {
@@ -91,7 +95,7 @@ def _process_ticker_options(args: Tuple) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         'memory_mb': df.memory_usage(deep=True).sum() / 1024 / 1024 if not df.empty else 0
     }
     
-    return df, stats
+    return df, stats, cache_stats
 
 
 # ============================================================================
@@ -2422,13 +2426,19 @@ class StockQuestDB(StockDBBase):
                 
                 batch_dfs = []
                 batch_stats = []
+                batch_cache_stats = []
                 for result in batch_results:
-                    df, stats = result
+                    df, stats, cache_stats = result
                     batch_stats.append(stats)
+                    batch_cache_stats.append(cache_stats)
                     if not df.empty and not df.isna().all().all():
                         batch_dfs.append(df)
                 
                 self._process_stats.extend(batch_stats)
+                # Store cache stats from worker processes
+                if not hasattr(self, '_cache_stats_by_process'):
+                    self._cache_stats_by_process = []
+                self._cache_stats_by_process.extend(batch_cache_stats)
                 
                 if batch_dfs:
                     batch_df = pd.concat(batch_dfs, ignore_index=True)
@@ -2506,15 +2516,43 @@ class StockQuestDB(StockDBBase):
         return await self.financial_service.get(ticker, start_date, end_date)
     
     def get_cache_statistics(self) -> Dict[str, Any]:
-        """Get cache statistics."""
+        """Get cache statistics, aggregated across all processes in multi-process mode."""
+        # Start with main process stats
         stats = self.cache.get_statistics()
         stats['enabled'] = self.cache.enable_cache
+        
+        # Aggregate stats from worker processes if available
+        if hasattr(self, '_cache_stats_by_process') and self._cache_stats_by_process:
+            worker_stats = self._cache_stats_by_process
+            # Aggregate all worker process stats
+            aggregated = {
+                'hits': sum(s.get('hits', 0) for s in worker_stats),
+                'misses': sum(s.get('misses', 0) for s in worker_stats),
+                'sets': sum(s.get('sets', 0) for s in worker_stats),
+                'invalidations': sum(s.get('invalidations', 0) for s in worker_stats),
+                'errors': sum(s.get('errors', 0) for s in worker_stats),
+            }
+            # Add worker stats to main process stats
+            stats['hits'] = stats.get('hits', 0) + aggregated['hits']
+            stats['misses'] = stats.get('misses', 0) + aggregated['misses']
+            stats['sets'] = stats.get('sets', 0) + aggregated['sets']
+            stats['invalidations'] = stats.get('invalidations', 0) + aggregated['invalidations']
+            stats['errors'] = stats.get('errors', 0) + aggregated['errors']
+        
         total_requests = stats.get('hits', 0) + stats.get('misses', 0)
         stats['total_requests'] = total_requests
         if total_requests > 0:
             stats['hit_rate'] = stats.get('hits', 0) / total_requests
         else:
             stats['hit_rate'] = 0.0
+        
+        # Add database query count (aggregated from all processes) if available
+        db_query_count = stats.get('db_query_count', 0)
+        if hasattr(self, '_cache_stats_by_process') and self._cache_stats_by_process:
+            db_query_count += sum(s.get('db_query_count', 0) for s in self._cache_stats_by_process)
+        if db_query_count > 0:
+            stats['db_query_count'] = db_query_count
+        
         return stats
     
     async def close_session(self):
