@@ -623,7 +623,7 @@ class OptionsAnalyzer:
         """Get financial information (P/E, market_cap) for the given tickers."""
         financial_data = {}
         
-        if self.debug or not self.quiet:
+        if self.debug:
             print(f"DEBUG: Fetching financial info for {len(tickers)} tickers", file=sys.stderr)
         
         for ticker in tickers:
@@ -734,20 +734,73 @@ class OptionsAnalyzer:
         if max_days is not None:
             from datetime import date, timedelta
             end_date = (date.today() + timedelta(days=max_days)).strftime('%Y-%m-%d')
-            if not self.quiet:
-                print(f"Using max_days={max_days}: filtering options expiring through {end_date}")
+            if self.debug:
+                print(f"DEBUG: Using max_days={max_days}: filtering options expiring through {end_date}", file=sys.stderr)
         
         # Use memory-efficient batch fetching instead of single large query
         try:
-            if self.debug or not self.quiet:
+            if self.debug:
                 print(f"DEBUG: Starting options fetch for {len(tickers_upper)} tickers", file=sys.stderr)
                 print(f"DEBUG: Date range: {start_date} to {end_date}", file=sys.stderr)
                 print(f"DEBUG: Tickers: {tickers_upper[:10]}{'...' if len(tickers_upper) > 10 else ''}", file=sys.stderr)
             
+            # If spread mode is enabled, prepare to fetch long-term options concurrently
+            long_options_df = None
+            long_options_task = None
+            if spread_mode:
+                # Calculate the target date range for long options (around spread_long_days from today)
+                from datetime import date, timedelta
+                today = date.today()
+                
+                # If spread_long_min_days is set, use it as the lower bound; otherwise use tolerance-based approach
+                if spread_long_min_days is not None:
+                    long_start_date = (today + timedelta(days=spread_long_min_days)).strftime('%Y-%m-%d')
+                    long_end_date = (today + timedelta(days=spread_long_days)).strftime('%Y-%m-%d')
+                    if self.debug:
+                        print(f"DEBUG: Preparing to fetch long-term options expiring between {spread_long_min_days} and {spread_long_days} days (concurrently with short-term)", file=sys.stderr)
+                        print(f"DEBUG:   Date range: {long_start_date} to {long_end_date}", file=sys.stderr)
+                else:
+                    # Allow ±N days window around the target long expiry (configurable)
+                    long_start_date = (today + timedelta(days=spread_long_days - spread_long_days_tolerance)).strftime('%Y-%m-%d')
+                    long_end_date = (today + timedelta(days=spread_long_days + spread_long_days_tolerance)).strftime('%Y-%m-%d')
+                    if self.debug:
+                        print(f"DEBUG: Preparing to fetch long-term options expiring around {spread_long_days} days (±{spread_long_days_tolerance} days) (concurrently with short-term)", file=sys.stderr)
+                        print(f"DEBUG:   Date range: {long_start_date} to {long_end_date}", file=sys.stderr)
+                
+                # Use a much larger timestamp lookback for long-term options since they may have been
+                # written weeks or months ago but are still valid. Use at least 180 days to catch options
+                # that were written when they were first listed (which could be months before expiration)
+                long_timestamp_lookback_days = max(timestamp_lookback_days, 180)  # At least 180 days for long-term options
+                if self.debug:
+                    print(f"DEBUG: Using timestamp_lookback_days={long_timestamp_lookback_days} for long-term options (vs {timestamp_lookback_days} for short-term)", file=sys.stderr)
+                
+                # Create async task to fetch long-term options concurrently
+                async def fetch_long_options():
+                    if max_workers > 1:
+                        return await self.db.get_latest_options_data_batch_multiprocess(
+                            tickers=tickers_upper,
+                            start_datetime=long_start_date,
+                            end_datetime=long_end_date,
+                            batch_size=batch_size,
+                            max_workers=max_workers,
+                            timestamp_lookback_days=long_timestamp_lookback_days
+                        )
+                    else:
+                        return await self.db.get_latest_options_data_batch(
+                            tickers=tickers_upper,
+                            start_datetime=long_start_date,
+                            end_datetime=long_end_date,
+                            max_concurrent=max_concurrent,
+                            batch_size=batch_size,
+                            timestamp_lookback_days=long_timestamp_lookback_days
+                        )
+                
+                long_options_task = asyncio.create_task(fetch_long_options())
+            
             # Choose between asyncio-only or hybrid asyncio+multiprocess based on max_workers
             if max_workers > 1:
-                if not self.quiet:
-                    print(f"Using multiprocess mode with {max_workers} workers")
+                if self.debug:
+                    print(f"DEBUG: Using multiprocess mode with {max_workers} workers", file=sys.stderr)
                 # Use hybrid asyncio + multiprocessing
                 options_df = await self.db.get_latest_options_data_batch_multiprocess(
                     tickers=tickers_upper,
@@ -759,8 +812,8 @@ class OptionsAnalyzer:
                 )
             else:
                 # Use asyncio-only (single process)
-                if not self.quiet:
-                    print("Using single-process mode")
+                if self.debug:
+                    print("DEBUG: Using single-process mode", file=sys.stderr)
                 options_df = await self.db.get_latest_options_data_batch(
                     tickers=tickers_upper,
                     start_datetime=start_date,
@@ -770,7 +823,24 @@ class OptionsAnalyzer:
                     timestamp_lookback_days=timestamp_lookback_days
                 )
             
-            if self.debug or not self.quiet:
+            # If we started fetching long-term options concurrently, wait for it now
+            if long_options_task is not None:
+                if self.debug:
+                    print("DEBUG: Waiting for long-term options fetch to complete...", file=sys.stderr)
+                try:
+                    long_options_df = await long_options_task
+                    if self.debug:
+                        print(f"DEBUG: Fetched {len(long_options_df)} long-term options from database", file=sys.stderr)
+                except Exception as e:
+                    if not self.quiet:
+                        print(f"Warning: Failed to fetch long-term options concurrently: {e}", file=sys.stderr)
+                        print("Will attempt to fetch long-term options during spread analysis...", file=sys.stderr)
+                    if self.debug:
+                        import traceback
+                        traceback.print_exc()
+                    long_options_df = None  # Will trigger fetch in _create_spread_analysis
+            
+            if self.debug:
                 print(f"DEBUG: Fetched {len(options_df)} total options from database", file=sys.stderr)
                 if not options_df.empty:
                     print(f"DEBUG: Options columns: {list(options_df.columns)}", file=sys.stderr)
@@ -795,10 +865,10 @@ class OptionsAnalyzer:
             before_call_filter = len(options_df)
             if 'option_type' in options_df.columns:
                 options_df = options_df[options_df['option_type'] == 'call']
-                if self.debug or not self.quiet:
+                if self.debug:
                     print(f"DEBUG: After call filter: {len(options_df)} options (was {before_call_filter})", file=sys.stderr)
             else:
-                if self.debug or not self.quiet:
+                if self.debug:
                     print("DEBUG: Warning: 'option_type' column not found in options DataFrame", file=sys.stderr)
             
             if options_df.empty:
@@ -817,7 +887,7 @@ class OptionsAnalyzer:
                     if not self.quiet:
                         print(f"Warning: Could not fetch price for {ticker}: {e}", file=sys.stderr)
             
-            if self.debug or not self.quiet:
+            if self.debug:
                 print(f"DEBUG: Fetched stock prices for {len(stock_prices)}/{len(tickers_upper)} tickers", file=sys.stderr)
                 if stock_prices:
                     sample_prices = list(stock_prices.items())[:5]
@@ -838,7 +908,7 @@ class OptionsAnalyzer:
             before_price_filter = len(df)
             df = df[df['current_price'].notna()]
             
-            if self.debug or not self.quiet:
+            if self.debug:
                 print(f"DEBUG: After price mapping: {len(df)} options (was {before_price_filter})", file=sys.stderr)
             
             if df.empty:
@@ -979,13 +1049,14 @@ class OptionsAnalyzer:
                     end_date=end_date,
                     max_concurrent=max_concurrent,
                     batch_size=batch_size,
-                timestamp_lookback_days=timestamp_lookback_days,
-                max_workers=max_workers,
-                position_size=position_size,
-                min_write_timestamp=min_write_timestamp
-            )
+                    timestamp_lookback_days=timestamp_lookback_days,
+                    max_workers=max_workers,
+                    position_size=position_size,
+                    min_write_timestamp=min_write_timestamp,
+                    long_options_df=long_options_df  # Pass pre-fetched long-term options data
+                )
             
-            if self.debug or not self.quiet:
+            if self.debug:
                 print(f"DEBUG: Final options count before spread/filtering: {len(df)}", file=sys.stderr)
             
             return df
@@ -1012,7 +1083,8 @@ class OptionsAnalyzer:
             timestamp_lookback_days: int,
             max_workers: int,
             position_size: float,
-            min_write_timestamp: Optional[str]
+            min_write_timestamp: Optional[str],
+            long_options_df: Optional[pd.DataFrame] = None
         ) -> pd.DataFrame:
         """
         Match short-term options with long-term options to create calendar spread analysis.
@@ -1024,6 +1096,7 @@ class OptionsAnalyzer:
             spread_long_days: Maximum/target days to expiry for long options
             spread_long_days_tolerance: Days tolerance for long option expiration window (e.g., ±14 days, ignored if spread_long_min_days is set)
             spread_long_min_days: Minimum days to expiry for long options (if set, searches from min to max instead of using tolerance)
+            long_options_df: Optional pre-fetched long-term options DataFrame. If provided, skips fetching.
             Other args: Same as analyze_options
             
         Returns:
@@ -1033,6 +1106,7 @@ class OptionsAnalyzer:
             return df_short
         
         # Calculate the target date range for long options (around spread_long_days from today)
+        # This is used for logging/debugging even if long_options_df is already provided
         from datetime import date, timedelta
         today = date.today()
         
@@ -1041,7 +1115,10 @@ class OptionsAnalyzer:
             long_start_date = (today + timedelta(days=spread_long_min_days)).strftime('%Y-%m-%d')
             long_end_date = (today + timedelta(days=spread_long_days)).strftime('%Y-%m-%d')
             if not self.quiet:
-                print(f"Fetching long-term options expiring between {spread_long_min_days} and {spread_long_days} days")
+                if long_options_df is None:
+                    print(f"Fetching long-term options expiring between {spread_long_min_days} and {spread_long_days} days")
+                else:
+                    print(f"Using pre-fetched long-term options expiring between {spread_long_min_days} and {spread_long_days} days")
                 print(f"  Date range: {long_start_date} to {long_end_date}")
             if self.debug:
                 print(f"DEBUG: Calculated long-term date range: {long_start_date} to {long_end_date} (from today {today})", file=sys.stderr)
@@ -1050,7 +1127,10 @@ class OptionsAnalyzer:
             long_start_date = (today + timedelta(days=spread_long_days - spread_long_days_tolerance)).strftime('%Y-%m-%d')
             long_end_date = (today + timedelta(days=spread_long_days + spread_long_days_tolerance)).strftime('%Y-%m-%d')
             if not self.quiet:
-                print(f"Fetching long-term options expiring around {spread_long_days} days (±{spread_long_days_tolerance} days)")
+                if long_options_df is None:
+                    print(f"Fetching long-term options expiring around {spread_long_days} days (±{spread_long_days_tolerance} days)")
+                else:
+                    print(f"Using pre-fetched long-term options expiring around {spread_long_days} days (±{spread_long_days_tolerance} days)")
                 print(f"  Date range: {long_start_date} to {long_end_date}")
             if self.debug:
                 print(f"DEBUG: Calculated long-term date range: {long_start_date} to {long_end_date} (from today {today})", file=sys.stderr)
@@ -1063,43 +1143,60 @@ class OptionsAnalyzer:
                 print(f"  Min expiration: {df_short['expiration_date'].min()}")
                 print(f"  Max expiration: {df_short['expiration_date'].max()}")
         
-        # Fetch long-term options data
-        # Use a much larger timestamp lookback for long-term options since they may have been
-        # written weeks or months ago but are still valid. Use at least 180 days to catch options
-        # that were written when they were first listed (which could be months before expiration)
-        long_timestamp_lookback_days = max(timestamp_lookback_days, 180)  # At least 180 days for long-term options
-        if self.debug or not self.quiet:
-            print(f"DEBUG: Using timestamp_lookback_days={long_timestamp_lookback_days} for long-term options (vs {timestamp_lookback_days} for short-term)", file=sys.stderr)
+        # Fetch long-term options data only if not already provided
+        if long_options_df is None:
+            # Use a much larger timestamp lookback for long-term options since they may have been
+            # written weeks or months ago but are still valid. Use at least 180 days to catch options
+            # that were written when they were first listed (which could be months before expiration)
+            long_timestamp_lookback_days = max(timestamp_lookback_days, 180)  # At least 180 days for long-term options
+            if self.debug:
+                print(f"DEBUG: Using timestamp_lookback_days={long_timestamp_lookback_days} for long-term options (vs {timestamp_lookback_days} for short-term)", file=sys.stderr)
+            
+            try:
+                if self.debug:
+                    print(f"DEBUG: Calling get_latest_options_data_batch with:", file=sys.stderr)
+                    print(f"  tickers: {tickers}", file=sys.stderr)
+                    print(f"  start_datetime: {long_start_date}", file=sys.stderr)
+                    print(f"  end_datetime: {long_end_date}", file=sys.stderr)
+                    print(f"  timestamp_lookback_days: {long_timestamp_lookback_days}", file=sys.stderr)
+                
+                if max_workers > 1:
+                    long_options_df = await self.db.get_latest_options_data_batch_multiprocess(
+                        tickers=tickers,
+                        start_datetime=long_start_date,
+                        end_datetime=long_end_date,
+                        batch_size=batch_size,
+                        max_workers=max_workers,
+                        timestamp_lookback_days=long_timestamp_lookback_days
+                    )
+                else:
+                    long_options_df = await self.db.get_latest_options_data_batch(
+                        tickers=tickers,
+                        start_datetime=long_start_date,
+                        end_datetime=long_end_date,
+                        max_concurrent=max_concurrent,
+                        batch_size=batch_size,
+                        timestamp_lookback_days=long_timestamp_lookback_days
+                    )
+                
+                if self.debug:
+                    print(f"DEBUG: Batch fetch returned {len(long_options_df)} rows", file=sys.stderr)
+            except Exception as e:
+                if not self.quiet:
+                    print(f"Error fetching long-term options: {e}", file=sys.stderr)
+                import traceback
+                if self.debug:
+                    traceback.print_exc()
+                return pd.DataFrame()
+        else:
+            if not self.quiet:
+                print(f"Using pre-fetched long-term options ({len(long_options_df)} rows)")
+            if self.debug:
+                print(f"DEBUG: Using pre-fetched long-term options DataFrame with {len(long_options_df)} rows", file=sys.stderr)
+            # Ensure we have a copy of the pre-fetched DataFrame to avoid SettingWithCopyWarning
+            long_options_df = long_options_df.copy()
         
         try:
-            if self.debug:
-                print(f"DEBUG: Calling get_latest_options_data_batch with:", file=sys.stderr)
-                print(f"  tickers: {tickers}", file=sys.stderr)
-                print(f"  start_datetime: {long_start_date}", file=sys.stderr)
-                print(f"  end_datetime: {long_end_date}", file=sys.stderr)
-                print(f"  timestamp_lookback_days: {long_timestamp_lookback_days}", file=sys.stderr)
-            
-            if max_workers > 1:
-                long_options_df = await self.db.get_latest_options_data_batch_multiprocess(
-                    tickers=tickers,
-                    start_datetime=long_start_date,
-                    end_datetime=long_end_date,
-                    batch_size=batch_size,
-                    max_workers=max_workers,
-                    timestamp_lookback_days=long_timestamp_lookback_days
-                )
-            else:
-                long_options_df = await self.db.get_latest_options_data_batch(
-                    tickers=tickers,
-                    start_datetime=long_start_date,
-                    end_datetime=long_end_date,
-                    max_concurrent=max_concurrent,
-                    batch_size=batch_size,
-                    timestamp_lookback_days=long_timestamp_lookback_days
-                )
-            
-            if self.debug:
-                print(f"DEBUG: Batch fetch returned {len(long_options_df)} rows", file=sys.stderr)
             
             if self.debug:
                 print(f"DEBUG: Fetched {len(long_options_df)} total options from database")
@@ -1128,12 +1225,14 @@ class OptionsAnalyzer:
                     min_ts_utc = min_ts.astimezone(pytz.UTC)
                     
                     if 'write_timestamp' in long_options_df.columns:
+                        # Ensure we have a copy before modifying to avoid SettingWithCopyWarning
+                        long_options_df = long_options_df.copy()
                         long_options_df['write_timestamp'] = pd.to_datetime(long_options_df['write_timestamp'])
                         if long_options_df['write_timestamp'].dt.tz is None:
                             long_options_df['write_timestamp'] = long_options_df['write_timestamp'].dt.tz_localize('UTC')
                         
                         before_count = len(long_options_df)
-                        long_options_df = long_options_df[long_options_df['write_timestamp'] >= min_ts_utc]
+                        long_options_df = long_options_df[long_options_df['write_timestamp'] >= min_ts_utc].copy()
                         after_count = len(long_options_df)
                         
                         if not self.quiet:
@@ -1157,7 +1256,7 @@ class OptionsAnalyzer:
             
             # Filter for call options only
             if 'option_type' in long_options_df.columns:
-                long_options_df = long_options_df[long_options_df['option_type'] == 'call']
+                long_options_df = long_options_df[long_options_df['option_type'] == 'call'].copy()
             
             if self.debug:
                 print(f"DEBUG: After filtering for calls: {len(long_options_df)} call options")
@@ -1166,6 +1265,9 @@ class OptionsAnalyzer:
                 if not self.quiet:
                     print("Warning: No long-term call options found for spread analysis.", file=sys.stderr)
                 return pd.DataFrame()
+            
+            # Ensure we have a copy before modifying to avoid SettingWithCopyWarning
+            long_options_df = long_options_df.copy()
             
             # Calculate days to expiry for long options
             long_options_df['expiration_date'] = pd.to_datetime(long_options_df['expiration_date'])
@@ -1878,7 +1980,7 @@ Examples:
     args = parser.parse_args()
     
     # Log parsed arguments for debugging
-    if args.debug or not args.quiet:
+    if args.debug:
         print("DEBUG: Parsed arguments:", file=sys.stderr)
         print(f"  symbols: {getattr(args, 'symbols', None)}", file=sys.stderr)
         print(f"  types: {getattr(args, 'types', None)}", file=sys.stderr)
@@ -1916,7 +2018,7 @@ Examples:
         if not args.quiet:
             print(f"Analyzing {len(symbols_list)} tickers...")
         
-        if args.debug or not args.quiet:
+        if args.debug:
             print(f"DEBUG: Symbols list: {symbols_list[:10]}{'...' if len(symbols_list) > 10 else ''}", file=sys.stderr)
         
         # Get financial information
