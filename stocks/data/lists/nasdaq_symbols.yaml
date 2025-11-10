@@ -59,13 +59,13 @@ symbols:
 - BKNG
 - BKR
 - BLLN
+- BLTE
 - BMRN
 - BNTX
 - BOKF
 - BPOP
 - BRKR
 - BSY
-- BTDR
 - BTSG
 - BULL
 - BZ
@@ -109,7 +109,6 @@ symbols:
 - CPB
 - CPRT
 - CRDO
-- CROX
 - CRSP
 - CRUS
 - CRWD
@@ -143,6 +142,7 @@ symbols:
 - EA
 - EBAY
 - ENLT
+- ENPH
 - ENSG
 - ENTG
 - EOSE
@@ -171,7 +171,6 @@ symbols:
 - FITB
 - FIVE
 - FLEX
-- FLNC
 - FORM
 - FOX
 - FOXA
@@ -324,6 +323,7 @@ symbols:
 - NUVL
 - NVDA
 - NVMI
+- NWE
 - NWS
 - NWSA
 - NXPI
