@@ -82,6 +82,30 @@ def load_data(file_path: Optional[str] = None) -> pd.DataFrame:
 def calculate_bid_ask_analysis(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate bid/ask spread analysis and scoring metrics.
     
+    MATH EXPLANATIONS:
+    
+    1. SPREAD SLIPPAGE:
+       - short_spread = short_ask - short_bid (per contract)
+       - long_spread = long_ask - long_bid (per contract)
+       - spread_slippage = (short_spread + long_spread) * num_contracts
+       - This represents the total cost of bid/ask spreads across all contracts
+    
+    2. LIQUIDITY SCORE (0-10 points):
+       - Very tight short spread (<3%): +2 points
+       - Acceptable short spread (<10%): +1 point
+       - Very tight long spread (<3%): +2 points
+       - Acceptable long spread (<10%): +1 point
+       - High volume (>1000): +2 points
+       - Decent volume (>200): +1 point
+       - Good open interest (>200): +1 point
+       - Maximum: 10 points
+    
+    3. TRADE QUALITY SCORE:
+       - Liquidity Score * 2 (0-20 points) - Liquidity is CRITICAL
+       - (10 - Assignment Risk) (4-10 points) - Lower risk is better
+       - (net_daily_premium_after_spread / 100) (variable points) - Premium contribution
+       - Reasonable valuation bonus (P/E < 25): +2 points
+    
     Args:
         df: DataFrame with loaded data
         
@@ -115,6 +139,7 @@ def calculate_bid_ask_analysis(df: pd.DataFrame) -> pd.DataFrame:
             long_spread_pct = long_spread_pct.replace([np.inf, -np.inf], np.nan)
     
     # Calculate real costs after spreads
+    # spread_slippage = (short_spread + long_spread) * num_contracts
     df['spread_slippage'] = ((short_spread.fillna(0) + long_spread.fillna(0)) * 
                              df.get('num_contracts', 0))
     df['net_premium_after_spread'] = df['net_premium'] - df['spread_slippage']
@@ -152,6 +177,15 @@ def calculate_bid_ask_analysis(df: pd.DataFrame) -> pd.DataFrame:
         (df['net_daily_premium_after_spread'] / 100).fillna(0) +   # Premium contribution (variable)
         (df.get('pe_ratio', 999) < 25).astype(int) * 2              # Reasonable valuation bonus (0-2 points)
     )
+    
+    # Calculate number of long options to purchase
+    # Formula: net_premium / (l_prem * 100)
+    # This calculates how many contracts we can afford with the net premium
+    # Each contract costs l_prem * 100 (premium per share * 100 shares per contract)
+    cost_per_contract = df.get('l_prem', 0) * 100
+    df['long_options_to_purchase'] = (df['net_premium'] / cost_per_contract).fillna(0)
+    # Round to nearest integer and set to 0 if negative or invalid
+    df['long_options_to_purchase'] = np.round(df['long_options_to_purchase']).astype(int).clip(lower=0)
     
     return df
 
@@ -237,6 +271,9 @@ def print_detailed_analysis(df: pd.DataFrame) -> None:
         print(f"   Net Credit: ${row['net_premium']:,.0f}")
         print(f"   Daily Income: ${row['net_daily_premi']:,.2f}")
         print(f"   ROI on $100k: {(row['net_premium']/100000*100):.2f}%")
+        if 'long_options_to_purchase' in row:
+            long_options = row.get('long_options_to_purchase', 0)
+            print(f"   Long Options to Purchase: {int(long_options):,} contracts (based on net premium)")
         
         # Bid/Ask & Spread Analysis (if available)
         if 'spread_impact_pct' in row and pd.notna(row.get('spread_impact_pct')):
