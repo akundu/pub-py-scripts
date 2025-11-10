@@ -76,7 +76,7 @@ def format_numeric_value(x, col_name):
             return f"${val:,.2f}"
         elif 'ratio' in col_name.lower() or 'delta' in col_name.lower() or 'theta' in col_name.lower():
             return f"{val:.2f}"
-        elif 'days' in col_name.lower() or 'volume' in col_name.lower() or 'contracts' in col_name.lower():
+        elif 'days' in col_name.lower() or 'volume' in col_name.lower() or 'contracts' in col_name.lower() or 'options' in col_name.lower() or 'purchase' in col_name.lower():
             return f"{int(val):,}"
         elif 'percentage' in col_name.lower():
             return f"{val:.2f}%"
@@ -692,6 +692,9 @@ def generate_detailed_analysis_html(df: pd.DataFrame) -> str:
         html_parts.append(f'                    <p><span class="label">Net Credit:</span> ${row["net_premium"]:,.0f}</p>\n')
         html_parts.append(f'                    <p><span class="label">Daily Income:</span> ${row["net_daily_premi"]:,.2f}</p>\n')
         html_parts.append(f'                    <p><span class="label">ROI on $100k:</span> {roi:.2f}%</p>\n')
+        if 'long_options_to_purchase' in row and pd.notna(row.get('long_options_to_purchase')):
+            long_options = int(row.get('long_options_to_purchase', 0))
+            html_parts.append(f'                    <p><span class="label">Long Options to Purchase:</span> {long_options:,} contracts (based on net premium)</p>\n')
         html_parts.append('                </div>\n')
         
         # Spread & Liquidity Analysis (if available)
@@ -769,7 +772,7 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
     # Format numeric columns for better display
     numeric_cols = [
         'ticker','pe_ratio','market_cap_b','curr_price','strike_price','price_above_curr','opt_prem.','IV','delta','theta','expiration_date','days_to_expiry','s_prem_tot','s_day_prem','l_strike','l_prem','liv','l_delta','l_theta','l_expiration_date','l_days_to_expiry','l_prem_tot','l_cnt_avl','prem_diff','net_premium','net_daily_premi','volume','num_contracts','option_ticker','l_option_ticker',
-        'spread_slippage','net_premium_after_spread','net_daily_premium_after_spread','spread_impact_pct','liquidity_score','assignment_risk','trade_quality'
+        'spread_slippage','net_premium_after_spread','net_daily_premium_after_spread','spread_impact_pct','liquidity_score','assignment_risk','trade_quality','long_options_to_purchase'
     ]
     
     for col in numeric_cols:
@@ -889,4 +892,5 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
     print(f"HTML output generated successfully!", file=sys.stderr)
     print(f"Output directory: {output_path.absolute()}", file=sys.stderr)
     print(f"Open: {html_file.absolute()}", file=sys.stderr)
+
 
