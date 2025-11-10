@@ -36,6 +36,7 @@ def parse_args():
     parser.add_argument("--remove-outliers", type=float, nargs='?', const=10.0, metavar='PERCENT', 
                        help="Remove outliers: remove PERCENT%% from bottom and top when calculating averages (default: 10%%)")
     parser.add_argument("--print-avg", action="store_true", help="Print average values in output.")
+    parser.add_argument("--no-cache", action="store_true", help="Disable caching and fetch fresh data from database.")
     
     # Filter arguments
     parser.add_argument("--filter-change", type=float, metavar='PERCENT', 
@@ -541,6 +542,177 @@ async def main():
         if df.empty:
             print(f"No data found for {args.symbol} between {args.start} and {args.end}.")
             return
+        
+        # Debug: Print DataFrame info if raw mode
+        if args.raw and args.debug:
+            print(f"\nDEBUG: DataFrame info after get_stock_data:")
+            print(f"  Index type: {type(df.index)}, dtype: {df.index.dtype}")
+            print(f"  Index name: {df.index.name}")
+            print(f"  Columns: {df.columns.tolist()}")
+            if len(df) > 0:
+                print(f"  First index value: {df.index[0]} (type: {type(df.index[0])})")
+                if 'date' in df.columns:
+                    print(f"  First 'date' column value: {df['date'].iloc[0]} (type: {type(df['date'].iloc[0])})")
+                if 'datetime' in df.columns:
+                    print(f"  First 'datetime' column value: {df['datetime'].iloc[0]} (type: {type(df['datetime'].iloc[0])})")
+        
+        # Check if index is DatetimeIndex but with wrong values (all 1970-01-01)
+        if pd.api.types.is_datetime64_any_dtype(df.index) and len(df) > 0:
+            first_date = df.index[0]
+            if isinstance(first_date, pd.Timestamp):
+                if first_date.year == 1970 and first_date.month == 1 and first_date.day == 1:
+                    # Dates are incorrectly parsed - need to re-parse from original column
+                    if args.debug:
+                        print(f"\nDEBUG: Index is DatetimeIndex but dates are wrong (1970-01-01)")
+                        print(f"  Trying to find original date column to re-parse...")
+                    # Try to find the original date column
+                    date_col = None
+                    for col_name in ['date', 'datetime', 'timestamp']:
+                        if col_name in df.columns:
+                            date_col = col_name
+                            break
+                    if date_col and date_col in df.columns:
+                        # Re-parse the date column
+                        date_series = df[date_col]
+                        if date_series.dtype == 'object' or pd.api.types.is_string_dtype(date_series):
+                            # Remove 'Z' timezone indicator if present
+                            date_series_clean = date_series.str.replace('Z$', '', regex=True) if hasattr(date_series, 'str') else date_series
+                            df[date_col] = pd.to_datetime(date_series_clean, format='%Y-%m-%dT%H:%M:%S.%f', errors='coerce')
+                            if df[date_col].isna().all():
+                                df[date_col] = pd.to_datetime(date_series_clean, format='%Y-%m-%dT%H:%M:%S', errors='coerce')
+                            if df[date_col].isna().all():
+                                df[date_col] = pd.to_datetime(date_series, errors='coerce')
+                            df.set_index(date_col, inplace=True)
+                            df = df[df.index.notna()]
+        
+        # Ensure the DataFrame has a DatetimeIndex
+        if not pd.api.types.is_datetime64_any_dtype(df.index):
+            # Try to find a date/datetime column - check all possible column names
+            date_col = None
+            
+            # First, check if index name matches a column (most common case after reset_index)
+            if df.index.name and df.index.name in df.columns:
+                date_col = df.index.name
+            else:
+                # Check standard column names
+                for col_name in ['date', 'datetime', 'timestamp']:
+                    if col_name in df.columns:
+                        date_col = col_name
+                        break
+                
+                # If still not found, check all columns for datetime-like content
+                if date_col is None:
+                    for col_name in df.columns:
+                        # Check if column contains date-like strings
+                        if df[col_name].dtype == 'object':
+                            sample_val = df[col_name].dropna().iloc[0] if not df[col_name].dropna().empty else None
+                            if sample_val and isinstance(sample_val, str):
+                                # Check if it looks like a date string
+                                if 'T' in str(sample_val) or '-' in str(sample_val):
+                                    # Try to parse it
+                                    try:
+                                        test_parse = pd.to_datetime(sample_val, errors='coerce')
+                                        if pd.notna(test_parse):
+                                            date_col = col_name
+                                            break
+                                    except:
+                                        pass
+            
+            if date_col and date_col in df.columns:
+                # Parse the date column - try multiple formats
+                date_series = df[date_col]
+                
+                # Debug: Check what we're working with
+                if args.debug:
+                    print(f"\nDEBUG: Found date column '{date_col}'")
+                    print(f"  Column dtype: {date_series.dtype}")
+                    if len(date_series) > 0:
+                        print(f"  First value: {date_series.iloc[0]} (type: {type(date_series.iloc[0])})")
+                        print(f"  Sample values: {date_series.head(3).tolist()}")
+                
+                # Check if dates are already parsed but incorrectly (showing as 1970-01-01)
+                if pd.api.types.is_datetime64_any_dtype(date_series):
+                    # Check if all dates are epoch (1970-01-01)
+                    first_date = date_series.iloc[0] if len(date_series) > 0 else None
+                    if first_date and isinstance(first_date, pd.Timestamp):
+                        if first_date.year == 1970 and first_date.month == 1 and first_date.day == 1:
+                            if args.debug:
+                                print(f"  WARNING: Dates appear to be incorrectly parsed (all showing 1970-01-01)")
+                            # Dates are already parsed but wrong - we need to get original values
+                            # This shouldn't happen, but if it does, we can't fix it here
+                            # The issue is in _parse_df_from_response
+                
+                # If it's already a string, try to parse it
+                if date_series.dtype == 'object' or pd.api.types.is_string_dtype(date_series):
+                    # First, try to parse ISO format strings (from server: '2025-05-13T00:00:00.000000Z')
+                    # Remove 'Z' timezone indicator if present, as pandas format doesn't handle it well
+                    date_series_clean = date_series.str.replace('Z$', '', regex=True) if hasattr(date_series, 'str') else date_series
+                    
+                    # Try specific ISO format patterns
+                    try:
+                        # Try with microseconds
+                        df[date_col] = pd.to_datetime(date_series_clean, format='%Y-%m-%dT%H:%M:%S.%f', errors='coerce')
+                    except (ValueError, TypeError):
+                        try:
+                            # Try without microseconds
+                            df[date_col] = pd.to_datetime(date_series_clean, format='%Y-%m-%dT%H:%M:%S', errors='coerce')
+                        except (ValueError, TypeError):
+                            try:
+                                # Try date only format
+                                df[date_col] = pd.to_datetime(date_series_clean, format='%Y-%m-%d', errors='coerce')
+                            except (ValueError, TypeError):
+                                # Fall back to flexible parsing (pandas can handle ISO8601 automatically)
+                                df[date_col] = pd.to_datetime(date_series, errors='coerce')
+                    
+                    # If all values are still NaT, try flexible parsing
+                    if df[date_col].isna().all():
+                        df[date_col] = pd.to_datetime(date_series, errors='coerce')
+                else:
+                    # If it's numeric, might be a timestamp
+                    if pd.api.types.is_numeric_dtype(date_series):
+                        first_val = date_series.iloc[0] if len(date_series) > 0 else 0
+                        if first_val > 1e10:  # Likely milliseconds
+                            df[date_col] = pd.to_datetime(date_series, unit='ms', errors='coerce')
+                        elif first_val > 1e9:  # Likely seconds
+                            df[date_col] = pd.to_datetime(date_series, unit='s', errors='coerce')
+                        else:
+                            df[date_col] = pd.to_datetime(date_series, errors='coerce')
+                    else:
+                        df[date_col] = pd.to_datetime(date_series, errors='coerce')
+                
+                df.set_index(date_col, inplace=True)
+                df = df[df.index.notna()]
+            else:
+                # Try to convert the index itself
+                try:
+                    if pd.api.types.is_numeric_dtype(df.index):
+                        first_val = df.index[0] if len(df) > 0 else 0
+                        if first_val > 1e10:  # Likely milliseconds
+                            df.index = pd.to_datetime(df.index, unit='ms', errors='coerce')
+                        elif first_val > 1e9:  # Likely seconds
+                            df.index = pd.to_datetime(df.index, unit='s', errors='coerce')
+                        else:
+                            df.index = pd.to_datetime(df.index, errors='coerce')
+                    else:
+                        df.index = pd.to_datetime(df.index, format='ISO8601', errors='coerce')
+                        if df.index.isna().any():
+                            df.index = pd.to_datetime(df.index, errors='coerce')
+                    df = df[df.index.notna()]
+                except Exception as e:
+                    if args.debug:
+                        print(f"\nDEBUG: Error converting index: {e}")
+                        print(f"  Index type: {type(df.index)}, dtype: {df.index.dtype}")
+                        print(f"  Columns: {df.columns.tolist()}")
+                    raise ValueError(f"Could not convert DataFrame index to DatetimeIndex. Index type: {type(df.index)}, columns: {df.columns.tolist()}, error: {e}")
+        
+        # Final check - ensure index is datetime
+        if not pd.api.types.is_datetime64_any_dtype(df.index):
+            if args.debug:
+                print(f"\nDEBUG: Index still not datetime after conversion attempts")
+                print(f"  Index type: {type(df.index)}, dtype: {df.index.dtype}")
+                print(f"  First index value: {df.index[0] if len(df) > 0 else 'N/A'}")
+            raise ValueError(f"Failed to convert DataFrame index to DatetimeIndex. Index type: {type(df.index)}, dtype: {df.index.dtype}")
+        
         df = df.sort_index()
         
         # Apply filter if specified
@@ -557,6 +729,12 @@ async def main():
             print(f"{'Date':<20} {'Open':<10} {'High':<10} {'Low':<10} {'Close':<10} {'Volume':<12}")
             print("-" * 80)
             for date, row in df.iterrows():
+                # Convert to datetime if it's a pandas Timestamp
+                if hasattr(date, 'to_pydatetime'):
+                    date = date.to_pydatetime()
+                elif isinstance(date, pd.Timestamp):
+                    date = date.to_pydatetime()
+                # Format the date string
                 date_str = date.strftime('%Y-%m-%d %H:%M') if args.interval == 'hourly' else date.strftime('%Y-%m-%d')
                 print(f"{date_str:<20} {row['open']:<10.2f} {row['high']:<10.2f} {row['low']:<10.2f} {row['close']:<10.2f} {row.get('volume', 0):<12.0f}")
             print("=" * 80)
