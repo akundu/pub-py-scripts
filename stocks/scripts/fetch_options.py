@@ -612,10 +612,51 @@ class HistoricalDataFetcher:
                         break
                 try:
                     snapshot_local = self.client.get_snapshot_option(symbol, contract_ticker_local)
+                    
+                    # Also try to get quote separately using get_last_quote
+                    quote_local = None
+                    try:
+                        quote_local = self.client.get_last_quote(ticker=contract_ticker_local)
+                    except Exception:
+                        # get_last_quote may not be available for all plans or contracts
+                        pass
+                    
                     if snapshot_local:
-                        if hasattr(snapshot_local, 'last_quote') and snapshot_local.last_quote:
-                            details['bid'] = getattr(snapshot_local.last_quote, 'bid', None)
-                            details['ask'] = getattr(snapshot_local.last_quote, 'ask', None)
+                        # First, try to get bid/ask from last_quote (primary source)
+                        # Also check snapshot object itself for bid/ask as fallback
+                        snapshot_bid = getattr(snapshot_local, 'bid', None)
+                        snapshot_ask = getattr(snapshot_local, 'ask', None)
+                        
+                        # Check if last_quote exists and is not None
+                        has_last_quote = hasattr(snapshot_local, 'last_quote') and snapshot_local.last_quote is not None
+                        
+                        if has_last_quote:
+                            # Get bid and ask separately - try multiple possible field names
+                            quote_bid = None
+                            quote_ask = None
+                            
+                            # Try standard field names first
+                            quote_bid = getattr(snapshot_local.last_quote, 'bid', None)
+                            quote_ask = getattr(snapshot_local.last_quote, 'ask', None)
+                            
+                            # Try alternative field names if standard ones are None
+                            if quote_bid is None:
+                                quote_bid = getattr(snapshot_local.last_quote, 'bid_price', None)
+                            if quote_ask is None:
+                                quote_ask = getattr(snapshot_local.last_quote, 'ask_price', None)
+                            
+                            # Try even more alternative names (bp, ap, etc.)
+                            if quote_bid is None:
+                                quote_bid = getattr(snapshot_local.last_quote, 'bp', None)
+                            if quote_ask is None:
+                                quote_ask = getattr(snapshot_local.last_quote, 'ap', None)
+                            
+                            # Only set if they're actually provided (not None)
+                            if quote_bid is not None:
+                                details['bid'] = quote_bid
+                            if quote_ask is not None:
+                                details['ask'] = quote_ask
+                            
                             # Extract timestamp from last_quote - try multiple possible field names
                             quote_timestamp = None
                             for field_name in ['t', 'timestamp', 'ts', 'time']:
@@ -629,34 +670,87 @@ class HistoricalDataFetcher:
                                 details['last_quote_timestamp'] = datetime.fromtimestamp(quote_timestamp / 1000000000, tz=timezone.utc)
                             
                             # Fallback: if no timestamp found, use current time
-                            if not details['last_quote_timestamp']:
+                            if not details.get('last_quote_timestamp'):
                                 from datetime import datetime, timezone
                                 details['last_quote_timestamp'] = datetime.now(tz=timezone.utc)
-                        if hasattr(snapshot_local, 'last_trade') and snapshot_local.last_trade:
-                            last_price = getattr(snapshot_local.last_trade, 'price', None)
-                            if last_price and not details['bid']:
-                                details['bid'] = last_price
-                                details['ask'] = last_price
+                        
+                        # Fallback: if last_quote didn't provide bid/ask, check details object
+                        if details['bid'] is None or details['ask'] is None:
+                            if hasattr(snapshot_local, 'details') and snapshot_local.details:
+                                details_bid = getattr(snapshot_local.details, 'bid', None)
+                                details_ask = getattr(snapshot_local.details, 'ask', None)
+                                if details_bid is None:
+                                    details_bid = getattr(snapshot_local.details, 'bid_price', None)
+                                if details_ask is None:
+                                    details_ask = getattr(snapshot_local.details, 'ask_price', None)
+                                if details['bid'] is None and details_bid is not None:
+                                    details['bid'] = details_bid
+                                if details['ask'] is None and details_ask is not None:
+                                    details['ask'] = details_ask
+                        
+                        # Fallback: if last_quote didn't provide bid/ask, try get_last_quote result
+                        if (details['bid'] is None or details['ask'] is None) and quote_local:
+                            quote_bid = getattr(quote_local, 'bid_price', None)
+                            quote_ask = getattr(quote_local, 'ask_price', None)
+                            if quote_bid is None:
+                                quote_bid = getattr(quote_local, 'bid', None)
+                            if quote_ask is None:
+                                quote_ask = getattr(quote_local, 'ask', None)
+                            if details['bid'] is None and quote_bid is not None:
+                                details['bid'] = quote_bid
+                            if details['ask'] is None and quote_ask is not None:
+                                details['ask'] = quote_ask
+                        
+                        # Fallback: if last_quote didn't provide bid/ask, check snapshot object itself
+                        if details['bid'] is None and snapshot_bid is not None:
+                            details['bid'] = snapshot_bid
+                        if details['ask'] is None and snapshot_ask is not None:
+                            details['ask'] = snapshot_ask
                         
                         # Final fallback: if no timestamp was set anywhere, use current time
                         if not details['last_quote_timestamp']:
                             from datetime import datetime, timezone
                             details['last_quote_timestamp'] = datetime.now(tz=timezone.utc)
+                        
+                        # Get day_close and volume (but don't use as bid/ask fallback)
                         if hasattr(snapshot_local, 'day') and snapshot_local.day:
                             day_close = getattr(snapshot_local.day, 'close', None)
                             if day_close:
                                 details['day_close'] = day_close
-                                if not details['bid']:
-                                    details['bid'] = day_close
-                                    details['ask'] = day_close
                             details['volume'] = getattr(snapshot_local.day, 'volume', None)
+                            
+                            # Check if day object has bid/ask
+                            day_bid = getattr(snapshot_local.day, 'bid', None)
+                            day_ask = getattr(snapshot_local.day, 'ask', None)
+                            if day_bid is None:
+                                day_bid = getattr(snapshot_local.day, 'bid_price', None)
+                            if day_ask is None:
+                                day_ask = getattr(snapshot_local.day, 'ask_price', None)
+                            
+                            # Use day bid/ask as fallback if we don't have them yet
+                            if details['bid'] is None and day_bid is not None:
+                                details['bid'] = day_bid
+                            if details['ask'] is None and day_ask is not None:
+                                details['ask'] = day_ask
+                        
+                        # Get FMV (but don't use as bid/ask fallback)
                         if hasattr(snapshot_local, 'fair_market_value') and snapshot_local.fair_market_value:
                             fmv = getattr(snapshot_local.fair_market_value, 'value', None)
                             if fmv:
                                 details['fmv'] = fmv
-                                if not details['bid']:
-                                    details['bid'] = fmv
-                                    details['ask'] = fmv
+                        
+                        # Only use last_trade.price as fallback if BOTH bid and ask are missing
+                        # And only set it to one of them, not both (to avoid identical values)
+                        if hasattr(snapshot_local, 'last_trade') and snapshot_local.last_trade:
+                            last_price = getattr(snapshot_local.last_trade, 'price', None)
+                            if last_price:
+                                # Only use as fallback if both are missing
+                                if details['bid'] is None and details['ask'] is None:
+                                    # Use last_price as a mid-point estimate, but don't set both to same value
+                                    # Instead, leave them as None or use a small spread estimate
+                                    # For now, we'll leave them as None to indicate missing data
+                                    pass
+                                # If only one is missing, don't fill it with last_price to avoid confusion
                         if hasattr(snapshot_local, 'greeks') and snapshot_local.greeks:
                             details['delta'] = getattr(snapshot_local.greeks, 'delta', None)
                             details['gamma'] = getattr(snapshot_local.greeks, 'gamma', None)
@@ -688,25 +782,8 @@ class HistoricalDataFetcher:
                                         details['implied_volatility'] = iv_value
                                     break
                 except Exception as e_local:
-                    # Fallback to historical for first few only
-                    try:
-                        if index_in_list < 3:
-                            historical_data_local = self.client.get_aggs(
-                                ticker=contract_ticker_local,
-                                multiplier=1,
-                                timespan="day",
-                                from_=target_date_str,
-                                to=target_date_str,
-                                adjusted=True,
-                                sort="desc",
-                                limit=1
-                            )
-                            if historical_data_local:
-                                bar_local = historical_data_local[0]
-                                details['bid'] = bar_local.close
-                                details['ask'] = bar_local.close
-                    except Exception as hist_e_local:
-                        pass
+                    # If snapshot fetch fails entirely, we can't get bid/ask
+                    pass
                 return details
 
             if self.snapshot_max_concurrent > 0:
@@ -784,7 +861,7 @@ class HistoricalDataFetcher:
 
         # --- Options Data ---
         output.append(f"\n--- Options for {symbol} on {target_date} ---")
-        output.append("Note: Bid/Ask from real-time data if available, otherwise from day close. Day Close = daily close price. FMV = Fair Market Value. Greeks, IV (Implied Volatility), and Volume from current market data.")
+        output.append("Note: Bid/Ask are only available with Polygon plans that include real-time quotes for options. If your plan doesn't include this, bid/ask will show as N/A. Day Close = daily close price. FMV = Fair Market Value. Greeks, IV (Implied Volatility), and Volume from current market data.")
 
         # Add a note about the filters
         filter_notes = []

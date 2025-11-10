@@ -17,6 +17,7 @@ import numpy as np
 import argparse
 import sys
 import os
+import textwrap
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +28,23 @@ if str(scripts_dir) not in sys.path:
 
 # Import HTML report generator
 from html_report_generator import generate_html_output
+
+
+def wrap_dataframe_columns(df: pd.DataFrame, width: int = 15) -> pd.DataFrame:
+    """Return a copy of the DataFrame with column headers wrapped to the specified width."""
+    wrapped_df = df.copy()
+    wrapped_columns = {}
+    for col in wrapped_df.columns:
+        col_name = str(col).replace('_', ' ')
+        wrapped_lines = textwrap.wrap(
+            col_name,
+            width=width,
+            break_long_words=True,
+            break_on_hyphens=False
+        )
+        wrapped_columns[col] = "\n".join(line.strip() for line in wrapped_lines) if wrapped_lines else col_name
+    wrapped_df = wrapped_df.rename(columns=wrapped_columns)
+    return wrapped_df
 
 
 def load_data(file_path: Optional[str] = None) -> pd.DataFrame:
@@ -49,12 +67,9 @@ def load_data(file_path: Optional[str] = None) -> pd.DataFrame:
     df = df[df['ticker'] != 'ticker']
     
     # Convert numeric columns
+    # Note: option_ticker, l_option_ticker, expiration_date, l_expiration_date are strings, not numeric
     numeric_cols = [
-        'pe_ratio', 'market_cap_b', 'current_price', 'strike_price', 'price_above_current',
-        'option_premium', 'option_premium_percentage', 'delta', 'theta', 'days_to_expiry',
-        'short_premium_total', 'short_daily_premium', 'long_strike_price', 'long_option_premium',
-        'long_delta', 'long_theta', 'long_days_to_expiry', 'long_premium_total', 'premium_diff',
-        'net_premium', 'net_daily_premium', 'volume', 'num_contracts'
+        'pe_ratio','market_cap_b','curr_price','strike_price','price_above_curr','opt_prem.','IV','delta','theta','days_to_expiry','s_prem_tot','s_day_prem','l_strike','l_prem','liv','l_delta','l_theta','l_days_to_expiry','l_prem_tot','l_cnt_avl','prem_diff','net_premium','net_daily_premi','volume','num_contracts'
     ]
     
     for col in numeric_cols:
@@ -64,48 +79,129 @@ def load_data(file_path: Optional[str] = None) -> pd.DataFrame:
     return df
 
 
+def calculate_bid_ask_analysis(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate bid/ask spread analysis and scoring metrics.
+    
+    Args:
+        df: DataFrame with loaded data
+        
+    Returns:
+        DataFrame with additional bid/ask analysis columns
+    """
+    df = df.copy()
+    
+    # Parse bid/ask spreads for short position (temporary for calculations only)
+    short_spread = pd.Series(0.0, index=df.index)
+    short_spread_pct = pd.Series(np.nan, index=df.index)
+    if 'bid:ask' in df.columns:
+        bid_ask_split = df['bid:ask'].str.split(':', expand=True)
+        if len(bid_ask_split.columns) >= 2:
+            short_bid = pd.to_numeric(bid_ask_split[0], errors='coerce')
+            short_ask = pd.to_numeric(bid_ask_split[1], errors='coerce')
+            short_spread = short_ask - short_bid
+            short_spread_pct = (short_spread / df['opt_prem.'] * 100).round(2)
+            short_spread_pct = short_spread_pct.replace([np.inf, -np.inf], np.nan)
+    
+    # Parse bid/ask spreads for long position (temporary for calculations only)
+    long_spread = pd.Series(0.0, index=df.index)
+    long_spread_pct = pd.Series(np.nan, index=df.index)
+    if 'l_bid:ask' in df.columns:
+        l_bid_ask_split = df['l_bid:ask'].str.split(':', expand=True)
+        if len(l_bid_ask_split.columns) >= 2:
+            long_bid = pd.to_numeric(l_bid_ask_split[0], errors='coerce')
+            long_ask = pd.to_numeric(l_bid_ask_split[1], errors='coerce')
+            long_spread = long_ask - long_bid
+            long_spread_pct = (long_spread / df['l_prem'] * 100).round(2)
+            long_spread_pct = long_spread_pct.replace([np.inf, -np.inf], np.nan)
+    
+    # Calculate real costs after spreads
+    df['spread_slippage'] = ((short_spread.fillna(0) + long_spread.fillna(0)) * 
+                             df.get('num_contracts', 0))
+    df['net_premium_after_spread'] = df['net_premium'] - df['spread_slippage']
+    df['net_daily_premium_after_spread'] = (df['net_premium_after_spread'] / 
+                                            df['days_to_expiry']).round(2)
+    df['net_daily_premium_after_spread'] = df['net_daily_premium_after_spread'].replace(
+        [np.inf, -np.inf], np.nan)
+    
+    # Calculate spread impact percentage
+    df['spread_impact_pct'] = (df['spread_slippage'] / df['net_premium'] * 100).round(2)
+    df['spread_impact_pct'] = df['spread_impact_pct'].replace([np.inf, -np.inf], np.nan)
+    
+    # Liquidity Scoring (0-10) - using temporary spread calculations
+    df['liquidity_score'] = (
+        (short_spread_pct.fillna(999) < 3).astype(int) * 2 +    # Very tight short spread
+        (short_spread_pct.fillna(999) < 10).astype(int) * 1 +   # Acceptable short spread
+        (long_spread_pct.fillna(999) < 3).astype(int) * 2 +    # Very tight long spread
+        (long_spread_pct.fillna(999) < 10).astype(int) * 1 +   # Acceptable long spread
+        (df.get('volume', 0) > 1000).astype(int) * 2 +            # High volume
+        (df.get('volume', 0) > 200).astype(int) * 1 +             # Decent volume
+        (df.get('num_contracts', 0) > 200).astype(int) * 1       # Good open interest
+    )
+    
+    # Assignment Risk Scoring (0-6, lower is better)
+    df['assignment_risk'] = (
+        (df.get('delta', 0) > 0.4).astype(int) * 2 +              # High delta = higher assignment risk
+        (df.get('price_above_curr', 999) < 2).astype(int) * 2 +   # Close to strike = risky
+        (df.get('pe_ratio', 0) > 40).astype(int) * 2               # Expensive valuation = risky
+    )
+    
+    # Overall Trade Quality Score
+    df['trade_quality'] = (
+        df['liquidity_score'] * 2 +                                # Liquidity is CRITICAL (0-20 points)
+        (10 - df['assignment_risk']) +                             # Lower risk is better (4-10 points)
+        (df['net_daily_premium_after_spread'] / 100).fillna(0) +   # Premium contribution (variable)
+        (df.get('pe_ratio', 999) < 25).astype(int) * 2              # Reasonable valuation bonus (0-2 points)
+    )
+    
+    return df
+
+
 def print_top_20_analysis(df: pd.DataFrame) -> None:
     """Print analysis for top 20 performers by net daily premium."""
-    top_20 = df.nlargest(20, 'net_daily_premium')
+    top_20 = df.nlargest(20, 'net_daily_premi')
     
     print("=" * 120)
     print("DEEP DIVE: TOP 20 COVERED CALL SPREADS BY NET DAILY PREMIUM")
     print("=" * 120)
     
     # Create comprehensive analysis
-    analysis = top_20[['ticker', 'current_price', 'strike_price', 'net_daily_premium', 
+    analysis = top_20[['ticker', 'curr_price', 'strike_price', 'net_daily_premi', 
                        'volume', 'pe_ratio', 'market_cap_b']].copy()
     
     # Calculate key risk metrics
-    analysis['moneyness'] = ((top_20['strike_price'] - top_20['current_price']) / top_20['current_price'] * 100).round(2)
+    analysis['moneyness'] = ((top_20['strike_price'] - top_20['curr_price']) / top_20['curr_price'] * 100).round(2)
     analysis['short_delta'] = top_20['delta']
-    analysis['long_delta'] = top_20['long_delta']
-    analysis['delta_diff'] = (top_20['long_delta'] - top_20['delta']).round(3)
+    analysis['l_delta'] = top_20['l_delta']
+    analysis['delta_diff'] = (top_20['l_delta'] - top_20['delta']).round(3)
     analysis['theta_decay_daily'] = top_20['theta']
-    analysis['premium_capture_pct'] = top_20['option_premium_percentage']
-    analysis['spread_width'] = top_20['long_strike_price'] - top_20['strike_price']
+    # analysis['premium_capture_pct'] = top_20['option_premium_percentage']
+    analysis['spread_width'] = top_20['l_strike'] - top_20['strike_price']
     analysis['net_premium'] = top_20['net_premium']
     analysis['roi_on_spread'] = ((top_20['net_premium'] / 100000) * 100).round(2)
     
     print("\n### RISK METRICS OVERVIEW ###\n")
-    print(analysis[['ticker', 'moneyness', 'short_delta', 'long_delta', 'delta_diff', 
-                    'theta_decay_daily', 'volume']].to_string(index=False))
+    risk_df = analysis[['ticker', 'moneyness', 'short_delta', 'l_delta', 'delta_diff',
+                        'theta_decay_daily', 'volume']]
+    print(wrap_dataframe_columns(risk_df).to_string(index=False))
     
     print("\n\n### PROFITABILITY METRICS ###\n")
-    print(analysis[['ticker', 'net_daily_premium', 'net_premium', 'roi_on_spread', 
-                    'premium_capture_pct', 'spread_width']].to_string(index=False))
+    profitability_df = analysis[['ticker', 'net_daily_premi', 'net_premium', 'roi_on_spread',
+                                # 'premium_capture_pct', 
+                                 'spread_width']]
+    print(wrap_dataframe_columns(profitability_df).to_string(index=False))
     
     print("\n\n### FUNDAMENTAL QUALITY ###\n")
-    print(analysis[['ticker', 'pe_ratio', 'market_cap_b', 'current_price']].to_string(index=False))
+    fundamentals_df = analysis[['ticker', 'pe_ratio', 'market_cap_b', 'curr_price']]
+    print(wrap_dataframe_columns(fundamentals_df).to_string(index=False))
 
 
 def print_detailed_analysis(df: pd.DataFrame) -> None:
-    """Print detailed analysis for top 10 picks."""
+    """Print unified detailed analysis for top 10 picks incorporating all parameters."""
     print("\n\n" + "=" * 120)
-    print("DETAILED ANALYSIS: TOP 10 PICKS WITH OPTION TICKERS")
+    print("COMPREHENSIVE ANALYSIS: TOP 10 PICKS WITH OPTION TICKERS")
     print("=" * 120)
     
-    top_10 = df.nlargest(10, 'net_daily_premium')
+    top_10 = df.nlargest(10, 'net_daily_premi')
     
     for idx, row in top_10.iterrows():
         ticker = row['ticker']
@@ -115,35 +211,57 @@ def print_detailed_analysis(df: pd.DataFrame) -> None:
         
         # Position Details
         print(f"\n📊 POSITION STRUCTURE:")
-        print(f"   Current Price: ${row['current_price']:.2f}")
-        print(f"   Short Strike: ${row['strike_price']:.2f} ({((row['strike_price']-row['current_price'])/row['current_price']*100):.2f}% OTM)")
-        print(f"   Long Strike: ${row['long_strike_price']:.2f}")
-        print(f"   Spread Width: ${row['long_strike_price'] - row['strike_price']:.2f}")
+        print(f"   Current Price: ${row['curr_price']:.2f}")
+        print(f"   Short Strike: ${row['strike_price']:.2f} ({((row['strike_price']-row['curr_price'])/row['curr_price']*100):.2f}% OTM)")
+        print(f"   Long Strike: ${row['l_strike']:.2f}")
+        print(f"   Spread Width: ${row['l_strike'] - row['strike_price']:.2f}")
         
         # Option Tickers - HIGHLIGHTED
         print(f"\n🎯 OPTION TICKERS:")
+        bid_ask_short = row.get('bid:ask', 'N/A:N/A')
+        bid_ask_long = row.get('l_bid:ask', 'N/A:N/A')
         print(f"   ┌─ SHORT (SELL): {row['option_ticker']}")
         print(f"   │  Strike: ${row['strike_price']:.2f} | Expiry: {row['expiration_date'][:10]} ({int(row['days_to_expiry'])} DTE)")
-        print(f"   │  Premium: ${row['option_premium']:.2f} per contract")
-        print(f"   │  Total Credit: ${row['short_premium_total']:,.0f} ({int(row['num_contracts'])} contracts)")
+        print(f"   │  Premium: ${row['opt_prem.']:.2f} per contract | Bid:Ask: {bid_ask_short}")
+        print(f"   │  Total Credit: ${row['s_prem_tot']:,.0f} ({int(row['num_contracts'])} contracts)")
         print(f"   │")
-        print(f"   └─ LONG (BUY):  {row['long_option_ticker']}")
-        print(f"      Strike: ${row['long_strike_price']:.2f} | Expiry: {row['long_expiration_date'][:10]} ({int(row['long_days_to_expiry'])} DTE)")
-        print(f"      Premium: ${row['long_option_premium']:.2f} per contract")
-        print(f"      Total Debit: ${row['long_premium_total']:,.0f} ({int(row['num_contracts'])} contracts)")
+        print(f"   └─ LONG (BUY):  {row['l_option_ticker']}")
+        print(f"      Strike: ${row['l_strike']:.2f} | Expiry: {row['l_expiration_date'][:10]} ({int(row['l_days_to_expiry'])} DTE)")
+        print(f"      Premium: ${row['l_prem']:.2f} per contract | Bid:Ask: {bid_ask_long}")
+        print(f"      Total Debit: ${row['l_prem_tot']:,.0f} ({int(row['num_contracts'])} contracts)")
         
         # Premium Analysis
         print(f"\n💰 PREMIUM BREAKDOWN:")
-        print(f"   Short Premium: ${row['short_premium_total']:,.0f} (${row['short_daily_premium']:,.0f}/day)")
-        print(f"   Long Premium: ${row['long_premium_total']:,.0f}")
+        print(f"   Short Premium: ${row['s_prem_tot']:,.0f} (${row['s_day_prem']:,.0f}/day)")
+        print(f"   Long Premium: ${row['l_prem_tot']:,.0f}")
         print(f"   Net Credit: ${row['net_premium']:,.0f}")
-        print(f"   Daily Income: ${row['net_daily_premium']:,.2f}")
+        print(f"   Daily Income: ${row['net_daily_premi']:,.2f}")
         print(f"   ROI on $100k: {(row['net_premium']/100000*100):.2f}%")
+        
+        # Bid/Ask & Spread Analysis (if available)
+        if 'spread_impact_pct' in row and pd.notna(row.get('spread_impact_pct')):
+            spread_slippage = row.get('spread_slippage', 0)
+            net_after_spread = row.get('net_premium_after_spread', row['net_premium'])
+            net_daily_after = row.get('net_daily_premium_after_spread', row['net_daily_premi'])
+            spread_impact = row.get('spread_impact_pct', 0)
+            
+            if 'liquidity_score' in row and pd.notna(row.get('liquidity_score')):
+                liquidity_score = row.get('liquidity_score', 0)
+                assignment_risk = row.get('assignment_risk', 0)
+                trade_quality = row.get('trade_quality', 0)
+                print(f"\n💱 SPREAD & LIQUIDITY ANALYSIS:")
+                print(f"   Spread Slippage: ${spread_slippage:,.0f}")
+                print(f"   Net Premium After Spread: ${net_after_spread:,.0f}")
+                print(f"   Daily Income After Spread: ${net_daily_after:,.2f}")
+                print(f"   Spread Impact: {spread_impact:.2f}%")
+                print(f"   Liquidity Score: {liquidity_score:.0f}/10")
+                print(f"   Assignment Risk: {assignment_risk:.0f}/6")
+                print(f"   Trade Quality Score: {trade_quality:.1f}")
         
         # Greeks & Risk
         print(f"\n📈 GREEKS & RISK:")
-        print(f"   Short Delta: {row['delta']:.2f} | Long Delta: {row['long_delta']:.2f} | Net: {row['long_delta']-row['delta']:.3f}")
-        print(f"   Short Theta: {row['theta']:.2f} | Long Theta: {row['long_theta']:.2f}")
+        print(f"   Short Delta: {row['delta']:.2f} | Long Delta: {row['l_delta']:.2f} | Net: {row['l_delta']-row['delta']:.3f}")
+        print(f"   Short Theta: {row['theta']:.2f} | Long Theta: {row['l_theta']:.2f}")
         print(f"   Assignment Risk: {'LOW' if row['delta'] < 0.35 else 'MODERATE' if row['delta'] < 0.50 else 'HIGH'}")
         
         # Liquidity & Fundamentals
@@ -189,8 +307,8 @@ def print_detailed_analysis(df: pd.DataFrame) -> None:
         
         # Overall score
         score = 0
-        if row['net_daily_premium'] > 10000: score += 3
-        elif row['net_daily_premium'] > 7000: score += 2
+        if row['net_daily_premi'] > 10000: score += 3
+        elif row['net_daily_premi'] > 7000: score += 2
         else: score += 1
         
         if row['volume'] > 1000: score += 3
@@ -218,27 +336,87 @@ def print_detailed_analysis(df: pd.DataFrame) -> None:
         print(f"   Recommendation: {recommendation}")
 
 
+def print_bid_ask_analysis(df: pd.DataFrame) -> None:
+    """Print summary statistics and top recommendations."""
+    print("\n\n" + "=" * 120)
+    print("SUMMARY STATISTICS & TOP RECOMMENDATIONS")
+    print("=" * 120)
+    
+    # Check if required columns exist
+    if 'spread_impact_pct' not in df.columns:
+        print("\n⚠️  Spread analysis columns not found. Skipping summary statistics.")
+        return
+    
+    print(f"\n📊 SPREAD IMPACT STATISTICS:")
+    spread_impact_mean = df['spread_impact_pct'].mean()
+    spread_impact_median = df['spread_impact_pct'].median()
+    low_impact_count = (df['spread_impact_pct'] < 5).sum()
+    high_impact_count = (df['spread_impact_pct'] > 10).sum()
+    
+    print(f"   Average spread impact: {spread_impact_mean:.2f}%")
+    print(f"   Median spread impact: {spread_impact_median:.2f}%")
+    print(f"   Trades with <5% impact: {low_impact_count}/{len(df)}")
+    print(f"   Trades with >10% impact: {high_impact_count}/{len(df)} ⚠️")
+    
+    print(f"\n💧 LIQUIDITY DISTRIBUTION:")
+    if 'liquidity_score' in df.columns:
+        high_liquidity = (df['liquidity_score'] >= 7).sum()
+        medium_liquidity = ((df['liquidity_score'] >= 4) & (df['liquidity_score'] < 7)).sum()
+        low_liquidity = (df['liquidity_score'] < 4).sum()
+        print(f"   High liquidity (7-10): {high_liquidity} trades")
+        print(f"   Medium liquidity (4-6): {medium_liquidity} trades")
+        print(f"   Low liquidity (<4): {low_liquidity} trades ⚠️")
+    
+    # Top 5 recommendations by trade quality
+    print("\n" + "=" * 120)
+    print("🏆 TOP 5 RECOMMENDED TRADES (By Trade Quality Score)")
+    print("=" * 120)
+    
+    if 'trade_quality' in df.columns:
+        top5 = df.nlargest(5, 'trade_quality')
+        for i, (idx, row) in enumerate(top5.iterrows(), 1):
+            print(f"\n#{i}. {row['ticker']} - Quality Score: {row['trade_quality']:.1f}")
+            
+            net_daily_after = row.get('net_daily_premium_after_spread', 0)
+            spread_impact = row.get('spread_impact_pct', 0)
+            liquidity = row.get('liquidity_score', 0)
+            assignment_risk = row.get('assignment_risk', 0)
+            
+            print(f"   💰 Daily Premium: ${net_daily_after:.2f} (after {spread_impact:.1f}% spread cost)")
+            print(f"   📊 Liquidity: {liquidity:.0f}/10 | Volume: {row.get('volume', 0):.0f} | OI: {row.get('num_contracts', 0):.0f}")
+            print(f"   ⚠️  Risk: {assignment_risk:.0f}/6 | P/E: {row.get('pe_ratio', 0):.2f} | Delta: {row.get('delta', 0):.2f}")
+            
+            if 'option_ticker' in row:
+                bid_ask_short = row.get('bid:ask', 'N/A:N/A')
+                print(f"   📉 SHORT: {row['option_ticker']} @ ${row.get('strike_price', 0):.2f} | Bid:Ask: {bid_ask_short}")
+            
+            if 'l_option_ticker' in row:
+                bid_ask_long = row.get('l_bid:ask', 'N/A:N/A')
+                print(f"   📈 LONG:  {row['l_option_ticker']} @ ${row.get('l_strike', 0):.2f} | Bid:Ask: {bid_ask_long}")
+
+
 def print_summary_rankings(df: pd.DataFrame) -> None:
     """Print summary rankings and top recommendations."""
     print("\n\n" + "=" * 120)
     print("SUMMARY RANKINGS")
     print("=" * 120)
     
-    top_10 = df.nlargest(10, 'net_daily_premium')
+    top_10 = df.nlargest(10, 'net_daily_premi')
     
     # Create final ranking
-    ranking = top_10[['ticker', 'net_daily_premium', 'volume', 'delta', 'pe_ratio', 
-                      'option_ticker', 'long_option_ticker']].copy()
+    ranking = top_10[['ticker', 'net_daily_premi', 'volume', 'delta', 'pe_ratio', 
+                      'option_ticker', 'l_option_ticker']].copy()
     ranking['liquidity_score'] = ranking['volume'].apply(lambda x: 3 if x > 1000 else 2 if x > 300 else 1)
     ranking['delta_score'] = ranking['delta'].apply(lambda x: 3 if x < 0.35 else 2 if x < 0.50 else 1)
-    ranking['premium_score'] = ranking['net_daily_premium'].apply(lambda x: 3 if x > 10000 else 2 if x > 7000 else 1)
+    ranking['premium_score'] = ranking['net_daily_premi'].apply(lambda x: 3 if x > 10000 else 2 if x > 7000 else 1)
     ranking['pe_score'] = ranking['pe_ratio'].apply(lambda x: 2 if x < 25 else 1 if x < 50 else 0)
     ranking['total_score'] = ranking['liquidity_score'] + ranking['delta_score'] + ranking['premium_score'] + ranking['pe_score']
     
     ranking = ranking.sort_values('total_score', ascending=False)
     
     print("\nFINAL RANKINGS (by composite score):\n")
-    print(ranking[['ticker', 'net_daily_premium', 'volume', 'delta', 'total_score']].to_string(index=False))
+    ranking_df = ranking[['ticker', 'net_daily_premi', 'volume', 'delta', 'total_score']]
+    print(wrap_dataframe_columns(ranking_df).to_string(index=False))
     
     print("\n\n" + "=" * 120)
     print("🏆 TOP 3 RECOMMENDATIONS WITH TRADE DETAILS")
@@ -249,15 +427,17 @@ def print_summary_rankings(df: pd.DataFrame) -> None:
         ticker_data = df[df['ticker'] == row['ticker']].iloc[0]
         
         print(f"\n{'─' * 110}")
-        print(f"#{i}. {row['ticker']} - Score: {row['total_score']}/11 | Daily Premium: ${row['net_daily_premium']:,.2f} | Volume: {row['volume']:,.0f}")
+        print(f"#{i}. {row['ticker']} - Score: {row['total_score']}/11 | Daily Premium: ${row['net_daily_premi']:,.2f} | Volume: {row['volume']:,.0f}")
         print(f"{'─' * 110}")
-        print(f"\n   📍 CURRENT PRICE: ${ticker_data['current_price']:.2f}")
+        print(f"\n   📍 CURRENT PRICE: ${ticker_data['curr_price']:.2f}")
+        bid_ask_short = ticker_data.get('bid:ask', 'N/A:N/A')
+        bid_ask_long = ticker_data.get('l_bid:ask', 'N/A:N/A')
         print(f"\n   🔴 SELL (SHORT):  {row['option_ticker']}")
-        print(f"      Strike: ${ticker_data['strike_price']:.2f} | Exp: {ticker_data['expiration_date'][:10]} | Premium: ${ticker_data['option_premium']:.2f}")
-        print(f"      Contracts: {int(ticker_data['num_contracts'])} | Total Credit: ${ticker_data['short_premium_total']:,.0f}")
-        print(f"\n   🟢 BUY (LONG):    {row['long_option_ticker']}")
-        print(f"      Strike: ${ticker_data['long_strike_price']:.2f} | Exp: {ticker_data['long_expiration_date'][:10]} | Premium: ${ticker_data['long_option_premium']:.2f}")
-        print(f"      Contracts: {int(ticker_data['num_contracts'])} | Total Debit: ${ticker_data['long_premium_total']:,.0f}")
+        print(f"      Strike: ${ticker_data['strike_price']:.2f} | Exp: {ticker_data['expiration_date'][:10]} | Premium: ${ticker_data['opt_prem.']:.2f} | Bid:Ask: {bid_ask_short}")
+        print(f"      Contracts: {int(ticker_data['num_contracts'])} | Total Credit: ${ticker_data['s_prem_tot']:,.0f}")
+        print(f"\n   🟢 BUY (LONG):    {row['l_option_ticker']}")
+        print(f"      Strike: ${ticker_data['l_strike']:.2f} | Exp: {ticker_data['l_expiration_date'][:10]} | Premium: ${ticker_data['l_prem']:.2f} | Bid:Ask: {bid_ask_long}")
+        print(f"      Contracts: {int(ticker_data['num_contracts'])} | Total Debit: ${ticker_data['l_prem_tot']:,.0f}")
         print(f"\n   💵 NET POSITION: ${ticker_data['net_premium']:,.0f} credit ({(ticker_data['net_premium']/100000*100):.1f}% ROI)")
         print(f"   📊 RISK: Delta {ticker_data['delta']:.2f} | Volume {ticker_data['volume']:,.0f} | P/E {ticker_data['pe_ratio']:.1f}")
     
@@ -273,8 +453,8 @@ def print_summary_rankings(df: pd.DataFrame) -> None:
         print("{:<8} {:<30} {:<30} ${:>10,.2f}".format(
             row['ticker'],
             row['option_ticker'],
-            row['long_option_ticker'],
-            row['net_daily_premium']
+            row['l_option_ticker'],
+            row['net_daily_premi']
         ))
     
     print("\n" + "=" * 120)
@@ -328,6 +508,9 @@ Examples:
             print("Error: No data loaded. Check your input file or stdin.", file=sys.stderr)
             sys.exit(1)
         
+        # Calculate bid/ask analysis
+        df = calculate_bid_ask_analysis(df)
+        
         # Generate HTML output if requested
         if args.html:
             generate_html_output(df, args.output_dir)
@@ -335,6 +518,7 @@ Examples:
             # Print analyses to stdout
             print_top_20_analysis(df)
             print_detailed_analysis(df)
+            print_bid_ask_analysis(df)
             print_summary_rankings(df)
         
     except FileNotFoundError:

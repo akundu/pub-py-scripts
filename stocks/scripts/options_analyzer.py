@@ -191,6 +191,7 @@ class FilterParser:
         'days_to_expiry': int,
         'delta': float,
         'theta': float,
+        'implied_volatility': float,
         # Spread-related fields
         'long_strike_price': float,
         'long_option_premium': float,
@@ -200,6 +201,8 @@ class FilterParser:
         'long_expiration_date': str,
         'long_option_ticker': str,
         'long_volume': int,
+        'long_implied_volatility': float,
+        'long_contracts_available': int,
         'premium_diff': float,
         'short_premium_total': float,
         'short_daily_premium': float,
@@ -488,45 +491,52 @@ class OptionsAnalyzer:
     def _create_compact_headers(self, df: pd.DataFrame) -> Dict[str, str]:
         """Create compact headers that are at most 4 characters longer than the data width."""
         compact_headers = {}
+
+        'current_price', 'strike_price', 'volume', 'pe_ratio', 'market_cap_b'
         
         # Define mapping for common columns to shorter names
         header_mapping = {
-            'ticker': 'TKR',
-            'current_price': 'PRC',
-            'pe_ratio': 'P/E',
-            'market_cap': 'MKT_CAP',
-            'market_cap_b': 'MKT_B',
-            'strike_price': 'STRK',
-            'price_above_current': 'ABOVE',
-            'option_premium': 'PREM',
-            'option_premium_percentage': 'PREM%',
-            'premium_above_diff_percentage': 'DIFF%',
-            'delta': 'DEL',
-            'theta': 'TH',
-            'volume': 'VOL',
-            'num_contracts': 'CNT',
-            'potential_premium': 'POT_PREM',
-            'daily_premium': 'DAY_PREM',
-            'expiration_date': 'EXP (UTC)',
-            'days_to_expiry': 'DAYS',
-            'last_quote_timestamp': 'LQUOTE_TS',
-            'write_timestamp': 'WRITE_TS (EST)',
-            'option_ticker': 'OPT_TKR',
-            # Spread-related columns
-            'long_strike_price': 'L_STRK',
-            'long_option_premium': 'L_PREM',
-            'long_expiration_date': 'L_EXP',
-            'long_days_to_expiry': 'L_DAYS',
-            'long_option_ticker': 'L_OPT_TKR',
-            'long_delta': 'L_DEL',
-            'long_theta': 'L_TH',
-            'long_volume': 'L_VOL',
-            'premium_diff': 'PREM_DIFF',
-            'short_premium_total': 'S_PREM_TOT',
-            'short_daily_premium': 'S_DAY_PREM',
-            'long_premium_total': 'L_PREM_TOT',
-            'net_premium': 'NET_PREM',
-            'net_daily_premium': 'NET_DAY'
+            # 'ticker': 'ticker',
+            'current_price': 'curr_price',
+            # 'pe_ratio': 'pe_ratio',
+            # 'market_cap': 'market_cap',
+            # 'market_cap_b': 'market_cap_b',
+            # 'strike_price': 'strike_price',
+            'price_above_current': 'price_above_curr',
+            'option_premium': 'opt_prem.',
+            'bid_ask': 'bid:ask',
+            'option_premium_percentage': 'opt_prem.%',
+            # 'premium_above_diff_percentage': 'DIFF%',
+            'implied_volatility': 'iv',
+            # 'delta': 'delta',
+            # 'theta': 'theta',
+            # 'volume': 'volume',
+            # 'num_contracts': 'CNT',
+            # 'potential_premium': 'POT_PREM',
+            # 'daily_premium': 'DAILY_PREM',
+            # 'expiration_date': 'EXP (UTC)',
+            # 'days_to_expiry': 'DAYS',
+            # 'last_quote_timestamp': 'LQUOTE_TS',
+            # 'write_timestamp': 'WRITE_TS (EST)',
+            # 'option_ticker': 'OPT_TKR',
+            # # Spread-related columns
+            'long_strike_price': 'l_strike',
+            'long_option_premium': 'l_prem',
+            'long_bid_ask': 'l_bid:ask',
+            'long_expiration_date': 'l_expiration_date',
+            'long_days_to_expiry': 'l_days_to_expiry',
+            'long_option_ticker': 'l_option_ticker',
+            'long_delta': 'l_delta',
+            'long_theta': 'l_theta',
+            'long_implied_volatility': 'liv',
+            'long_volume': 'l_volume',
+            'long_contracts_available': 'l_cnt_avl',
+            'premium_diff': 'prem_diff',
+            'short_premium_total': 's_prem_tot',
+            'short_daily_premium': 's_day_prem',
+            'long_premium_total': 'l_prem_tot',
+            # 'net_premium': 'net_premium',
+            # 'net_daily_premium': 'net_daily_premium'
         }
         
         for col in df.columns:
@@ -534,7 +544,7 @@ class OptionsAnalyzer:
                 compact_headers[col] = header_mapping[col]
             else:
                 # For unknown columns, use the original name but truncate if too long
-                compact_headers[col] = col[:8] if len(col) > 8 else col
+                compact_headers[col] = col[:15] if len(col) > 8 else col
         
         return compact_headers
     
@@ -987,6 +997,17 @@ class OptionsAnalyzer:
                 axis=1
             )
             
+            # Format bid:ask for short options
+            def format_bid_ask(row):
+                bid_val = row.get('bid', 0) if pd.notna(row.get('bid')) else 0
+                ask_val = row.get('ask', 0) if pd.notna(row.get('ask')) else 0
+                if pd.notna(row.get('bid')) or pd.notna(row.get('ask')):
+                    return f"{bid_val:.2f}:{ask_val:.2f}"
+                else:
+                    return "N/A:N/A"
+            
+            df['bid_ask'] = df.apply(format_bid_ask, axis=1)
+            
             # Calculate days to expiry
             df['expiration_date'] = pd.to_datetime(df['expiration_date'])
             # Ensure expiration_date is timezone-aware UTC
@@ -994,6 +1015,12 @@ class OptionsAnalyzer:
                 df['expiration_date'] = df['expiration_date'].dt.tz_localize('UTC')
             today = pd.Timestamp.now(tz='UTC').normalize()
             df['days_to_expiry'] = ((df['expiration_date'] - today).dt.total_seconds() / 86400).astype(int)
+
+            # Normalize short option implied volatility
+            if 'implied_volatility' in df.columns:
+                df['implied_volatility'] = pd.to_numeric(df['implied_volatility'], errors='coerce').round(4)
+            else:
+                df['implied_volatility'] = pd.Series([float('nan')] * len(df), index=df.index)
             
             # Apply days_to_expiry filter if specified
             if days_to_expiry is not None:
@@ -1065,6 +1092,8 @@ class OptionsAnalyzer:
             for col in ['bid', 'ask', 'delta', 'theta']:
                 if col in df.columns:
                     df[col] = df[col].round(2)
+            if 'implied_volatility' in df.columns:
+                df['implied_volatility'] = df['implied_volatility'].round(4)
             
             # Convert timestamps
             for ts_col in ['last_quote_timestamp', 'write_timestamp']:
@@ -1074,7 +1103,7 @@ class OptionsAnalyzer:
             # Select and order columns for output
             output_cols = [
                 'ticker', 'current_price', 'strike_price', 'price_above_current',
-                'option_premium', 'delta', 'theta', 'volume', 'num_contracts',
+                'option_premium', 'bid_ask', 'implied_volatility', 'delta', 'theta', 'volume', 'num_contracts',
                 'potential_premium', 'daily_premium', 'expiration_date', 'days_to_expiry',
                 'last_quote_timestamp', 'write_timestamp', 'option_ticker'
             ]
@@ -1329,6 +1358,10 @@ class OptionsAnalyzer:
             
             # Ensure we have a copy before modifying to avoid SettingWithCopyWarning
             long_options_df = long_options_df.copy()
+            if 'implied_volatility' in long_options_df.columns:
+                long_options_df['implied_volatility'] = pd.to_numeric(long_options_df['implied_volatility'], errors='coerce').round(4)
+            else:
+                long_options_df['implied_volatility'] = pd.Series([float('nan')] * len(long_options_df), index=long_options_df.index)
             
             # Calculate days to expiry for long options
             long_options_df['expiration_date'] = pd.to_datetime(long_options_df['expiration_date'])
@@ -1410,6 +1443,12 @@ class OptionsAnalyzer:
                     long_premium = 0.01
                 long_premium = round(float(long_premium), 2)
                 
+                long_iv = best_long.get('implied_volatility')
+                if pd.notna(long_iv):
+                    long_iv = float(long_iv)
+                else:
+                    long_iv = None
+
                 # SPREAD MODE: Calculate num_contracts based on long option premium (investment in long options)
                 # This represents how many spreads you can afford with your position_size
                 num_contracts = math.floor(position_size / (long_premium * 100)) if long_premium > 0 else 0
@@ -1470,6 +1509,23 @@ class OptionsAnalyzer:
                 short_daily_premium = round(short_premium_total / short_days, 2) if short_days > 0 else 0
                 # Net daily premium = net premium / days (amortized over short days)
                 net_daily_premium = round(net_premium / short_days, 2) if short_days > 0 else 0
+
+                long_contracts_available = best_long.get('open_interest')
+                if pd.notna(long_contracts_available):
+                    try:
+                        long_contracts_available = int(float(long_contracts_available))
+                    except (TypeError, ValueError):
+                        long_contracts_available = None
+                else:
+                    long_contracts_available = None
+                
+                # Format long bid:ask
+                long_bid_val = best_long.get('bid', 0) if pd.notna(best_long.get('bid')) else 0
+                long_ask_val = best_long.get('ask', 0) if pd.notna(best_long.get('ask')) else 0
+                if pd.notna(best_long.get('bid')) or pd.notna(best_long.get('ask')):
+                    long_bid_ask = f"{long_bid_val:.2f}:{long_ask_val:.2f}"
+                else:
+                    long_bid_ask = "N/A:N/A"
                 
                 # Create spread result row
                 spread_row = short_row.to_dict()
@@ -1477,12 +1533,15 @@ class OptionsAnalyzer:
                     'num_contracts': num_contracts,  # Override with spread-based calculation
                     'long_strike_price': round(float(best_long['strike_price']), 2),
                     'long_option_premium': long_premium,
+                    'long_bid_ask': long_bid_ask,
                     'long_expiration_date': best_long['expiration_date'],
                     'long_days_to_expiry': int(best_long['days_to_expiry']),
                     'long_option_ticker': best_long.get('option_ticker', ''),
                     'long_delta': round(float(best_long.get('delta', 0)), 2) if pd.notna(best_long.get('delta')) else None,
                     'long_theta': round(float(best_long.get('theta', 0)), 2) if pd.notna(best_long.get('theta')) else None,
                     'long_volume': int(best_long.get('volume', 0)) if pd.notna(best_long.get('volume')) else 0,
+                    'long_implied_volatility': long_iv,
+                    'long_contracts_available': long_contracts_available,
                     'premium_diff': premium_diff,
                     'short_premium_total': short_premium_total,
                     'short_daily_premium': short_daily_premium,
@@ -1552,6 +1611,12 @@ class OptionsAnalyzer:
         df_renamed['pe_ratio'] = df_renamed['ticker'].map(lambda x: financial_data.get(x, {}).get('pe_ratio'))
         df_renamed['market_cap'] = df_renamed['ticker'].map(lambda x: financial_data.get(x, {}).get('market_cap'))
         df_renamed['market_cap_b'] = df_renamed['market_cap'].apply(lambda x: round(x / 1e9, 2) if pd.notna(x) and x is not None else None)
+        if 'implied_volatility' in df_renamed.columns:
+            df_renamed['implied_volatility'] = pd.to_numeric(df_renamed['implied_volatility'], errors='coerce')
+        if 'long_implied_volatility' in df_renamed.columns:
+            df_renamed['long_implied_volatility'] = pd.to_numeric(df_renamed['long_implied_volatility'], errors='coerce')
+        if 'long_contracts_available' in df_renamed.columns:
+            df_renamed['long_contracts_available'] = pd.to_numeric(df_renamed['long_contracts_available'], errors='coerce')
         
         # Add option premium percentage calculation
         df_renamed['option_premium_percentage'] = (df_renamed['option_premium'] / df_renamed['current_price'] * 100).round(2)
@@ -1597,12 +1662,12 @@ class OptionsAnalyzer:
             display_columns = [
                 'ticker', 'pe_ratio', 'market_cap_b', 'current_price',
                 # Short option details
-                'strike_price', 'price_above_current', 'option_premium', 'option_premium_percentage',
-                'delta', 'theta', 'expiration_date', 'days_to_expiry',
+                'strike_price', 'price_above_current', 'option_premium', 'bid_ask',
+                'implied_volatility', 'delta', 'theta', 'expiration_date', 'days_to_expiry',
                 'short_premium_total', 'short_daily_premium',
                 # Long option details
-                'long_strike_price', 'long_option_premium', 'long_delta', 'long_theta',
-                'long_expiration_date', 'long_days_to_expiry', 'long_premium_total',
+                'long_strike_price', 'long_option_premium', 'long_bid_ask', 'long_implied_volatility', 'long_delta', 'long_theta',
+                'long_expiration_date', 'long_days_to_expiry', 'long_premium_total', 'long_contracts_available',
                 # Premium comparison
                 'premium_diff',
                 # Net spread calculations
@@ -1613,8 +1678,8 @@ class OptionsAnalyzer:
         else:
             display_columns = [
                 'ticker', 'pe_ratio', 'market_cap_b', 'current_price', 'strike_price',
-                'price_above_current', 'option_premium', 'option_premium_percentage', 'premium_above_diff_percentage',
-                'delta', 'theta',
+                'price_above_current', 'option_premium', 'bid_ask', 'premium_above_diff_percentage',
+                'implied_volatility', 'delta', 'theta',
                 'potential_premium', 'daily_premium', 'expiration_date', 'days_to_expiry',
                 #'volume', 'num_contracts', 'last_quote_timestamp', 'write_timestamp', 'option_ticker'
                 'volume', 'num_contracts', 'write_timestamp', 'option_ticker'
@@ -1663,16 +1728,46 @@ class OptionsAnalyzer:
             if self.debug or not self.quiet:
                 print(f"DEBUG: After top-n filter ({top_n}): {len(df_display)} rows (was {before_topn})", file=sys.stderr)
         
-        # Handle CSV column selection
-        if csv_columns and output_format == 'csv':
-            # Filter to only include specified columns
-            available_csv_columns = [col for col in csv_columns if col in df_display.columns]
-            if available_csv_columns:
-                df_display = df_display[available_csv_columns]
-        
         # Handle CSV formatting
         if output_format == 'csv':
-            return self._format_csv_output(df_display, csv_delimiter, csv_quoting, group_by, output_file)
+            df_csv = df_display.copy()
+            compact_headers = self._create_compact_headers(df_csv)
+            header_reverse_map = {v: k for k, v in compact_headers.items()}
+            
+            if csv_columns:
+                resolved_columns = []
+                for requested in csv_columns:
+                    if requested in df_csv.columns:
+                        resolved_columns.append(requested)
+                        continue
+                    # Allow compact header names
+                    if requested in header_reverse_map:
+                        resolved_columns.append(header_reverse_map[requested])
+                        continue
+                    # Case-insensitive match against compact headers
+                    matches = [
+                        header_reverse_map[h]
+                        for h in header_reverse_map
+                        if h.lower() == requested.lower()
+                    ]
+                    if len(matches) == 1:
+                        resolved_columns.append(matches[0])
+                        continue
+                    # Case-insensitive substring match on original columns
+                    substring_matches = [
+                        col for col in df_csv.columns
+                        if requested.lower() in str(col).lower()
+                    ]
+                    if len(substring_matches) == 1:
+                        resolved_columns.append(substring_matches[0])
+                if resolved_columns:
+                    df_csv = df_csv[resolved_columns]
+                    compact_headers = {
+                        col: compact_headers[col] for col in resolved_columns if col in compact_headers
+                    }
+            
+            df_csv = df_csv.rename(columns=compact_headers)
+            return self._format_csv_output(df_csv, csv_delimiter, csv_quoting, group_by, output_file)
         
         if group_by == 'ticker':
             # Group by ticker and show results per ticker
@@ -1700,6 +1795,15 @@ class OptionsAnalyzer:
                     for col in ['premium_above_diff_percentage']:
                         if col in ticker_data_formatted.columns:
                             ticker_data_formatted[col] = ticker_data_formatted[col].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
+
+                    for col in ['implied_volatility', 'long_implied_volatility']:
+                        if col in ticker_data_formatted.columns:
+                            ticker_data_formatted[col] = ticker_data_formatted[col].apply(lambda x: f"{x * 100:.2f}%" if pd.notna(x) else "N/A")
+
+                    if 'long_contracts_available' in ticker_data_formatted.columns:
+                        ticker_data_formatted['long_contracts_available'] = ticker_data_formatted['long_contracts_available'].apply(
+                            lambda x: f"{int(x)}" if pd.notna(x) else "N/A"
+                        )
                     
                     # Create compact headers and rename columns to ensure alignment
                     compact_headers = self._create_compact_headers(ticker_data_formatted)
@@ -1736,6 +1840,15 @@ class OptionsAnalyzer:
                 for col in ['premium_above_diff_percentage']:
                     if col in df_formatted.columns:
                         df_formatted[col] = df_formatted[col].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
+
+                for col in ['implied_volatility', 'long_implied_volatility']:
+                    if col in df_formatted.columns:
+                        df_formatted[col] = df_formatted[col].apply(lambda x: f"{x * 100:.2f}%" if pd.notna(x) else "N/A")
+
+                if 'long_contracts_available' in df_formatted.columns:
+                    df_formatted['long_contracts_available'] = df_formatted['long_contracts_available'].apply(
+                        lambda x: f"{int(x)}" if pd.notna(x) else "N/A"
+                    )
                 
                 # Create compact headers and rename columns to ensure alignment
                 compact_headers = self._create_compact_headers(df_formatted)
@@ -1991,22 +2104,36 @@ Examples:
         action='append',
         type=str,
         help="Filter expressions (can be used multiple times). Format: 'field operator value' or 'field operator field' or 'field exists/not_exists' or 'field*multiplier operator value'. "
-             "Supported fields: pe_ratio market_cap volume num_contracts potential_premium daily_premium current_price strike_price price_above_current option_premium option_premium_percentage premium_above_diff_percentage days_to_expiry delta theta "
-             "long_strike_price long_option_premium long_days_to_expiry long_delta long_theta long_expiration_date long_option_ticker long_volume premium_diff short_premium_total short_daily_premium long_premium_total net_premium net_daily_premium. "
              "Supported operators: > >= < <= == != exists not_exists. "
              "Mathematical operations: + - * / (e.g. 'num_contracts*0.1 > volume' 'potential_premium+1000 > daily_premium'). "
-             "Derived fields: option_premium_percentage = (option_premium / current_price) * 100; "
-             "premium_above_diff_percentage = ((option_premium - price_above_current) / price_above_current) * 100. "
-             "Spread fields (when --spread is enabled): premium_diff = long_premium - short_premium; num_contracts = position_size / (long_premium * 100); "
-             "short_premium_total = short_premium * num_contracts * 100; short_daily_premium = short_premium_total / short_days_to_expiry; "
-             "long_premium_total = long_premium * num_contracts * 100; "
-             "net_premium = short_premium_total - (long_premium_total - estimated_long_premium_at_short_expiry_total); "
-             "where estimated_long_premium_at_short_expiry is calculated using Black-Scholes model; "
-             "net_daily_premium = net_premium / short_days_to_expiry. "
-             "Market cap values support T (trillion) B (billion) and M (million) suffixes. "
-             "Examples: 'pe_ratio > 20' or 'market_cap < 3.5T' or 'num_contracts > volume' or 'num_contracts*0.1 > volume' or 'potential_premium > daily_premium' or 'volume exists' or "
-             "'option_premium_percentage >= 10' or 'premium_above_diff_percentage > 0' or 'net_daily_premium > 100'. "
-             "Multiple expressions in one --filter can be comma-separated."
+             "Field-to-field comparisons: 'num_contracts > volume' or 'potential_premium > daily_premium'. "
+             "Market cap values support T (trillion) B (billion) and M (million) suffixes (e.g. 'market_cap < 3.5T'). "
+             "Multiple expressions in one --filter can be comma-separated. "
+             "STANDARD FIELDS (always available): "
+             "Financial: pe_ratio (float), market_cap (float, supports T/B/M suffixes). "
+             "Pricing: current_price (float), strike_price (float), price_above_current (float), option_premium (float). "
+             "Derived percentages: option_premium_percentage (float, = option_premium/current_price*100), "
+             "premium_above_diff_percentage (float, = (option_premium-price_above_current)/price_above_current*100). "
+             "Option Greeks: delta (float), theta (float), implied_volatility (float). "
+             "Volume/Contracts: volume (int), num_contracts (int). "
+             "Premium calculations: potential_premium (float, = num_contracts*option_premium*100), "
+             "daily_premium (float, = potential_premium/days_to_expiry). "
+             "Time: days_to_expiry (int). "
+             "SPREAD MODE FIELDS (only when --spread is enabled): "
+             "Long option details: long_strike_price (float), long_option_premium (float), long_days_to_expiry (int), "
+             "long_delta (float), long_theta (float), long_implied_volatility (float), long_expiration_date (str), "
+             "long_option_ticker (str), long_volume (int), long_contracts_available (int, open interest). "
+             "Spread calculations: premium_diff (float, = long_premium - short_premium per contract), "
+             "short_premium_total (float, = num_contracts*short_premium*100), "
+             "short_daily_premium (float, = short_premium_total/short_days_to_expiry), "
+             "long_premium_total (float, = num_contracts*long_premium*100), "
+             "net_premium (float, = short_premium_total - (long_premium_total - estimated_long_premium_at_short_expiry_total), "
+             "uses Black-Scholes to estimate long option value at short expiration), "
+             "net_daily_premium (float, = net_premium/short_days_to_expiry). "
+             "Note: In spread mode, num_contracts = floor(position_size / (long_premium * 100)). "
+             "Examples: 'pe_ratio > 20', 'market_cap < 3.5T', 'num_contracts > volume', 'num_contracts*0.1 > volume', "
+             "'potential_premium > daily_premium', 'volume exists', 'option_premium_percentage >= 10', "
+             "'premium_above_diff_percentage > 0', 'net_daily_premium > 100', 'net_premium > 1000'."
     )
     parser.add_argument(
         '--filter-logic',

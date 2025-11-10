@@ -98,6 +98,7 @@ symbols:
 - CLSK
 - CMCSA
 - CME
+- COGT
 - COIN
 - COKE
 - COLB
@@ -170,6 +171,7 @@ symbols:
 - FITB
 - FIVE
 - FLEX
+- FLNC
 - FORM
 - FOX
 - FOXA
@@ -223,7 +225,6 @@ symbols:
 - IEP
 - IESC
 - ILMN
-- IMVT
 - INCY
 - INSM
 - INTC
@@ -323,7 +324,6 @@ symbols:
 - NUVL
 - NVDA
 - NVMI
-- NWE
 - NWS
 - NWSA
 - NXPI
@@ -394,6 +394,7 @@ symbols:
 - ROST
 - RPRX
 - RRR
+- RUN
 - RVMD
 - RYAAY
 - RYTM
@@ -427,7 +428,6 @@ symbols:
 - SOUN
 - SRAD
 - SSNC
-- SSRM
 - STEP
 - STLD
 - STNE
@@ -467,8 +467,8 @@ symbols:
 - UMBF
 - URBN
 - UTHR
-- VCTR
 - VFS
+- VICR
 - VKTX
 - VLY
 - VNOM

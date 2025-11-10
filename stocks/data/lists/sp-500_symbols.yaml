@@ -1,5 +1,5 @@
 type: sp-500
-count: 502
+count: 504
 symbols:
 - A
 - AAPL
@@ -388,6 +388,7 @@ symbols:
 - PTC
 - PWR
 - PYPL
+- Q
 - QCOM
 - RCL
 - REG
@@ -413,6 +414,7 @@ symbols:
 - SNA
 - SNPS
 - SO
+- SOLS
 - SOLV
 - SPG
 - SPGI

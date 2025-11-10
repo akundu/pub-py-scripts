@@ -41,6 +41,38 @@ except ImportError:
     REDIS_AVAILABLE = False
     redis = None
 
+def normalize_timestamp(ts: Any) -> datetime:
+    """Normalize timestamp to UTC-aware datetime for comparison."""
+    if ts is None:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    
+    if isinstance(ts, pd.Timestamp):
+        if ts.tz is None:
+            # Assume UTC if timezone-naive
+            return ts.to_pydatetime().replace(tzinfo=timezone.utc)
+        else:
+            return ts.tz_convert(timezone.utc).to_pydatetime()
+    
+    if isinstance(ts, datetime):
+        if ts.tzinfo is None:
+            # Assume UTC if timezone-naive
+            return ts.replace(tzinfo=timezone.utc)
+        else:
+            return ts.astimezone(timezone.utc)
+    
+    # Try to parse as string
+    if isinstance(ts, str):
+        try:
+            parsed = date_parser.parse(ts)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except:
+            pass
+    
+    # Fallback: return min datetime
+    return datetime.min.replace(tzinfo=timezone.utc)
+        
 
 # ============================================================================
 # Multiprocessing helper (must be at module level)
@@ -2529,38 +2561,6 @@ class PriceService:
         self.logger.debug(f"[DB] Fetching latest price for {ticker} (use_market_time={use_market_time})")
         market_is_open = is_market_hours() if use_market_time else True
         
-        def normalize_timestamp(ts: Any) -> datetime:
-            """Normalize timestamp to UTC-aware datetime for comparison."""
-            if ts is None:
-                return datetime.min.replace(tzinfo=timezone.utc)
-            
-            if isinstance(ts, pd.Timestamp):
-                if ts.tz is None:
-                    # Assume UTC if timezone-naive
-                    return ts.to_pydatetime().replace(tzinfo=timezone.utc)
-                else:
-                    return ts.tz_convert(timezone.utc).to_pydatetime()
-            
-            if isinstance(ts, datetime):
-                if ts.tzinfo is None:
-                    # Assume UTC if timezone-naive
-                    return ts.replace(tzinfo=timezone.utc)
-                else:
-                    return ts.astimezone(timezone.utc)
-            
-            # Try to parse as string
-            if isinstance(ts, str):
-                try:
-                    parsed = date_parser.parse(ts)
-                    if parsed.tzinfo is None:
-                        return parsed.replace(tzinfo=timezone.utc)
-                    return parsed.astimezone(timezone.utc)
-                except:
-                    pass
-            
-            # Fallback: return min datetime
-            return datetime.min.replace(tzinfo=timezone.utc)
-        
         async def fetch_realtime():
             try:
                 # Always try to get latest realtime data from DB (even when market is closed)
@@ -2637,9 +2637,9 @@ class PriceService:
         else:
             # Market closed: don't return realtime data (it's stale), use daily/hourly instead
             # Try hourly first (more recent), then daily
-            hr_result = await fetch_hourly()
-            if hr_result:
-                source, timestamp, price, _ = hr_result
+            daily_result = await fetch_daily()
+            if daily_result:
+                source, timestamp, price, _ = daily_result
                 return {
                     'price': price,
                     'timestamp': timestamp,
@@ -2647,9 +2647,10 @@ class PriceService:
                     'realtime_df': None  # No realtime data when market is closed
                 }
             else:
-                daily_result = await fetch_daily()
-                if daily_result:
-                    source, timestamp, price, _ = daily_result
+                return None
+                hr_result = await fetch_hourly()
+                if hr_result:
+                    source, timestamp, price, _ = hr_result
                     return {
                         'price': price,
                         'timestamp': timestamp,
