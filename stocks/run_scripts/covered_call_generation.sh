@@ -23,12 +23,10 @@ do
 
     start=$(date +%s)
     python scripts/options_analyzer.py --top-n 1 --stats --max-days $days_1 --batch-size $BATCH_SIZE --sort net_daily_premium  --position-size $POSITION_SIZE --$TYPE $TYPE_input --spread --spread-strike-tolerance 5.0 --spread-long-days 90 --spread-long-min-days 60 --spread-long-days-tolerance 15  --db-conn $QUERY_LOC --max-workers $MAX_WORKERS  --output ~/Downloads/results.csv  --filter "strike_price > current_price" --filter "volume > 50" --filter "long_option_premium > 0.25" --filter "option_premium > .25" --filter "premium_diff > 0"
-    python scripts/evaluate_covered_calls.py --file ~/Downloads/results.csv --html --output-dir /tmp/$OUTPUT_DIR
     echo "Elapsed: $(($(date +%s) - start)) seconds"
 
     #save to a location
-    rm -Rf $STORE_DIR/$OUTPUT_DIR
-    mv /tmp/$OUTPUT_DIR $STORE_DIR
+    python scripts/evaluate_covered_calls.py --file ~/Downloads/results.csv --html --output-dir /tmp/$OUTPUT_DIR && rm -Rf $STORE_DIR/$OUTPUT_DIR && mv /tmp/$OUTPUT_DIR $STORE_DIR
 
     sleep 10
 done

@@ -615,24 +615,119 @@ def get_javascript():
             return cell.textContent.trim();
         }
         
+        // Evaluate a mathematical expression like "curr_price*1.05" or "strike_price+100"
+        function evaluateMathExpression(expression, row) {
+            // Extract field names from expression (alphanumeric + underscore)
+            const fieldPattern = /[a-zA-Z_][a-zA-Z0-9_]*/g;
+            const fields = expression.match(fieldPattern) || [];
+            
+            // Filter out JavaScript keywords and common math functions
+            const jsKeywords = ['if', 'else', 'for', 'while', 'function', 'return', 'var', 'let', 'const', 'true', 'false', 'null', 'undefined'];
+            const validFields = fields.filter(f => !jsKeywords.includes(f.toLowerCase()));
+            
+            // Get unique fields and their values
+            const fieldValues = {};
+            for (const field of validFields) {
+                // Skip if we already processed this field
+                if (fieldValues.hasOwnProperty(field)) continue;
+                
+                const colIndex = findColumnIndex(field);
+                if (colIndex >= 0) {
+                    const cell = row.cells[colIndex];
+                    if (cell) {
+                        const value = getRawValue(cell);
+                        if (value !== null) {
+                            fieldValues[field] = value;
+                        } else {
+                            console.warn('Field', field, 'found but has no numeric value');
+                            return null; // Field not found or has no value
+                        }
+                    } else {
+                        console.warn('Field', field, 'column index', colIndex, 'but cell not found');
+                        return null; // Cell not found
+                    }
+                } else {
+                    console.warn('Field', field, 'not found in table columns');
+                    return null; // Field not found
+                }
+            }
+            
+            // Replace field names with their values (in reverse order of length to avoid partial replacements)
+            let evalExpr = expression;
+            const sortedFields = Object.keys(fieldValues).sort((a, b) => b.length - a.length);
+            for (const field of sortedFields) {
+                const value = fieldValues[field];
+                // Replace field name, ensuring we match whole identifiers (not part of another identifier)
+                // Escape special regex characters in the field name
+                const escapedField = field.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+                // Match field name as whole word (not part of another identifier)
+                const regex = new RegExp('(^|[^a-zA-Z0-9_])' + escapedField + '([^a-zA-Z0-9_]|$)', 'g');
+                evalExpr = evalExpr.replace(regex, function(match, before, after) {
+                    // Preserve the before/after characters, replace only the field name
+                    return before + value + after;
+                });
+            }
+            
+            // Safely evaluate the expression
+            try {
+                // Use Function constructor for safer evaluation
+                // This evaluates basic math expressions with +, -, *, /
+                const result = Function('"use strict"; return (' + evalExpr + ')')();
+                return typeof result === 'number' && !isNaN(result) ? result : null;
+            } catch (e) {
+                console.error('Error evaluating math expression:', evalExpr, e);
+                return null;
+            }
+        }
+        
         // Find column index by field name (supports substring matching)
         function findColumnIndex(fieldName) {
             const table = document.getElementById('resultsTable');
             const headers = Array.from(table.querySelectorAll('th'));
-            const lowerField = fieldName.toLowerCase();
+            const lowerField = fieldName.toLowerCase().replace(/\\s+/g, '_');
             
-            // Try exact match first
+            // First, try to match against data-filterable-name attribute (most reliable)
+            for (let i = 0; i < headers.length; i++) {
+                const filterableName = headers[i].getAttribute('data-filterable-name');
+                if (filterableName) {
+                    const normalizedFilterable = filterableName.toLowerCase().replace(/\\s+/g, '_');
+                    // Exact match
+                    if (normalizedFilterable === lowerField) {
+                        return i;
+                    }
+                    // Check if field name is contained in filterable name or vice versa
+                    // e.g., 'curr_price' should match 'current_price'
+                    if (normalizedFilterable === lowerField || 
+                        normalizedFilterable.replace('current', 'curr') === lowerField ||
+                        lowerField.replace('curr', 'current') === normalizedFilterable ||
+                        normalizedFilterable.includes(lowerField) || 
+                        lowerField.includes(normalizedFilterable)) {
+                        return i;
+                    }
+                }
+            }
+            
+            // Try exact match against header text
             for (let i = 0; i < headers.length; i++) {
                 const headerText = headers[i].textContent.trim().toLowerCase().replace(/\\s+/g, '_');
-                if (headerText === lowerField || headerText === lowerField.replace(/_/g, ' ')) {
+                if (headerText === lowerField) {
                     return i;
                 }
             }
             
-            // Try substring match
+            // Try substring match on header text and filterable name
             for (let i = 0; i < headers.length; i++) {
                 const headerText = headers[i].textContent.trim().toLowerCase();
-                if (headerText.includes(lowerField) || lowerField.includes(headerText.replace(/\\s+/g, '_'))) {
+                const filterableName = headers[i].getAttribute('data-filterable-name');
+                const normalizedHeader = headerText.replace(/\\s+/g, '_');
+                const normalizedFilterable = filterableName ? filterableName.toLowerCase().replace(/\\s+/g, '_') : '';
+                
+                // Check various matching strategies
+                if (normalizedHeader.includes(lowerField) || 
+                    lowerField.includes(normalizedHeader) ||
+                    (normalizedFilterable && (normalizedFilterable.includes(lowerField) || lowerField.includes(normalizedFilterable))) ||
+                    normalizedHeader.replace('current', 'curr') === lowerField ||
+                    lowerField.replace('curr', 'current') === normalizedHeader) {
                     return i;
                 }
             }
@@ -683,7 +778,38 @@ def get_javascript():
                         const fieldExpr = parts[0].trim();
                         const valueStr = parts[1].trim();
                         
-                        // Check if value is a field name (field-to-field comparison)
+                        // Check for mathematical expressions in field FIRST
+                        const hasMath = /[+\\-*/]/.test(fieldExpr);
+                        if (hasMath) {
+                            // Check if the value is also a field (field-to-field comparison with math)
+                            const valueColIndex = findColumnIndex(valueStr);
+                            if (valueColIndex >= 0) {
+                                // Math expression compared to another field: "curr_price*1.05 < strike_price"
+                                return {
+                                    field: fieldExpr,
+                                    operator: op,
+                                    value: valueStr,
+                                    isFieldComparison: true,
+                                    hasMath: true
+                                };
+                            } else {
+                                // Math expression compared to a value: "curr_price*1.05 < 150"
+                                let value = valueStr;
+                                const numValue = parseFloat(valueStr);
+                                if (!isNaN(numValue)) {
+                                    value = numValue;
+                                }
+                                return {
+                                    field: fieldExpr,
+                                    operator: op,
+                                    value: value,
+                                    isFieldComparison: false,
+                                    hasMath: true
+                                };
+                            }
+                        }
+                        
+                        // Check if value is a field name (field-to-field comparison without math)
                         const valueColIndex = findColumnIndex(valueStr);
                         if (valueColIndex >= 0) {
                             return {
@@ -691,18 +817,6 @@ def get_javascript():
                                 operator: op,
                                 value: valueStr,
                                 isFieldComparison: true
-                            };
-                        }
-                        
-                        // Check for mathematical expressions in field
-                        const hasMath = /[+\\-*/]/.test(fieldExpr);
-                        if (hasMath) {
-                            return {
-                                field: fieldExpr,
-                                operator: op,
-                                value: valueStr,
-                                isFieldComparison: false,
-                                hasMath: true
                             };
                         }
                         
@@ -733,26 +847,67 @@ def get_javascript():
         
         // Evaluate filter expression for a row
         function evaluateFilter(filter, row) {
-            const colIndex = findColumnIndex(filter.field);
-            if (colIndex < 0) return false;
-            
-            const cell = row.cells[colIndex];
-            if (!cell) return false;
-            
-            // Handle exists/not_exists
-            if (filter.operator === 'exists') {
-                const rawValue = cell.getAttribute('data-raw');
-                const text = cell.textContent.trim();
-                return (rawValue !== null && rawValue !== '') || (text !== '' && text !== 'N/A');
+            // Handle exists/not_exists (only works for single fields, not expressions)
+            if (filter.operator === 'exists' || filter.operator === 'not_exists') {
+                if (filter.hasMath) return false; // Can't use exists/not_exists with math expressions
+                const colIndex = findColumnIndex(filter.field);
+                if (colIndex < 0) return false;
+                const cell = row.cells[colIndex];
+                if (!cell) return false;
+                
+                if (filter.operator === 'exists') {
+                    const rawValue = cell.getAttribute('data-raw');
+                    const text = cell.textContent.trim();
+                    return (rawValue !== null && rawValue !== '') || (text !== '' && text !== 'N/A');
+                }
+                if (filter.operator === 'not_exists') {
+                    const rawValue = cell.getAttribute('data-raw');
+                    const text = cell.textContent.trim();
+                    return (rawValue === null || rawValue === '') && (text === '' || text === 'N/A');
+                }
             }
-            if (filter.operator === 'not_exists') {
-                const rawValue = cell.getAttribute('data-raw');
-                const text = cell.textContent.trim();
-                return (rawValue === null || rawValue === '') && (text === '' || text === 'N/A');
+            
+            // Handle mathematical expressions
+            if (filter.hasMath) {
+                // Evaluate the mathematical expression on the left side
+                const leftValue = evaluateMathExpression(filter.field, row);
+                if (leftValue === null) return false; // Can't evaluate expression
+                
+                // Get the right side value
+                let rightValue = null;
+                if (filter.isFieldComparison) {
+                    // Right side is also a field: "curr_price*1.05 < strike_price"
+                    const valueColIndex = findColumnIndex(filter.value);
+                    if (valueColIndex < 0) return false;
+                    const valueCell = row.cells[valueColIndex];
+                    if (!valueCell) return false;
+                    rightValue = getRawValue(valueCell);
+                } else {
+                    // Right side is a numeric value: "curr_price*1.05 < 150"
+                    rightValue = typeof filter.value === 'string' ? parseFloat(filter.value) : filter.value;
+                }
+                
+                if (rightValue === null || isNaN(rightValue)) return false;
+                
+                // Compare the evaluated expression with the right side
+                switch (filter.operator) {
+                    case '>': return leftValue > rightValue;
+                    case '>=': return leftValue >= rightValue;
+                    case '<': return leftValue < rightValue;
+                    case '<=': return leftValue <= rightValue;
+                    case '==': return Math.abs(leftValue - rightValue) < 0.0001;
+                    case '!=': return Math.abs(leftValue - rightValue) >= 0.0001;
+                    default: return false;
+                }
             }
             
-            // Handle field-to-field comparison
+            // Handle field-to-field comparison (without math)
             if (filter.isFieldComparison) {
+                const colIndex = findColumnIndex(filter.field);
+                if (colIndex < 0) return false;
+                const cell = row.cells[colIndex];
+                if (!cell) return false;
+                
                 const valueColIndex = findColumnIndex(filter.value);
                 if (valueColIndex < 0) return false;
                 const valueCell = row.cells[valueColIndex];
@@ -773,14 +928,12 @@ def get_javascript():
                 }
             }
             
-            // Handle mathematical expressions (simplified - basic support)
-            if (filter.hasMath) {
-                // For now, skip complex math expressions in client-side filtering
-                // Could be enhanced with a proper expression parser
-                return true; // Don't filter out if we can't evaluate
-            }
+            // Handle value comparison (regular field to value)
+            const colIndex = findColumnIndex(filter.field);
+            if (colIndex < 0) return false;
+            const cell = row.cells[colIndex];
+            if (!cell) return false;
             
-            // Handle value comparison
             const cellValue = getRawValue(cell);
             if (cellValue === null) return false;
             
@@ -1444,6 +1597,10 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
         'spread_slippage','net_premium_after_spread','net_daily_premium_after_spread','spread_impact_pct','liquidity_score','assignment_risk','trade_quality','long_options_to_purchase'
     ]
     
+    # Helper function to normalize column names
+    def _normalize_col_name(name: str) -> str:
+        return str(name).strip().lower().replace(' ', '_')
+    
     # Also check for common column name variations
     all_numeric_cols = set(numeric_cols)
     for col in df_display.columns:
@@ -1465,6 +1622,42 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
             all_numeric_cols.add(col)
         elif 'days' in col_lower:
             all_numeric_cols.add(col)
+    
+    # Format expiration date columns to show only date portion (no time)
+    def format_date_value(x, col_name):
+        """Format date values to show only date portion."""
+        if pd.isna(x) or x == '' or x is None:
+            return ''
+        normalized_col = _normalize_col_name(col_name)
+        if normalized_col in ['expiration_date', 'l_expiration_date', 'long_expiration_date']:
+            try:
+                if isinstance(x, pd.Timestamp):
+                    return x.strftime('%Y-%m-%d')
+                elif isinstance(x, (str, datetime)):
+                    dt = pd.to_datetime(x, errors='coerce')
+                    if pd.notna(dt):
+                        return dt.strftime('%Y-%m-%d')
+                    else:
+                        # Try to extract date portion from string
+                        x_str = str(x)
+                        if ' ' in x_str:
+                            return x_str.split(' ')[0]
+                        elif 'T' in x_str:
+                            return x_str.split('T')[0]
+                        elif len(x_str) >= 10:
+                            return x_str[:10]
+            except (ValueError, TypeError, AttributeError):
+                # If all parsing fails, try to extract first 10 characters
+                x_str = str(x)
+                if len(x_str) >= 10:
+                    return x_str[:10]
+        return x
+    
+    # Format date columns first
+    for col in df_display.columns:
+        normalized_col = _normalize_col_name(col)
+        if normalized_col in ['expiration_date', 'l_expiration_date', 'long_expiration_date']:
+            df_display[col] = df_display[col].apply(lambda x: format_date_value(x, col))
     
     for col in all_numeric_cols:
         if col in df_display.columns:
@@ -1550,7 +1743,10 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
                 • <code>delta < 0.5</code> - Delta less than 0.5<br>
                 • <code>days_to_expiry >= 7</code> - Days to expiry at least 7<br>
                 • <code>num_contracts > volume</code> - Field-to-field comparison<br>
+                • <code>curr_price*1.05 < strike_price</code> - Mathematical expression (5% above current price less than strike)<br>
+                • <code>strike_price*0.95 > curr_price</code> - Mathematical expression (strike 5% below current)<br>
                 <strong>Operators:</strong> <code>&gt;</code> <code>&gt;=</code> <code>&lt;</code> <code>&lt;=</code> <code>==</code> <code>!=</code> <code>exists</code> <code>not_exists</code><br>
+                <strong>Math Operations:</strong> Use <code>+</code> <code>-</code> <code>*</code> <code>/</code> in expressions (e.g., <code>field*1.05</code>, <code>field+100</code>)<br>
                 <strong>💡 Tip:</strong> When the filter section is expanded, column headers show their filterable field names. Filters are automatically saved in the URL - share the URL to share your filtered view!
             </div>
         </div>
@@ -1561,9 +1757,6 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
 """)
     
     # Columns to hide by default (use normalized lowercase names with underscores)
-    def _normalize_col_name(name: str) -> str:
-        return str(name).strip().lower().replace(' ', '_')
-
     hidden_columns_list = [
         'price_above_curr',
         'price_above_current',
