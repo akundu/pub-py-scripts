@@ -196,6 +196,12 @@ def get_css_styles():
             padding: 20px;
         }
         
+        /* Hidden columns handling */
+        .table-wrapper.hide-hidden th.is-hidden-col,
+        .table-wrapper.hide-hidden td.is-hidden-col {
+            display: none;
+        }
+        
         table {
             width: 100%;
             border-collapse: collapse;
@@ -1034,6 +1040,23 @@ def get_javascript():
                 button.title = 'Hide filter options and show display column names';
             }
         }
+
+        // Toggle hidden columns visibility
+        function toggleHiddenColumns() {
+            const wrapper = document.getElementById('tableWrapper');
+            const btn = document.getElementById('toggleHiddenBtn');
+            if (!wrapper || !btn) return;
+            const willShow = wrapper.classList.contains('hide-hidden');
+            if (willShow) {
+                wrapper.classList.remove('hide-hidden');
+                btn.textContent = '🙈 Hide hidden columns';
+                btn.title = 'Hide the default-hidden columns';
+            } else {
+                wrapper.classList.add('hide-hidden');
+                btn.textContent = '👁️ Show hidden columns';
+                btn.title = 'Show the default-hidden columns';
+            }
+        }
         
         // Update URL with current filters
         function updateURL() {
@@ -1123,6 +1146,22 @@ def get_javascript():
             initColumnMap();
             updateFilterDisplay();
             loadFiltersFromURL();
+            // Ensure hidden columns are hidden on load
+            const wrapper = document.getElementById('tableWrapper');
+            const toggleBtn = document.getElementById('toggleHiddenBtn');
+            const ensureHidden = wrapper && !wrapper.classList.contains('hide-hidden');
+            if (ensureHidden) {
+                wrapper.classList.add('hide-hidden');
+            }
+            if (toggleBtn) {
+                if (wrapper && wrapper.classList.contains('hide-hidden')) {
+                    toggleBtn.textContent = '👁️ Show hidden columns';
+                    toggleBtn.title = 'Show the default-hidden columns';
+                } else {
+                    toggleBtn.textContent = '🙈 Hide hidden columns';
+                    toggleBtn.title = 'Hide the default-hidden columns';
+                }
+            }
         });
 """
 
@@ -1474,10 +1513,17 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
         </div>
         
         <div class="tab-content active">
-        <div style="margin-bottom: 15px; text-align: right;">
-            <button class="filter-button" onclick="toggleFilterSection()" id="toggleFilterBtn" title="Show/hide filter options and filterable column names">
-                🔍 Filter
-            </button>
+        <div style="margin-bottom: 15px; display: flex; justify-content: space-between; gap: 10px; align-items: center;">
+            <div>
+                <button class="filter-button clear" onclick="toggleHiddenColumns()" id="toggleHiddenBtn" title="Show or hide default-hidden columns">
+                    👁️ Show hidden columns
+                </button>
+            </div>
+            <div style="text-align: right;">
+                <button class="filter-button" onclick="toggleFilterSection()" id="toggleFilterBtn" title="Show/hide filter options and filterable column names">
+                    🔍 Filter
+                </button>
+            </div>
         </div>
         <div class="filter-section" id="filterSection">
             <h3 style="margin-top: 0; color: #667eea;">🔍 Filter Options</h3>
@@ -1508,19 +1554,53 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
                 <strong>💡 Tip:</strong> When the filter section is expanded, column headers show their filterable field names. Filters are automatically saved in the URL - share the URL to share your filtered view!
             </div>
         </div>
-        <div class="table-wrapper">
+        <div class="table-wrapper hide-hidden" id="tableWrapper">
             <table id="resultsTable">
                 <thead>
                     <tr>
 """)
     
+    # Columns to hide by default (use normalized lowercase names with underscores)
+    def _normalize_col_name(name: str) -> str:
+        return str(name).strip().lower().replace(' ', '_')
+
+    hidden_columns_list = [
+        'price_above_curr',
+        'price_above_current',
+        'days_to_expiry',
+        'iv',
+        'implied_volatility',
+        'liv',
+        'long_implied_volatility',
+        'theta',
+        'l_theta',
+        'long_theta',
+        'l_days_to_expiry',
+        'long_days_to_expiry',
+        'l_cnt_avl',
+        'long_contracts_available',
+        'option_ticker',
+        'l_option_ticker',
+        'net_premium_after_spread',
+        'spread_slippage',
+        'net_daily_premium_after_spread',
+        'spread_impact_pct',
+        'liquidity_score',
+        'assignment_risk',
+    ]
+
+    hidden_columns_set = set(_normalize_col_name(col) for col in hidden_columns_list)
+
     # Generate table headers with filterable name toggle
     for col in df_display.columns:
         col_index = df_display.columns.get_loc(col)
         truncated_title = truncate_header(str(col), 15)
         # Use the original column name as the filterable name
         filterable_name = html.escape(str(col))
-        html_parts.append(f'                        <th class="sortable" onclick="sortTable({col_index})" data-filterable-name="{filterable_name}">')
+        normalized_col = _normalize_col_name(col)
+        is_hidden = normalized_col in hidden_columns_set
+        hidden_class = ' is-hidden-col' if is_hidden else ''
+        html_parts.append(f'                        <th class="sortable{hidden_class}" onclick="sortTable({col_index})" data-filterable-name="{filterable_name}">')
         html_parts.append(f'                            <span class="column-name-display">{truncated_title}</span>')
         html_parts.append(f'                            <span class="column-name-filterable">{filterable_name}</span>')
         html_parts.append(f'                        </th>\n')
@@ -1563,9 +1643,12 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
                 td_attrs.append(f'data-raw="{html.escape(str(raw_value))}"')
             if raw_text is not None:
                 td_attrs.append(f'data-raw-text="{html.escape(str(raw_text))}"')
-            
-            attrs_str = ' ' + ' '.join(td_attrs) if td_attrs else ''
-            html_parts.append(f'                        <td{attrs_str}>{cell_value}</td>\n')
+            # Hidden class for default-hidden columns
+            normalized_col = _normalize_col_name(col)
+            td_hidden_class = ' is-hidden-col' if normalized_col in hidden_columns_set else ''
+            attrs_str = (' ' + ' '.join(td_attrs) if td_attrs else '')
+            class_attr = f' class="{td_hidden_class.strip()}"' if td_hidden_class else ''
+            html_parts.append(f'                        <td{class_attr}{attrs_str}>{cell_value}</td>\n')
         html_parts.append("                    </tr>\n")
     
     html_parts.append("""                </tbody>
