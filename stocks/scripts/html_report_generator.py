@@ -230,6 +230,26 @@ def get_css_styles():
             background: #e9ecef;
         }
         
+        
+        .column-name-display {
+            display: block;
+        }
+        
+        .column-name-filterable {
+            display: none;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            color: #667eea;
+        }
+        
+        th.showing-filterable .column-name-display {
+            display: none;
+        }
+        
+        th.showing-filterable .column-name-filterable {
+            display: block;
+        }
+        
         th.sortable::after {
             content: ' ↕';
             opacity: 0.5;
@@ -399,6 +419,114 @@ def get_css_styles():
             color: white;
         }
         
+        .filter-section {
+            background: #f8f9fa;
+            padding: 20px;
+            border-bottom: 2px solid #dee2e6;
+            margin-bottom: 20px;
+            display: none; /* Hidden by default */
+        }
+        
+        .filter-section.expanded {
+            display: block;
+        }
+        
+        .filter-controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .filter-input-group {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            flex: 1;
+            min-width: 250px;
+        }
+        
+        .filter-input {
+            flex: 1;
+            padding: 10px;
+            border: 2px solid #dee2e6;
+            border-radius: 6px;
+            font-size: 0.9em;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .filter-input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .filter-button {
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9em;
+            font-weight: 600;
+            transition: background 0.3s ease;
+        }
+        
+        .filter-button:hover {
+            background: #5568d3;
+        }
+        
+        .filter-button.clear {
+            background: #6c757d;
+        }
+        
+        .filter-button.clear:hover {
+            background: #5a6268;
+        }
+        
+        .filter-logic {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        
+        .filter-logic label {
+            font-weight: 600;
+            color: #495057;
+        }
+        
+        .filter-logic input[type="radio"] {
+            margin-right: 5px;
+        }
+        
+        .filter-help {
+            font-size: 0.85em;
+            color: #6c757d;
+            margin-top: 10px;
+            padding: 10px;
+            background: white;
+            border-radius: 5px;
+            border-left: 3px solid #667eea;
+        }
+        
+        .filter-help code {
+            background: #f8f9fa;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .filter-error {
+            color: #dc3545;
+            font-size: 0.9em;
+            margin-top: 5px;
+            padding: 5px;
+            background: #f8d7da;
+            border-radius: 3px;
+        }
+        
         @media (max-width: 768px) {
             .header h1 {
                 font-size: 1.8em;
@@ -411,23 +539,395 @@ def get_css_styles():
             th, td {
                 padding: 8px 6px;
             }
+            
+            .filter-controls {
+                flex-direction: column;
+            }
+            
+            .filter-input-group {
+                width: 100%;
+            }
         }
 """
 
 
 def get_javascript():
-    """Get JavaScript code for table sorting functionality.
+    """Get JavaScript code for table sorting and filtering functionality.
     
     Returns:
         String containing JavaScript code
     """
     return """        let sortDirection = {};
         let currentSortColumn = -1;
+        let activeFilters = [];
+        let filterLogic = 'AND';
+        
+        // Column name mapping (original names to display names)
+        const columnMap = {};
+        
+        // Initialize column map
+        function initColumnMap() {
+            const table = document.getElementById('resultsTable');
+            const headers = table.querySelectorAll('th');
+            headers.forEach((th, index) => {
+                const colName = th.textContent.trim().replace(/\\s+/g, ' ').replace(/\\n/g, '');
+                columnMap[colName] = index;
+                // Also map common variations
+                const lowerName = colName.toLowerCase();
+                if (lowerName.includes('pe') && lowerName.includes('ratio')) columnMap['pe_ratio'] = index;
+                if (lowerName.includes('market') && lowerName.includes('cap')) columnMap['market_cap_b'] = index;
+                if (lowerName.includes('current') || lowerName.includes('curr')) columnMap['current_price'] = index;
+                if (lowerName.includes('strike')) columnMap['strike_price'] = index;
+                if (lowerName.includes('premium') && !lowerName.includes('daily') && !lowerName.includes('total')) columnMap['option_premium'] = index;
+                if (lowerName.includes('daily') && lowerName.includes('prem')) columnMap['daily_premium'] = index;
+                if (lowerName.includes('volume')) columnMap['volume'] = index;
+                if (lowerName.includes('delta')) columnMap['delta'] = index;
+                if (lowerName.includes('theta')) columnMap['theta'] = index;
+                if (lowerName.includes('days') && lowerName.includes('expir')) columnMap['days_to_expiry'] = index;
+                if (lowerName.includes('net') && lowerName.includes('daily')) columnMap['net_daily_premium'] = index;
+                if (lowerName.includes('net') && lowerName.includes('prem') && !lowerName.includes('daily')) columnMap['net_premium'] = index;
+            });
+        }
+        
+        // Get raw numeric value from a cell
+        function getRawValue(cell) {
+            const rawValue = cell.getAttribute('data-raw');
+            if (rawValue !== null && rawValue !== '') {
+                const num = parseFloat(rawValue);
+                if (!isNaN(num)) return num;
+            }
+            // Fallback: try to parse from text
+            const text = cell.textContent.trim();
+            const num = parseFloat(text.replace(/[^0-9.-]/g, ''));
+            return isNaN(num) ? null : num;
+        }
+        
+        // Get raw text value from a cell
+        function getRawText(cell) {
+            const rawValue = cell.getAttribute('data-raw-text');
+            if (rawValue !== null) return rawValue;
+            return cell.textContent.trim();
+        }
+        
+        // Find column index by field name (supports substring matching)
+        function findColumnIndex(fieldName) {
+            const table = document.getElementById('resultsTable');
+            const headers = Array.from(table.querySelectorAll('th'));
+            const lowerField = fieldName.toLowerCase();
+            
+            // Try exact match first
+            for (let i = 0; i < headers.length; i++) {
+                const headerText = headers[i].textContent.trim().toLowerCase().replace(/\\s+/g, '_');
+                if (headerText === lowerField || headerText === lowerField.replace(/_/g, ' ')) {
+                    return i;
+                }
+            }
+            
+            // Try substring match
+            for (let i = 0; i < headers.length; i++) {
+                const headerText = headers[i].textContent.trim().toLowerCase();
+                if (headerText.includes(lowerField) || lowerField.includes(headerText.replace(/\\s+/g, '_'))) {
+                    return i;
+                }
+            }
+            
+            // Try column map
+            if (columnMap[fieldName] !== undefined) {
+                return columnMap[fieldName];
+            }
+            
+            return -1;
+        }
+        
+        // Parse market cap value with B/M/T suffixes
+        function parseMarketCapValue(valueStr) {
+            valueStr = valueStr.trim().toUpperCase();
+            if (valueStr.endsWith('T')) {
+                return parseFloat(valueStr.slice(0, -1)) * 1e12;
+            } else if (valueStr.endsWith('B')) {
+                return parseFloat(valueStr.slice(0, -1)) * 1e9;
+            } else if (valueStr.endsWith('M')) {
+                return parseFloat(valueStr.slice(0, -1)) * 1e6;
+            }
+            return parseFloat(valueStr);
+        }
+        
+        // Parse filter expression
+        function parseFilterExpression(expression) {
+            expression = expression.trim();
+            if (!expression) return null;
+            
+            // Handle exists/not_exists
+            const existsMatch = expression.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\\s+(exists|not_exists)$/i);
+            if (existsMatch) {
+                return {
+                    field: existsMatch[1],
+                    operator: existsMatch[2].toLowerCase(),
+                    value: null,
+                    isFieldComparison: false
+                };
+            }
+            
+            // Parse comparison operators
+            const operators = ['>=', '<=', '==', '!=', '>', '<'];
+            for (const op of operators) {
+                if (expression.includes(op)) {
+                    const parts = expression.split(op, 2);
+                    if (parts.length === 2) {
+                        const fieldExpr = parts[0].trim();
+                        const valueStr = parts[1].trim();
+                        
+                        // Check if value is a field name (field-to-field comparison)
+                        const valueColIndex = findColumnIndex(valueStr);
+                        if (valueColIndex >= 0) {
+                            return {
+                                field: fieldExpr,
+                                operator: op,
+                                value: valueStr,
+                                isFieldComparison: true
+                            };
+                        }
+                        
+                        // Check for mathematical expressions in field
+                        const hasMath = /[+\\-*/]/.test(fieldExpr);
+                        if (hasMath) {
+                            return {
+                                field: fieldExpr,
+                                operator: op,
+                                value: valueStr,
+                                isFieldComparison: false,
+                                hasMath: true
+                            };
+                        }
+                        
+                        // Regular value comparison
+                        let value = valueStr;
+                        // Try to parse as number
+                        if (fieldExpr.toLowerCase().includes('market_cap') || fieldExpr.toLowerCase().includes('market cap')) {
+                            value = parseMarketCapValue(valueStr);
+                        } else {
+                            const numValue = parseFloat(valueStr);
+                            if (!isNaN(numValue)) {
+                                value = numValue;
+                            }
+                        }
+                        
+                        return {
+                            field: fieldExpr,
+                            operator: op,
+                            value: value,
+                            isFieldComparison: false
+                        };
+                    }
+                }
+            }
+            
+            return null;
+        }
+        
+        // Evaluate filter expression for a row
+        function evaluateFilter(filter, row) {
+            const colIndex = findColumnIndex(filter.field);
+            if (colIndex < 0) return false;
+            
+            const cell = row.cells[colIndex];
+            if (!cell) return false;
+            
+            // Handle exists/not_exists
+            if (filter.operator === 'exists') {
+                const rawValue = cell.getAttribute('data-raw');
+                const text = cell.textContent.trim();
+                return (rawValue !== null && rawValue !== '') || (text !== '' && text !== 'N/A');
+            }
+            if (filter.operator === 'not_exists') {
+                const rawValue = cell.getAttribute('data-raw');
+                const text = cell.textContent.trim();
+                return (rawValue === null || rawValue === '') && (text === '' || text === 'N/A');
+            }
+            
+            // Handle field-to-field comparison
+            if (filter.isFieldComparison) {
+                const valueColIndex = findColumnIndex(filter.value);
+                if (valueColIndex < 0) return false;
+                const valueCell = row.cells[valueColIndex];
+                if (!valueCell) return false;
+                
+                const cellValue = getRawValue(cell);
+                const compareValue = getRawValue(valueCell);
+                if (cellValue === null || compareValue === null) return false;
+                
+                switch (filter.operator) {
+                    case '>': return cellValue > compareValue;
+                    case '>=': return cellValue >= compareValue;
+                    case '<': return cellValue < compareValue;
+                    case '<=': return cellValue <= compareValue;
+                    case '==': return Math.abs(cellValue - compareValue) < 0.0001;
+                    case '!=': return Math.abs(cellValue - compareValue) >= 0.0001;
+                    default: return false;
+                }
+            }
+            
+            // Handle mathematical expressions (simplified - basic support)
+            if (filter.hasMath) {
+                // For now, skip complex math expressions in client-side filtering
+                // Could be enhanced with a proper expression parser
+                return true; // Don't filter out if we can't evaluate
+            }
+            
+            // Handle value comparison
+            const cellValue = getRawValue(cell);
+            if (cellValue === null) return false;
+            
+            const filterValue = typeof filter.value === 'string' ? parseFloat(filter.value) : filter.value;
+            if (isNaN(filterValue)) {
+                // String comparison
+                const cellText = getRawText(cell).toLowerCase();
+                const filterText = String(filter.value).toLowerCase();
+                switch (filter.operator) {
+                    case '==': return cellText === filterText;
+                    case '!=': return cellText !== filterText;
+                    default: return false;
+                }
+            }
+            
+            // Numeric comparison
+            switch (filter.operator) {
+                case '>': return cellValue > filterValue;
+                case '>=': return cellValue >= filterValue;
+                case '<': return cellValue < filterValue;
+                case '<=': return cellValue <= filterValue;
+                case '==': return Math.abs(cellValue - filterValue) < 0.0001;
+                case '!=': return Math.abs(cellValue - filterValue) >= 0.0001;
+                default: return false;
+            }
+        }
+        
+        // Apply all filters to table
+        function applyFilters() {
+            const table = document.getElementById('resultsTable');
+            const tbody = table.querySelector('tbody');
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            const errorDiv = document.getElementById('filterError');
+            
+            if (errorDiv) errorDiv.textContent = '';
+            
+            if (activeFilters.length === 0) {
+                rows.forEach(row => {
+                    row.style.display = '';
+                });
+                updateVisibleCount();
+                return;
+            }
+            
+            rows.forEach(row => {
+                let matches = activeFilters.map(filter => evaluateFilter(filter, row));
+                
+                let shouldShow;
+                if (filterLogic === 'AND') {
+                    shouldShow = matches.every(m => m);
+                } else {
+                    shouldShow = matches.some(m => m);
+                }
+                
+                row.style.display = shouldShow ? '' : 'none';
+            });
+            
+            updateVisibleCount();
+        }
+        
+        // Add filter
+        function addFilter() {
+            const input = document.getElementById('filterInput');
+            const expression = input.value.trim();
+            
+            if (!expression) return;
+            
+            const filter = parseFilterExpression(expression);
+            if (!filter) {
+                const errorDiv = document.getElementById('filterError');
+                if (errorDiv) {
+                    errorDiv.textContent = 'Invalid filter expression. Format: field operator value (e.g., "pe_ratio > 20", "volume exists")';
+                }
+                return;
+            }
+            
+            activeFilters.push(filter);
+            input.value = '';
+            
+            // Update filter display
+            updateFilterDisplay();
+            applyFilters();
+            updateURL();
+        }
+        
+        // Remove filter
+        function removeFilter(index) {
+            activeFilters.splice(index, 1);
+            updateFilterDisplay();
+            applyFilters();
+            updateURL();
+        }
+        
+        // Clear all filters
+        function clearFilters() {
+            activeFilters = [];
+            updateFilterDisplay();
+            applyFilters();
+            updateURL();
+        }
+        
+        // Update filter display
+        function updateFilterDisplay() {
+            const container = document.getElementById('activeFilters');
+            if (!container) return;
+            
+            container.innerHTML = '';
+            
+            if (activeFilters.length === 0) {
+                container.innerHTML = '<p style="color: #6c757d; font-style: italic;">No active filters</p>';
+                return;
+            }
+            
+            activeFilters.forEach((filter, index) => {
+                const filterDiv = document.createElement('div');
+                filterDiv.style.cssText = 'display: inline-block; margin: 5px; padding: 5px 10px; background: #667eea; color: white; border-radius: 5px; font-size: 0.9em;';
+                
+                const filterText = document.createElement('span');
+                filterText.textContent = `${filter.field} ${filter.operator} ${filter.value !== null ? filter.value : ''}`;
+                filterDiv.appendChild(filterText);
+                
+                const removeBtn = document.createElement('button');
+                removeBtn.textContent = '×';
+                removeBtn.style.cssText = 'margin-left: 8px; background: rgba(255,255,255,0.3); border: none; color: white; cursor: pointer; border-radius: 3px; padding: 2px 6px;';
+                removeBtn.onclick = () => removeFilter(index);
+                filterDiv.appendChild(removeBtn);
+                
+                container.appendChild(filterDiv);
+            });
+        }
+        
+        // Update filter logic
+        function updateFilterLogic(logic) {
+            filterLogic = logic;
+            applyFilters();
+            updateURL();
+        }
+        
+        // Update visible count
+        function updateVisibleCount() {
+            const table = document.getElementById('resultsTable');
+            const tbody = table.querySelector('tbody');
+            const visibleRows = Array.from(tbody.querySelectorAll('tr')).filter(row => row.style.display !== 'none');
+            const visibleCountEl = document.getElementById('visibleCount');
+            if (visibleCountEl) {
+                visibleCountEl.textContent = visibleRows.length;
+            }
+        }
         
         function sortTable(columnIndex) {
             const table = document.getElementById('resultsTable');
             const tbody = table.querySelector('tbody');
-            const rows = Array.from(tbody.querySelectorAll('tr'));
+            const rows = Array.from(tbody.querySelectorAll('tr:not([style*="display: none"])'));
             const headers = table.querySelectorAll('th');
             
             // Remove sort classes from all headers
@@ -448,54 +948,181 @@ def get_javascript():
             
             // Sort rows
             rows.sort((a, b) => {
-                const aText = a.cells[columnIndex].textContent.trim();
-                const bText = b.cells[columnIndex].textContent.trim();
+                const aCell = a.cells[columnIndex];
+                const bCell = b.cells[columnIndex];
+                if (!aCell || !bCell) return 0;
                 
-                // Try to parse as number (handles currency, percentages, etc.)
-                const aNum = parseFloat(aText.replace(/[^0-9.-]/g, ''));
-                const bNum = parseFloat(bText.replace(/[^0-9.-]/g, ''));
+                const aRaw = aCell.getAttribute('data-raw');
+                const bRaw = bCell.getAttribute('data-raw');
+                
+                let aNum = aRaw !== null ? parseFloat(aRaw) : NaN;
+                let bNum = bRaw !== null ? parseFloat(bRaw) : NaN;
+                
+                if (isNaN(aNum)) {
+                    aNum = parseFloat(aCell.textContent.trim().replace(/[^0-9.-]/g, ''));
+                }
+                if (isNaN(bNum)) {
+                    bNum = parseFloat(bCell.textContent.trim().replace(/[^0-9.-]/g, ''));
+                }
                 
                 let comparison = 0;
                 
                 if (!isNaN(aNum) && !isNaN(bNum)) {
-                    // Both are numbers
                     comparison = aNum - bNum;
                 } else {
-                    // String comparison
+                    const aText = aCell.textContent.trim();
+                    const bText = bCell.textContent.trim();
                     comparison = aText.localeCompare(bText);
                 }
                 
                 return sortDirection[columnIndex] === 'asc' ? comparison : -comparison;
             });
             
-            // Re-append sorted rows
+            // Re-append sorted rows (only visible ones)
+            const hiddenRows = Array.from(tbody.querySelectorAll('tr[style*="display: none"]'));
             rows.forEach(row => tbody.appendChild(row));
+            hiddenRows.forEach(row => tbody.appendChild(row));
             
-            // Update visible count
-            document.getElementById('visibleCount').textContent = rows.length;
+            updateVisibleCount();
         }
-        
-        // Initialize - preserve original CSV order (no auto-sort)
-        // Users can click column headers to sort if desired
         
         // Tab switching functionality
         function switchTab(tabIndex) {
-            // Hide all tab contents
             const tabContents = document.querySelectorAll('.tab-content');
             tabContents.forEach(content => content.classList.remove('active'));
             
-            // Remove active class from all tab buttons
             const tabButtons = document.querySelectorAll('.tab-button');
             tabButtons.forEach(button => button.classList.remove('active'));
             
-            // Show selected tab content
             tabContents[tabIndex].classList.add('active');
             tabButtons[tabIndex].classList.add('active');
         }
         
-        // Initialize first tab as active
+        // Handle Enter key in filter input
+        function handleFilterKeyPress(event) {
+            if (event.key === 'Enter') {
+                addFilter();
+            }
+        }
+        
+        // Toggle filter section and column names
+        function toggleFilterSection() {
+            const filterSection = document.getElementById('filterSection');
+            const button = document.getElementById('toggleFilterBtn');
+            const headers = document.querySelectorAll('#resultsTable th');
+            
+            if (!filterSection || !button) return;
+            
+            // Toggle filter section
+            const isExpanded = filterSection.classList.contains('expanded');
+            
+            if (isExpanded) {
+                // Collapse: hide filter section and show display names
+                filterSection.classList.remove('expanded');
+                headers.forEach(th => {
+                    th.classList.remove('showing-filterable');
+                });
+                button.textContent = '🔍 Filter';
+                button.title = 'Show filter options and filterable column names';
+            } else {
+                // Expand: show filter section and show filterable names
+                filterSection.classList.add('expanded');
+                headers.forEach(th => {
+                    th.classList.add('showing-filterable');
+                });
+                button.textContent = '✖️ Hide Filter';
+                button.title = 'Hide filter options and show display column names';
+            }
+        }
+        
+        // Update URL with current filters
+        function updateURL() {
+            const params = new URLSearchParams();
+            
+            // Add filter logic (only if not default AND)
+            if (filterLogic && filterLogic !== 'AND') {
+                params.set('filterLogic', filterLogic);
+            }
+            
+            // Add filters
+            if (activeFilters.length > 0) {
+                const filterStrings = activeFilters.map(f => {
+                    let filterStr = f.field;
+                    if (f.operator) {
+                        filterStr += ' ' + f.operator;
+                        if (f.value !== null) {
+                            filterStr += ' ' + f.value;
+                        }
+                    }
+                    return filterStr;
+                });
+                params.set('filters', filterStrings.join('|'));
+            }
+            
+            // Update URL without reloading page
+            const newURL = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
+            window.history.replaceState({}, '', newURL);
+        }
+        
+        // Load filters from URL
+        function loadFiltersFromURL() {
+            const params = new URLSearchParams(window.location.search);
+            const errorDiv = document.getElementById('filterError');
+            if (errorDiv) errorDiv.textContent = '';
+            
+            // Load filter logic
+            const urlFilterLogic = params.get('filterLogic');
+            if (urlFilterLogic && (urlFilterLogic === 'AND' || urlFilterLogic === 'OR')) {
+                filterLogic = urlFilterLogic;
+                // Update radio button
+                const radio = document.querySelector(`input[name="filterLogic"][value="${filterLogic}"]`);
+                if (radio) {
+                    radio.checked = true;
+                }
+            }
+            
+            // Load filters
+            const filtersParam = params.get('filters');
+            if (filtersParam) {
+                const filterStrings = filtersParam.split('|');
+                activeFilters = [];
+                
+                for (const filterStr of filterStrings) {
+                    if (filterStr.trim()) {
+                        const filter = parseFilterExpression(filterStr.trim());
+                        if (filter) {
+                            activeFilters.push(filter);
+                        }
+                    }
+                }
+                
+                // If filters were loaded from URL, expand the filter section
+                if (activeFilters.length > 0) {
+                    const filterSection = document.getElementById('filterSection');
+                    const button = document.getElementById('toggleFilterBtn');
+                    const headers = document.querySelectorAll('#resultsTable th');
+                    
+                    if (filterSection && button) {
+                        filterSection.classList.add('expanded');
+                        headers.forEach(th => {
+                            th.classList.add('showing-filterable');
+                        });
+                        button.textContent = '✖️ Hide Filter';
+                        button.title = 'Hide filter options and show display column names';
+                    }
+                }
+                
+                updateFilterDisplay();
+                applyFilters();
+            }
+        }
+        
+        // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             switchTab(0);
+            initColumnMap();
+            updateFilterDisplay();
+            loadFiltersFromURL();
         });
 """
 
@@ -769,13 +1396,38 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
     # Prepare data for HTML table
     df_display = df.copy()
     
+    # Store raw values before formatting (for filtering) - keep original DataFrame
+    df_raw = df.copy()
+    
     # Format numeric columns for better display
     numeric_cols = [
         'ticker','pe_ratio','market_cap_b','curr_price','strike_price','price_above_curr','opt_prem.','IV','delta','theta','expiration_date','days_to_expiry','s_prem_tot','s_day_prem','l_strike','l_prem','liv','l_delta','l_theta','l_expiration_date','l_days_to_expiry','l_prem_tot','l_cnt_avl','prem_diff','net_premium','net_daily_premi','volume','num_contracts','option_ticker','l_option_ticker',
         'spread_slippage','net_premium_after_spread','net_daily_premium_after_spread','spread_impact_pct','liquidity_score','assignment_risk','trade_quality','long_options_to_purchase'
     ]
     
-    for col in numeric_cols:
+    # Also check for common column name variations
+    all_numeric_cols = set(numeric_cols)
+    for col in df_display.columns:
+        col_lower = col.lower()
+        # Map common variations
+        if 'pe' in col_lower and 'ratio' in col_lower:
+            all_numeric_cols.add(col)
+        elif 'market' in col_lower and 'cap' in col_lower:
+            all_numeric_cols.add(col)
+        elif 'current' in col_lower or 'curr' in col_lower:
+            all_numeric_cols.add(col)
+        elif 'strike' in col_lower:
+            all_numeric_cols.add(col)
+        elif 'premium' in col_lower:
+            all_numeric_cols.add(col)
+        elif 'delta' in col_lower or 'theta' in col_lower:
+            all_numeric_cols.add(col)
+        elif 'volume' in col_lower or 'contracts' in col_lower:
+            all_numeric_cols.add(col)
+        elif 'days' in col_lower:
+            all_numeric_cols.add(col)
+    
+    for col in all_numeric_cols:
         if col in df_display.columns:
             df_display[col] = df_display[col].apply(lambda x: format_numeric_value(x, col))
     
@@ -822,31 +1474,98 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
         </div>
         
         <div class="tab-content active">
+        <div style="margin-bottom: 15px; text-align: right;">
+            <button class="filter-button" onclick="toggleFilterSection()" id="toggleFilterBtn" title="Show/hide filter options and filterable column names">
+                🔍 Filter
+            </button>
+        </div>
+        <div class="filter-section" id="filterSection">
+            <h3 style="margin-top: 0; color: #667eea;">🔍 Filter Options</h3>
+            <div class="filter-logic">
+                <label>Filter Logic:</label>
+                <label><input type="radio" name="filterLogic" value="AND" checked onchange="updateFilterLogic('AND')"> AND</label>
+                <label><input type="radio" name="filterLogic" value="OR" onchange="updateFilterLogic('OR')"> OR</label>
+            </div>
+            <div class="filter-controls">
+                <div class="filter-input-group">
+                    <input type="text" id="filterInput" class="filter-input" placeholder="e.g., pe_ratio > 20, volume exists, net_daily_premium > 100" onkeypress="handleFilterKeyPress(event)">
+                    <button class="filter-button" onclick="addFilter()">Add Filter</button>
+                    <button class="filter-button clear" onclick="clearFilters()">Clear All</button>
+                </div>
+            </div>
+            <div id="filterError" class="filter-error"></div>
+            <div id="activeFilters" style="margin-top: 10px;"></div>
+            <div class="filter-help">
+                <strong>Filter Examples:</strong><br>
+                • <code>pe_ratio > 20</code> - P/E ratio greater than 20<br>
+                • <code>market_cap_b < 3.5</code> - Market cap less than 3.5B<br>
+                • <code>volume exists</code> - Volume data exists<br>
+                • <code>net_daily_premium > 100</code> - Net daily premium greater than 100<br>
+                • <code>delta < 0.5</code> - Delta less than 0.5<br>
+                • <code>days_to_expiry >= 7</code> - Days to expiry at least 7<br>
+                • <code>num_contracts > volume</code> - Field-to-field comparison<br>
+                <strong>Operators:</strong> <code>&gt;</code> <code>&gt;=</code> <code>&lt;</code> <code>&lt;=</code> <code>==</code> <code>!=</code> <code>exists</code> <code>not_exists</code><br>
+                <strong>💡 Tip:</strong> When the filter section is expanded, column headers show their filterable field names. Filters are automatically saved in the URL - share the URL to share your filtered view!
+            </div>
+        </div>
         <div class="table-wrapper">
             <table id="resultsTable">
                 <thead>
                     <tr>
 """)
     
-    # Generate table headers
+    # Generate table headers with filterable name toggle
     for col in df_display.columns:
         col_index = df_display.columns.get_loc(col)
         truncated_title = truncate_header(str(col), 15)
-        html_parts.append(f'                        <th class="sortable" onclick="sortTable({col_index})">{truncated_title}</th>\n')
+        # Use the original column name as the filterable name
+        filterable_name = html.escape(str(col))
+        html_parts.append(f'                        <th class="sortable" onclick="sortTable({col_index})" data-filterable-name="{filterable_name}">')
+        html_parts.append(f'                            <span class="column-name-display">{truncated_title}</span>')
+        html_parts.append(f'                            <span class="column-name-filterable">{filterable_name}</span>')
+        html_parts.append(f'                        </th>\n')
     
     html_parts.append("""                    </tr>
                 </thead>
                 <tbody>
 """)
     
-    # Generate table rows
-    for _, row in df_display.iterrows():
+    # Generate table rows with raw values stored in data attributes
+    for row_idx, row in df_display.iterrows():
         html_parts.append("                    <tr>\n")
         for col in df_display.columns:
             cell_value = str(row[col]) if pd.notna(row[col]) else ''
             # Escape HTML special characters
             cell_value = cell_value.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-            html_parts.append(f'                        <td>{cell_value}</td>\n')
+            
+            # Get raw value for filtering
+            raw_value = None
+            raw_text = None
+            if row_idx in df_raw.index and col in df_raw.columns:
+                raw_val = df_raw.loc[row_idx, col]
+                if pd.notna(raw_val):
+                    # Store numeric value if it's a number
+                    try:
+                        # Try to convert to float first to check if it's numeric
+                        float_val = float(raw_val)
+                        # If successful and it's actually a number (not NaN), store as numeric
+                        if not pd.isna(float_val):
+                            raw_value = str(float_val)
+                        else:
+                            raw_text = str(raw_val)
+                    except (ValueError, TypeError):
+                        # Not a number, store as text
+                        raw_text = str(raw_val)
+            
+            # Build td with data attributes
+            td_attrs = []
+            if raw_value is not None:
+                td_attrs.append(f'data-raw="{html.escape(str(raw_value))}"')
+            if raw_text is not None:
+                td_attrs.append(f'data-raw-text="{html.escape(str(raw_text))}"')
+            
+            attrs_str = ' ' + ' '.join(td_attrs) if td_attrs else ''
+            html_parts.append(f'                        <td{attrs_str}>{cell_value}</td>\n')
         html_parts.append("                    </tr>\n")
     
     html_parts.append("""                </tbody>
