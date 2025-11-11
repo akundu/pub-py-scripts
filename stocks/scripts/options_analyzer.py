@@ -1063,396 +1063,97 @@ class OptionsAnalyzer:
         
         # Use memory-efficient batch fetching instead of single large query
         try:
-            if self.debug:
-                print(f"DEBUG: Starting options fetch for {len(tickers_upper)} tickers", file=sys.stderr)
-                print(f"DEBUG: Date range: {start_date} to {end_date}", file=sys.stderr)
-                print(f"DEBUG: Tickers: {tickers_upper[:10]}{'...' if len(tickers_upper) > 10 else ''}", file=sys.stderr)
-            
-            # If spread mode is enabled, prepare to fetch long-term options concurrently
+            # 1) Fetch short options universe (and optionally long options simultaneously in spread mode)
             long_options_df = None
-            long_options_task = None
             if spread_mode:
-                # Calculate the target date range for long options (around spread_long_days from today)
-                from datetime import date, timedelta
-                today = date.today()
-                
-                # If spread_long_min_days is set, use it as the lower bound; otherwise use tolerance-based approach
-                if spread_long_min_days is not None:
-                    long_start_date = (today + timedelta(days=spread_long_min_days)).strftime('%Y-%m-%d')
-                    long_end_date = (today + timedelta(days=spread_long_days)).strftime('%Y-%m-%d')
-                    if self.debug:
-                        print(f"DEBUG: Preparing to fetch long-term options expiring between {spread_long_min_days} and {spread_long_days} days (concurrently with short-term)", file=sys.stderr)
-                        print(f"DEBUG:   Date range: {long_start_date} to {long_end_date}", file=sys.stderr)
-                else:
-                    # Allow ±N days window around the target long expiry (configurable)
-                    long_start_date = (today + timedelta(days=spread_long_days - spread_long_days_tolerance)).strftime('%Y-%m-%d')
-                    long_end_date = (today + timedelta(days=spread_long_days + spread_long_days_tolerance)).strftime('%Y-%m-%d')
-                    if self.debug:
-                        print(f"DEBUG: Preparing to fetch long-term options expiring around {spread_long_days} days (±{spread_long_days_tolerance} days) (concurrently with short-term)", file=sys.stderr)
-                        print(f"DEBUG:   Date range: {long_start_date} to {long_end_date}", file=sys.stderr)
-                
-                # Use a much larger timestamp lookback for long-term options since they may have been
-                # written weeks or months ago but are still valid. Use at least 180 days to catch options
-                # that were written when they were first listed (which could be months before expiration)
-                long_timestamp_lookback_days = max(timestamp_lookback_days, 180)  # At least 180 days for long-term options
-                if self.debug:
-                    print(f"DEBUG: Using timestamp_lookback_days={long_timestamp_lookback_days} for long-term options (vs {timestamp_lookback_days} for short-term)", file=sys.stderr)
-                
-                # Create async task to fetch long-term options concurrently
-                async def fetch_long_options():
-                    if max_workers > 1:
-                        return await self.db.get_latest_options_data_batch_multiprocess(
-                            tickers=tickers_upper,
-                            start_datetime=long_start_date,
-                            end_datetime=long_end_date,
-                            batch_size=batch_size,
-                            max_workers=max_workers,
-                            timestamp_lookback_days=long_timestamp_lookback_days
-                        )
-                    else:
-                        return await self.db.get_latest_options_data_batch(
-                            tickers=tickers_upper,
-                            start_datetime=long_start_date,
-                            end_datetime=long_end_date,
-                            max_concurrent=max_concurrent,
-                            batch_size=batch_size,
-                            timestamp_lookback_days=long_timestamp_lookback_days
-                        )
-                
-                long_options_task = asyncio.create_task(fetch_long_options())
-            
-            # Choose between asyncio-only or hybrid asyncio+multiprocess based on max_workers
-            if max_workers > 1:
-                if self.debug:
-                    print(f"DEBUG: Using multiprocess mode with {max_workers} workers", file=sys.stderr)
-                # Use hybrid asyncio + multiprocessing
-                options_df = await self.db.get_latest_options_data_batch_multiprocess(
-                    tickers=tickers_upper,
-                    start_datetime=start_date,
-                    end_datetime=end_date,
-                    batch_size=batch_size,
-                    max_workers=max_workers,
-                    timestamp_lookback_days=timestamp_lookback_days
+                # Compute long-term date window upfront
+                long_start_date, long_end_date = self._calculate_long_options_date_range(
+                    spread_long_days, spread_long_days_tolerance, spread_long_min_days
                 )
+
+                # Respect max_workers: split available processes between short and long fetches
+                short_workers = max_workers
+                long_workers = 0
+                if max_workers > 1:
+                    short_workers = max(1, max_workers // 2)
+                    long_workers = max_workers - short_workers
+                    if long_workers == 0:
+                        long_workers = 1
+                        short_workers = max(1, short_workers - 1)
+
+                async def _fetch_short():
+                    return await self._fetch_short_options_window(
+                        tickers_upper=tickers_upper,
+                        start_date=start_date,
+                        end_date=end_date,
+                        timestamp_lookback_days=timestamp_lookback_days,
+                        max_workers=short_workers,
+                        max_concurrent=max_concurrent,
+                        batch_size=batch_size,
+                    )
+
+                async def _fetch_long():
+                    return await self._fetch_long_term_options(
+                        tickers=tickers_upper,
+                        long_start_date=long_start_date,
+                        long_end_date=long_end_date,
+                        timestamp_lookback_days=timestamp_lookback_days,
+                        max_workers=long_workers,
+                        max_concurrent=max_concurrent,
+                        batch_size=batch_size,
+                    )
+
+                # Run concurrently; in non-multiprocess paths, this is still async concurrent;
+                # in multiprocess paths, the worker split above ensures total <= max_workers.
+                options_df, long_options_df = await asyncio.gather(_fetch_short(), _fetch_long())
+                # Prepare and filter long options now; pass down to spread analysis to avoid refetch
+                if long_options_df is not None and not long_options_df.empty:
+                    long_options_df = self._filter_and_prepare_long_options(
+                        long_options_df=long_options_df,
+                        min_write_timestamp=min_write_timestamp,
+                        long_start_date=long_start_date,
+                        long_end_date=long_end_date,
+                        tickers=tickers_upper
+                    )
             else:
-                # Use asyncio-only (single process)
-                if self.debug:
-                    print("DEBUG: Using single-process mode", file=sys.stderr)
-                options_df = await self.db.get_latest_options_data_batch(
-                    tickers=tickers_upper,
-                    start_datetime=start_date,
-                    end_datetime=end_date,
+                options_df = await self._fetch_short_options_window(
+                    tickers_upper=tickers_upper,
+                    start_date=start_date,
+                    end_date=end_date,
+                    timestamp_lookback_days=timestamp_lookback_days,
+                    max_workers=max_workers,
                     max_concurrent=max_concurrent,
                     batch_size=batch_size,
-                    timestamp_lookback_days=timestamp_lookback_days
                 )
-            
-            # If we started fetching long-term options concurrently, wait for it now
-            if long_options_task is not None:
-                if self.debug:
-                    print("DEBUG: Waiting for long-term options fetch to complete...", file=sys.stderr)
-                try:
-                    long_options_df = await long_options_task
-                    if self.debug:
-                        print(f"DEBUG: Fetched {len(long_options_df)} long-term options from database", file=sys.stderr)
-                except Exception as e:
-                    if not self.quiet:
-                        print(f"Warning: Failed to fetch long-term options concurrently: {e}", file=sys.stderr)
-                        print("Will attempt to fetch long-term options during spread analysis...", file=sys.stderr)
-                    if self.debug:
-                        import traceback
-                        traceback.print_exc()
-                    long_options_df = None  # Will trigger fetch in _create_spread_analysis
-            
-            if self.debug:
-                print(f"DEBUG: Fetched {len(options_df)} total options from database", file=sys.stderr)
-                if not options_df.empty:
-                    print(f"DEBUG: Options columns: {list(options_df.columns)}", file=sys.stderr)
-                    if 'ticker' in options_df.columns:
-                        unique_tickers = options_df['ticker'].unique().tolist()
-                        print(f"DEBUG: Options tickers: {unique_tickers[:10]}{'...' if len(unique_tickers) > 10 else ''}", file=sys.stderr)
-                    if 'option_type' in options_df.columns:
-                        option_types = options_df['option_type'].unique().tolist()
-                        print(f"DEBUG: Option types found: {option_types}", file=sys.stderr)
-                else:
-                    print("DEBUG: No options data returned from database", file=sys.stderr)
-            
             if options_df.empty:
-                if not self.quiet:
-                    print("DEBUG: Empty options DataFrame after fetch. Possible reasons:", file=sys.stderr)
-                    print("  1. No options data in database for these tickers", file=sys.stderr)
-                    print(f"  2. No options expiring between {start_date} and {end_date}", file=sys.stderr)
-                    print(f"  3. Options exist but outside timestamp_lookback_days={timestamp_lookback_days} window", file=sys.stderr)
                 return pd.DataFrame()
-            
-            # Filter for call options only
-            before_call_filter = len(options_df)
-            if 'option_type' in options_df.columns:
-                options_df = options_df[options_df['option_type'] == 'call']
-                if self.debug:
-                    print(f"DEBUG: After call filter: {len(options_df)} options (was {before_call_filter})", file=sys.stderr)
-            else:
-                if self.debug:
-                    print("DEBUG: Warning: 'option_type' column not found in options DataFrame", file=sys.stderr)
-            
+
+            # 2) Filter to calls
+            options_df = self._filter_call_options(options_df)
             if options_df.empty:
                 if not self.quiet:
                     print("DEBUG: No call options found after filtering", file=sys.stderr)
                 return pd.DataFrame()
-            
-            # Get latest stock prices for all tickers in parallel
-            # When market is open: uses latest realtime price
-            # When market is closed: uses last close price from daily data
-            stock_prices = {}
-            price_sources = {}  # Track which source was used for each ticker
-            
-            # Create async tasks for all tickers to fetch prices in parallel
-            async def fetch_price_for_ticker(ticker):
-                try:
-                    # Use get_latest_price_with_data to get source information
-                    price_data = await self.db.get_latest_price_with_data(ticker, use_market_time=use_market_time)
-                    if price_data and price_data.get('price'):
-                        price = price_data['price']
-                        source = price_data.get('source', 'unknown')
-                        
-                        if self.debug:
-                            # Determine market status based on source: realtime = market open, daily/hourly = market closed
-                            if source == 'realtime':
-                                market_status = "OPEN (using latest realtime price)"
-                            elif source == 'daily':
-                                market_status = "CLOSED (using last close price from daily data)"
-                            elif source == 'hourly':
-                                market_status = "CLOSED (using hourly close price as fallback)"
-                            else:
-                                market_status = f"UNKNOWN (source: {source})"
-                            print(f"DEBUG: {ticker}: ${price:.2f} from {source} - Market {market_status}", file=sys.stderr)
-                        
-                        return ticker, price, source
-                    return ticker, None, None
-                except Exception as e:
-                    if not self.quiet:
-                        print(f"Warning: Could not fetch price for {ticker}: {e}", file=sys.stderr)
-                    return ticker, None, None
-            
-            # Fetch all prices concurrently
-            price_tasks = [fetch_price_for_ticker(ticker) for ticker in tickers_upper]
-            price_results = await asyncio.gather(*price_tasks)
-            
-            # Process results
-            for ticker, price, source in price_results:
-                if price is not None:
-                    stock_prices[ticker] = price
-                    price_sources[ticker] = source
-            
-            if self.debug or not self.quiet:
-                print(f"DEBUG: Fetched stock prices for {len(stock_prices)}/{len(tickers_upper)} tickers", file=sys.stderr)
-                if stock_prices and price_sources:
-                    # Show price source summary
-                    source_counts = {}
-                    for ticker, source in price_sources.items():
-                        source_counts[source] = source_counts.get(source, 0) + 1
-                    print(f"DEBUG: Price sources: {source_counts}", file=sys.stderr)
-                    if self.debug:
-                        sample_prices = [(t, stock_prices[t], price_sources.get(t, 'unknown')) for t in list(stock_prices.keys())[:5]]
-                        print(f"DEBUG: Sample prices (ticker, price, source): {sample_prices}", file=sys.stderr)
-            
-            if not stock_prices:
-                if not self.quiet:
-                    print("DEBUG: No stock prices fetched. Cannot calculate option metrics.", file=sys.stderr)
-                return pd.DataFrame()
-            
-            # Build the analysis DataFrame
-            df = options_df.copy()
-            
-            # Ensure ticker column exists
-            if 'ticker' not in df.columns:
-                if not self.quiet:
-                    print(f"Error: DataFrame missing 'ticker' column. Available columns: {list(df.columns)}", file=sys.stderr)
-                return pd.DataFrame()
-            
-            # Map stock prices to each option row
-            df['current_price'] = df['ticker'].map(stock_prices)
-            
-            # Filter out rows where we don't have a stock price
-            before_price_filter = len(df)
-            df = df[df['current_price'].notna()]
-            
-            if self.debug:
-                print(f"DEBUG: After price mapping: {len(df)} options (was {before_price_filter})", file=sys.stderr)
-            
+
+            # 3) Attach latest prices (market-time aware)
+            df = await self._attach_latest_prices(options_df, tickers_upper, use_market_time)
             if df.empty:
-                if not self.quiet:
-                    print("DEBUG: No options remaining after price mapping", file=sys.stderr)
                 return pd.DataFrame()
-            
-            # Calculate derived fields
-            df['strike_price'] = df['strike_price'].round(2)
-            df['price_above_current'] = (df['strike_price'] - df['current_price']).round(2)
-            
-            # Option premium: use ask, fallback to bid, fallback to 0.01
-            df['option_premium'] = df.apply(
-                lambda row: round(row['ask'] if pd.notna(row.get('ask')) else (row['bid'] if pd.notna(row.get('bid')) else 0.01), 2),
-                axis=1
-            )
-            
-            # Format bid:ask for short options
-            def format_bid_ask(row):
-                bid_val = row.get('bid', 0) if pd.notna(row.get('bid')) else 0
-                ask_val = row.get('ask', 0) if pd.notna(row.get('ask')) else 0
-                if pd.notna(row.get('bid')) or pd.notna(row.get('ask')):
-                    return f"{bid_val:.2f}:{ask_val:.2f}"
-                else:
-                    return "N/A:N/A"
-            
-            df['bid_ask'] = df.apply(format_bid_ask, axis=1)
-            
-            # Calculate days to expiry
-            # Normalize expiration_date to timezone-aware UTC, handling mixed timezone-aware/naive values
-            def normalize_to_utc(x):
-                if pd.isna(x):
-                    return pd.NaT
-                # Convert to datetime if not already
-                if isinstance(x, pd.Timestamp):
-                    dt = x
-                else:
-                    dt = pd.to_datetime(x, errors='coerce')
-                    if pd.isna(dt):
-                        return pd.NaT
-                # Normalize to UTC
-                if dt.tz is None:
-                    return dt.tz_localize('UTC')
-                else:
-                    return dt.tz_convert('UTC')
-            
-            # Apply normalization directly to the original column to avoid creating mixed Series
-            df['expiration_date'] = df['expiration_date'].apply(normalize_to_utc)
-            today = pd.Timestamp.now(tz='UTC').normalize()
-            df['days_to_expiry'] = ((df['expiration_date'] - today).dt.total_seconds() / 86400).astype(int)
 
-            # Normalize short option implied volatility
-            if 'implied_volatility' in df.columns:
-                df['implied_volatility'] = pd.to_numeric(df['implied_volatility'], errors='coerce').round(4)
-            else:
-                df['implied_volatility'] = pd.Series([float('nan')] * len(df), index=df.index)
-            
-            # Apply days_to_expiry filter if specified
-            if days_to_expiry is not None:
-                before_days_filter = len(df)
-                df = df[
-                    (df['days_to_expiry'] >= days_to_expiry - 1) &
-                    (df['days_to_expiry'] <= days_to_expiry + 1)
-                ]
-                if self.debug or not self.quiet:
-                    print(f"DEBUG: After days_to_expiry filter ({days_to_expiry}): {len(df)} options (was {before_days_filter})", file=sys.stderr)
-            
-            # Calculate position metrics
-            df['num_contracts'] = df['current_price'].apply(
-                lambda cp: 0 if pd.isna(cp) or cp <= 0 else math.floor(position_size / (cp * 100))
+            # 4) Derive metrics and apply filters
+            df = self._derive_and_filter_short_metrics(
+                df=df,
+                position_size=position_size,
+                days_to_expiry=days_to_expiry,
+                min_volume=min_volume,
+                min_premium=min_premium,
+                min_write_timestamp=min_write_timestamp,
             )
-            
-            # Potential premium = num_contracts * (option_premium * 100)
-            df['potential_premium'] = (df['num_contracts'] * (df['option_premium'] * 100)).round(2)
-            
-            # Daily premium = potential_premium / days_to_expiry
-            df['daily_premium'] = df.apply(
-                lambda row: 0 if row['days_to_expiry'] <= 0 else round(row['potential_premium'] / row['days_to_expiry'], 2),
-                axis=1
-            )
-            
-            # Apply filters
-            if min_volume > 0:
-                before_volume_filter = len(df)
-                df = df[df['volume'] >= min_volume]
-                if self.debug or not self.quiet:
-                    print(f"DEBUG: After min_volume filter ({min_volume}): {len(df)} options (was {before_volume_filter})", file=sys.stderr)
-            
-            if min_premium > 0.0:
-                before_premium_filter = len(df)
-                df = df[df['potential_premium'] >= min_premium]
-                if self.debug or not self.quiet:
-                    print(f"DEBUG: After min_premium filter ({min_premium}): {len(df)} options (was {before_premium_filter})", file=sys.stderr)
-            
-            # Apply write timestamp filter if specified
-            if min_write_timestamp:
-                try:
-                    # Parse EST timestamp and convert to UTC for comparison
-                    import pytz
-                    est = pytz.timezone('America/New_York')
-                    # Parse the input timestamp (assume EST)
-                    min_ts = pd.to_datetime(min_write_timestamp)
-                    # If timezone-naive, localize to EST
-                    if min_ts.tz is None:
-                        min_ts = est.localize(min_ts)
-                    # Convert to UTC for comparison
-                    min_ts_utc = min_ts.astimezone(pytz.UTC)
-                    
-                    # Ensure write_timestamp column is datetime and timezone-aware
-                    if 'write_timestamp' in df.columns:
-                        # Normalize write_timestamp to UTC, handling mixed timezone-aware/naive values
-                        def normalize_write_timestamp(x):
-                            if pd.isna(x):
-                                return pd.NaT
-                            if isinstance(x, pd.Timestamp):
-                                dt = x
-                            else:
-                                dt = pd.to_datetime(x, errors='coerce')
-                                if pd.isna(dt):
-                                    return pd.NaT
-                            if dt.tz is None:
-                                return dt.tz_localize('UTC')
-                            else:
-                                return dt.tz_convert('UTC')
-                        
-                        df['write_timestamp'] = df['write_timestamp'].apply(normalize_write_timestamp)
-                        # Filter
-                        df = df[df['write_timestamp'] >= min_ts_utc]
-                        if not self.quiet:
-                            print(f"Filtered options to those written after {min_write_timestamp} EST ({min_ts_utc} UTC)")
-                except Exception as e:
-                    if not self.quiet:
-                        print(f"Warning: Could not apply write timestamp filter: {e}", file=sys.stderr)
+            if df.empty:
+                return pd.DataFrame()
 
-            
-            # Round numeric columns
-            for col in ['bid', 'ask', 'delta', 'theta']:
-                if col in df.columns:
-                    df[col] = df[col].round(2)
-            if 'implied_volatility' in df.columns:
-                df['implied_volatility'] = df['implied_volatility'].round(4)
-            
-            # Convert timestamps - handle mixed timezone-aware/naive values
-            def normalize_timestamp_to_utc(x):
-                if pd.isna(x):
-                    return pd.NaT
-                # Convert to datetime if not already
-                if isinstance(x, pd.Timestamp):
-                    dt = x
-                else:
-                    dt = pd.to_datetime(x, errors='coerce')
-                    if pd.isna(dt):
-                        return pd.NaT
-                # Normalize to UTC
-                if dt.tz is None:
-                    return dt.tz_localize('UTC')
-                else:
-                    return dt.tz_convert('UTC')
-            
-            for ts_col in ['last_quote_timestamp', 'write_timestamp']:
-                if ts_col in df.columns:
-                    # Apply normalization directly to avoid creating mixed Series
-                    df[ts_col] = df[ts_col].apply(normalize_timestamp_to_utc)
-            
-            # Select and order columns for output
-            output_cols = [
-                'ticker', 'current_price', 'strike_price', 'price_above_current',
-                'option_premium', 'bid_ask', 'implied_volatility', 'delta', 'theta', 'volume', 'num_contracts',
-                'potential_premium', 'daily_premium', 'expiration_date', 'days_to_expiry',
-                'last_quote_timestamp', 'write_timestamp', 'option_ticker'
-            ]
-            
-            # Only include columns that exist
-            available_cols = [col for col in output_cols if col in df.columns]
-            df = df[available_cols]
+            # 5) Normalize timestamps and select columns
+            df = self._normalize_short_timestamps_and_select(df)
             
             # If spread mode is enabled, match short-term options with long-term options
             if spread_mode:
@@ -1485,7 +1186,7 @@ class OptionsAnalyzer:
                     max_workers=max_workers,
                     position_size=position_size,
                     min_write_timestamp=min_write_timestamp,
-                    long_options_df=long_options_df  # Pass pre-fetched long-term options data
+                    long_options_df=long_options_df  # reuse concurrently fetched long options if available
                 )
             
             if self.debug:
@@ -1499,6 +1200,276 @@ class OptionsAnalyzer:
             if self.debug:
                 traceback.print_exc()
             return pd.DataFrame()
+
+    # ===== Helper methods for analyze_options =====
+    async def _fetch_short_options_window(
+        self,
+        tickers_upper: List[str],
+        start_date: str,
+        end_date: Optional[str],
+        timestamp_lookback_days: int,
+        max_workers: int,
+        max_concurrent: int,
+        batch_size: int
+    ) -> pd.DataFrame:
+        if self.debug:
+            print(f"DEBUG: Starting options fetch for {len(tickers_upper)} tickers", file=sys.stderr)
+            print(f"DEBUG: Date range: {start_date} to {end_date}", file=sys.stderr)
+            print(f"DEBUG: Tickers: {tickers_upper[:10]}{'...' if len(tickers_upper) > 10 else ''}", file=sys.stderr)
+
+        if max_workers > 1:
+            if self.debug:
+                print(f"DEBUG: Using multiprocess mode with {max_workers} workers", file=sys.stderr)
+            options_df = await self.db.get_latest_options_data_batch_multiprocess(
+                tickers=tickers_upper,
+                start_datetime=start_date,
+                end_datetime=end_date,
+                batch_size=batch_size,
+                max_workers=max_workers,
+                timestamp_lookback_days=timestamp_lookback_days
+            )
+        else:
+            if self.debug:
+                print("DEBUG: Using single-process mode", file=sys.stderr)
+            options_df = await self.db.get_latest_options_data_batch(
+                tickers=tickers_upper,
+                start_datetime=start_date,
+                end_datetime=end_date,
+                max_concurrent=max_concurrent,
+                batch_size=batch_size,
+                timestamp_lookback_days=timestamp_lookback_days
+            )
+
+        if self.debug:
+            print(f"DEBUG: Fetched {len(options_df)} total options from database", file=sys.stderr)
+            if not options_df.empty:
+                print(f"DEBUG: Options columns: {list(options_df.columns)}", file=sys.stderr)
+                if 'ticker' in options_df.columns:
+                    unique_tickers = options_df['ticker'].unique().tolist()
+                    print(f"DEBUG: Options tickers: {unique_tickers[:10]}{'...' if len(unique_tickers) > 10 else ''}", file=sys.stderr)
+                if 'option_type' in options_df.columns:
+                    option_types = options_df['option_type'].unique().tolist()
+                    print(f"DEBUG: Option types found: {option_types}", file=sys.stderr)
+            else:
+                print("DEBUG: No options data returned from database", file=sys.stderr)
+        return options_df
+
+    def _filter_call_options(self, options_df: pd.DataFrame) -> pd.DataFrame:
+        before_call_filter = len(options_df)
+        if 'option_type' in options_df.columns:
+            options_df = options_df[options_df['option_type'] == 'call']
+            if self.debug:
+                print(f"DEBUG: After call filter: {len(options_df)} options (was {before_call_filter})", file=sys.stderr)
+        else:
+            if self.debug:
+                print("DEBUG: Warning: 'option_type' column not found in options DataFrame", file=sys.stderr)
+        return options_df
+
+    async def _attach_latest_prices(
+        self,
+        options_df: pd.DataFrame,
+        tickers_upper: List[str],
+        use_market_time: bool
+    ) -> pd.DataFrame:
+        stock_prices: Dict[str, float] = {}
+        price_sources: Dict[str, str] = {}
+
+        async def fetch_price_for_ticker(ticker):
+            try:
+                price_data = await self.db.get_latest_price_with_data(ticker, use_market_time=use_market_time)
+                if price_data and price_data.get('price'):
+                    price = price_data['price']
+                    source = price_data.get('source', 'unknown')
+                    if self.debug:
+                        if source == 'realtime':
+                            market_status = "OPEN (using latest realtime price)"
+                        elif source == 'daily':
+                            market_status = "CLOSED (using last close price from daily data)"
+                        elif source == 'hourly':
+                            market_status = "CLOSED (using hourly close price as fallback)"
+                        else:
+                            market_status = f"UNKNOWN (source: {source})"
+                        print(f"DEBUG: {ticker}: ${price:.2f} from {source} - Market {market_status}", file=sys.stderr)
+                    return ticker, price, source
+                return ticker, None, None
+            except Exception as e:
+                if not self.quiet:
+                    print(f"Warning: Could not fetch price for {ticker}: {e}", file=sys.stderr)
+                return ticker, None, None
+
+        price_tasks = [fetch_price_for_ticker(ticker) for ticker in tickers_upper]
+        price_results = await asyncio.gather(*price_tasks)
+        for ticker, price, source in price_results:
+            if price is not None:
+                stock_prices[ticker] = price
+                price_sources[ticker] = source
+
+        if self.debug or not self.quiet:
+            print(f"DEBUG: Fetched stock prices for {len(stock_prices)}/{len(tickers_upper)} tickers", file=sys.stderr)
+            if stock_prices and price_sources:
+                source_counts: Dict[str, int] = {}
+                for _, source in price_sources.items():
+                    source_counts[source] = source_counts.get(source, 0) + 1
+                print(f"DEBUG: Price sources: {source_counts}", file=sys.stderr)
+                if self.debug:
+                    sample_prices = [(t, stock_prices[t], price_sources.get(t, 'unknown')) for t in list(stock_prices.keys())[:5]]
+                    print(f"DEBUG: Sample prices (ticker, price, source): {sample_prices}", file=sys.stderr)
+
+        if not stock_prices:
+            if not self.quiet:
+                print("DEBUG: No stock prices fetched. Cannot calculate option metrics.", file=sys.stderr)
+            return pd.DataFrame()
+
+        df = options_df.copy()
+        if 'ticker' not in df.columns:
+            if not self.quiet:
+                print(f"Error: DataFrame missing 'ticker' column. Available columns: {list(df.columns)}", file=sys.stderr)
+            return pd.DataFrame()
+        df['current_price'] = df['ticker'].map(stock_prices)
+        before_price_filter = len(df)
+        df = df[df['current_price'].notna()]
+        if self.debug:
+            print(f"DEBUG: After price mapping: {len(df)} options (was {before_price_filter})", file=sys.stderr)
+        return df
+
+    def _derive_and_filter_short_metrics(
+        self,
+        df: pd.DataFrame,
+        position_size: float,
+        days_to_expiry: Optional[int],
+        min_volume: int,
+        min_premium: float,
+        min_write_timestamp: Optional[str]
+    ) -> pd.DataFrame:
+        df = df.copy()
+        df['strike_price'] = df['strike_price'].round(2)
+        df['price_above_current'] = (df['strike_price'] - df['current_price']).round(2)
+        df['option_premium'] = df.apply(
+            lambda row: round(row['ask'] if pd.notna(row.get('ask')) else (row['bid'] if pd.notna(row.get('bid')) else 0.01), 2),
+            axis=1
+        )
+        def _format_bid_ask(row):
+            bid_val = row.get('bid', 0) if pd.notna(row.get('bid')) else 0
+            ask_val = row.get('ask', 0) if pd.notna(row.get('ask')) else 0
+            if pd.notna(row.get('bid')) or pd.notna(row.get('ask')):
+                return f"{bid_val:.2f}:{ask_val:.2f}"
+            return "N/A:N/A"
+        df['bid_ask'] = df.apply(_format_bid_ask, axis=1)
+
+        def _normalize_to_utc(x):
+            if pd.isna(x):
+                return pd.NaT
+            if isinstance(x, pd.Timestamp):
+                dt = x
+            else:
+                dt = pd.to_datetime(x, errors='coerce')
+                if pd.isna(dt):
+                    return pd.NaT
+            if dt.tz is None:
+                return dt.tz_localize('UTC')
+            return dt.tz_convert('UTC')
+        df['expiration_date'] = df['expiration_date'].apply(_normalize_to_utc)
+        today = pd.Timestamp.now(tz='UTC').normalize()
+        df['days_to_expiry'] = ((df['expiration_date'] - today).dt.total_seconds() / 86400).astype(int)
+
+        if 'implied_volatility' in df.columns:
+            df['implied_volatility'] = pd.to_numeric(df['implied_volatility'], errors='coerce').round(4)
+        else:
+            df['implied_volatility'] = pd.Series([float('nan')] * len(df), index=df.index)
+
+        if days_to_expiry is not None:
+            before_days_filter = len(df)
+            df = df[
+                (df['days_to_expiry'] >= days_to_expiry - 1) &
+                (df['days_to_expiry'] <= days_to_expiry + 1)
+            ]
+            if self.debug or not self.quiet:
+                print(f"DEBUG: After days_to_expiry filter ({days_to_expiry}): {len(df)} options (was {before_days_filter})", file=sys.stderr)
+
+        df['num_contracts'] = df['current_price'].apply(
+            lambda cp: 0 if pd.isna(cp) or cp <= 0 else math.floor(position_size / (cp * 100))
+        )
+        df['potential_premium'] = (df['num_contracts'] * (df['option_premium'] * 100)).round(2)
+        df['daily_premium'] = df.apply(
+            lambda row: 0 if row['days_to_expiry'] <= 0 else round(row['potential_premium'] / row['days_to_expiry'], 2),
+            axis=1
+        )
+
+        if min_volume > 0:
+            before_volume_filter = len(df)
+            df = df[df['volume'] >= min_volume]
+            if self.debug or not self.quiet:
+                print(f"DEBUG: After min_volume filter ({min_volume}): {len(df)} options (was {before_volume_filter})", file=sys.stderr)
+
+        if min_premium > 0.0:
+            before_premium_filter = len(df)
+            df = df[df['potential_premium'] >= min_premium]
+            if self.debug or not self.quiet:
+                print(f"DEBUG: After min_premium filter ({min_premium}): {len(df)} options (was {before_premium_filter})", file=sys.stderr)
+
+        if min_write_timestamp:
+            try:
+                import pytz
+                est = pytz.timezone('America/New_York')
+                min_ts = pd.to_datetime(min_write_timestamp)
+                if min_ts.tz is None:
+                    min_ts = est.localize(min_ts)
+                min_ts_utc = min_ts.astimezone(pytz.UTC)
+                if 'write_timestamp' in df.columns:
+                    def _normalize_write_timestamp(x):
+                        if pd.isna(x):
+                            return pd.NaT
+                        if isinstance(x, pd.Timestamp):
+                            dt = x
+                        else:
+                            dt = pd.to_datetime(x, errors='coerce')
+                            if pd.isna(dt):
+                                return pd.NaT
+                        if dt.tz is None:
+                            return dt.tz_localize('UTC')
+                        return dt.tz_convert('UTC')
+                    df['write_timestamp'] = df['write_timestamp'].apply(_normalize_write_timestamp)
+                    df = df[df['write_timestamp'] >= min_ts_utc]
+                    if not self.quiet:
+                        print(f"Filtered options to those written after {min_write_timestamp} EST ({min_ts_utc} UTC)")
+            except Exception as e:
+                if not self.quiet:
+                    print(f"Warning: Could not apply write timestamp filter: {e}", file=sys.stderr)
+        return df
+
+    def _normalize_short_timestamps_and_select(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        for col in ['bid', 'ask', 'delta', 'theta']:
+            if col in df.columns:
+                df[col] = df[col].round(2)
+        if 'implied_volatility' in df.columns:
+            df['implied_volatility'] = df['implied_volatility'].round(4)
+
+        def _normalize_timestamp_to_utc(x):
+            if pd.isna(x):
+                return pd.NaT
+            if isinstance(x, pd.Timestamp):
+                dt = x
+            else:
+                dt = pd.to_datetime(x, errors='coerce')
+                if pd.isna(dt):
+                    return pd.NaT
+            if dt.tz is None:
+                return dt.tz_localize('UTC')
+            return dt.tz_convert('UTC')
+
+        for ts_col in ['last_quote_timestamp', 'write_timestamp']:
+            if ts_col in df.columns:
+                df[ts_col] = df[ts_col].apply(_normalize_timestamp_to_utc)
+
+        output_cols = [
+            'ticker', 'current_price', 'strike_price', 'price_above_current',
+            'option_premium', 'bid_ask', 'implied_volatility', 'delta', 'theta', 'volume', 'num_contracts',
+            'potential_premium', 'daily_premium', 'expiration_date', 'days_to_expiry',
+            'last_quote_timestamp', 'write_timestamp', 'option_ticker'
+        ]
+        available_cols = [c for c in output_cols if c in df.columns]
+        return df[available_cols]
     
     def _calculate_long_options_date_range(
         self,

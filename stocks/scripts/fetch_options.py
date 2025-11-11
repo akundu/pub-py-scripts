@@ -36,6 +36,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # Import common symbol loading functions
 from common.symbol_loader import add_symbol_arguments, fetch_lists_data
 from common.stock_db import get_stock_db
+from common.common import run_iteration_in_subprocess
 from common.market_hours import is_market_hours as common_is_market_hours, compute_market_transition_times as common_compute_market_transition_times
 
 try:
@@ -1259,6 +1260,68 @@ async def save_options_via_direct_db(db_save_tasks: list, db_config: str, args) 
                 if not args.quiet:
                     print(f"Warning: error closing DB connection: {close_e}")
 
+
+async def _execute_options_iteration(
+    symbols_list: list[str],
+    args: argparse.Namespace,
+    api_key: str,
+) -> dict:
+    """
+    Execute one iteration of options fetching (without sleeping) and return summary data.
+    """
+    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+
+    exec_type = args.executor_type
+    if args.max_concurrent and args.max_concurrent > 0:
+        max_workers = args.max_concurrent
+    else:
+        max_workers = (os.cpu_count() or 1) if exec_type == 'process' else (os.cpu_count() or 1) * 5
+
+    if not args.quiet:
+        print(
+            f"Starting concurrent fetch for {len(symbols_list)} symbols "
+            f"using {exec_type} executor with max_workers={max_workers}"
+        )
+
+    ExecutorCls = ProcessPoolExecutor if exec_type == 'process' else ThreadPoolExecutor
+    db_save_tasks = []
+    with ExecutorCls(max_workers=max_workers) as pool:
+        futures_map = {pool.submit(_run_for_symbol, symbol, args, api_key): symbol for symbol in symbols_list}
+        for fut in as_completed(futures_map):
+            result = fut.result()
+            if isinstance(result, dict) and 'formatted_output' in result:
+                if not args.quiet and result['formatted_output']:
+                    print(result['formatted_output'])
+                if result.get('db_save_data'):
+                    db_save_tasks.append(result['db_save_data'])
+            elif not args.quiet and result:
+                print(result)
+
+    if db_save_tasks and getattr(args, 'use_db', None):
+        await save_options_to_database(db_save_tasks, args)
+
+    return {
+        "symbols_processed": len(symbols_list),
+        "db_tasks": len(db_save_tasks),
+    }
+
+
+def _options_iteration_worker(
+    symbols_list: list[str],
+    args_dict: dict,
+    api_key: str,
+) -> dict:
+    """
+    Wrapper suitable for running an options iteration inside a subprocess.
+    """
+    iteration_args = argparse.Namespace(**args_dict)
+
+    async def _runner() -> dict:
+        return await _execute_options_iteration(symbols_list, iteration_args, api_key)
+
+    return asyncio.run(_runner())
+
+
 async def main():
     """Main function to run the data fetcher."""
     if not POLYGON_AVAILABLE:
@@ -1581,122 +1644,86 @@ Examples:
                 else:
                     print("Warning: Market is still not open after waiting. Proceeding anyway...")
 
-    fetcher = HistoricalDataFetcher(api_key, args.data_dir, args.quiet, getattr(args, 'snapshot_max_concurrent', 0))
-    
-    async def run_one_batch_and_sleep_once() -> bool:
-        # returns True if should continue, False to stop
-        from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
-        exec_type = args.executor_type
-        if args.max_concurrent and args.max_concurrent > 0:
-            max_workers = args.max_concurrent
-        else:
-            max_workers = (os.cpu_count() or 1) if exec_type == 'process' else (os.cpu_count() or 1) * 5
-
-        if not args.quiet:
-            print(f"Starting concurrent fetch for {len(symbols_list)} symbols using {exec_type} executor with max_workers={max_workers}")
-
-        ExecutorCls = ProcessPoolExecutor if exec_type == 'process' else ThreadPoolExecutor
-        with ExecutorCls(max_workers=max_workers) as pool:
-            futures_map = {pool.submit(_run_for_symbol, symbol, args, api_key): symbol for symbol in symbols_list}
-            db_save_tasks = []
-            for fut in as_completed(futures_map):
-                result = fut.result()
-                if isinstance(result, dict) and 'formatted_output' in result:
-                    # New format with database save data
-                    if not args.quiet and result['formatted_output']:
-                        print(result['formatted_output'])
-                    if result.get('db_save_data'):
-                        db_save_tasks.append(result['db_save_data'])
-                elif not args.quiet and result:
-                    # Old format (string output)
-                    print(result)
-            
-            # Save all database data in main thread
-            if db_save_tasks and getattr(args, 'use_db', None):
-                await save_options_to_database(db_save_tasks, args)
-
-        # Intelligent sleep based on market transitions
-        now_utc = datetime.now(timezone.utc)
-        seconds_to_open, seconds_to_close = common_compute_market_transition_times(now_utc, "America/New_York")
-        is_market_open = HistoricalDataFetcher._is_market_open(now_utc)
-        
-        sleep_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed'] * 60
-        print_string = ""
-        if is_market_open:
-            # Market is open: prefer staying on open cadence; do not sleep past close
-            base_sleep = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
-            if seconds_to_close is not None:
-                sleep_seconds = max(min(base_sleep, seconds_to_close), 5)
-                if not args.quiet:
-                    print(f"Next run in {sleep_seconds:.0f}s (market open, {HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']}min interval; {seconds_to_close:.0f}s until close) [MARKET OPEN]")
-            else:
-                sleep_seconds = base_sleep
-                if not args.quiet:
-                    print(f"Next run in {sleep_seconds:.0f}s (market open, {HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']}min interval) [MARKET OPEN]")
-        else:
-            # Market is closed: if opening soon, sleep to open; otherwise use closed cadence
-            #sleep_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed'] * 60
-            opening_soon_threshold = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
-            if not args.quiet:
-                print(f"opening_soon_threshold: {opening_soon_threshold}, seconds_to_open: {seconds_to_open}", file=sys.stderr)
-            if seconds_to_open is not None and seconds_to_open <= sleep_seconds:
-                sleep_seconds = min(seconds_to_open, opening_soon_threshold)
-                if not args.quiet:
-                    print(f"Next run in {sleep_seconds:.0f}s (sleeping until market open in {seconds_to_open:.0f}s) [MARKET CLOSED→OPEN]")
-            else:
-                if not args.quiet:
-                    print(f"Next run in {sleep_seconds:.0f}s (markets closed, {HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed']}min interval) [MARKET CLOSED]")
-        
-        # Apply interval multiplier to cadence-based sleeps; do not shorten sleep-until-open
-        adjusted_sleep = sleep_seconds * (args.interval_multiplier if getattr(args, 'interval_multiplier', None) else 1.0)
-        if not args.quiet:
-            print(f"Next run in {adjusted_sleep:.0f}s {print_string}")
-        await asyncio.sleep(adjusted_sleep)
-        return True
-
     if args.continuous:
         run_num = 0
         while True:
             run_num += 1
             if not args.quiet:
                 print(f"\n--- Continuous run #{run_num} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
-            should_continue = await run_one_batch_and_sleep_once()
+
+            iteration_args_dict = vars(args).copy()
+            payload = await asyncio.to_thread(
+                run_iteration_in_subprocess,
+                _options_iteration_worker,
+                symbols_list,
+                iteration_args_dict,
+                api_key,
+            )
+
+            if payload.get("status") != "ok":
+                error_text = payload.get("error", "Unknown error in options iteration subprocess")
+                print(
+                    f"Error during options iteration (process exit {payload.get('exitcode')}): {error_text}",
+                    file=sys.stderr,
+                )
+
+            # Intelligent sleep based on market transitions (performed in parent)
+            now_utc = datetime.now(timezone.utc)
+            seconds_to_open, seconds_to_close = common_compute_market_transition_times(now_utc, "America/New_York")
+            is_market_open = HistoricalDataFetcher._is_market_open(now_utc)
+
+            sleep_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed'] * 60
+            if is_market_open:
+                base_sleep = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
+                if seconds_to_close is not None:
+                    sleep_seconds = max(min(base_sleep, seconds_to_close), 5)
+                    if not args.quiet:
+                        print(
+                            f"Next run in {sleep_seconds:.0f}s (market open, "
+                            f"{HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']}min interval; "
+                            f"{seconds_to_close:.0f}s until close) [MARKET OPEN]"
+                        )
+                else:
+                    sleep_seconds = base_sleep
+                    if not args.quiet:
+                        print(
+                            f"Next run in {sleep_seconds:.0f}s (market open, "
+                            f"{HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']}min interval) [MARKET OPEN]"
+                        )
+            else:
+                opening_soon_threshold = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
+                if not args.quiet:
+                    print(
+                        f"opening_soon_threshold: {opening_soon_threshold}, seconds_to_open: {seconds_to_open}",
+                        file=sys.stderr,
+                    )
+                if seconds_to_open is not None and seconds_to_open <= sleep_seconds:
+                    sleep_seconds = min(seconds_to_open, opening_soon_threshold)
+                    if not args.quiet:
+                        print(
+                            f"Next run in {sleep_seconds:.0f}s (sleeping until market open in "
+                            f"{seconds_to_open:.0f}s) [MARKET CLOSED→OPEN]"
+                        )
+                else:
+                    if not args.quiet:
+                        print(
+                            f"Next run in {sleep_seconds:.0f}s (markets closed, "
+                            f"{HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed']}min interval) [MARKET CLOSED]"
+                        )
+
+            adjusted_sleep = sleep_seconds * (args.interval_multiplier if getattr(args, 'interval_multiplier', None) else 1.0)
+            if not args.quiet:
+                print(f"Next run in {adjusted_sleep:.0f}s")
+            await asyncio.sleep(adjusted_sleep)
+
             if args.continuous_max_runs and run_num >= args.continuous_max_runs:
                 if not args.quiet:
                     print("Reached maximum runs, stopping continuous mode.")
                 break
-            if not should_continue:
-                break
         return
     else:
         # Single run (no sleep)
-        from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
-        exec_type = args.executor_type
-        if args.max_concurrent and args.max_concurrent > 0:
-            max_workers = args.max_concurrent
-        else:
-            max_workers = (os.cpu_count() or 1) if exec_type == 'process' else (os.cpu_count() or 1) * 5
-        if not args.quiet:
-            print(f"Starting concurrent fetch for {len(symbols_list)} symbols using {exec_type} executor with max_workers={max_workers}")
-        ExecutorCls = ProcessPoolExecutor if exec_type == 'process' else ThreadPoolExecutor
-        with ExecutorCls(max_workers=max_workers) as pool:
-            futures_map = {pool.submit(_run_for_symbol, symbol, args, api_key): symbol for symbol in symbols_list}
-            db_save_tasks = []
-            for fut in as_completed(futures_map):
-                result = fut.result()
-                if isinstance(result, dict) and 'formatted_output' in result:
-                    # New format with database save data
-                    if not args.quiet and result['formatted_output']:
-                        print(result['formatted_output'])
-                    if result.get('db_save_data'):
-                        db_save_tasks.append(result['db_save_data'])
-                elif not args.quiet and result:
-                    # Old format (string output)
-                    print(result)
-            
-            # Save all database data in main thread
-            if db_save_tasks and getattr(args, 'use_db', None):
-                await save_options_to_database(db_save_tasks, args)
+        await _execute_options_iteration(symbols_list, args, api_key)
         return
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 from common.symbol_loader import add_symbol_arguments, fetch_lists_data
+from common.common import run_iteration_in_subprocess
 from fetch_symbol_data import fetch_and_save_data, get_current_price, get_financial_ratios
 from common.market_hours import is_market_hours, compute_market_transition_times
 from common.stock_db import get_stock_db, get_default_db_path
@@ -671,6 +672,28 @@ async def process_symbols(all_symbols_list: list[str], args: argparse.Namespace,
     return (total_success_count, total_failure_count)
 
 
+def _continuous_iteration_worker(
+    all_symbols_list: list[str],
+    iteration_args: argparse.Namespace,
+    db_configs_for_workers: list[tuple[str, str]],
+) -> dict:
+    """
+    Execute a single iteration of the continuous fetch loop in a forked process.
+
+    Returns:
+        Dictionary with ``success_count`` and ``failure_count`` for the iteration.
+    """
+
+    async def _runner() -> tuple[int, int]:
+        return await process_symbols(all_symbols_list, iteration_args, db_configs_for_workers)
+
+    success_count, failure_count = asyncio.run(_runner())
+    return {
+        "success_count": success_count,
+        "failure_count": failure_count,
+    }
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Fetch stock lists and optionally market data from Alpaca API')
     parser.add_argument('--data-dir', default='./data',
@@ -965,8 +988,24 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
                 except Exception:
                     pass
 
-            # Run the fetch with iteration-specific dates
-            (success_count, failure_count) = await process_symbols(all_symbols_list, iteration_args, db_configs_for_workers)
+            # Run the fetch with iteration-specific dates in a forked subprocess
+            payload = await asyncio.to_thread(
+                run_iteration_in_subprocess,
+                _continuous_iteration_worker,
+                all_symbols_list,
+                iteration_args,
+                db_configs_for_workers,
+            )
+
+            if payload.get("status") != "ok":
+                error_msg = payload.get("error", "Unknown error in subprocess iteration")
+                print(f"Error during continuous fetch iteration (process exit {payload.get('exitcode')}): {error_msg}", file=sys.stderr)
+                failure_count = len(all_symbols_list)
+                success_count = 0
+            else:
+                result_data = payload.get("result") or {}
+                success_count = result_data.get("success_count", 0)
+                failure_count = result_data.get("failure_count", 0)
             
             # Calculate how long this fetch took
             fetch_duration = time.time() - start_time
