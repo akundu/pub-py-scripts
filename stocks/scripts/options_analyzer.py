@@ -2354,6 +2354,12 @@ Examples:
         help="Maximum days from today for option expiration (convenience parameter that sets end-date to today + max-days, overrides --end-date if both are provided)."
     )
     parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=300,
+        help="Number of tickers per batch when fetching options in multiprocessing mode (default: 300). Lower uses less memory."
+    )
+    parser.add_argument(
         '--start-date',
         type=str,
         default=None,
@@ -2636,6 +2642,7 @@ Examples:
             days_to_expiry=args.days,
             min_volume=args.min_volume,
             max_days=args.max_days,
+            batch_size=args.batch_size,
             min_premium=args.min_premium,
             position_size=args.position_size,
             filters=filters,
