@@ -1,5 +1,5 @@
 type: sp-500
-count: 504
+count: 502
 symbols:
 - A
 - AAPL
@@ -160,7 +160,6 @@ symbols:
 - EL
 - ELV
 - EME
-- EMN
 - EMR
 - EOG
 - EPAM
@@ -187,7 +186,6 @@ symbols:
 - FDX
 - FE
 - FFIV
-- FI
 - FICO
 - FIS
 - FITB

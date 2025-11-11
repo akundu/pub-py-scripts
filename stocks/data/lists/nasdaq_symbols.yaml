@@ -168,6 +168,7 @@ symbols:
 - FFIN
 - FFIV
 - FIGR
+- FISV
 - FITB
 - FIVE
 - FLEX
@@ -323,7 +324,6 @@ symbols:
 - NUVL
 - NVDA
 - NVMI
-- NWE
 - NWS
 - NWSA
 - NXPI
@@ -428,6 +428,7 @@ symbols:
 - SOUN
 - SRAD
 - SSNC
+- SSRM
 - STEP
 - STLD
 - STNE
@@ -473,7 +474,6 @@ symbols:
 - VLY
 - VNOM
 - VOD
-- VRNS
 - VRSK
 - VRSN
 - VRTX
