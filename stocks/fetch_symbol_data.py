@@ -1003,6 +1003,8 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
     try:
         # Try to get realtime data first (most recent)
         # Use get_latest_price_with_data() if available to avoid duplicate queries
+        # Note: This function doesn't have access to args, so we default to True (use market time)
+        # The caller should pass use_market_time parameter if needed
         if hasattr(db_instance, 'get_latest_price_with_data'):
             latest_data = await db_instance.get_latest_price_with_data(symbol, use_market_time=True)
             if latest_data and latest_data.get('realtime_df') is not None:
@@ -1650,6 +1652,11 @@ def parse_args():
         action="store_true",
         help="Disable Redis caching for QuestDB operations (default: cache enabled)"
     )
+    parser.add_argument(
+        "--no-market-time",
+        action="store_true",
+        help="Disable market-hours logic for price fetching (default: market time enabled, uses latest realtime price when market is open, last close price when market is closed)"
+    )
 
     return parser.parse_args()
 
@@ -1827,7 +1834,9 @@ async def main() -> None:
                 try:
                     # Get latest price with data (this will query realtime, hourly, and daily tables appropriately)
                     # This returns price, timestamp, source, and realtime_df (if from realtime)
-                    latest_data = await db_instance.get_latest_price_with_data(args.symbol, use_market_time=True)
+                    # Default to using market time (True) unless --no-market-time is specified
+                    use_market_time = not args.no_market_time
+                    latest_data = await db_instance.get_latest_price_with_data(args.symbol, use_market_time=use_market_time)
                     
                     if latest_data:
                         # Display the price returned by get_latest_price_with_data

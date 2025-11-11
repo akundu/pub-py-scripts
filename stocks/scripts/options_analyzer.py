@@ -942,21 +942,46 @@ class OptionsAnalyzer:
                 return pd.DataFrame()
             
             # Get latest stock prices for all tickers
+            # When market is open: uses latest realtime price
+            # When market is closed: uses last close price from daily data
             stock_prices = {}
+            price_sources = {}  # Track which source was used for each ticker
             for ticker in tickers_upper:
                 try:
-                    price = await self.db.get_latest_price(ticker, use_market_time=use_market_time)
-                    if price:
+                    # Use get_latest_price_with_data to get source information
+                    price_data = await self.db.get_latest_price_with_data(ticker, use_market_time=use_market_time)
+                    if price_data and price_data.get('price'):
+                        price = price_data['price']
+                        source = price_data.get('source', 'unknown')
                         stock_prices[ticker] = price
+                        price_sources[ticker] = source
+                        
+                        if self.debug:
+                            # Determine market status based on source: realtime = market open, daily/hourly = market closed
+                            if source == 'realtime':
+                                market_status = "OPEN (using latest realtime price)"
+                            elif source == 'daily':
+                                market_status = "CLOSED (using last close price from daily data)"
+                            elif source == 'hourly':
+                                market_status = "CLOSED (using hourly close price as fallback)"
+                            else:
+                                market_status = f"UNKNOWN (source: {source})"
+                            print(f"DEBUG: {ticker}: ${price:.2f} from {source} - Market {market_status}", file=sys.stderr)
                 except Exception as e:
                     if not self.quiet:
                         print(f"Warning: Could not fetch price for {ticker}: {e}", file=sys.stderr)
             
-            if self.debug:
+            if self.debug or not self.quiet:
                 print(f"DEBUG: Fetched stock prices for {len(stock_prices)}/{len(tickers_upper)} tickers", file=sys.stderr)
-                if stock_prices:
-                    sample_prices = list(stock_prices.items())[:5]
-                    print(f"DEBUG: Sample prices: {sample_prices}", file=sys.stderr)
+                if stock_prices and price_sources:
+                    # Show price source summary
+                    source_counts = {}
+                    for ticker, source in price_sources.items():
+                        source_counts[source] = source_counts.get(source, 0) + 1
+                    print(f"DEBUG: Price sources: {source_counts}", file=sys.stderr)
+                    if self.debug:
+                        sample_prices = [(t, stock_prices[t], price_sources.get(t, 'unknown')) for t in list(stock_prices.keys())[:5]]
+                        print(f"DEBUG: Sample prices (ticker, price, source): {sample_prices}", file=sys.stderr)
             
             if not stock_prices:
                 if not self.quiet:
@@ -1009,10 +1034,25 @@ class OptionsAnalyzer:
             df['bid_ask'] = df.apply(format_bid_ask, axis=1)
             
             # Calculate days to expiry
-            df['expiration_date'] = pd.to_datetime(df['expiration_date'])
-            # Ensure expiration_date is timezone-aware UTC
-            if df['expiration_date'].dt.tz is None:
-                df['expiration_date'] = df['expiration_date'].dt.tz_localize('UTC')
+            # Normalize expiration_date to timezone-aware UTC, handling mixed timezone-aware/naive values
+            def normalize_to_utc(x):
+                if pd.isna(x):
+                    return pd.NaT
+                # Convert to datetime if not already
+                if isinstance(x, pd.Timestamp):
+                    dt = x
+                else:
+                    dt = pd.to_datetime(x, errors='coerce')
+                    if pd.isna(dt):
+                        return pd.NaT
+                # Normalize to UTC
+                if dt.tz is None:
+                    return dt.tz_localize('UTC')
+                else:
+                    return dt.tz_convert('UTC')
+            
+            # Apply normalization directly to the original column to avoid creating mixed Series
+            df['expiration_date'] = df['expiration_date'].apply(normalize_to_utc)
             today = pd.Timestamp.now(tz='UTC').normalize()
             df['days_to_expiry'] = ((df['expiration_date'] - today).dt.total_seconds() / 86400).astype(int)
 
@@ -1075,10 +1115,22 @@ class OptionsAnalyzer:
                     
                     # Ensure write_timestamp column is datetime and timezone-aware
                     if 'write_timestamp' in df.columns:
-                        df['write_timestamp'] = pd.to_datetime(df['write_timestamp'])
-                        # If timezone-naive, assume UTC
-                        if df['write_timestamp'].dt.tz is None:
-                            df['write_timestamp'] = df['write_timestamp'].dt.tz_localize('UTC')
+                        # Normalize write_timestamp to UTC, handling mixed timezone-aware/naive values
+                        def normalize_write_timestamp(x):
+                            if pd.isna(x):
+                                return pd.NaT
+                            if isinstance(x, pd.Timestamp):
+                                dt = x
+                            else:
+                                dt = pd.to_datetime(x, errors='coerce')
+                                if pd.isna(dt):
+                                    return pd.NaT
+                            if dt.tz is None:
+                                return dt.tz_localize('UTC')
+                            else:
+                                return dt.tz_convert('UTC')
+                        
+                        df['write_timestamp'] = df['write_timestamp'].apply(normalize_write_timestamp)
                         # Filter
                         df = df[df['write_timestamp'] >= min_ts_utc]
                         if not self.quiet:
@@ -1095,10 +1147,27 @@ class OptionsAnalyzer:
             if 'implied_volatility' in df.columns:
                 df['implied_volatility'] = df['implied_volatility'].round(4)
             
-            # Convert timestamps
+            # Convert timestamps - handle mixed timezone-aware/naive values
+            def normalize_timestamp_to_utc(x):
+                if pd.isna(x):
+                    return pd.NaT
+                # Convert to datetime if not already
+                if isinstance(x, pd.Timestamp):
+                    dt = x
+                else:
+                    dt = pd.to_datetime(x, errors='coerce')
+                    if pd.isna(dt):
+                        return pd.NaT
+                # Normalize to UTC
+                if dt.tz is None:
+                    return dt.tz_localize('UTC')
+                else:
+                    return dt.tz_convert('UTC')
+            
             for ts_col in ['last_quote_timestamp', 'write_timestamp']:
                 if ts_col in df.columns:
-                    df[ts_col] = pd.to_datetime(df[ts_col])
+                    # Apply normalization directly to avoid creating mixed Series
+                    df[ts_col] = df[ts_col].apply(normalize_timestamp_to_utc)
             
             # Select and order columns for output
             output_cols = [
@@ -1317,9 +1386,22 @@ class OptionsAnalyzer:
                     if 'write_timestamp' in long_options_df.columns:
                         # Ensure we have a copy before modifying to avoid SettingWithCopyWarning
                         long_options_df = long_options_df.copy()
-                        long_options_df['write_timestamp'] = pd.to_datetime(long_options_df['write_timestamp'])
-                        if long_options_df['write_timestamp'].dt.tz is None:
-                            long_options_df['write_timestamp'] = long_options_df['write_timestamp'].dt.tz_localize('UTC')
+                        # Normalize write_timestamp to UTC, handling mixed timezone-aware/naive values
+                        def normalize_write_timestamp(x):
+                            if pd.isna(x):
+                                return pd.NaT
+                            if isinstance(x, pd.Timestamp):
+                                dt = x
+                            else:
+                                dt = pd.to_datetime(x, errors='coerce')
+                                if pd.isna(dt):
+                                    return pd.NaT
+                            if dt.tz is None:
+                                return dt.tz_localize('UTC')
+                            else:
+                                return dt.tz_convert('UTC')
+                        
+                        long_options_df['write_timestamp'] = long_options_df['write_timestamp'].apply(normalize_write_timestamp)
                         
                         before_count = len(long_options_df)
                         long_options_df = long_options_df[long_options_df['write_timestamp'] >= min_ts_utc].copy()
@@ -1364,9 +1446,25 @@ class OptionsAnalyzer:
                 long_options_df['implied_volatility'] = pd.Series([float('nan')] * len(long_options_df), index=long_options_df.index)
             
             # Calculate days to expiry for long options
-            long_options_df['expiration_date'] = pd.to_datetime(long_options_df['expiration_date'])
-            if long_options_df['expiration_date'].dt.tz is None:
-                long_options_df['expiration_date'] = long_options_df['expiration_date'].dt.tz_localize('UTC')
+            # Normalize expiration_date to timezone-aware UTC, handling mixed timezone-aware/naive values
+            def normalize_to_utc(x):
+                if pd.isna(x):
+                    return pd.NaT
+                # Convert to datetime if not already
+                if isinstance(x, pd.Timestamp):
+                    dt = x
+                else:
+                    dt = pd.to_datetime(x, errors='coerce')
+                    if pd.isna(dt):
+                        return pd.NaT
+                # Normalize to UTC
+                if dt.tz is None:
+                    return dt.tz_localize('UTC')
+                else:
+                    return dt.tz_convert('UTC')
+            
+            # Apply normalization directly to the original column to avoid creating mixed Series
+            long_options_df['expiration_date'] = long_options_df['expiration_date'].apply(normalize_to_utc)
             today_ts = pd.Timestamp.now(tz='UTC').normalize()
             long_options_df['days_to_expiry'] = ((long_options_df['expiration_date'] - today_ts).dt.total_seconds() / 86400).astype(int)
             
@@ -1529,12 +1627,26 @@ class OptionsAnalyzer:
                 
                 # Create spread result row
                 spread_row = short_row.to_dict()
+                # Ensure long_expiration_date is properly normalized (should already be UTC from normalization above)
+                long_exp_dt = best_long['expiration_date']
+                if isinstance(long_exp_dt, pd.Timestamp):
+                    if long_exp_dt.tz is None:
+                        long_exp_dt = long_exp_dt.tz_localize('UTC')
+                    else:
+                        long_exp_dt = long_exp_dt.tz_convert('UTC')
+                elif isinstance(long_exp_dt, (str, datetime)):
+                    long_exp_dt = pd.to_datetime(long_exp_dt)
+                    if long_exp_dt.tz is None:
+                        long_exp_dt = long_exp_dt.tz_localize('UTC')
+                    else:
+                        long_exp_dt = long_exp_dt.tz_convert('UTC')
+                
                 spread_row.update({
                     'num_contracts': num_contracts,  # Override with spread-based calculation
                     'long_strike_price': round(float(best_long['strike_price']), 2),
                     'long_option_premium': long_premium,
                     'long_bid_ask': long_bid_ask,
-                    'long_expiration_date': best_long['expiration_date'],
+                    'long_expiration_date': long_exp_dt,
                     'long_days_to_expiry': int(best_long['days_to_expiry']),
                     'long_option_ticker': best_long.get('option_ticker', ''),
                     'long_delta': round(float(best_long.get('delta', 0)), 2) if pd.notna(best_long.get('delta')) else None,
@@ -1631,23 +1743,51 @@ class OptionsAnalyzer:
         # Convert timestamps to EST/EDT (America/New_York) for display, except expiration_date which should be UTC
         try:
             # Handle expiration_date (UTC)
-            if 'expiration_date' in df_renamed.columns:
-                ser = pd.to_datetime(df_renamed['expiration_date'], errors='coerce')
-                # Ensure timezone-aware UTC
-                if getattr(ser.dt, 'tz', None) is None:
-                    ser = ser.dt.tz_localize('UTC')
+            def normalize_expiration_date_for_display(x):
+                if pd.isna(x):
+                    return pd.NaT
+                # Convert to datetime if not already
+                if isinstance(x, pd.Timestamp):
+                    dt = x
                 else:
-                    ser = ser.dt.tz_convert('UTC')
+                    dt = pd.to_datetime(x, errors='coerce')
+                    if pd.isna(dt):
+                        return pd.NaT
+                # Normalize to UTC
+                if dt.tz is None:
+                    dt = dt.tz_localize('UTC')
+                else:
+                    dt = dt.tz_convert('UTC')
+                return dt
+            
+            if 'expiration_date' in df_renamed.columns:
+                # Apply normalization directly to avoid creating mixed Series
+                ser = df_renamed['expiration_date'].apply(normalize_expiration_date_for_display)
                 df_renamed['expiration_date'] = ser.dt.strftime('%Y-%m-%d %H:%M:%S')
 
             # Handle other timestamps in America/New_York
+            def normalize_timestamp_for_display(x):
+                if pd.isna(x):
+                    return pd.NaT
+                # Convert to datetime if not already
+                if isinstance(x, pd.Timestamp):
+                    dt = x
+                else:
+                    dt = pd.to_datetime(x, errors='coerce')
+                    if pd.isna(dt):
+                        return pd.NaT
+                # Normalize to UTC first, then convert to America/New_York
+                if dt.tz is None:
+                    dt = dt.tz_localize('UTC')
+                else:
+                    dt = dt.tz_convert('UTC')
+                # Convert to America/New_York for display
+                return dt.tz_convert('America/New_York')
+            
             for ts_col in ['last_quote_timestamp', 'write_timestamp']:
                 if ts_col in df_renamed.columns:
-                    ser = pd.to_datetime(df_renamed[ts_col], errors='coerce')
-                    # Localize naive timestamps to UTC, then convert to America/New_York
-                    if getattr(ser.dt, 'tz', None) is None:
-                        ser = ser.dt.tz_localize('UTC')
-                    ser = ser.dt.tz_convert('America/New_York')
+                    # Apply normalization directly to avoid creating mixed Series
+                    ser = df_renamed[ts_col].apply(normalize_timestamp_for_display)
                     # Format as string for clean table output
                     df_renamed[ts_col] = ser.dt.strftime('%Y-%m-%d %H:%M:%S')
         except Exception:
@@ -2319,6 +2459,10 @@ Examples:
                 print(f"Cache Misses: {cache_stats.get('misses', 0)}", file=sys.stderr)
                 hit_rate = cache_stats.get('hit_rate', 0.0)
                 print(f"Hit Rate: {hit_rate:.2%}", file=sys.stderr)
+                negative_hits = cache_stats.get('negative_hits', 0)
+                negative_sets = cache_stats.get('negative_sets', 0)
+                print(f"Negative Cache Hits: {negative_hits}", file=sys.stderr)
+                print(f"Negative Cache Sets: {negative_sets}", file=sys.stderr)
                 print(f"Cache Sets: {cache_stats.get('sets', 0)}", file=sys.stderr)
                 print(f"Cache Invalidations: {cache_stats.get('invalidations', 0)}", file=sys.stderr)
                 print(f"Cache Errors: {cache_stats.get('errors', 0)}", file=sys.stderr)
