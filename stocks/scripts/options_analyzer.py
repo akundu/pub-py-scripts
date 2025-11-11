@@ -26,6 +26,8 @@ from pathlib import Path
 import json
 import re
 import math
+from concurrent.futures import ProcessPoolExecutor
+import functools
 
 # Black-Scholes option pricing
 try:
@@ -433,6 +435,263 @@ class FilterParser:
                     raise ValueError(f"Unsupported logic: {logic}. Use 'AND' or 'OR'")
         
         return df[mask]
+
+
+def _black_scholes_call_standalone(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    """
+    Standalone Black-Scholes call option price calculation (for multiprocessing).
+    
+    Args:
+        S: Current stock price
+        K: Strike price
+        T: Time to expiration (in years)
+        r: Risk-free rate (annual)
+        sigma: Implied volatility (annual)
+    
+    Returns:
+        Call option price
+    """
+    if T <= 0:
+        # Option expired, intrinsic value only
+        return max(S - K, 0)
+    
+    if sigma <= 0:
+        # No volatility, return intrinsic value
+        return max(S - K, 0)
+    
+    # Calculate d1 and d2
+    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    
+    # Calculate cumulative normal distribution
+    if SCIPY_AVAILABLE:
+        N_d1 = norm.cdf(d1)
+        N_d2 = norm.cdf(d2)
+    else:
+        # Fallback to basic normal CDF approximation
+        def norm_cdf(x):
+            """Approximate cumulative normal distribution."""
+            return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+        N_d1 = norm_cdf(d1)
+        N_d2 = norm_cdf(d2)
+    
+    # Black-Scholes formula for call option
+    call_price = S * N_d1 - K * math.exp(-r * T) * N_d2
+    
+    return max(call_price, 0)  # Ensure non-negative
+
+
+def _process_spread_match(args_tuple):
+    """
+    Process a single spread match (standalone function for multiprocessing).
+    
+    Args:
+        args_tuple: Tuple containing:
+            - short_row_dict: Dictionary representation of short option row
+            - long_options_dict: Dictionary of long options data (ticker -> list of option dicts)
+            - spread_strike_tolerance: Percentage tolerance for strike matching
+            - spread_long_days: Target days to expiry for long options
+            - position_size: Position size in dollars
+            - risk_free_rate: Annual risk-free rate
+            - debug: Whether to print debug messages
+    
+    Returns:
+        Dictionary with spread result row, or None if no match found
+    """
+    short_row_dict, long_options_dict, spread_strike_tolerance, spread_long_days, position_size, risk_free_rate, debug = args_tuple
+    
+    ticker = short_row_dict['ticker']
+    short_strike = short_row_dict['strike_price']
+    
+    # Get long options for this ticker
+    ticker_long_options_list = long_options_dict.get(ticker, [])
+    
+    if not ticker_long_options_list:
+        if debug:
+            print(f"DEBUG: No long options found for ticker {ticker}")
+        return None
+    
+    # Convert list of dicts back to DataFrame for easier filtering
+    import pandas as pd
+    ticker_long_options = pd.DataFrame(ticker_long_options_list)
+    # Ensure expiration_date is properly typed as Timestamp if present
+    if 'expiration_date' in ticker_long_options.columns:
+        ticker_long_options['expiration_date'] = pd.to_datetime(ticker_long_options['expiration_date'], errors='coerce')
+    
+    if ticker_long_options.empty:
+        if debug:
+            print(f"DEBUG: No long options found for ticker {ticker}")
+        return None
+    
+    if debug:
+        print(f"DEBUG: Processing {ticker} - short strike: ${short_strike:.2f}, {len(ticker_long_options)} long options available")
+    
+    # Calculate strike tolerance range
+    tolerance_multiplier = spread_strike_tolerance / 100.0
+    strike_min = short_strike * (1 - tolerance_multiplier)
+    strike_max = short_strike * (1 + tolerance_multiplier)
+    
+    if debug:
+        print(f"DEBUG:   Strike tolerance range: ${strike_min:.2f} to ${strike_max:.2f} ({spread_strike_tolerance}%)")
+    
+    # Find matching long options within strike tolerance
+    matching_long = ticker_long_options[
+        (ticker_long_options['strike_price'] >= strike_min) &
+        (ticker_long_options['strike_price'] <= strike_max)
+    ].copy()
+    
+    if debug:
+        print(f"DEBUG:   Found {len(matching_long)} matching long options within strike tolerance")
+    
+    if matching_long.empty:
+        if debug:
+            if not ticker_long_options.empty:
+                available_strikes = ticker_long_options['strike_price'].unique()
+                print(f"DEBUG:   No matches. Available strikes for {ticker}: {sorted(available_strikes)[:10]}..." if len(available_strikes) > 10 else f"DEBUG:   No matches. Available strikes for {ticker}: {sorted(available_strikes)}")
+            else:
+                print(f"DEBUG:   No long options available for ticker {ticker} in the database")
+        return None
+    
+    # Pick the best matching long option (closest strike, then closest to target days)
+    matching_long['strike_diff'] = abs(matching_long['strike_price'] - short_strike)
+    matching_long['days_diff'] = abs(matching_long['days_to_expiry'] - spread_long_days)
+    matching_long = matching_long.sort_values(['strike_diff', 'days_diff'])
+    
+    best_long = matching_long.iloc[0].to_dict()
+    
+    # Calculate long option premium (use ask, fallback to bid, fallback to 0.01)
+    long_premium = best_long.get('ask', best_long.get('bid', 0.01))
+    if pd.isna(long_premium):
+        long_premium = best_long.get('bid', 0.01)
+    if pd.isna(long_premium):
+        long_premium = 0.01
+    long_premium = round(float(long_premium), 2)
+    
+    long_iv = best_long.get('implied_volatility')
+    if pd.notna(long_iv):
+        long_iv = float(long_iv)
+    else:
+        long_iv = None
+
+    # SPREAD MODE: Calculate num_contracts based on long option premium (investment in long options)
+    # This represents how many spreads you can afford with your position_size
+    num_contracts = math.floor(position_size / (long_premium * 100)) if long_premium > 0 else 0
+    
+    # Calculate premiums based on spread position sizing
+    short_premium = short_row_dict['option_premium']
+    premium_diff = round(long_premium - short_premium, 2)  # Long - Short (per contract)
+    short_premium_total = round(num_contracts * short_premium * 100, 2)  # Total received from selling short-term options
+    long_premium_total = round(num_contracts * long_premium * 100, 2)  # Total paid for buying long-term options
+    
+    # Calculate Black-Scholes based long option value at short expiration
+    # This estimates what the long option will be worth when the short expires
+    current_price = short_row_dict.get('current_price')
+    long_strike = float(best_long['strike_price'])
+    short_days = short_row_dict['days_to_expiry']
+    long_days = int(best_long['days_to_expiry'])
+    
+    # Time remaining for long option at short expiration (in years)
+    time_to_long_expiry_at_short_expiry = (long_days - short_days) / 365.0
+    
+    # Get implied volatility from long option data, or use a default
+    implied_vol = best_long.get('implied_volatility')
+    if pd.isna(implied_vol) or implied_vol is None or implied_vol <= 0:
+        # Default to 0.3 (30% annual volatility) if not available
+        implied_vol = 0.3
+    else:
+        implied_vol = float(implied_vol)
+        # Ensure it's in decimal form (not percentage)
+        if implied_vol > 1.0:
+            implied_vol = implied_vol / 100.0
+    
+    # Calculate Black-Scholes long option value at short expiration
+    # Assume stock price stays the same (or use current price as estimate)
+    estimated_stock_price_at_short_expiry = current_price if current_price else long_strike
+    
+    long_option_value_at_short_expiry = 0.0
+    if time_to_long_expiry_at_short_expiry > 0 and current_price:
+        try:
+            long_option_value_at_short_expiry = _black_scholes_call_standalone(
+                S=estimated_stock_price_at_short_expiry,
+                K=long_strike,
+                T=time_to_long_expiry_at_short_expiry,
+                r=risk_free_rate,
+                sigma=implied_vol
+            )
+        except Exception as e:
+            if debug:
+                print(f"DEBUG: Black-Scholes calculation error: {e}")
+            # Fallback: use current long premium as estimate
+            long_option_value_at_short_expiry = long_premium
+    
+    # Net premium = short_premium - (current_long_premium - estimated_long_premium_at_short_expiry)
+    # This represents: what you receive - (what you pay now - what the long will be worth later)
+    long_premium_at_short_expiry_total = round(num_contracts * long_option_value_at_short_expiry * 100, 2)
+    net_premium = round(short_premium_total - (long_premium_total - long_premium_at_short_expiry_total), 2)
+    
+    # Daily premium calculations (until short expiration - exit point)
+    short_daily_premium = round(short_premium_total / short_days, 2) if short_days > 0 else 0
+    # Net daily premium = net premium / days (amortized over short days)
+    net_daily_premium = round(net_premium / short_days, 2) if short_days > 0 else 0
+
+    long_contracts_available = best_long.get('open_interest')
+    if pd.notna(long_contracts_available):
+        try:
+            long_contracts_available = int(float(long_contracts_available))
+        except (TypeError, ValueError):
+            long_contracts_available = None
+    else:
+        long_contracts_available = None
+    
+    # Format long bid:ask
+    long_bid_val = best_long.get('bid', 0) if pd.notna(best_long.get('bid')) else 0
+    long_ask_val = best_long.get('ask', 0) if pd.notna(best_long.get('ask')) else 0
+    if pd.notna(best_long.get('bid')) or pd.notna(best_long.get('ask')):
+        long_bid_ask = f"{long_bid_val:.2f}:{long_ask_val:.2f}"
+    else:
+        long_bid_ask = "N/A:N/A"
+    
+    # Create spread result row
+    spread_row = short_row_dict.copy()
+    # Ensure long_expiration_date is properly normalized
+    long_exp_dt = best_long['expiration_date']
+    # Handle Timestamp objects (may come as Timestamp, string, or already normalized)
+    if isinstance(long_exp_dt, pd.Timestamp):
+        if long_exp_dt.tz is None:
+            long_exp_dt = long_exp_dt.tz_localize('UTC')
+        else:
+            long_exp_dt = long_exp_dt.tz_convert('UTC')
+    elif isinstance(long_exp_dt, (str, datetime)):
+        long_exp_dt = pd.to_datetime(long_exp_dt)
+        if long_exp_dt.tz is None:
+            long_exp_dt = long_exp_dt.tz_localize('UTC')
+        else:
+            long_exp_dt = long_exp_dt.tz_convert('UTC')
+    elif long_exp_dt is None or pd.isna(long_exp_dt):
+        long_exp_dt = pd.NaT
+    
+    spread_row.update({
+        'num_contracts': num_contracts,  # Override with spread-based calculation
+        'long_strike_price': round(float(best_long['strike_price']), 2),
+        'long_option_premium': long_premium,
+        'long_bid_ask': long_bid_ask,
+        'long_expiration_date': long_exp_dt,
+        'long_days_to_expiry': int(best_long['days_to_expiry']),
+        'long_option_ticker': best_long.get('option_ticker', ''),
+        'long_delta': round(float(best_long.get('delta', 0)), 2) if pd.notna(best_long.get('delta')) else None,
+        'long_theta': round(float(best_long.get('theta', 0)), 2) if pd.notna(best_long.get('theta')) else None,
+        'long_volume': int(best_long.get('volume', 0)) if pd.notna(best_long.get('volume')) else 0,
+        'long_implied_volatility': long_iv,
+        'long_contracts_available': long_contracts_available,
+        'premium_diff': premium_diff,
+        'short_premium_total': short_premium_total,
+        'short_daily_premium': short_daily_premium,
+        'long_premium_total': long_premium_total,
+        'net_premium': net_premium,
+        'net_daily_premium': net_daily_premium
+    })
+    
+    return spread_row
 
 
 class OptionsAnalyzer:
@@ -941,20 +1200,20 @@ class OptionsAnalyzer:
                     print("DEBUG: No call options found after filtering", file=sys.stderr)
                 return pd.DataFrame()
             
-            # Get latest stock prices for all tickers
+            # Get latest stock prices for all tickers in parallel
             # When market is open: uses latest realtime price
             # When market is closed: uses last close price from daily data
             stock_prices = {}
             price_sources = {}  # Track which source was used for each ticker
-            for ticker in tickers_upper:
+            
+            # Create async tasks for all tickers to fetch prices in parallel
+            async def fetch_price_for_ticker(ticker):
                 try:
                     # Use get_latest_price_with_data to get source information
                     price_data = await self.db.get_latest_price_with_data(ticker, use_market_time=use_market_time)
                     if price_data and price_data.get('price'):
                         price = price_data['price']
                         source = price_data.get('source', 'unknown')
-                        stock_prices[ticker] = price
-                        price_sources[ticker] = source
                         
                         if self.debug:
                             # Determine market status based on source: realtime = market open, daily/hourly = market closed
@@ -967,9 +1226,23 @@ class OptionsAnalyzer:
                             else:
                                 market_status = f"UNKNOWN (source: {source})"
                             print(f"DEBUG: {ticker}: ${price:.2f} from {source} - Market {market_status}", file=sys.stderr)
+                        
+                        return ticker, price, source
+                    return ticker, None, None
                 except Exception as e:
                     if not self.quiet:
                         print(f"Warning: Could not fetch price for {ticker}: {e}", file=sys.stderr)
+                    return ticker, None, None
+            
+            # Fetch all prices concurrently
+            price_tasks = [fetch_price_for_ticker(ticker) for ticker in tickers_upper]
+            price_results = await asyncio.gather(*price_tasks)
+            
+            # Process results
+            for ticker, price, source in price_results:
+                if price is not None:
+                    stock_prices[ticker] = price
+                    price_sources[ticker] = source
             
             if self.debug or not self.quiet:
                 print(f"DEBUG: Fetched stock prices for {len(stock_prices)}/{len(tickers_upper)} tickers", file=sys.stderr)
@@ -1227,6 +1500,314 @@ class OptionsAnalyzer:
                 traceback.print_exc()
             return pd.DataFrame()
     
+    def _calculate_long_options_date_range(
+        self,
+        spread_long_days: int,
+        spread_long_days_tolerance: int,
+        spread_long_min_days: Optional[int]
+    ) -> Tuple[str, str]:
+        """
+        Calculate the date range for fetching long-term options.
+        
+        Returns:
+            Tuple of (start_date, end_date) as strings in YYYY-MM-DD format
+        """
+        from datetime import date, timedelta
+        today = date.today()
+        
+        if spread_long_min_days is not None:
+            long_start_date = (today + timedelta(days=spread_long_min_days)).strftime('%Y-%m-%d')
+            long_end_date = (today + timedelta(days=spread_long_days)).strftime('%Y-%m-%d')
+            if not self.quiet:
+                print(f"Long-term options expiring between {spread_long_min_days} and {spread_long_days} days")
+                print(f"  Date range: {long_start_date} to {long_end_date}")
+            if self.debug:
+                print(f"DEBUG: Calculated long-term date range: {long_start_date} to {long_end_date} (from today {today})", file=sys.stderr)
+        else:
+            long_start_date = (today + timedelta(days=spread_long_days - spread_long_days_tolerance)).strftime('%Y-%m-%d')
+            long_end_date = (today + timedelta(days=spread_long_days + spread_long_days_tolerance)).strftime('%Y-%m-%d')
+            if not self.quiet:
+                print(f"Long-term options expiring around {spread_long_days} days (±{spread_long_days_tolerance} days)")
+                print(f"  Date range: {long_start_date} to {long_end_date}")
+            if self.debug:
+                print(f"DEBUG: Calculated long-term date range: {long_start_date} to {long_end_date} (from today {today})", file=sys.stderr)
+        
+        return long_start_date, long_end_date
+    
+    async def _fetch_long_term_options(
+        self,
+        tickers: List[str],
+        long_start_date: str,
+        long_end_date: str,
+        timestamp_lookback_days: int,
+        max_workers: int,
+        max_concurrent: int,
+        batch_size: int
+    ) -> pd.DataFrame:
+        """
+        Fetch long-term options from the database.
+        
+        Returns:
+            DataFrame with long-term options data
+        """
+        # Use a much larger timestamp lookback for long-term options since they may have been
+        # written weeks or months ago but are still valid. Use at least 180 days to catch options
+        # that were written when they were first listed (which could be months before expiration)
+        long_timestamp_lookback_days = max(timestamp_lookback_days, 180)
+        if self.debug:
+            print(f"DEBUG: Using timestamp_lookback_days={long_timestamp_lookback_days} for long-term options (vs {timestamp_lookback_days} for short-term)", file=sys.stderr)
+        
+        try:
+            if self.debug:
+                print(f"DEBUG: Calling get_latest_options_data_batch with:", file=sys.stderr)
+                print(f"  tickers: {tickers}", file=sys.stderr)
+                print(f"  start_datetime: {long_start_date}", file=sys.stderr)
+                print(f"  end_datetime: {long_end_date}", file=sys.stderr)
+                print(f"  timestamp_lookback_days: {long_timestamp_lookback_days}", file=sys.stderr)
+            
+            if max_workers > 1:
+                long_options_df = await self.db.get_latest_options_data_batch_multiprocess(
+                    tickers=tickers,
+                    start_datetime=long_start_date,
+                    end_datetime=long_end_date,
+                    batch_size=batch_size,
+                    max_workers=max_workers,
+                    timestamp_lookback_days=long_timestamp_lookback_days
+                )
+            else:
+                long_options_df = await self.db.get_latest_options_data_batch(
+                    tickers=tickers,
+                    start_datetime=long_start_date,
+                    end_datetime=long_end_date,
+                    max_concurrent=max_concurrent,
+                    batch_size=batch_size,
+                    timestamp_lookback_days=long_timestamp_lookback_days
+                )
+            
+            if self.debug:
+                print(f"DEBUG: Batch fetch returned {len(long_options_df)} rows", file=sys.stderr)
+            
+            return long_options_df
+        except Exception as e:
+            if not self.quiet:
+                print(f"Error fetching long-term options: {e}", file=sys.stderr)
+            import traceback
+            if self.debug:
+                traceback.print_exc()
+            raise
+    
+    def _filter_and_prepare_long_options(
+        self,
+        long_options_df: pd.DataFrame,
+        min_write_timestamp: Optional[str],
+        long_start_date: str,
+        long_end_date: str,
+        tickers: List[str]
+    ) -> pd.DataFrame:
+        """
+        Filter and prepare long options DataFrame (call options only, write timestamp filter, etc.).
+        
+        Returns:
+            Filtered and prepared DataFrame
+        """
+        if self.debug:
+            print(f"DEBUG: Fetched {len(long_options_df)} total options from database")
+            if not long_options_df.empty:
+                print(f"DEBUG: Long options columns: {list(long_options_df.columns)}")
+                if 'ticker' in long_options_df.columns:
+                    unique_tickers = long_options_df['ticker'].unique().tolist()
+                    print(f"DEBUG: Long options tickers: {unique_tickers}")
+                    for ticker in unique_tickers:
+                        count = len(long_options_df[long_options_df['ticker'] == ticker])
+                        print(f"DEBUG:   {ticker}: {count} options")
+                if 'option_type' in long_options_df.columns:
+                    print(f"DEBUG: Option types: {long_options_df['option_type'].unique().tolist()}")
+            else:
+                print(f"DEBUG: No long-term options found in database for date range {long_start_date} to {long_end_date}")
+        
+        # Apply write timestamp filter to long options if specified
+        if min_write_timestamp and not long_options_df.empty:
+            try:
+                import pytz
+                est = pytz.timezone('America/New_York')
+                min_ts = pd.to_datetime(min_write_timestamp)
+                if min_ts.tz is None:
+                    min_ts = est.localize(min_ts)
+                min_ts_utc = min_ts.astimezone(pytz.UTC)
+                
+                if 'write_timestamp' in long_options_df.columns:
+                    long_options_df = long_options_df.copy()
+                    # Normalize write_timestamp to UTC, handling mixed timezone-aware/naive values
+                    def normalize_write_timestamp(x):
+                        if pd.isna(x):
+                            return pd.NaT
+                        if isinstance(x, pd.Timestamp):
+                            dt = x
+                        else:
+                            dt = pd.to_datetime(x, errors='coerce')
+                            if pd.isna(dt):
+                                return pd.NaT
+                        if dt.tz is None:
+                            return dt.tz_localize('UTC')
+                        else:
+                            return dt.tz_convert('UTC')
+                    
+                    long_options_df['write_timestamp'] = long_options_df['write_timestamp'].apply(normalize_write_timestamp)
+                    
+                    before_count = len(long_options_df)
+                    long_options_df = long_options_df[long_options_df['write_timestamp'] >= min_ts_utc].copy()
+                    after_count = len(long_options_df)
+                    
+                    if not self.quiet:
+                        print(f"Filtered long options by write timestamp: {before_count} -> {after_count} options")
+                    if self.debug:
+                        print(f"DEBUG: Applied write timestamp filter >= {min_ts_utc} UTC")
+            except Exception as e:
+                if not self.quiet:
+                    print(f"Warning: Could not apply write timestamp filter to long options: {e}", file=sys.stderr)
+        
+        if long_options_df.empty:
+            if not self.quiet:
+                print("Warning: No long-term options found for spread analysis.", file=sys.stderr)
+            if self.debug:
+                print("DEBUG: This could mean:", file=sys.stderr)
+                print("  1. No options data in database for the specified date range", file=sys.stderr)
+                print("  2. Options exist but not in the target expiration window", file=sys.stderr)
+                print(f"  3. Check database for tickers: {tickers}", file=sys.stderr)
+            return pd.DataFrame()
+        
+        # Filter for call options only
+        if 'option_type' in long_options_df.columns:
+            long_options_df = long_options_df[long_options_df['option_type'] == 'call'].copy()
+        
+        if self.debug:
+            print(f"DEBUG: After filtering for calls: {len(long_options_df)} call options")
+        
+        if long_options_df.empty:
+            if not self.quiet:
+                print("Warning: No long-term call options found for spread analysis.", file=sys.stderr)
+            return pd.DataFrame()
+        
+        # Ensure we have a copy before modifying
+        long_options_df = long_options_df.copy()
+        if 'implied_volatility' in long_options_df.columns:
+            long_options_df['implied_volatility'] = pd.to_numeric(long_options_df['implied_volatility'], errors='coerce').round(4)
+        else:
+            long_options_df['implied_volatility'] = pd.Series([float('nan')] * len(long_options_df), index=long_options_df.index)
+        
+        # Calculate days to expiry for long options
+        def normalize_to_utc(x):
+            if pd.isna(x):
+                return pd.NaT
+            if isinstance(x, pd.Timestamp):
+                dt = x
+            else:
+                dt = pd.to_datetime(x, errors='coerce')
+                if pd.isna(dt):
+                    return pd.NaT
+            if dt.tz is None:
+                return dt.tz_localize('UTC')
+            else:
+                return dt.tz_convert('UTC')
+        
+        long_options_df['expiration_date'] = long_options_df['expiration_date'].apply(normalize_to_utc)
+        today_ts = pd.Timestamp.now(tz='UTC').normalize()
+        long_options_df['days_to_expiry'] = ((long_options_df['expiration_date'] - today_ts).dt.total_seconds() / 86400).astype(int)
+        
+        if self.debug:
+            print(f"DEBUG: Long options days to expiry range: {long_options_df['days_to_expiry'].min()} to {long_options_df['days_to_expiry'].max()}")
+            print(f"DEBUG: Long options strike price range: {long_options_df['strike_price'].min()} to {long_options_df['strike_price'].max()}")
+        
+        return long_options_df
+    
+    def _prepare_spread_matching_data(
+        self,
+        df_short: pd.DataFrame,
+        long_options_df: pd.DataFrame
+    ) -> Tuple[List[Dict], Dict[str, List[Dict]]]:
+        """
+        Prepare data structures for multiprocessing spread matching.
+        
+        Returns:
+            Tuple of (short_rows_list, long_options_dict)
+        """
+        # Reset index and deduplicate
+        df_short = df_short.reset_index(drop=True)
+        if 'option_ticker' in df_short.columns:
+            before_dedup = len(df_short)
+            df_short = df_short.drop_duplicates(subset=['option_ticker'], keep='first')
+            if self.debug and len(df_short) < before_dedup:
+                print(f"DEBUG: Deduplicated df_short: {before_dedup} -> {len(df_short)} rows (removed {before_dedup - len(df_short)} duplicates)", file=sys.stderr)
+        
+        # Convert df_short rows to dictionaries (serializable)
+        short_rows_list = [row.to_dict() for _, row in df_short.iterrows()]
+        
+        # Convert long_options_df to a dictionary structure (ticker -> list of option dicts)
+        long_options_dict = {}
+        for ticker in long_options_df['ticker'].unique():
+            ticker_options = long_options_df[long_options_df['ticker'] == ticker]
+            long_options_dict[ticker] = []
+            for _, row in ticker_options.iterrows():
+                row_dict = row.to_dict()
+                # Timestamps are preserved as-is (they're pickleable)
+                if 'expiration_date' in row_dict and isinstance(row_dict['expiration_date'], pd.Timestamp):
+                    row_dict['expiration_date'] = row_dict['expiration_date']
+                long_options_dict[ticker].append(row_dict)
+        
+        return short_rows_list, long_options_dict
+    
+    async def _execute_spread_matching(
+        self,
+        short_rows_list: List[Dict],
+        long_options_dict: Dict[str, List[Dict]],
+        spread_strike_tolerance: float,
+        spread_long_days: int,
+        position_size: float,
+        max_workers: int
+    ) -> List[Dict]:
+        """
+        Execute spread matching using multiprocessing or sequential processing.
+        
+        Returns:
+            List of spread result dictionaries
+        """
+        # Prepare arguments for multiprocessing
+        process_args = [
+            (
+                short_row_dict,
+                long_options_dict,
+                spread_strike_tolerance,
+                spread_long_days,
+                position_size,
+                self.risk_free_rate,
+                self.debug
+            )
+            for short_row_dict in short_rows_list
+        ]
+        
+        # Use multiprocessing to process spread matches in parallel
+        if max_workers > 1 and len(short_rows_list) > 0:
+            if self.debug:
+                print(f"DEBUG: Processing {len(short_rows_list)} spread matches using {max_workers} CPU workers", file=sys.stderr)
+            
+            loop = asyncio.get_event_loop()
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = [loop.run_in_executor(executor, _process_spread_match, args) for args in process_args]
+                results = await asyncio.gather(*futures)
+            
+            # Filter out None results (no matches)
+            return [r for r in results if r is not None]
+        else:
+            # Fallback to sequential processing
+            if self.debug and max_workers <= 1:
+                print(f"DEBUG: Using sequential processing (max_workers={max_workers})", file=sys.stderr)
+            spread_results = []
+            for args in process_args:
+                result = _process_spread_match(args)
+                if result is not None:
+                    spread_results.append(result)
+            return spread_results
+    
     async def _create_spread_analysis(
         self,
         df_short: pd.DataFrame,
@@ -1264,411 +1845,73 @@ class OptionsAnalyzer:
         if df_short.empty:
             return df_short
         
-        # Calculate the target date range for long options (around spread_long_days from today)
-        # This is used for logging/debugging even if long_options_df is already provided
-        from datetime import date, timedelta
-        today = date.today()
-        
-        # If spread_long_min_days is set, use it as the lower bound; otherwise use tolerance-based approach
-        if spread_long_min_days is not None:
-            long_start_date = (today + timedelta(days=spread_long_min_days)).strftime('%Y-%m-%d')
-            long_end_date = (today + timedelta(days=spread_long_days)).strftime('%Y-%m-%d')
-            if not self.quiet:
-                if long_options_df is None:
-                    print(f"Fetching long-term options expiring between {spread_long_min_days} and {spread_long_days} days")
-                else:
-                    print(f"Using pre-fetched long-term options expiring between {spread_long_min_days} and {spread_long_days} days")
-                print(f"  Date range: {long_start_date} to {long_end_date}")
-            if self.debug:
-                print(f"DEBUG: Calculated long-term date range: {long_start_date} to {long_end_date} (from today {today})", file=sys.stderr)
-        else:
-            # Allow ±N days window around the target long expiry (configurable)
-            long_start_date = (today + timedelta(days=spread_long_days - spread_long_days_tolerance)).strftime('%Y-%m-%d')
-            long_end_date = (today + timedelta(days=spread_long_days + spread_long_days_tolerance)).strftime('%Y-%m-%d')
-            if not self.quiet:
-                if long_options_df is None:
-                    print(f"Fetching long-term options expiring around {spread_long_days} days (±{spread_long_days_tolerance} days)")
-                else:
-                    print(f"Using pre-fetched long-term options expiring around {spread_long_days} days (±{spread_long_days_tolerance} days)")
-                print(f"  Date range: {long_start_date} to {long_end_date}")
-            if self.debug:
-                print(f"DEBUG: Calculated long-term date range: {long_start_date} to {long_end_date} (from today {today})", file=sys.stderr)
-        
-        if self.debug:
-            print(f"DEBUG: Tickers to fetch: {tickers}")
-            print(f"DEBUG: Short-term options count: {len(df_short)}")
-            print(f"DEBUG: Short-term date range in df_short:")
-            if not df_short.empty and 'expiration_date' in df_short.columns:
-                print(f"  Min expiration: {df_short['expiration_date'].min()}")
-                print(f"  Max expiration: {df_short['expiration_date'].max()}")
-        
-        # Fetch long-term options data only if not already provided
-        if long_options_df is None:
-            # Use a much larger timestamp lookback for long-term options since they may have been
-            # written weeks or months ago but are still valid. Use at least 180 days to catch options
-            # that were written when they were first listed (which could be months before expiration)
-            long_timestamp_lookback_days = max(timestamp_lookback_days, 180)  # At least 180 days for long-term options
-            if self.debug:
-                print(f"DEBUG: Using timestamp_lookback_days={long_timestamp_lookback_days} for long-term options (vs {timestamp_lookback_days} for short-term)", file=sys.stderr)
-            
-            try:
-                if self.debug:
-                    print(f"DEBUG: Calling get_latest_options_data_batch with:", file=sys.stderr)
-                    print(f"  tickers: {tickers}", file=sys.stderr)
-                    print(f"  start_datetime: {long_start_date}", file=sys.stderr)
-                    print(f"  end_datetime: {long_end_date}", file=sys.stderr)
-                    print(f"  timestamp_lookback_days: {long_timestamp_lookback_days}", file=sys.stderr)
-                
-                if max_workers > 1:
-                    long_options_df = await self.db.get_latest_options_data_batch_multiprocess(
-                        tickers=tickers,
-                        start_datetime=long_start_date,
-                        end_datetime=long_end_date,
-                        batch_size=batch_size,
-                        max_workers=max_workers,
-                        timestamp_lookback_days=long_timestamp_lookback_days
-                    )
-                else:
-                    long_options_df = await self.db.get_latest_options_data_batch(
-                        tickers=tickers,
-                        start_datetime=long_start_date,
-                        end_datetime=long_end_date,
-                        max_concurrent=max_concurrent,
-                        batch_size=batch_size,
-                        timestamp_lookback_days=long_timestamp_lookback_days
-                    )
-                
-                if self.debug:
-                    print(f"DEBUG: Batch fetch returned {len(long_options_df)} rows", file=sys.stderr)
-            except Exception as e:
-                if not self.quiet:
-                    print(f"Error fetching long-term options: {e}", file=sys.stderr)
-                import traceback
-                if self.debug:
-                    traceback.print_exc()
-                return pd.DataFrame()
-        else:
-            if not self.quiet:
-                print(f"Using pre-fetched long-term options ({len(long_options_df)} rows)")
-            if self.debug:
-                print(f"DEBUG: Using pre-fetched long-term options DataFrame with {len(long_options_df)} rows", file=sys.stderr)
-            # Ensure we have a copy of the pre-fetched DataFrame to avoid SettingWithCopyWarning
-            long_options_df = long_options_df.copy()
-        
         try:
+            # Calculate date range for long options
+            long_start_date, long_end_date = self._calculate_long_options_date_range(
+                spread_long_days, spread_long_days_tolerance, spread_long_min_days
+            )
             
             if self.debug:
-                print(f"DEBUG: Fetched {len(long_options_df)} total options from database")
-                if not long_options_df.empty:
-                    print(f"DEBUG: Long options columns: {list(long_options_df.columns)}")
-                    if 'ticker' in long_options_df.columns:
-                        unique_tickers = long_options_df['ticker'].unique().tolist()
-                        print(f"DEBUG: Long options tickers: {unique_tickers}")
-                        # Show count per ticker
-                        for ticker in unique_tickers:
-                            count = len(long_options_df[long_options_df['ticker'] == ticker])
-                            print(f"DEBUG:   {ticker}: {count} options")
-                    if 'option_type' in long_options_df.columns:
-                        print(f"DEBUG: Option types: {long_options_df['option_type'].unique().tolist()}")
-                else:
-                    print(f"DEBUG: No long-term options found in database for date range {long_start_date} to {long_end_date}")
+                print(f"DEBUG: Tickers to fetch: {tickers}", file=sys.stderr)
+                print(f"DEBUG: Short-term options count: {len(df_short)}", file=sys.stderr)
+                print(f"DEBUG: Short-term date range in df_short:", file=sys.stderr)
+                if not df_short.empty and 'expiration_date' in df_short.columns:
+                    print(f"  Min expiration: {df_short['expiration_date'].min()}", file=sys.stderr)
+                    print(f"  Max expiration: {df_short['expiration_date'].max()}", file=sys.stderr)
             
-            # Apply write timestamp filter to long options if specified
-            if min_write_timestamp and not long_options_df.empty:
-                try:
-                    import pytz
-                    est = pytz.timezone('America/New_York')
-                    min_ts = pd.to_datetime(min_write_timestamp)
-                    if min_ts.tz is None:
-                        min_ts = est.localize(min_ts)
-                    min_ts_utc = min_ts.astimezone(pytz.UTC)
-                    
-                    if 'write_timestamp' in long_options_df.columns:
-                        # Ensure we have a copy before modifying to avoid SettingWithCopyWarning
-                        long_options_df = long_options_df.copy()
-                        # Normalize write_timestamp to UTC, handling mixed timezone-aware/naive values
-                        def normalize_write_timestamp(x):
-                            if pd.isna(x):
-                                return pd.NaT
-                            if isinstance(x, pd.Timestamp):
-                                dt = x
-                            else:
-                                dt = pd.to_datetime(x, errors='coerce')
-                                if pd.isna(dt):
-                                    return pd.NaT
-                            if dt.tz is None:
-                                return dt.tz_localize('UTC')
-                            else:
-                                return dt.tz_convert('UTC')
-                        
-                        long_options_df['write_timestamp'] = long_options_df['write_timestamp'].apply(normalize_write_timestamp)
-                        
-                        before_count = len(long_options_df)
-                        long_options_df = long_options_df[long_options_df['write_timestamp'] >= min_ts_utc].copy()
-                        after_count = len(long_options_df)
-                        
-                        if not self.quiet:
-                            print(f"Filtered long options by write timestamp: {before_count} -> {after_count} options")
-                        if self.debug:
-                            print(f"DEBUG: Applied write timestamp filter >= {min_ts_utc} UTC")
-                except Exception as e:
-                    if not self.quiet:
-                        print(f"Warning: Could not apply write timestamp filter to long options: {e}", file=sys.stderr)
-            
-            if long_options_df.empty:
+            # Fetch long-term options if not already provided
+            if long_options_df is None:
                 if not self.quiet:
-                    print("Warning: No long-term options found for spread analysis.", file=sys.stderr)
-                if self.debug:
-                    print("DEBUG: This could mean:", file=sys.stderr)
-                    print("  1. No options data in database for the specified date range", file=sys.stderr)
-                    print("  2. Options exist but not in the target expiration window", file=sys.stderr)
-                    print(f"  3. Try increasing --spread-long-days-tolerance (currently {spread_long_days_tolerance} days)", file=sys.stderr)
-                    print(f"  4. Check database for tickers: {tickers}", file=sys.stderr)
-                return pd.DataFrame()
-            
-            # Filter for call options only
-            if 'option_type' in long_options_df.columns:
-                long_options_df = long_options_df[long_options_df['option_type'] == 'call'].copy()
-            
-            if self.debug:
-                print(f"DEBUG: After filtering for calls: {len(long_options_df)} call options")
-            
-            if long_options_df.empty:
-                if not self.quiet:
-                    print("Warning: No long-term call options found for spread analysis.", file=sys.stderr)
-                return pd.DataFrame()
-            
-            # Ensure we have a copy before modifying to avoid SettingWithCopyWarning
-            long_options_df = long_options_df.copy()
-            if 'implied_volatility' in long_options_df.columns:
-                long_options_df['implied_volatility'] = pd.to_numeric(long_options_df['implied_volatility'], errors='coerce').round(4)
+                    print(f"Fetching long-term options...")
+                long_options_df = await self._fetch_long_term_options(
+                    tickers=tickers,
+                    long_start_date=long_start_date,
+                    long_end_date=long_end_date,
+                    timestamp_lookback_days=timestamp_lookback_days,
+                    max_workers=max_workers,
+                    max_concurrent=max_concurrent,
+                    batch_size=batch_size
+                )
             else:
-                long_options_df['implied_volatility'] = pd.Series([float('nan')] * len(long_options_df), index=long_options_df.index)
-            
-            # Calculate days to expiry for long options
-            # Normalize expiration_date to timezone-aware UTC, handling mixed timezone-aware/naive values
-            def normalize_to_utc(x):
-                if pd.isna(x):
-                    return pd.NaT
-                # Convert to datetime if not already
-                if isinstance(x, pd.Timestamp):
-                    dt = x
-                else:
-                    dt = pd.to_datetime(x, errors='coerce')
-                    if pd.isna(dt):
-                        return pd.NaT
-                # Normalize to UTC
-                if dt.tz is None:
-                    return dt.tz_localize('UTC')
-                else:
-                    return dt.tz_convert('UTC')
-            
-            # Apply normalization directly to the original column to avoid creating mixed Series
-            long_options_df['expiration_date'] = long_options_df['expiration_date'].apply(normalize_to_utc)
-            today_ts = pd.Timestamp.now(tz='UTC').normalize()
-            long_options_df['days_to_expiry'] = ((long_options_df['expiration_date'] - today_ts).dt.total_seconds() / 86400).astype(int)
-            
-            if self.debug:
-                print(f"DEBUG: Long options days to expiry range: {long_options_df['days_to_expiry'].min()} to {long_options_df['days_to_expiry'].max()}")
-                print(f"DEBUG: Long options strike price range: {long_options_df['strike_price'].min()} to {long_options_df['strike_price'].max()}")
-            
-            # Match short options with long options
-            spread_results = []
-            
-            # Reset index to avoid issues with duplicate indices that could cause infinite loops
-            df_short = df_short.reset_index(drop=True)
-            
-            # Deduplicate by option_ticker to avoid processing the same option multiple times
-            if 'option_ticker' in df_short.columns:
-                before_dedup = len(df_short)
-                df_short = df_short.drop_duplicates(subset=['option_ticker'], keep='first')
-                if self.debug and len(df_short) < before_dedup:
-                    print(f"DEBUG: Deduplicated df_short: {before_dedup} -> {len(df_short)} rows (removed {before_dedup - len(df_short)} duplicates)", file=sys.stderr)
-            
-            for idx, short_row in df_short.iterrows():
-                ticker = short_row['ticker']
-                short_strike = short_row['strike_price']
-                
-                # Filter long options for this ticker
-                ticker_long_options = long_options_df[long_options_df['ticker'] == ticker].copy()
-                
-                if ticker_long_options.empty:
-                    if self.debug:
-                        print(f"DEBUG: No long options found for ticker {ticker}")
-                    continue
-                
+                if not self.quiet:
+                    print(f"Using pre-fetched long-term options ({len(long_options_df)} rows)")
                 if self.debug:
-                    print(f"DEBUG: Processing {ticker} - short strike: ${short_strike:.2f}, {len(ticker_long_options)} long options available")
-                
-                # Calculate strike tolerance range
-                tolerance_multiplier = spread_strike_tolerance / 100.0
-                strike_min = short_strike * (1 - tolerance_multiplier)
-                strike_max = short_strike * (1 + tolerance_multiplier)
-                
-                if self.debug:
-                    print(f"DEBUG:   Strike tolerance range: ${strike_min:.2f} to ${strike_max:.2f} ({spread_strike_tolerance}%)")
-                
-                # Find matching long options within strike tolerance
-                matching_long = ticker_long_options[
-                    (ticker_long_options['strike_price'] >= strike_min) &
-                    (ticker_long_options['strike_price'] <= strike_max)
-                ].copy()  # Explicit copy to avoid SettingWithCopyWarning
-                
-                if self.debug:
-                    print(f"DEBUG:   Found {len(matching_long)} matching long options within strike tolerance")
-                
-                if matching_long.empty:
-                    if self.debug:
-                        if not ticker_long_options.empty:
-                            available_strikes = ticker_long_options['strike_price'].unique()
-                            print(f"DEBUG:   No matches. Available strikes for {ticker}: {sorted(available_strikes)[:10]}..." if len(available_strikes) > 10 else f"DEBUG:   No matches. Available strikes for {ticker}: {sorted(available_strikes)}")
-                        else:
-                            print(f"DEBUG:   No long options available for ticker {ticker} in the database")
-                    continue
-                
-                # Pick the best matching long option (closest strike, then closest to target days)
-                matching_long['strike_diff'] = abs(matching_long['strike_price'] - short_strike)
-                matching_long['days_diff'] = abs(matching_long['days_to_expiry'] - spread_long_days)
-                matching_long = matching_long.sort_values(['strike_diff', 'days_diff'])
-                
-                best_long = matching_long.iloc[0]
-                
-                # Calculate long option premium (use ask, fallback to bid, fallback to 0.01)
-                long_premium = best_long.get('ask', best_long.get('bid', 0.01))
-                if pd.isna(long_premium):
-                    long_premium = best_long.get('bid', 0.01)
-                if pd.isna(long_premium):
-                    long_premium = 0.01
-                long_premium = round(float(long_premium), 2)
-                
-                long_iv = best_long.get('implied_volatility')
-                if pd.notna(long_iv):
-                    long_iv = float(long_iv)
-                else:
-                    long_iv = None
-
-                # SPREAD MODE: Calculate num_contracts based on long option premium (investment in long options)
-                # This represents how many spreads you can afford with your position_size
-                num_contracts = math.floor(position_size / (long_premium * 100)) if long_premium > 0 else 0
-                
-                # Calculate premiums based on spread position sizing
-                short_premium = short_row['option_premium']
-                premium_diff = round(long_premium - short_premium, 2)  # Long - Short (per contract)
-                short_premium_total = round(num_contracts * short_premium * 100, 2)  # Total received from selling short-term options
-                long_premium_total = round(num_contracts * long_premium * 100, 2)  # Total paid for buying long-term options
-                
-                # Calculate Black-Scholes based long option value at short expiration
-                # This estimates what the long option will be worth when the short expires
-                current_price = short_row.get('current_price')
-                long_strike = float(best_long['strike_price'])
-                short_days = short_row['days_to_expiry']
-                long_days = int(best_long['days_to_expiry'])
-                
-                # Time remaining for long option at short expiration (in years)
-                time_to_long_expiry_at_short_expiry = (long_days - short_days) / 365.0
-                
-                # Get implied volatility from long option data, or use a default
-                implied_vol = best_long.get('implied_volatility')
-                if pd.isna(implied_vol) or implied_vol is None or implied_vol <= 0:
-                    # Default to 0.3 (30% annual volatility) if not available
-                    implied_vol = 0.3
-                else:
-                    implied_vol = float(implied_vol)
-                    # Ensure it's in decimal form (not percentage)
-                    if implied_vol > 1.0:
-                        implied_vol = implied_vol / 100.0
-                
-                # Calculate Black-Scholes long option value at short expiration
-                # Assume stock price stays the same (or use current price as estimate)
-                estimated_stock_price_at_short_expiry = current_price if current_price else long_strike
-                
-                long_option_value_at_short_expiry = 0.0
-                if time_to_long_expiry_at_short_expiry > 0 and current_price:
-                    try:
-                        long_option_value_at_short_expiry = self._black_scholes_call(
-                            S=estimated_stock_price_at_short_expiry,
-                            K=long_strike,
-                            T=time_to_long_expiry_at_short_expiry,
-                            r=self.risk_free_rate,
-                            sigma=implied_vol
-                        )
-                    except Exception as e:
-                        if self.debug:
-                            print(f"DEBUG: Black-Scholes calculation error: {e}", file=sys.stderr)
-                        # Fallback: use current long premium as estimate
-                        long_option_value_at_short_expiry = long_premium
-                
-                # Net premium = short_premium - (current_long_premium - estimated_long_premium_at_short_expiry)
-                # This represents: what you receive - (what you pay now - what the long will be worth later)
-                long_premium_at_short_expiry_total = round(num_contracts * long_option_value_at_short_expiry * 100, 2)
-                net_premium = round(short_premium_total - (long_premium_total - long_premium_at_short_expiry_total), 2)
-                
-                # Daily premium calculations (until short expiration - exit point)
-                short_daily_premium = round(short_premium_total / short_days, 2) if short_days > 0 else 0
-                # Net daily premium = net premium / days (amortized over short days)
-                net_daily_premium = round(net_premium / short_days, 2) if short_days > 0 else 0
-
-                long_contracts_available = best_long.get('open_interest')
-                if pd.notna(long_contracts_available):
-                    try:
-                        long_contracts_available = int(float(long_contracts_available))
-                    except (TypeError, ValueError):
-                        long_contracts_available = None
-                else:
-                    long_contracts_available = None
-                
-                # Format long bid:ask
-                long_bid_val = best_long.get('bid', 0) if pd.notna(best_long.get('bid')) else 0
-                long_ask_val = best_long.get('ask', 0) if pd.notna(best_long.get('ask')) else 0
-                if pd.notna(best_long.get('bid')) or pd.notna(best_long.get('ask')):
-                    long_bid_ask = f"{long_bid_val:.2f}:{long_ask_val:.2f}"
-                else:
-                    long_bid_ask = "N/A:N/A"
-                
-                # Create spread result row
-                spread_row = short_row.to_dict()
-                # Ensure long_expiration_date is properly normalized (should already be UTC from normalization above)
-                long_exp_dt = best_long['expiration_date']
-                if isinstance(long_exp_dt, pd.Timestamp):
-                    if long_exp_dt.tz is None:
-                        long_exp_dt = long_exp_dt.tz_localize('UTC')
-                    else:
-                        long_exp_dt = long_exp_dt.tz_convert('UTC')
-                elif isinstance(long_exp_dt, (str, datetime)):
-                    long_exp_dt = pd.to_datetime(long_exp_dt)
-                    if long_exp_dt.tz is None:
-                        long_exp_dt = long_exp_dt.tz_localize('UTC')
-                    else:
-                        long_exp_dt = long_exp_dt.tz_convert('UTC')
-                
-                spread_row.update({
-                    'num_contracts': num_contracts,  # Override with spread-based calculation
-                    'long_strike_price': round(float(best_long['strike_price']), 2),
-                    'long_option_premium': long_premium,
-                    'long_bid_ask': long_bid_ask,
-                    'long_expiration_date': long_exp_dt,
-                    'long_days_to_expiry': int(best_long['days_to_expiry']),
-                    'long_option_ticker': best_long.get('option_ticker', ''),
-                    'long_delta': round(float(best_long.get('delta', 0)), 2) if pd.notna(best_long.get('delta')) else None,
-                    'long_theta': round(float(best_long.get('theta', 0)), 2) if pd.notna(best_long.get('theta')) else None,
-                    'long_volume': int(best_long.get('volume', 0)) if pd.notna(best_long.get('volume')) else 0,
-                    'long_implied_volatility': long_iv,
-                    'long_contracts_available': long_contracts_available,
-                    'premium_diff': premium_diff,
-                    'short_premium_total': short_premium_total,
-                    'short_daily_premium': short_daily_premium,
-                    'long_premium_total': long_premium_total,
-                    'net_premium': net_premium,
-                    'net_daily_premium': net_daily_premium
-                })
-                
-                spread_results.append(spread_row)
+                    print(f"DEBUG: Using pre-fetched long-term options DataFrame with {len(long_options_df)} rows", file=sys.stderr)
+                long_options_df = long_options_df.copy()
+            
+            # Filter and prepare long options
+            long_options_df = self._filter_and_prepare_long_options(
+                long_options_df=long_options_df,
+                min_write_timestamp=min_write_timestamp,
+                long_start_date=long_start_date,
+                long_end_date=long_end_date,
+                tickers=tickers
+            )
+            
+            if long_options_df.empty:
+                return pd.DataFrame()
+            
+            # Prepare data for spread matching
+            short_rows_list, long_options_dict = self._prepare_spread_matching_data(
+                df_short=df_short,
+                long_options_df=long_options_df
+            )
+            
+            # Execute spread matching
+            spread_results = await self._execute_spread_matching(
+                short_rows_list=short_rows_list,
+                long_options_dict=long_options_dict,
+                spread_strike_tolerance=spread_strike_tolerance,
+                spread_long_days=spread_long_days,
+                position_size=position_size,
+                max_workers=max_workers
+            )
             
             if not spread_results:
                 if not self.quiet:
                     print("Warning: No matching spread opportunities found within strike tolerance.", file=sys.stderr)
                 if self.debug:
-                    print(f"DEBUG: Summary - Processed {len(df_short)} short options, but none matched with long options", file=sys.stderr)
+                    print(f"DEBUG: Summary - Processed {len(short_rows_list)} short options, but none matched with long options", file=sys.stderr)
                     print("DEBUG: Possible reasons:", file=sys.stderr)
                     print("  1. Strike prices don't overlap between short and long options", file=sys.stderr)
                     print("  2. Strike tolerance is too strict (try increasing --spread-strike-tolerance)", file=sys.stderr)
@@ -1688,7 +1931,8 @@ class OptionsAnalyzer:
             if not self.quiet:
                 print(f"Error creating spread analysis: {e}", file=sys.stderr)
             import traceback
-            traceback.print_exc()
+            if self.debug:
+                traceback.print_exc()
             return pd.DataFrame()
     
     def format_output(
