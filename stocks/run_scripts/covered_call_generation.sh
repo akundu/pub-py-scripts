@@ -17,7 +17,8 @@ TIME_TO_USE=`TZ='America/New_York' date -v-30M '+%Y-%m-%d %H:%M:%S'`
 
 POSITION_SIZE=100000 #amt to invest
 
-SORT="DAY_PREM"
+#SORT="DAY_PREM"
+SORT="potential_premium"
 TOP_N=1
 
 MIN_PE=1

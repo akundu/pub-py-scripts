@@ -296,6 +296,16 @@ def get_css_styles():
             background: #f9f9f9;
         }
         
+        td.price-positive {
+            color: #28a745;
+            font-weight: 600;
+        }
+        
+        td.price-negative {
+            color: #dc3545;
+            font-weight: 600;
+        }
+        
         tbody tr.even-row {
             background: #f8f9fa;
         }
@@ -1333,10 +1343,19 @@ def get_javascript():
             // Add sort class to current header
             headers[columnIndex].classList.add(sortDirection[columnIndex] === 'asc' ? 'sort-asc' : 'sort-desc');
             
+            // Check if sorting by change_pct (renamed from price_with_change)
+            // We can sort directly using the data-raw attribute which contains the percentage value
+            // No need to find a separate column - the change_pct column itself has the percentage in data-raw
+            const currentHeader = headers[columnIndex];
+            const filterableName = currentHeader.getAttribute('data-filterable-name');
+            let sortColumnIndex = columnIndex;
+            // For change_pct column, we'll use its own data-raw attribute which contains the percentage
+            // The JavaScript sorting code below will automatically use data-raw if available
+            
             // Sort rows
             rows.sort((a, b) => {
-                const aCell = a.cells[columnIndex];
-                const bCell = b.cells[columnIndex];
+                const aCell = a.cells[sortColumnIndex];
+                const bCell = b.cells[sortColumnIndex];
                 if (!aCell || !bCell) return 0;
                 
                 const aRaw = aCell.getAttribute('data-raw');
@@ -1541,12 +1560,74 @@ def get_javascript():
             }
         }
         
+        // Calculate and display time ago
+        function updateTimeAgo() {
+            const timeAgoEl = document.getElementById('timeAgo');
+            const generatedTimeEl = document.getElementById('generatedTime');
+            if (!timeAgoEl || !generatedTimeEl) return;
+            
+            // Get the ISO timestamp from the data-generated attribute on the paragraph
+            const generatedTimeStr = generatedTimeEl.getAttribute('data-generated');
+            if (!generatedTimeStr) return;
+            
+            try {
+                const generatedTime = new Date(generatedTimeStr);
+                // Check if date is valid
+                if (isNaN(generatedTime.getTime())) {
+                    console.error('Invalid date string:', generatedTimeStr);
+                    timeAgoEl.textContent = '';
+                    return;
+                }
+                
+                const now = new Date();
+                const diffMs = now - generatedTime;
+                
+                // Handle negative differences (future dates) or invalid calculations
+                if (isNaN(diffMs) || diffMs < 0) {
+                    timeAgoEl.textContent = '';
+                    return;
+                }
+                
+                const diffSeconds = Math.floor(diffMs / 1000);
+                const diffMinutes = Math.floor(diffSeconds / 60);
+                const diffHours = Math.floor(diffMinutes / 60);
+                const diffDays = Math.floor(diffHours / 24);
+                
+                let timeAgoText = '';
+                if (diffSeconds < 60) {
+                    timeAgoText = `(${diffSeconds} second${diffSeconds !== 1 ? 's' : ''} ago)`;
+                } else if (diffMinutes < 60) {
+                    timeAgoText = `(${diffMinutes} minute${diffMinutes !== 1 ? 's' : ''} ago)`;
+                } else if (diffHours < 24) {
+                    timeAgoText = `(${diffHours} hour${diffHours !== 1 ? 's' : ''} ago)`;
+                } else if (diffDays < 7) {
+                    timeAgoText = `(${diffDays} day${diffDays !== 1 ? 's' : ''} ago)`;
+                } else {
+                    const diffWeeks = Math.floor(diffDays / 7);
+                    // Validate diffWeeks is a valid number
+                    if (isNaN(diffWeeks) || diffWeeks < 0) {
+                        timeAgoEl.textContent = '';
+                        return;
+                    }
+                    timeAgoText = `(${diffWeeks} week${diffWeeks !== 1 ? 's' : ''} ago)`;
+                }
+                
+                timeAgoEl.textContent = timeAgoText;
+            } catch (e) {
+                console.error('Error calculating time ago:', e);
+                timeAgoEl.textContent = '';
+            }
+        }
+        
         // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             switchTab(0);
             initColumnMap();
             updateFilterDisplay();
             loadFiltersFromURL();
+            updateTimeAgo(); // Update time ago on page load
+            // Update time ago every minute
+            setInterval(updateTimeAgo, 60000);
             // Ensure hidden columns are hidden on load
             const wrapper = document.getElementById('tableWrapper');
             const toggleBtn = document.getElementById('toggleHiddenBtn');
@@ -1914,6 +1995,129 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
     # Replace remaining NaN with empty strings for display
     df_display = df_display.fillna('')
     
+    # Helper function to find column by partial name match (handles truncated variations)
+    def find_column_by_partial_name(df, target_pattern):
+        """Find a column in DataFrame by partial name match, handling variations."""
+        target_pattern_normalized = target_pattern.lower().replace(' ', '_')
+        for col in df.columns:
+            col_normalized = _normalize_col_name(col)
+            # Check if the column starts with the pattern (handles truncation)
+            if col_normalized.startswith(target_pattern_normalized):
+                return col
+            # Also check exact match
+            if col_normalized == target_pattern_normalized:
+                return col
+        return None
+    
+    # Normalize/standardize column names first
+    # Handle current_price variations (curr_price, current_price, cur_price)
+    current_price_col = find_column_by_partial_name(df_display, 'curr')
+    if current_price_col:
+        # Check if it's actually a price column (not current_strike, etc.)
+        if 'price' in current_price_col.lower() or current_price_col.lower() in ['curr_price', 'cur_price']:
+            if current_price_col != 'current_price':
+                df_display = df_display.rename(columns={current_price_col: 'current_price'})
+                df_raw = df_raw.rename(columns={current_price_col: 'current_price'})
+    
+    # Handle price_with_change variations (price_with_chan, price_with_ch, price_with_change)
+    price_with_change_col = find_column_by_partial_name(df_display, 'price_with_ch')
+    if price_with_change_col and 'pct' not in price_with_change_col.lower():
+        if price_with_change_col != 'price_with_change':
+            df_display = df_display.rename(columns={price_with_change_col: 'price_with_change'})
+            df_raw = df_raw.rename(columns={price_with_change_col: 'price_with_change'})
+    
+    # Handle price_change_pct variations (price_change_pc, price_change_pct)
+    for col in df_display.columns:
+        col_lower = col.lower()
+        if 'price_change' in col_lower and 'pc' in col_lower and col != 'price_change_pct':
+            df_display = df_display.rename(columns={col: 'price_change_pct'})
+            df_raw = df_raw.rename(columns={col: 'price_change_pct'})
+            break
+    
+    # Reorder columns: ticker, pe_ratio, market_cap_b, current_price, price_with_change (renamed to change_pct)
+    # Define desired column order (only reorder if columns exist)
+    # Note: price_change_pct is kept for sorting but not shown in desired_order
+    
+    # Build a flexible mapping for column ordering that handles CSV column name variations
+    def find_matching_column(desired_name):
+        """Find a column that matches the desired name, handling variations."""
+        # Exact match first
+        if desired_name in df_display.columns:
+            return desired_name
+        
+        # Handle common variations
+        variations = {
+            'current_price': ['curr_price', 'cur_price', 'current_price'],
+            'price_with_change': ['price_with_change', 'price_with_chan', 'price_with_ch'],
+            'option_premium': ['opt_prem.', 'opt_prem', 'option_premium'],
+            'bid_ask': ['bid:ask', 'bid_ask'],
+            'short_premium_total': ['s_prem_tot', 's_prem_total', 'short_premium_total'],
+            'short_daily_premium': ['s_day_prem', 's_daily_prem', 'short_daily_premium'],
+            'long_strike_price': ['l_strike', 'l_strike_price', 'long_strike_price'],
+            'long_option_premium': ['l_opt_prem', 'l_prem', 'l_option_premium', 'long_option_premium'],
+            'long_bid_ask': ['l_bid:ask', 'l_bid_ask', 'long_bid_ask'],
+            'long_implied_volatility': ['liv', 'l_iv', 'long_implied_volatility'],
+            'long_delta': ['l_delta', 'long_delta'],
+            'long_theta': ['l_theta', 'long_theta'],
+            'long_expiration_date': ['l_expiration_date', 'long_expiration_date'],
+            'long_days_to_expiry': ['l_days_to_expiry', 'long_days_to_expiry'],
+            'long_premium_total': ['l_prem_tot', 'l_premium_total', 'long_premium_total'],
+            'long_contracts_available': ['l_cnt_avl', 'l_contracts_available', 'long_contracts_available'],
+            'net_daily_premium': ['net_daily_premi', 'net_daily_premium'],
+        }
+        
+        if desired_name in variations:
+            for var in variations[desired_name]:
+                if var in df_display.columns:
+                    return var
+        
+        return None
+    
+    # Define desired order with standardized names
+    desired_order_names = [
+        'ticker', 'pe_ratio', 'market_cap_b', 'current_price', 'price_with_change',
+        'strike_price', 'option_premium', 'expiration_date', 'bid_ask', 'delta', 'theta',
+        'short_premium_total', 'short_daily_premium',
+        'long_strike_price', 'long_option_premium', 'long_expiration_date', 'long_bid_ask', 'long_delta', 'long_theta',
+        'long_implied_volatility', 'long_days_to_expiry', 
+        'long_premium_total', 'long_contracts_available',
+        'net_premium', 'net_daily_premium',
+        'price_above_current', 'premium_above_diff_percentage',
+        'implied_volatility', 'days_to_expiry',
+        'potential_premium', 'daily_premium',
+        'volume', 'num_contracts', 'write_timestamp', 'option_ticker', 'long_option_ticker',
+        'premium_diff',  # Will be hidden by default
+        'spread_slippage', 'net_premium_after_spread', 'net_daily_premium_after_spread',
+        'spread_impact_pct', 'liquidity_score', 'assignment_risk', 'trade_quality'
+    ]
+    
+    # Get existing columns in desired order, handling variations
+    ordered_cols = []
+    for desired_name in desired_order_names:
+        actual_col = find_matching_column(desired_name)
+        if actual_col:
+            ordered_cols.append(actual_col)
+    
+    # Add any remaining columns (excluding price_change_pct from visible)
+    remaining_cols = [col for col in df_display.columns if col not in ordered_cols and col != 'price_change_pct']
+    # Add price_change_pct at the end (hidden, used for sorting)
+    if 'price_change_pct' in df_display.columns:
+        remaining_cols.append('price_change_pct')
+    df_display = df_display[ordered_cols + remaining_cols]
+    
+    # Rename price_with_change to change_pct for display
+    if 'price_with_change' in df_display.columns:
+        df_display = df_display.rename(columns={'price_with_change': 'change_pct'})
+        # Also update df_raw for consistency
+        if 'price_with_change' in df_raw.columns:
+            df_raw = df_raw.rename(columns={'price_with_change': 'change_pct'})
+    
+    # Rename l_prem to l_opt_prem for display
+    if 'l_prem' in df_display.columns:
+        df_display = df_display.rename(columns={'l_prem': 'l_opt_prem'})
+        if 'l_prem' in df_raw.columns:
+            df_raw = df_raw.rename(columns={'l_prem': 'l_opt_prem'})
+    
     # Apply compact headers to keep column names concise
     # compact_headers = {}
     # for col in df_display.columns:
@@ -1924,7 +2128,10 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
     # df_display = df_display.rename(columns=compact_headers)
     
     # Get current timestamp for display
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now()
+    timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+    # Get ISO timestamp with timezone for JavaScript parsing (ensure it's parseable)
+    iso_timestamp = now.isoformat()
     
     # Generate HTML - build it piece by piece
     html_parts = []
@@ -1949,7 +2156,7 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
                 <button class="tab-button active" onclick="switchTab(0)">📋 Data Table</button>
                 <button class="tab-button" onclick="switchTab(1)">📊 Comprehensive Analysis</button>
             </div>
-            <p>Generated: """ + timestamp + """</p>
+            <p id="generatedTime" data-generated="""" + iso_timestamp + """">Generated: """ + timestamp + """ <span id="timeAgo"></span></p>
             <p>Click column headers to sort • """ + str(len(df)) + """ total results</p>
         </div>
         
@@ -2005,9 +2212,14 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
 """)
     
     # Columns to hide by default (use normalized lowercase names with underscores)
+    # Note: This is checked AFTER column renaming, so use the final column names
     hidden_columns_list = [
+        'price_change_pct',  # Hidden - used only for sorting change% column
+        'price_change_pc',   # Variation that might exist
         'price_above_curr',
         'price_above_current',
+        'premium_diff',  # Hidden by default, show only with hidden columns
+        'prem_diff',     # Variation
         'days_to_expiry',
         'iv',
         'implied_volatility',
@@ -2078,6 +2290,18 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
                         # Not a number, store as text
                         raw_text = str(raw_val)
             
+            # For change_pct column, also store the percentage value from price_change_pct for sorting
+            if col == 'change_pct' and 'price_change_pct' in df_raw.columns and row_idx in df_raw.index:
+                pct_val = df_raw.loc[row_idx, 'price_change_pct']
+                if pd.notna(pct_val):
+                    try:
+                        pct_float = float(pct_val)
+                        if not pd.isna(pct_float):
+                            # Store as raw value for sorting (this will be used by JavaScript)
+                            raw_value = str(pct_float)
+                    except (ValueError, TypeError):
+                        pass
+            
             # Build td with data attributes
             td_attrs = []
             if raw_value is not None:
@@ -2087,8 +2311,31 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
             # Hidden class for default-hidden columns
             normalized_col = _normalize_col_name(col)
             td_hidden_class = ' is-hidden-col' if normalized_col in hidden_columns_set else ''
+            
+            # Add price change color class for change_pct column (renamed from price_with_change)
+            price_class = ''
+            # Check if this is the change_pct column (handle both original and renamed names)
+            is_change_col = (normalized_col == 'price_with_change' or 
+                           normalized_col == 'change_pct' or
+                           normalized_col == 'change%')
+            if is_change_col and cell_value:
+                # Check multiple format variations:
+                # Format 1: "+$2.50 (+2.50%)" or "-$2.50 (-2.50%)"
+                # Format 2: "$336.15 (-0.68%)" where sign is in the percentage
+                # Format 3: "$2.50 (2.50%)" where positive doesn't have explicit sign
+                if cell_value.startswith('+$') or (cell_value.startswith('$') and '(+' in cell_value):
+                    price_class = ' price-positive'
+                elif cell_value.startswith('-$') or (cell_value.startswith('$') and '(-' in cell_value):
+                    price_class = ' price-negative'
+                elif '(+' in cell_value:
+                    price_class = ' price-positive'
+                elif '(-' in cell_value:
+                    price_class = ' price-negative'
+            
+            # Combine all classes
+            all_classes = (td_hidden_class + price_class).strip()
             attrs_str = (' ' + ' '.join(td_attrs) if td_attrs else '')
-            class_attr = f' class="{td_hidden_class.strip()}"' if td_hidden_class else ''
+            class_attr = f' class="{all_classes}"' if all_classes else ''
             html_parts.append(f'                        <td{class_attr}{attrs_str}>{cell_value}</td>\n')
         html_parts.append("                    </tr>\n")
     

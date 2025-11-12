@@ -1419,6 +1419,16 @@ class OptionsAnalyzer:
                 stock_prices[ticker] = price
                 price_sources[ticker] = source
 
+        # Fetch previous close prices for price change calculation
+        prev_close_prices: Dict[str, float] = {}
+        try:
+            prev_close_prices = await self.db.get_previous_close_prices(list(stock_prices.keys()))
+            if self.debug:
+                print(f"DEBUG: Fetched previous close prices for {len(prev_close_prices)} tickers", file=sys.stderr)
+        except Exception as e:
+            if self.debug:
+                print(f"DEBUG: Could not fetch previous close prices: {e}", file=sys.stderr)
+
         if self.debug or not self.quiet:
             print(f"DEBUG: Fetched stock prices for {len(stock_prices)}/{len(tickers_upper)} tickers", file=sys.stderr)
             if stock_prices and price_sources:
@@ -1441,6 +1451,33 @@ class OptionsAnalyzer:
                 print(f"Error: DataFrame missing 'ticker' column. Available columns: {list(df.columns)}", file=sys.stderr)
             return pd.DataFrame()
         df['current_price'] = df['ticker'].map(stock_prices)
+        
+        # Calculate price change and format as single column
+        # Store percentage change separately for sorting
+        def format_price_with_change(row):
+            ticker = row['ticker']
+            current = row['current_price']
+            prev_close = prev_close_prices.get(ticker) if prev_close_prices else None
+            
+            if pd.isna(current) or current is None:
+                return None, None
+            
+            if prev_close is None or pd.isna(prev_close) or prev_close <= 0:
+                return f"${current:.2f}", None
+            
+            change = current - prev_close
+            change_pct = (change / prev_close) * 100
+            
+            if change >= 0:
+                return f"+${change:.2f} (+{change_pct:.2f}%)", change_pct
+            else:
+                return f"-${abs(change):.2f} ({change_pct:.2f}%)", change_pct
+        
+        # Apply formatting and store both display value and sort value
+        result = df.apply(format_price_with_change, axis=1, result_type='expand')
+        df['price_with_change'] = result[0]
+        df['price_change_pct'] = result[1]  # Store percentage for sorting
+        
         before_price_filter = len(df)
         df = df[df['current_price'].notna()]
         if self.debug:
@@ -1658,7 +1695,7 @@ class OptionsAnalyzer:
                 df[ts_col] = df[ts_col].apply(_normalize_timestamp_to_utc)
 
         output_cols = [
-            'ticker', 'current_price', 'strike_price', 'price_above_current',
+            'ticker', 'current_price', 'price_with_change', 'price_change_pct', 'strike_price', 'price_above_current',
             'option_premium', 'bid_ask', 'implied_volatility', 'delta', 'theta', 'volume', 'num_contracts',
             'potential_premium', 'daily_premium', 'expiration_date', 'days_to_expiry',
             'last_quote_timestamp', 'write_timestamp', 'option_ticker'
@@ -2224,7 +2261,7 @@ class OptionsAnalyzer:
         
         if is_spread_mode:
             display_columns = [
-                'ticker', 'pe_ratio', 'market_cap_b', 'current_price',
+                'ticker', 'pe_ratio', 'market_cap_b', 'current_price', 'price_with_change', 'price_change_pct',
                 # Short option details
                 'strike_price', 'price_above_current', 'option_premium', 'bid_ask',
                 'implied_volatility', 'delta', 'theta', 'expiration_date', 'days_to_expiry',
@@ -2241,7 +2278,7 @@ class OptionsAnalyzer:
             ]
         else:
             display_columns = [
-                'ticker', 'pe_ratio', 'market_cap_b', 'current_price', 'strike_price',
+                'ticker', 'pe_ratio', 'market_cap_b', 'current_price', 'price_with_change', 'price_change_pct', 'strike_price',
                 'price_above_current', 'option_premium', 'bid_ask', 'premium_above_diff_percentage',
                 'implied_volatility', 'delta', 'theta',
                 'potential_premium', 'daily_premium', 'expiration_date', 'days_to_expiry',

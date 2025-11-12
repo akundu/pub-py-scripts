@@ -232,25 +232,40 @@ class WebSocketManager:
             if price_data:
                 # The get_current_price function already saves to database via stock_db_instance
                 # Now we need to broadcast it to WebSocket subscribers
-                # Format the data similar to save_realtime_data format
+                # Format the data exactly like save_realtime_data does for consistency
                 # Note: broadcast() will handle JSON serialization conversion recursively
+                
+                # Get timestamp - handle both string and datetime objects
+                timestamp = price_data.get('timestamp')
+                if timestamp is None:
+                    timestamp = datetime.now(timezone.utc).isoformat()
+                elif isinstance(timestamp, datetime):
+                    timestamp = timestamp.isoformat()
+                elif isinstance(timestamp, pd.Timestamp):
+                    timestamp = timestamp.isoformat()
+                elif not isinstance(timestamp, str):
+                    timestamp = str(timestamp)
+                
+                # Format payload to match save_realtime_data format for quotes
+                # This ensures consumers receive data in the same format as real-time updates
+                payload_record = {
+                    "timestamp": timestamp,
+                    "bid_price": price_data.get('bid_price') or price_data.get('price'),  # Use bid_price if available, fallback to price
+                    "bid_size": price_data.get('bid_size') or price_data.get('size'),      # Use bid_size if available, fallback to size
+                    "ask_price": price_data.get('ask_price'),
+                    "ask_size": price_data.get('ask_size')
+                }
+                
+                # Create broadcast data matching the format from save_realtime_data
                 broadcast_data = {
                     "type": "quote",
-                    "timestamp": price_data.get('timestamp', datetime.now(timezone.utc).isoformat()),
-                    "event_type": "stale_data_update",
-                    "payload": [{
-                        "timestamp": price_data.get('timestamp', datetime.now(timezone.utc).isoformat()),
-                        "price": price_data.get('price'),
-                        "bid_price": price_data.get('bid_price'),
-                        "ask_price": price_data.get('ask_price'),
-                        "bid_size": price_data.get('bid_size'),
-                        "ask_size": price_data.get('ask_size'),
-                        "size": price_data.get('size')
-                    }]
+                    "timestamp": timestamp,
+                    "event_type": "quote_update",  # Match the event_type used in save_realtime_data
+                    "payload": [payload_record]
                 }
                 
                 await self.broadcast(symbol, broadcast_data)
-                logger.info(f"Successfully fetched and broadcasted stale data for {symbol}")
+                logger.info(f"Successfully fetched and broadcasted stale data for {symbol} in quote_update format")
             else:
                 logger.warning(f"No price data returned for {symbol}")
                 

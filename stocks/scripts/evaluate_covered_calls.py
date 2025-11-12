@@ -67,9 +67,9 @@ def load_data(file_path: Optional[str] = None) -> pd.DataFrame:
     df = df[df['ticker'] != 'ticker']
     
     # Convert numeric columns
-    # Note: option_ticker, l_option_ticker, expiration_date, l_expiration_date are strings, not numeric
+    # Note: option_ticker, l_option_ticker, expiration_date, l_expiration_date, price_with_change are strings, not numeric
     numeric_cols = [
-        'pe_ratio','market_cap_b','curr_price','strike_price','price_above_curr','opt_prem.','IV','delta','theta','days_to_expiry','s_prem_tot','s_day_prem','l_strike','l_prem','liv','l_delta','l_theta','l_days_to_expiry','l_prem_tot','l_cnt_avl','prem_diff','net_premium','net_daily_premi','volume','num_contracts'
+        'pe_ratio','market_cap_b','curr_price','current_price','strike_price','price_above_curr','opt_prem.','IV','delta','theta','days_to_expiry','s_prem_tot','s_day_prem','l_strike','l_prem','liv','l_delta','l_theta','l_days_to_expiry','l_prem_tot','l_cnt_avl','prem_diff','net_premium','net_daily_premi','volume','num_contracts','price_change_pct'
     ]
     
     for col in numeric_cols:
