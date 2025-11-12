@@ -13,7 +13,7 @@ BATCH_SIZE=300
 
 MAX_DAYS=`days=$((6 - $(date +%u)));[ $days -le 0 ] && days=$((days + 7)); echo $days` #count the number of days till the next saturday
 MAX_DAYS=21
-TIME_TO_USE=`TZ='America/New_York' date -v-30M '+%Y-%m-%d %H:%M:%S'`
+TIME_TO_USE=`TZ='America/New_York' date -v-1440M '+%Y-%m-%d %H:%M:%S'`
 
 POSITION_SIZE=100000 #amt to invest
 
