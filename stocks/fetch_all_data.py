@@ -847,6 +847,11 @@ def parse_args():
         action="store_true",
         help="Disable Redis caching for QuestDB operations (default: cache enabled)"
     )
+    parser.add_argument(
+        "--fetch-once-before-wait",
+        action="store_true",
+        help="If market is closed, fetch once immediately before waiting for market open. Useful since stock prices don't change during non-market hours."
+    )
     
     # Time interval for fetching market data
     time_group = parser.add_mutually_exclusive_group()
@@ -1038,18 +1043,26 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
                         sleep_time = base_sleep
                         print(f"Next fetch in {sleep_time:.1f}s (market open, 30s interval) [MARKET OPEN]")
                 else:
-                    # Closed: if opening soon, sleep to open; otherwise use closed cadence
-                    opening_soon_threshold = FETCH_INTERVAL_MARKET_OPEN  # prefer next open if within open interval
-                    if seconds_to_open is not None and seconds_to_open <= opening_soon_threshold:
-                        #sleep_time = max(seconds_to_open - fetch_duration, 1)
-                        sleep_time = min(seconds_to_open, opening_soon_threshold)
-                        print(f"Next fetch in {sleep_time:.1f}s (sleeping until market open in {seconds_to_open:.1f}s) [MARKET CLOSED→OPEN]")
+                    # Closed: if we know when market opens next, sleep until shortly before it opens
+                    opening_soon_threshold = FETCH_INTERVAL_MARKET_OPEN  # 300 seconds (5 minutes)
+                    if seconds_to_open is not None:
+                        if seconds_to_open <= opening_soon_threshold:
+                            # Market opens very soon - sleep until it opens
+                            sleep_time = seconds_to_open
+                            print(f"Next fetch in {sleep_time:.1f}s (sleeping until market open in {seconds_to_open:.1f}s) [MARKET CLOSED→OPEN]")
+                        else:
+                            # Market opens later - sleep until shortly before it opens
+                            # Wake up 5 minutes before market open to be ready
+                            sleep_time = seconds_to_open - opening_soon_threshold
+                            # Apply interval multiplier
+                            sleep_time = max(sleep_time * (args.interval_multiplier if args.interval_multiplier and args.interval_multiplier > 0 else 1.0), 1)
+                            print(f"Next fetch in {sleep_time:.1f}s (markets closed, will wake {opening_soon_threshold/60:.0f}min before market open in {seconds_to_open:.1f}s) [MARKET CLOSED]")
                     else:
+                        # Don't know when market opens - use default closed interval
                         base_sleep = max(FETCH_INTERVAL_MARKET_CLOSED - fetch_duration, 60)
                         # Apply interval multiplier to cadence-based sleep
                         sleep_time = max(base_sleep * (args.interval_multiplier if args.interval_multiplier and args.interval_multiplier > 0 else 1.0), 1)
-                        msg_extra = f"; {seconds_to_open:.1f}s until open" if seconds_to_open is not None else ""
-                        print(f"Next fetch in {sleep_time:.1f}s (markets closed, 5min interval{msg_extra}) [MARKET CLOSED]")
+                        print(f"Next fetch in {sleep_time:.1f}s (markets closed, {FETCH_INTERVAL_MARKET_CLOSED/60:.0f}min interval) [MARKET CLOSED]")
             else:
                 # Standard behavior - fetch every 30 seconds
                 base_sleep = max(30 - fetch_duration, 5)
@@ -1193,6 +1206,85 @@ async def main():
     else:
         # Latest mode removed; continuous mode now just repeats the standard processing
         if args.continuous:
+            # Check market status and wait if needed (only in continuous mode with market hours awareness)
+            if args.use_market_hours:
+                now_utc = datetime.now(timezone.utc)
+                is_market_open = is_market_hours()
+                seconds_to_open, _ = compute_market_transition_times(now_utc, args.timezone)
+                
+                if not is_market_open and seconds_to_open is not None:
+                    # Market is closed - handle based on fetch-once-before-wait flag
+                    if getattr(args, 'fetch_once_before_wait', False):
+                        # Fetch once immediately before waiting
+                        print(f"Market is closed. Fetching once immediately before waiting for market open...")
+                        
+                        # Run a single fetch iteration
+                        iteration_args = argparse.Namespace(**vars(args))
+                        # Set up iteration dates similar to continuous mode
+                        if (
+                            getattr(iteration_args, 'start_date', None) is None and
+                            getattr(iteration_args, 'end_date', None) is None and
+                            getattr(iteration_args, 'days_back', None) in (None,)
+                        ):
+                            today_str = datetime.now().strftime('%Y-%m-%d')
+                            iteration_args.end_date = today_str
+                            iteration_args.days_back = 0
+                            if hasattr(iteration_args, '_latest_only'):
+                                delattr(iteration_args, '_latest_only')
+                        elif iteration_args.end_date and iteration_args.days_back:
+                            try:
+                                end_dt = datetime.strptime(iteration_args.end_date, '%Y-%m-%d')
+                                start_dt = end_dt - timedelta(days=iteration_args.days_back)
+                                iteration_args.start_date = start_dt.strftime('%Y-%m-%d')
+                            except Exception:
+                                pass
+                        
+                        # Run one iteration
+                        payload = await asyncio.to_thread(
+                            run_iteration_in_subprocess,
+                            _continuous_iteration_worker,
+                            all_symbols_list,
+                            iteration_args,
+                            db_configs_for_workers,
+                        )
+                        
+                        if payload.get("status") != "ok":
+                            error_msg = payload.get("error", "Unknown error in subprocess iteration")
+                            print(f"Error during initial fetch (process exit {payload.get('exitcode')}): {error_msg}", file=sys.stderr)
+                        else:
+                            result_data = payload.get("result") or {}
+                            success_count = result_data.get("success_count", 0)
+                            failure_count = result_data.get("failure_count", 0)
+                            print(f"Initial fetch completed: {success_count} successes, {failure_count} failures")
+                        
+                        # Now wait for market open
+                        hours_to_wait = seconds_to_open / 3600
+                        print(f"One-time fetch completed. Waiting {hours_to_wait:.2f} hours ({seconds_to_open:.0f} seconds) until market opens...")
+                        
+                        await asyncio.sleep(seconds_to_open)
+                        
+                        # Re-check market status after waiting
+                        now_utc = datetime.now(timezone.utc)
+                        is_market_open = is_market_hours()
+                        if is_market_open:
+                            print("Market is now open. Proceeding with normal operation...")
+                        else:
+                            print("Warning: Market is still not open after waiting. Proceeding anyway...")
+                    else:
+                        # Wait for market open before starting
+                        hours_to_wait = seconds_to_open / 3600
+                        print(f"Market is closed. Waiting {hours_to_wait:.2f} hours ({seconds_to_open:.0f} seconds) until market opens before starting...")
+                        
+                        await asyncio.sleep(seconds_to_open)
+                        
+                        # Re-check market status after waiting
+                        now_utc = datetime.now(timezone.utc)
+                        is_market_open = is_market_hours()
+                        if is_market_open:
+                            print("Market is now open. Starting data fetch...")
+                        else:
+                            print("Warning: Market is still not open after waiting. Proceeding anyway...")
+            
             await run_continuous_latest_fetch(all_symbols_list, args, db_configs_for_workers)
         else:
             print(f"Fetching market data for {len(all_symbols_list)} symbols using {args.executor_type} pool...")

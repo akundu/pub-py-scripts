@@ -55,7 +55,6 @@ symbols:
 - BE
 - BEKE
 - BEP
-- BEPC
 - BG
 - BHP
 - BIP
@@ -244,6 +243,7 @@ symbols:
 - JBL
 - JCI
 - JNJ
+- JOBY
 - JPM
 - K
 - KB
@@ -472,7 +472,6 @@ symbols:
 - VST
 - VTR
 - VZ
-- W
 - WAB
 - WAT
 - WCN
@@ -485,6 +484,7 @@ symbols:
 - WM
 - WMB
 - WMT
+- WPC
 - WPM
 - WRB
 - WSM

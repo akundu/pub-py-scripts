@@ -1697,14 +1697,28 @@ Examples:
                         f"opening_soon_threshold: {opening_soon_threshold}, seconds_to_open: {seconds_to_open}",
                         file=sys.stderr,
                     )
-                if seconds_to_open is not None and seconds_to_open <= sleep_seconds:
-                    sleep_seconds = min(seconds_to_open, opening_soon_threshold)
-                    if not args.quiet:
-                        print(
-                            f"Next run in {sleep_seconds:.0f}s (sleeping until market open in "
-                            f"{seconds_to_open:.0f}s) [MARKET CLOSED→OPEN]"
-                        )
+                # If we know when market opens next, sleep until shortly before it opens
+                # (or until it opens if it's very soon)
+                if seconds_to_open is not None:
+                    if seconds_to_open <= opening_soon_threshold:
+                        # Market opens very soon - sleep until it opens
+                        sleep_seconds = seconds_to_open
+                        if not args.quiet:
+                            print(
+                                f"Next run in {sleep_seconds:.0f}s (sleeping until market open in "
+                                f"{seconds_to_open:.0f}s) [MARKET CLOSED→OPEN]"
+                            )
+                    else:
+                        # Market opens later - sleep until shortly before it opens
+                        # Wake up 20 minutes before market open to be ready
+                        sleep_seconds = seconds_to_open - opening_soon_threshold
+                        if not args.quiet:
+                            print(
+                                f"Next run in {sleep_seconds:.0f}s (markets closed, will wake "
+                                f"{opening_soon_threshold/60:.0f}min before market open in {seconds_to_open:.0f}s) [MARKET CLOSED]"
+                            )
                 else:
+                    # Don't know when market opens - use default closed interval
                     if not args.quiet:
                         print(
                             f"Next run in {sleep_seconds:.0f}s (markets closed, "

@@ -202,7 +202,7 @@ def _get_market_session(now_et: datetime | None = None) -> str:
 
 async def _get_last_update_age_seconds(db_instance: StockDBBase, symbol: str) -> dict | None:
     """Return info about age since most recent update across realtime/hourly/daily.
-    Returns dict: { 'age_seconds': float, 'source': 'write'|'original', 'timestamp': iso_string }
+    Returns dict: { 'age_seconds': float, 'source': 'write'|'original', 'timestamp': iso_string, 'latest_data': dict }
     """
     try:
         info = await _get_latest_price_with_timestamp(db_instance, symbol)
@@ -229,19 +229,39 @@ async def _get_last_update_age_seconds(db_instance: StockDBBase, symbol: str) ->
         else:
             ref_dt = ref_dt.astimezone(timezone.utc)
         age = (now_utc - ref_dt).total_seconds()
-        return {
+        result = {
             'age_seconds': age,
             'source': 'write' if wt else 'original',
             'timestamp': ref_dt.isoformat()
         }
+        # Include the full latest_data if available for caching
+        if 'latest_data' in info:
+            result['latest_data'] = info['latest_data']
+        return result
     except Exception:
         return None
-async def _get_last_bar_age_seconds(db_instance: StockDBBase, symbol: str, interval: str) -> dict | None:
+async def _get_last_bar_age_seconds(db_instance: StockDBBase, symbol: str, interval: str, cached_df: pd.DataFrame | None = None) -> dict | None:
     """Return age info for the latest bar of a given interval ('daily' or 'hourly').
     Returns dict: { 'age_seconds': float, 'timestamp': iso_string }
+    Uses cached DataFrame if provided, otherwise uses a constrained date window to avoid fetching all historical data.
     """
     try:
-        df = await db_instance.get_stock_data(symbol, interval=interval)
+        if cached_df is not None and not cached_df.empty:
+            # Use cached DataFrame if available
+            df = cached_df
+        else:
+            # Use a constrained date window: last 30 days for daily, last 7 days for hourly
+            # This avoids fetching thousands of rows just to get the latest one
+            now_utc = datetime.now(timezone.utc)
+            if interval == 'daily':
+                start_date = (now_utc - timedelta(days=30)).strftime('%Y-%m-%d')
+                end_date = now_utc.strftime('%Y-%m-%d')
+            else:  # hourly
+                start_date = (now_utc - timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%S')
+                end_date = now_utc.strftime('%Y-%m-%dT%H:%M:%S')
+            
+            df = await db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval=interval)
+        
         if df is None or df.empty:
             return None
         last_idx = df.index[-1]
@@ -288,10 +308,27 @@ def _format_price_block(price_info: dict, target_tz: str | None = 'America/New_Y
         lines.append(f"Realtime formatting error: {e}")
     return lines
 
-async def _get_last_write_age_seconds(db_instance: StockDBBase, symbol: str, interval: str) -> dict | None:
-    """Get age of last write_timestamp from DB for the given symbol and interval."""
+async def _get_last_write_age_seconds(db_instance: StockDBBase, symbol: str, interval: str, cached_df: pd.DataFrame | None = None) -> dict | None:
+    """Get age of last write_timestamp from DB for the given symbol and interval.
+    Uses cached DataFrame if provided, otherwise uses a constrained date window to avoid fetching all historical data.
+    """
     try:
-        df = await db_instance.get_stock_data(symbol, interval=interval)
+        if cached_df is not None and not cached_df.empty:
+            # Use cached DataFrame if available
+            df = cached_df
+        else:
+            # Use a constrained date window: last 30 days for daily, last 7 days for hourly
+            # This avoids fetching thousands of rows just to get the latest one
+            now_utc = datetime.now(timezone.utc)
+            if interval == 'daily':
+                start_date = (now_utc - timedelta(days=30)).strftime('%Y-%m-%d')
+                end_date = now_utc.strftime('%Y-%m-%d')
+            else:  # hourly
+                start_date = (now_utc - timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%S')
+                end_date = now_utc.strftime('%Y-%m-%dT%H:%M:%S')
+            
+            df = await db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval=interval)
+        
         if df is None or df.empty:
             return None
         # prefer write_timestamp column if present and not null
@@ -998,7 +1035,7 @@ async def process_symbol_data(
 async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str) -> dict | None:
     """
     Get the latest price with timestamp from the database.
-    Returns a dictionary with 'price', 'timestamp', and 'write_timestamp' keys, or None if not found.
+    Returns a dictionary with 'price', 'timestamp', 'write_timestamp', and optionally 'latest_data' keys, or None if not found.
     """
     try:
         # Try to get realtime data first (most recent)
@@ -1009,6 +1046,22 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
             latest_data = await db_instance.get_latest_price_with_data(symbol, use_market_time=True)
             if latest_data and latest_data.get('realtime_df') is not None:
                 realtime_data = latest_data['realtime_df']
+                # Take the FIRST row (most recent write_timestamp) instead of last
+                latest_row = realtime_data.iloc[0]
+                return {
+                    'price': latest_row['price'],
+                    'timestamp': latest_row.name,  # Index is the timestamp
+                    'write_timestamp': latest_row.get('write_timestamp'),  # When it was written to DB
+                    'latest_data': latest_data  # Cache the full result for reuse
+                }
+            elif latest_data and latest_data.get('price') is not None:
+                # We have price data but no realtime_df (e.g., from hourly/daily)
+                return {
+                    'price': latest_data.get('price'),
+                    'timestamp': latest_data.get('timestamp'),
+                    'write_timestamp': None,
+                    'latest_data': latest_data  # Cache the full result for reuse
+                }
             else:
                 # No realtime data from get_latest_price_with_data, try other sources
                 realtime_data = pd.DataFrame()
@@ -1786,6 +1839,7 @@ async def main() -> None:
                 max_age = None  # closed -> no periodic refetch
 
             should_refetch_now = False
+            cached_latest_data = None  # Cache the result from freshness check
             if max_age is not None:
                 rt_info = await _get_last_update_age_seconds(db_instance, args.symbol)
                 if rt_info is None:
@@ -1798,26 +1852,32 @@ async def main() -> None:
                     logging.info(f"Freshness: realtime age {rt_age:.1f}s (from {rt_src} ts: {rt_ts}), threshold {max_age}s, session {session}.")
                     if rt_age > max_age:
                         should_refetch_now = True
+                    else:
+                        # Cache the latest_data if available to avoid duplicate query
+                        cached_latest_data = rt_info.get('latest_data')
 
             if should_refetch_now:
-                try:
-                    fetch_success = await fetch_and_save_data(
-                        symbol=args.symbol,
-                        data_dir=args.data_dir,
-                        stock_db_instance=db_instance,
-                        start_date=today_str,
-                        end_date=today_str,
-                        db_save_batch_size=args.db_batch_size,
-                        data_source=args.data_source,
-                        chunk_size=args.chunk_size,
-                        save_db_csv=args.save_db_csv
-                    )
-                    if fetch_success:
-                        logging.info(f"Freshness fetch: performed because realtime age>{max_age}s during {session} session.")
-                    else:
-                        logging.warning("Freshness fetch skipped due to failure.")
-                except Exception as e:
-                    logging.error(f"Freshness pre-fetch error: {e}")
+                if args.query_only:
+                    logging.info(f"Freshness fetch: skipped (--query-only mode, will only serve from cache/DB).")
+                else:
+                    try:
+                        fetch_success = await fetch_and_save_data(
+                            symbol=args.symbol,
+                            data_dir=args.data_dir,
+                            stock_db_instance=db_instance,
+                            start_date=today_str,
+                            end_date=today_str,
+                            db_save_batch_size=args.db_batch_size,
+                            data_source=args.data_source,
+                            chunk_size=args.chunk_size,
+                            save_db_csv=args.save_db_csv
+                        )
+                        if fetch_success:
+                            logging.info(f"Freshness fetch: performed because realtime age>{max_age}s during {session} session.")
+                        else:
+                            logging.warning("Freshness fetch skipped due to failure.")
+                    except Exception as e:
+                        logging.error(f"Freshness pre-fetch error: {e}")
             else:
                 if max_age is not None:
                     logging.info(f"Freshness fetch: skipped (realtime recent enough, age<= {max_age}s for {session} session).")
@@ -1828,15 +1888,18 @@ async def main() -> None:
 
             # Realtime section - use get_latest_price_with_data() which handles realtime, hourly, and daily queries
             # This returns the price along with the realtime DataFrame (if available) to avoid duplicate queries
-            # Note: We may have already called get_latest_price_with_data() during the freshness check,
-            # but we'll call it again here to ensure we have the latest data for display
+            # Reuse cached result from freshness check if available to avoid duplicate queries
             if args.only_fetch in (None, 'realtime'):
                 try:
-                    # Get latest price with data (this will query realtime, hourly, and daily tables appropriately)
-                    # This returns price, timestamp, source, and realtime_df (if from realtime)
-                    # Default to using market time (True) unless --no-market-time is specified
-                    use_market_time = not args.no_market_time
-                    latest_data = await db_instance.get_latest_price_with_data(args.symbol, use_market_time=use_market_time)
+                    # Use cached result if available, otherwise fetch fresh
+                    if cached_latest_data is not None:
+                        latest_data = cached_latest_data
+                    else:
+                        # Get latest price with data (this will query realtime, hourly, and daily tables appropriately)
+                        # This returns price, timestamp, source, and realtime_df (if from realtime)
+                        # Default to using market time (True) unless --no-market-time is specified
+                        use_market_time = not args.no_market_time
+                        latest_data = await db_instance.get_latest_price_with_data(args.symbol, use_market_time=use_market_time)
                     
                     if latest_data:
                         # Display the price returned by get_latest_price_with_data
@@ -1936,11 +1999,16 @@ async def main() -> None:
                     d_threshold = 259200  # 72 hours
                 
                 try:
+                    # OPTIMIZATION: Use cached DataFrames from latest_data if available to avoid duplicate queries
+                    cached_hourly_df = cached_latest_data.get('hourly_df') if cached_latest_data else None
+                    cached_daily_df = cached_latest_data.get('daily_df') if cached_latest_data else None
+                    
                     # OPTIMIZATION: Run all age checks in parallel to reduce database round trips
-                    h_info_task = _get_last_bar_age_seconds(db_instance, args.symbol, 'hourly')
-                    d_info_task = _get_last_bar_age_seconds(db_instance, args.symbol, 'daily')
-                    w_h_task = _get_last_write_age_seconds(db_instance, args.symbol, 'hourly')
-                    w_d_task = _get_last_write_age_seconds(db_instance, args.symbol, 'daily')
+                    # Pass cached DataFrames to avoid re-fetching data we already have
+                    h_info_task = _get_last_bar_age_seconds(db_instance, args.symbol, 'hourly', cached_hourly_df)
+                    d_info_task = _get_last_bar_age_seconds(db_instance, args.symbol, 'daily', cached_daily_df)
+                    w_h_task = _get_last_write_age_seconds(db_instance, args.symbol, 'hourly', cached_hourly_df)
+                    w_d_task = _get_last_write_age_seconds(db_instance, args.symbol, 'daily', cached_daily_df)
                     
                     # Wait for all age checks to complete
                     h_info, d_info, w_h, w_d = await asyncio.gather(h_info_task, d_info_task, w_h_task, w_d_task)
@@ -1987,7 +2055,10 @@ async def main() -> None:
                 logging.info("Fetch decision (by last write): hourly=False, daily=False (skipped detailed checks)")
                 
                 # Fetch daily and hourly data separately based on their individual needs
-                if (args.only_fetch in (None, 'daily') and need_daily) or (args.only_fetch in (None, 'hourly') and need_hourly):
+                # Skip fetching if --query-only is set
+                if args.query_only:
+                    logging.info("Fetch by last write: skipped (--query-only mode, will only serve from cache/DB).")
+                elif (args.only_fetch in (None, 'daily') and need_daily) or (args.only_fetch in (None, 'hourly') and need_hourly):
                     try:
                         # Create separate fetch functions for daily and hourly
                         daily_success = False
@@ -2105,7 +2176,8 @@ async def main() -> None:
                         fetch_date = last_trading_day
                 
                 # Respect earlier freshness decision: only fetch if daily is needed
-                if should_fetch and need_daily and (args.only_fetch in (None, 'daily')):
+                # Skip fetching if --query-only is set
+                if should_fetch and need_daily and (args.only_fetch in (None, 'daily')) and not args.query_only:
                     if fetch_date == today_str:
                         print(f"\nTrading day detected, attempting to fetch today's data for {args.symbol}...")
                     else:
@@ -2278,6 +2350,13 @@ async def main() -> None:
             
             return
         finally:
+            # Wait for pending cache writes to complete before closing
+            if db_instance and hasattr(db_instance, 'cache') and hasattr(db_instance.cache, 'wait_for_pending_writes'):
+                try:
+                    await db_instance.cache.wait_for_pending_writes(timeout=10.0)
+                except Exception as e:
+                    logging.debug(f"Error waiting for pending cache writes: {e}")
+            
             if db_instance and hasattr(db_instance, 'close_session') and callable(db_instance.close_session):
                 try:
                     await db_instance.close_session()
@@ -2399,6 +2478,13 @@ async def main() -> None:
                     print("=" * 80 + "\n", file=sys.stderr)
             except Exception as e:
                 pass  # Silently ignore if cache stats not available
+        
+        # Wait for pending cache writes to complete before closing
+        if db_instance_for_cleanup and hasattr(db_instance_for_cleanup, 'cache') and hasattr(db_instance_for_cleanup.cache, 'wait_for_pending_writes'):
+            try:
+                await db_instance_for_cleanup.cache.wait_for_pending_writes(timeout=10.0)
+            except Exception as e:
+                logging.debug(f"Error waiting for pending cache writes: {e}")
         
         if db_instance_for_cleanup and hasattr(db_instance_for_cleanup, 'close_session') and callable(db_instance_for_cleanup.close_session):
             try:

@@ -559,13 +559,39 @@ def _process_spread_match(args_tuple):
     
     best_long = matching_long.iloc[0].to_dict()
     
-    # Calculate long option premium (use ask, fallback to bid, fallback to 0.01)
-    long_premium = best_long.get('ask', best_long.get('bid', 0.01))
-    if pd.isna(long_premium):
-        long_premium = best_long.get('bid', 0.01)
-    if pd.isna(long_premium):
+    # Calculate long option premium (use mid-price (bid+ask)/2 if both available, else fallback to ask, bid, last price, or 0.01)
+    bid = best_long.get('bid')
+    ask = best_long.get('ask')
+    last_price = best_long.get('price')
+    long_strike_val = best_long.get('strike_price')
+    long_strike_str = f"{long_strike_val:.2f}" if pd.notna(long_strike_val) else "N/A"
+    long_ticker = best_long.get('ticker', 'UNKNOWN')
+    
+    # Use mid-price if both bid and ask are available
+    if pd.notna(bid) and pd.notna(ask):
+        long_premium = round((float(bid) + float(ask)) / 2.0, 2)
+        if debug:
+            print(f"DEBUG: {long_ticker} ${long_strike_str} LONG option_premium: mid-price = ({bid:.2f} + {ask:.2f}) / 2 = ${long_premium:.2f}", file=sys.stderr)
+    # Fallback to ask if available
+    elif pd.notna(ask):
+        long_premium = round(float(ask), 2)
+        if debug:
+            print(f"DEBUG: {long_ticker} ${long_strike_str} LONG option_premium: using ask = ${long_premium:.2f} (bid unavailable)", file=sys.stderr)
+    # Fallback to bid if available
+    elif pd.notna(bid):
+        long_premium = round(float(bid), 2)
+        if debug:
+            print(f"DEBUG: {long_ticker} ${long_strike_str} LONG option_premium: using bid = ${long_premium:.2f} (ask unavailable)", file=sys.stderr)
+    # Fallback to last price if available
+    elif pd.notna(last_price):
+        long_premium = round(float(last_price), 2)
+        if debug:
+            print(f"DEBUG: {long_ticker} ${long_strike_str} LONG option_premium: using last price = ${long_premium:.2f} (bid/ask unavailable)", file=sys.stderr)
+    # Default fallback
+    else:
         long_premium = 0.01
-    long_premium = round(float(long_premium), 2)
+        if debug:
+            print(f"DEBUG: {long_ticker} ${long_strike_str} LONG option_premium: using default = $0.01 (no price data)", file=sys.stderr)
     
     long_iv = best_long.get('implied_volatility')
     if pd.notna(long_iv):
@@ -582,6 +608,28 @@ def _process_spread_match(args_tuple):
     premium_diff = round(long_premium - short_premium, 2)  # Long - Short (per contract)
     short_premium_total = round(num_contracts * short_premium * 100, 2)  # Total received from selling short-term options
     long_premium_total = round(num_contracts * long_premium * 100, 2)  # Total paid for buying long-term options
+    
+    # Debug output for spread calculations
+    if debug:
+        ticker = short_row_dict.get('ticker', 'UNKNOWN')
+        short_strike = short_row_dict.get('strike_price', 'N/A')
+        short_days = short_row_dict.get('days_to_expiry', 0)
+        long_days = int(best_long.get('days_to_expiry', 0))
+        
+        print(f"DEBUG: {ticker} SPREAD premium calculation:", file=sys.stderr)
+        print(f"  position_size = ${position_size:,.2f}", file=sys.stderr)
+        print(f"  SHORT option:", file=sys.stderr)
+        print(f"    strike_price = ${short_strike:.2f}", file=sys.stderr)
+        print(f"    days_to_expiry = {short_days}", file=sys.stderr)
+        print(f"    option_premium = ${short_premium:.2f}", file=sys.stderr)
+        print(f"  LONG option:", file=sys.stderr)
+        print(f"    strike_price = ${long_strike_str}", file=sys.stderr)
+        print(f"    days_to_expiry = {long_days}", file=sys.stderr)
+        print(f"    option_premium = ${long_premium:.2f}", file=sys.stderr)
+        print(f"  num_contracts = floor({position_size:,.2f} / (${long_premium:.2f} * 100)) = floor({position_size:,.2f} / ${long_premium * 100:.2f}) = {num_contracts}", file=sys.stderr)
+        print(f"  premium_diff (per contract) = ${long_premium:.2f} - ${short_premium:.2f} = ${premium_diff:.2f}", file=sys.stderr)
+        print(f"  short_premium_total = {num_contracts} * ${short_premium:.2f} * 100 = ${short_premium_total:,.2f}", file=sys.stderr)
+        print(f"  long_premium_total = {num_contracts} * ${long_premium:.2f} * 100 = ${long_premium_total:,.2f}", file=sys.stderr)
     
     # Calculate Black-Scholes based long option value at short expiration
     # This estimates what the long option will be worth when the short expires
@@ -606,6 +654,7 @@ def _process_spread_match(args_tuple):
     
     # Calculate Black-Scholes long option value at short expiration
     # Assume stock price stays the same (or use current price as estimate)
+    # NOTE: This is an estimate - actual value will depend on stock movement and volatility changes
     estimated_stock_price_at_short_expiry = current_price if current_price else long_strike
     
     long_option_value_at_short_expiry = 0.0
@@ -624,15 +673,50 @@ def _process_spread_match(args_tuple):
             # Fallback: use current long premium as estimate
             long_option_value_at_short_expiry = long_premium
     
-    # Net premium = short_premium - (current_long_premium - estimated_long_premium_at_short_expiry)
-    # This represents: what you receive - (what you pay now - what the long will be worth later)
+    # Net premium calculation for calendar spread:
+    # Formula: net_premium = short_premium_total - (long_premium_total - long_premium_at_short_expiry_total)
+    # Expanded: net_premium = short_premium_total - long_premium_total + long_premium_at_short_expiry_total
+    #
+    # This represents the net cash flow if you:
+    # 1. Receive short_premium_total from selling short-term calls
+    # 2. Pay long_premium_total to buy long-term calls (now)
+    # 3. Could recover long_premium_at_short_expiry_total by selling long calls when short expires
+    #
+    # NOTE: net_premium can exceed short_premium_total if the long option appreciates significantly
+    # (i.e., when long_premium_at_short_expiry_total > long_premium_total)
+    # This happens when the long option gains value faster than it decays, which is possible
+    # if volatility increases or the stock moves favorably, but the estimate assumes stock price stays flat.
     long_premium_at_short_expiry_total = round(num_contracts * long_option_value_at_short_expiry * 100, 2)
     net_premium = round(short_premium_total - (long_premium_total - long_premium_at_short_expiry_total), 2)
+    
+    # Debug output for net premium calculations
+    if debug:
+        print(f"  Black-Scholes estimate (long option value at short expiry):", file=sys.stderr)
+        print(f"    estimated_stock_price_at_short_expiry = ${estimated_stock_price_at_short_expiry:.2f}", file=sys.stderr)
+        print(f"    long_strike = ${long_strike:.2f}", file=sys.stderr)
+        print(f"    time_to_long_expiry_at_short_expiry = {time_to_long_expiry_at_short_expiry:.4f} years ({long_days - short_days} days)", file=sys.stderr)
+        print(f"    implied_volatility = {implied_vol:.4f}", file=sys.stderr)
+        print(f"    long_option_value_at_short_expiry (per contract) = ${long_option_value_at_short_expiry:.2f}", file=sys.stderr)
+        print(f"    long_premium_at_short_expiry_total = {num_contracts} * ${long_option_value_at_short_expiry:.2f} * 100 = ${long_premium_at_short_expiry_total:,.2f}", file=sys.stderr)
+        print(f"  net_premium calculation:", file=sys.stderr)
+        print(f"    net_premium = short_premium_total - (long_premium_total - long_premium_at_short_expiry_total)", file=sys.stderr)
+        print(f"    net_premium = ${short_premium_total:,.2f} - (${long_premium_total:,.2f} - ${long_premium_at_short_expiry_total:,.2f})", file=sys.stderr)
+        print(f"    net_premium = ${short_premium_total:,.2f} - ${long_premium_total - long_premium_at_short_expiry_total:,.2f} = ${net_premium:,.2f}", file=sys.stderr)
     
     # Daily premium calculations (until short expiration - exit point)
     short_daily_premium = round(short_premium_total / short_days, 2) if short_days > 0 else 0
     # Net daily premium = net premium / days (amortized over short days)
     net_daily_premium = round(net_premium / short_days, 2) if short_days > 0 else 0
+    
+    if debug:
+        print(f"  daily_premium calculations:", file=sys.stderr)
+        if short_days > 0:
+            print(f"    short_daily_premium = ${short_premium_total:,.2f} / {short_days} days = ${short_daily_premium:.2f}", file=sys.stderr)
+            print(f"    net_daily_premium = ${net_premium:,.2f} / {short_days} days = ${net_daily_premium:.2f}", file=sys.stderr)
+        else:
+            print(f"    short_daily_premium = $0.00 (short_days <= 0)", file=sys.stderr)
+            print(f"    net_daily_premium = $0.00 (short_days <= 0)", file=sys.stderr)
+        print("", file=sys.stderr)  # Empty line for readability
 
     long_contracts_available = best_long.get('open_interest')
     if pd.notna(long_contracts_available):
@@ -707,6 +791,21 @@ class OptionsAnalyzer:
         self.log_level = log_level
         self.db = None
         self.risk_free_rate = risk_free_rate  # Annual risk-free rate (default 5%)
+    
+    @staticmethod
+    def _extract_ticker_from_option_ticker(option_ticker):
+        """Extract ticker symbol from option_ticker (e.g., 'AAPL250117C00150000' -> 'AAPL')."""
+        if pd.isna(option_ticker):
+            return None
+        option_ticker_str = str(option_ticker)
+        # Remove "O:" prefix if present
+        if option_ticker_str.startswith("O:"):
+            option_ticker_str = option_ticker_str[2:]
+        # Extract ticker (first 1-5 uppercase letters before the date)
+        match = re.match(r'^([A-Z]{1,5})', option_ticker_str)
+        if match:
+            return match.group(1)
+        return None
     
     def _black_scholes_call(self, S: float, K: float, T: float, r: float, sigma: float) -> float:
         """
@@ -1252,6 +1351,22 @@ class OptionsAnalyzer:
                     print(f"DEBUG: Option types found: {option_types}", file=sys.stderr)
             else:
                 print("DEBUG: No options data returned from database", file=sys.stderr)
+        
+        # Ensure ticker column exists - extract from option_ticker if missing
+        if not options_df.empty and 'ticker' not in options_df.columns:
+            if 'option_ticker' in options_df.columns:
+                if self.debug:
+                    print("DEBUG: ticker column missing, extracting from option_ticker", file=sys.stderr)
+                options_df['ticker'] = options_df['option_ticker'].apply(self._extract_ticker_from_option_ticker)
+                
+                if self.debug:
+                    extracted_tickers = options_df['ticker'].dropna().unique().tolist()
+                    print(f"DEBUG: Extracted tickers from option_ticker: {extracted_tickers[:10]}{'...' if len(extracted_tickers) > 10 else ''}", file=sys.stderr)
+            else:
+                # If we have the list of tickers being queried, we could try to match, but it's safer to fail
+                if self.debug:
+                    print("DEBUG: Warning: Neither 'ticker' nor 'option_ticker' column found in options DataFrame", file=sys.stderr)
+        
         return options_df
 
     def _filter_call_options(self, options_df: pd.DataFrame) -> pd.DataFrame:
@@ -1344,10 +1459,46 @@ class OptionsAnalyzer:
         df = df.copy()
         df['strike_price'] = df['strike_price'].round(2)
         df['price_above_current'] = (df['strike_price'] - df['current_price']).round(2)
-        df['option_premium'] = df.apply(
-            lambda row: round(row['ask'] if pd.notna(row.get('ask')) else (row['bid'] if pd.notna(row.get('bid')) else 0.01), 2),
-            axis=1
-        )
+        
+        def _calculate_option_premium(row):
+            """Calculate option premium using mid-price (bid+ask)/2 if both available, else fallback to ask, bid, last price, or 0.01"""
+            ticker = row.get('ticker', 'UNKNOWN')
+            strike = row.get('strike_price', 'N/A')
+            bid = row.get('bid')
+            ask = row.get('ask')
+            last_price = row.get('price')
+            
+            # Use mid-price if both bid and ask are available
+            if pd.notna(bid) and pd.notna(ask):
+                premium = round((float(bid) + float(ask)) / 2.0, 2)
+                if self.debug:
+                    print(f"DEBUG: {ticker} ${strike:.2f} option_premium: mid-price = ({bid:.2f} + {ask:.2f}) / 2 = ${premium:.2f}", file=sys.stderr)
+                return premium
+            # Fallback to ask if available
+            elif pd.notna(ask):
+                premium = round(float(ask), 2)
+                if self.debug:
+                    print(f"DEBUG: {ticker} ${strike:.2f} option_premium: using ask = ${premium:.2f} (bid unavailable)", file=sys.stderr)
+                return premium
+            # Fallback to bid if available
+            elif pd.notna(bid):
+                premium = round(float(bid), 2)
+                if self.debug:
+                    print(f"DEBUG: {ticker} ${strike:.2f} option_premium: using bid = ${premium:.2f} (ask unavailable)", file=sys.stderr)
+                return premium
+            # Fallback to last price if available
+            elif pd.notna(last_price):
+                premium = round(float(last_price), 2)
+                if self.debug:
+                    print(f"DEBUG: {ticker} ${strike:.2f} option_premium: using last price = ${premium:.2f} (bid/ask unavailable)", file=sys.stderr)
+                return premium
+            # Default fallback
+            else:
+                if self.debug:
+                    print(f"DEBUG: {ticker} ${strike:.2f} option_premium: using default = $0.01 (no price data)", file=sys.stderr)
+                return 0.01
+        
+        df['option_premium'] = df.apply(_calculate_option_premium, axis=1)
         def _format_bid_ask(row):
             bid_val = row.get('bid', 0) if pd.notna(row.get('bid')) else 0
             ask_val = row.get('ask', 0) if pd.notna(row.get('ask')) else 0
@@ -1386,14 +1537,58 @@ class OptionsAnalyzer:
             if self.debug or not self.quiet:
                 print(f"DEBUG: After days_to_expiry filter ({days_to_expiry}): {len(df)} options (was {before_days_filter})", file=sys.stderr)
 
-        df['num_contracts'] = df['current_price'].apply(
-            lambda cp: 0 if pd.isna(cp) or cp <= 0 else math.floor(position_size / (cp * 100))
+        df['num_contracts'] = df.apply(
+            lambda row: 0 if pd.isna(row.get('current_price')) or row.get('current_price') <= 0 else math.floor(position_size / (row.get('current_price') * 100)),
+            axis=1
         )
+        
+        # Debug output for premium calculations
+        if self.debug:
+            for idx, row in df.iterrows():
+                ticker = row.get('ticker', 'UNKNOWN')
+                strike = row.get('strike_price', 'N/A')
+                current_price = row.get('current_price', 0)
+                option_premium = row.get('option_premium', 0)
+                num_contracts = row.get('num_contracts', 0)
+                days_to_expiry = row.get('days_to_expiry', 0)
+                
+                print(f"DEBUG: {ticker} ${strike:.2f} premium calculation:", file=sys.stderr)
+                print(f"  position_size = ${position_size:,.2f}", file=sys.stderr)
+                print(f"  current_price = ${current_price:.2f}", file=sys.stderr)
+                print(f"  num_contracts = floor({position_size:,.2f} / (${current_price:.2f} * 100)) = floor({position_size:,.2f} / ${current_price * 100:.2f}) = {num_contracts}", file=sys.stderr)
+                print(f"  option_premium = ${option_premium:.2f}", file=sys.stderr)
+        
         df['potential_premium'] = (df['num_contracts'] * (df['option_premium'] * 100)).round(2)
+        
+        if self.debug:
+            for idx, row in df.iterrows():
+                ticker = row.get('ticker', 'UNKNOWN')
+                strike = row.get('strike_price', 'N/A')
+                num_contracts = row.get('num_contracts', 0)
+                option_premium = row.get('option_premium', 0)
+                potential_premium = row.get('potential_premium', 0)
+                days_to_expiry = row.get('days_to_expiry', 0)
+                
+                print(f"  potential_premium = {num_contracts} * ${option_premium:.2f} * 100 = ${potential_premium:,.2f}", file=sys.stderr)
+        
         df['daily_premium'] = df.apply(
             lambda row: 0 if row['days_to_expiry'] <= 0 else round(row['potential_premium'] / row['days_to_expiry'], 2),
             axis=1
         )
+        
+        if self.debug:
+            for idx, row in df.iterrows():
+                ticker = row.get('ticker', 'UNKNOWN')
+                strike = row.get('strike_price', 'N/A')
+                potential_premium = row.get('potential_premium', 0)
+                days_to_expiry = row.get('days_to_expiry', 0)
+                daily_premium = row.get('daily_premium', 0)
+                
+                if days_to_expiry > 0:
+                    print(f"  daily_premium = ${potential_premium:,.2f} / {days_to_expiry} days = ${daily_premium:.2f}", file=sys.stderr)
+                else:
+                    print(f"  daily_premium = $0.00 (days_to_expiry <= 0)", file=sys.stderr)
+                print("", file=sys.stderr)  # Empty line for readability
 
         if min_volume > 0:
             before_volume_filter = len(df)
@@ -1557,6 +1752,20 @@ class OptionsAnalyzer:
             
             if self.debug:
                 print(f"DEBUG: Batch fetch returned {len(long_options_df)} rows", file=sys.stderr)
+            
+            # Ensure ticker column exists - extract from option_ticker if missing
+            if not long_options_df.empty and 'ticker' not in long_options_df.columns:
+                if 'option_ticker' in long_options_df.columns:
+                    if self.debug:
+                        print("DEBUG: ticker column missing in long options, extracting from option_ticker", file=sys.stderr)
+                    long_options_df['ticker'] = long_options_df['option_ticker'].apply(self._extract_ticker_from_option_ticker)
+                    
+                    if self.debug:
+                        extracted_tickers = long_options_df['ticker'].dropna().unique().tolist()
+                        print(f"DEBUG: Extracted tickers from long option_ticker: {extracted_tickers[:10]}{'...' if len(extracted_tickers) > 10 else ''}", file=sys.stderr)
+                else:
+                    if self.debug:
+                        print("DEBUG: Warning: Neither 'ticker' nor 'option_ticker' column found in long options DataFrame", file=sys.stderr)
             
             return long_options_df
         except Exception as e:

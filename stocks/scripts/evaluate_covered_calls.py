@@ -178,15 +178,6 @@ def calculate_bid_ask_analysis(df: pd.DataFrame) -> pd.DataFrame:
         (df.get('pe_ratio', 999) < 25).astype(int) * 2              # Reasonable valuation bonus (0-2 points)
     )
     
-    # Calculate number of long options to purchase
-    # Formula: net_premium / (l_prem * 100)
-    # This calculates how many contracts we can afford with the net premium
-    # Each contract costs l_prem * 100 (premium per share * 100 shares per contract)
-    cost_per_contract = df.get('l_prem', 0) * 100
-    df['long_options_to_purchase'] = (df['net_premium'] / cost_per_contract).fillna(0)
-    # Round to nearest integer and set to 0 if negative or invalid
-    df['long_options_to_purchase'] = np.round(df['long_options_to_purchase']).astype(int).clip(lower=0)
-    
     return df
 
 
@@ -271,9 +262,6 @@ def print_detailed_analysis(df: pd.DataFrame) -> None:
         print(f"   Net Credit: ${row['net_premium']:,.0f}")
         print(f"   Daily Income: ${row['net_daily_premi']:,.2f}")
         print(f"   ROI on $100k: {(row['net_premium']/100000*100):.2f}%")
-        if 'long_options_to_purchase' in row:
-            long_options = row.get('long_options_to_purchase', 0)
-            print(f"   Long Options to Purchase: {int(long_options):,} contracts (based on net premium)")
         
         # Bid/Ask & Spread Analysis (if available)
         if 'spread_impact_pct' in row and pd.notna(row.get('spread_impact_pct')):

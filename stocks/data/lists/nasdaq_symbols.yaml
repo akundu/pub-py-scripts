@@ -33,6 +33,7 @@ symbols:
 - AMKR
 - AMZN
 - APA
+- APGE
 - APLD
 - APP
 - APPF
@@ -59,7 +60,6 @@ symbols:
 - BKNG
 - BKR
 - BLLN
-- BLTE
 - BMRN
 - BNTX
 - BOKF
@@ -95,7 +95,6 @@ symbols:
 - CIFR
 - CIGI
 - CINF
-- CLSK
 - CMCSA
 - CME
 - COGT
@@ -109,6 +108,7 @@ symbols:
 - CPB
 - CPRT
 - CRDO
+- CRNX
 - CRSP
 - CRUS
 - CRWD
@@ -123,7 +123,6 @@ symbols:
 - CWST
 - CYBR
 - CYTK
-- CZR
 - DASH
 - DBX
 - DDOG
@@ -142,7 +141,6 @@ symbols:
 - EA
 - EBAY
 - ENLT
-- ENPH
 - ENSG
 - ENTG
 - EOSE
@@ -172,7 +170,6 @@ symbols:
 - FITB
 - FIVE
 - FLEX
-- FORM
 - FOX
 - FOXA
 - FRHC
@@ -324,6 +321,7 @@ symbols:
 - NUVL
 - NVDA
 - NVMI
+- NWE
 - NWS
 - NWSA
 - NXPI
@@ -468,12 +466,14 @@ symbols:
 - UMBF
 - URBN
 - UTHR
+- VCTR
 - VFS
 - VICR
 - VKTX
 - VLY
 - VNOM
 - VOD
+- VRNS
 - VRSK
 - VRSN
 - VRTX

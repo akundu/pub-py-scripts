@@ -9,11 +9,19 @@ import logging
 from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
 import sys
 from pathlib import Path
-from typing import Dict, Set, Any
+from typing import Dict, Set, Any, Optional
 import json
 from datetime import datetime, timezone
 import time
 import socket
+
+# Try to import numpy for type conversion
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
+    np = None
 # multiprocessing not used for workers anymore; keep only for Queue import
 import signal
 # Removed ProcessPoolExecutor and threading imports; using native fork model
@@ -21,8 +29,42 @@ import weakref
 import errno
 from collections import deque
 
+# Import market hours checking and data fetching
+try:
+    from common.market_hours import is_market_hours
+except ImportError:
+    # Fallback if market_hours module doesn't exist
+    def is_market_hours(dt: Optional[datetime] = None, tz_name: str = "America/New_York") -> bool:
+        """Simple fallback market hours check."""
+        if dt is None:
+            dt = datetime.now(timezone.utc)
+        # Basic check: weekday between 9:30 AM and 4:00 PM ET
+        from zoneinfo import ZoneInfo
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = ZoneInfo("America/New_York")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local_dt = dt.astimezone(tz)
+        if local_dt.weekday() >= 5:
+            return False
+        market_open = local_dt.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = local_dt.replace(hour=16, minute=0, second=0, microsecond=0)
+        return market_open <= local_dt <= market_close
+
 # Global logger instance
 logger = logging.getLogger("db_server_logger")
+
+# Try to import fetch functions
+try:
+    from fetch_symbol_data import get_current_price
+    FETCH_AVAILABLE = True
+except ImportError:
+    FETCH_AVAILABLE = False
+    # Logger might not be initialized yet, so use print for now
+    # Will log properly once logger is set up
+    pass
 
 # Global logging queue (for multi-process safe logging)
 log_queue = None
@@ -35,18 +77,33 @@ child_shutdown_flag = False
 
 # Global WebSocket connection management
 class WebSocketManager:
-    def __init__(self, heartbeat_interval: float = 1.0):
+    def __init__(self, heartbeat_interval: float = 1.0, stale_data_timeout: float = 120.0):
         self.connections: Dict[str, Set[web.WebSocketResponse]] = {}  # symbol -> set of websockets
         self.lock = asyncio.Lock()
         self.heartbeat_interval = heartbeat_interval
         self.heartbeat_tasks: Dict[str, asyncio.Task] = {}  # symbol -> heartbeat task
         self.running = True
+        self.last_update_times: Dict[str, float] = {}  # symbol -> last update timestamp
+        self.stale_data_timeout = stale_data_timeout  # seconds before considering data stale
+        self.monitoring_task: Optional[asyncio.Task] = None
+        self.db_instance: Optional[StockDBBase] = None
 
+    def set_db_instance(self, db_instance: StockDBBase) -> None:
+        """Set the database instance for fetching data."""
+        self.db_instance = db_instance
+    
+    def update_last_update_time(self, symbol: str) -> None:
+        """Update the last update time for a symbol."""
+        self.last_update_times[symbol] = time.time()
+    
     async def add_subscriber(self, symbol: str, ws: web.WebSocketResponse) -> None:
         """Add a WebSocket connection as a subscriber for a symbol."""
         async with self.lock:
             if symbol not in self.connections:
                 self.connections[symbol] = set()
+                # Initialize last update time if not exists
+                if symbol not in self.last_update_times:
+                    self.last_update_times[symbol] = time.time()
                 # Start heartbeat task for this symbol if it doesn't exist
                 if symbol not in self.heartbeat_tasks:
                     self.heartbeat_tasks[symbol] = asyncio.create_task(self._heartbeat_loop(symbol))
@@ -78,14 +135,57 @@ class WebSocketManager:
                 logger.error(f"Error in heartbeat loop for {symbol}: {e}")
                 await asyncio.sleep(self.heartbeat_interval)  # Still wait before retrying
 
+    def _convert_to_json_serializable(self, obj: Any) -> Any:
+        """Recursively convert numpy/pandas types to JSON-serializable Python types."""
+        if obj is None:
+            return None
+        
+        # Handle numpy/pandas numeric types
+        if NUMPY_AVAILABLE and np is not None:
+            if isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8)):
+                return int(obj)
+            if isinstance(obj, (np.floating, np.float64, np.float32, np.float16)):
+                return float(obj)
+            if hasattr(obj, 'item'):  # numpy scalar (fallback)
+                return obj.item()
+        
+        # Handle pandas Timestamp
+        if isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        
+        # Handle datetime objects
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        
+        # Handle dictionaries - recurse into values
+        if isinstance(obj, dict):
+            return {key: self._convert_to_json_serializable(value) for key, value in obj.items()}
+        
+        # Handle lists/tuples - recurse into elements
+        if isinstance(obj, (list, tuple)):
+            return [self._convert_to_json_serializable(item) for item in obj]
+        
+        # Already a native type
+        if isinstance(obj, (int, float, str, bool)):
+            return obj
+        
+        # Fallback: convert to string
+        return str(obj)
+
     async def broadcast(self, symbol: str, data: Any) -> None:
         """Broadcast data to all subscribers of a symbol."""
         if symbol not in self.connections:
             return
 
+        # Update last update time when broadcasting
+        self.update_last_update_time(symbol)
+
+        # Convert data to JSON-serializable format recursively
+        serializable_data = self._convert_to_json_serializable(data)
+
         message = json.dumps({
             "symbol": symbol,
-            "data": data
+            "data": serializable_data
         })
 
         try:    
@@ -104,10 +204,122 @@ class WebSocketManager:
         except Exception as e:
             logger.error(f"Error in broadcast method for {symbol}: {e}")
             # Continue execution even if broadcast fails
+    
+    async def _fetch_and_broadcast_stale_data(self, symbol: str) -> None:
+        """Fetch latest data for a symbol and broadcast it to subscribers."""
+        if not FETCH_AVAILABLE:
+            logger.warning(f"Cannot fetch stale data for {symbol}: fetch_symbol_data module not available")
+            return
+        if not self.db_instance:
+            logger.warning(f"Cannot fetch stale data for {symbol}: database instance not set")
+            return
+        
+        try:
+            logger.info(f"Fetching stale data for {symbol} (no update for {self.stale_data_timeout}s)")
+            
+            # Determine data source from environment
+            data_source = os.getenv('DATA_SOURCE', 'polygon').lower()
+            if data_source not in ['polygon', 'alpaca']:
+                data_source = 'polygon'  # Default to polygon
+            
+            # Fetch current price data
+            price_data = await get_current_price(
+                symbol=symbol,
+                data_source=data_source,
+                stock_db_instance=self.db_instance
+            )
+            
+            if price_data:
+                # The get_current_price function already saves to database via stock_db_instance
+                # Now we need to broadcast it to WebSocket subscribers
+                # Format the data similar to save_realtime_data format
+                # Note: broadcast() will handle JSON serialization conversion recursively
+                broadcast_data = {
+                    "type": "quote",
+                    "timestamp": price_data.get('timestamp', datetime.now(timezone.utc).isoformat()),
+                    "event_type": "stale_data_update",
+                    "payload": [{
+                        "timestamp": price_data.get('timestamp', datetime.now(timezone.utc).isoformat()),
+                        "price": price_data.get('price'),
+                        "bid_price": price_data.get('bid_price'),
+                        "ask_price": price_data.get('ask_price'),
+                        "bid_size": price_data.get('bid_size'),
+                        "ask_size": price_data.get('ask_size'),
+                        "size": price_data.get('size')
+                    }]
+                }
+                
+                await self.broadcast(symbol, broadcast_data)
+                logger.info(f"Successfully fetched and broadcasted stale data for {symbol}")
+            else:
+                logger.warning(f"No price data returned for {symbol}")
+                
+        except Exception as e:
+            logger.error(f"Error fetching stale data for {symbol}: {e}", exc_info=True)
+    
+    async def _monitoring_loop(self) -> None:
+        """Background task that monitors tracked symbols and fetches stale data during market hours."""
+        check_interval = 10.0  # Check every 10 seconds
+        
+        while self.running:
+            try:
+                # Only check during market hours
+                if is_market_hours():
+                    now = time.time()
+                    stale_symbols = []
+                    
+                    # Check all tracked symbols
+                    async with self.lock:
+                        tracked_symbols = list(self.connections.keys())
+                    
+                    for symbol in tracked_symbols:
+                        last_update = self.last_update_times.get(symbol, 0)
+                        age_seconds = now - last_update
+                        
+                        if age_seconds >= self.stale_data_timeout:
+                            stale_symbols.append(symbol)
+                    
+                    # Fetch data for stale symbols (limit concurrent fetches)
+                    if stale_symbols:
+                        logger.debug(f"Found {len(stale_symbols)} stale symbols: {stale_symbols}")
+                        # Process up to 5 symbols at a time to avoid rate limits
+                        for i in range(0, len(stale_symbols), 5):
+                            batch = stale_symbols[i:i+5]
+                            tasks = [self._fetch_and_broadcast_stale_data(symbol) for symbol in batch]
+                            await asyncio.gather(*tasks, return_exceptions=True)
+                            # Small delay between batches
+                            if i + 5 < len(stale_symbols):
+                                await asyncio.sleep(1.0)
+                
+                await asyncio.sleep(check_interval)
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in monitoring loop: {e}", exc_info=True)
+                await asyncio.sleep(check_interval)
+    
+    def start_monitoring(self) -> None:
+        """Start the background monitoring task."""
+        if self.monitoring_task is None or self.monitoring_task.done():
+            self.monitoring_task = asyncio.create_task(self._monitoring_loop())
+            fetch_status = "enabled" if FETCH_AVAILABLE else "disabled (fetch_symbol_data module not available)"
+            logger.info(f"Started stale data monitoring (timeout: {self.stale_data_timeout}s, fetch: {fetch_status})")
+    
+    def stop_monitoring(self) -> None:
+        """Stop the background monitoring task."""
+        if self.monitoring_task and not self.monitoring_task.done():
+            self.monitoring_task.cancel()
 
     async def shutdown(self) -> None:
         """Shutdown the WebSocket manager and cancel all heartbeat tasks."""
         self.running = False
+        self.stop_monitoring()
+        if self.monitoring_task:
+            try:
+                await self.monitoring_task
+            except asyncio.CancelledError:
+                pass
         for task in self.heartbeat_tasks.values():
             task.cancel()
         await asyncio.gather(*self.heartbeat_tasks.values(), return_exceptions=True)
@@ -180,7 +392,8 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
                               questdb_connection_timeout: int = 180,
                               enable_access_log: bool = False,
                               enable_cache: bool = True,
-                              redis_url: str | None = None):
+                              redis_url: str | None = None,
+                              stale_data_timeout: float = 120.0):
     """Server runner for individual worker processes."""
     global ws_manager
     
@@ -194,9 +407,11 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
         logger.critical(f"Worker {worker_id}: Fatal Error: Could not initialize database from file '{db_file}': {e}", exc_info=True)
         return
 
-    # Initialize WebSocket manager with heartbeat interval
-    ws_manager = WebSocketManager(heartbeat_interval=heartbeat_interval)
-    logger.info(f"Worker {worker_id}: WebSocket manager initialized with heartbeat interval: {heartbeat_interval}s")
+    # Initialize WebSocket manager with heartbeat interval and stale data timeout
+    ws_manager = WebSocketManager(heartbeat_interval=heartbeat_interval, stale_data_timeout=stale_data_timeout)
+    ws_manager.set_db_instance(app_db_instance)
+    ws_manager.start_monitoring()
+    logger.info(f"Worker {worker_id}: WebSocket manager initialized with heartbeat interval: {heartbeat_interval}s, stale data timeout: {stale_data_timeout}s")
 
     app = web.Application(middlewares=[logging_middleware])
     app['db_instance'] = app_db_instance
@@ -330,7 +545,8 @@ class ForkingServer:
                  questdb_connection_timeout: int = 180,
                  enable_access_log: bool = False,
                  enable_cache: bool = True,
-                 redis_url: str | None = None):
+                 redis_url: str | None = None,
+                 stale_data_timeout: float = 120.0):
         self.workers = max(1, int(workers))
         self.port = port
         self.db_file = db_file
@@ -345,6 +561,7 @@ class ForkingServer:
         self.questdb_connection_timeout = questdb_connection_timeout
         self.enable_cache = enable_cache
         self.redis_url = redis_url
+        self.stale_data_timeout = stale_data_timeout
 
         self.bound_socket: socket.socket | None = None
         self.child_index_to_pid: dict[int, int] = {}
@@ -461,6 +678,7 @@ class ForkingServer:
                     enable_access_log=self.enable_access_log,
                     enable_cache=self.enable_cache,
                     redis_url=self.redis_url,
+                    stale_data_timeout=self.stale_data_timeout,
                 ))
             except Exception as e:
                 logger.error(f"Child {index} crashed: {e}", exc_info=True)
@@ -821,6 +1039,10 @@ async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
                 # Get the latest price from the database
                 latest_price = await db_instance.get_latest_price(symbol)
                 if latest_price is not None:
+                    # Update last update time for this symbol
+                    if ws_manager:
+                        ws_manager.update_last_update_time(symbol)
+                    
                     # Create an initial price message
                     initial_message = {
                         "symbol": symbol,
@@ -1239,8 +1461,10 @@ async def handle_db_command(request: web.Request) -> web.Response:
             # QuestDB handles deduplication automatically, no need for on_duplicate parameter
             await db_instance.save_stock_data(df_to_save, ticker, interval)
             
-            # Broadcast the new data to WebSocket subscribers
-            await ws_manager.broadcast(ticker, data_records)
+            # Update last update time and broadcast the new data to WebSocket subscribers
+            if ws_manager:
+                ws_manager.update_last_update_time(ticker)
+                await ws_manager.broadcast(ticker, data_records)
             
             return web.json_response({"message": "Aggregated data saved successfully."})
         
@@ -1267,6 +1491,9 @@ async def handle_db_command(request: web.Request) -> web.Response:
 
             # QuestDB handles deduplication automatically, no need for on_duplicate parameter
             await db_instance.save_realtime_data(df_to_save, ticker, data_type)
+            # Update last update time for this ticker
+            if ws_manager:
+                ws_manager.update_last_update_time(ticker)
             #broadcast the data to the websocket subscribers
             if data_records: # Ensure there's something to broadcast
                 transformed_payload_for_broadcast = []
@@ -1687,6 +1914,8 @@ async def main_server_runner():
                         help="Logging level (default: INFO).")
     parser.add_argument("--heartbeat-interval", type=float, default=1.0,
                         help="Interval in seconds between WebSocket heartbeats (default: 1.0).")
+    parser.add_argument("--stale-data-timeout", type=float, default=120.0,
+                        help="Seconds before fetching new data for tracked tickers during market hours (default: 120.0).")
     parser.add_argument(
         "--max-body-mb", 
         type=int, 
@@ -1795,6 +2024,7 @@ async def main_server_runner():
             enable_access_log=args.enable_access_log,
             enable_cache=enable_cache,
             redis_url=redis_url,
+            stale_data_timeout=args.stale_data_timeout,
         )
         forking_server.run()
         return
@@ -1816,10 +2046,12 @@ async def main_server_runner():
         logger.critical(f"Fatal Error: Could not initialize database from file '{args.db_file}': {e}", exc_info=True)
         return
 
-    # Initialize WebSocket manager with heartbeat interval
+    # Initialize WebSocket manager with heartbeat interval and stale data timeout
     global ws_manager
-    ws_manager = WebSocketManager(heartbeat_interval=args.heartbeat_interval)
-    logger.info(f"WebSocket manager initialized with heartbeat interval: {args.heartbeat_interval}s")
+    ws_manager = WebSocketManager(heartbeat_interval=args.heartbeat_interval, stale_data_timeout=args.stale_data_timeout)
+    ws_manager.set_db_instance(app_db_instance)
+    ws_manager.start_monitoring()
+    logger.info(f"WebSocket manager initialized with heartbeat interval: {args.heartbeat_interval}s, stale data timeout: {args.stale_data_timeout}s")
 
     app = web.Application(middlewares=[logging_middleware])
     app['db_instance'] = app_db_instance
