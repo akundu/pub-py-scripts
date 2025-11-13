@@ -9,17 +9,17 @@ TYPE="types"
 TYPE_input="all"
 
 MAX_WORKERS=7
-BATCH_SIZE=300
+BATCH_SIZE=200
 
 MAX_DAYS=`days=$((6 - $(date +%u)));[ $days -le 0 ] && days=$((days + 7)); echo $days` #count the number of days till the next saturday
-MAX_DAYS=21
+MAX_DAYS=14
 TIME_TO_USE=`TZ='America/New_York' date -v-1440M '+%Y-%m-%d %H:%M:%S'`
 
 POSITION_SIZE=100000 #amt to invest
 
 #SORT="DAY_PREM"
 SORT="potential_premium"
-TOP_N=1
+TOP_N=2
 
 MIN_PE=1
 MIN_VOL=50

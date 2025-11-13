@@ -18,8 +18,18 @@ import argparse
 import sys
 import os
 import textwrap
+import re
+import logging
 from pathlib import Path
 from typing import Optional
+
+# Set up logging - use INFO level by default, DEBUG for troubleshooting
+import sys as sys_module
+if '--debug' in sys_module.argv:
+    logging.basicConfig(level=logging.DEBUG, format='%(levelname)s: %(message)s')
+else:
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 # Add scripts directory to path for imports
 scripts_dir = Path(__file__).parent
@@ -28,6 +38,41 @@ if str(scripts_dir) not in sys.path:
 
 # Import HTML report generator
 from html_report_generator import generate_html_output
+
+
+def safe_to_numeric(series, col_name=None):
+    """Convert series to numeric, handling malformed concatenated strings like '0.120.260.110.210.36'."""
+    def extract_first_number(val):
+        if pd.isna(val):
+            return np.nan
+        try:
+            val_str = str(val)
+            # Try direct conversion first
+            try:
+                return float(val_str)
+            except (ValueError, TypeError):
+                # Extract first valid number from string
+                match = re.search(r'-?\d+\.?\d*', val_str)
+                if match:
+                    extracted = float(match.group())
+                    if col_name and val_str != str(extracted):
+                        logger.debug(f"Column '{col_name}': Extracted {extracted} from malformed string '{val_str}'")
+                    return extracted
+                if col_name:
+                    logger.warning(f"Column '{col_name}': Could not extract number from '{val_str}', using NaN")
+                return np.nan
+        except (ValueError, TypeError, AttributeError) as e:
+            if col_name:
+                logger.warning(f"Column '{col_name}': Error processing value '{val}': {e}")
+            return np.nan
+    
+    # Apply safe conversion and ensure numeric dtype
+    logger.debug(f"Converting column '{col_name}' to numeric (dtype: {series.dtype})")
+    result = series.apply(extract_first_number)
+    # Ensure the result is actually numeric dtype (not object)
+    result = pd.to_numeric(result, errors='coerce')
+    logger.debug(f"Column '{col_name}' converted to dtype: {result.dtype}")
+    return result
 
 
 def wrap_dataframe_columns(df: pd.DataFrame, width: int = 15) -> pd.DataFrame:
@@ -74,7 +119,74 @@ def load_data(file_path: Optional[str] = None) -> pd.DataFrame:
     
     for col in numeric_cols:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+            logger.debug(f"Processing column '{col}' (current dtype: {df[col].dtype})")
+            # Check for malformed values before conversion - even if dtype is numeric, there might be string values
+            if df[col].dtype == 'object':
+                sample_values = df[col].dropna().head(5).tolist()
+                logger.debug(f"  Sample values: {sample_values}")
+                # Check if any values look malformed (contain multiple dots in a row)
+                malformed = df[col].astype(str).str.contains(r'\d+\.\d+\.', regex=True, na=False)
+                if malformed.any():
+                    malformed_values = df[col][malformed].unique()[:3]
+                    logger.warning(f"  Found {malformed.sum()} malformed values in '{col}': {malformed_values.tolist()}")
+            else:
+                # Even if dtype is numeric, check for string values that might have slipped through
+                string_mask = df[col].astype(str).str.contains(r'\d+\.\d+\.', regex=True, na=False)
+                if string_mask.any():
+                    logger.warning(f"  Found {string_mask.sum()} malformed string values in numeric column '{col}'")
+                    malformed_values = df[col][string_mask].unique()[:3]
+                    logger.warning(f"  Malformed values: {malformed_values.tolist()}")
+                    # Force conversion to object first, then convert safely
+                    df[col] = df[col].astype(str)
+            
+            # Use safe conversion for columns that might have malformed data
+            if col in ['net_daily_premi', 'net_daily_premium', 'net_premium', 's_prem_tot', 's_day_prem', 'l_prem_tot']:
+                try:
+                    df[col] = safe_to_numeric(df[col], col_name=col)
+                    # Double-check: ensure no string values remain
+                    if df[col].dtype == 'object' or df[col].astype(str).str.contains(r'\d+\.\d+\.', regex=True, na=False).any():
+                        logger.warning(f"  Column '{col}' still contains malformed values after conversion, retrying...")
+                        df[col] = safe_to_numeric(df[col], col_name=col)
+                except Exception as e:
+                    logger.error(f"Error converting column '{col}' to numeric: {e}")
+                    logger.error(f"  Column dtype: {df[col].dtype}")
+                    logger.error(f"  Sample values: {df[col].dropna().head(3).tolist()}")
+                    raise
+            else:
+                try:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                except Exception as e:
+                    logger.error(f"Error converting column '{col}' to numeric: {e}")
+                    logger.error(f"  Column dtype: {df[col].dtype}")
+                    logger.error(f"  Sample values: {df[col].dropna().head(3).tolist()}")
+                    # Try safe conversion as fallback
+                    logger.info(f"  Attempting safe conversion for '{col}'")
+                    df[col] = safe_to_numeric(df[col], col_name=col)
+    
+    # Final check: verify net_daily_premi is truly numeric
+    if 'net_daily_premi' in df.columns:
+        if df['net_daily_premi'].dtype == 'object':
+            logger.error("net_daily_premi is still object dtype after conversion!")
+            logger.error(f"  Sample values: {df['net_daily_premi'].dropna().head(5).tolist()}")
+            # Force conversion one more time
+            df['net_daily_premi'] = safe_to_numeric(df['net_daily_premi'], col_name='net_daily_premi')
+        # Check for any remaining string values
+        string_check = df['net_daily_premi'].astype(str).str.contains(r'\d+\.\d+\.', regex=True, na=False)
+        if string_check.any():
+            logger.error(f"Found {string_check.sum()} malformed values still in net_daily_premi after conversion!")
+            logger.error(f"  Values: {df['net_daily_premi'][string_check].unique()[:5].tolist()}")
+            # Force fix these values
+            def fix_malformed(val):
+                if pd.isna(val):
+                    return np.nan
+                val_str = str(val)
+                if re.search(r'\d+\.\d+\.', val_str):
+                    match = re.search(r'-?\d+\.?\d*', val_str)
+                    if match:
+                        return float(match.group())
+                return val
+            df['net_daily_premi'] = df['net_daily_premi'].apply(fix_malformed)
+            df['net_daily_premi'] = pd.to_numeric(df['net_daily_premi'], errors='coerce')
     
     return df
 
@@ -143,39 +255,74 @@ def calculate_bid_ask_analysis(df: pd.DataFrame) -> pd.DataFrame:
     df['spread_slippage'] = ((short_spread.fillna(0) + long_spread.fillna(0)) * 
                              df.get('num_contracts', 0))
     df['net_premium_after_spread'] = df['net_premium'] - df['spread_slippage']
-    df['net_daily_premium_after_spread'] = (df['net_premium_after_spread'] / 
-                                            df['days_to_expiry']).round(2)
+    # Safely calculate net_daily_premium_after_spread, ensuring numeric types
+    try:
+        net_prem_after = pd.to_numeric(df['net_premium_after_spread'], errors='coerce')
+        days_exp = pd.to_numeric(df['days_to_expiry'], errors='coerce')
+        df['net_daily_premium_after_spread'] = (net_prem_after / days_exp).round(2)
+    except Exception as e:
+        logger.error(f"Error calculating net_daily_premium_after_spread: {e}")
+        logger.error(f"  net_premium_after_spread dtype: {df['net_premium_after_spread'].dtype}")
+        logger.error(f"  days_to_expiry dtype: {df['days_to_expiry'].dtype}")
+        raise
     df['net_daily_premium_after_spread'] = df['net_daily_premium_after_spread'].replace(
         [np.inf, -np.inf], np.nan)
     
-    # Calculate spread impact percentage
-    df['spread_impact_pct'] = (df['spread_slippage'] / df['net_premium'] * 100).round(2)
-    df['spread_impact_pct'] = df['spread_impact_pct'].replace([np.inf, -np.inf], np.nan)
+    # Calculate spread impact percentage - ensure numeric types first
+    try:
+        spread_slip = pd.to_numeric(df['spread_slippage'], errors='coerce')
+        net_prem = pd.to_numeric(df['net_premium'], errors='coerce')
+        df['spread_impact_pct'] = (spread_slip / net_prem * 100).round(2)
+        df['spread_impact_pct'] = df['spread_impact_pct'].replace([np.inf, -np.inf], np.nan)
+        # Ensure the result is numeric
+        df['spread_impact_pct'] = pd.to_numeric(df['spread_impact_pct'], errors='coerce')
+    except Exception as e:
+        logger.error(f"Error calculating spread_impact_pct: {e}")
+        logger.error(f"  spread_slippage dtype: {df['spread_slippage'].dtype}")
+        logger.error(f"  net_premium dtype: {df['net_premium'].dtype}")
+        raise
     
     # Liquidity Scoring (0-10) - using temporary spread calculations
+    # Ensure all values are numeric before comparisons
+    short_spread_pct_num = pd.to_numeric(short_spread_pct, errors='coerce').fillna(999)
+    long_spread_pct_num = pd.to_numeric(long_spread_pct, errors='coerce').fillna(999)
+    volume_num = pd.to_numeric(df.get('volume', 0), errors='coerce').fillna(0)
+    num_contracts_num = pd.to_numeric(df.get('num_contracts', 0), errors='coerce').fillna(0)
+    
     df['liquidity_score'] = (
-        (short_spread_pct.fillna(999) < 3).astype(int) * 2 +    # Very tight short spread
-        (short_spread_pct.fillna(999) < 10).astype(int) * 1 +   # Acceptable short spread
-        (long_spread_pct.fillna(999) < 3).astype(int) * 2 +    # Very tight long spread
-        (long_spread_pct.fillna(999) < 10).astype(int) * 1 +   # Acceptable long spread
-        (df.get('volume', 0) > 1000).astype(int) * 2 +            # High volume
-        (df.get('volume', 0) > 200).astype(int) * 1 +             # Decent volume
-        (df.get('num_contracts', 0) > 200).astype(int) * 1       # Good open interest
+        (short_spread_pct_num < 3).astype(int) * 2 +    # Very tight short spread
+        (short_spread_pct_num < 10).astype(int) * 1 +   # Acceptable short spread
+        (long_spread_pct_num < 3).astype(int) * 2 +    # Very tight long spread
+        (long_spread_pct_num < 10).astype(int) * 1 +   # Acceptable long spread
+        (volume_num > 1000).astype(int) * 2 +            # High volume
+        (volume_num > 200).astype(int) * 1 +             # Decent volume
+        (num_contracts_num > 200).astype(int) * 1       # Good open interest
     )
     
     # Assignment Risk Scoring (0-6, lower is better)
+    # Ensure all values are numeric before comparisons
+    delta_num = pd.to_numeric(df.get('delta', 0), errors='coerce').fillna(0)
+    price_above_num = pd.to_numeric(df.get('price_above_curr', 999), errors='coerce').fillna(999)
+    pe_ratio_num = pd.to_numeric(df.get('pe_ratio', 0), errors='coerce').fillna(0)
+    
     df['assignment_risk'] = (
-        (df.get('delta', 0) > 0.4).astype(int) * 2 +              # High delta = higher assignment risk
-        (df.get('price_above_curr', 999) < 2).astype(int) * 2 +   # Close to strike = risky
-        (df.get('pe_ratio', 0) > 40).astype(int) * 2               # Expensive valuation = risky
+        (delta_num > 0.4).astype(int) * 2 +              # High delta = higher assignment risk
+        (price_above_num < 2).astype(int) * 2 +   # Close to strike = risky
+        (pe_ratio_num > 40).astype(int) * 2               # Expensive valuation = risky
     )
     
     # Overall Trade Quality Score
+    # Ensure all values are numeric before calculations
+    liquidity_score_num = pd.to_numeric(df['liquidity_score'], errors='coerce').fillna(0)
+    assignment_risk_num = pd.to_numeric(df['assignment_risk'], errors='coerce').fillna(0)
+    net_daily_after_num = pd.to_numeric(df['net_daily_premium_after_spread'], errors='coerce').fillna(0)
+    pe_ratio_quality_num = pd.to_numeric(df.get('pe_ratio', 999), errors='coerce').fillna(999)
+    
     df['trade_quality'] = (
-        df['liquidity_score'] * 2 +                                # Liquidity is CRITICAL (0-20 points)
-        (10 - df['assignment_risk']) +                             # Lower risk is better (4-10 points)
-        (df['net_daily_premium_after_spread'] / 100).fillna(0) +   # Premium contribution (variable)
-        (df.get('pe_ratio', 999) < 25).astype(int) * 2              # Reasonable valuation bonus (0-2 points)
+        liquidity_score_num * 2 +                                # Liquidity is CRITICAL (0-20 points)
+        (10 - assignment_risk_num) +                             # Lower risk is better (4-10 points)
+        (net_daily_after_num / 100) +   # Premium contribution (variable)
+        (pe_ratio_quality_num < 25).astype(int) * 2              # Reasonable valuation bonus (0-2 points)
     )
     
     return df
@@ -183,7 +330,20 @@ def calculate_bid_ask_analysis(df: pd.DataFrame) -> pd.DataFrame:
 
 def print_top_20_analysis(df: pd.DataFrame) -> None:
     """Print analysis for top 20 performers by net daily premium."""
-    top_20 = df.nlargest(20, 'net_daily_premi')
+    # Ensure net_daily_premi is numeric before sorting
+    if 'net_daily_premi' in df.columns:
+        df = df.copy()
+        if not pd.api.types.is_numeric_dtype(df['net_daily_premi']):
+            df['_net_daily_premi_numeric'] = safe_to_numeric(df['net_daily_premi'])
+            df_valid = df[df['_net_daily_premi_numeric'].notna()]
+            if len(df_valid) > 0:
+                top_20 = df_valid.nlargest(20, '_net_daily_premi_numeric').drop(columns=['_net_daily_premi_numeric'])
+            else:
+                top_20 = df.head(20).drop(columns=['_net_daily_premi_numeric'], errors='ignore')
+        else:
+            top_20 = df.nlargest(20, 'net_daily_premi')
+    else:
+        top_20 = df.head(20)
     
     print("=" * 120)
     print("DEEP DIVE: TOP 20 COVERED CALL SPREADS BY NET DAILY PREMIUM")
@@ -226,7 +386,20 @@ def print_detailed_analysis(df: pd.DataFrame) -> None:
     print("COMPREHENSIVE ANALYSIS: TOP 10 PICKS WITH OPTION TICKERS")
     print("=" * 120)
     
-    top_10 = df.nlargest(10, 'net_daily_premi')
+    # Ensure net_daily_premi is numeric before sorting
+    if 'net_daily_premi' in df.columns:
+        df = df.copy()
+        if not pd.api.types.is_numeric_dtype(df['net_daily_premi']):
+            df['_net_daily_premi_numeric'] = safe_to_numeric(df['net_daily_premi'])
+            df_valid = df[df['_net_daily_premi_numeric'].notna()]
+            if len(df_valid) > 0:
+                top_10 = df_valid.nlargest(10, '_net_daily_premi_numeric').drop(columns=['_net_daily_premi_numeric'])
+            else:
+                top_10 = df.head(10).drop(columns=['_net_daily_premi_numeric'], errors='ignore')
+        else:
+            top_10 = df.nlargest(10, 'net_daily_premi')
+    else:
+        top_10 = df.head(10)
     
     for idx, row in top_10.iterrows():
         ticker = row['ticker']
@@ -398,7 +571,13 @@ def print_bid_ask_analysis(df: pd.DataFrame) -> None:
     print("=" * 120)
     
     if 'trade_quality' in df.columns:
+        # Ensure trade_quality is numeric before sorting
+        if not pd.api.types.is_numeric_dtype(df['trade_quality']):
+            logger.warning("trade_quality is not numeric, converting...")
+            df['trade_quality'] = pd.to_numeric(df['trade_quality'], errors='coerce')
         top5 = df.nlargest(5, 'trade_quality')
+    else:
+        top5 = df.head(5)
         for i, (idx, row) in enumerate(top5.iterrows(), 1):
             print(f"\n#{i}. {row['ticker']} - Quality Score: {row['trade_quality']:.1f}")
             
@@ -426,7 +605,20 @@ def print_summary_rankings(df: pd.DataFrame) -> None:
     print("SUMMARY RANKINGS")
     print("=" * 120)
     
-    top_10 = df.nlargest(10, 'net_daily_premi')
+    # Ensure net_daily_premi is numeric before sorting
+    if 'net_daily_premi' in df.columns:
+        df = df.copy()
+        if not pd.api.types.is_numeric_dtype(df['net_daily_premi']):
+            df['_net_daily_premi_numeric'] = safe_to_numeric(df['net_daily_premi'])
+            df_valid = df[df['_net_daily_premi_numeric'].notna()]
+            if len(df_valid) > 0:
+                top_10 = df_valid.nlargest(10, '_net_daily_premi_numeric').drop(columns=['_net_daily_premi_numeric'])
+            else:
+                top_10 = df.head(10).drop(columns=['_net_daily_premi_numeric'], errors='ignore')
+        else:
+            top_10 = df.nlargest(10, 'net_daily_premi')
+    else:
+        top_10 = df.head(10)
     
     # Create final ranking
     ranking = top_10[['ticker', 'net_daily_premi', 'volume', 'delta', 'pe_ratio', 
@@ -538,7 +730,16 @@ Examples:
         
         # Generate HTML output if requested
         if args.html:
-            generate_html_output(df, args.output_dir)
+            try:
+                logger.info("Generating HTML output...")
+                generate_html_output(df, args.output_dir)
+                logger.info(f"HTML output generated successfully in {args.output_dir}")
+            except Exception as e:
+                logger.error(f"Error generating HTML output: {e}")
+                logger.error(f"  Error type: {type(e).__name__}")
+                import traceback
+                logger.error(f"  Traceback:\n{traceback.format_exc()}")
+                raise
         else:
             # Print analyses to stdout
             print_top_20_analysis(df)
