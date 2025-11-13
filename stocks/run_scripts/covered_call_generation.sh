@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 STORE_DIR="/Users/akundu/programs/http-proxy/static/"
 OUTPUT_DIR="stocks_to_buy"
@@ -8,25 +8,31 @@ QUERY_LOC="questdb://stock_user:stock_password@localhost:8812/stock_data"
 TYPE="types"
 TYPE_input="all"
 
-MAX_WORKERS=7
-BATCH_SIZE=200
+MAX_WORKERS=8
+BATCH_SIZE=300
 
 MAX_DAYS=`days=$((6 - $(date +%u)));[ $days -le 0 ] && days=$((days + 7)); echo $days` #count the number of days till the next saturday
-MAX_DAYS=14
-TIME_TO_USE=`TZ='America/New_York' date -v-1440M '+%Y-%m-%d %H:%M:%S'`
+MAX_DAYS=8
+
+CUR_HOUR_MIN=$(TZ='America/New_York' date '+%H%M')
+if [ "$CUR_HOUR_MIN" -ge 930 ] && [ "$CUR_HOUR_MIN" -le 1600 ]; then
+  TIME_TO_USE=`TZ='America/New_York' date -v-30M '+%Y-%m-%d %H:%M:%S'`
+else
+  TIME_TO_USE=`TZ='America/New_York' date -v-10080m '+%Y-%m-%d %H:%M:%S'`
+fi
 
 POSITION_SIZE=100000 #amt to invest
 
 #SORT="DAY_PREM"
 SORT="potential_premium"
-TOP_N=2
+TOP_N=1
 
 MIN_PE=1
 MIN_VOL=50
 MIN_LONG_PREMIUM=0.5
 MIN_PREMIUM=0.25
 MIN_NET_PREMIUM=1000
-CURR_PRIC_MULT=1
+CURR_PRIC_MULT=1.001
 
 
 #spread info
