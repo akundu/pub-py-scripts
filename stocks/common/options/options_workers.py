@@ -28,13 +28,14 @@ from common.common import (
     normalize_expiration_date_to_utc,
     calculate_days_to_expiry
 )
-from scripts.options_filters import FilterParser, FilterExpression
+from .options_filters import FilterParser, FilterExpression
 
 
 def setup_worker_imports():
     """Set up sys.path for worker processes."""
     CURRENT_DIR = Path(__file__).resolve().parent
-    PROJECT_ROOT = CURRENT_DIR.parent
+    # Go up two levels: common/options/ -> common/ -> project_root
+    PROJECT_ROOT = CURRENT_DIR.parent.parent
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -42,17 +43,22 @@ def setup_worker_imports():
 def import_filter_classes():
     """Import FilterParser and FilterExpression classes for use in worker processes."""
     try:
-        from scripts.options_filters import FilterParser, FilterExpression
+        from common.options.options_filters import FilterParser, FilterExpression
         return FilterParser, FilterExpression
     except ImportError:
-        import sys
-        if 'scripts.options_filters' in sys.modules:
-            mod = sys.modules['scripts.options_filters']
-            return mod.FilterParser, mod.FilterExpression
-        else:
-            import importlib
-            mod = importlib.import_module('scripts.options_filters')
-            return mod.FilterParser, mod.FilterExpression
+        try:
+            # Try relative import
+            from .options_filters import FilterParser, FilterExpression
+            return FilterParser, FilterExpression
+        except ImportError:
+            import sys
+            if 'common.options.options_filters' in sys.modules:
+                mod = sys.modules['common.options.options_filters']
+                return mod.FilterParser, mod.FilterExpression
+            else:
+                import importlib
+                mod = importlib.import_module('common.options.options_filters')
+                return mod.FilterParser, mod.FilterExpression
 
 
 def process_ticker_analysis(args_tuple):
@@ -79,7 +85,7 @@ def process_ticker_analysis(args_tuple):
     # Re-import needed modules in worker process
     setup_worker_imports()
     from common.stock_db import get_stock_db
-    from scripts.options_formatting import normalize_and_select_columns
+    from common.options.options_formatting import normalize_and_select_columns
     FilterParser, FilterExpression = import_filter_classes()
     
     async def _async_process():
@@ -383,7 +389,7 @@ def process_ticker_spread_analysis(args_tuple):
     # Re-import needed modules in worker process
     setup_worker_imports()
     from common.stock_db import get_stock_db
-    from scripts.options_formatting import normalize_and_select_columns
+    from common.options.options_formatting import normalize_and_select_columns
     FilterParser, FilterExpression = import_filter_classes()
     
     async def _async_process():

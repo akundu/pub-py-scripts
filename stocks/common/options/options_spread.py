@@ -18,7 +18,7 @@ from common.common import (
     normalize_expiration_date_to_utc,
     calculate_days_to_expiry
 )
-from scripts.options_workers import process_spread_match
+from .options_workers import process_spread_match
 
 
 def calculate_long_options_date_range(
