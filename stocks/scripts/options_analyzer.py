@@ -28,24 +28,27 @@ import re
 import math
 from concurrent.futures import ProcessPoolExecutor
 import functools
-
-# Black-Scholes option pricing
-try:
-    from scipy.stats import norm
-    from scipy import special
-    SCIPY_AVAILABLE = True
-except ImportError:
-    SCIPY_AVAILABLE = False
-    # Fallback to basic normal CDF approximation
-    def norm_cdf(x):
-        """Approximate cumulative normal distribution."""
-        return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+import subprocess
+import multiprocessing
 
 # Ensure project root is on sys.path so `common` can be imported when running from any cwd
 CURRENT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = CURRENT_DIR.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+# Import common functions
+from common.common import (
+    black_scholes_call,
+    check_tickers_for_refresh as common_check_tickers_for_refresh,
+    fetch_latest_option_timestamp_standalone as common_fetch_latest_option_timestamp_standalone,
+    get_redis_client_for_refresh,
+    check_redis_refresh_pending,
+    set_redis_refresh_pending,
+    clear_redis_refresh_pending,
+    set_redis_last_write_timestamp,
+    REDIS_AVAILABLE
+)
 
 # Import common symbol loading functions
 from common.symbol_loader import add_symbol_arguments, fetch_lists_data
@@ -447,48 +450,1031 @@ class FilterParser:
         return df[mask]
 
 
-def _black_scholes_call_standalone(S: float, K: float, T: float, r: float, sigma: float) -> float:
+# Module-level cache for latest option timestamps (per process)
+# This ensures timestamps are only fetched once per ticker per process
+_timestamp_cache_per_process: Dict[str, pd.Timestamp] = {}
+
+
+# ============================================================================
+# Common Utility Functions
+# ============================================================================
+
+def _extract_ticker_from_option_ticker(option_ticker: Any) -> Optional[str]:
+    """Extract ticker symbol from option_ticker (e.g., 'AAPL250117C00150000' -> 'AAPL')."""
+    if pd.isna(option_ticker):
+        return None
+    option_ticker_str = str(option_ticker)
+    # Remove "O:" prefix if present
+    if option_ticker_str.startswith("O:"):
+        option_ticker_str = option_ticker_str[2:]
+    # Extract ticker (first 1-5 uppercase letters before the date)
+    match = re.match(r'^([A-Z]{1,5})', option_ticker_str)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _calculate_option_premium(row: pd.Series) -> float:
+    """Calculate option premium using mid-price (bid+ask)/2 if both available, else fallback to ask, bid, last price, or 0.01."""
+    bid = row.get('bid')
+    ask = row.get('ask')
+    last_price = row.get('price')
+    
+    if pd.notna(bid) and pd.notna(ask):
+        return round((float(bid) + float(ask)) / 2.0, 2)
+    elif pd.notna(ask):
+        return round(float(ask), 2)
+    elif pd.notna(bid):
+        return round(float(bid), 2)
+    elif pd.notna(last_price):
+        return round(float(last_price), 2)
+    else:
+        return 0.01
+
+
+def _format_bid_ask(row: pd.Series) -> str:
+    """Format bid and ask prices as 'bid:ask' string."""
+    bid_val = row.get('bid', 0) if pd.notna(row.get('bid')) else 0
+    ask_val = row.get('ask', 0) if pd.notna(row.get('ask')) else 0
+    if pd.notna(row.get('bid')) or pd.notna(row.get('ask')):
+        return f"{bid_val:.2f}:{ask_val:.2f}"
+    return "N/A:N/A"
+
+
+def _normalize_to_utc(x: Any) -> pd.Timestamp:
+    """Normalize a datetime value to UTC timezone-aware Timestamp."""
+    if pd.isna(x):
+        return pd.NaT
+    if isinstance(x, pd.Timestamp):
+        dt = x
+    else:
+        dt = pd.to_datetime(x, errors='coerce', utc=True)
+        if pd.isna(dt):
+            return pd.NaT
+    if dt.tz is None:
+        dt = dt.tz_localize('UTC')
+    else:
+        dt = dt.tz_convert('UTC')
+    return dt
+
+
+def _normalize_timestamp_to_utc(x: Any) -> pd.Timestamp:
+    """Normalize a timestamp value to UTC timezone-aware Timestamp."""
+    if pd.isna(x):
+        return pd.NaT
+    if isinstance(x, pd.Timestamp):
+        dt = x
+    else:
+        dt = pd.to_datetime(x, errors='coerce', utc=True)
+        if pd.isna(dt):
+            return pd.NaT
+    if dt.tz is None:
+        dt = dt.tz_localize('UTC')
+    else:
+        dt = dt.tz_convert('UTC')
+    return dt
+
+
+def _safe_days_calc(exp_date: Any, today_ref: pd.Timestamp) -> int:
+    """Calculate days to expiry from expiration date, handling timezone-aware timestamps."""
+    if pd.isna(exp_date):
+        return 0
+    if isinstance(exp_date, pd.Timestamp):
+        if exp_date.tz is None:
+            exp_date = exp_date.tz_localize('UTC')
+        else:
+            exp_date = exp_date.tz_convert('UTC')
+    else:
+        exp_date = pd.to_datetime(exp_date, utc=True)
+    return int((exp_date - today_ref).total_seconds() / 86400)
+
+
+def _format_price_with_change(current_price: float, prev_close: Optional[float]) -> Tuple[str, Optional[float]]:
+    """Format price with change percentage. Returns (formatted_string, change_percentage)."""
+    if pd.isna(current_price) or current_price is None:
+        return None, None
+    
+    if prev_close is None or pd.isna(prev_close) or prev_close <= 0:
+        return f"${current_price:.2f}", None
+    
+    change = current_price - prev_close
+    change_pct = (change / prev_close) * 100
+    
+    if change >= 0:
+        return f"+${change:.2f} (+{change_pct:.2f}%)", change_pct
+    else:
+        return f"-${abs(change):.2f} ({change_pct:.2f}%)", change_pct
+
+
+def _normalize_write_timestamp(x: Any) -> pd.Timestamp:
+    """Normalize write timestamp to UTC."""
+    if pd.isna(x):
+        return pd.NaT
+    if isinstance(x, pd.Timestamp):
+        dt = x
+    else:
+        dt = pd.to_datetime(x, errors='coerce')
+        if pd.isna(dt):
+            return pd.NaT
+    if dt.tz is None:
+        return dt.tz_localize('UTC')
+    return dt.tz_convert('UTC')
+
+
+def _import_filter_classes():
+    """Import FilterParser and FilterExpression classes for use in worker processes."""
+    try:
+        from scripts.options_analyzer import FilterParser, FilterExpression
+        return FilterParser, FilterExpression
+    except ImportError:
+        import sys
+        if 'scripts.options_analyzer' in sys.modules:
+            mod = sys.modules['scripts.options_analyzer']
+            return mod.FilterParser, mod.FilterExpression
+        else:
+            import importlib
+            mod = importlib.import_module('scripts.options_analyzer')
+            return mod.FilterParser, mod.FilterExpression
+
+
+def _setup_worker_imports():
+    """Set up sys.path for worker processes."""
+    from pathlib import Path
+    CURRENT_DIR = Path(__file__).resolve().parent
+    PROJECT_ROOT = CURRENT_DIR.parent
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+
+
+# ============================================================================
+# Options Processing Helper Functions
+# ============================================================================
+
+def _ensure_ticker_column(options_df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure ticker column exists in options DataFrame, extracting from option_ticker if needed."""
+    if 'ticker' not in options_df.columns and 'option_ticker' in options_df.columns:
+        options_df = options_df.copy()
+        options_df['ticker'] = options_df['option_ticker'].apply(_extract_ticker_from_option_ticker)
+    return options_df
+
+
+def _calculate_option_metrics(
+    df: pd.DataFrame,
+    position_size: float,
+    days_to_expiry: Optional[int] = None
+) -> pd.DataFrame:
+    """Calculate option metrics: premium, contracts, potential premium, daily premium."""
+    df = df.copy()
+    df['strike_price'] = df['strike_price'].round(2)
+    df['price_above_current'] = (df['strike_price'] - df['current_price']).round(2)
+    df['option_premium'] = df.apply(_calculate_option_premium, axis=1)
+    df['bid_ask'] = df.apply(_format_bid_ask, axis=1)
+    
+    # Normalize expiration_date and calculate days_to_expiry
+    df['expiration_date'] = df['expiration_date'].apply(_normalize_to_utc)
+    today = pd.Timestamp.now(tz='UTC').normalize()
+    df['days_to_expiry'] = df['expiration_date'].apply(lambda x: _safe_days_calc(x, today))
+    
+    # Normalize implied_volatility
+    if 'implied_volatility' in df.columns:
+        df['implied_volatility'] = pd.to_numeric(df['implied_volatility'], errors='coerce').round(4)
+    else:
+        df['implied_volatility'] = pd.Series([float('nan')] * len(df), index=df.index)
+    
+    # Apply days_to_expiry filter
+    if days_to_expiry is not None:
+        df = df[
+            (df['days_to_expiry'] >= days_to_expiry - 1) &
+            (df['days_to_expiry'] <= days_to_expiry + 1)
+        ].copy()
+    
+    # Calculate num_contracts and premiums
+    df['num_contracts'] = df.apply(
+        lambda row: 0 if pd.isna(row.get('current_price')) or row.get('current_price') <= 0 
+                  else math.floor(position_size / (row.get('current_price') * 100)),
+        axis=1
+    )
+    df['potential_premium'] = (df['num_contracts'] * (df['option_premium'] * 100)).round(2)
+    df['daily_premium'] = df.apply(
+        lambda row: 0 if row['days_to_expiry'] <= 0 
+                  else round(row['potential_premium'] / row['days_to_expiry'], 2),
+        axis=1
+    )
+    
+    return df
+
+
+def _apply_basic_filters(
+    df: pd.DataFrame,
+    min_volume: int = 0,
+    min_premium: float = 0.0,
+    min_write_timestamp: Optional[str] = None
+) -> pd.DataFrame:
+    """Apply basic filters: volume, premium, write timestamp."""
+    if min_volume > 0:
+        df = df[df['volume'] >= min_volume].copy()
+    
+    if min_premium > 0.0:
+        df = df[df['potential_premium'] >= min_premium].copy()
+    
+    if min_write_timestamp:
+        try:
+            import pytz
+            est = pytz.timezone('America/New_York')
+            min_ts = pd.to_datetime(min_write_timestamp)
+            if min_ts.tz is None:
+                min_ts = est.localize(min_ts)
+            min_ts_utc = min_ts.astimezone(pytz.UTC)
+            if 'write_timestamp' in df.columns:
+                df['write_timestamp'] = df['write_timestamp'].apply(_normalize_write_timestamp)
+                df = df[df['write_timestamp'] >= min_ts_utc].copy()
+        except Exception:
+            pass  # Ignore timestamp filter errors
+    
+    return df
+
+
+async def _get_previous_close_for_date(db, ticker: str, reference_date: pd.Timestamp, debug: bool = False) -> Optional[float]:
     """
-    Standalone Black-Scholes call option price calculation (for multiprocessing).
+    Get the previous close price for a ticker based on a reference date.
+    Returns the close price from the day before the reference date.
+    
+    Uses StockDataService.get() to fetch daily prices for a date range and picks the relevant price.
     
     Args:
-        S: Current stock price
-        K: Strike price
-        T: Time to expiration (in years)
-        r: Risk-free rate (annual)
-        sigma: Implied volatility (annual)
+        db: Database connection object (must have get_stock_data method)
+        ticker: Ticker symbol
+        reference_date: The date to use as reference (will find close price before this date)
+        debug: Whether to print debug messages
+        
+    Returns:
+        Previous close price (float) or None if not found
+    """
+    try:
+        # Convert reference_date to date in EST timezone
+        import pytz
+        from datetime import datetime, timedelta
+        
+        if reference_date.tz is None:
+            reference_date = reference_date.tz_localize('UTC')
+        else:
+            reference_date = reference_date.tz_convert('UTC')
+        
+        # Convert to EST for date comparison
+        est = pytz.timezone('America/New_York')
+        reference_date_est = reference_date.tz_convert(est)
+        reference_date_only = reference_date_est.date()
+        
+        # Calculate date range: fetch last 10 days before reference date to ensure we get the previous close
+        # This handles weekends/holidays where there might be gaps
+        end_date = reference_date_only - timedelta(days=1)  # Day before reference date
+        start_date = end_date - timedelta(days=10)  # Go back 10 days to ensure we get data
+        
+        # Use get_stock_data to fetch daily prices for the date range
+        if hasattr(db, 'get_stock_data'):
+            df = await db.get_stock_data(
+                ticker=ticker,
+                start_date=start_date.strftime('%Y-%m-%d'),
+                end_date=end_date.strftime('%Y-%m-%d'),
+                interval='daily'
+            )
+            
+            if df is not None and not df.empty:
+                # Get the most recent close price (last row, since data is ordered by date)
+                # The date index should be the date column
+                if isinstance(df.index, pd.DatetimeIndex):
+                    # Filter to only dates before the reference date
+                    df_filtered = df[df.index.date < reference_date_only]
+                    if not df_filtered.empty:
+                        # Get the last row (most recent date before reference)
+                        latest_row = df_filtered.iloc[-1]
+                        prev_close = float(latest_row['close'])
+                        prev_date = df_filtered.index[-1].date() if hasattr(df_filtered.index[-1], 'date') else df_filtered.index[-1]
+                        
+                        if debug:
+                            print(f"DEBUG: {ticker} - Found previous close ${prev_close:.2f} for date {prev_date} (before reference date {reference_date_only})", file=sys.stderr)
+                        return prev_close
+                else:
+                    # If index is not DatetimeIndex, check if there's a 'date' column
+                    if 'date' in df.columns:
+                        df['date'] = pd.to_datetime(df['date'])
+                        df_filtered = df[df['date'].dt.date < reference_date_only]
+                        if not df_filtered.empty:
+                            latest_row = df_filtered.iloc[-1]
+                            prev_close = float(latest_row['close'])
+                            prev_date = latest_row['date'].date() if hasattr(latest_row['date'], 'date') else latest_row['date']
+                            
+                            if debug:
+                                print(f"DEBUG: {ticker} - Found previous close ${prev_close:.2f} for date {prev_date} (before reference date {reference_date_only})", file=sys.stderr)
+                            return prev_close
+        
+        if debug:
+            print(f"DEBUG: {ticker} - No previous close found before {reference_date_only}", file=sys.stderr)
+        return None
+    except Exception as e:
+        if debug:
+            print(f"DEBUG: {ticker} - Error getting previous close for date {reference_date}: {e}", file=sys.stderr)
+        return None
+
+
+async def _attach_price_data(
+    options_df: pd.DataFrame,
+    db,
+    ticker: str,
+    use_market_time: bool,
+    redis_client: Optional[Any] = None,
+    debug: bool = False
+) -> pd.DataFrame:
+    """Attach current price and price change data to options DataFrame."""
+    price_data = await db.get_latest_price_with_data(ticker, use_market_time=use_market_time)
+    if not price_data or not price_data.get('price'):
+        return pd.DataFrame()
+    
+    current_price = price_data['price']
+    price_timestamp = price_data.get('timestamp')
+    price_source = price_data.get('source', 'unknown')
+    options_df = options_df.copy()
+    options_df['current_price'] = current_price
+    
+    # Get previous close price based on the current price's date
+    # If market is open: compare realtime price to previous close
+    # If market is closed: compare current close price to previous close (day before current price's date)
+    prev_close = None
+    if price_timestamp:
+        # Use the current price's timestamp to get the previous close
+        if isinstance(price_timestamp, pd.Timestamp):
+            prev_close = await _get_previous_close_for_date(db, ticker, price_timestamp, debug=debug)
+        else:
+            # Convert to Timestamp if needed
+            try:
+                ts = pd.to_datetime(price_timestamp, utc=True)
+                prev_close = await _get_previous_close_for_date(db, ticker, ts, debug=debug)
+            except Exception as e:
+                if debug:
+                    print(f"DEBUG: {ticker} - Could not parse timestamp {price_timestamp}: {e}", file=sys.stderr)
+    
+    # Fallback to standard method if we couldn't get previous close based on date
+    if prev_close is None:
+        prev_close_prices = await db.get_previous_close_prices([ticker])
+        prev_close = prev_close_prices.get(ticker) if prev_close_prices else None
+    
+    if debug:
+        prev_close_str = f"{prev_close:.2f}" if prev_close is not None else "None"
+        print(f"DEBUG: {ticker} - current_price=${current_price:.2f}, prev_close=${prev_close_str}, source={price_source}, timestamp={price_timestamp}", file=sys.stderr)
+        if prev_close is None:
+            print(f"DEBUG: {ticker} - WARNING: prev_close is None, cannot calculate price change", file=sys.stderr)
+        elif prev_close <= 0:
+            print(f"DEBUG: {ticker} - WARNING: prev_close={prev_close} is <= 0, cannot calculate price change", file=sys.stderr)
+        elif abs(current_price - prev_close) < 0.01:
+            print(f"DEBUG: {ticker} - WARNING: current_price ({current_price:.2f}) equals prev_close ({prev_close:.2f}), change will be 0", file=sys.stderr)
+    
+    # Format price with change
+    price_with_change, price_change_pct = _format_price_with_change(current_price, prev_close)
+    options_df['price_with_change'] = price_with_change
+    options_df['price_change_pct'] = price_change_pct
+    
+    # Fetch latest option timestamp (with Redis caching)
+    latest_opt_ts = await _fetch_latest_option_timestamp_standalone(db, ticker, redis_client=redis_client, debug=debug)
+    options_df['latest_opt_ts'] = latest_opt_ts
+    
+    # Filter out rows without price
+    options_df = options_df[options_df['current_price'].notna()].copy()
+    
+    return options_df
+
+
+def _format_age_seconds(x: Any) -> Optional[str]:
+    """Format age in seconds as a readable string."""
+    if pd.isna(x) or x is None:
+        return None
+    try:
+        # If it's already a Timestamp (shouldn't happen, but handle it), convert to age
+        if isinstance(x, pd.Timestamp):
+            from datetime import datetime, timezone
+            now_utc = datetime.now(timezone.utc)
+            if x.tz is None:
+                x = x.tz_localize('UTC')
+            else:
+                x = x.tz_convert('UTC')
+            x_dt = x.to_pydatetime()
+            age_sec = (now_utc - x_dt).total_seconds()
+        elif isinstance(x, str):
+            # If it's a string, try to parse as float
+            age_sec = float(x)
+        else:
+            # It should be a float (age in seconds)
+            age_sec = float(x)
+        
+        if age_sec < 0:
+            return None
+        # Format as seconds with 1 decimal place
+        return f"{age_sec:.1f}"
+    except (ValueError, TypeError, AttributeError):
+        # If conversion fails, return as string representation
+        return str(x) if x is not None else None
+
+
+def _normalize_expiration_date_for_display(x: Any) -> pd.Timestamp:
+    """Normalize expiration date to UTC for display."""
+    if pd.isna(x):
+        return pd.NaT
+    if isinstance(x, pd.Timestamp):
+        dt = x
+    else:
+        dt = pd.to_datetime(x, errors='coerce')
+        if pd.isna(dt):
+            return pd.NaT
+    if dt.tz is None:
+        dt = dt.tz_localize('UTC')
+    else:
+        dt = dt.tz_convert('UTC')
+    return dt
+
+
+def _normalize_timestamp_for_display(x: Any) -> pd.Timestamp:
+    """Normalize timestamp to America/New_York for display."""
+    if pd.isna(x):
+        return pd.NaT
+    if isinstance(x, pd.Timestamp):
+        dt = x
+    else:
+        dt = pd.to_datetime(x, errors='coerce')
+        if pd.isna(dt):
+            return pd.NaT
+    if dt.tz is None:
+        dt = dt.tz_localize('UTC')
+    else:
+        dt = dt.tz_convert('UTC')
+    return dt.tz_convert('America/New_York')
+
+
+def _format_dataframe_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """Format DataFrame columns for table display (currency, percentages, etc.)."""
+    df = df.copy()
+    
+    # Format currency columns
+    currency_cols = ['current_price', 'strike_price', 'price_above_current', 'option_premium', 
+                     'potential_premium', 'daily_premium', 'long_strike_price', 'long_option_premium', 
+                     'premium_diff', 'short_premium_total', 'short_daily_premium', 'long_premium_total', 
+                     'net_premium', 'net_daily_premium']
+    for col in currency_cols:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+    
+    # Format numeric columns
+    numeric_cols = ['pe_ratio', 'market_cap_b']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+    
+    # Format percentage columns
+    pct_cols = ['option_premium_percentage', 'premium_above_diff_percentage']
+    for col in pct_cols:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
+    
+    # Format implied volatility columns (convert from decimal to percentage)
+    iv_cols = ['implied_volatility', 'long_implied_volatility']
+    for col in iv_cols:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: f"{x * 100:.2f}%" if pd.notna(x) else "N/A")
+    
+    # Format integer columns
+    if 'long_contracts_available' in df.columns:
+        df['long_contracts_available'] = df['long_contracts_available'].apply(
+            lambda x: f"{int(x)}" if pd.notna(x) else "N/A"
+        )
+    
+    return df
+
+
+def _normalize_and_select_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize timestamps and select output columns."""
+    df = df.copy()
+    
+    # Round numeric columns
+    for col in ['bid', 'ask', 'delta', 'theta']:
+        if col in df.columns:
+            df[col] = df[col].round(2)
+    
+    if 'implied_volatility' in df.columns:
+        df['implied_volatility'] = df['implied_volatility'].round(4)
+    
+    # Normalize timestamp columns
+    for ts_col in ['last_quote_timestamp', 'write_timestamp']:
+        if ts_col in df.columns:
+            df[ts_col] = df[ts_col].apply(_normalize_timestamp_to_utc)
+    
+    output_cols = [
+        'ticker', 'current_price', 'price_with_change', 'price_change_pct', 'strike_price', 'price_above_current',
+        'option_premium', 'bid_ask', 'implied_volatility', 'delta', 'theta', 'volume', 'num_contracts',
+        'potential_premium', 'daily_premium', 'expiration_date', 'days_to_expiry',
+        'last_quote_timestamp', 'option_ticker', 'latest_opt_ts'
+    ]
+    available_cols = [c for c in output_cols if c in df.columns]
+    return df[available_cols].copy()
+
+
+# Wrapper to use module-level cache
+async def _fetch_latest_option_timestamp_standalone(
+    db,
+    ticker: str,
+    cache: Optional[Dict[str, pd.Timestamp]] = None,
+    redis_client: Optional[Any] = None,
+    debug: bool = False
+) -> Optional[float]:
+    """
+    Standalone function to fetch latest option write timestamp for a single ticker.
+    Returns the age in seconds (difference between now and the timestamp).
+    Can be used in multiprocessing workers or regular code paths.
+    
+    Args:
+        db: Database connection object (must have execute_select_sql method)
+        ticker: Ticker symbol to fetch timestamp for
+        cache: Optional dictionary to use/update as cache (defaults to module-level cache)
+        redis_client: Optional Redis client for timestamp caching
+        debug: Whether to print debug messages
+        
+    Returns:
+        Age in seconds since the latest write timestamp (float), or None if no timestamp found
+    """
+    # Use provided cache or module-level cache
+    if cache is None:
+        cache = _timestamp_cache_per_process
+    
+    return await common_fetch_latest_option_timestamp_standalone(db, ticker, cache, redis_client=redis_client, debug=debug)
+
+
+# Alias for backward compatibility
+_black_scholes_call_standalone = black_scholes_call
+
+
+def _process_ticker_analysis(args_tuple):
+    """
+    Process a single ticker's options analysis end-to-end in a separate process.
+    This includes: fetching options, filtering, price attachment, metric calculation, and filter application.
+    
+    Args:
+        args_tuple: Tuple containing all parameters needed for analysis:
+            - ticker: Ticker symbol
+            - db_config: Database connection string
+            - start_date: Start date for expiration filtering
+            - end_date: End date for expiration filtering
+            - timestamp_lookback_days: Days to look back for timestamp data
+            - position_size: Position size in dollars
+            - days_to_expiry: Optional days to expiry filter
+            - min_volume: Minimum volume filter
+            - min_premium: Minimum premium filter
+            - min_write_timestamp: Optional minimum write timestamp
+            - use_market_time: Whether to use market hours logic
+            - filters: List of FilterExpression objects (must be picklable)
+            - filter_logic: 'AND' or 'OR'
+            - enable_cache: Whether caching is enabled
+            - redis_url: Redis URL for caching
+            - log_level: Logging level
+            - debug: Whether debug output is enabled
     
     Returns:
-        Call option price
+        Tuple of (DataFrame with processed results, error_message or None)
     """
-    if T <= 0:
-        # Option expired, intrinsic value only
-        return max(S - K, 0)
+    import asyncio
+    import sys
+    import os
+    import re
+    import math
+    import pandas as pd
+    from pathlib import Path
     
-    if sigma <= 0:
-        # No volatility, return intrinsic value
-        return max(S - K, 0)
+    # Unpack arguments
+    (ticker, db_config, start_date, end_date, timestamp_lookback_days,
+     position_size, days_to_expiry, min_volume, min_premium, min_write_timestamp,
+     use_market_time, filters, filter_logic, enable_cache, redis_url, log_level, debug) = args_tuple
     
-    # Calculate d1 and d2
-    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
-    d2 = d1 - sigma * math.sqrt(T)
+    # Get Redis client for timestamp caching in worker process
+    redis_client = None
+    if enable_cache and redis_url and REDIS_AVAILABLE:
+        redis_client = get_redis_client_for_refresh(redis_url)
     
-    # Calculate cumulative normal distribution
-    if SCIPY_AVAILABLE:
-        N_d1 = norm.cdf(d1)
-        N_d2 = norm.cdf(d2)
-    else:
-        # Fallback to basic normal CDF approximation
-        def norm_cdf(x):
-            """Approximate cumulative normal distribution."""
-            return 0.5 * (1 + math.erf(x / math.sqrt(2)))
-        N_d1 = norm_cdf(d1)
-        N_d2 = norm_cdf(d2)
+    # Re-import needed modules in worker process
+    _setup_worker_imports()
+    from common.stock_db import get_stock_db
+    FilterParser, FilterExpression = _import_filter_classes()
     
-    # Black-Scholes formula for call option
-    call_price = S * N_d1 - K * math.exp(-r * T) * N_d2
+    async def _async_process():
+        # Create database connection in worker process
+        db = get_stock_db('questdb', db_config=db_config, enable_cache=enable_cache, 
+                        redis_url=redis_url, log_level=log_level)
+        
+        try:
+            # Use database as async context manager
+            async with db:
+                # Fetch options data for this ticker
+                if debug:
+                    print(f"DEBUG [PID {os.getpid()}]: Processing ticker {ticker}", file=sys.stderr)
+                
+                # Use single-process batch method with just one ticker
+                options_df = await db.get_latest_options_data_batch(
+                    tickers=[ticker],
+                    start_datetime=start_date,
+                    end_datetime=end_date,
+                    max_concurrent=1,
+                    batch_size=1,
+                    timestamp_lookback_days=timestamp_lookback_days
+                )
+                
+                if options_df.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: No options data for {ticker}", file=sys.stderr)
+                    return pd.DataFrame(), None
+                
+                # Ensure ticker column exists
+                options_df = _ensure_ticker_column(options_df)
+                
+                # Filter for call options
+                if 'option_type' in options_df.columns:
+                    options_df = options_df[options_df['option_type'] == 'call'].copy()
+                
+                if options_df.empty:
+                    return pd.DataFrame(), None
+                
+                # Attach price data
+                options_df = await _attach_price_data(options_df, db, ticker, use_market_time, redis_client=redis_client, debug=debug)
+                if options_df.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: No price data for {ticker}", file=sys.stderr)
+                    return pd.DataFrame(), None
+                
+                # Calculate metrics
+                df = _calculate_option_metrics(options_df, position_size, days_to_expiry)
+                if df.empty:
+                    return pd.DataFrame(), None
+                
+                # Apply basic filters
+                df = _apply_basic_filters(df, min_volume, min_premium, min_write_timestamp)
+                
+                # Apply custom filters if provided
+                if filters:
+                    df = FilterParser.apply_filters(df, filters, filter_logic)
+                
+                if df.empty:
+                    return pd.DataFrame(), None
+                
+                # Normalize and select columns
+                df = _normalize_and_select_columns(df)
+                
+                if debug:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} processed - {len(df)} options", file=sys.stderr)
+                
+                return df, None
+                
+        except Exception as e:
+            error_msg = f"Error processing {ticker}: {str(e)}"
+            if debug:
+                import traceback
+                print(f"DEBUG [PID {os.getpid()}]: {error_msg}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+            return pd.DataFrame(), error_msg
     
-    return max(call_price, 0)  # Ensure non-negative
+    # Run async function in worker process
+    return asyncio.run(_async_process())
+
+
+def _process_ticker_spread_analysis(args_tuple):
+    """
+    Process a single ticker's spread analysis end-to-end in a separate process.
+    This includes: fetching short-term options, processing them, fetching long-term options,
+    matching them, and calculating spread metrics - all in one worker process.
+    
+    Args:
+        args_tuple: Tuple containing all parameters needed for spread analysis:
+            - ticker: Ticker symbol
+            - db_config: Database connection string
+            - start_date: Start date for short-term expiration filtering
+            - end_date: End date for short-term expiration filtering
+            - long_start_date: Start date for long-term expiration filtering
+            - long_end_date: End date for long-term expiration filtering
+            - timestamp_lookback_days: Days to look back for timestamp data
+            - position_size: Position size in dollars
+            - days_to_expiry: Optional days to expiry filter for short-term
+            - min_volume: Minimum volume filter
+            - min_premium: Minimum premium filter
+            - min_write_timestamp: Optional minimum write timestamp
+            - use_market_time: Whether to use market hours logic
+            - filters: List of FilterExpression objects
+            - filter_logic: 'AND' or 'OR'
+            - spread_strike_tolerance: Percentage tolerance for strike matching
+            - spread_long_days: Target days to expiry for long options
+            - risk_free_rate: Risk-free rate for Black-Scholes
+            - enable_cache: Whether caching is enabled
+            - redis_url: Redis URL for caching
+            - log_level: Logging level
+            - debug: Whether debug output is enabled
+    
+    Returns:
+        Tuple of (DataFrame with spread results, error_message or None)
+    """
+    import asyncio
+    import sys
+    import os
+    import re
+    import math
+    import pandas as pd
+    from pathlib import Path
+    
+    # Unpack arguments
+    (ticker, db_config, start_date, end_date, long_start_date, long_end_date,
+     timestamp_lookback_days, position_size, days_to_expiry, min_volume, min_premium,
+     min_write_timestamp, use_market_time, filters, filter_logic, spread_strike_tolerance,
+     spread_long_days, risk_free_rate, enable_cache, redis_url, log_level, debug) = args_tuple
+    
+    # Get Redis client for timestamp caching in worker process
+    redis_client = None
+    if enable_cache and redis_url and REDIS_AVAILABLE:
+        redis_client = get_redis_client_for_refresh(redis_url)
+    
+    # Re-import needed modules in worker process
+    _setup_worker_imports()
+    from common.stock_db import get_stock_db
+    FilterParser, FilterExpression = _import_filter_classes()
+    
+    async def _async_process():
+        # Create database connection in worker process
+        db = get_stock_db('questdb', db_config=db_config, enable_cache=enable_cache, 
+                        redis_url=redis_url, log_level=log_level)
+        
+        try:
+            # Use database as async context manager
+            async with db:
+                if debug:
+                    print(f"DEBUG [PID {os.getpid()}]: Processing spread analysis for ticker {ticker}", file=sys.stderr)
+                
+                # ===== STEP 1: Fetch and process short-term options =====
+                if debug:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - Fetching short-term options (date range: {start_date} to {end_date})", file=sys.stderr)
+                short_options_df = await db.get_latest_options_data_batch(
+                    tickers=[ticker],
+                    start_datetime=start_date,
+                    end_datetime=end_date,
+                    max_concurrent=1,
+                    batch_size=1,
+                    timestamp_lookback_days=timestamp_lookback_days
+                )
+                
+                if debug:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - Fetched {len(short_options_df)} short-term options from DB", file=sys.stderr)
+                
+                if short_options_df.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - No short-term options found in DB", file=sys.stderr)
+                    return pd.DataFrame(), None
+                
+                # Ensure ticker column exists
+                short_options_df = _ensure_ticker_column(short_options_df)
+                
+                # Filter for call options
+                before_call_filter = len(short_options_df)
+                if 'option_type' in short_options_df.columns:
+                    short_options_df = short_options_df[short_options_df['option_type'] == 'call'].copy()
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - After call filter: {len(short_options_df)} options (was {before_call_filter})", file=sys.stderr)
+                
+                if short_options_df.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - No call options after filtering", file=sys.stderr)
+                    return pd.DataFrame(), None
+                
+                # Attach price data
+                before_price_filter = len(short_options_df)
+                short_options_df = await _attach_price_data(short_options_df, db, ticker, use_market_time, redis_client=redis_client, debug=debug)
+                if debug and not short_options_df.empty:
+                    current_price = short_options_df['current_price'].iloc[0] if 'current_price' in short_options_df.columns else None
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - After price filter: {len(short_options_df)} options (was {before_price_filter}), current_price=${current_price:.2f}" if current_price else f"DEBUG [PID {os.getpid()}]: {ticker} - After price filter: {len(short_options_df)} options (was {before_price_filter})", file=sys.stderr)
+                
+                if short_options_df.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - No options after price filter", file=sys.stderr)
+                    return pd.DataFrame(), None
+                
+                # Process short-term options
+                if debug:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - Processing {len(short_options_df)} short-term options", file=sys.stderr)
+                df_short = _calculate_option_metrics(short_options_df, position_size, days_to_expiry)
+                
+                if days_to_expiry is not None and not df_short.empty:
+                    before_days_filter = len(df_short)
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - After days_to_expiry filter ({days_to_expiry}): {len(df_short)} options (was {before_days_filter})", file=sys.stderr)
+                        if not df_short.empty:
+                            print(f"DEBUG [PID {os.getpid()}]: {ticker} - Short-term days_to_expiry range: {df_short['days_to_expiry'].min()} to {df_short['days_to_expiry'].max()}", file=sys.stderr)
+                
+                if df_short.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - No options after days_to_expiry filter", file=sys.stderr)
+                    return pd.DataFrame(), None
+                
+                # Apply basic filters with debug logging
+                before_volume_filter = len(df_short)
+                df_short = _apply_basic_filters(df_short, min_volume, min_premium, min_write_timestamp)
+                if debug and min_volume > 0 and before_volume_filter != len(df_short):
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - After min_volume filter ({min_volume}): {len(df_short)} options (was {before_volume_filter})", file=sys.stderr)
+                if debug and min_premium > 0.0 and before_volume_filter != len(df_short):
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - After min_premium filter (${min_premium}): {len(df_short)} options", file=sys.stderr)
+                
+                # Split filters into short-term filters (apply before matching) and spread filters (apply after matching)
+                # Spread-only columns: long_*, premium_diff, net_premium, net_daily_premium, short_premium_total, long_premium_total
+                spread_only_columns = {'long_strike_price', 'long_option_premium', 'long_days_to_expiry', 'long_delta', 
+                                      'long_theta', 'long_expiration_date', 'long_option_ticker', 'long_volume', 
+                                      'long_implied_volatility', 'premium_diff', 'net_premium', 'net_daily_premium',
+                                      'short_premium_total', 'long_premium_total', 'short_daily_premium'}
+                
+                short_term_filters = []
+                spread_filters = []
+                
+                if filters:
+                    import re
+                    for f in filters:
+                        # Extract field names from filter
+                        field_expr = f.field_expression if f.field_expression else f.field
+                        # Check if filter references any spread-only columns
+                        field_names = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', str(field_expr))
+                        if f.is_field_comparison and f.value:
+                            field_names.append(str(f.value))
+                        
+                        is_spread_filter = any(col in spread_only_columns for col in field_names)
+                        if is_spread_filter:
+                            spread_filters.append(f)
+                        else:
+                            short_term_filters.append(f)
+                
+                # Apply short-term filters before matching
+                if short_term_filters:
+                    before_custom_filters = len(df_short)
+                    df_short = FilterParser.apply_filters(df_short, short_term_filters, filter_logic)
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - After short-term filters ({len(short_term_filters)} filters, logic={filter_logic}): {len(df_short)} options (was {before_custom_filters})", file=sys.stderr)
+                        if short_term_filters:
+                            filter_strs = [str(f) for f in short_term_filters]
+                            print(f"DEBUG [PID {os.getpid()}]: {ticker} - Short-term filters: {filter_strs}", file=sys.stderr)
+                
+                if spread_filters and debug:
+                    filter_strs = [str(f) for f in spread_filters]
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - Spread filters (will apply after matching): {filter_strs}", file=sys.stderr)
+                
+                if df_short.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - No short-term options remaining after all filters", file=sys.stderr)
+                    return pd.DataFrame(), None
+                
+                if debug:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - Short-term options summary: {len(df_short)} options", file=sys.stderr)
+                    if not df_short.empty:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - Short-term strike range: ${df_short['strike_price'].min():.2f} to ${df_short['strike_price'].max():.2f}", file=sys.stderr)
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - Short-term days_to_expiry range: {df_short['days_to_expiry'].min()} to {df_short['days_to_expiry'].max()}", file=sys.stderr)
+                
+                # ===== STEP 2: Fetch and prepare long-term options =====
+                # Use larger timestamp lookback for long-term options
+                long_timestamp_lookback = max(timestamp_lookback_days, 180)
+                
+                if debug:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - Fetching long-term options (date range: {long_start_date} to {long_end_date})", file=sys.stderr)
+                long_options_df = await db.get_latest_options_data_batch(
+                    tickers=[ticker],
+                    start_datetime=long_start_date,
+                    end_datetime=long_end_date,
+                    max_concurrent=1,
+                    batch_size=1,
+                    timestamp_lookback_days=long_timestamp_lookback
+                )
+                
+                if debug:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - Fetched {len(long_options_df)} long-term options from DB", file=sys.stderr)
+                
+                if long_options_df.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - No long-term options found in DB", file=sys.stderr)
+                    return pd.DataFrame(), None
+                
+                # Ensure ticker column exists
+                long_options_df = _ensure_ticker_column(long_options_df)
+                
+                # Filter for call options
+                before_long_call_filter = len(long_options_df)
+                if 'option_type' in long_options_df.columns:
+                    long_options_df = long_options_df[long_options_df['option_type'] == 'call'].copy()
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - After long call filter: {len(long_options_df)} options (was {before_long_call_filter})", file=sys.stderr)
+                
+                if long_options_df.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - No long-term call options after filtering", file=sys.stderr)
+                    return pd.DataFrame(), None
+                
+                # Apply write timestamp filter
+                if min_write_timestamp:
+                    before_long_write_ts_filter = len(long_options_df)
+                    long_options_df = _apply_basic_filters(long_options_df, 0, 0.0, min_write_timestamp)
+                    if debug and before_long_write_ts_filter != len(long_options_df):
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - After long min_write_timestamp filter: {len(long_options_df)} options (was {before_long_write_ts_filter})", file=sys.stderr)
+                
+                # Normalize implied_volatility
+                if 'implied_volatility' in long_options_df.columns:
+                    long_options_df['implied_volatility'] = pd.to_numeric(long_options_df['implied_volatility'], errors='coerce').round(4)
+                else:
+                    long_options_df['implied_volatility'] = pd.Series([float('nan')] * len(long_options_df), index=long_options_df.index)
+                
+                # Calculate days to expiry for long options
+                long_options_df['expiration_date'] = long_options_df['expiration_date'].apply(_normalize_to_utc)
+                today = pd.Timestamp.now(tz='UTC').normalize()
+                long_options_df['days_to_expiry'] = long_options_df['expiration_date'].apply(lambda x: _safe_days_calc(x, today))
+                
+                if debug:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - Long-term options summary: {len(long_options_df)} options", file=sys.stderr)
+                    if not long_options_df.empty:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - Long-term strike range: ${long_options_df['strike_price'].min():.2f} to ${long_options_df['strike_price'].max():.2f}", file=sys.stderr)
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - Long-term days_to_expiry range: {long_options_df['days_to_expiry'].min()} to {long_options_df['days_to_expiry'].max()}", file=sys.stderr)
+                
+                if long_options_df.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - No long-term options remaining after filters", file=sys.stderr)
+                    return pd.DataFrame(), None
+                
+                # ===== STEP 3: Match short-term with long-term options =====
+                if debug:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - Starting spread matching: {len(df_short)} short options vs {len(long_options_df)} long options", file=sys.stderr)
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - Spread parameters: strike_tolerance={spread_strike_tolerance}%, long_days={spread_long_days}", file=sys.stderr)
+                
+                # Convert to dictionaries for matching
+                short_rows_list = [row.to_dict() for _, row in df_short.iterrows()]
+                long_options_dict = {ticker: [row.to_dict() for _, row in long_options_df.iterrows()]}
+                
+                if debug:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - Converted to dicts: {len(short_rows_list)} short rows, {len(long_options_dict.get(ticker, []))} long rows", file=sys.stderr)
+                
+                # Process each short option match
+                spread_results = []
+                matches_checked = 0
+                for short_row_dict in short_rows_list:
+                    matches_checked += 1
+                    result = _process_spread_match((
+                        short_row_dict,
+                        long_options_dict,
+                        spread_strike_tolerance,
+                        spread_long_days,
+                        position_size,
+                        risk_free_rate,
+                        debug
+                    ))
+                    if result is not None:
+                        spread_results.append(result)
+                        if debug and len(spread_results) <= 5:  # Log first 5 matches
+                            print(f"DEBUG [PID {os.getpid()}]: {ticker} - Found match #{len(spread_results)}: short_strike=${short_row_dict.get('strike_price', 'N/A')}, long_strike=${result.get('long_strike_price', 'N/A')}", file=sys.stderr)
+                
+                if debug:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - Spread matching complete: checked {matches_checked} short options, found {len(spread_results)} matches", file=sys.stderr)
+                
+                if not spread_results:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - No spread matches found. Possible reasons:", file=sys.stderr)
+                        print(f"DEBUG [PID {os.getpid()}]:   - Strike prices don't overlap (short range: ${df_short['strike_price'].min():.2f}-${df_short['strike_price'].max():.2f}, long range: ${long_options_df['strike_price'].min():.2f}-${long_options_df['strike_price'].max():.2f})", file=sys.stderr)
+                        print(f"DEBUG [PID {os.getpid()}]:   - Strike tolerance ({spread_strike_tolerance}%) too strict", file=sys.stderr)
+                        print(f"DEBUG [PID {os.getpid()}]:   - Long options not in target days range ({spread_long_days} days)", file=sys.stderr)
+                    return pd.DataFrame(), None
+                
+                # Convert to DataFrame
+                df_spread = pd.DataFrame(spread_results)
+                
+                if debug:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - Created spread DataFrame with {len(df_spread)} matches", file=sys.stderr)
+                
+                # Apply spread filters after matching
+                if not df_spread.empty and spread_filters:
+                    before_spread_filters = len(df_spread)
+                    df_spread = FilterParser.apply_filters(df_spread, spread_filters, filter_logic)
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - After spread filters ({len(spread_filters)} filters, logic={filter_logic}): {len(df_spread)} matches (was {before_spread_filters})", file=sys.stderr)
+                        if df_spread.empty:
+                            print(f"DEBUG [PID {os.getpid()}]: {ticker} - All spread matches filtered out by spread filters", file=sys.stderr)
+                
+                if df_spread.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - No spread results after all filters", file=sys.stderr)
+                    return pd.DataFrame(), None
+                
+                if debug:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} processed - {len(df_spread)} spread matches", file=sys.stderr)
+                
+                return df_spread, None
+                
+        except Exception as e:
+            error_msg = f"Error processing spread analysis for {ticker}: {str(e)}"
+            if debug:
+                import traceback
+                print(f"DEBUG [PID {os.getpid()}]: {error_msg}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+            return pd.DataFrame(), error_msg
+    
+    # Run async function in worker process
+    return asyncio.run(_async_process())
 
 
 def _process_spread_match(args_tuple):
@@ -508,6 +1494,9 @@ def _process_spread_match(args_tuple):
     Returns:
         Dictionary with spread result row, or None if no match found
     """
+    # Import common function in worker process
+    from common.common import black_scholes_call
+    
     short_row_dict, long_options_dict, spread_strike_tolerance, spread_long_days, position_size, risk_free_rate, debug = args_tuple
     
     ticker = short_row_dict['ticker']
@@ -569,39 +1558,8 @@ def _process_spread_match(args_tuple):
     
     best_long = matching_long.iloc[0].to_dict()
     
-    # Calculate long option premium (use mid-price (bid+ask)/2 if both available, else fallback to ask, bid, last price, or 0.01)
-    bid = best_long.get('bid')
-    ask = best_long.get('ask')
-    last_price = best_long.get('price')
-    long_strike_val = best_long.get('strike_price')
-    long_strike_str = f"{long_strike_val:.2f}" if pd.notna(long_strike_val) else "N/A"
-    long_ticker = best_long.get('ticker', 'UNKNOWN')
-    
-    # Use mid-price if both bid and ask are available
-    if pd.notna(bid) and pd.notna(ask):
-        long_premium = round((float(bid) + float(ask)) / 2.0, 2)
-        if debug:
-            print(f"DEBUG: {long_ticker} ${long_strike_str} LONG option_premium: mid-price = ({bid:.2f} + {ask:.2f}) / 2 = ${long_premium:.2f}", file=sys.stderr)
-    # Fallback to ask if available
-    elif pd.notna(ask):
-        long_premium = round(float(ask), 2)
-        if debug:
-            print(f"DEBUG: {long_ticker} ${long_strike_str} LONG option_premium: using ask = ${long_premium:.2f} (bid unavailable)", file=sys.stderr)
-    # Fallback to bid if available
-    elif pd.notna(bid):
-        long_premium = round(float(bid), 2)
-        if debug:
-            print(f"DEBUG: {long_ticker} ${long_strike_str} LONG option_premium: using bid = ${long_premium:.2f} (ask unavailable)", file=sys.stderr)
-    # Fallback to last price if available
-    elif pd.notna(last_price):
-        long_premium = round(float(last_price), 2)
-        if debug:
-            print(f"DEBUG: {long_ticker} ${long_strike_str} LONG option_premium: using last price = ${long_premium:.2f} (bid/ask unavailable)", file=sys.stderr)
-    # Default fallback
-    else:
-        long_premium = 0.01
-        if debug:
-            print(f"DEBUG: {long_ticker} ${long_strike_str} LONG option_premium: using default = $0.01 (no price data)", file=sys.stderr)
+    # Calculate long option premium using utility function
+    long_premium = _calculate_option_premium(pd.Series(best_long))
     
     long_iv = best_long.get('implied_volatility')
     if pd.notna(long_iv):
@@ -625,6 +1583,8 @@ def _process_spread_match(args_tuple):
         short_strike = short_row_dict.get('strike_price', 'N/A')
         short_days = short_row_dict.get('days_to_expiry', 0)
         long_days = int(best_long.get('days_to_expiry', 0))
+        long_strike_val = best_long.get('strike_price')
+        long_strike_str = f"{long_strike_val:.2f}" if pd.notna(long_strike_val) else "N/A"
         
         print(f"DEBUG: {ticker} SPREAD premium calculation:", file=sys.stderr)
         print(f"  position_size = ${position_size:,.2f}", file=sys.stderr)
@@ -670,7 +1630,7 @@ def _process_spread_match(args_tuple):
     long_option_value_at_short_expiry = 0.0
     if time_to_long_expiry_at_short_expiry > 0 and current_price:
         try:
-            long_option_value_at_short_expiry = _black_scholes_call_standalone(
+            long_option_value_at_short_expiry = black_scholes_call(
                 S=estimated_stock_price_at_short_expiry,
                 K=long_strike,
                 T=time_to_long_expiry_at_short_expiry,
@@ -737,32 +1697,13 @@ def _process_spread_match(args_tuple):
     else:
         long_contracts_available = None
     
-    # Format long bid:ask
-    long_bid_val = best_long.get('bid', 0) if pd.notna(best_long.get('bid')) else 0
-    long_ask_val = best_long.get('ask', 0) if pd.notna(best_long.get('ask')) else 0
-    if pd.notna(best_long.get('bid')) or pd.notna(best_long.get('ask')):
-        long_bid_ask = f"{long_bid_val:.2f}:{long_ask_val:.2f}"
-    else:
-        long_bid_ask = "N/A:N/A"
+    # Format long bid:ask using utility function
+    long_bid_ask = _format_bid_ask(pd.Series(best_long))
     
     # Create spread result row
     spread_row = short_row_dict.copy()
-    # Ensure long_expiration_date is properly normalized
-    long_exp_dt = best_long['expiration_date']
-    # Handle Timestamp objects (may come as Timestamp, string, or already normalized)
-    if isinstance(long_exp_dt, pd.Timestamp):
-        if long_exp_dt.tz is None:
-            long_exp_dt = long_exp_dt.tz_localize('UTC')
-        else:
-            long_exp_dt = long_exp_dt.tz_convert('UTC')
-    elif isinstance(long_exp_dt, (str, datetime)):
-        long_exp_dt = pd.to_datetime(long_exp_dt)
-        if long_exp_dt.tz is None:
-            long_exp_dt = long_exp_dt.tz_localize('UTC')
-        else:
-            long_exp_dt = long_exp_dt.tz_convert('UTC')
-    elif long_exp_dt is None or pd.isna(long_exp_dt):
-        long_exp_dt = pd.NaT
+    # Ensure long_expiration_date is properly normalized using utility function
+    long_exp_dt = _normalize_to_utc(best_long.get('expiration_date'))
     
     spread_row.update({
         'num_contracts': num_contracts,  # Override with spread-based calculation
@@ -800,6 +1741,8 @@ class OptionsAnalyzer:
         self.redis_url = redis_url
         self.db = None
         self.risk_free_rate = risk_free_rate  # Annual risk-free rate (default 5%)
+        self._timestamp_cache: Dict[str, pd.Timestamp] = {}  # Cache for latest option timestamps per ticker
+        self._redis_client = None  # Redis client for timestamp caching
     
     def _should_log(self, level: str) -> bool:
         """Check if a log level should be printed based on current log_level setting."""
@@ -813,59 +1756,44 @@ class OptionsAnalyzer:
         if self._should_log(level):
             print(message, file=file)
     
+    async def _fetch_latest_option_timestamps(
+        self,
+        tickers: List[str],
+        cache: Optional[Dict[str, pd.Timestamp]] = None
+    ) -> Dict[str, Optional[float]]:
+        """
+        Fetch latest option write timestamps for multiple tickers.
+        Returns ages in seconds (difference between now and the timestamp).
+        
+        Args:
+            tickers: List of ticker symbols to fetch timestamps for
+            cache: Optional dictionary to use/update as cache (avoids duplicate fetches)
+            
+        Returns:
+            Dictionary mapping ticker -> age in seconds (float) or None if no timestamp found
+        """
+        # Use instance cache if no cache provided
+        if cache is None:
+            cache = self._timestamp_cache
+        
+        # Fetch ages for all tickers using the standalone function (it handles caching internally)
+        result: Dict[str, Optional[float]] = {}
+        for ticker in tickers:
+            age_seconds = await _fetch_latest_option_timestamp_standalone(
+                self.db, ticker, cache=cache, redis_client=self._redis_client, debug=self.debug
+            )
+            result[ticker] = age_seconds
+        
+        return result
+    
     @staticmethod
     def _extract_ticker_from_option_ticker(option_ticker):
         """Extract ticker symbol from option_ticker (e.g., 'AAPL250117C00150000' -> 'AAPL')."""
-        if pd.isna(option_ticker):
-            return None
-        option_ticker_str = str(option_ticker)
-        # Remove "O:" prefix if present
-        if option_ticker_str.startswith("O:"):
-            option_ticker_str = option_ticker_str[2:]
-        # Extract ticker (first 1-5 uppercase letters before the date)
-        match = re.match(r'^([A-Z]{1,5})', option_ticker_str)
-        if match:
-            return match.group(1)
-        return None
+        return _extract_ticker_from_option_ticker(option_ticker)
     
     def _black_scholes_call(self, S: float, K: float, T: float, r: float, sigma: float) -> float:
-        """
-        Calculate Black-Scholes call option price.
-        
-        Args:
-            S: Current stock price
-            K: Strike price
-            T: Time to expiration (in years)
-            r: Risk-free rate (annual)
-            sigma: Implied volatility (annual)
-        
-        Returns:
-            Call option price
-        """
-        if T <= 0:
-            # Option expired, intrinsic value only
-            return max(S - K, 0)
-        
-        if sigma <= 0:
-            # No volatility, return intrinsic value
-            return max(S - K, 0)
-        
-        # Calculate d1 and d2
-        d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
-        d2 = d1 - sigma * math.sqrt(T)
-        
-        # Calculate cumulative normal distribution
-        if SCIPY_AVAILABLE:
-            N_d1 = norm.cdf(d1)
-            N_d2 = norm.cdf(d2)
-        else:
-            N_d1 = norm_cdf(d1)
-            N_d2 = norm_cdf(d2)
-        
-        # Black-Scholes formula for call option
-        call_price = S * N_d1 - K * math.exp(-r * T) * N_d2
-        
-        return max(call_price, 0)  # Ensure non-negative
+        """Calculate Black-Scholes call option price (delegates to common function)."""
+        return black_scholes_call(S, K, T, r, sigma)
     
     def _create_compact_headers(self, df: pd.DataFrame) -> Dict[str, str]:
         """Create compact headers that are at most 4 characters longer than the data width."""
@@ -994,65 +1922,13 @@ class OptionsAnalyzer:
             self.db = get_stock_db('questdb', db_config=self.db_conn, enable_cache=self.enable_cache, redis_url=self.redis_url, log_level=self.log_level)
             cache_status = "enabled" if self.enable_cache else "disabled"
             self._log("INFO", f"Database connection established successfully (cache: {cache_status}).")
+            
+            # Initialize Redis client for timestamp caching
+            if self.enable_cache and self.redis_url and REDIS_AVAILABLE:
+                self._redis_client = get_redis_client_for_refresh(self.redis_url)
         except Exception as e:
             print(f"Error connecting to database: {e}", file=sys.stderr)
             sys.exit(1)
-    
-    async def get_available_tickers(self) -> List[str]:
-        """Get all available tickers from the daily_prices table."""
-        try:
-            if self.debug:
-                print("DEBUG: Checking daily_prices table for available tickers", file=sys.stderr)
-            # First, let's check if the table exists and has data
-            check_query = """
-            SELECT COUNT(*) as row_count 
-            FROM daily_prices
-            """
-            count_df = await self.db.execute_select_sql(check_query)
-            
-            if not count_df.empty:
-                # QuestDB might return the count in different column names
-                row_count = None
-                for col in count_df.columns:
-                    col_str = str(col).lower()
-                    if 'count' in col_str or col == 0:  # QuestDB sometimes returns as column 0
-                        row_count = count_df.iloc[0][col]
-                        break
-                
-                if row_count is not None:
-                    self._log("INFO", f"Found {row_count} rows in daily_prices table")
-                    
-                    if row_count == 0:
-                        self._log("WARNING", "daily_prices table is empty")
-                        return []
-                else:
-                    self._log("WARNING", f"Could not determine row count. Columns: {list(count_df.columns)}")
-            
-            # Now get the distinct tickers
-            query = """
-            SELECT DISTINCT ticker 
-            FROM daily_prices 
-            ORDER BY ticker
-            """
-            df = await self.db.execute_select_sql(query)
-            
-            if df.empty:
-                self._log("WARNING", "No tickers found in daily_prices table")
-                return []
-            
-            # QuestDB might return columns as integers (0, 1, 2, etc.)
-            # The first column should be the ticker
-            if len(df.columns) > 0:
-                ticker_col = df.columns[0]  # First column should be ticker
-                tickers = df[ticker_col].tolist()
-                self._log("INFO", f"Found {len(tickers)} unique tickers")
-                return tickers
-            else:
-                self._log("WARNING", f"Unexpected column structure. Available columns: {list(df.columns)}")
-                return []
-        except Exception as e:
-            self._log("ERROR", f"Error fetching available tickers: {e}")
-            return []
     
     async def get_financial_info(self, tickers: List[str]) -> Dict[str, Dict[str, Any]]:
         """Get financial information (P/E, market_cap) for the given tickers."""
@@ -1099,6 +1975,203 @@ class OptionsAnalyzer:
                 }
         
         return financial_data
+    
+    async def _analyze_options_multiprocess(
+        self,
+        tickers_upper: List[str],
+        start_date: str,
+        end_date: Optional[str],
+        timestamp_lookback_days: int,
+        position_size: float,
+        days_to_expiry: Optional[int],
+        min_volume: int,
+        min_premium: float,
+        min_write_timestamp: Optional[str],
+        use_market_time: bool,
+        filters: Optional[List[FilterExpression]],
+        filter_logic: str,
+        max_workers: int
+    ) -> pd.DataFrame:
+        """
+        Analyze options using multiprocessing where each ticker is processed end-to-end in a separate process.
+        All processing (fetching, filtering, metrics, filters) happens in worker processes.
+        Main process only aggregates, sorts, and presents results.
+        """
+        from concurrent.futures import ProcessPoolExecutor
+        
+        self._log("INFO", f"Using multiprocessing mode: processing {len(tickers_upper)} tickers with {max_workers} workers")
+        self._log("INFO", "Each ticker will be processed end-to-end in a separate process (fetch, filter, metrics, filters)")
+        
+        # Prepare arguments for each ticker
+        process_args = []
+        for ticker in tickers_upper:
+            args = (
+                ticker,
+                self.db_conn,
+                start_date,
+                end_date,
+                timestamp_lookback_days,
+                position_size,
+                days_to_expiry,
+                min_volume,
+                min_premium,
+                min_write_timestamp,
+                use_market_time,
+                filters,  # FilterExpression objects should be picklable
+                filter_logic,
+                self.enable_cache,
+                self.redis_url,
+                self.log_level,
+                self.debug
+            )
+            process_args.append(args)
+        
+        # Execute in parallel using ProcessPoolExecutor
+        loop = asyncio.get_event_loop()
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                loop.run_in_executor(executor, _process_ticker_analysis, args)
+                for args in process_args
+            ]
+            results = await asyncio.gather(*futures, return_exceptions=True)
+        
+        # Collect results and handle errors
+        dfs = []
+        errors = []
+        for i, result in enumerate(results):
+            ticker = tickers_upper[i]
+            if isinstance(result, Exception):
+                error_msg = f"Error processing {ticker}: {result}"
+                errors.append(error_msg)
+                self._log("ERROR", error_msg)
+                if self.debug:
+                    import traceback
+                    traceback.print_exc()
+            elif isinstance(result, tuple) and len(result) == 2:
+                df, error = result
+                if error:
+                    errors.append(error)
+                    self._log("WARNING", error)
+                if not df.empty:
+                    dfs.append(df)
+            else:
+                self._log("WARNING", f"Unexpected result type for {ticker}: {type(result)}")
+        
+        if errors and self.debug:
+            self._log("INFO", f"Encountered {len(errors)} error(s) during processing")
+        
+        # Concatenate all results
+        if not dfs:
+            self._log("INFO", "No results from any ticker")
+            return pd.DataFrame()
+        
+        combined_df = pd.concat(dfs, ignore_index=True)
+        self._log("INFO", f"Combined results from {len(dfs)} tickers: {len(combined_df)} total options")
+        
+        return combined_df
+    
+    async def _analyze_spread_multiprocess(
+        self,
+        tickers_upper: List[str],
+        start_date: str,
+        end_date: Optional[str],
+        long_start_date: str,
+        long_end_date: str,
+        timestamp_lookback_days: int,
+        position_size: float,
+        days_to_expiry: Optional[int],
+        min_volume: int,
+        min_premium: float,
+        min_write_timestamp: Optional[str],
+        use_market_time: bool,
+        filters: Optional[List[FilterExpression]],
+        filter_logic: str,
+        spread_strike_tolerance: float,
+        spread_long_days: int,
+        max_workers: int
+    ) -> pd.DataFrame:
+        """
+        Analyze spread options using multiprocessing where each ticker is processed end-to-end in a separate process.
+        All processing (fetching short-term, processing short-term, fetching long-term, matching, spread calculations)
+        happens in worker processes. Main process only aggregates results.
+        """
+        from concurrent.futures import ProcessPoolExecutor
+        
+        self._log("INFO", f"Using multiprocessing mode for spread analysis: processing {len(tickers_upper)} tickers with {max_workers} workers")
+        self._log("INFO", "Each ticker will be processed end-to-end in a separate process (short-term fetch/process, long-term fetch, matching, spread calculations)")
+        
+        # Prepare arguments for each ticker
+        process_args = []
+        for ticker in tickers_upper:
+            args = (
+                ticker,
+                self.db_conn,
+                start_date,
+                end_date,
+                long_start_date,
+                long_end_date,
+                timestamp_lookback_days,
+                position_size,
+                days_to_expiry,
+                min_volume,
+                min_premium,
+                min_write_timestamp,
+                use_market_time,
+                filters,
+                filter_logic,
+                spread_strike_tolerance,
+                spread_long_days,
+                self.risk_free_rate,
+                self.enable_cache,
+                self.redis_url,
+                self.log_level,
+                self.debug
+            )
+            process_args.append(args)
+        
+        # Execute in parallel using ProcessPoolExecutor
+        loop = asyncio.get_event_loop()
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                loop.run_in_executor(executor, _process_ticker_spread_analysis, args)
+                for args in process_args
+            ]
+            results = await asyncio.gather(*futures, return_exceptions=True)
+        
+        # Collect results and handle errors
+        dfs = []
+        errors = []
+        for i, result in enumerate(results):
+            ticker = tickers_upper[i]
+            if isinstance(result, Exception):
+                error_msg = f"Error processing spread analysis for {ticker}: {result}"
+                errors.append(error_msg)
+                self._log("ERROR", error_msg)
+                if self.debug:
+                    import traceback
+                    traceback.print_exc()
+            elif isinstance(result, tuple) and len(result) == 2:
+                df, error = result
+                if error:
+                    errors.append(error)
+                    self._log("WARNING", error)
+                if not df.empty:
+                    dfs.append(df)
+            else:
+                self._log("WARNING", f"Unexpected result type for {ticker}: {type(result)}")
+        
+        if errors and self.debug:
+            self._log("INFO", f"Encountered {len(errors)} error(s) during spread processing")
+        
+        # Concatenate all results
+        if not dfs:
+            self._log("INFO", "No spread results from any ticker")
+            return pd.DataFrame()
+        
+        combined_df = pd.concat(dfs, ignore_index=True)
+        self._log("INFO", f"Combined spread results from {len(dfs)} tickers: {len(combined_df)} total spread opportunities")
+        
+        return combined_df
     
     async def analyze_options(
         self,
@@ -1173,6 +2246,49 @@ class OptionsAnalyzer:
         
         # Use memory-efficient batch fetching instead of single large query
         try:
+            # If using multiprocessing, process each ticker in a separate process
+            if max_workers > 1:
+                if spread_mode:
+                    # Calculate long-term date range for spread mode
+                    long_start_date, long_end_date = self._calculate_long_options_date_range(
+                        spread_long_days, spread_long_days_tolerance, spread_long_min_days
+                    )
+                    return await self._analyze_spread_multiprocess(
+                        tickers_upper=tickers_upper,
+                        start_date=start_date,
+                        end_date=end_date,
+                        long_start_date=long_start_date,
+                        long_end_date=long_end_date,
+                        timestamp_lookback_days=timestamp_lookback_days,
+                        position_size=position_size,
+                        days_to_expiry=days_to_expiry,
+                        min_volume=min_volume,
+                        min_premium=min_premium,
+                        min_write_timestamp=min_write_timestamp,
+                        use_market_time=use_market_time,
+                        filters=filters,
+                        filter_logic=filter_logic,
+                        spread_strike_tolerance=spread_strike_tolerance,
+                        spread_long_days=spread_long_days,
+                        max_workers=max_workers
+                    )
+                else:
+                    return await self._analyze_options_multiprocess(
+                        tickers_upper=tickers_upper,
+                        start_date=start_date,
+                        end_date=end_date,
+                        timestamp_lookback_days=timestamp_lookback_days,
+                        position_size=position_size,
+                        days_to_expiry=days_to_expiry,
+                        min_volume=min_volume,
+                        min_premium=min_premium,
+                        min_write_timestamp=min_write_timestamp,
+                        use_market_time=use_market_time,
+                        filters=filters,
+                        filter_logic=filter_logic,
+                        max_workers=max_workers
+                    )
+            
             # 1) Fetch options universe (combined short and long if spread mode, otherwise just short)
             long_options_df = None
             if spread_mode:
@@ -1432,10 +2548,12 @@ class OptionsAnalyzer:
         self,
         options_df: pd.DataFrame,
         tickers_upper: List[str],
-        use_market_time: bool
+        use_market_time: bool,
+        timestamp_cache: Optional[Dict[str, pd.Timestamp]] = None
     ) -> pd.DataFrame:
         stock_prices: Dict[str, float] = {}
         price_sources: Dict[str, str] = {}
+        price_timestamps: Dict[str, Any] = {}
 
         async def fetch_price_for_ticker(ticker):
             try:
@@ -1443,6 +2561,7 @@ class OptionsAnalyzer:
                 if price_data and price_data.get('price'):
                     price = price_data['price']
                     source = price_data.get('source', 'unknown')
+                    timestamp = price_data.get('timestamp')
                     if self.debug:
                         if source == 'realtime':
                             market_status = "OPEN (using latest realtime price)"
@@ -1453,28 +2572,69 @@ class OptionsAnalyzer:
                         else:
                             market_status = f"UNKNOWN (source: {source})"
                         print(f"DEBUG: {ticker}: ${price:.2f} from {source} - Market {market_status}", file=sys.stderr)
-                    return ticker, price, source
-                return ticker, None, None
+                    return ticker, price, source, timestamp
+                return ticker, None, None, None
             except Exception as e:
                 self._log("WARNING", f"Could not fetch price for {ticker}: {e}")
-                return ticker, None, None
+                return ticker, None, None, None
 
         price_tasks = [fetch_price_for_ticker(ticker) for ticker in tickers_upper]
         price_results = await asyncio.gather(*price_tasks)
-        for ticker, price, source in price_results:
+        for ticker, price, source, timestamp in price_results:
             if price is not None:
                 stock_prices[ticker] = price
                 price_sources[ticker] = source
+                if timestamp is not None:
+                    price_timestamps[ticker] = timestamp
 
-        # Fetch previous close prices for price change calculation
+        # Fetch previous close prices based on each ticker's current price date
+        # If market is open: compare realtime price to previous close
+        # If market is closed: compare current close price to previous close (day before current price's date)
         prev_close_prices: Dict[str, float] = {}
         try:
-            prev_close_prices = await self.db.get_previous_close_prices(list(stock_prices.keys()))
+            # First, try to get previous close based on each ticker's price timestamp
+            for ticker in stock_prices.keys():
+                timestamp = price_timestamps.get(ticker)
+                if timestamp:
+                    try:
+                        if isinstance(timestamp, pd.Timestamp):
+                            prev_close = await _get_previous_close_for_date(self.db, ticker, timestamp, debug=self.debug)
+                        else:
+                            ts = pd.to_datetime(timestamp, utc=True)
+                            prev_close = await _get_previous_close_for_date(self.db, ticker, ts, debug=self.debug)
+                        if prev_close is not None:
+                            prev_close_prices[ticker] = prev_close
+                    except Exception as e:
+                        if self.debug:
+                            print(f"DEBUG: {ticker} - Error getting previous close for date: {e}", file=sys.stderr)
+            
+            # Fallback: for any tickers we couldn't get previous close for, use standard method
+            missing_tickers = [t for t in stock_prices.keys() if t not in prev_close_prices]
+            if missing_tickers:
+                fallback_prev_closes = await self.db.get_previous_close_prices(missing_tickers)
+                prev_close_prices.update(fallback_prev_closes)
+            
             if self.debug:
                 print(f"DEBUG: Fetched previous close prices for {len(prev_close_prices)} tickers", file=sys.stderr)
+                # Debug each ticker's prices
+                for ticker in list(stock_prices.keys())[:5]:  # Show first 5 for debugging
+                    current = stock_prices.get(ticker)
+                    prev = prev_close_prices.get(ticker)
+                    timestamp = price_timestamps.get(ticker)
+                    if current and prev:
+                        change = current - prev
+                        change_pct = (change / prev) * 100 if prev > 0 else 0
+                        print(f"DEBUG: {ticker} - current=${current:.2f}, prev_close=${prev:.2f}, change=${change:.2f} ({change_pct:.2f}%), timestamp={timestamp}", file=sys.stderr)
+                    elif current:
+                        print(f"DEBUG: {ticker} - current=${current:.2f}, prev_close=None (cannot calculate change), timestamp={timestamp}", file=sys.stderr)
         except Exception as e:
             if self.debug:
                 print(f"DEBUG: Could not fetch previous close prices: {e}", file=sys.stderr)
+
+        # Fetch latest option timestamps for each ticker (same as refresh check)
+        # Use the reusable method with caching (use instance cache if no cache provided)
+        cache_to_use = timestamp_cache if timestamp_cache is not None else self._timestamp_cache
+        latest_opt_timestamps = await self._fetch_latest_option_timestamps(list(stock_prices.keys()), cache=cache_to_use)
 
         self._log("INFO", f"Fetched stock prices for {len(stock_prices)}/{len(tickers_upper)} tickers")
         if self.debug:
@@ -1497,30 +2657,18 @@ class OptionsAnalyzer:
             self._log("ERROR", f"DataFrame missing 'ticker' column. Available columns: {list(df.columns)}")
             return pd.DataFrame()
         df['current_price'] = df['ticker'].map(stock_prices)
+        df['latest_opt_ts'] = df['ticker'].map(latest_opt_timestamps)
         
-        # Calculate price change and format as single column
+        # Calculate price change and format as single column using helper function
         # Store percentage change separately for sorting
-        def format_price_with_change(row):
+        def format_price_with_change_wrapper(row):
             ticker = row['ticker']
             current = row['current_price']
             prev_close = prev_close_prices.get(ticker) if prev_close_prices else None
-            
-            if pd.isna(current) or current is None:
-                return None, None
-            
-            if prev_close is None or pd.isna(prev_close) or prev_close <= 0:
-                return f"${current:.2f}", None
-            
-            change = current - prev_close
-            change_pct = (change / prev_close) * 100
-            
-            if change >= 0:
-                return f"+${change:.2f} (+{change_pct:.2f}%)", change_pct
-            else:
-                return f"-${abs(change):.2f} ({change_pct:.2f}%)", change_pct
+            return _format_price_with_change(current, prev_close)
         
         # Apply formatting and store both display value and sort value
-        result = df.apply(format_price_with_change, axis=1, result_type='expand')
+        result = df.apply(format_price_with_change_wrapper, axis=1, result_type='expand')
         df['price_with_change'] = result[0]
         df['price_change_pct'] = result[1]  # Store percentage for sorting
         
@@ -1540,171 +2688,29 @@ class OptionsAnalyzer:
         min_premium: float,
         min_write_timestamp: Optional[str]
     ) -> pd.DataFrame:
-        df = df.copy()
-        df['strike_price'] = df['strike_price'].round(2)
-        df['price_above_current'] = (df['strike_price'] - df['current_price']).round(2)
+        """Derive metrics and apply filters for short options (uses helper functions)."""
+        # Use helper function to calculate metrics
+        df = _calculate_option_metrics(df, position_size, days_to_expiry)
         
-        def _calculate_option_premium(row):
-            """Calculate option premium using mid-price (bid+ask)/2 if both available, else fallback to ask, bid, last price, or 0.01"""
-            ticker = row.get('ticker', 'UNKNOWN')
-            strike = row.get('strike_price', 'N/A')
-            bid = row.get('bid')
-            ask = row.get('ask')
-            last_price = row.get('price')
-            
-            # Use mid-price if both bid and ask are available
-            if pd.notna(bid) and pd.notna(ask):
-                premium = round((float(bid) + float(ask)) / 2.0, 2)
-                if self.debug:
-                    print(f"DEBUG: {ticker} ${strike:.2f} option_premium: mid-price = ({bid:.2f} + {ask:.2f}) / 2 = ${premium:.2f}", file=sys.stderr)
-                return premium
-            # Fallback to ask if available
-            elif pd.notna(ask):
-                premium = round(float(ask), 2)
-                if self.debug:
-                    print(f"DEBUG: {ticker} ${strike:.2f} option_premium: using ask = ${premium:.2f} (bid unavailable)", file=sys.stderr)
-                return premium
-            # Fallback to bid if available
-            elif pd.notna(bid):
-                premium = round(float(bid), 2)
-                if self.debug:
-                    print(f"DEBUG: {ticker} ${strike:.2f} option_premium: using bid = ${premium:.2f} (ask unavailable)", file=sys.stderr)
-                return premium
-            # Fallback to last price if available
-            elif pd.notna(last_price):
-                premium = round(float(last_price), 2)
-                if self.debug:
-                    print(f"DEBUG: {ticker} ${strike:.2f} option_premium: using last price = ${premium:.2f} (bid/ask unavailable)", file=sys.stderr)
-                return premium
-            # Default fallback
-            else:
-                if self.debug:
-                    print(f"DEBUG: {ticker} ${strike:.2f} option_premium: using default = $0.01 (no price data)", file=sys.stderr)
-                return 0.01
-        
-        df['option_premium'] = df.apply(_calculate_option_premium, axis=1)
-        def _format_bid_ask(row):
-            bid_val = row.get('bid', 0) if pd.notna(row.get('bid')) else 0
-            ask_val = row.get('ask', 0) if pd.notna(row.get('ask')) else 0
-            if pd.notna(row.get('bid')) or pd.notna(row.get('ask')):
-                return f"{bid_val:.2f}:{ask_val:.2f}"
-            return "N/A:N/A"
-        df['bid_ask'] = df.apply(_format_bid_ask, axis=1)
-
-        def _normalize_to_utc(x):
-            if pd.isna(x):
-                return pd.NaT
-            if isinstance(x, pd.Timestamp):
-                dt = x
-            else:
-                dt = pd.to_datetime(x, errors='coerce', utc=True)
-                if pd.isna(dt):
-                    return pd.NaT
-            # Ensure timezone-aware UTC
-            if dt.tz is None:
-                dt = dt.tz_localize('UTC')
-            else:
-                dt = dt.tz_convert('UTC')
-            return dt
-        df['expiration_date'] = df['expiration_date'].apply(_normalize_to_utc)
-        today = pd.Timestamp.now(tz='UTC').normalize()
-        # Ensure both are timezone-aware before subtraction
-        # Handle NaT values and ensure consistent timezone
-        def safe_days_calc(exp_date, today_ref):
-            if pd.isna(exp_date):
-                return 0
-            # Ensure both are timezone-aware Timestamps
-            if isinstance(exp_date, pd.Timestamp):
-                if exp_date.tz is None:
-                    exp_date = exp_date.tz_localize('UTC')
-                else:
-                    exp_date = exp_date.tz_convert('UTC')
-            else:
-                exp_date = pd.to_datetime(exp_date, utc=True)
-            return int((exp_date - today_ref).total_seconds() / 86400)
-        df['days_to_expiry'] = df['expiration_date'].apply(lambda x: safe_days_calc(x, today))
-
-        if 'implied_volatility' in df.columns:
-            df['implied_volatility'] = pd.to_numeric(df['implied_volatility'], errors='coerce').round(4)
-        else:
-            df['implied_volatility'] = pd.Series([float('nan')] * len(df), index=df.index)
-
-        if days_to_expiry is not None:
+        if days_to_expiry is not None and not df.empty:
             before_days_filter = len(df)
-            df = df[
-                (df['days_to_expiry'] >= days_to_expiry - 1) &
-                (df['days_to_expiry'] <= days_to_expiry + 1)
-            ]
             self._log("INFO", f"After days_to_expiry filter ({days_to_expiry}): {len(df)} options (was {before_days_filter})")
             if self.debug:
                 print(f"DEBUG: After days_to_expiry filter ({days_to_expiry}): {len(df)} options (was {before_days_filter})", file=sys.stderr)
 
-        df['num_contracts'] = df.apply(
-            lambda row: 0 if pd.isna(row.get('current_price')) or row.get('current_price') <= 0 else math.floor(position_size / (row.get('current_price') * 100)),
-            axis=1
-        )
-        
-        # Debug output for premium calculations
-        if self.debug:
-            for idx, row in df.iterrows():
-                ticker = row.get('ticker', 'UNKNOWN')
-                strike = row.get('strike_price', 'N/A')
-                current_price = row.get('current_price', 0)
-                option_premium = row.get('option_premium', 0)
-                num_contracts = row.get('num_contracts', 0)
-                days_to_expiry = row.get('days_to_expiry', 0)
-                
-                print(f"DEBUG: {ticker} ${strike:.2f} premium calculation:", file=sys.stderr)
-                print(f"  position_size = ${position_size:,.2f}", file=sys.stderr)
-                print(f"  current_price = ${current_price:.2f}", file=sys.stderr)
-                print(f"  num_contracts = floor({position_size:,.2f} / (${current_price:.2f} * 100)) = floor({position_size:,.2f} / ${current_price * 100:.2f}) = {num_contracts}", file=sys.stderr)
-                print(f"  option_premium = ${option_premium:.2f}", file=sys.stderr)
-        
-        df['potential_premium'] = (df['num_contracts'] * (df['option_premium'] * 100)).round(2)
-        
-        if self.debug:
-            for idx, row in df.iterrows():
-                ticker = row.get('ticker', 'UNKNOWN')
-                strike = row.get('strike_price', 'N/A')
-                num_contracts = row.get('num_contracts', 0)
-                option_premium = row.get('option_premium', 0)
-                potential_premium = row.get('potential_premium', 0)
-                days_to_expiry = row.get('days_to_expiry', 0)
-                
-                print(f"  potential_premium = {num_contracts} * ${option_premium:.2f} * 100 = ${potential_premium:,.2f}", file=sys.stderr)
-        
-        df['daily_premium'] = df.apply(
-            lambda row: 0 if row['days_to_expiry'] <= 0 else round(row['potential_premium'] / row['days_to_expiry'], 2),
-            axis=1
-        )
-        
-        if self.debug:
-            for idx, row in df.iterrows():
-                ticker = row.get('ticker', 'UNKNOWN')
-                strike = row.get('strike_price', 'N/A')
-                potential_premium = row.get('potential_premium', 0)
-                days_to_expiry = row.get('days_to_expiry', 0)
-                daily_premium = row.get('daily_premium', 0)
-                
-                if days_to_expiry > 0:
-                    print(f"  daily_premium = ${potential_premium:,.2f} / {days_to_expiry} days = ${daily_premium:.2f}", file=sys.stderr)
-                else:
-                    print(f"  daily_premium = $0.00 (days_to_expiry <= 0)", file=sys.stderr)
-                print("", file=sys.stderr)  # Empty line for readability
-
-        if min_volume > 0:
+        # Apply basic filters using helper function
             before_volume_filter = len(df)
-            df = df[df['volume'] >= min_volume]
+        df = _apply_basic_filters(df, min_volume, min_premium, min_write_timestamp)
+        
+        if min_volume > 0 and before_volume_filter != len(df):
             self._log("INFO", f"After min_volume filter ({min_volume}): {len(df)} options (was {before_volume_filter})")
             if self.debug:
                 print(f"DEBUG: After min_volume filter ({min_volume}): {len(df)} options (was {before_volume_filter})", file=sys.stderr)
 
-        if min_premium > 0.0:
-            before_premium_filter = len(df)
-            df = df[df['potential_premium'] >= min_premium]
-            self._log("INFO", f"After min_premium filter ({min_premium}): {len(df)} options (was {before_premium_filter})")
+        if min_premium > 0.0 and before_volume_filter != len(df):
+            self._log("INFO", f"After min_premium filter ({min_premium}): {len(df)} options")
             if self.debug:
-                print(f"DEBUG: After min_premium filter ({min_premium}): {len(df)} options (was {before_premium_filter})", file=sys.stderr)
+                print(f"DEBUG: After min_premium filter ({min_premium}): {len(df)} options", file=sys.stderr)
 
         if min_write_timestamp:
             try:
@@ -1714,62 +2720,15 @@ class OptionsAnalyzer:
                 if min_ts.tz is None:
                     min_ts = est.localize(min_ts)
                 min_ts_utc = min_ts.astimezone(pytz.UTC)
-                if 'write_timestamp' in df.columns:
-                    def _normalize_write_timestamp(x):
-                        if pd.isna(x):
-                            return pd.NaT
-                        if isinstance(x, pd.Timestamp):
-                            dt = x
-                        else:
-                            dt = pd.to_datetime(x, errors='coerce')
-                            if pd.isna(dt):
-                                return pd.NaT
-                        if dt.tz is None:
-                            return dt.tz_localize('UTC')
-                        return dt.tz_convert('UTC')
-                    df['write_timestamp'] = df['write_timestamp'].apply(_normalize_write_timestamp)
-                    df = df[df['write_timestamp'] >= min_ts_utc]
-                    self._log("INFO", f"Filtered options to those written after {min_write_timestamp} EST ({min_ts_utc} UTC)")
+                self._log("INFO", f"Filtered options to those written after {min_write_timestamp} EST ({min_ts_utc} UTC)")
             except Exception as e:
                 self._log("WARNING", f"Could not apply write timestamp filter: {e}")
+        
         return df
 
     def _normalize_short_timestamps_and_select(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
-        for col in ['bid', 'ask', 'delta', 'theta']:
-            if col in df.columns:
-                df[col] = df[col].round(2)
-        if 'implied_volatility' in df.columns:
-            df['implied_volatility'] = df['implied_volatility'].round(4)
-
-        def _normalize_timestamp_to_utc(x):
-            if pd.isna(x):
-                return pd.NaT
-            if isinstance(x, pd.Timestamp):
-                dt = x
-            else:
-                dt = pd.to_datetime(x, errors='coerce', utc=True)
-                if pd.isna(dt):
-                    return pd.NaT
-            # Ensure timezone-aware UTC
-            if dt.tz is None:
-                dt = dt.tz_localize('UTC')
-            else:
-                dt = dt.tz_convert('UTC')
-            return dt
-
-        for ts_col in ['last_quote_timestamp', 'write_timestamp']:
-            if ts_col in df.columns:
-                df[ts_col] = df[ts_col].apply(_normalize_timestamp_to_utc)
-
-        output_cols = [
-            'ticker', 'current_price', 'price_with_change', 'price_change_pct', 'strike_price', 'price_above_current',
-            'option_premium', 'bid_ask', 'implied_volatility', 'delta', 'theta', 'volume', 'num_contracts',
-            'potential_premium', 'daily_premium', 'expiration_date', 'days_to_expiry',
-            'last_quote_timestamp', 'write_timestamp', 'option_ticker'
-        ]
-        available_cols = [c for c in output_cols if c in df.columns]
-        return df[available_cols]
+        """Normalize timestamps and select output columns (uses helper function)."""
+        return _normalize_and_select_columns(df)
     
     def _calculate_long_options_date_range(
         self,
@@ -2011,42 +2970,19 @@ class OptionsAnalyzer:
         
         # Apply write timestamp filter to long options if specified
         if min_write_timestamp and not long_options_df.empty:
-            try:
-                import pytz
-                est = pytz.timezone('America/New_York')
-                min_ts = pd.to_datetime(min_write_timestamp)
-                if min_ts.tz is None:
-                    min_ts = est.localize(min_ts)
-                min_ts_utc = min_ts.astimezone(pytz.UTC)
-                
-                if 'write_timestamp' in long_options_df.columns:
-                    long_options_df = long_options_df.copy()
-                    # Normalize write_timestamp to UTC, handling mixed timezone-aware/naive values
-                    def normalize_write_timestamp(x):
-                        if pd.isna(x):
-                            return pd.NaT
-                        if isinstance(x, pd.Timestamp):
-                            dt = x
-                        else:
-                            dt = pd.to_datetime(x, errors='coerce')
-                            if pd.isna(dt):
-                                return pd.NaT
-                        if dt.tz is None:
-                            return dt.tz_localize('UTC')
-                        else:
-                            return dt.tz_convert('UTC')
-                    
-                    long_options_df['write_timestamp'] = long_options_df['write_timestamp'].apply(normalize_write_timestamp)
-                    
-                    before_count = len(long_options_df)
-                    long_options_df = long_options_df[long_options_df['write_timestamp'] >= min_ts_utc].copy()
-                    after_count = len(long_options_df)
-                    
-                    self._log("INFO", f"Filtered long options by write timestamp: {before_count} -> {after_count} options")
-                    if self.debug:
-                        print(f"DEBUG: Applied write timestamp filter >= {min_ts_utc} UTC")
-            except Exception as e:
-                self._log("WARNING", f"Could not apply write timestamp filter to long options: {e}")
+            before_count = len(long_options_df)
+            long_options_df = _apply_basic_filters(long_options_df, 0, 0.0, min_write_timestamp)
+            after_count = len(long_options_df)
+            if before_count != after_count:
+                self._log("INFO", f"Filtered long options by write timestamp: {before_count} -> {after_count} options")
+                if self.debug:
+                    import pytz
+                    est = pytz.timezone('America/New_York')
+                    min_ts = pd.to_datetime(min_write_timestamp)
+                    if min_ts.tz is None:
+                        min_ts = est.localize(min_ts)
+                    min_ts_utc = min_ts.astimezone(pytz.UTC)
+                    print(f"DEBUG: Applied write timestamp filter >= {min_ts_utc} UTC")
         
         if long_options_df.empty:
             self._log("WARNING", "No long-term options found for spread analysis.")
@@ -2075,40 +3011,10 @@ class OptionsAnalyzer:
         else:
             long_options_df['implied_volatility'] = pd.Series([float('nan')] * len(long_options_df), index=long_options_df.index)
         
-        # Calculate days to expiry for long options
-        def normalize_to_utc(x):
-            if pd.isna(x):
-                return pd.NaT
-            if isinstance(x, pd.Timestamp):
-                dt = x
-            else:
-                dt = pd.to_datetime(x, errors='coerce', utc=True)
-                if pd.isna(dt):
-                    return pd.NaT
-            # Ensure timezone-aware UTC
-            if dt.tz is None:
-                dt = dt.tz_localize('UTC')
-            else:
-                dt = dt.tz_convert('UTC')
-            return dt
-        
-        long_options_df['expiration_date'] = long_options_df['expiration_date'].apply(normalize_to_utc)
+        # Calculate days to expiry for long options using utility functions
+        long_options_df['expiration_date'] = long_options_df['expiration_date'].apply(_normalize_to_utc)
         today_ts = pd.Timestamp.now(tz='UTC').normalize()
-        # Ensure both are timezone-aware before subtraction
-        # Handle NaT values and ensure consistent timezone
-        def safe_days_calc_long(exp_date, today_ref):
-            if pd.isna(exp_date):
-                return 0
-            # Ensure both are timezone-aware Timestamps
-            if isinstance(exp_date, pd.Timestamp):
-                if exp_date.tz is None:
-                    exp_date = exp_date.tz_localize('UTC')
-                else:
-                    exp_date = exp_date.tz_convert('UTC')
-            else:
-                exp_date = pd.to_datetime(exp_date, utc=True)
-            return int((exp_date - today_ref).total_seconds() / 86400)
-        long_options_df['days_to_expiry'] = long_options_df['expiration_date'].apply(lambda x: safe_days_calc_long(x, today_ts))
+        long_options_df['days_to_expiry'] = long_options_df['expiration_date'].apply(lambda x: _safe_days_calc(x, today_ts))
         
         if self.debug:
             print(f"DEBUG: Long options days to expiry range: {long_options_df['days_to_expiry'].min()} to {long_options_df['days_to_expiry'].max()}")
@@ -2374,55 +3280,20 @@ class OptionsAnalyzer:
             * 100
         ).round(2)
         
+        # Format latest_opt_ts FIRST as age in seconds (it's a float, not a timestamp)
+        # This must happen BEFORE any timestamp normalization to prevent conversion
+        if 'latest_opt_ts' in df_renamed.columns:
+            df_renamed['latest_opt_ts'] = df_renamed['latest_opt_ts'].apply(_format_age_seconds).astype(str)
+        
         # Convert timestamps to EST/EDT (America/New_York) for display, except expiration_date which should be UTC
         try:
-            # Handle expiration_date (UTC)
-            def normalize_expiration_date_for_display(x):
-                if pd.isna(x):
-                    return pd.NaT
-                # Convert to datetime if not already
-                if isinstance(x, pd.Timestamp):
-                    dt = x
-                else:
-                    dt = pd.to_datetime(x, errors='coerce')
-                    if pd.isna(dt):
-                        return pd.NaT
-                # Normalize to UTC
-                if dt.tz is None:
-                    dt = dt.tz_localize('UTC')
-                else:
-                    dt = dt.tz_convert('UTC')
-                return dt
-            
             if 'expiration_date' in df_renamed.columns:
-                # Apply normalization directly to avoid creating mixed Series
-                ser = df_renamed['expiration_date'].apply(normalize_expiration_date_for_display)
+                ser = df_renamed['expiration_date'].apply(_normalize_expiration_date_for_display)
                 df_renamed['expiration_date'] = ser.dt.strftime('%Y-%m-%d %H:%M:%S')
-
-            # Handle other timestamps in America/New_York
-            def normalize_timestamp_for_display(x):
-                if pd.isna(x):
-                    return pd.NaT
-                # Convert to datetime if not already
-                if isinstance(x, pd.Timestamp):
-                    dt = x
-                else:
-                    dt = pd.to_datetime(x, errors='coerce')
-                    if pd.isna(dt):
-                        return pd.NaT
-                # Normalize to UTC first, then convert to America/New_York
-                if dt.tz is None:
-                    dt = dt.tz_localize('UTC')
-                else:
-                    dt = dt.tz_convert('UTC')
-                # Convert to America/New_York for display
-                return dt.tz_convert('America/New_York')
             
             for ts_col in ['last_quote_timestamp', 'write_timestamp']:
                 if ts_col in df_renamed.columns:
-                    # Apply normalization directly to avoid creating mixed Series
-                    ser = df_renamed[ts_col].apply(normalize_timestamp_for_display)
-                    # Format as string for clean table output
+                    ser = df_renamed[ts_col].apply(_normalize_timestamp_for_display)
                     df_renamed[ts_col] = ser.dt.strftime('%Y-%m-%d %H:%M:%S')
         except Exception:
             # If conversion fails, leave as-is
@@ -2447,7 +3318,7 @@ class OptionsAnalyzer:
                 # Net spread calculations
                 'net_premium', 'net_daily_premium',
                 # Additional details
-                'volume', 'num_contracts', 'write_timestamp', 'option_ticker', 'long_option_ticker'
+                'volume', 'num_contracts', 'option_ticker', 'long_option_ticker', 'latest_opt_ts'
             ]
         else:
             display_columns = [
@@ -2455,8 +3326,8 @@ class OptionsAnalyzer:
                 'price_above_current', 'option_premium', 'bid_ask', 'premium_above_diff_percentage',
                 'implied_volatility', 'delta', 'theta',
                 'potential_premium', 'daily_premium', 'expiration_date', 'days_to_expiry',
-                #'volume', 'num_contracts', 'last_quote_timestamp', 'write_timestamp', 'option_ticker'
-                'volume', 'num_contracts', 'write_timestamp', 'option_ticker'
+                #'volume', 'num_contracts', 'last_quote_timestamp', 'option_ticker'
+                'volume', 'num_contracts', 'option_ticker', 'latest_opt_ts'
             ]
         
         # Only include columns that exist in the dataframe
@@ -2553,32 +3424,7 @@ class OptionsAnalyzer:
                 
                 if output_format == 'table':
                     # Format numeric columns for better display
-                    ticker_data_formatted = ticker_data.copy()
-                    for col in ['current_price', 'strike_price', 'price_above_current', 'option_premium', 'potential_premium', 'daily_premium', 
-                                'long_strike_price', 'long_option_premium', 'premium_diff', 'short_premium_total', 'short_daily_premium', 'long_premium_total', 'net_premium', 'net_daily_premium']:
-                        if col in ticker_data_formatted.columns:
-                            ticker_data_formatted[col] = ticker_data_formatted[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
-                    
-                    for col in ['pe_ratio', 'market_cap_b']:
-                        if col in ticker_data_formatted.columns:
-                            ticker_data_formatted[col] = ticker_data_formatted[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
-                    
-                    for col in ['option_premium_percentage']:
-                        if col in ticker_data_formatted.columns:
-                            ticker_data_formatted[col] = ticker_data_formatted[col].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
-                    
-                    for col in ['premium_above_diff_percentage']:
-                        if col in ticker_data_formatted.columns:
-                            ticker_data_formatted[col] = ticker_data_formatted[col].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
-
-                    for col in ['implied_volatility', 'long_implied_volatility']:
-                        if col in ticker_data_formatted.columns:
-                            ticker_data_formatted[col] = ticker_data_formatted[col].apply(lambda x: f"{x * 100:.2f}%" if pd.notna(x) else "N/A")
-
-                    if 'long_contracts_available' in ticker_data_formatted.columns:
-                        ticker_data_formatted['long_contracts_available'] = ticker_data_formatted['long_contracts_available'].apply(
-                            lambda x: f"{int(x)}" if pd.notna(x) else "N/A"
-                        )
+                    ticker_data_formatted = _format_dataframe_for_display(ticker_data)
                     
                     # Create compact headers and rename columns to ensure alignment
                     compact_headers = self._create_compact_headers(ticker_data_formatted)
@@ -2598,32 +3444,7 @@ class OptionsAnalyzer:
             # Overall ranking
             if output_format == 'table':
                 # Format numeric columns for better display
-                df_formatted = df_display.copy()
-                for col in ['current_price', 'strike_price', 'price_above_current', 'option_premium', 'potential_premium', 'daily_premium',
-                            'long_strike_price', 'long_option_premium', 'premium_diff', 'short_premium_total', 'short_daily_premium', 'long_premium_total', 'net_premium', 'net_daily_premium']:
-                    if col in df_formatted.columns:
-                        df_formatted[col] = df_formatted[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
-                
-                for col in ['pe_ratio', 'market_cap_b']:
-                    if col in df_formatted.columns:
-                        df_formatted[col] = df_formatted[col].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
-                
-                for col in ['option_premium_percentage']:
-                    if col in df_formatted.columns:
-                        df_formatted[col] = df_formatted[col].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
-                
-                for col in ['premium_above_diff_percentage']:
-                    if col in df_formatted.columns:
-                        df_formatted[col] = df_formatted[col].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
-
-                for col in ['implied_volatility', 'long_implied_volatility']:
-                    if col in df_formatted.columns:
-                        df_formatted[col] = df_formatted[col].apply(lambda x: f"{x * 100:.2f}%" if pd.notna(x) else "N/A")
-
-                if 'long_contracts_available' in df_formatted.columns:
-                    df_formatted['long_contracts_available'] = df_formatted['long_contracts_available'].apply(
-                        lambda x: f"{int(x)}" if pd.notna(x) else "N/A"
-                    )
+                df_formatted = _format_dataframe_for_display(df_display)
                 
                 # Create compact headers and rename columns to ensure alignment
                 compact_headers = self._create_compact_headers(df_formatted)
@@ -2654,6 +3475,13 @@ class OptionsAnalyzer:
 # Helper functions for main() - modularized for reusability
 # ============================================================================
 
+# Alias for backward compatibility
+_get_redis_client_for_refresh = get_redis_client_for_refresh
+_check_redis_refresh_pending = check_redis_refresh_pending
+_set_redis_refresh_pending = set_redis_refresh_pending
+_clear_redis_refresh_pending = clear_redis_refresh_pending
+
+
 def _build_analysis_args(args, tickers: List[str], filters: List[FilterExpression]) -> Dict[str, Any]:
     """Build arguments dictionary for analyze_options call. Reusable for both initial and refresh analysis."""
     return {
@@ -2683,92 +3511,41 @@ def _build_analysis_args(args, tickers: List[str], filters: List[FilterExpressio
 async def _check_tickers_for_refresh(
     analyzer: OptionsAnalyzer,
     tickers: List[str],
-    refresh_threshold_seconds: int
+    refresh_threshold_seconds: int,
+    redis_client: Optional[Any] = None,
+    timestamp_cache: Optional[Dict[str, pd.Timestamp]] = None,
+    min_write_timestamp: Optional[str] = None
 ) -> List[str]:
     """
     Check which tickers need refresh based on their latest write_timestamp.
+    Also includes tickers that don't meet the min_write_timestamp criteria.
     
+    Args:
+        analyzer: OptionsAnalyzer instance
+        tickers: List of ticker symbols to check
+        refresh_threshold_seconds: Age threshold in seconds for refresh
+        redis_client: Optional Redis client for deduplication
+        timestamp_cache: Optional cache dictionary to reuse previously fetched timestamps
+        min_write_timestamp: Optional minimum write timestamp (EST format) - tickers with data older than this will be refreshed
+        
     Returns:
         List of ticker symbols that need refresh
     """
-    tickers_to_refresh = []
-    now_utc = datetime.now(timezone.utc)
+    # Use analyzer's method to fetch timestamps
+    async def fetch_timestamps(tickers_list: List[str], cache: Optional[Dict]) -> Dict[str, Optional[float]]:
+        """Wrapper to use analyzer's timestamp fetching method."""
+        return await analyzer._fetch_latest_option_timestamps(tickers_list, cache=cache)
     
-    analyzer._log("INFO", f"\n=== Checking options data freshness for {len(tickers)} ticker(s) ===")
-    analyzer._log("INFO", f"Refresh threshold: {refresh_threshold_seconds} seconds")
-    
-    for ticker in tickers:
-        try:
-            query = f"""
-            SELECT MAX(write_timestamp) as max_write_timestamp
-            FROM options_data
-            WHERE ticker = '{ticker}'
-            """
-            
-            timestamp_df = await analyzer.db.execute_select_sql(query)
-            
-            if timestamp_df.empty:
-                # No data found, needs refresh
-                tickers_to_refresh.append(ticker)
-                analyzer._log("INFO", f"  {ticker}: No options data found - will refresh")
-            else:
-                # Get the max write_timestamp - try different column access methods
-                if 'max_write_timestamp' in timestamp_df.columns:
-                    max_write_ts = timestamp_df.iloc[0]['max_write_timestamp']
-                elif len(timestamp_df.columns) > 0:
-                    # Fallback: get first column value
-                    max_write_ts = timestamp_df.iloc[0].iloc[0]
-                else:
-                    max_write_ts = None
-                
-                # Check if the value is actually null/NaN
-                if pd.isna(max_write_ts) or max_write_ts is None:
-                    tickers_to_refresh.append(ticker)
-                    analyzer._log("INFO", f"  {ticker}: No valid write_timestamp found - will refresh")
-                    continue
-                
-                # Handle different timestamp formats
-                # QuestDB returns timezone-naive datetimes (stored as naive UTC)
-                if isinstance(max_write_ts, pd.Timestamp):
-                    max_write_dt = max_write_ts
-                elif isinstance(max_write_ts, str):
-                    max_write_dt = pd.to_datetime(max_write_ts)
-                else:
-                    max_write_dt = pd.to_datetime(max_write_ts)
-                
-                # Ensure timezone-aware (QuestDB stores as naive UTC, so localize to UTC)
-                if isinstance(max_write_dt, pd.Timestamp):
-                    if max_write_dt.tz is None:
-                        max_write_dt = max_write_dt.tz_localize('UTC')
-                    else:
-                        max_write_dt = max_write_dt.tz_convert('UTC')
-                    # Convert to timezone-aware datetime for comparison
-                    max_write_dt_aware = max_write_dt.to_pydatetime()
-                else:
-                    # It's a datetime object
-                    if max_write_dt.tzinfo is None:
-                        max_write_dt_aware = max_write_dt.replace(tzinfo=timezone.utc)
-                    else:
-                        max_write_dt_aware = max_write_dt.astimezone(timezone.utc)
-                
-                # Calculate age (both are now timezone-aware)
-                age_seconds = (now_utc - max_write_dt_aware).total_seconds()
-                age_minutes = age_seconds / 60
-                
-                # Always show the timestamp details at INFO level
-                analyzer._log("INFO", f"  {ticker}: Latest write_timestamp: {max_write_dt_aware.strftime('%Y-%m-%d %H:%M:%S')} UTC, Current time: {now_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC, Age: {age_minutes:.1f} minutes ({age_seconds:.0f}s)")
-                
-                if age_seconds > refresh_threshold_seconds:
-                    tickers_to_refresh.append(ticker)
-                    analyzer._log("INFO", f"  {ticker}: Data is {age_minutes:.1f} minutes old (>{refresh_threshold_seconds}s threshold) - will refresh")
-                else:
-                    analyzer._log("INFO", f"  {ticker}: Data is {age_minutes:.1f} minutes old (<={refresh_threshold_seconds}s threshold) - skipping refresh")
-        except Exception as e:
-            # On error, include ticker to be safe
-            tickers_to_refresh.append(ticker)
-            analyzer._log("WARNING", f"  {ticker}: Error checking timestamp ({e}) - will refresh")
-    
-    return tickers_to_refresh
+    return await common_check_tickers_for_refresh(
+        db=analyzer.db,
+        tickers=tickers,
+        refresh_threshold_seconds=refresh_threshold_seconds,
+        fetch_timestamp_func=fetch_timestamps,
+        redis_client=redis_client,
+        timestamp_cache=timestamp_cache,
+        min_write_timestamp=min_write_timestamp,
+        debug=analyzer.debug
+    )
 
 
 def _calculate_refresh_date_ranges(
@@ -2779,6 +3556,7 @@ def _calculate_refresh_date_ranges(
 ) -> Tuple[str, Optional[str], int]:
     """
     Calculate date ranges and max_days for refresh fetch.
+    For refresh, we always use 30 days max expiration.
     
     Returns:
         Tuple of (short_start_date, max_end_date, combined_max_days)
@@ -2811,42 +3589,149 @@ def _calculate_refresh_date_ranges(
         else:
             max_end_date = long_end_date
     
-    # Calculate max_days_to_expiry for combined window
-    # If spread mode, we'll fetch all options in one go covering both short and long term ranges
-    if args.spread and long_end_date:
-        # Use the maximum range that covers both short and long term
-        short_end_dt = datetime.strptime(short_end_date, '%Y-%m-%d').date() if short_end_date else None
-        long_end_dt = datetime.strptime(long_end_date, '%Y-%m-%d').date()
-        short_start_dt = datetime.strptime(short_start_date, '%Y-%m-%d').date()
-        long_start_dt = datetime.strptime(long_start_date, '%Y-%m-%d').date()
-        
-        # Find the overall min and max dates
-        all_dates = [short_start_dt, long_start_dt]
-        if short_end_dt:
-            all_dates.append(short_end_dt)
-        all_dates.append(long_end_dt)
-        
-        overall_min = min(all_dates)
-        overall_max = max(all_dates)
-        
-        days_to_max = (overall_max - today_date).days
-        days_from_min = (today_date - overall_min).days
-        combined_max_days = max(days_to_max, days_from_min, 0) + 1
-    else:
-        # Not in spread mode, use short-term range only
-        if args.max_days:
-            combined_max_days = args.max_days
-        elif short_end_date:
-            end_dt = datetime.strptime(short_end_date, '%Y-%m-%d').date()
-            start_dt = datetime.strptime(short_start_date, '%Y-%m-%d').date()
-            days_to_end = (end_dt - today_date).days
-            days_from_start = (today_date - start_dt).days
-            combined_max_days = max(days_to_end, days_from_start, 0) + 1
-        else:
-            # Default to 30 days if no end date specified
-            combined_max_days = 30
+    # For refresh, always use 30 days max expiration
+    combined_max_days = 30
     
     return short_start_date, max_end_date, combined_max_days
+
+
+def _process_refresh_batch(args_tuple):
+    """
+    Process a batch of tickers for refresh in a separate process.
+    
+    Args:
+        args_tuple: Tuple containing:
+            - tickers: List of ticker symbols to refresh
+            - db_conn: Database connection string
+            - api_key: Polygon API key
+            - data_dir: Data directory
+            - today_str: Today's date string
+            - enable_cache: Whether caching is enabled
+            - redis_url: Redis URL for caching
+            - log_level: Logging level
+            - debug: Whether debug output is enabled
+    
+    Returns:
+        List of result dictionaries, one per ticker
+    """
+    import asyncio
+    import sys
+    import os
+    import pandas as pd
+    from pathlib import Path
+    
+    # Unpack arguments
+    (tickers, db_conn, api_key, data_dir, today_str, enable_cache, redis_url, log_level, debug) = args_tuple
+    
+    # Re-import needed modules in worker process
+    CURRENT_DIR = Path(__file__).resolve().parent
+    PROJECT_ROOT = CURRENT_DIR.parent
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    
+    from common.stock_db import get_stock_db
+    from common.common import get_redis_client_for_refresh, set_redis_last_write_timestamp, REDIS_AVAILABLE
+    from scripts.fetch_options import HistoricalDataFetcher
+    
+    async def _async_process():
+        # Get process ID for logging
+        import multiprocessing
+        process_id = os.getpid()
+        try:
+            process_name = multiprocessing.current_process().name
+        except:
+            process_name = 'unknown'
+        ticker_list = ', '.join(tickers)
+        print(f"INFO [PID {process_id}, Process: {process_name}]: Starting refresh batch - Processing {len(tickers)} ticker(s): {ticker_list}", file=sys.stderr)
+        
+        # Create database connection in worker process
+        db = get_stock_db('questdb', db_config=db_conn, enable_cache=enable_cache, 
+                        redis_url=redis_url, log_level=log_level)
+        
+        # Create fetcher instance
+        fetcher = HistoricalDataFetcher(
+            api_key,
+            data_dir,
+            quiet=True,  # Suppress fetch_options progress in workers
+            snapshot_max_concurrent=0
+        )
+        
+        results = []
+        
+        try:
+            async with db:
+                for ticker in tickers:
+                    try:
+                        # Get stock price for the ticker
+                        stock_result = await fetcher.get_stock_price_for_date(ticker, today_str)
+                        stock_close_price = stock_result['data'].get('close') if stock_result.get('success') else None
+                        
+                        # Fetch options - always use 30 days max expiration for refresh
+                        options_result = await fetcher.get_active_options_for_date(
+                            symbol=ticker,
+                            target_date_str=today_str,
+                            option_type='call',
+                            stock_close_price=stock_close_price,
+                            strike_range_percent=None,
+                            max_days_to_expiry=30,  # Always use 30 days for refresh
+                            include_expired=False,
+                            use_cache=False,
+                            save_to_csv=False,
+                            use_db=False,
+                            db_conn=None,
+                            force_fresh=True,
+                            enable_cache=enable_cache,
+                            redis_url=redis_url
+                        )
+                        
+                        if options_result.get('success'):
+                            contracts = options_result['data'].get('contracts', [])
+                            if contracts:
+                                # Convert contracts to DataFrame and save to database
+                                contracts_df = pd.DataFrame.from_records(contracts)
+                                if not contracts_df.empty:
+                                    # Map columns to match DB schema
+                                    if 'ticker' in contracts_df.columns and 'option_ticker' not in contracts_df.columns:
+                                        contracts_df = contracts_df.rename(columns={'ticker': 'option_ticker'})
+                                    
+                                    column_mapping = {
+                                        'expiration': 'expiration_date',
+                                        'strike': 'strike_price',
+                                        'type': 'option_type',
+                                    }
+                                    for old_name, new_name in column_mapping.items():
+                                        if old_name in contracts_df.columns:
+                                            contracts_df = contracts_df.rename(columns={old_name: new_name})
+                                    
+                                    # Save to database
+                                    await db.save_options_data(df=contracts_df, ticker=ticker)
+                                    
+                                    # Update Redis cache with the current timestamp
+                                    if enable_cache and redis_url:
+                                        redis_client = get_redis_client_for_refresh(redis_url) if redis_url else None
+                                        if redis_client:
+                                            from datetime import datetime, timezone
+                                            now_utc = datetime.now(timezone.utc)
+                                            set_redis_last_write_timestamp(redis_client, ticker, now_utc, ttl_seconds=86400)
+                            
+                            results.append({'ticker': ticker, 'success': True, 'contracts': len(contracts)})
+                        else:
+                            results.append({'ticker': ticker, 'success': False, 'error': options_result.get('error', 'Unknown error')})
+                    except Exception as e:
+                        results.append({'ticker': ticker, 'success': False, 'error': str(e)})
+        except Exception as e:
+            # If database connection fails, return errors for all tickers
+            for ticker in tickers:
+                results.append({'ticker': ticker, 'success': False, 'error': f"Database error: {str(e)}"})
+        
+        # Log completion with process ID
+        successful_count = sum(1 for r in results if r.get('success'))
+        print(f"INFO [PID {process_id}]: Completed refresh batch - {successful_count}/{len(tickers)} ticker(s) successful", file=sys.stderr)
+        
+        return results
+    
+    # Run async function in worker process
+    return asyncio.run(_async_process())
 
 
 async def _fetch_and_save_refresh_options(
@@ -2855,7 +3740,8 @@ async def _fetch_and_save_refresh_options(
     today_str: str,
     combined_max_days: int,
     analyzer: OptionsAnalyzer,
-    enable_cache: bool
+    enable_cache: bool,
+    redis_client: Optional[Any] = None
 ) -> Dict[str, Any]:
     """Fetch and save options data for a single ticker during refresh."""
     try:
@@ -2863,7 +3749,7 @@ async def _fetch_and_save_refresh_options(
         stock_result = await fetcher.get_stock_price_for_date(ticker, today_str)
         stock_close_price = stock_result['data'].get('close') if stock_result.get('success') else None
         
-        # Fetch options (combined short and long term if spread mode, otherwise just short term)
+        # Fetch options - always use 30 days max expiration for refresh
         redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
         
         options_result = await fetcher.get_active_options_for_date(
@@ -2872,7 +3758,7 @@ async def _fetch_and_save_refresh_options(
             option_type='call',  # Only calls for covered call analysis
             stock_close_price=stock_close_price,
             strike_range_percent=None,  # Fetch all strikes
-            max_days_to_expiry=combined_max_days,  # Combined range covers both short and long term
+            max_days_to_expiry=30,  # Always use 30 days for refresh
             include_expired=False,
             use_cache=False,  # Don't use CSV cache
             save_to_csv=False,  # Don't save to CSV
@@ -2904,13 +3790,26 @@ async def _fetch_and_save_refresh_options(
                     
                     # Save to database using analyzer's db connection
                     await analyzer.db.save_options_data(df=contracts_df, ticker=ticker)
+                    
+                    # Update Redis cache with the current timestamp
+                    if redis_client:
+                        from datetime import datetime, timezone
+                        now_utc = datetime.now(timezone.utc)
+                        set_redis_last_write_timestamp(redis_client, ticker, now_utc, ttl_seconds=86400)
+                        _clear_redis_refresh_pending(redis_client, ticker)
             
             analyzer._log("INFO", f"  ✓ Fetched and saved {len(contracts)} options contracts for {ticker}")
             return {'ticker': ticker, 'success': True, 'contracts': len(contracts)}
         else:
+            # Clear Redis flag on failure
+            if redis_client:
+                _clear_redis_refresh_pending(redis_client, ticker)
             analyzer._log("WARNING", f"  ✗ Failed to fetch options for {ticker}: {options_result.get('error', 'Unknown error')}")
             return {'ticker': ticker, 'success': False, 'error': options_result.get('error')}
     except Exception as e:
+        # Clear Redis flag on error
+        if redis_client:
+            _clear_redis_refresh_pending(redis_client, ticker)
         analyzer._log("ERROR", f"  ✗ Error fetching options for {ticker}: {e}")
         return {'ticker': ticker, 'success': False, 'error': str(e)}
 
@@ -2920,7 +3819,9 @@ async def _run_refresh_analysis(
     args,
     df: pd.DataFrame,
     filters: List[FilterExpression],
-    refresh_threshold_seconds: int
+    refresh_threshold_seconds: int,
+    redis_client: Optional[Any] = None,
+    timestamp_cache: Optional[Dict[str, pd.Timestamp]] = None
 ) -> pd.DataFrame:
     """
     Run the refresh analysis: check timestamps, fetch fresh data, and re-analyze.
@@ -2954,27 +3855,31 @@ async def _run_refresh_analysis(
         analyzer._log("INFO", "No tickers found in results. Skipping refresh.")
         return original_df
     
-    # Check which tickers need refresh
+    # Check which tickers need refresh (reuse timestamp cache if provided)
+    min_write_timestamp = getattr(args, 'min_write_timestamp', None)
     tickers_to_refresh = await _check_tickers_for_refresh(
-        analyzer, result_tickers, refresh_threshold_seconds
+        analyzer, result_tickers, refresh_threshold_seconds, redis_client, timestamp_cache, min_write_timestamp
     )
     
     if not tickers_to_refresh:
         analyzer._log("INFO", f"\nAll tickers have fresh data (within {refresh_threshold_seconds}s threshold). No refresh needed.")
         return original_df
     
+    # Calculate percentage
+    refresh_percentage = (len(tickers_to_refresh) / len(result_tickers) * 100) if result_tickers else 0
+    
+    # Print summary to stderr so it's always visible
+    print(f"\n=== Refresh Summary ===", file=sys.stderr)
+    print(f"Total tickers in results: {len(result_tickers)}", file=sys.stderr)
+    print(f"Tickers being refreshed: {len(tickers_to_refresh)} ({refresh_percentage:.1f}%)", file=sys.stderr)
+    print(f"\nAll tickers in results: {', '.join(sorted(result_tickers))}", file=sys.stderr)
+    print(f"\nTickers being refreshed: {', '.join(sorted(tickers_to_refresh))}", file=sys.stderr)
+    print("", file=sys.stderr)
+    
     analyzer._log("INFO", f"\n=== Refreshing options data for {len(tickers_to_refresh)} ticker(s) ===")
     analyzer._log("INFO", f"Tickers to refresh: {', '.join(tickers_to_refresh)}")
     
     try:
-        # Create fetcher instance
-        fetcher = HistoricalDataFetcher(
-            api_key,
-            args.data_dir,
-            quiet=False,  # Always show fetch_options progress
-            snapshot_max_concurrent=0  # Use default concurrency
-        )
-        
         # Calculate date ranges
         today_str = datetime.now().strftime('%Y-%m-%d')
         from datetime import date
@@ -2984,60 +3889,99 @@ async def _run_refresh_analysis(
             analyzer, args, today_str, today_date
         )
         
-        # Log fetch start
-        for ticker in tickers_to_refresh:
-            if args.spread:
-                analyzer._log("INFO", f"Fetching fresh options data for {ticker} (combined window: {short_start_date} to {max_end_date})...")
-            else:
-                analyzer._log("INFO", f"Fetching fresh options data for {ticker} (window: {short_start_date} to {max_end_date or 'unlimited'})...")
+        # Set Redis flags for pending refreshes (only during market hours)
+        if redis_client:
+            for ticker in tickers_to_refresh:
+                _set_redis_refresh_pending(redis_client, ticker, ttl_seconds=900)
         
-        # Create fetch tasks
+        # Use multiprocessing with max_workers/2 processes
         enable_cache = not args.no_cache
-        refresh_tasks = [
-            _fetch_and_save_refresh_options(
-                fetcher, ticker, today_str, combined_max_days, analyzer, enable_cache
+        redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
+        max_workers = getattr(args, 'max_workers', 4)
+        refresh_workers = max(1, max_workers // 2)  # Use half of max_workers, minimum 1
+        
+        analyzer._log("INFO", f"Using {refresh_workers} processes for refresh (max_workers={max_workers})")
+        
+        # Split tickers across processes
+        tickers_per_process = max(1, len(tickers_to_refresh) // refresh_workers)
+        ticker_batches = []
+        for i in range(0, len(tickers_to_refresh), tickers_per_process):
+            batch = tickers_to_refresh[i:i + tickers_per_process]
+            if batch:
+                ticker_batches.append(batch)
+        
+        # Ensure we don't have more batches than workers
+        if len(ticker_batches) > refresh_workers:
+            ticker_batches = ticker_batches[:refresh_workers]
+        
+        analyzer._log("INFO", f"Split {len(tickers_to_refresh)} tickers into {len(ticker_batches)} batches")
+        
+        # Log ticker distribution per batch (print to stderr so it's always visible)
+        print(f"\nRefresh multiprocess ticker distribution ({refresh_workers} processes):", file=sys.stderr)
+        for i, batch in enumerate(ticker_batches, 1):
+            ticker_list = ', '.join(batch)
+            print(f"  Process {i}: {len(batch)} ticker(s) - {ticker_list}", file=sys.stderr)
+        print("", file=sys.stderr)  # Empty line for readability
+        
+        # Prepare arguments for each batch
+        process_args = []
+        for batch in ticker_batches:
+            args_tuple = (
+                batch,
+                analyzer.db_conn,
+                api_key,
+                args.data_dir,
+                today_str,
+                enable_cache,
+                redis_url,
+                analyzer.log_level,
+                analyzer.debug
             )
-            for ticker in tickers_to_refresh
-        ]
+            process_args.append(args_tuple)
         
-        # Execute all fetches concurrently with progress updates
-        if args.spread:
-            analyzer._log("INFO", f"Starting concurrent fetch for {len(refresh_tasks)} tickers (combined short and long-term)...")
-        else:
-            analyzer._log("INFO", f"Starting concurrent fetch for {len(refresh_tasks)} tickers...")
-        
-        # Track progress as tasks complete
-        completed_count = [0]  # Use list to allow modification in nested function
-        total_count = len(refresh_tasks)
+        # Execute in parallel using ProcessPoolExecutor
+        from concurrent.futures import ProcessPoolExecutor
+        loop = asyncio.get_event_loop()
         start_time = datetime.now()
         
-        # Create tasks and track completion
-        task_dict = {}
-        for task, ticker in zip(refresh_tasks, tickers_to_refresh):
-            task_obj = asyncio.create_task(task)
-            task_dict[task_obj] = ticker
+        with ProcessPoolExecutor(max_workers=refresh_workers) as executor:
+            futures = [
+                loop.run_in_executor(executor, _process_refresh_batch, args)
+                for args in process_args
+            ]
+            batch_results = await asyncio.gather(*futures, return_exceptions=True)
         
+        # Flatten results from all batches
         refresh_results = []
+        for i, batch_result in enumerate(batch_results):
+            if isinstance(batch_result, Exception):
+                # If a batch failed, mark all tickers in that batch as failed
+                batch = ticker_batches[i]
+                for ticker in batch:
+                    refresh_results.append({'ticker': ticker, 'success': False, 'error': str(batch_result)})
+            else:
+                refresh_results.extend(batch_result)
         
-        # Process tasks as they complete to show progress
-        for task in asyncio.as_completed(task_dict.keys()):
-            result = await task
-            refresh_results.append(result)
-            completed_count[0] += 1
-            
-            # Show progress at 25%, 50%, 75%, and 100%
-            progress_pct = (completed_count[0] / total_count) * 100
+        # Clear Redis flags for successful refreshes
+        if redis_client:
+            for result in refresh_results:
+                if result.get('success'):
+                    _clear_redis_refresh_pending(redis_client, result['ticker'])
+        
+        # Log progress
             elapsed = (datetime.now() - start_time).total_seconds()
-            ticker_name = task_dict.get(task, result.get('ticker', 'unknown'))
-            
-            if completed_count[0] % max(1, total_count // 4) == 0 or completed_count[0] == total_count:
-                status = "✓" if result.get('success') else "✗"
-                contracts = result.get('contracts', 0)
-                analyzer._log("INFO", f"  Progress: {completed_count[0]}/{total_count} ({progress_pct:.0f}%) - {status} {ticker_name} ({contracts} contracts) - {elapsed:.1f}s elapsed")
-        
-        # Summary of refresh
         successful = sum(1 for r in refresh_results if r.get('success'))
-        analyzer._log("INFO", f"\nRefresh complete: {successful}/{len(tickers_to_refresh)} tickers successful")
+        analyzer._log("INFO", f"\nRefresh complete: {successful}/{len(tickers_to_refresh)} tickers successful ({elapsed:.1f}s elapsed)")
+        
+        # Log individual results
+        for result in refresh_results:
+            ticker = result.get('ticker', 'unknown')
+            if result.get('success'):
+                contracts = result.get('contracts', 0)
+                analyzer._log("INFO", f"  ✓ {ticker}: {contracts} contracts")
+            else:
+                error = result.get('error', 'Unknown error')
+                analyzer._log("WARNING", f"  ✗ {ticker}: {error}")
         
         # Small delay to ensure database commits are visible before re-analysis
         if successful > 0:
@@ -3063,6 +4007,461 @@ async def _run_refresh_analysis(
             traceback.print_exc()
         analyzer._log("WARNING", "Using original analysis results due to refresh error.")
         return original_df
+
+
+def _run_background_refresh_worker_subprocess(
+    db_conn: str,
+    tickers: List[str],
+    refresh_threshold_seconds: int,
+    redis_url: Optional[str],
+    log_level: str,
+    debug: bool,
+    enable_cache: bool,
+    args_dict: Dict[str, Any]
+) -> None:
+    """
+    Worker function for subprocess-based background refresh.
+    This version doesn't use multiprocessing.Queue since it's called via subprocess.
+    """
+    _run_background_refresh_worker_internal(
+        db_conn, tickers, refresh_threshold_seconds, redis_url,
+        log_level, debug, enable_cache, args_dict, status_queue=None
+    )
+
+
+def _run_background_refresh_worker(
+    db_conn: str,
+    tickers: List[str],
+    refresh_threshold_seconds: int,
+    redis_url: Optional[str],
+    log_level: str,
+    debug: bool,
+    enable_cache: bool,
+    args_dict: Dict[str, Any],
+    status_queue: Optional[Any] = None
+) -> None:
+    """
+    Worker function to run refresh in background process (multiprocessing version).
+    """
+    _run_background_refresh_worker_internal(
+        db_conn, tickers, refresh_threshold_seconds, redis_url,
+        log_level, debug, enable_cache, args_dict, status_queue
+    )
+
+
+def _run_background_refresh_worker_internal(
+    db_conn: str,
+    tickers: List[str],
+    refresh_threshold_seconds: int,
+    redis_url: Optional[str],
+    log_level: str,
+    debug: bool,
+    enable_cache: bool,
+    args_dict: Dict[str, Any],
+    status_queue: Optional[Any] = None
+) -> None:
+    """
+    Worker function to run refresh in background process.
+    
+    Args:
+        status_queue: Optional multiprocessing.Queue to send status updates to parent process
+    """
+    import asyncio
+    import sys
+    import os
+    from pathlib import Path
+    
+    # Immediately send status to parent if queue is provided
+    if status_queue is not None:
+        try:
+            import multiprocessing
+            worker_pid = os.getpid()
+            try:
+                worker_name = multiprocessing.current_process().name
+            except:
+                worker_name = 'unknown'
+            status_queue.put({
+                'pid': worker_pid,
+                'name': worker_name,
+                'tickers': tickers,
+                'ticker_count': len(tickers)
+            })
+        except Exception as e:
+            # If queue communication fails, continue anyway
+            print(f"Warning: Failed to send status to parent: {e}", file=sys.stderr)
+    
+    # Re-import needed modules in the worker process
+    CURRENT_DIR = Path(__file__).resolve().parent
+    PROJECT_ROOT = CURRENT_DIR.parent
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    
+    async def _worker():
+        try:
+            # Log process info
+            worker_pid = os.getpid()
+            try:
+                import multiprocessing
+                worker_name = multiprocessing.current_process().name
+            except:
+                worker_name = 'unknown'
+            print(f"Background refresh worker started [PID {worker_pid}, Process: {worker_name}]", file=sys.stderr)
+            
+            # Create analyzer in worker process
+            analyzer = OptionsAnalyzer(db_conn, log_level=log_level, debug=debug, enable_cache=enable_cache, redis_url=redis_url)
+            await analyzer.initialize()
+            
+            # Get Redis client
+            redis_client = None
+            if redis_url and REDIS_AVAILABLE:
+                redis_client = _get_redis_client_for_refresh(redis_url)
+            
+            # Check market hours
+            from common.market_hours import is_market_hours
+            now_utc = datetime.now(timezone.utc)
+            is_market_open = is_market_hours(now_utc, "America/New_York")
+            
+            if not is_market_open:
+                analyzer._log("INFO", "Background refresh: Market is closed. Skipping refresh.")
+                return
+            
+            # Check which tickers need refresh
+            min_write_timestamp = args_dict.get('min_write_timestamp', None)
+            tickers_to_refresh = await _check_tickers_for_refresh(
+                analyzer, tickers, refresh_threshold_seconds, redis_client, None, min_write_timestamp
+            )
+            
+            if not tickers_to_refresh:
+                analyzer._log("INFO", "Background refresh: No tickers need refresh.")
+                return
+            
+            analyzer._log("INFO", f"Background refresh: Refreshing {len(tickers_to_refresh)} ticker(s): {', '.join(tickers_to_refresh)}")
+            
+            # Import fetch_options in worker
+            try:
+                from scripts.fetch_options import HistoricalDataFetcher
+            except ImportError:
+                analyzer._log("ERROR", "Background refresh: fetch_options module not available.")
+                return
+            
+            api_key = os.getenv('POLYGON_API_KEY')
+            if not api_key:
+                analyzer._log("ERROR", "Background refresh: POLYGON_API_KEY not set.")
+                return
+            
+            # Calculate date ranges
+            from datetime import date
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            today_date = date.today()
+            
+            short_start_date, max_end_date, combined_max_days = _calculate_refresh_date_ranges(
+                analyzer, args_dict, today_str, today_date
+            )
+            
+            # Set Redis flags
+            if redis_client:
+                for ticker in tickers_to_refresh:
+                    _set_redis_refresh_pending(redis_client, ticker, ttl_seconds=1800)
+            
+            # Use multiprocessing with max_workers/2 processes
+            max_workers = args_dict.get('max_workers', 4)
+            refresh_workers = max(1, max_workers // 2)  # Use half of max_workers, minimum 1
+            
+            analyzer._log("INFO", f"Background refresh: Using {refresh_workers} processes (max_workers={max_workers})")
+            
+            # Split tickers across processes
+            tickers_per_process = max(1, len(tickers_to_refresh) // refresh_workers)
+            ticker_batches = []
+            for i in range(0, len(tickers_to_refresh), tickers_per_process):
+                batch = tickers_to_refresh[i:i + tickers_per_process]
+                if batch:
+                    ticker_batches.append(batch)
+            
+            # Ensure we don't have more batches than workers
+            if len(ticker_batches) > refresh_workers:
+                ticker_batches = ticker_batches[:refresh_workers]
+            
+            analyzer._log("INFO", f"Background refresh: Split {len(tickers_to_refresh)} tickers into {len(ticker_batches)} batches")
+            
+            # Log ticker distribution per batch (print to stderr so it's always visible)
+            print(f"\nBackground refresh multiprocess ticker distribution ({refresh_workers} processes):", file=sys.stderr)
+            for i, batch in enumerate(ticker_batches, 1):
+                ticker_list = ', '.join(batch)
+                print(f"  Process {i}: {len(batch)} ticker(s) - {ticker_list}", file=sys.stderr)
+            print("", file=sys.stderr)  # Empty line for readability
+            
+            # Prepare arguments for each batch
+            process_args = []
+            for batch in ticker_batches:
+                args_tuple = (
+                    batch,
+                    db_conn,
+                    api_key,
+                    args_dict.get('data_dir', './data'),
+                    today_str,
+                    enable_cache,
+                    redis_url,
+                    log_level,
+                    debug
+                )
+                process_args.append(args_tuple)
+            
+            # Execute in parallel using ProcessPoolExecutor
+            from concurrent.futures import ProcessPoolExecutor
+            loop = asyncio.get_event_loop()
+            
+            with ProcessPoolExecutor(max_workers=refresh_workers) as executor:
+                futures = [
+                    loop.run_in_executor(executor, _process_refresh_batch, args)
+                    for args in process_args
+                ]
+                batch_results = await asyncio.gather(*futures, return_exceptions=True)
+            
+            # Flatten results from all batches
+            refresh_results = []
+            for i, batch_result in enumerate(batch_results):
+                if isinstance(batch_result, Exception):
+                    # If a batch failed, mark all tickers in that batch as failed
+                    batch = ticker_batches[i]
+                    for ticker in batch:
+                        refresh_results.append({'ticker': ticker, 'success': False, 'error': str(batch_result)})
+                else:
+                    refresh_results.extend(batch_result)
+            
+            # Clear Redis flags and log results
+            for result in refresh_results:
+                ticker = result.get('ticker', 'unknown')
+                if result.get('success'):
+                    if redis_client:
+                        _clear_redis_refresh_pending(redis_client, ticker)
+                    contracts = result.get('contracts', 0)
+                    analyzer._log("INFO", f"Background refresh: ✓ {ticker} - {contracts} contracts")
+                else:
+                    if redis_client:
+                        _clear_redis_refresh_pending(redis_client, ticker)
+                    error = result.get('error', 'Unknown error')
+                    analyzer._log("WARNING", f"Background refresh: ✗ {ticker} - {error}")
+            
+            analyzer._log("INFO", "Background refresh: Complete")
+            
+        except Exception as e:
+            print(f"Background refresh worker error: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+        finally:
+            if analyzer and analyzer.db:
+                await analyzer.db.close()
+    
+    # Run the async worker
+    asyncio.run(_worker())
+
+
+async def _run_background_refresh(
+    analyzer: OptionsAnalyzer,
+    args,
+    df: pd.DataFrame,
+    filters: List[FilterExpression],
+    refresh_threshold_seconds: int,
+    redis_client: Optional[Any],
+    timestamp_cache: Optional[Dict[str, pd.Timestamp]] = None
+) -> None:
+    """
+    Run refresh in a background process without waiting.
+    Main process continues and shows existing results.
+    """
+    if not POLYGON_AVAILABLE or HistoricalDataFetcher is None:
+        analyzer._log("WARNING", "Background refresh: fetch_options module not available. Skipping.")
+        return
+    
+    api_key = os.getenv('POLYGON_API_KEY')
+    if not api_key:
+        analyzer._log("WARNING", "Background refresh: POLYGON_API_KEY not set. Skipping.")
+        return
+    
+    # Check if market is open
+    now_utc = datetime.now(timezone.utc)
+    is_market_open = common_is_market_hours(now_utc, "America/New_York")
+    
+    if not is_market_open:
+        analyzer._log("INFO", "Background refresh: Market is closed. Skipping.")
+        return
+    
+    # Extract unique tickers from results
+    result_tickers = df['ticker'].unique().tolist() if 'ticker' in df.columns else []
+    
+    if not result_tickers:
+        analyzer._log("INFO", "Background refresh: No tickers found in results. Skipping.")
+        return
+    
+    # Check which tickers need refresh (with Redis deduplication, reuse timestamp cache if provided)
+    min_write_timestamp = getattr(args, 'min_write_timestamp', None)
+    tickers_to_refresh = await _check_tickers_for_refresh(
+        analyzer, result_tickers, refresh_threshold_seconds, redis_client, timestamp_cache, min_write_timestamp
+    )
+    
+    if not tickers_to_refresh:
+        analyzer._log("INFO", "Background refresh: No tickers need refresh.")
+        return
+    
+    # Calculate percentage
+    refresh_percentage = (len(tickers_to_refresh) / len(result_tickers) * 100) if result_tickers else 0
+    
+    # Print summary to stderr so it's always visible
+    print(f"\n=== Background Refresh Summary ===", file=sys.stderr)
+    print(f"Total tickers in results: {len(result_tickers)}", file=sys.stderr)
+    print(f"Tickers being refreshed: {len(tickers_to_refresh)} ({refresh_percentage:.1f}%)", file=sys.stderr)
+    print(f"\nAll tickers in results: {', '.join(sorted(result_tickers))}", file=sys.stderr)
+    print(f"\nTickers being refreshed: {', '.join(sorted(tickers_to_refresh))}", file=sys.stderr)
+    print("", file=sys.stderr)
+    
+    analyzer._log("WARNING", f"Background refresh initiated for {len(tickers_to_refresh)} ticker(s): {', '.join(tickers_to_refresh)}")
+    analyzer._log("INFO", f"Starting background refresh for {len(tickers_to_refresh)} ticker(s): {', '.join(tickers_to_refresh)}")
+    
+    # Calculate refresh workers and ticker distribution in main process for visibility
+    max_workers = getattr(args, 'max_workers', 4)
+    refresh_workers = max(1, max_workers // 2)  # Use half of max_workers, minimum 1
+    
+    # Split tickers across processes to show distribution
+    tickers_per_process = max(1, len(tickers_to_refresh) // refresh_workers)
+    ticker_batches = []
+    for i in range(0, len(tickers_to_refresh), tickers_per_process):
+        batch = tickers_to_refresh[i:i + tickers_per_process]
+        if batch:
+            ticker_batches.append(batch)
+    
+    # Ensure we don't have more batches than workers
+    if len(ticker_batches) > refresh_workers:
+        ticker_batches = ticker_batches[:refresh_workers]
+    
+    # Print ticker distribution to stderr so it's always visible
+    print(f"\nBackground refresh multiprocess ticker distribution ({refresh_workers} processes):", file=sys.stderr)
+    for i, batch in enumerate(ticker_batches, 1):
+        ticker_list = ', '.join(batch)
+        print(f"  Process {i}: {len(batch)} ticker(s) - {ticker_list}", file=sys.stderr)
+    print("", file=sys.stderr)  # Empty line for readability
+    
+    # Prepare arguments for worker process
+    args_dict = {
+        'data_dir': getattr(args, 'data_dir', './data'),
+        'spread': getattr(args, 'spread', False),
+        'start_date': getattr(args, 'start_date', None),
+        'end_date': getattr(args, 'end_date', None),
+        'max_days': getattr(args, 'max_days', None),
+        'spread_long_days': getattr(args, 'spread_long_days', 90),
+        'spread_long_days_tolerance': getattr(args, 'spread_long_days_tolerance', 10),
+        'spread_long_min_days': getattr(args, 'spread_long_min_days', None),
+        'min_write_timestamp': min_write_timestamp,
+        'max_workers': max_workers,
+    }
+    
+    # Spawn background process using subprocess so it can survive parent exit
+    try:
+        import subprocess
+        import json
+        import tempfile
+        
+        # Create a temporary file to pass arguments (since subprocess needs serializable args)
+        # We'll pass the arguments as JSON in environment variables and a temp file
+        temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
+        worker_args = {
+            'db_conn': analyzer.db_conn,
+            'tickers': tickers_to_refresh,
+            'refresh_threshold_seconds': refresh_threshold_seconds,
+            'redis_url': analyzer.redis_url,
+            'log_level': analyzer.log_level,
+            'debug': analyzer.debug,
+            'enable_cache': analyzer.enable_cache,
+            'args_dict': args_dict
+        }
+        json.dump(worker_args, temp_file)
+        temp_file.close()
+        args_file = temp_file.name
+        
+        # Get the script directory for proper path resolution
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(script_dir)
+        
+        # Create a wrapper script that will run the worker
+        # We need to import the module and call the worker function
+        script_content = f"""
+import sys
+import os
+import json
+import asyncio
+from pathlib import Path
+
+# Add project to path
+PROJECT_ROOT = r'{project_root}'
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+# Import the worker function
+from scripts.options_analyzer import _run_background_refresh_worker_subprocess
+
+# Read arguments from file
+with open(r'{args_file}', 'r') as f:
+    args = json.load(f)
+
+# Run the worker
+_run_background_refresh_worker_subprocess(**args)
+"""
+        
+        # Write wrapper script to temp file
+        script_file = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False)
+        script_file.write(script_content)
+        script_file.close()
+        script_path = script_file.name
+        
+        # Make script executable
+        os.chmod(script_path, 0o755)
+        
+        # Start subprocess with proper detachment
+        # Use start_new_session=True to create a new process group
+        # Redirect stdout/stderr to files so we can see output
+        log_file = tempfile.NamedTemporaryFile(mode='w', suffix='.log', delete=False)
+        log_file.close()
+        
+        process = subprocess.Popen(
+            [sys.executable, script_path],
+            stdout=open(log_file.name, 'w'),
+            stderr=subprocess.STDOUT,
+            start_new_session=True,  # Create new session so process survives parent exit
+            cwd=os.getcwd()
+        )
+        
+        # Give it a moment to start and send initial status
+        import time
+        time.sleep(0.5)
+        
+        # Check if process is still running
+        if process.poll() is None:
+            print(f"\nBackground refresh process started and running:", file=sys.stderr)
+            print(f"  Worker PID: {process.pid}", file=sys.stderr)
+            print(f"  Processing {len(tickers_to_refresh)} ticker(s)", file=sys.stderr)
+            print(f"  Main process PID: {os.getpid()}", file=sys.stderr)
+            print(f"  Tickers: {', '.join(tickers_to_refresh[:10])}{'...' if len(tickers_to_refresh) > 10 else ''}", file=sys.stderr)
+            print(f"  Log file: {log_file.name}", file=sys.stderr)
+            print(f"\nTo check background processes: ps auxww | grep -E 'options_analyzer|{process.pid}'", file=sys.stderr)
+            print(f"To view logs: tail -f {log_file.name}", file=sys.stderr)
+            print("", file=sys.stderr)
+            analyzer._log("INFO", f"Background refresh process started (PID: {process.pid}). Main process continuing with existing results.")
+        else:
+            # Process exited immediately, check the log
+            print(f"\nBackground refresh process exited immediately (exit code: {process.returncode})", file=sys.stderr)
+            print(f"Check log file for details: {log_file.name}", file=sys.stderr)
+            try:
+                with open(log_file.name, 'r') as f:
+                    log_content = f.read()
+                    if log_content:
+                        print(f"Log content:\n{log_content}", file=sys.stderr)
+            except:
+                pass
+            analyzer._log("WARNING", f"Background refresh process exited immediately (PID: {process.pid}, exit code: {process.returncode})")
+    except Exception as e:
+        print(f"ERROR: Failed to start background refresh process: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        analyzer._log("ERROR", f"Failed to start background refresh process: {e}")
 
 
 def _print_statistics(analyzer: OptionsAnalyzer, args):
@@ -3103,8 +4502,8 @@ def _print_statistics(analyzer: OptionsAnalyzer, args):
             print("===================================\n", file=sys.stderr)
 
 
-async def main():
-    """Main function to run the options analyzer."""
+def _parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments for the options analyzer."""
     parser = argparse.ArgumentParser(
         description="Analyze covered call opportunities across all strike prices and tickers.",
         epilog="""
@@ -3425,6 +4824,14 @@ Examples:
         default=None,
         help="If market is open, refresh options data for tickers in results and re-analyze if the most recent write_timestamp is older than the specified threshold (in seconds). Default: 300 seconds. Requires POLYGON_API_KEY environment variable. Example: --refresh-results 300 or --refresh-results (uses default 300)."
     )
+    parser.add_argument(
+        '--refresh-results-background',
+        type=int,
+        nargs='?',
+        const=300,
+        default=None,
+        help="Like --refresh-results, but runs refresh in a background process without waiting. Main process shows existing analysis results immediately. Requires POLYGON_API_KEY and Redis (for deduplication). Example: --refresh-results-background 300"
+    )
     
     # CSV formatting options
     parser.add_argument(
@@ -3477,19 +4884,99 @@ Examples:
         print(f"  timestamp_lookback_days: {args.timestamp_lookback_days}", file=sys.stderr)
         print(f"  max_workers: {args.max_workers}", file=sys.stderr)
     
+    return args
+
+
+def _build_analysis_args(args: argparse.Namespace, symbols_list: List[str], filters: List) -> dict:
+    """Build arguments dictionary for analyze_options from parsed args."""
+    return {
+        'tickers': symbols_list,
+        'days_to_expiry': args.days,
+        'min_volume': args.min_volume,
+        'max_days': args.max_days,
+        'min_premium': args.min_premium,
+        'position_size': args.position_size,
+        'filters': filters,
+        'filter_logic': args.filter_logic,
+        'use_market_time': not args.no_market_time,
+        'start_date': args.start_date,
+        'end_date': args.end_date,
+        'max_concurrent': getattr(args, 'max_concurrent', 10),  # Default to 10 if not specified
+        'batch_size': args.batch_size,
+        'timestamp_lookback_days': args.timestamp_lookback_days,
+        'max_workers': args.max_workers,
+        'spread_mode': args.spread,
+        'spread_strike_tolerance': args.spread_strike_tolerance,
+        'spread_long_days': args.spread_long_days,
+        'spread_long_days_tolerance': args.spread_long_days_tolerance,
+        'spread_long_min_days': args.spread_long_min_days,
+        'min_write_timestamp': args.min_write_timestamp
+    }
+
+
+def _print_statistics(analyzer: 'OptionsAnalyzer', args: argparse.Namespace) -> None:
+    """Print multiprocess and cache statistics."""
+    # Print multiprocess statistics if using multiprocessing
+    if args.max_workers > 1 and hasattr(analyzer.db, 'print_process_statistics'):
+        quiet = not analyzer._should_log("INFO")
+        analyzer.db.print_process_statistics(quiet=quiet)
+    
+    # Print cache statistics (always print at INFO level or lower)
+    if analyzer._should_log("INFO") and hasattr(analyzer.db, 'get_cache_statistics'):
+        cache_stats = analyzer.db.get_cache_statistics()
+        print("\n=== Cache Statistics ===", file=sys.stderr)
+        if cache_stats.get('enabled', False):
+            print(f"Cache Status: ENABLED", file=sys.stderr)
+            print(f"Total Requests: {cache_stats.get('total_requests', 0)}", file=sys.stderr)
+            print(f"Cache Hits: {cache_stats.get('hits', 0)}", file=sys.stderr)
+            print(f"Cache Misses: {cache_stats.get('misses', 0)}", file=sys.stderr)
+            hit_rate = cache_stats.get('hit_rate', 0.0)
+            print(f"Hit Rate: {hit_rate:.2%}", file=sys.stderr)
+            negative_hits = cache_stats.get('negative_hits', 0)
+            negative_sets = cache_stats.get('negative_sets', 0)
+            print(f"Negative Cache Hits: {negative_hits}", file=sys.stderr)
+            print(f"Negative Cache Sets: {negative_sets}", file=sys.stderr)
+            print(f"Cache Sets: {cache_stats.get('sets', 0)}", file=sys.stderr)
+            print(f"Cache Invalidations: {cache_stats.get('invalidations', 0)}", file=sys.stderr)
+            print(f"Cache Errors: {cache_stats.get('errors', 0)}", file=sys.stderr)
+        else:
+            print(f"Cache Status: DISABLED", file=sys.stderr)
+        # Database query statistics (if available)
+        db_query_count = cache_stats.get('db_query_count')
+        if db_query_count is not None:
+            print(f"\n=== Database Query Statistics ===", file=sys.stderr)
+            print(f"Total Database Queries: {db_query_count}", file=sys.stderr)
+            print("===================================\n", file=sys.stderr)
+        else:
+            print("===================================\n", file=sys.stderr)
+    
+    # Also check for args.stats flag (legacy support)
+    if args.stats and hasattr(analyzer.db, 'get_cache_stats'):
+        stats = analyzer.db.get_cache_stats()
+        if stats:
+            print("\n===================================", file=sys.stderr)
+            print("Cache Statistics:", file=sys.stderr)
+            print("===================================", file=sys.stderr)
+            for key, value in stats.items():
+                print(f"{key}: {value}", file=sys.stderr)
+            print("===================================\n", file=sys.stderr)
+
+
+async def main():
+    """Main function to run the options analyzer."""
+    args = _parse_arguments()
+    
     # Initialize analyzer
     enable_cache = not args.no_cache
     redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
     log_level = args.log_level if hasattr(args, 'log_level') else ("DEBUG" if args.debug else "INFO")
     
-    # Initialize analyzer
     analyzer = OptionsAnalyzer(args.db_conn, log_level=log_level, debug=args.debug, enable_cache=enable_cache, redis_url=redis_url)
     await analyzer.initialize()
     
     # Use async context manager to ensure close() is always called
     async with analyzer.db:
         # Get symbols list using common library
-        # Convert log_level to quiet boolean for fetch_lists_data
         quiet = not analyzer._should_log("INFO")
         symbols_list = await fetch_lists_data(args, quiet)
         if not symbols_list:
@@ -3508,7 +4995,6 @@ Examples:
         filters = []
         if hasattr(args, 'filter') and args.filter:
             try:
-                # Normalize whitespace in each filter input (collapse internal spaces)
                 normalized_filters = [' '.join(f.split()) for f in args.filter]
                 filters = FilterParser.parse_filters(normalized_filters)
                 if filters:
@@ -3528,11 +5014,25 @@ Examples:
             print("No options data found matching the criteria.")
             return
         
+        # Get Redis client for refresh deduplication (if available)
+        redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
+        redis_client = None
+        if redis_url and REDIS_AVAILABLE:
+            redis_client = _get_redis_client_for_refresh(redis_url)
+        
+        # Use the analyzer's instance-level timestamp cache
+        timestamp_cache = analyzer._timestamp_cache
+        
         # Refresh results if requested and market is open
         if args.refresh_results is not None:
             refresh_threshold_seconds = args.refresh_results
             df = await _run_refresh_analysis(
-                analyzer, args, df, filters, refresh_threshold_seconds
+                analyzer, args, df, filters, refresh_threshold_seconds, redis_client, timestamp_cache
+            )
+        elif args.refresh_results_background is not None:
+            refresh_threshold_seconds = args.refresh_results_background
+            await _run_background_refresh(
+                analyzer, args, df, filters, refresh_threshold_seconds, redis_client, timestamp_cache
             )
         
         # Print statistics
@@ -3551,12 +5051,12 @@ Examples:
             else:
                 output_format = 'table'
         
-        # Normalize sort input by stripping all whitespace characters
+        # Normalize sort input
         import re as _re
         sort_arg = _re.sub(r"\s+", "", args.sort) if hasattr(args, 'sort') and args.sort else None
         
         # If in spread mode and user didn't specify a sort, default to net_daily_premium
-        if args.spread and args.sort == 'daily_premium':  # daily_premium is the default
+        if args.spread and args.sort == 'daily_premium':
             sort_arg = 'net_daily_premium'
 
         # Parse CSV columns if specified
@@ -3592,3 +5092,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\nAn unexpected error occurred: {e}", file=sys.stderr)
         sys.exit(1)
+

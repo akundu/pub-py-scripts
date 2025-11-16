@@ -1376,7 +1376,18 @@ class OptionsDataRepository(BaseRepository):
                     if success_count == 0:
                         raise
             
-            self.logger.info(f"Options insert: inserted={success_count} ticker={ticker} bucket={bucket_ts.isoformat()}")
+            self.logger.info(f"Options insert: inserted={success_count} ticker={ticker} bucket={bucket_ts.isoformat()} write_timestamp={now_utc.isoformat()}")
+            
+            # QuestDB may need a small delay for data to be visible to SELECT queries
+            # Add a small sleep to ensure data is committed and visible
+            # Also, try to force a commit by executing a simple query
+            import asyncio
+            try:
+                # Execute a simple query to ensure the connection has processed the inserts
+                await conn.fetch("SELECT 1")
+            except Exception:
+                pass
+            await asyncio.sleep(0.2)  # 200ms delay for QuestDB consistency
     
     async def get(self, ticker: str, expiration_date: Optional[str] = None,
                  start_datetime: Optional[str] = None, end_datetime: Optional[str] = None,
@@ -1526,7 +1537,186 @@ WHERE rn = 1"""
                 self.logger.debug(f"[DB QUERY] Fetched {len(rows)} rows from options_data (latest) for {ticker}")
                 if not rows:
                     return pd.DataFrame()
-                df = pd.DataFrame([dict(r) for r in rows])
+                # Convert rows to dicts, handling any type issues
+                # First, normalize all columns to avoid type comparison issues
+                row_dicts = []
+                for r in rows:
+                    row_dict = {}
+                    try:
+                        # Convert asyncpg row to dict - this might raise an error if there are type issues
+                        try:
+                            row_data = dict(r)
+                        except (TypeError, ValueError) as dict_error:
+                            # If dict conversion fails, try to handle it
+                            self.logger.warning(f"Error converting row to dict for {ticker}: {dict_error}. Trying alternative method...")
+                            # Try accessing row as a record
+                            row_data = {}
+                            for key in r.keys():
+                                try:
+                                    row_data[key] = r[key]
+                                except:
+                                    row_data[key] = None
+                        
+                        for key, value in row_data.items():
+                            # Normalize timestamp columns to avoid Timestamp/int comparison issues
+                            if 'timestamp' in key.lower() and value is not None:
+                                # Convert all timestamp values to pd.Timestamp or None
+                                if isinstance(value, pd.Timestamp):
+                                    row_dict[key] = value
+                                elif isinstance(value, (int, float)) and not pd.isna(value):
+                                    # Convert numeric timestamps - try different units
+                                    try:
+                                        # Try as seconds (Unix timestamp)
+                                        row_dict[key] = pd.to_datetime(value, unit='s', errors='coerce')
+                                    except:
+                                        try:
+                                            # Try as nanoseconds
+                                            row_dict[key] = pd.to_datetime(value, unit='ns', errors='coerce')
+                                        except:
+                                            # Try as microseconds
+                                            try:
+                                                row_dict[key] = pd.to_datetime(value, unit='us', errors='coerce')
+                                            except:
+                                                # Last resort: try to parse as-is
+                                                row_dict[key] = pd.to_datetime(value, errors='coerce')
+                                elif isinstance(value, (datetime, date)):
+                                    row_dict[key] = pd.to_datetime(value, errors='coerce')
+                                elif isinstance(value, str):
+                                    row_dict[key] = pd.to_datetime(value, errors='coerce')
+                                else:
+                                    # Unknown type, try to convert
+                                    try:
+                                        row_dict[key] = pd.to_datetime(value, errors='coerce')
+                                    except:
+                                        row_dict[key] = None
+                            else:
+                                # For non-timestamp columns, keep as-is but handle None/NaN
+                                if value is None or (isinstance(value, float) and pd.isna(value)):
+                                    row_dict[key] = None
+                                else:
+                                    row_dict[key] = value
+                    except Exception as e:
+                        # If there's an error converting a row, skip it
+                        self.logger.warning(f"Error processing row for {ticker}: {e}. Skipping row.")
+                        import traceback
+                        self.logger.debug(f"Traceback: {traceback.format_exc()}")
+                        continue
+                    row_dicts.append(row_dict)
+                
+                # Now create DataFrame with normalized types
+                if not row_dicts:
+                    return pd.DataFrame()
+                
+                # Before creating DataFrame, ensure all values in each column are of consistent type
+                # This prevents pandas from trying to compare Timestamp with int during DataFrame creation
+                if row_dicts:
+                    # Get all column names
+                    all_keys = set()
+                    for row_dict in row_dicts:
+                        all_keys.update(row_dict.keys())
+                    
+                    # Normalize each column to ensure consistent types
+                    for key in all_keys:
+                        # Check if this is a timestamp column
+                        if 'timestamp' in key.lower():
+                            # Ensure all values in this column are pd.Timestamp or None
+                            for row_dict in row_dicts:
+                                if key in row_dict:
+                                    value = row_dict[key]
+                                    if value is not None and not isinstance(value, pd.Timestamp):
+                                        # Convert to Timestamp if not already
+                                        try:
+                                            if isinstance(value, (int, float)) and not pd.isna(value):
+                                                # Try different timestamp units
+                                                try:
+                                                    row_dict[key] = pd.to_datetime(value, unit='s', errors='coerce')
+                                                except:
+                                                    try:
+                                                        row_dict[key] = pd.to_datetime(value, unit='ns', errors='coerce')
+                                                    except:
+                                                        try:
+                                                            row_dict[key] = pd.to_datetime(value, unit='us', errors='coerce')
+                                                        except:
+                                                            row_dict[key] = pd.to_datetime(value, errors='coerce')
+                                            else:
+                                                row_dict[key] = pd.to_datetime(value, errors='coerce')
+                                        except:
+                                            row_dict[key] = None
+                                    elif value is None:
+                                        row_dict[key] = None
+                
+                try:
+                    # Before creating DataFrame, verify all timestamp columns are normalized
+                    # Check for any remaining mixed types that could cause comparison errors
+                    for key in all_keys:
+                        if 'timestamp' in key.lower():
+                            types_found = set()
+                            for row_dict in row_dicts:
+                                if key in row_dict:
+                                    val = row_dict[key]
+                                    if val is not None:
+                                        types_found.add(type(val).__name__)
+                            if len(types_found) > 1:
+                                self.logger.warning(f"Mixed types in {key} column for {ticker}: {types_found}. Re-normalizing...")
+                                # Re-normalize this column
+                                for row_dict in row_dicts:
+                                    if key in row_dict:
+                                        val = row_dict[key]
+                                        if val is not None and not isinstance(val, pd.Timestamp):
+                                            try:
+                                                row_dict[key] = pd.to_datetime(val, errors='coerce')
+                                            except:
+                                                row_dict[key] = None
+                    
+                    # Create DataFrame with object dtype first to avoid type comparison issues during creation
+                    # This prevents pandas from trying to infer types and compare Timestamp with int
+                    # We've already normalized all timestamp columns, so this should work
+                    try:
+                        df = pd.DataFrame(row_dicts, dtype=object)
+                    except (TypeError, ValueError) as df_error:
+                        # If DataFrame creation fails, try to identify the problematic column
+                        self.logger.warning(f"Error creating DataFrame for {ticker}: {df_error}")
+                        # Try to find which column has the issue
+                        for key in all_keys:
+                            try:
+                                # Try creating a DataFrame with just this column
+                                test_data = [{key: row_dict.get(key)} for row_dict in row_dicts]
+                                test_df = pd.DataFrame(test_data, dtype=object)
+                            except Exception as col_error:
+                                self.logger.warning(f"Column {key} causes error: {col_error}")
+                                # Try to fix this column
+                                for row_dict in row_dicts:
+                                    if key in row_dict:
+                                        val = row_dict[key]
+                                        # Convert to string to avoid type comparison
+                                        try:
+                                            row_dict[key] = str(val) if val is not None else None
+                                        except:
+                                            row_dict[key] = None
+                        # Try again
+                        df = pd.DataFrame(row_dicts, dtype=object)
+                    
+                    # Now convert columns to appropriate types
+                    for col in df.columns:
+                        if 'timestamp' in col.lower():
+                            try:
+                                df[col] = pd.to_datetime(df[col], errors='coerce')
+                            except Exception as e:
+                                self.logger.warning(f"Error converting {col} to datetime for {ticker}: {e}")
+                                pass
+                        # Convert numeric columns
+                        elif col in ['strike_price', 'bid', 'ask', 'price', 'volume', 'open_interest', 
+                                     'implied_volatility', 'delta', 'gamma', 'theta', 'vega']:
+                            try:
+                                df[col] = pd.to_numeric(df[col], errors='coerce')
+                            except:
+                                pass
+                except Exception as e:
+                    # If DataFrame creation fails, log and return empty DataFrame
+                    self.logger.error(f"Error creating DataFrame for {ticker}: {e}")
+                    import traceback
+                    self.logger.error(f"Traceback: {traceback.format_exc()}")
+                    return pd.DataFrame()
                 
                 # Remove the rn column if it exists
                 if 'rn' in df.columns:
@@ -1538,15 +1728,42 @@ WHERE rn = 1"""
                     df['ticker'] = ticker
                 
                 if 'timestamp' in df.columns:
-                    df['timestamp'] = pd.to_datetime(df['timestamp'])
-                    df.set_index('timestamp', inplace=True)
-                    df = df[df.index.notna()]
-                    # Ensure ticker column is still present after setting index
-                    if 'ticker' not in df.columns:
-                        df['ticker'] = ticker
+                    try:
+                        # Before converting, ensure all values are already Timestamps or None
+                        # Check for any non-Timestamp values
+                        non_timestamp_mask = df['timestamp'].apply(lambda x: x is not None and not isinstance(x, pd.Timestamp))
+                        if non_timestamp_mask.any():
+                            self.logger.warning(f"Found non-Timestamp values in timestamp column for {ticker}. Converting...")
+                            # Convert any remaining non-Timestamp values
+                            df.loc[non_timestamp_mask, 'timestamp'] = pd.to_datetime(df.loc[non_timestamp_mask, 'timestamp'], errors='coerce')
+                        
+                        # Now all values should be Timestamp or None, safe to convert
+                        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+                        
+                        # Before setting index, ensure no comparison issues
+                        # Filter out None/NaT values first
+                        valid_timestamp_mask = df['timestamp'].notna()
+                        if not valid_timestamp_mask.all():
+                            # Some timestamps are invalid, filter them out
+                            df = df[valid_timestamp_mask].copy()
+                        
+                        if not df.empty and 'timestamp' in df.columns:
+                            df.set_index('timestamp', inplace=True)
+                            # Ensure ticker column is still present after setting index
+                            if 'ticker' not in df.columns:
+                                df['ticker'] = ticker
+                    except (TypeError, ValueError) as e:
+                        # If timestamp conversion fails, drop the timestamp column and continue
+                        self.logger.warning(f"Error processing timestamp column for {ticker}: {e}. Dropping timestamp column.")
+                        import traceback
+                        self.logger.debug(f"Traceback: {traceback.format_exc()}")
+                        if 'timestamp' in df.columns:
+                            df = df.drop(columns=['timestamp'])
                 return df
             except Exception as e:
                 self.logger.error(f"Error retrieving latest options data for {ticker}: {e}")
+                import traceback
+                self.logger.debug(f"Traceback: {traceback.format_exc()}")
                 return pd.DataFrame()
 
 
@@ -2678,23 +2895,159 @@ class OptionsDataService:
         # Filter out empty DataFrames (negative cache) from the final result
         combine_start = time.time()
         if cached_data:
-            non_empty_data = {k: v for k, v in cached_data.items() if not v.empty}
+            # Filter out empty DataFrames and DataFrames with all-NA entries
+            non_empty_data = {
+                k: v for k, v in cached_data.items() 
+                if not v.empty and not v.isna().all().all()
+            }
             if non_empty_data:
                 dfs = list(non_empty_data.values())
-                combined_df = pd.concat(dfs).sort_index()
+                # Filter out any remaining empty or all-NA DataFrames before concat
+                # Also drop all-NA columns from each DataFrame to avoid FutureWarning
+                # Normalize timestamp columns to avoid Timestamp/int comparison errors
+                valid_dfs = []
+                for df in dfs:
+                    if not df.empty:
+                        try:
+                            # Make a copy to avoid SettingWithCopyWarning and ensure modifications persist
+                            df = df.copy()
+                            
+                            # Normalize timestamp columns before concatenation
+                            for col in df.columns:
+                                if 'timestamp' in col.lower():
+                                    try:
+                                        # Ensure all values in timestamp column are pd.Timestamp or None
+                                        # Convert any non-Timestamp values
+                                        df.loc[:, col] = pd.to_datetime(df[col], errors='coerce')
+                                    except Exception as e:
+                                        self.logger.warning(f"Error normalizing timestamp column {col} in cached data: {e}")
+                                        # If conversion fails, drop the column
+                                        df = df.drop(columns=[col], errors='ignore')
+                            
+                            # Normalize index if it's a timestamp
+                            if df.index.name and 'timestamp' in df.index.name.lower():
+                                try:
+                                    df.index = pd.to_datetime(df.index, errors='coerce')
+                                except:
+                                    pass
+                            elif isinstance(df.index, pd.DatetimeIndex):
+                                # Index is already a DatetimeIndex, ensure it's properly typed
+                                try:
+                                    df.index = pd.to_datetime(df.index, errors='coerce')
+                                except:
+                                    pass
+                            
+                            # Drop columns that are all-NA to avoid FutureWarning
+                            df_cleaned = df.dropna(axis=1, how='all')
+                            # Only include if DataFrame still has data after dropping all-NA columns
+                            if not df_cleaned.empty and not df_cleaned.isna().all().all():
+                                valid_dfs.append(df_cleaned)
+                        except Exception as e:
+                            self.logger.warning(f"Error processing cached DataFrame: {e}. Skipping.")
+                            import traceback
+                            self.logger.debug(f"Traceback: {traceback.format_exc()}")
+                            continue
+                
+                if valid_dfs:
+                    try:
+                        # CRITICAL: Normalize ALL timestamp columns in ALL DataFrames BEFORE concatenation
+                        # This prevents pandas from trying to compare Timestamp with int during concat
+                        normalized_dfs = []
+                        for df in valid_dfs:
+                            df_copy = df.copy()
+                            
+                            # Normalize all timestamp columns first
+                            for col in df_copy.columns:
+                                if 'timestamp' in col.lower():
+                                    try:
+                                        # Convert all values to pd.Timestamp or NaT
+                                        df_copy.loc[:, col] = pd.to_datetime(df_copy[col], errors='coerce')
+                                    except Exception as e:
+                                        # If normalization fails, drop the column to avoid issues
+                                        try:
+                                            df_copy = df_copy.drop(columns=[col])
+                                        except:
+                                            pass
+                            
+                            # Reset index to avoid any index-related comparison issues
+                            # This ensures we don't have mixed types in the index
+                            df_copy = df_copy.reset_index(drop=True)
+                            
+                            normalized_dfs.append(df_copy)
+                        
+                        # Now concatenate with all normalized DataFrames
+                        combined_df = pd.concat(normalized_dfs, ignore_index=True)
+                        
+                        # Final normalization pass (shouldn't be needed, but just in case)
+                        for col in combined_df.columns:
+                            if 'timestamp' in col.lower():
+                                try:
+                                    combined_df.loc[:, col] = pd.to_datetime(combined_df[col], errors='coerce')
+                                except:
+                                    pass
+                        
+                        # No need to sort index since we're using ignore_index=True
+                    except (TypeError, ValueError) as concat_error:
+                        self.logger.warning(f"Error concatenating cached DataFrames: {concat_error}. Trying to normalize and reset indices...")
+                        # Try normalizing all DataFrames before resetting indices
+                        try:
+                            normalized_reset_dfs = []
+                            for df in valid_dfs:
+                                df_copy = df.copy()
+                                # Normalize all timestamp columns first
+                                for col in df_copy.columns:
+                                    if 'timestamp' in col.lower():
+                                        try:
+                                            df_copy.loc[:, col] = pd.to_datetime(df_copy[col], errors='coerce')
+                                        except:
+                                            pass
+                                # Reset index to avoid any index-related comparison issues
+                                df_copy = df_copy.reset_index(drop=True)
+                                normalized_reset_dfs.append(df_copy)
+                            
+                            # Now try concatenating with normalized DataFrames
+                            combined_df = pd.concat(normalized_reset_dfs, ignore_index=True)
+                            
+                            # Final normalization pass on the combined DataFrame
+                            for col in combined_df.columns:
+                                if 'timestamp' in col.lower():
+                                    try:
+                                        combined_df.loc[:, col] = pd.to_datetime(combined_df[col], errors='coerce')
+                                    except:
+                                        pass
+                        except Exception as e2:
+                            self.logger.warning(f"Error retrying concatenation: {e2}. Returning empty DataFrame.")
+                            import traceback
+                            self.logger.debug(f"Retry traceback: {traceback.format_exc()}")
+                            combined_df = pd.DataFrame()
+                else:
+                    combined_df = pd.DataFrame()
                 
                 # Deduplicate to get latest per option_ticker if requested
-                if deduplicate:
-                    # Sort by timestamp descending first to ensure we keep the latest
-                    if 'timestamp' in combined_df.columns:
-                        combined_df = combined_df.sort_values('timestamp', ascending=False)
-                    if 'option_ticker' in combined_df.columns and not combined_df.empty:
-                        combined_df = combined_df.drop_duplicates(subset=['option_ticker'], keep='first')
-                
-                combine_elapsed = time.time() - combine_start
-                total_elapsed = time.time() - method_start
-                self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s (combine: {combine_elapsed:.3f}s), returning {len(combined_df)} rows")
-                return combined_df
+                if not combined_df.empty:
+                    if deduplicate:
+                        # Sort by timestamp descending first to ensure we keep the latest
+                        if 'timestamp' in combined_df.columns:
+                            try:
+                                # Ensure timestamp column is properly normalized before sorting
+                                combined_df.loc[:, 'timestamp'] = pd.to_datetime(combined_df['timestamp'], errors='coerce')
+                                combined_df = combined_df.sort_values('timestamp', ascending=False)
+                            except (TypeError, ValueError) as sort_error:
+                                self.logger.warning(f"Error sorting by timestamp: {sort_error}. Skipping sort.")
+                                # Continue without sorting
+                        if 'option_ticker' in combined_df.columns:
+                            combined_df = combined_df.drop_duplicates(subset=['option_ticker'], keep='first')
+                    
+                    combine_elapsed = time.time() - combine_start
+                    total_elapsed = time.time() - method_start
+                    self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s (combine: {combine_elapsed:.3f}s), returning {len(combined_df)} rows")
+                    return combined_df
+                else:
+                    # All DataFrames were empty or all-NA
+                    combine_elapsed = time.time() - combine_start
+                    total_elapsed = time.time() - method_start
+                    self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s (combine: {combine_elapsed:.3f}s), returning empty DataFrame")
+                    return pd.DataFrame()
             else:
                 total_elapsed = time.time() - method_start
                 self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s, returning empty DataFrame")
@@ -3127,7 +3480,17 @@ class StockQuestDB(StockDBBase):
                 param_list = list(params)
                 rows = await conn.fetch(sql_query, *param_list)
                 if rows:
-                    return pd.DataFrame(rows)
+                    # Convert Record objects to dicts to preserve column names
+                    # asyncpg Record objects have column names accessible via row.keys()
+                    # We need to explicitly get column names to ensure they're preserved
+                    if rows:
+                        # Get column names from the first row
+                        column_names = list(rows[0].keys())
+                        # Convert rows to list of dicts with explicit column names
+                        data = [{col: row[col] for col in column_names} for row in rows]
+                        return pd.DataFrame(data, columns=column_names)
+                    else:
+                        return pd.DataFrame()
                 else:
                     return pd.DataFrame()
             except Exception as e:
