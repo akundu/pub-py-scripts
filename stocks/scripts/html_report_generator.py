@@ -60,6 +60,56 @@ COMPACT_HEADER_MAP = {
 }
 
 
+def format_age_seconds(age_seconds):
+    """Format age in seconds to human-readable format.
+    
+    Args:
+        age_seconds: Age in seconds (float or numeric string)
+        
+    Returns:
+        Human-readable string like "5 secs", "2 mins", "3 hrs", "1.2 days"
+    """
+    if pd.isna(age_seconds) or age_seconds == '' or age_seconds is None:
+        return ''
+    
+    try:
+        # Convert to float
+        if isinstance(age_seconds, str):
+            # Try to extract first valid number from string
+            match = re.search(r'-?\d+\.?\d*', age_seconds)
+            if match:
+                age_sec = float(match.group())
+            else:
+                return str(age_seconds)
+        else:
+            age_sec = float(age_seconds)
+        
+        # Handle negative or zero values
+        if age_sec < 0:
+            return 'N/A'
+        if age_sec == 0:
+            return '0 secs'
+        
+        # Convert to appropriate unit
+        if age_sec < 60:
+            # Less than 1 minute - show seconds
+            return f"{age_sec:.1f} secs" if age_sec < 10 else f"{int(age_sec)} secs"
+        elif age_sec < 3600:
+            # Less than 1 hour - show minutes
+            mins = age_sec / 60
+            return f"{mins:.1f} mins" if mins < 10 else f"{int(mins)} mins"
+        elif age_sec < 86400:
+            # Less than 1 day - show hours
+            hrs = age_sec / 3600
+            return f"{hrs:.1f} hrs" if hrs < 10 else f"{int(hrs)} hrs"
+        else:
+            # 1 day or more - show days
+            days = age_sec / 86400
+            return f"{days:.1f} days" if days < 10 else f"{int(days)} days"
+    except (ValueError, TypeError, AttributeError):
+        return str(age_seconds) if age_seconds != '' else ''
+
+
 def format_numeric_value(x, col_name):
     """Format numeric value based on column type.
     
@@ -214,6 +264,17 @@ def get_css_styles():
         /* Hidden columns handling */
         .table-wrapper.hide-hidden th.is-hidden-col,
         .table-wrapper.hide-hidden td.is-hidden-col {
+            display: none;
+        }
+        
+        /* Always hidden columns (hidden in all cases) */
+        th.always-hidden,
+        td.always-hidden {
+            display: none !important;
+        }
+        
+        /* Hide group header row when hidden columns are shown */
+        .table-wrapper:not(.hide-hidden) tr.group-header-row {
             display: none;
         }
         
@@ -640,9 +701,199 @@ def get_css_styles():
             border-radius: 3px;
         }
         
+        /* Mobile Card Layout */
+        .card-wrapper {
+            display: none;
+            padding: 15px;
+        }
+        
+        .data-card {
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+            transition: box-shadow 0.3s ease;
+        }
+        
+        .data-card:hover {
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        }
+        
+        .data-card.hidden {
+            display: none;
+        }
+        
+        .card-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        
+        .card-header-main {
+            flex: 1;
+            min-width: 200px;
+        }
+        
+        .card-ticker {
+            font-size: 1.3em;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        
+        .card-price {
+            font-size: 1.1em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        
+        .card-price-value {
+            font-weight: 600;
+        }
+        
+        .card-price-change {
+            font-size: 0.9em;
+            padding: 2px 8px;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.2);
+        }
+        
+        .card-price-change.positive {
+            background: rgba(40, 167, 69, 0.3);
+        }
+        
+        .card-price-change.negative {
+            background: rgba(220, 53, 69, 0.3);
+        }
+        
+        .card-body {
+            padding: 15px;
+        }
+        
+        .card-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #f0f0f0;
+            align-items: center;
+        }
+        
+        .card-row:last-child {
+            border-bottom: none;
+        }
+        
+        .card-label {
+            font-weight: 600;
+            color: #495057;
+            font-size: 0.9em;
+            flex: 1;
+        }
+        
+        .card-value {
+            color: #212529;
+            text-align: right;
+            flex: 1;
+            font-size: 0.95em;
+        }
+        
+        .card-section {
+            margin-bottom: 15px;
+        }
+        
+        .card-section-title {
+            font-weight: 700;
+            color: #667eea;
+            font-size: 0.95em;
+            margin-bottom: 10px;
+            padding-bottom: 5px;
+            border-bottom: 2px solid #667eea;
+        }
+        
+        .card-details {
+            display: none;
+        }
+        
+        .card-details.expanded {
+            display: block;
+        }
+        
+        .card-toggle {
+            background: #f8f9fa;
+            border: none;
+            width: 100%;
+            padding: 12px;
+            cursor: pointer;
+            font-size: 0.9em;
+            color: #667eea;
+            font-weight: 600;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+            transition: background 0.3s ease;
+        }
+        
+        .card-toggle:hover {
+            background: #e9ecef;
+        }
+        
+        .card-toggle-icon {
+            transition: transform 0.3s ease;
+        }
+        
+        .card-toggle.expanded .card-toggle-icon {
+            transform: rotate(180deg);
+        }
+        
+        .card-primary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        
+        .card-primary-item {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 6px;
+            text-align: center;
+        }
+        
+        .card-primary-label {
+            font-size: 0.75em;
+            color: #6c757d;
+            margin-bottom: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .card-primary-value {
+            font-size: 1.1em;
+            font-weight: 600;
+            color: #212529;
+        }
+        
         @media (max-width: 768px) {
             .header h1 {
                 font-size: 1.8em;
+            }
+            
+            /* Hide table on mobile */
+            .table-wrapper {
+                display: none;
+            }
+            
+            /* Show cards on mobile */
+            .card-wrapper {
+                display: block;
             }
             
             table {
@@ -659,6 +910,66 @@ def get_css_styles():
             
             .filter-input-group {
                 width: 100%;
+            }
+            
+            .container {
+                max-width: 100%;
+                border-radius: 0;
+            }
+            
+            body {
+                padding: 0;
+            }
+            
+            .card-header {
+                padding: 12px;
+            }
+            
+            .card-ticker {
+                font-size: 1.2em;
+            }
+            
+            .card-body {
+                padding: 12px;
+            }
+        }
+        
+        @media (min-width: 769px) {
+            /* Hide cards on desktop */
+            .card-wrapper {
+                display: none;
+            }
+            
+            /* Show table on desktop */
+            .table-wrapper {
+                display: block;
+            }
+            
+            /* Show desktop-only messages */
+            .desktop-only {
+                display: block;
+            }
+            
+            .mobile-only {
+                display: none;
+            }
+        }
+        
+        .desktop-only {
+            display: block;
+        }
+        
+        .mobile-only {
+            display: none;
+        }
+        
+        @media (max-width: 768px) {
+            .desktop-only {
+                display: none;
+            }
+            
+            .mobile-only {
+                display: block;
             }
         }
 """
@@ -1381,10 +1692,12 @@ def get_javascript():
             const visibleColumnIndices = [];
             headers.forEach((th, index) => {
                 // Column is visible if:
-                // 1. It doesn't have is-hidden-col class, OR
-                // 2. It has is-hidden-col but hide-hidden is false (showing all columns)
+                // 1. It doesn't have always-hidden class (always-hidden columns are never visible)
+                // 2. It doesn't have is-hidden-col class, OR
+                // 3. It has is-hidden-col but hide-hidden is false (showing all columns)
+                const isAlwaysHidden = th.classList.contains('always-hidden');
                 const isHiddenCol = th.classList.contains('is-hidden-col');
-                if (!isHiddenCol || !hideHidden) {
+                if (!isAlwaysHidden && (!isHiddenCol || !hideHidden)) {
                     visibleColumnIndices.push(index);
                 }
             });
@@ -1442,6 +1755,26 @@ def get_javascript():
             // For change_pct column, we'll use its own data-raw attribute which contains the percentage
             // The JavaScript sorting code below will automatically use data-raw if available
             
+            // Check if this is a date column
+            // Note: latest_option_writets is NOT a date column - it's age in seconds (numeric)
+            const filterableLower = filterableName ? filterableName.toLowerCase() : '';
+            const isDateColumn = filterableLower && (
+                filterableLower.includes('expiration_date') ||
+                filterableLower.includes('exp_date') ||
+                (filterableLower.endsWith('_expiration_date') && !filterableLower.includes('latest_option_writets') && !filterableLower.includes('latest_opt_ts')) ||
+                (filterableLower.endsWith('_exp_date') && !filterableLower.includes('latest_option_writets') && !filterableLower.includes('latest_opt_ts')) ||
+                filterableLower === 'l_expiration_date' ||
+                filterableLower === 'long_expiration_date' ||
+                filterableLower === 'expiration_date'
+            );
+            
+            // Check if this is an age column (latest_option_writets - age in seconds)
+            const isAgeColumn = filterableLower && (
+                filterableLower.includes('latest_option_writets') ||
+                filterableLower.includes('latest_opt_ts') ||
+                filterableLower.endsWith('_writets')
+            );
+            
             // Sort rows
             rows.sort((a, b) => {
                 const aCell = a.cells[sortColumnIndex];
@@ -1451,24 +1784,83 @@ def get_javascript():
                 const aRaw = aCell.getAttribute('data-raw');
                 const bRaw = bCell.getAttribute('data-raw');
                 
-                let aNum = aRaw !== null ? parseFloat(aRaw) : NaN;
-                let bNum = bRaw !== null ? parseFloat(bRaw) : NaN;
-                
-                if (isNaN(aNum)) {
-                    aNum = parseFloat(aCell.textContent.trim().replace(/[^0-9.-]/g, ''));
-                }
-                if (isNaN(bNum)) {
-                    bNum = parseFloat(bCell.textContent.trim().replace(/[^0-9.-]/g, ''));
-                }
-                
                 let comparison = 0;
                 
-                if (!isNaN(aNum) && !isNaN(bNum)) {
-                    comparison = aNum - bNum;
+                // Handle age columns (latest_option_writets) - sort as numeric (smaller = more recent)
+                if (isAgeColumn) {
+                    // Age in seconds - smaller value = more recent
+                    let aNum = aRaw !== null ? parseFloat(aRaw) : NaN;
+                    let bNum = bRaw !== null ? parseFloat(bRaw) : NaN;
+                    
+                    if (isNaN(aNum)) {
+                        aNum = parseFloat(aCell.textContent.trim().replace(/[^0-9.-]/g, ''));
+                    }
+                    if (isNaN(bNum)) {
+                        bNum = parseFloat(bCell.textContent.trim().replace(/[^0-9.-]/g, ''));
+                    }
+                    
+                    if (!isNaN(aNum) && !isNaN(bNum)) {
+                        comparison = aNum - bNum;  // Smaller age = more recent
+                    } else if (isNaN(aNum) && !isNaN(bNum)) {
+                        comparison = 1; // a comes after b
+                    } else if (!isNaN(aNum) && isNaN(bNum)) {
+                        comparison = -1; // a comes before b
+                    } else {
+                        // Both are NaN, use text comparison
+                        const aText = aCell.textContent.trim();
+                        const bText = bCell.textContent.trim();
+                        comparison = aText.localeCompare(bText);
+                    }
+                }
+                // Handle date columns specially
+                else if (isDateColumn) {
+                    // For date columns, data-raw contains timestamp in milliseconds
+                    let aTimestamp = aRaw !== null ? parseFloat(aRaw) : NaN;
+                    let bTimestamp = bRaw !== null ? parseFloat(bRaw) : NaN;
+                    
+                    // If timestamp parsing fails, try to parse from text (YYYY-MM-DD format)
+                    if (isNaN(aTimestamp)) {
+                        const aText = aCell.textContent.trim();
+                        const aDate = new Date(aText);
+                        aTimestamp = isNaN(aDate.getTime()) ? NaN : aDate.getTime();
+                    }
+                    if (isNaN(bTimestamp)) {
+                        const bText = bCell.textContent.trim();
+                        const bDate = new Date(bText);
+                        bTimestamp = isNaN(bDate.getTime()) ? NaN : bDate.getTime();
+                    }
+                    
+                    if (!isNaN(aTimestamp) && !isNaN(bTimestamp)) {
+                        comparison = aTimestamp - bTimestamp;
+                    } else if (isNaN(aTimestamp) && !isNaN(bTimestamp)) {
+                        comparison = 1; // a comes after b
+                    } else if (!isNaN(aTimestamp) && isNaN(bTimestamp)) {
+                        comparison = -1; // a comes before b
+                    } else {
+                        // Both are NaN, use text comparison
+                        const aText = aCell.textContent.trim();
+                        const bText = bCell.textContent.trim();
+                        comparison = aText.localeCompare(bText);
+                    }
                 } else {
-                    const aText = aCell.textContent.trim();
-                    const bText = bCell.textContent.trim();
-                    comparison = aText.localeCompare(bText);
+                    // Regular numeric/text sorting
+                    let aNum = aRaw !== null ? parseFloat(aRaw) : NaN;
+                    let bNum = bRaw !== null ? parseFloat(bRaw) : NaN;
+                    
+                    if (isNaN(aNum)) {
+                        aNum = parseFloat(aCell.textContent.trim().replace(/[^0-9.-]/g, ''));
+                    }
+                    if (isNaN(bNum)) {
+                        bNum = parseFloat(bCell.textContent.trim().replace(/[^0-9.-]/g, ''));
+                    }
+                    
+                    if (!isNaN(aNum) && !isNaN(bNum)) {
+                        comparison = aNum - bNum;
+                    } else {
+                        const aText = aCell.textContent.trim();
+                        const bText = bCell.textContent.trim();
+                        comparison = aText.localeCompare(bText);
+                    }
                 }
                 
                 return sortDirection[columnIndex] === 'asc' ? comparison : -comparison;
@@ -1479,8 +1871,40 @@ def get_javascript():
             rows.forEach(row => tbody.appendChild(row));
             hiddenRows.forEach(row => tbody.appendChild(row));
             
+            // Sync card order with table order
+            syncCardOrder();
+            
             updateVisibleCount();
             applyRowStriping();
+        }
+        
+        // Sync card order with table row order
+        function syncCardOrder() {
+            const table = document.getElementById('resultsTable');
+            const tbody = table ? table.querySelector('tbody') : null;
+            const cardWrapper = document.getElementById('cardWrapper');
+            if (!tbody || !cardWrapper) return;
+            
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            const cards = Array.from(document.querySelectorAll('.data-card'));
+            
+            // Create a map of row index to card
+            const cardMap = new Map();
+            cards.forEach(card => {
+                const rowIndex = parseInt(card.getAttribute('data-row-index'));
+                if (!isNaN(rowIndex)) {
+                    cardMap.set(rowIndex, card);
+                }
+            });
+            
+            // Reorder cards to match table row order
+            rows.forEach((row, index) => {
+                const rowIndex = parseInt(row.getAttribute('data-row-index') || index);
+                const card = cardMap.get(rowIndex);
+                if (card) {
+                    cardWrapper.appendChild(card);
+                }
+            });
         }
         
         // Tab switching functionality
@@ -1723,6 +2147,73 @@ def get_javascript():
             }
         }
         
+        // Toggle card details (expand/collapse)
+        function toggleCardDetails(rowIndex) {
+            const detailsEl = document.getElementById('cardDetails_' + rowIndex);
+            const toggleBtn = document.getElementById('cardToggle_' + rowIndex);
+            if (!detailsEl || !toggleBtn) return;
+            
+            const isExpanded = detailsEl.classList.contains('expanded');
+            if (isExpanded) {
+                detailsEl.classList.remove('expanded');
+                toggleBtn.classList.remove('expanded');
+                toggleBtn.querySelector('span:first-child').textContent = 'Show More Details';
+            } else {
+                detailsEl.classList.add('expanded');
+                toggleBtn.classList.add('expanded');
+                toggleBtn.querySelector('span:first-child').textContent = 'Hide Details';
+            }
+        }
+        
+        // Sync card visibility with table row visibility (for filtering)
+        function syncCardVisibility() {
+            const table = document.getElementById('resultsTable');
+            const tbody = table ? table.querySelector('tbody') : null;
+            if (!tbody) return;
+            
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            const cards = Array.from(document.querySelectorAll('.data-card'));
+            
+            // Create a map of row index to card
+            const cardMap = new Map();
+            cards.forEach(card => {
+                const rowIndex = card.getAttribute('data-row-index');
+                if (rowIndex !== null) {
+                    cardMap.set(rowIndex, card);
+                }
+            });
+            
+            // Sync visibility based on row index
+            rows.forEach((row) => {
+                const rowIndex = row.getAttribute('data-row-index');
+                if (rowIndex !== null) {
+                    const card = cardMap.get(rowIndex);
+                    if (card) {
+                        const isVisible = row.style.display !== 'none';
+                        if (isVisible) {
+                            card.classList.remove('hidden');
+                        } else {
+                            card.classList.add('hidden');
+                        }
+                    }
+                }
+            });
+            
+            // Update visible count for cards
+            const visibleCards = cards.filter(card => !card.classList.contains('hidden'));
+            const visibleCountEl = document.getElementById('visibleCount');
+            if (visibleCountEl) {
+                visibleCountEl.textContent = visibleCards.length;
+            }
+        }
+        
+        // Override applyFilters to also sync cards
+        const originalApplyFilters = applyFilters;
+        applyFilters = function() {
+            originalApplyFilters();
+            syncCardVisibility();
+        };
+        
         // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             switchTab(0);
@@ -1751,6 +2242,17 @@ def get_javascript():
             // Apply initial row and column striping
             applyRowStriping();
             applyColumnStriping();
+            
+            // Sync card visibility on load
+            syncCardVisibility();
+            
+            // Default sort by net_premium descending
+            const netPremiumColIndex = findColumnIndex('net_premium');
+            if (netPremiumColIndex >= 0) {
+                // Call sortTable twice: first sets to asc, second toggles to desc
+                sortTable(netPremiumColIndex);
+                sortTable(netPremiumColIndex);
+            }
         });
 """
 
@@ -2239,12 +2741,87 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
             except (ValueError, TypeError, AttributeError):
                 # If all parsing fails, return the string representation
                 return str(x)
+        elif normalized_col in ['latest_option_writets', 'latest_opt_ts']:
+            # For latest_option_writets, it's stored as age in seconds (not a timestamp)
+            # Format as human-readable age (secs, mins, hrs, days)
+            try:
+                # First check if it's already a timestamp (pd.Timestamp or datetime)
+                if isinstance(x, pd.Timestamp):
+                    # If it's a timestamp, calculate age from now
+                    now = pd.Timestamp.now(tz='UTC') if x.tz else pd.Timestamp.now()
+                    if x.tz:
+                        age_sec = (now - x).total_seconds()
+                    else:
+                        age_sec = (now.tz_localize(None) - x).total_seconds()
+                    return format_age_seconds(age_sec)
+                elif isinstance(x, (str, datetime)):
+                    # Try to parse as datetime first
+                    dt = pd.to_datetime(x, errors='coerce')
+                    if pd.notna(dt):
+                        # It's a timestamp, calculate age
+                        now = pd.Timestamp.now(tz='UTC') if dt.tz else pd.Timestamp.now()
+                        if dt.tz:
+                            age_sec = (now - dt).total_seconds()
+                        else:
+                            age_sec = (now.tz_localize(None) - dt).total_seconds()
+                        return format_age_seconds(age_sec)
+                
+                # If not a timestamp, treat as age in seconds (numeric)
+                x_str = str(x).strip()
+                
+                # Check if it looks like a timestamp string (has date-like patterns)
+                if ' ' in x_str and len(x_str) >= 19:
+                    # Looks like a timestamp string, try to parse
+                    dt = pd.to_datetime(x_str, errors='coerce')
+                    if pd.notna(dt):
+                        now = pd.Timestamp.now(tz='UTC') if dt.tz else pd.Timestamp.now()
+                        if dt.tz:
+                            age_sec = (now - dt).total_seconds()
+                        else:
+                            age_sec = (now.tz_localize(None) - dt).total_seconds()
+                        return format_age_seconds(age_sec)
+                    # If parsing fails, return as-is
+                    return x_str[:19]
+                elif 'T' in x_str:
+                    # ISO format timestamp
+                    dt = pd.to_datetime(x_str, errors='coerce')
+                    if pd.notna(dt):
+                        now = pd.Timestamp.now(tz='UTC') if dt.tz else pd.Timestamp.now()
+                        if dt.tz:
+                            age_sec = (now - dt).total_seconds()
+                        else:
+                            age_sec = (now.tz_localize(None) - dt).total_seconds()
+                        return format_age_seconds(age_sec)
+                    return x_str.replace('T', ' ')[:19]
+                else:
+                    # Likely a numeric value (age in seconds)
+                    # Try to parse as float
+                    try:
+                        age_sec = float(x_str)
+                        # If it's a reasonable age value (0 to 1 year in seconds)
+                        if 0 <= age_sec <= 31536000:  # 1 year in seconds
+                            return format_age_seconds(age_sec)
+                        # If it's a very large number, might be a timestamp in milliseconds
+                        elif age_sec > 1000000000000:  # Timestamp in milliseconds
+                            dt = pd.to_datetime(age_sec / 1000, unit='s', errors='coerce')
+                            if pd.notna(dt):
+                                now = pd.Timestamp.now(tz='UTC')
+                                age_sec_calc = (now - dt.tz_localize('UTC')).total_seconds()
+                                return format_age_seconds(age_sec_calc)
+                    except (ValueError, TypeError):
+                        pass
+                    
+                    # If all else fails, return as string
+                    return x_str
+            except (ValueError, TypeError, AttributeError):
+                # If all parsing fails, return the string representation
+                return str(x)
         return x
     
     # Format date columns first - use raw values from df_raw before any numeric formatting
     for col in df_display.columns:
         normalized_col = _normalize_col_name(col)
-        if normalized_col in ['expiration_date', 'l_expiration_date', 'long_expiration_date']:
+        if normalized_col in ['expiration_date', 'l_expiration_date', 'long_expiration_date', 'latest_option_writets', 'latest_opt_ts']:
             # Use raw values from df_raw to get original date format before any numeric conversion
             if df_raw is not None and col in df_raw.columns:
                 df_display[col] = df_raw[col].apply(lambda x: format_date_value(x, col))
@@ -2299,6 +2876,12 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
             df_raw = df_raw.rename(columns={col: 'price_change_pct'})
             break
     
+    # Rename latest_opt_ts to latest_option_writets for display (before reordering)
+    if 'latest_opt_ts' in df_display.columns:
+        df_display = df_display.rename(columns={'latest_opt_ts': 'latest_option_writets'})
+        if 'latest_opt_ts' in df_raw.columns:
+            df_raw = df_raw.rename(columns={'latest_opt_ts': 'latest_option_writets'})
+    
     # Reorder columns: ticker, pe_ratio, market_cap_b, current_price, price_with_change (renamed to change_pct)
     # Define desired column order (only reorder if columns exist)
     # Note: price_change_pct is kept for sorting but not shown in desired_order
@@ -2350,10 +2933,11 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
         'price_above_current', 'premium_above_diff_percentage',
         'implied_volatility', 'days_to_expiry',
         'potential_premium', 'daily_premium',
-        'volume', 'num_contracts', 'write_timestamp', 'option_ticker', 'long_option_ticker',
+        'volume', 'num_contracts', 'option_ticker', 'long_option_ticker',
         'premium_diff',  # Will be hidden by default
         'spread_slippage', 'net_premium_after_spread', 'net_daily_premium_after_spread',
-        'spread_impact_pct', 'liquidity_score', 'assignment_risk', 'trade_quality'
+        'spread_impact_pct', 'liquidity_score', 'assignment_risk', 'trade_quality',
+        'latest_option_writets'  # Latest option write timestamp (always visible, rightmost)
     ]
     
     # Get existing columns in desired order, handling variations
@@ -2363,11 +2947,22 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
         if actual_col:
             ordered_cols.append(actual_col)
     
-    # Add any remaining columns (excluding price_change_pct from visible)
-    remaining_cols = [col for col in df_display.columns if col not in ordered_cols and col != 'price_change_pct']
-    # Add price_change_pct at the end (hidden, used for sorting)
+    # Remove latest_option_writets from ordered_cols if present (will be added at the end)
+    # latest_option_writets should always be at the rightmost position
+    if 'latest_option_writets' in ordered_cols:
+        ordered_cols.remove('latest_option_writets')
+    
+    # Add any remaining columns (excluding price_change_pct and latest_option_writets from visible)
+    remaining_cols = [col for col in df_display.columns 
+                      if col not in ordered_cols 
+                      and col != 'price_change_pct' 
+                      and col != 'latest_option_writets']
+    # Add price_change_pct before latest_option_writets (hidden, used for sorting)
     if 'price_change_pct' in df_display.columns:
         remaining_cols.append('price_change_pct')
+    # Add latest_option_writets at the very end (rightmost position) if it exists
+    if 'latest_option_writets' in df_display.columns:
+        remaining_cols.append('latest_option_writets')
     df_display = df_display[ordered_cols + remaining_cols]
     
     # Rename price_with_change to change_pct for display
@@ -2433,7 +3028,8 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
                 <button class="tab-button" onclick="switchTab(1)">📊 Comprehensive Analysis</button>
             </div>
             <p id="generatedTime" data-generated="""" + iso_timestamp + """">Generated: """ + timestamp + """ <span id="timeAgo"></span></p>
-            <p>Click column headers to sort • """ + str(len(df)) + """ total results</p>
+            <p class="desktop-only">Click column headers to sort • """ + str(len(df)) + """ total results</p>
+            <p class="mobile-only">Tap cards to expand details • """ + str(len(df)) + """ total results</p>
         </div>
         
         <div class="tab-content active">
@@ -2501,15 +3097,12 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
         'implied_volatility',
         'liv',
         'long_implied_volatility',
-        'theta',
-        'l_theta',
-        'long_theta',
         'l_days_to_expiry',
         'long_days_to_expiry',
-        'l_cnt_avl',
         'long_contracts_available',
         'option_ticker',
         'l_option_ticker',
+        'buy_cost',
         'net_premium_after_spread',
         'spread_slippage',
         'net_daily_premium_after_spread',
@@ -2519,6 +3112,14 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
     ]
 
     hidden_columns_set = set(_normalize_col_name(col) for col in hidden_columns_list)
+    
+    # Columns to always hide (hidden in all cases, even when "Show hidden columns" is clicked)
+    always_hidden_columns_list = [
+        'l_cnt_avl',
+        'long_contracts_available',  # Also hide the full name variation
+    ]
+    
+    always_hidden_columns_set = set(_normalize_col_name(col) for col in always_hidden_columns_list)
 
     # Define column groups - pairs that should be grouped together
     # Format: (group_name, ([col1_variations], [col2_variations]))
@@ -2528,6 +3129,7 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
         'expiration_date': (['expiration_date'], ['l_expiration_date', 'long_expiration_date']),
         'bid:ask': (['bid:ask', 'bid_ask'], ['l_bid:ask', 'l_bid_ask', 'long_bid_ask']),
         'delta': (['delta'], ['l_delta', 'long_delta']),
+        'theta': (['theta'], ['l_theta', 'long_theta']),
         's_prem_tot': (['s_prem_tot', 'short_premium_total'], ['net_premium']),
         's_day_prem': (['s_day_prem', 'short_daily_premium'], ['net_daily_premium', 'net_daily_premi']),
     }
@@ -2558,6 +3160,7 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
                 'expiration_date': 'Expiration Date',
                 'bid:ask': 'Bid:Ask',
                 'delta': 'Delta',
+                'theta': 'Theta',
                 's_prem_tot': 'Premium Total',
                 's_day_prem': 'Daily Premium',
             }.get(group_name, group_name.replace('_', ' ').title())
@@ -2574,16 +3177,17 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
     # Columns to place after daily premium
     after_daily_premium = ['num_contracts', 'buy_cost', 'volume', 'trade_quality']
     
-    # First, add ungrouped columns in their original order (excluding those that go after daily premium)
+    # First, add ungrouped columns in their original order (excluding those that go after daily premium, price_change_pct, and latest_option_writets)
+    # latest_option_writets should always be at the rightmost position (after price_change_pct)
     for col in original_columns:
-        if col not in col_to_group and col not in after_daily_premium:
+        if col not in col_to_group and col not in after_daily_premium and col != 'latest_option_writets' and col != 'price_change_pct':
             new_column_order.append(col)
             processed_cols_reorder.add(col)
     
     # Then, add grouped pairs together
     # Use the order defined in column_groups_def to maintain a consistent order
     # expiration_date comes right after strike_price
-    group_order = ['strike_price', 'expiration_date', 'opt_prem', 'bid:ask', 'delta', 's_prem_tot', 's_day_prem']
+    group_order = ['strike_price', 'expiration_date', 'opt_prem', 'bid:ask', 'delta', 'theta', 's_prem_tot', 's_day_prem']
     for group_name in group_order:
         if group_name in column_groups:
             col1, col2 = column_groups[group_name]
@@ -2601,10 +3205,40 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
             processed_cols_reorder.add(col)
     
     # Add any remaining columns that weren't processed (shouldn't happen, but safety check)
+    # But ensure price_change_pct and latest_option_writets are always at the rightmost positions
+    latest_opt_col_reorder = None
+    price_change_pct_col = None
     for col in original_columns:
         if col not in processed_cols_reorder:
-            new_column_order.append(col)
-            processed_cols_reorder.add(col)
+            if col == 'latest_option_writets':
+                latest_opt_col_reorder = col
+            elif col == 'price_change_pct':
+                price_change_pct_col = col
+            else:
+                new_column_order.append(col)
+                processed_cols_reorder.add(col)
+    
+    # Remove latest_option_writets and price_change_pct from new_column_order if they were somehow added earlier
+    if 'latest_option_writets' in new_column_order:
+        new_column_order.remove('latest_option_writets')
+        processed_cols_reorder.discard('latest_option_writets')
+        latest_opt_col_reorder = 'latest_option_writets'
+    if 'price_change_pct' in new_column_order:
+        new_column_order.remove('price_change_pct')
+        processed_cols_reorder.discard('price_change_pct')
+        price_change_pct_col = 'price_change_pct'
+    
+    # Add price_change_pct before latest_option_writets (hidden, used for sorting)
+    if price_change_pct_col or 'price_change_pct' in original_columns:
+        if 'price_change_pct' in original_columns:
+            new_column_order.append('price_change_pct')
+            processed_cols_reorder.add('price_change_pct')
+    
+    # Add latest_option_writets at the very end (rightmost position) if it exists
+    if latest_opt_col_reorder or 'latest_option_writets' in original_columns:
+        if 'latest_option_writets' in original_columns:
+            new_column_order.append('latest_option_writets')
+            processed_cols_reorder.add('latest_option_writets')
     
     # Reorder both df_display and df_raw to match the new column order
     df_display = df_display[new_column_order]
@@ -2646,8 +3280,10 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
             # Regular column (not grouped) - create empty cell in first row
             normalized_col = _normalize_col_name(col)
             is_hidden = normalized_col in hidden_columns_set
+            is_always_hidden = normalized_col in always_hidden_columns_set
             hidden_class = ' is-hidden-col' if is_hidden else ''
-            html_parts.append(f'                        <th class="group-header{hidden_class}" colspan="1" style="background: transparent; border: none;"></th>\n')
+            always_hidden_class = ' always-hidden' if is_always_hidden else ''
+            html_parts.append(f'                        <th class="group-header{hidden_class}{always_hidden_class}" colspan="1" style="background: transparent; border: none;"></th>\n')
             processed_cols_first_row.add(col)
     
     html_parts.append("""                    </tr>\n""")
@@ -2663,7 +3299,9 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
         filterable_name = html.escape(str(col))
         normalized_col = _normalize_col_name(col)
         is_hidden = normalized_col in hidden_columns_set
+        is_always_hidden = normalized_col in always_hidden_columns_set
         hidden_class = ' is-hidden-col' if is_hidden else ''
+        always_hidden_class = ' always-hidden' if is_always_hidden else ''
         
         # Determine if this column is part of a group and which position (short/long)
         grouped_class = ''
@@ -2677,7 +3315,7 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
             elif col == col2:
                 short_long_label = 'Long'
         
-        html_parts.append(f'                        <th class="sortable{grouped_class}{hidden_class}" onclick="sortTable({col_index})" data-filterable-name="{filterable_name}">')
+        html_parts.append(f'                        <th class="sortable{grouped_class}{hidden_class}{always_hidden_class}" onclick="sortTable({col_index})" data-filterable-name="{filterable_name}">')
         html_parts.append(f'                            <span class="column-name-display">{truncated_title}</span>')
         if short_long_label:
             html_parts.append(f'                            <span class="column-name-short-long">{short_long_label}</span>')
@@ -2692,7 +3330,7 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
     # Generate table rows with raw values stored in data attributes
     # NOTE: Each column maintains its own separate data cells, even when visually grouped
     for row_idx, row in df_display.iterrows():
-        html_parts.append("                    <tr>\n")
+        html_parts.append(f'                    <tr data-row-index="{row_idx}">\n')
         for col in df_display.columns:
             cell_value = str(row[col]) if pd.notna(row[col]) else ''
             # Escape HTML special characters
@@ -2701,39 +3339,96 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
             # Get raw value for filtering
             raw_value = None
             raw_text = None
+            
+            # Normalize column name for use in multiple checks
+            normalized_col = _normalize_col_name(col)
+            
+            # Check if this is a date column first (before numeric conversion)
+            # Note: latest_option_writets is NOT a date column - it's age in seconds
+            is_date_col = (
+                normalized_col in ['expiration_date', 'l_expiration_date', 'long_expiration_date'] or
+                normalized_col.endswith('_expiration_date') or
+                normalized_col.endswith('_exp_date') or
+                ('expiration_date' in normalized_col and 'latest_option_writets' not in normalized_col and 'latest_opt_ts' not in normalized_col)
+            )
+            
+            # Check if this is latest_option_writets (age in seconds, not a timestamp)
+            is_age_col = normalized_col in ['latest_option_writets', 'latest_opt_ts'] or normalized_col.endswith('_writets')
+            
             if row_idx in df_raw.index and col in df_raw.columns:
                 raw_val = df_raw.loc[row_idx, col]
                 if pd.notna(raw_val):
-                    # Store numeric value if it's a number
-                    try:
-                        # Handle malformed strings like '0.120.260.110.210.36'
-                        val_str = str(raw_val)
-                        # Try direct conversion first
+                    # Handle latest_option_writets as age in seconds (numeric, not date)
+                    if is_age_col:
                         try:
-                            float_val = float(val_str)
-                            # If successful and it's actually a number (not NaN), store as numeric
-                            if not pd.isna(float_val):
-                                raw_value = str(float_val)
-                            else:
-                                raw_text = str(raw_val)
-                        except (ValueError, TypeError):
-                            # Extract first valid number from string if direct conversion fails
-                            match = re.search(r'-?\d+\.?\d*', val_str)
-                            if match:
-                                try:
-                                    float_val = float(match.group())
-                                    if not pd.isna(float_val):
-                                        raw_value = str(float_val)
-                                    else:
-                                        raw_text = str(raw_val)
-                                except (ValueError, TypeError):
+                            # Store as numeric seconds for sorting
+                            val_str = str(raw_val).strip()
+                            # Try direct conversion first
+                            try:
+                                age_sec = float(val_str)
+                                # Store as numeric value for sorting (smaller = more recent)
+                                raw_value = str(age_sec)
+                            except (ValueError, TypeError):
+                                # Extract first valid number from string
+                                match = re.search(r'-?\d+\.?\d*', val_str)
+                                if match:
+                                    age_sec = float(match.group())
+                                    raw_value = str(age_sec)
+                                else:
                                     raw_text = str(raw_val)
+                        except (ValueError, TypeError, AttributeError):
+                            raw_text = str(raw_val)
+                    # Handle date columns specially
+                    elif is_date_col:
+                        try:
+                            # Try to parse as datetime/timestamp
+                            if isinstance(raw_val, pd.Timestamp):
+                                # Store as timestamp (milliseconds since epoch) for sorting
+                                raw_value = str(int(raw_val.timestamp() * 1000))
+                            elif isinstance(raw_val, (str, datetime)):
+                                dt = pd.to_datetime(raw_val, errors='coerce')
+                                if pd.notna(dt):
+                                    raw_value = str(int(dt.timestamp() * 1000))
                             else:
-                                # Not a number, store as text
-                                raw_text = str(raw_val)
-                    except (ValueError, TypeError, AttributeError):
-                        # Not a number, store as text
-                        raw_text = str(raw_val)
+                                # Try to parse string representation
+                                val_str = str(raw_val).strip()
+                                dt = pd.to_datetime(val_str, errors='coerce')
+                                if pd.notna(dt):
+                                    raw_value = str(int(dt.timestamp() * 1000))
+                        except (ValueError, TypeError, AttributeError, OverflowError):
+                            # If date parsing fails, fall back to text sorting
+                            raw_text = str(raw_val)
+                    else:
+                        # Store numeric value if it's a number (non-date columns)
+                        try:
+                            # Handle malformed strings like '0.120.260.110.210.36'
+                            val_str = str(raw_val)
+                            # Try direct conversion first
+                            try:
+                                float_val = float(val_str)
+                                # If successful and it's actually a number (not NaN), store as numeric
+                                if not pd.isna(float_val):
+                                    raw_value = str(float_val)
+                                else:
+                                    raw_text = str(raw_val)
+                            except (ValueError, TypeError):
+                                # Extract first valid number from string if direct conversion fails
+                                match = re.search(r'-?\d+\.?\d*', val_str)
+                                if match:
+                                    try:
+                                        float_val = float(match.group())
+                                        if not pd.isna(float_val):
+                                            raw_value = str(float_val)
+                                        else:
+                                            raw_text = str(raw_val)
+                                    except (ValueError, TypeError):
+                                        raw_text = str(raw_val)
+                                else:
+                                    # Not a number, store as text
+                                    raw_text = str(raw_val)
+                        except (ValueError, TypeError, AttributeError):
+                            # Not a number, store as text
+                            raw_text = str(raw_val)
             
             # For change_pct column, also store the percentage value from price_change_pct for sorting
             if col == 'change_pct' and 'price_change_pct' in df_raw.columns and row_idx in df_raw.index:
@@ -2747,15 +3442,90 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
                     except (ValueError, TypeError):
                         pass
             
+            # Calculate and append theta percentage for theta columns
+            is_theta_col = (normalized_col == 'theta' or normalized_col == 'l_theta' or normalized_col == 'long_theta')
+            if is_theta_col and row_idx in df_raw.index:
+                # Get theta value from df_raw
+                theta_val = None
+                if col in df_raw.columns:
+                    theta_raw = df_raw.loc[row_idx, col]
+                    if pd.notna(theta_raw):
+                        try:
+                            theta_str = str(theta_raw)
+                            # Try direct conversion
+                            try:
+                                theta_val = float(theta_str)
+                            except (ValueError, TypeError):
+                                # Extract first valid number
+                                match = re.search(r'-?\d+\.?\d*', theta_str)
+                                if match:
+                                    theta_val = float(match.group())
+                        except (ValueError, TypeError, AttributeError):
+                            pass
+                
+                # Find corresponding option premium column
+                opt_prem_col = None
+                if normalized_col == 'theta':
+                    # Short theta - find short option premium
+                    for opt_col in ['opt_prem.', 'opt_prem', 'option_premium']:
+                        if opt_col in df_raw.columns:
+                            opt_prem_col = opt_col
+                            break
+                elif normalized_col in ['l_theta', 'long_theta']:
+                    # Long theta - find long option premium
+                    for opt_col in ['l_opt_prem', 'l_prem', 'long_option_premium']:
+                        if opt_col in df_raw.columns:
+                            opt_prem_col = opt_col
+                            break
+                
+                # Calculate theta percentage
+                if theta_val is not None and opt_prem_col and opt_prem_col in df_raw.columns:
+                    opt_prem_raw = df_raw.loc[row_idx, opt_prem_col]
+                    if pd.notna(opt_prem_raw):
+                        try:
+                            opt_prem_str = str(opt_prem_raw)
+                            # Try direct conversion
+                            try:
+                                opt_prem_val = float(opt_prem_str)
+                            except (ValueError, TypeError):
+                                # Extract first valid number
+                                match = re.search(r'-?\d+\.?\d*', opt_prem_str)
+                                if match:
+                                    opt_prem_val = float(match.group())
+                                else:
+                                    opt_prem_val = None
+                            
+                            if opt_prem_val is not None and opt_prem_val != 0:
+                                theta_pct = (theta_val / opt_prem_val) * 100
+                                # Validate theta percentage - if invalid (>100%, NaN, or infinity), show N/A
+                                if pd.isna(theta_pct) or np.isinf(theta_pct) or abs(theta_pct) > 100:
+                                    # Invalid percentage - show N/A
+                                    if cell_value:
+                                        cell_value = f"{cell_value} (N/A)"
+                                    else:
+                                        cell_value = f"{theta_val:.2f} (N/A)"
+                                    # Don't set raw_value for invalid percentages - keep base theta value for sorting
+                                else:
+                                    # Valid percentage - store in raw_value for sorting
+                                    raw_value = str(theta_pct)
+                                    # Append theta percentage to cell value
+                                    if cell_value:
+                                        cell_value = f"{cell_value} ({theta_pct:.2f}%)"
+                                    else:
+                                        cell_value = f"{theta_val:.2f} ({theta_pct:.2f}%)"
+                        except (ValueError, TypeError, AttributeError, ZeroDivisionError):
+                            pass
+            
             # Build td with data attributes
             td_attrs = []
             if raw_value is not None:
                 td_attrs.append(f'data-raw="{html.escape(str(raw_value))}"')
             if raw_text is not None:
                 td_attrs.append(f'data-raw-text="{html.escape(str(raw_text))}"')
-            # Hidden class for default-hidden columns
-            normalized_col = _normalize_col_name(col)
+            # Hidden class for default-hidden columns (normalized_col already calculated above)
             td_hidden_class = ' is-hidden-col' if normalized_col in hidden_columns_set else ''
+            td_always_hidden_class = ' always-hidden' if normalized_col in always_hidden_columns_set else ''
+            td_hidden_class = (td_hidden_class + td_always_hidden_class).strip()
             
             # Add price change color class for change_pct column (renamed from price_with_change)
             price_class = ''
@@ -2787,6 +3557,224 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
     html_parts.append("""                </tbody>
             </table>
         </div>
+        
+        <!-- Mobile Card Layout -->
+        <div class="card-wrapper" id="cardWrapper">
+""")
+    
+    # Define primary columns (always visible on cards) and expandable columns
+    # Map normalized column names to display labels
+    primary_columns_map = {
+        'ticker': 'Ticker',
+        'current_price': 'Price',
+        'curr_price': 'Price',
+        'change_pct': 'Change',
+        'price_with_change': 'Change',
+        'strike_price': 'Strike',
+        'option_premium': 'Premium',
+        'opt_prem': 'Premium',
+        'expiration_date': 'Expiry',
+        'daily_premium': 'Daily',
+        'net_daily_premium': 'Net Daily',
+        'net_daily_premi': 'Net Daily',
+        's_day_prem': 'Daily',
+        'short_daily_premium': 'Daily',
+    }
+    
+    # Helper function to find column by normalized name
+    def find_col_by_normalized(target_normalized):
+        for col in df_display.columns:
+            if _normalize_col_name(col) == target_normalized:
+                return col
+        return None
+    
+    # Generate cards for each row
+    for row_idx, row in df_display.iterrows():
+        # Get ticker for card header
+        ticker = str(row.get('ticker', 'N/A')) if pd.notna(row.get('ticker')) else 'N/A'
+        
+        # Get current price and change - try multiple column name variations
+        current_price_val = ''
+        for price_col in ['current_price', 'curr_price', 'cur_price']:
+            if price_col in row.index and pd.notna(row[price_col]) and str(row[price_col]).strip():
+                current_price_val = row[price_col]
+                break
+        
+        change_pct_val = ''
+        for change_col in ['change_pct', 'price_with_change', 'price_with_chan']:
+            if change_col in row.index and pd.notna(row[change_col]) and str(row[change_col]).strip():
+                change_pct_val = row[change_col]
+                break
+        
+        # Determine change color class
+        change_class = ''
+        if change_pct_val:
+            change_str = str(change_pct_val)
+            if '+$' in change_str or '(+' in change_str:
+                change_class = 'positive'
+            elif '-$' in change_str or '(-' in change_str:
+                change_class = 'negative'
+        
+        # Store raw values for filtering - get from df_raw if available
+        card_data_attrs = []
+        if df_raw is not None and row_idx in df_raw.index:
+            # Store key values as data attributes for filtering
+            for col in ['ticker', 'current_price', 'strike_price', 'option_premium', 'daily_premium', 'net_daily_premium', 'volume', 'delta', 'theta']:
+                col_found = None
+                for c in df_raw.columns:
+                    if _normalize_col_name(c) == _normalize_col_name(col):
+                        col_found = c
+                        break
+                if col_found and col_found in df_raw.columns:
+                    raw_val = df_raw.loc[row_idx, col_found]
+                    if pd.notna(raw_val):
+                        try:
+                            # Try to get numeric value
+                            if isinstance(raw_val, (int, float)):
+                                card_data_attrs.append(f'data-{_normalize_col_name(col)}="{raw_val}"')
+                            else:
+                                val_str = str(raw_val)
+                                # Try to extract number
+                                match = re.search(r'-?\d+\.?\d*', val_str)
+                                if match:
+                                    card_data_attrs.append(f'data-{_normalize_col_name(col)}="{match.group()}"')
+                        except:
+                            pass
+        
+        data_attrs_str = ' ' + ' '.join(card_data_attrs) if card_data_attrs else ''
+        html_parts.append(f'            <div class="data-card" data-row-index="{row_idx}"{data_attrs_str}>\n')
+        html_parts.append('                <div class="card-header">\n')
+        html_parts.append('                    <div class="card-header-main">\n')
+        html_parts.append(f'                        <div class="card-ticker">{html.escape(ticker)}</div>\n')
+        html_parts.append('                        <div class="card-price">\n')
+        if current_price_val:
+            price_str = str(current_price_val)
+            # Remove $ if already present (from formatting)
+            if price_str.startswith('$'):
+                price_display = html.escape(price_str)
+            else:
+                price_display = '$' + html.escape(price_str)
+            html_parts.append(f'                            <span class="card-price-value">{price_display}</span>\n')
+        if change_pct_val:
+            html_parts.append(f'                            <span class="card-price-change {change_class}">{html.escape(str(change_pct_val))}</span>\n')
+        html_parts.append('                        </div>\n')
+        html_parts.append('                    </div>\n')
+        html_parts.append('                </div>\n')
+        html_parts.append('                <div class="card-body">\n')
+        
+        # Primary metrics section (always visible)
+        html_parts.append('                    <div class="card-primary">\n')
+        
+        # Add primary columns (skip ticker, current_price, change_pct as they're in header)
+        primary_cols_to_show = ['strike_price', 'option_premium', 'expiration_date', 'daily_premium', 'net_daily_premium', 'net_daily_premi', 's_day_prem', 'short_daily_premium']
+        shown_primary = set()
+        
+        for col_key in primary_cols_to_show:
+            col_name = find_col_by_normalized(_normalize_col_name(col_key))
+            if col_name and col_name in row.index:
+                val = row[col_name]
+                if pd.notna(val) and str(val).strip() and col_name not in shown_primary:
+                    col_label = primary_columns_map.get(col_key, col_key.replace('_', ' ').title())
+                    html_parts.append('                        <div class="card-primary-item">\n')
+                    html_parts.append(f'                            <div class="card-primary-label">{html.escape(col_label)}</div>\n')
+                    html_parts.append(f'                            <div class="card-primary-value">{html.escape(str(val))}</div>\n')
+                    html_parts.append('                        </div>\n')
+                    shown_primary.add(col_name)
+        
+        html_parts.append('                    </div>\n')
+        
+        # Expandable details section
+        html_parts.append('                    <div class="card-details" id="cardDetails_' + str(row_idx) + '">\n')
+        
+        # Group columns by category for better organization
+        option_cols = []
+        greeks_cols = []
+        premium_cols = []
+        other_cols = []
+        
+        for col in df_display.columns:
+            normalized = _normalize_col_name(col)
+            # Skip columns already shown in primary section
+            if normalized in ['ticker', 'current_price', 'curr_price', 'change_pct', 'price_with_change']:
+                continue
+            if col in shown_primary:
+                continue
+            
+            val = row[col]
+            
+            # Skip always-hidden columns, but include regular hidden columns in cards
+            is_always_hidden = normalized in always_hidden_columns_set
+            if is_always_hidden:
+                continue
+            
+            if pd.isna(val) or str(val).strip() == '':
+                continue
+            
+            col_label = col.replace('_', ' ').title()
+            
+            # Categorize columns
+            if any(x in normalized for x in ['strike', 'expiration', 'expiry', 'option_ticker', 'bid', 'ask']):
+                option_cols.append((col, col_label, val))
+            elif any(x in normalized for x in ['delta', 'theta', 'gamma', 'vega', 'iv', 'implied']):
+                greeks_cols.append((col, col_label, val))
+            elif any(x in normalized for x in ['premium', 'prem', 'net', 'total', 'daily']):
+                premium_cols.append((col, col_label, val))
+            else:
+                other_cols.append((col, col_label, val))
+        
+        # Render categorized sections
+        if option_cols:
+            html_parts.append('                        <div class="card-section">\n')
+            html_parts.append('                            <div class="card-section-title">Option Details</div>\n')
+            for col, col_label, val in option_cols:
+                html_parts.append('                            <div class="card-row">\n')
+                html_parts.append(f'                                <span class="card-label">{html.escape(col_label)}</span>\n')
+                html_parts.append(f'                                <span class="card-value">{html.escape(str(val))}</span>\n')
+                html_parts.append('                            </div>\n')
+            html_parts.append('                        </div>\n')
+        
+        if greeks_cols:
+            html_parts.append('                        <div class="card-section">\n')
+            html_parts.append('                            <div class="card-section-title">Greeks</div>\n')
+            for col, col_label, val in greeks_cols:
+                html_parts.append('                            <div class="card-row">\n')
+                html_parts.append(f'                                <span class="card-label">{html.escape(col_label)}</span>\n')
+                html_parts.append(f'                                <span class="card-value">{html.escape(str(val))}</span>\n')
+                html_parts.append('                            </div>\n')
+            html_parts.append('                        </div>\n')
+        
+        if premium_cols:
+            html_parts.append('                        <div class="card-section">\n')
+            html_parts.append('                            <div class="card-section-title">Premium & Returns</div>\n')
+            for col, col_label, val in premium_cols:
+                html_parts.append('                            <div class="card-row">\n')
+                html_parts.append(f'                                <span class="card-label">{html.escape(col_label)}</span>\n')
+                html_parts.append(f'                                <span class="card-value">{html.escape(str(val))}</span>\n')
+                html_parts.append('                            </div>\n')
+            html_parts.append('                        </div>\n')
+        
+        if other_cols:
+            html_parts.append('                        <div class="card-section">\n')
+            html_parts.append('                            <div class="card-section-title">Other</div>\n')
+            for col, col_label, val in other_cols:
+                html_parts.append('                            <div class="card-row">\n')
+                html_parts.append(f'                                <span class="card-label">{html.escape(col_label)}</span>\n')
+                html_parts.append(f'                                <span class="card-value">{html.escape(str(val))}</span>\n')
+                html_parts.append('                            </div>\n')
+            html_parts.append('                        </div>\n')
+        
+        html_parts.append('                    </div>\n')
+        
+        # Toggle button
+        html_parts.append(f'                    <button class="card-toggle" onclick="toggleCardDetails({row_idx})" id="cardToggle_{row_idx}">\n')
+        html_parts.append('                        <span>Show More Details</span>\n')
+        html_parts.append('                        <span class="card-toggle-icon">▼</span>\n')
+        html_parts.append('                    </button>\n')
+        
+        html_parts.append('                </div>\n')
+        html_parts.append('            </div>\n')
+    
+    html_parts.append("""        </div>
         
         <div class="stats">
             <div class="stat-item">
@@ -2828,6 +3816,8 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
     print(f"HTML output generated successfully!", file=sys.stderr)
     print(f"Output directory: {output_path.absolute()}", file=sys.stderr)
     print(f"Open: {html_file.absolute()}", file=sys.stderr)
+
+
 
 
 
