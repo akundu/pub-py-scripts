@@ -687,3 +687,227 @@ async def check_tickers_for_refresh(
     return tickers_to_refresh
 
 
+# ============================================================================
+# Options Utility Functions
+# ============================================================================
+
+def extract_ticker_from_option_ticker(option_ticker: Any) -> Optional[str]:
+    """Extract ticker symbol from option_ticker (e.g., 'AAPL250117C00150000' -> 'AAPL')."""
+    if not PANDAS_AVAILABLE:
+        return None
+    if pd.isna(option_ticker):
+        return None
+    option_ticker_str = str(option_ticker)
+    # Remove "O:" prefix if present
+    if option_ticker_str.startswith("O:"):
+        option_ticker_str = option_ticker_str[2:]
+    # Extract ticker (first 1-5 uppercase letters before the date)
+    import re
+    match = re.match(r'^([A-Z]{1,5})', option_ticker_str)
+    if match:
+        return match.group(1)
+    return None
+
+
+def calculate_option_premium(row: Any) -> float:
+    """Calculate option premium using mid-price (bid+ask)/2 if both available, else fallback to ask, bid, last price, or 0.01."""
+    if not PANDAS_AVAILABLE:
+        return 0.01
+    
+    if isinstance(row, dict):
+        bid = row.get('bid')
+        ask = row.get('ask')
+        last_price = row.get('price')
+    elif hasattr(row, 'get'):
+        bid = row.get('bid')
+        ask = row.get('ask')
+        last_price = row.get('price')
+    else:
+        return 0.01
+    
+    if pd.notna(bid) and pd.notna(ask):
+        return round((float(bid) + float(ask)) / 2.0, 2)
+    elif pd.notna(ask):
+        return round(float(ask), 2)
+    elif pd.notna(bid):
+        return round(float(bid), 2)
+    elif pd.notna(last_price):
+        return round(float(last_price), 2)
+    else:
+        return 0.01
+
+
+def format_bid_ask(row: Any) -> str:
+    """Format bid and ask prices as 'bid:ask' string."""
+    if not PANDAS_AVAILABLE:
+        return "N/A:N/A"
+    
+    if isinstance(row, dict):
+        bid = row.get('bid')
+        ask = row.get('ask')
+    elif hasattr(row, 'get'):
+        bid = row.get('bid')
+        ask = row.get('ask')
+    else:
+        return "N/A:N/A"
+    
+    bid_val = bid if pd.notna(bid) else 0
+    ask_val = ask if pd.notna(ask) else 0
+    if pd.notna(bid) or pd.notna(ask):
+        return f"{bid_val:.2f}:{ask_val:.2f}"
+    return "N/A:N/A"
+
+
+def format_price_with_change(current_price: float, prev_close: Optional[float]) -> Tuple[Optional[str], Optional[float]]:
+    """Format price with change percentage. Returns (formatted_string, change_percentage)."""
+    if not PANDAS_AVAILABLE:
+        if current_price is None:
+            return None, None
+        if prev_close is None or prev_close <= 0:
+            return f"${current_price:.2f}", None
+        change = current_price - prev_close
+        change_pct = (change / prev_close) * 100
+        if change >= 0:
+            return f"+${change:.2f} (+{change_pct:.2f}%)", change_pct
+        else:
+            return f"-${abs(change):.2f} ({change_pct:.2f}%)", change_pct
+    
+    if pd.isna(current_price) or current_price is None:
+        return None, None
+    
+    if prev_close is None or pd.isna(prev_close) or prev_close <= 0:
+        return f"${current_price:.2f}", None
+    
+    change = current_price - prev_close
+    change_pct = (change / prev_close) * 100
+    
+    if change >= 0:
+        return f"+${change:.2f} (+{change_pct:.2f}%)", change_pct
+    else:
+        return f"-${abs(change):.2f} ({change_pct:.2f}%)", change_pct
+
+
+def calculate_days_to_expiry(exp_date: Any, today_ref: Any) -> int:
+    """Calculate days to expiry from expiration date, handling timezone-aware timestamps."""
+    if not PANDAS_AVAILABLE:
+        return 0
+    
+    if pd.isna(exp_date):
+        return 0
+    
+    # Normalize today_ref to UTC Timestamp
+    if isinstance(today_ref, pd.Timestamp):
+        if today_ref.tz is None:
+            today_ref = today_ref.tz_localize('UTC')
+        else:
+            today_ref = today_ref.tz_convert('UTC')
+    else:
+        today_ref = pd.to_datetime(today_ref, utc=True)
+        if today_ref.tz is None:
+            today_ref = today_ref.tz_localize('UTC')
+    
+    # Normalize exp_date to UTC Timestamp
+    if isinstance(exp_date, pd.Timestamp):
+        if exp_date.tz is None:
+            exp_date = exp_date.tz_localize('UTC')
+        else:
+            exp_date = exp_date.tz_convert('UTC')
+    else:
+        exp_date = pd.to_datetime(exp_date, utc=True)
+        if pd.isna(exp_date):
+            return 0
+        if exp_date.tz is None:
+            exp_date = exp_date.tz_localize('UTC')
+    
+    return int((exp_date - today_ref).total_seconds() / 86400)
+
+
+def format_age_seconds(age_seconds: Any) -> Optional[str]:
+    """Format age in seconds as a readable string."""
+    if not PANDAS_AVAILABLE:
+        if age_seconds is None:
+            return None
+        try:
+            age_sec = float(age_seconds)
+            if age_sec < 0:
+                return None
+            return f"{age_sec:.1f}"
+        except (ValueError, TypeError):
+            return str(age_seconds) if age_seconds is not None else None
+    
+    if pd.isna(age_seconds) or age_seconds is None:
+        return None
+    try:
+        # If it's already a Timestamp (shouldn't happen, but handle it), convert to age
+        if isinstance(age_seconds, pd.Timestamp):
+            from datetime import datetime, timezone
+            now_utc = datetime.now(timezone.utc)
+            if age_seconds.tz is None:
+                age_seconds = age_seconds.tz_localize('UTC')
+            else:
+                age_seconds = age_seconds.tz_convert('UTC')
+            age_seconds_dt = age_seconds.to_pydatetime()
+            age_sec = (now_utc - age_seconds_dt).total_seconds()
+        elif isinstance(age_seconds, str):
+            # If it's a string, try to parse as float
+            age_sec = float(age_seconds)
+        else:
+            # It should be a float (age in seconds)
+            age_sec = float(age_seconds)
+        
+        if age_sec < 0:
+            return None
+        # Format as seconds with 1 decimal place
+        return f"{age_sec:.1f}"
+    except (ValueError, TypeError, AttributeError):
+        # If conversion fails, return as string representation
+        return str(age_seconds) if age_seconds is not None else None
+
+
+def normalize_expiration_date_to_utc(x: Any) -> Any:
+    """Normalize expiration date to UTC for display."""
+    if not PANDAS_AVAILABLE:
+        return x
+    
+    if pd.isna(x):
+        return pd.NaT
+    if isinstance(x, pd.Timestamp):
+        dt = x
+    else:
+        dt = pd.to_datetime(x, errors='coerce')
+        if pd.isna(dt):
+            return pd.NaT
+    if dt.tz is None:
+        dt = dt.tz_localize('UTC')
+    else:
+        dt = dt.tz_convert('UTC')
+    return dt
+
+
+def normalize_timestamp_for_display(x: Any, timezone_str: str = 'America/New_York') -> Any:
+    """Normalize timestamp to specified timezone for display."""
+    if not PANDAS_AVAILABLE:
+        return x
+    
+    if pd.isna(x):
+        return pd.NaT
+    if isinstance(x, pd.Timestamp):
+        dt = x
+    else:
+        dt = pd.to_datetime(x, errors='coerce')
+        if pd.isna(dt):
+            return pd.NaT
+    if dt.tz is None:
+        dt = dt.tz_localize('UTC')
+    else:
+        dt = dt.tz_convert('UTC')
+    
+    # Convert to display timezone
+    try:
+        import pytz
+        display_tz = pytz.timezone(timezone_str)
+        return dt.tz_convert(display_tz)
+    except Exception:
+        return dt
+
+
