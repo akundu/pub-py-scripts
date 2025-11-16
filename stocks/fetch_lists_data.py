@@ -11,6 +11,7 @@ import pandas as pd
 import io
 
 # Define all available concrete types
+FULL_AVAILABLE_TYPES = ['nyse', 'nasdaq', 'nasdaq-new', 'nyse-new', 'dow-jones', 'sp-500', 'etfs', 'crypto', 'stocks_to_track']
 ALL_AVAILABLE_TYPES = ['nyse', 'nasdaq', 'dow-jones', 'sp-500', 'etfs', 'crypto', 'stocks_to_track']
 
 async def fetch_nasdaq_companies():
@@ -299,7 +300,7 @@ async def fetch_data_by_type(data_type):
     """Fetch symbols based on the specified data type"""
     if data_type == "nyse":
         return await fetch_stock_analysis_symbols("nyse")
-    elif data_type == "nyse-all":
+    elif data_type == "nyse-new":
         # Use fetch_nyse_companies for NYSE (more reliable source)
         try:
             df = await fetch_nyse_companies()
@@ -315,7 +316,7 @@ async def fetch_data_by_type(data_type):
         return await fetch_stock_analysis_symbols("nyse")
     elif data_type == "nasdaq":
         return await fetch_stock_analysis_symbols("nasdaq")
-    elif data_type == "nasdaq-all":
+    elif data_type == "nasdaq-new":
         # Use fetch_nasdaq_companies for NASDAQ (more reliable source)
         try:
             df = await fetch_nasdaq_companies()
@@ -348,38 +349,17 @@ async def fetch_types(args):
     if not args.types:
         return []
     
-    actual_types_to_process = set()
+    # When "all" is specified, use ALL_AVAILABLE_TYPES (excludes -new types)
+    # When specific types are specified (including -new types), use them explicitly
     if "all" in args.types:
-        actual_types_to_process.update(ALL_AVAILABLE_TYPES)
+        # Use ALL_AVAILABLE_TYPES which excludes nasdaq-new and nyse-new
+        current_types_for_fetching = list(ALL_AVAILABLE_TYPES)
     else:
-        actual_types_to_process.update(ty for ty in args.types if ty != "all") # Ensure "all" itself isn't processed if mixed
-        # If only specific types are given, use them directly
-        if not actual_types_to_process: # e.g. if args.types was just ["all"]
-             actual_types_to_process.update(args.types) # then this becomes empty, so re-evaluate
+        # Use explicitly specified types (can include -new types if user requests them)
+        current_types_for_fetching = [ty for ty in args.types if ty != "all" and ty in FULL_AVAILABLE_TYPES]
     
-    # Refined logic for actual_types_to_process
-    processed_types_list = []
-    if "all" in args.types:
-        processed_types_list = list(ALL_AVAILABLE_TYPES)
-    else:
-        processed_types_list = [ty for ty in args.types if ty in ALL_AVAILABLE_TYPES] # Filter to only known valid types
-
-    if not processed_types_list:
-        if args.types: # If types were specified but none are valid or only 'all' leading to empty here after specific filter
-            print(f"Warning: No valid types specified for fetching from {args.types}. Defaulting to all known types if 'all' was intended or no valid specific types given.")
-            # This case is a bit tricky. If user says --types all foo, foo is invalid.
-            # If user says --types foo, foo is invalid. 
-            # The argparse choices should catch invalid types. So processed_types_list should always be valid if args.types is not empty.
-            # Let's simplify the logic assuming argparse handles choices. 
-            pass # No actual types to fetch if this list is empty after filtering (should not happen due to choices)
-
-    current_types_for_fetching = []
-    if "all" in args.types:
-        current_types_for_fetching.extend(ALL_AVAILABLE_TYPES)
-    else:
-        current_types_for_fetching.extend(args.types)
-    # Remove duplicates that might occur if user specifies "all" and other types
-    current_types_for_fetching = sorted(list(set(t for t in current_types_for_fetching if t in ALL_AVAILABLE_TYPES)))
+    # Remove duplicates
+    current_types_for_fetching = sorted(list(set(current_types_for_fetching)))
 
     if not current_types_for_fetching:
         print("No valid symbol types selected for fetching.")
@@ -444,29 +424,38 @@ async def fetch_types(args):
     return all_symbols_list
 
 def load_symbols_from_disk(args):
-    """Load symbols from previously saved YAML files based on specified types."""
+    """Load symbols from previously saved YAML files based on specified types.
+    
+    Returns:
+        dict with 'symbols' (list) and 'loaded_types' (list) keys, or empty list for backward compatibility
+    """
     all_symbols = set()
+    loaded_types = []  # Track which types were successfully loaded
     list_dir_path = os.path.join(args.data_dir, 'lists')
 
     if not args.types:
         print("Info: --load-only used but no --types specified. No symbol lists to load.")
-        return []
+        return {'symbols': [], 'loaded_types': []}
 
-    current_types_to_load = []
+    # When "all" is specified, use ALL_AVAILABLE_TYPES (excludes -new types)
+    # When specific types are specified (including -new types), use them explicitly
     if "all" in args.types:
-        current_types_to_load.extend(ALL_AVAILABLE_TYPES)
+        # Use ALL_AVAILABLE_TYPES which excludes nasdaq-new and nyse-new
+        current_types_to_load = list(ALL_AVAILABLE_TYPES)
     else:
-        current_types_to_load.extend(args.types)
-    # Remove duplicates and ensure only valid, known types are processed
-    current_types_to_load = sorted(list(set(t for t in current_types_to_load if t in ALL_AVAILABLE_TYPES)))
+        # Use explicitly specified types (can include -new types if user requests them)
+        current_types_to_load = [ty for ty in args.types if ty != "all" and ty in FULL_AVAILABLE_TYPES]
+    
+    # Remove duplicates
+    current_types_to_load = sorted(list(set(current_types_to_load)))
 
     if not current_types_to_load:
         print("No valid symbol types selected for loading from disk.")
-        return []
+        return {'symbols': [], 'loaded_types': []}
 
     if not os.path.isdir(list_dir_path):
-        print(f"Warning: Symbol list directory {list_dir_path} not found. Cannot load symbols from disk for types: {current_types_to_load}.")
-        return []
+        print(f"Warning: Symbol list directory {list_dir_path} not found. Cannot load symbols from disk for types: {current_types_to_load}.", file=sys.stderr)
+        return {'symbols': [], 'loaded_types': []}
 
     for data_type in current_types_to_load:
         yaml_file = os.path.join(list_dir_path, f'{data_type}_symbols.yaml')
@@ -476,15 +465,16 @@ def load_symbols_from_disk(args):
                 if data and 'symbols' in data and isinstance(data['symbols'], list):
                     symbols_from_file = data['symbols']
                     all_symbols.update(symbols_from_file)
+                    loaded_types.append(data_type)  # Track successful load
                     print(f"Loaded {len(symbols_from_file)} symbols for {data_type} from {yaml_file}", file=sys.stderr)
                 else:
-                    print(f"Warning: No symbols found or malformed data in {yaml_file} for type {data_type}.")
+                    print(f"Warning: No symbols found or malformed data in {yaml_file} for type {data_type}.", file=sys.stderr)
         except FileNotFoundError:
-            print(f"Warning: File {yaml_file} not found for type {data_type}. Skipping.")
+            print(f"Warning: File {yaml_file} not found for type {data_type}. Skipping.", file=sys.stderr)
         except yaml.YAMLError as e:
-            print(f"Error parsing YAML file {yaml_file}: {e}")
+            print(f"Error parsing YAML file {yaml_file}: {e}", file=sys.stderr)
         except Exception as e:
-            print(f"Error loading {yaml_file} for type {data_type}: {e}")
+            print(f"Error loading {yaml_file} for type {data_type}: {e}", file=sys.stderr)
     
     all_symbols_list = sorted(list(all_symbols))
     if all_symbols_list:
@@ -492,7 +482,9 @@ def load_symbols_from_disk(args):
     else:
         if args.types: # Only print this if types were specified but nothing loaded
             print("No symbols were loaded from disk for the specified types.", file=sys.stderr)
-    return all_symbols_list
+    
+    # Return dict with symbols and loaded_types for new logic, but maintain backward compatibility
+    return {'symbols': all_symbols_list, 'loaded_types': loaded_types}
 
 
 async def download_list(list_type: str, data_dir: str = './data') -> None:
@@ -503,8 +495,8 @@ async def download_list(list_type: str, data_dir: str = './data') -> None:
         list_type: Type of list to download (nyse, nasdaq, dow-jones, sp-500, etfs, crypto)
         data_dir: Directory to save the YAML file (default: ./data)
     """
-    if list_type not in ALL_AVAILABLE_TYPES:
-        print(f"Error: Unknown list type '{list_type}'. Available types: {ALL_AVAILABLE_TYPES}")
+    if list_type not in FULL_AVAILABLE_TYPES:
+        print(f"Error: Unknown list type '{list_type}'. Available types: {FULL_AVAILABLE_TYPES}")
         return
     
     if list_type == 'stocks_to_track':
@@ -570,15 +562,15 @@ Examples:
   # Download to custom directory
   python fetch_lists_data.py --download nasdaq --data-dir ./my_data
 
-Available list types: {', '.join(ALL_AVAILABLE_TYPES)}
+Available list types: {', '.join(FULL_AVAILABLE_TYPES)}
         """
     )
     
     parser.add_argument(
         '--download',
         nargs='+',
-        choices=ALL_AVAILABLE_TYPES + ['all'],
-        help=f"List type(s) to download. Available: {', '.join(ALL_AVAILABLE_TYPES)}, or 'all' for all types."
+        choices=FULL_AVAILABLE_TYPES + ['all'],
+        help=f"List type(s) to download. Available: {', '.join(FULL_AVAILABLE_TYPES)}, or 'all' for all types."
     )
     
     parser.add_argument(
@@ -596,7 +588,7 @@ Available list types: {', '.join(ALL_AVAILABLE_TYPES)}
     # Determine which lists to download
     lists_to_download = []
     if 'all' in args.download:
-        lists_to_download = [t for t in ALL_AVAILABLE_TYPES if t != 'stocks_to_track']
+        lists_to_download = [t for t in FULL_AVAILABLE_TYPES if t != 'stocks_to_track']
     else:
         lists_to_download = [t for t in args.download if t != 'all' and t != 'stocks_to_track']
     

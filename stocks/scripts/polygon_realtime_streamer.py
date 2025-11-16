@@ -9,16 +9,26 @@ the database server's realtime feed. It supports:
 - Streaming quotes, trades, or both
 - Multiple WebSocket connections with configurable symbols per connection
 - Automatic reconnection and error handling
+- Both stocks and options markets (requires appropriate Polygon subscription plan)
 
 Usage Examples:
-    # Stream quotes and trades for specific symbols
-    python polygon_realtime_streamer.py --symbols AAPL MSFT GOOGL --feed both
+    # Stream quotes and trades for specific stock symbols
+    python polygon_realtime_streamer.py --symbols AAPL MSFT GOOGL --feed both --market stocks
+
+    # Stream options contracts (use OCC format like AAPL250117C00150000)
+    python polygon_realtime_streamer.py --symbols AAPL250117C00150000 AAPL250117P00150000 --feed both --market options
+
+    # Stream options for a ticker (automatically fetches all option contracts)
+    python polygon_realtime_streamer.py --symbols AAPL --feed both --market options --max-expiry-days 30
+
+    # Stream only call options for a ticker
+    python polygon_realtime_streamer.py --symbols AAPL --feed both --market options --option-type call --max-expiry-days 14
 
     # Stream from YAML file with 5 symbols per WebSocket connection
-    python polygon_realtime_streamer.py --symbols-list symbols.yaml --feed quotes --symbols-per-connection 5
+    python polygon_realtime_streamer.py --symbols-list symbols.yaml --feed quotes --symbols-per-connection 5 --market stocks
 
     # Stream S&P 500 symbols (trades only) to remote database server
-    python polygon_realtime_streamer.py --types sp500 --feed trades --db-server localhost:8080
+    python polygon_realtime_streamer.py --types sp500 --feed trades --db-server localhost:8080 --market stocks
 """
 
 import os
@@ -31,9 +41,10 @@ import time
 import yaml
 import json
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, date
 from typing import List, Dict, Set, Optional, Tuple
 import pandas as pd
+import re
 from concurrent.futures import ThreadPoolExecutor
 import logging
 
@@ -44,7 +55,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 try:
-    from fetch_lists_data import ALL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
+    from fetch_lists_data import FULL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
     from common.stock_db import get_stock_db
 except ImportError as e:
     print(f"Error importing required modules: {e}", file=sys.stderr)
@@ -159,15 +170,105 @@ def check_polygon_api_key() -> bool:
         return False
     return True
 
+def is_occ_format_symbol(symbol: str) -> bool:
+    """
+    Check if a symbol is in OCC format (option contract format).
+    OCC format: TICKER + YYMMDD + C/P + STRIKE (e.g., AAPL250117C00150000)
+    """
+    # OCC format is typically: 1-5 letter ticker + 6 digits (YYMMDD) + C or P + 8 digits (strike)
+    # Pattern: [A-Z]{1,5}\d{6}[CP]\d{8}
+    occ_pattern = r'^[A-Z]{1,5}\d{6}[CP]\d{8}$'
+    return bool(re.match(occ_pattern, symbol.upper()))
+
+async def fetch_option_contracts_for_ticker(
+    ticker: str,
+    api_key: str,
+    max_expiry_days: int = 30,
+    option_type: str = 'both'
+) -> List[str]:
+    """
+    Fetch option contract symbols for a given ticker.
+    
+    Args:
+        ticker: Stock ticker symbol (e.g., AAPL)
+        api_key: Polygon API key
+        max_expiry_days: Maximum days to expiration (default: 30)
+        option_type: 'call', 'put', or 'both' (default: 'both')
+    
+    Returns:
+        List of OCC format option contract symbols
+    """
+    try:
+        from polygon import RESTClient
+    except ImportError:
+        logger.error("polygon-api-client is not installed. Cannot fetch option contracts.")
+        return []
+    
+    try:
+        client = RESTClient(api_key)
+        
+        # Calculate expiration date range
+        today = date.today()
+        max_expiry_date = today + timedelta(days=max_expiry_days)
+        expiration_date_gte = today.strftime('%Y-%m-%d')
+        expiration_date_lte = max_expiry_date.strftime('%Y-%m-%d')
+        
+        logger.info(f"Fetching option contracts for {ticker} (expiring within {max_expiry_days} days, type: {option_type})...")
+        
+        # Fetch active contracts
+        contracts_generator = client.list_options_contracts(
+            underlying_ticker=ticker.upper(),
+            expiration_date_gte=expiration_date_gte,
+            expiration_date_lte=expiration_date_lte,
+            limit=1000,
+            expired=False
+        )
+        
+        # Collect contracts
+        all_contracts = []
+        contract_count = 0
+        for contract in contracts_generator:
+            all_contracts.append(contract)
+            contract_count += 1
+            if contract_count >= 1000:  # Limit to prevent excessive API calls
+                break
+        
+        logger.info(f"Found {len(all_contracts)} option contracts for {ticker}")
+        
+        # Filter by option type
+        if option_type.lower() != 'both':
+            filtered_contracts = [
+                c for c in all_contracts
+                if getattr(c, 'contract_type', '').lower() == option_type.lower()
+            ]
+            logger.info(f"Filtered to {len(filtered_contracts)} {option_type} contracts")
+        else:
+            filtered_contracts = all_contracts
+        
+        # Extract ticker symbols (OCC format)
+        option_symbols = []
+        for contract in filtered_contracts:
+            contract_ticker = getattr(contract, 'ticker', None)
+            if contract_ticker:
+                option_symbols.append(contract_ticker)
+        
+        logger.info(f"Extracted {len(option_symbols)} option contract symbols for {ticker}")
+        return option_symbols
+        
+    except Exception as e:
+        logger.error(f"Error fetching option contracts for {ticker}: {e}")
+        return []
+
 class PolygonStreamManager:
     """Manages multiple Polygon WebSocket connections."""
     
     def __init__(self, api_key: str, db_client: DatabaseClient, feed_types: List[str],
-                 symbols_per_connection: int = 10, max_retries: int = 3, 
+                 market: str = "stocks", symbols_per_connection: int = 10, max_retries: int = 3, 
                  retry_delay: float = 5.0, batch_interval: float = 5.0):
         self.api_key = api_key
         self.db_client = db_client
         self.feed_types = feed_types
+        self.market = market  # "stocks" or "options"
         self.symbols_per_connection = symbols_per_connection
         self.max_retries = max_retries
         self.retry_delay = retry_delay
@@ -196,6 +297,7 @@ class PolygonStreamManager:
             return
             
         logger.info(f"Starting Polygon streaming for {len(all_symbols)} symbols")
+        logger.info(f"Market: {self.market}")
         logger.info(f"Feed types: {', '.join(self.feed_types)}")
         logger.info(f"Symbols per connection: {self.symbols_per_connection}")
         logger.info(f"Batch interval: {self.batch_interval} seconds")
@@ -400,17 +502,21 @@ class PolygonStreamManager:
             logger.error("polygon-api-client not available")
             return
             
-        # Create WebSocket client
-        stream = WebSocketClient(api_key=self.api_key, market="stocks")
+        # Create WebSocket client with specified market
+        stream = WebSocketClient(api_key=self.api_key, market=self.market)
         
         # Subscribe to symbols
+        # For both stocks and options: T.{symbol} for trades, Q.{symbol} for quotes
+        # The difference is the market parameter and symbol format:
+        # - Stocks: regular ticker symbols (e.g., AAPL)
+        # - Options: OCC format option contract symbols (e.g., AAPL250117C00150000)
         for symbol in symbols:
             if "trades" in self.feed_types:
                 stream.subscribe(f"T.{symbol}")
-                logger.debug(f"Connection {connection_id}: Subscribed to trades for {symbol}")
+                logger.debug(f"Connection {connection_id}: Subscribed to {self.market} trades for {symbol}")
             if "quotes" in self.feed_types:
                 stream.subscribe(f"Q.{symbol}")
-                logger.debug(f"Connection {connection_id}: Subscribed to quotes for {symbol}")
+                logger.debug(f"Connection {connection_id}: Subscribed to {self.market} quotes for {symbol}")
                 
         # Message handler
         async def handle_msg(msg):
@@ -640,7 +746,8 @@ class PolygonStreamManager:
 async def load_symbols_from_types(args: argparse.Namespace) -> List[str]:
     """Load symbols from types (like in fetch_all_data.py)."""
     if not args.fetch_online:
-        symbols = load_symbols_from_disk(args)
+        disk_result = load_symbols_from_disk(args)
+        symbols = disk_result.get('symbols', []) if isinstance(disk_result, dict) else disk_result
         if not symbols:
             logger.info(f"Could not load symbols for {args.types} from disk. Use --fetch-online to fetch them.")
         return symbols
@@ -669,6 +776,36 @@ async def get_all_symbols(args: argparse.Namespace) -> List[str]:
     elif args.types:
         all_symbols = await load_symbols_from_types(args)
     
+    # For options market, expand ticker symbols to option contracts if needed
+    if args.market == 'options' and all_symbols:
+        api_key = os.getenv("POLYGON_API_KEY")
+        if not api_key:
+            logger.error("POLYGON_API_KEY required for fetching option contracts")
+            return []
+        
+        expanded_symbols = []
+        for symbol in all_symbols:
+            if is_occ_format_symbol(symbol):
+                # Already in OCC format, use as-is
+                expanded_symbols.append(symbol)
+            else:
+                # Regular ticker, fetch option contracts
+                logger.info(f"Expanding ticker {symbol} to option contracts...")
+                option_contracts = await fetch_option_contracts_for_ticker(
+                    ticker=symbol,
+                    api_key=api_key,
+                    max_expiry_days=getattr(args, 'max_expiry_days', 30),
+                    option_type=getattr(args, 'option_type', 'both')
+                )
+                if option_contracts:
+                    expanded_symbols.extend(option_contracts)
+                    logger.info(f"Expanded {symbol} to {len(option_contracts)} option contracts")
+                else:
+                    logger.warning(f"No option contracts found for {symbol}")
+        
+        all_symbols = expanded_symbols
+        logger.info(f"Total option contract symbols after expansion: {len(all_symbols)}")
+    
     # Apply limit if specified
     if args.limit and all_symbols:
         original_count = len(all_symbols)
@@ -690,7 +827,7 @@ def parse_args():
     symbol_group.add_argument(
         '--symbols',
         nargs='+',
-        help='One or more stock symbols (e.g., AAPL MSFT GOOGL)'
+        help='One or more symbols. For stocks: ticker symbols (e.g., AAPL MSFT GOOGL). For options: ticker symbols (e.g., AAPL) which will be expanded to option contracts, or OCC format contract symbols (e.g., AAPL250117C00150000)'
     )
     symbol_group.add_argument(
         '--symbols-list',
@@ -700,8 +837,31 @@ def parse_args():
     symbol_group.add_argument(
         '--types',
         nargs='+',
-        choices=ALL_AVAILABLE_TYPES + ['all'],
+        choices=FULL_AVAILABLE_TYPES + ['all'],
         help='Types of symbol lists to process (e.g., sp500, nasdaq100)'
+    )
+    
+    # Market configuration
+    parser.add_argument(
+        '--market',
+        choices=['stocks', 'options'],
+        default='stocks',
+        help='Market type to stream: stocks or options (default: stocks). For options, you can provide ticker symbols (e.g., AAPL) which will be automatically expanded to option contracts, or OCC format contract symbols (e.g., AAPL250117C00150000)'
+    )
+    
+    # Options-specific configuration
+    parser.add_argument(
+        '--max-expiry-days',
+        type=int,
+        default=30,
+        help='Maximum days to expiration for option contracts when expanding ticker symbols (default: 30). Only applies when --market=options and ticker symbols (not OCC format) are provided.'
+    )
+    
+    parser.add_argument(
+        '--option-type',
+        choices=['call', 'put', 'both'],
+        default='both',
+        help='Option type filter when expanding ticker symbols: call, put, or both (default: both). Only applies when --market=options and ticker symbols (not OCC format) are provided.'
     )
     
     # Feed configuration
@@ -875,6 +1035,7 @@ async def main():
             api_key=api_key,
             db_client=db_client,
             feed_types=feed_types,
+            market=args.market,
             symbols_per_connection=args.symbols_per_connection,
             max_retries=args.max_retries,
             retry_delay=args.retry_delay,

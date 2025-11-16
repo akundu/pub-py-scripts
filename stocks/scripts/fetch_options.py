@@ -36,7 +36,14 @@ if str(PROJECT_ROOT) not in sys.path:
 # Import common symbol loading functions
 from common.symbol_loader import add_symbol_arguments, fetch_lists_data
 from common.stock_db import get_stock_db
-from common.common import run_iteration_in_subprocess
+from common.common import (
+    run_iteration_in_subprocess,
+    check_tickers_for_refresh,
+    fetch_latest_option_timestamp_standalone,
+    get_redis_client_for_refresh,
+    check_redis_refresh_pending,
+    set_redis_last_write_timestamp
+)
 from common.market_hours import is_market_hours as common_is_market_hours, compute_market_transition_times as common_compute_market_transition_times
 
 try:
@@ -346,10 +353,20 @@ class HistoricalDataFetcher:
             print(f"Fetching options for {symbol} expiring around {target_date_str}...")
         overall_start_time = time.time()
         
-        # 1) Prefer DB when enabled: load latest options from QuestDB and return if available (unless force_fresh)
+        # 1) Prefer DB when enabled: load latest options from database and return if available (unless force_fresh)
         if use_db and db_conn and not force_fresh:
             try:
-                db = get_stock_db('questdb', db_config=db_conn, enable_cache=enable_cache, redis_url=redis_url)
+                # Determine database type based on connection string
+                db_type = 'questdb'  # default
+                db_config = db_conn
+                if db_conn.startswith('http://') or db_conn.startswith('https://'):
+                    db_type = 'remote'
+                    # StockDBClient expects "host:port" format, not "http://host:port"
+                    db_config = db_conn.replace('http://', '').replace('https://', '')
+                elif db_conn.startswith('postgresql://'):
+                    db_type = 'postgresql'
+                
+                db = get_stock_db(db_type, db_config=db_config, enable_cache=enable_cache, redis_url=redis_url)
                 latest_df = await db.get_latest_options_data(ticker=symbol)
                 if latest_df is not None and not latest_df.empty:
                     # Map DB dataframe to contracts list in script format
@@ -1137,6 +1154,16 @@ async def save_options_via_http(db_save_tasks: list, http_url: str, args) -> Non
                                 result = await response.json()
                                 if not args.quiet:
                                     print(f"Successfully saved {contracts_count} options contracts to database for {symbol}")
+                                
+                                # Update Redis cache with the current timestamp
+                                enable_cache = not getattr(args, 'no_cache', False)
+                                if enable_cache:
+                                    redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+                                    redis_client = get_redis_client_for_refresh(redis_url) if redis_url else None
+                                    if redis_client:
+                                        from datetime import datetime, timezone
+                                        now_utc = datetime.now(timezone.utc)
+                                        set_redis_last_write_timestamp(redis_client, symbol, now_utc, ttl_seconds=86400)
                             else:
                                 error_text = await response.text()
                                 if not args.quiet:
@@ -1180,6 +1207,16 @@ async def save_options_via_http(db_save_tasks: list, http_url: str, args) -> Non
                                         successful_batches += 1
                                         if not args.quiet:
                                             print(f"    Batch {batch_num + 1} saved successfully")
+                                        # Update Redis cache after last batch
+                                        if batch_num == num_batches - 1:
+                                            enable_cache = not getattr(args, 'no_cache', False)
+                                            if enable_cache:
+                                                redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+                                                redis_client = get_redis_client_for_refresh(redis_url) if redis_url else None
+                                                if redis_client:
+                                                    from datetime import datetime, timezone
+                                                    now_utc = datetime.now(timezone.utc)
+                                                    set_redis_last_write_timestamp(redis_client, symbol, now_utc, ttl_seconds=86400)
                                     else:
                                         error_text = await response.text()
                                         failed_batches += 1
@@ -1244,6 +1281,16 @@ async def save_options_via_direct_db(db_save_tasks: list, db_config: str, args) 
                 await db_instance.save_options_data(df=df, ticker=symbol)
                 if not args.quiet:
                     print(f"Successfully saved {contracts_count} options contracts to database for {symbol}")
+                
+                # Update Redis cache with the current timestamp
+                enable_cache = not getattr(args, 'no_cache', False)
+                if enable_cache:
+                    redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+                    redis_client = get_redis_client_for_refresh(redis_url) if redis_url else None
+                    if redis_client:
+                        from datetime import datetime, timezone
+                        now_utc = datetime.now(timezone.utc)
+                        set_redis_last_write_timestamp(redis_client, symbol, now_utc, ttl_seconds=86400)
             except Exception as e:
                 if not args.quiet:
                     print(f"Warning: failed to save options to DB for {symbol}: {e}")
@@ -1268,8 +1315,96 @@ async def _execute_options_iteration(
 ) -> dict:
     """
     Execute one iteration of options fetching (without sleeping) and return summary data.
+    Checks if tickers were recently fetched and skips them if data is fresh.
     """
     from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+
+    # Check if we should skip recently fetched tickers
+    symbols_to_fetch = symbols_list
+    refresh_threshold_seconds = None
+    
+    # Calculate refresh threshold based on next fetch interval (if in continuous mode)
+    if getattr(args, 'continuous', False):
+        now_utc = datetime.now(timezone.utc)
+        is_market_open = HistoricalDataFetcher._is_market_open(now_utc)
+        if is_market_open:
+            # Market open: use market_open cache duration (20 minutes)
+            refresh_threshold_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
+        else:
+            # Market closed: use market_closed cache duration (360 minutes)
+            refresh_threshold_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed'] * 60
+    else:
+        # Single run: use market_open cache duration as default (20 minutes)
+        refresh_threshold_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
+    
+    # Check if tickers need refresh (only if using database)
+    if getattr(args, 'use_db', None) and refresh_threshold_seconds:
+        try:
+            enable_cache = not getattr(args, 'no_cache', False)
+            redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
+            redis_client = get_redis_client_for_refresh(redis_url) if redis_url else None
+            
+            # Determine database type based on connection string
+            db_type = 'questdb'  # default
+            db_config = args.use_db
+            if args.use_db.startswith('http://') or args.use_db.startswith('https://'):
+                db_type = 'remote'
+                # StockDBClient expects "host:port" format, not "http://host:port"
+                db_config = args.use_db.replace('http://', '').replace('https://', '')
+            elif args.use_db.startswith('postgresql://'):
+                db_type = 'postgresql'
+            
+            # Create database connection for timestamp checking
+            db = get_stock_db(db_type, db_config=db_config, enable_cache=enable_cache, redis_url=redis_url)
+            async with db:
+                # Create a wrapper function to fetch timestamps for multiple tickers
+                async def fetch_timestamps(tickers: list[str], cache: dict) -> dict:
+                    """Fetch latest option timestamps for multiple tickers."""
+                    result = {}
+                    debug_mode = getattr(args, 'debug', False)
+                    for ticker in tickers:
+                        age = await fetch_latest_option_timestamp_standalone(db, ticker, cache, redis_client=redis_client, debug=debug_mode)
+                        result[ticker] = age
+                        if debug_mode:
+                            from datetime import datetime, timezone
+                            now_utc = datetime.now(timezone.utc)
+                            cached_ts = cache.get(ticker)
+                            print(f"DEBUG [fetch_timestamps]: {ticker} - age={age}, now_utc={now_utc}, cached_ts={cached_ts}", file=sys.stderr)
+                    return result
+                
+                # Check which tickers need refresh
+                # Enable debug for timestamp checking if --debug flag is set
+                debug_mode = getattr(args, 'debug', False)
+                symbols_to_fetch = await check_tickers_for_refresh(
+                    db=db,
+                    tickers=symbols_list,
+                    refresh_threshold_seconds=refresh_threshold_seconds,
+                    fetch_timestamp_func=fetch_timestamps,
+                    redis_client=redis_client,
+                    timestamp_cache=None,
+                    min_write_timestamp=None,
+                    debug=debug_mode
+                )
+                
+                if not args.quiet and len(symbols_to_fetch) < len(symbols_list):
+                    skipped = len(symbols_list) - len(symbols_to_fetch)
+                    print(f"Skipping {skipped} ticker(s) with fresh data (threshold: {refresh_threshold_seconds}s)")
+        except Exception as e:
+            # If checking fails, fetch all tickers
+            if not args.quiet:
+                import traceback
+                print(f"Warning: Could not check ticker freshness ({e}). Fetching all tickers.", file=sys.stderr)
+                if getattr(args, 'debug', False):
+                    traceback.print_exc(file=sys.stderr)
+            symbols_to_fetch = symbols_list
+    
+    if not symbols_to_fetch:
+        if not args.quiet:
+            print("All tickers have fresh data. Skipping fetch.")
+        return {
+            "symbols_processed": 0,
+            "db_tasks": 0,
+        }
 
     exec_type = args.executor_type
     if args.max_concurrent and args.max_concurrent > 0:
@@ -1279,14 +1414,14 @@ async def _execute_options_iteration(
 
     if not args.quiet:
         print(
-            f"Starting concurrent fetch for {len(symbols_list)} symbols "
+            f"Starting concurrent fetch for {len(symbols_to_fetch)} symbols "
             f"using {exec_type} executor with max_workers={max_workers}"
         )
 
     ExecutorCls = ProcessPoolExecutor if exec_type == 'process' else ThreadPoolExecutor
     db_save_tasks = []
     with ExecutorCls(max_workers=max_workers) as pool:
-        futures_map = {pool.submit(_run_for_symbol, symbol, args, api_key): symbol for symbol in symbols_list}
+        futures_map = {pool.submit(_run_for_symbol, symbol, args, api_key): symbol for symbol in symbols_to_fetch}
         for fut in as_completed(futures_map):
             result = fut.result()
             if isinstance(result, dict) and 'formatted_output' in result:
@@ -1301,7 +1436,7 @@ async def _execute_options_iteration(
         await save_options_to_database(db_save_tasks, args)
 
     return {
-        "symbols_processed": len(symbols_list),
+        "symbols_processed": len(symbols_to_fetch),
         "db_tasks": len(db_save_tasks),
     }
 
@@ -1502,6 +1637,11 @@ Examples:
         action='store_true',
         help="Disable Redis caching for QuestDB operations (default: cache enabled)"
     )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help="Enable debug output with detailed information about data fetching and timestamp checking."
+    )
     # Backward-compatibility (hidden): legacy --db-conn maps to --use-db
     parser.add_argument(
         '--db-conn',
@@ -1571,78 +1711,79 @@ Examples:
         print("No symbols specified or found. Exiting.", file=sys.stderr)
         sys.exit(1)
 
-    # Check market status and wait if needed
-    now_utc = datetime.now(timezone.utc)
-    is_market_open = common_is_market_hours(now_utc, "America/New_York")
-    seconds_to_open, _ = common_compute_market_transition_times(now_utc, "America/New_York")
-    
-    if not is_market_open and seconds_to_open is not None:
-        # Market is closed - handle based on fetch-once-before-wait flag
-        if getattr(args, 'fetch_once_before_wait', False):
-            # Fetch once immediately before waiting
-            if not args.quiet:
-                print(f"Market is closed. Fetching once immediately before waiting for market open...")
-            
-            # Run a single fetch
-            from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
-            exec_type = args.executor_type
-            if args.max_concurrent and args.max_concurrent > 0:
-                max_workers = args.max_concurrent
-            else:
-                max_workers = (os.cpu_count() or 1) if exec_type == 'process' else (os.cpu_count() or 1) * 5
-            
-            if not args.quiet:
-                print(f"Fetching data for {len(symbols_list)} symbols (one-time fetch before waiting)...")
-            
-            ExecutorCls = ProcessPoolExecutor if exec_type == 'process' else ThreadPoolExecutor
-            with ExecutorCls(max_workers=max_workers) as pool:
-                futures_map = {pool.submit(_run_for_symbol, symbol, args, api_key): symbol for symbol in symbols_list}
-                db_save_tasks = []
-                for fut in as_completed(futures_map):
-                    result = fut.result()
-                    if isinstance(result, dict) and 'formatted_output' in result:
-                        if not args.quiet and result['formatted_output']:
-                            print(result['formatted_output'])
-                        if result.get('db_save_data'):
-                            db_save_tasks.append(result['db_save_data'])
-                    elif not args.quiet and result:
-                        print(result)
+    if args.continuous:
+        # Check market status and wait if needed (only in continuous mode)
+        now_utc = datetime.now(timezone.utc)
+        is_market_open = common_is_market_hours(now_utc, "America/New_York")
+        seconds_to_open, _ = common_compute_market_transition_times(now_utc, "America/New_York")
+        
+        if not is_market_open and seconds_to_open is not None:
+            # Market is closed - handle based on fetch-once-before-wait flag
+            if getattr(args, 'fetch_once_before_wait', False):
+                # Fetch once immediately before waiting
+                if not args.quiet:
+                    print(f"Market is closed. Fetching once immediately before waiting for market open...")
                 
-                # Save all database data
-                if db_save_tasks and getattr(args, 'use_db', None):
-                    await save_options_to_database(db_save_tasks, args)
-            
-            # Now wait for market open
-            if not args.quiet:
-                hours_to_wait = seconds_to_open / 3600
-                print(f"One-time fetch completed. Waiting {hours_to_wait:.2f} hours ({seconds_to_open:.0f} seconds) until market opens...")
-            
-            await asyncio.sleep(seconds_to_open)
-            
-            # Re-check market status after waiting
-            now_utc = datetime.now(timezone.utc)
-            is_market_open = common_is_market_hours(now_utc, "America/New_York")
-            if not args.quiet:
-                if is_market_open:
-                    print("Market is now open. Proceeding with normal operation...")
+                # Run a single fetch
+                from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+                exec_type = args.executor_type
+                if args.max_concurrent and args.max_concurrent > 0:
+                    max_workers = args.max_concurrent
                 else:
-                    print("Warning: Market is still not open after waiting. Proceeding anyway...")
-        else:
-            # Wait for market open before starting
-            if not args.quiet:
-                hours_to_wait = seconds_to_open / 3600
-                print(f"Market is closed. Waiting {hours_to_wait:.2f} hours ({seconds_to_open:.0f} seconds) until market opens before starting...")
-            
-            await asyncio.sleep(seconds_to_open)
-            
-            # Re-check market status after waiting
-            now_utc = datetime.now(timezone.utc)
-            is_market_open = common_is_market_hours(now_utc, "America/New_York")
-            if not args.quiet:
-                if is_market_open:
-                    print("Market is now open. Starting data fetch...")
-                else:
-                    print("Warning: Market is still not open after waiting. Proceeding anyway...")
+                    max_workers = (os.cpu_count() or 1) if exec_type == 'process' else (os.cpu_count() or 1) * 5
+                
+                if not args.quiet:
+                    print(f"Fetching data for {len(symbols_list)} symbols (one-time fetch before waiting)...")
+                
+                ExecutorCls = ProcessPoolExecutor if exec_type == 'process' else ThreadPoolExecutor
+                with ExecutorCls(max_workers=max_workers) as pool:
+                    futures_map = {pool.submit(_run_for_symbol, symbol, args, api_key): symbol for symbol in symbols_list}
+                    db_save_tasks = []
+                    for fut in as_completed(futures_map):
+                        result = fut.result()
+                        if isinstance(result, dict) and 'formatted_output' in result:
+                            if not args.quiet and result['formatted_output']:
+                                print(result['formatted_output'])
+                            if result.get('db_save_data'):
+                                db_save_tasks.append(result['db_save_data'])
+                        elif not args.quiet and result:
+                            print(result)
+                    
+                    # Save all database data
+                    if db_save_tasks and getattr(args, 'use_db', None):
+                        await save_options_to_database(db_save_tasks, args)
+                
+                # Now wait for market open
+                if not args.quiet:
+                    hours_to_wait = seconds_to_open / 3600
+                    print(f"One-time fetch completed. Waiting {hours_to_wait:.2f} hours ({seconds_to_open:.0f} seconds) until market opens...")
+                
+                await asyncio.sleep(seconds_to_open)
+                
+                # Re-check market status after waiting
+                now_utc = datetime.now(timezone.utc)
+                is_market_open = common_is_market_hours(now_utc, "America/New_York")
+                if not args.quiet:
+                    if is_market_open:
+                        print("Market is now open. Proceeding with normal operation...")
+                    else:
+                        print("Warning: Market is still not open after waiting. Proceeding anyway...")
+            else:
+                # Wait for market open before starting
+                if not args.quiet:
+                    hours_to_wait = seconds_to_open / 3600
+                    print(f"Market is closed. Waiting {hours_to_wait:.2f} hours ({seconds_to_open:.0f} seconds) until market opens before starting...")
+                
+                await asyncio.sleep(seconds_to_open)
+                
+                # Re-check market status after waiting
+                now_utc = datetime.now(timezone.utc)
+                is_market_open = common_is_market_hours(now_utc, "America/New_York")
+                if not args.quiet:
+                    if is_market_open:
+                        print("Market is now open. Starting data fetch...")
+                    else:
+                        print("Warning: Market is still not open after waiting. Proceeding anyway...")
 
     if args.continuous:
         run_num = 0

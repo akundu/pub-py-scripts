@@ -59,7 +59,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 try:
-    from fetch_lists_data import ALL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
+    from fetch_lists_data import FULL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
     from common.stock_db import get_stock_db
 except ImportError as e:
     print(f"Error importing required modules: {e}", file=sys.stderr)
@@ -1081,7 +1081,8 @@ def load_symbols_from_yaml(yaml_file: str) -> List[str]:
 async def load_symbols_from_types(args: argparse.Namespace) -> List[str]:
     """Load symbols from types (like in fetch_all_data.py)."""
     if not args.fetch_online:
-        symbols = load_symbols_from_disk(args)
+        disk_result = load_symbols_from_disk(args)
+        symbols = disk_result.get('symbols', []) if isinstance(disk_result, dict) else disk_result
         if not symbols:
             logger.info(f"Could not load symbols for {args.types} from disk. Use --fetch-online to fetch them.")
         return symbols
@@ -1141,7 +1142,7 @@ def parse_args():
     symbol_group.add_argument(
         '--types',
         nargs='+',
-        choices=ALL_AVAILABLE_TYPES + ['all'],
+        choices=FULL_AVAILABLE_TYPES + ['all'],
         help='Types of symbol lists to process (e.g., sp500, nasdaq100)'
     )
     

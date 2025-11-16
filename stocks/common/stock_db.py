@@ -1526,7 +1526,49 @@ class StockDBClient(StockDBBase):
     def _parse_df_from_response(self, response_data: list[dict], index_col: str) -> pd.DataFrame:
         if not response_data:
             return pd.DataFrame()
-        df = pd.DataFrame.from_records(response_data)
+        # Handle case where response_data might be a list of lists instead of list of dicts
+        if response_data and isinstance(response_data[0], list):
+            # If it's a list of lists, we can't preserve column names - this shouldn't happen
+            # but we'll handle it gracefully
+            df = pd.DataFrame(response_data)
+        else:
+            df = pd.DataFrame.from_records(response_data)
+        
+        # Parse all timestamp columns (not just the index column)
+        # Look for columns with 'timestamp' in the name
+        for col in df.columns:
+            if 'timestamp' in col.lower() and not pd.api.types.is_datetime64_any_dtype(df[col]):
+                # Check if the column is already an integer (Unix timestamp)
+                if pd.api.types.is_integer_dtype(df[col]):
+                    # Try to convert integer to datetime (Unix timestamp)
+                    first_val = df[col].iloc[0] if len(df) > 0 and not df[col].isna().all() else 0
+                    if first_val > 1e10:  # Likely milliseconds
+                        df[col] = pd.to_datetime(df[col], unit='ms', errors='coerce')
+                    elif first_val > 1e9:  # Likely seconds
+                        df[col] = pd.to_datetime(df[col], unit='s', errors='coerce')
+                    else:
+                        # Try general conversion
+                        df[col] = pd.to_datetime(df[col], errors='coerce')
+                else:
+                    # Try to parse with explicit format first, then fall back to flexible parsing
+                    try:
+                        # Try ISO format first (most common for our timestamps)
+                        df[col] = pd.to_datetime(df[col], format='ISO8601', errors='coerce')
+                    except (ValueError, TypeError):
+                        try:
+                            # Try specific ISO format patterns
+                            df[col] = pd.to_datetime(df[col], format='%Y-%m-%dT%H:%M:%S.%fZ', errors='coerce')
+                        except (ValueError, TypeError):
+                            try:
+                                # Try without microseconds
+                                df[col] = pd.to_datetime(df[col], format='%Y-%m-%dT%H:%M:%SZ', errors='coerce')
+                            except (ValueError, TypeError):
+                                # Fall back to flexible parsing but suppress the warning
+                                import warnings
+                                with warnings.catch_warnings():
+                                    warnings.filterwarnings('ignore', category=UserWarning, message='Could not infer format')
+                                    df[col] = pd.to_datetime(df[col], errors='coerce')
+        
         if index_col in df.columns:
             # Check if the index column is already an integer (Unix timestamp)
             if pd.api.types.is_integer_dtype(df[index_col]):

@@ -7,6 +7,7 @@ symbols:
 - ABNB
 - ABTC
 - ABVX
+- ACAD
 - ACGL
 - ACIW
 - ACLX
@@ -60,6 +61,7 @@ symbols:
 - BKNG
 - BKR
 - BLLN
+- BLTE
 - BMRN
 - BNTX
 - BOKF
@@ -80,8 +82,10 @@ symbols:
 - CCC
 - CCEP
 - CDNS
+- CDTX
 - CDW
 - CEG
+- CELC
 - CELH
 - CFLT
 - CG
@@ -95,8 +99,10 @@ symbols:
 - CIFR
 - CIGI
 - CINF
+- CLBT
 - CMCSA
 - CME
+- CNTA
 - COGT
 - COIN
 - COKE
@@ -123,6 +129,7 @@ symbols:
 - CWST
 - CYBR
 - CYTK
+- CZR
 - DASH
 - DBX
 - DDOG
@@ -143,7 +150,6 @@ symbols:
 - ENLT
 - ENSG
 - ENTG
-- EOSE
 - EQIX
 - ERIC
 - ERIE
@@ -222,6 +228,7 @@ symbols:
 - IEP
 - IESC
 - ILMN
+- IMVT
 - INCY
 - INSM
 - INTC
@@ -252,6 +259,7 @@ symbols:
 - LECO
 - LEGN
 - LFUS
+- LGN
 - LI
 - LIF
 - LIN
@@ -261,7 +269,6 @@ symbols:
 - LLYVA
 - LLYVK
 - LNT
-- LNW
 - LOGI
 - LOPE
 - LPLA
@@ -300,7 +307,6 @@ symbols:
 - MSTR
 - MTCH
 - MTSI
-- MTSR
 - MU
 - MZTI
 - NAMS
@@ -311,7 +317,6 @@ symbols:
 - NDSN
 - NFLX
 - NICE
-- NMRK
 - NTAP
 - NTES
 - NTNX
@@ -360,7 +365,6 @@ symbols:
 - PODD
 - PONY
 - POOL
-- POWL
 - PPC
 - PRAX
 - PSKY
@@ -442,7 +446,6 @@ symbols:
 - TGTX
 - TIGO
 - TLN
-- TMDX
 - TMUS
 - TPG
 - TRI
@@ -468,12 +471,10 @@ symbols:
 - UTHR
 - VCTR
 - VFS
-- VICR
 - VKTX
 - VLY
 - VNOM
 - VOD
-- VRNS
 - VRSK
 - VRSN
 - VRTX
@@ -484,7 +485,6 @@ symbols:
 - WDAY
 - WDC
 - WFRD
-- WGS
 - WING
 - WIX
 - WMG
@@ -501,4 +501,3 @@ symbols:
 - ZION
 - ZM
 - ZS
-last_updated: '2025-11-12 05:52:08'

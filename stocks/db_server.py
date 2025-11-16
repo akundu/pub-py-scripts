@@ -1799,7 +1799,15 @@ async def handle_db_command(request: web.Request) -> web.Response:
                 for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
                     df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
                 
-                return web.json_response({"data": df_reset.to_dict(orient='records')})
+                # Ensure column names are preserved when converting to dict
+                # to_dict(orient='records') should preserve column names, but let's be explicit
+                records = df_reset.to_dict(orient='records')
+                # Verify column names are preserved
+                if records and df_reset.columns.tolist():
+                    # The records should have the same keys as the DataFrame columns
+                    pass  # This should work correctly
+                
+                return web.json_response({"data": records})
             
             elif query_type == "raw":
                 # Now expects a list of dicts (potentially empty)

@@ -15,10 +15,11 @@ from pathlib import Path
 
 # Import symbol loading functions from fetch_lists_data
 try:
-    from fetch_lists_data import ALL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
+    from fetch_lists_data import FULL_AVAILABLE_TYPES, ALL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
     SYMBOL_LOADING_AVAILABLE = True
 except ImportError:
     SYMBOL_LOADING_AVAILABLE = False
+    FULL_AVAILABLE_TYPES = []
     ALL_AVAILABLE_TYPES = []
 
 
@@ -81,15 +82,52 @@ async def fetch_lists_data(args: argparse.Namespace, quiet: bool = False) -> Lis
                 print("Error: Symbol loading functions not available. Please ensure fetch_lists_data.py is accessible.", file=sys.stderr)
             return []
             
-        if not args.fetch_online:
-            all_symbols_list = load_symbols_from_disk(args)
-            if not all_symbols_list:
-                if not quiet:
-                    print(f"Info: Could not load symbols for {args.types} from disk. Use --fetch-online to fetch them.")
-        else:
+        if args.fetch_online:
+            # Force fetch from network
             if not quiet:
                 print("Fetching symbol lists from network as --fetch-online was specified.")
             all_symbols_list = await fetch_types(args)
+        else:
+            # Try loading from disk first
+            disk_result = load_symbols_from_disk(args)
+            all_symbols_list = disk_result.get('symbols', []) if isinstance(disk_result, dict) else disk_result
+            loaded_types = disk_result.get('loaded_types', []) if isinstance(disk_result, dict) else []
+            
+            # Determine which types were requested
+            # When "all" is specified, use ALL_AVAILABLE_TYPES (excludes -new types)
+            # When specific types are specified (including -new types), use them explicitly
+            if "all" in args.types:
+                requested_types = list(ALL_AVAILABLE_TYPES)
+            else:
+                requested_types = [t for t in args.types if t in FULL_AVAILABLE_TYPES]
+            
+            # Find types that weren't loaded from disk but are fetchable
+            missing_types = [t for t in requested_types if t not in loaded_types]
+            
+            if missing_types:
+                # Automatically fetch missing types from network
+                if not quiet:
+                    if loaded_types:
+                        print(f"Loaded {len(loaded_types)} type(s) from disk: {loaded_types}. Fetching missing types from network: {missing_types}")
+                    else:
+                        print(f"Symbol lists not found on disk for {missing_types}. Automatically fetching from network...")
+                
+                # Create a temporary args object with only the missing types
+                temp_args = argparse.Namespace(**vars(args))
+                temp_args.types = missing_types
+                network_symbols = await fetch_types(temp_args)
+                
+                # Combine symbols from disk and network
+                all_symbols_set = set(all_symbols_list)
+                all_symbols_set.update(network_symbols)
+                all_symbols_list = sorted(list(all_symbols_set))
+                
+                if not quiet and all_symbols_list:
+                    print(f"Combined symbols from disk and network: {len(all_symbols_list)} total unique symbols")
+            elif not all_symbols_list:
+                # Nothing was loaded and nothing to fetch
+                if not quiet:
+                    print(f"Info: Could not load symbols for {args.types} from disk. Use --fetch-online to fetch them.")
     
     # Apply limit if specified
     if args.limit and all_symbols_list:
@@ -127,7 +165,7 @@ def add_symbol_arguments(parser: argparse.ArgumentParser, required: bool = False
         help='Path to a YAML file containing a list of symbols under the \'symbols\' key. Mutually exclusive with symbol, --symbols, and --types.'
     )
     symbol_group.add_argument('--types', nargs='+', 
-                      choices=ALL_AVAILABLE_TYPES + ['all'] if SYMBOL_LOADING_AVAILABLE else [],
+                      choices=FULL_AVAILABLE_TYPES + ['all'] if SYMBOL_LOADING_AVAILABLE else [],
                       help='Types of symbol lists to process. \'all\' processes all. Used with --fetch-online for network fetch. Mutually exclusive with symbol, --symbols, and --symbols-list.')
     
     # Add common symbol-related arguments

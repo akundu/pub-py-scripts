@@ -8,17 +8,20 @@ QUERY_LOC="questdb://stock_user:stock_password@localhost:8812/stock_data"
 TYPE="types"
 TYPE_input="all"
 
-MAX_WORKERS=8
+MAX_WORKERS=7
 BATCH_SIZE=300
 
 MAX_DAYS=`days=$((6 - $(date +%u)));[ $days -le 0 ] && days=$((days + 7)); echo $days` #count the number of days till the next saturday
-MAX_DAYS=8
+MAX_DAYS=30
 
+SLEEP_TIME=10
 CUR_HOUR_MIN=$(TZ='America/New_York' date '+%H%M')
-if [ "$CUR_HOUR_MIN" -ge 930 ] && [ "$CUR_HOUR_MIN" -le 1600 ]; then
+DAY_OF_WEEK=$(TZ='America/New_York' date '+%u')  # 1=Monday, ..., 7=Sunday
+if [ "$DAY_OF_WEEK" -lt 6 ] && [ "$CUR_HOUR_MIN" -ge 930 ] && [ "$CUR_HOUR_MIN" -le 1600 ]; then
   TIME_TO_USE=`TZ='America/New_York' date -v-30M '+%Y-%m-%d %H:%M:%S'`
 else
-  TIME_TO_USE=`TZ='America/New_York' date -v-10080m '+%Y-%m-%d %H:%M:%S'`
+  TIME_TO_USE=`TZ='America/New_York' date -v-72H '+%Y-%m-%d %H:%M:%S'`
+  SLEEP_TIME=3600
 fi
 
 POSITION_SIZE=100000 #amt to invest
@@ -28,18 +31,22 @@ SORT="potential_premium"
 TOP_N=1
 
 MIN_PE=1
-MIN_VOL=50
-MIN_LONG_PREMIUM=0.5
+MIN_VOL=100
+MIN_LONG_PREMIUM=1.5
 MIN_PREMIUM=0.25
-MIN_NET_PREMIUM=1000
-CURR_PRIC_MULT=1.001
+MIN_NET_PREMIUM=100
+CURR_PRIC_MULT=1.01
 
 
 #spread info
 spread_strike_tolerance=5
-spread_long_days=90
-spread_long_min_days=60
-spread_long_days_tolerance=10
+spread_long_days=120
+spread_long_min_days=90
+spread_long_days_tolerance=15
+
+refresh_results_background=600
+
+log_level="WARNING"
 
 while true;
 do
@@ -61,6 +68,8 @@ do
       --filter \"premium_diff > 0\" \
       --filter \"net_premium > $MIN_NET_PREMIUM\" \
       --min-write-timestamp \"$TIME_TO_USE\" \
+      --refresh-results-background $refresh_results_background \
+      --log-level $log_level \
       --sort $SORT" #--filter "pe_ratio > $MIN_PE"
 
     echo "running $command"
@@ -74,5 +83,6 @@ do
         mv /tmp/$OUTPUT_DIR $STORE_DIR
     fi
 
-    sleep 10
+    echo "Sleeping for $SLEEP_TIME seconds..."
+    sleep $SLEEP_TIME
 done

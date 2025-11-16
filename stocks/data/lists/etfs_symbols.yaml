@@ -15,6 +15,7 @@ symbols:
 - DYNF
 - EFA
 - EFV
+- GDX
 - GLD
 - GOVT
 - IAU
@@ -44,7 +45,6 @@ symbols:
 - JPST
 - LQD
 - MBB
-- MDY
 - MGK
 - MUB
 - OEF
