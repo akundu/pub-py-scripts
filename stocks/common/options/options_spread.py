@@ -148,10 +148,14 @@ def filter_and_prepare_long_options(
     long_end_date: str,
     tickers: List[str],
     log_func=None,
-    debug: bool = False
+    debug: bool = False,
+    option_type: str = 'call'
 ) -> pd.DataFrame:
     """
-    Filter and prepare long options DataFrame (call options only, write timestamp filter, etc.).
+    Filter and prepare long options DataFrame (filter by option type, write timestamp filter, etc.).
+    
+    Args:
+        option_type: Type of options to filter ('call', 'put', or 'both'). Default: 'call'
     
     Returns:
         Filtered and prepared DataFrame
@@ -169,13 +173,21 @@ def filter_and_prepare_long_options(
             log_func("WARNING", "No long-term options found for spread analysis.")
         return pd.DataFrame()
     
-    # Filter for call options only
+    # Filter by option type
     if 'option_type' in long_options_df.columns:
-        long_options_df = long_options_df[long_options_df['option_type'] == 'call'].copy()
+        if option_type == 'both':
+            # Keep both calls and puts (matching will be done by process_spread_match based on each short option's type)
+            if debug:
+                print(f"DEBUG: Keeping both call and put long options: {len(long_options_df)} options", file=sys.stderr)
+        else:
+            long_options_df = long_options_df[long_options_df['option_type'] == option_type].copy()
+            if debug:
+                print(f"DEBUG: After filtering for {option_type} long options: {len(long_options_df)} {option_type} options", file=sys.stderr)
     
     if long_options_df.empty:
+        option_type_label = option_type if option_type != 'both' else 'call/put'
         if log_func:
-            log_func("WARNING", "No long-term call options found for spread analysis.")
+            log_func("WARNING", f"No long-term {option_type_label} options found for spread analysis.")
         return pd.DataFrame()
     
     # Ensure we have a copy before modifying

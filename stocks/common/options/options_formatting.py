@@ -18,13 +18,19 @@ def format_dataframe_for_display(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     
     # Format currency columns
-    currency_cols = ['current_price', 'strike_price', 'price_above_current', 'option_premium', 
-                     'potential_premium', 'daily_premium', 'long_strike_price', 'long_option_premium', 
-                     'premium_diff', 'short_premium_total', 'short_daily_premium', 'long_premium_total', 
-                     'net_premium', 'net_daily_premium']
-    for col in currency_cols:
+    # For large totals, use comma formatting; for smaller values, use 2 decimal places
+    large_currency_cols = ['short_premium_total', 'short_daily_premium', 'long_premium_total', 
+                          'net_premium', 'net_daily_premium', 'potential_premium', 'daily_premium']
+    small_currency_cols = ['current_price', 'strike_price', 'price_above_current', 'option_premium', 
+                          'long_strike_price', 'long_option_premium', 'premium_diff']
+    
+    for col in large_currency_cols:
         if col in df.columns:
-            df[col] = df[col].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+            df[col] = df[col].apply(lambda x: f"${float(x):,.2f}" if pd.notna(x) else "N/A")
+    
+    for col in small_currency_cols:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: f"${float(x):.2f}" if pd.notna(x) else "N/A")
     
     # Format numeric columns
     numeric_cols = ['pe_ratio', 'market_cap_b']

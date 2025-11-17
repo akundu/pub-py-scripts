@@ -28,7 +28,7 @@ POSITION_SIZE=100000 #amt to invest
 
 #SORT="DAY_PREM"
 SORT="potential_premium"
-TOP_N=1
+TOP_N=10
 
 MIN_PE=1
 MIN_VOL=100
@@ -36,6 +36,7 @@ MIN_LONG_PREMIUM=1.5
 MIN_PREMIUM=0.25
 MIN_NET_PREMIUM=100
 CURR_PRIC_MULT=1.01
+SENSIBLE_PRICE=0.005
 
 
 #spread info
@@ -47,6 +48,7 @@ spread_long_days_tolerance=15
 refresh_results_background=600
 
 log_level="WARNING"
+option_type="both"
 
 while true;
 do
@@ -59,18 +61,22 @@ do
       --position-size $POSITION_SIZE \
       --$TYPE $TYPE_input \
       --spread --spread-strike-tolerance $spread_strike_tolerance --spread-long-days $spread_long_days --spread-long-min-days $spread_long_min_days --spread-long-days-tolerance $spread_long_days_tolerance \
+      --min-write-timestamp \"$TIME_TO_USE\" \
       --db-conn $QUERY_LOC \
       --output $DOWNLOAD_LOC \
-      --filter \"current_price*$CURR_PRIC_MULT < strike_price\" \
-      --filter \"volume > $MIN_VOL\" \
-      --filter \"long_option_premium > $MIN_LONG_PREMIUM\" \
-      --filter \"option_premium > $MIN_PREMIUM\" \
-      --filter \"premium_diff > 0\" \
-      --filter \"net_premium > $MIN_NET_PREMIUM\" \
-      --min-write-timestamp \"$TIME_TO_USE\" \
       --refresh-results-background $refresh_results_background \
       --log-level $log_level \
-      --sort $SORT" #--filter "pe_ratio > $MIN_PE"
+      --option-type $option_type \
+      --sensible-price $SENSIBLE_PRICE \
+      --sort $SORT" 
+      #--filter "pe_ratio > $MIN_PE" 
+      #--filter \"current_price*$CURR_PRIC_MULT < strike_price\" \      
+      #--filter \"long_option_premium > $MIN_LONG_PREMIUM\" \
+      #--filter \"option_premium > $MIN_PREMIUM\" \
+
+      # --filter \"volume > $MIN_VOL\" \
+      # --filter \"premium_diff > 0\" \
+      # --filter \"net_premium > $MIN_NET_PREMIUM\" \
 
     echo "running $command"
     eval $command

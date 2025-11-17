@@ -75,7 +75,7 @@ def process_ticker_analysis(args_tuple):
     # Unpack arguments
     (ticker, db_config, start_date, end_date, timestamp_lookback_days,
      position_size, days_to_expiry, min_volume, min_premium, min_write_timestamp,
-     use_market_time, filters, filter_logic, enable_cache, redis_url, log_level, debug) = args_tuple
+     use_market_time, filters, filter_logic, option_type, enable_cache, redis_url, log_level, debug, sensible_price) = args_tuple
     
     # Get Redis client for timestamp caching in worker process
     redis_client = None
@@ -118,9 +118,13 @@ def process_ticker_analysis(args_tuple):
                 # Ensure ticker column exists
                 options_df = ensure_ticker_column(options_df)
                 
-                # Filter for call options
+                # Filter by option type
                 if 'option_type' in options_df.columns:
-                    options_df = options_df[options_df['option_type'] == 'call'].copy()
+                    if option_type == 'both':
+                        # Keep both calls and puts
+                        pass
+                    else:
+                        options_df = options_df[options_df['option_type'] == option_type].copy()
                 
                 if options_df.empty:
                     return pd.DataFrame(), None
@@ -136,6 +140,34 @@ def process_ticker_analysis(args_tuple):
                 df = calculate_option_metrics(options_df, position_size, days_to_expiry)
                 if df.empty:
                     return pd.DataFrame(), None
+                
+                # Apply sensible price filter (strike price relative to current price as percentage multiplier)
+                if sensible_price > 0 and not df.empty and 'current_price' in df.columns and 'strike_price' in df.columns and 'option_type' in df.columns:
+                    before_sensible_filter = len(df)
+                    if option_type == 'call' or option_type == 'both':
+                        # For calls: only show strikes > current_price * (1 + sensible_price) (OTM calls)
+                        # Example: if current_price=100 and sensible_price=0.05, show strikes > 105
+                        call_mask = (df['option_type'] == 'call') & (df['strike_price'] > df['current_price'] * (1 + sensible_price))
+                        if option_type == 'call':
+                            df = df[call_mask].copy()
+                        else:  # both
+                            # Keep calls that meet the filter, and all puts (puts will be filtered separately)
+                            put_mask = df['option_type'] == 'put'
+                            df = df[call_mask | put_mask].copy()
+                    
+                    if option_type == 'put' or option_type == 'both':
+                        # For puts: only show strikes < current_price * (1 - sensible_price) (OTM puts)
+                        # Example: if current_price=100 and sensible_price=0.05, show strikes < 95
+                        put_mask = (df['option_type'] == 'put') & (df['strike_price'] < df['current_price'] * (1 - sensible_price))
+                        if option_type == 'put':
+                            df = df[put_mask].copy()
+                        else:  # both
+                            # Keep puts that meet the filter, and all calls (calls already filtered above)
+                            call_mask = df['option_type'] == 'call'
+                            df = df[call_mask | put_mask].copy()
+                    
+                    if debug and before_sensible_filter != len(df):
+                        print(f"DEBUG: After sensible_price filter ({sensible_price*100:.1f}%): {len(df)} options (was {before_sensible_filter})", file=sys.stderr)
                 
                 # Apply basic filters
                 df = apply_basic_filters(df, min_volume, min_premium, min_write_timestamp)
@@ -177,12 +209,17 @@ def process_spread_match(args_tuple):
     Returns:
         Dictionary with spread result row, or None if no match found
     """
-    from common.common import black_scholes_call
+    from common.common import black_scholes_call, black_scholes_put
     
     short_row_dict, long_options_dict, spread_strike_tolerance, spread_long_days, position_size, risk_free_rate, debug = args_tuple
     
     ticker = short_row_dict['ticker']
     short_strike = short_row_dict['strike_price']
+    
+    # Get option type from short option (default to 'call' for backward compatibility)
+    short_option_type = short_row_dict.get('option_type', 'call')
+    if short_option_type not in ['call', 'put']:
+        short_option_type = 'call'  # Default to call if invalid
     
     # Get long options for this ticker
     ticker_long_options_list = long_options_dict.get(ticker, [])
@@ -198,13 +235,23 @@ def process_spread_match(args_tuple):
     if 'expiration_date' in ticker_long_options.columns:
         ticker_long_options['expiration_date'] = pd.to_datetime(ticker_long_options['expiration_date'], errors='coerce')
     
+    # CRITICAL: Filter long options by the same option type as short option
+    # This ensures that puts only match with puts and calls only match with calls.
+    # When option_type='both', we may have both calls and puts in long_options_dict,
+    # but each short option will only match with long options of the same type.
+    if 'option_type' in ticker_long_options.columns:
+        before_type_filter = len(ticker_long_options)
+        ticker_long_options = ticker_long_options[ticker_long_options['option_type'] == short_option_type].copy()
+        if debug and len(ticker_long_options) < before_type_filter:
+            print(f"DEBUG: Filtered long options by type '{short_option_type}': {before_type_filter} -> {len(ticker_long_options)}")
+    
     if ticker_long_options.empty:
         if debug:
-            print(f"DEBUG: No long options found for ticker {ticker}")
+            print(f"DEBUG: No long {short_option_type} options found for ticker {ticker}")
         return None
     
     if debug:
-        print(f"DEBUG: Processing {ticker} - short strike: ${short_strike:.2f}, {len(ticker_long_options)} long options available")
+        print(f"DEBUG: Processing {ticker} - short {short_option_type} strike: ${short_strike:.2f}, {len(ticker_long_options)} long {short_option_type} options available")
     
     # Calculate strike tolerance range
     tolerance_multiplier = spread_strike_tolerance / 100.0
@@ -248,11 +295,21 @@ def process_spread_match(args_tuple):
     else:
         long_iv = None
 
+    # Calculate short option premium
+    short_premium = short_row_dict['option_premium']
+    
+    # Filter out spreads where short premium > long premium (not a sensible spread)
+    # In a calendar spread, you typically want to collect more premium from the short option
+    # than you pay for the long option, or at least have a reasonable spread
+    if short_premium > long_premium:
+        if debug:
+            print(f"DEBUG: Filtered out spread - short premium (${short_premium:.2f}) > long premium (${long_premium:.2f})", file=sys.stderr)
+        return None
+    
     # SPREAD MODE: Calculate num_contracts based on long option premium (investment in long options)
     num_contracts = math.floor(position_size / (long_premium * 100)) if long_premium > 0 else 0
     
     # Calculate premiums based on spread position sizing
-    short_premium = short_row_dict['option_premium']
     premium_diff = round(long_premium - short_premium, 2)
     short_premium_total = round(num_contracts * short_premium * 100, 2)
     long_premium_total = round(num_contracts * long_premium * 100, 2)
@@ -276,30 +333,47 @@ def process_spread_match(args_tuple):
             implied_vol = implied_vol / 100.0
     
     # Calculate Black-Scholes long option value at short expiration
+    # Use the appropriate Black-Scholes function based on option type
     estimated_stock_price_at_short_expiry = current_price if current_price else long_strike
     
     long_option_value_at_short_expiry = 0.0
     if time_to_long_expiry_at_short_expiry > 0 and current_price:
         try:
-            long_option_value_at_short_expiry = black_scholes_call(
-                S=estimated_stock_price_at_short_expiry,
-                K=long_strike,
-                T=time_to_long_expiry_at_short_expiry,
-                r=risk_free_rate,
-                sigma=implied_vol
-            )
+            # Use call or put pricing based on option type
+            if short_option_type == 'put':
+                long_option_value_at_short_expiry = black_scholes_put(
+                    S=estimated_stock_price_at_short_expiry,
+                    K=long_strike,
+                    T=time_to_long_expiry_at_short_expiry,
+                    r=risk_free_rate,
+                    sigma=implied_vol
+                )
+            else:  # call
+                long_option_value_at_short_expiry = black_scholes_call(
+                    S=estimated_stock_price_at_short_expiry,
+                    K=long_strike,
+                    T=time_to_long_expiry_at_short_expiry,
+                    r=risk_free_rate,
+                    sigma=implied_vol
+                )
         except Exception as e:
             if debug:
                 print(f"DEBUG: Black-Scholes calculation error: {e}")
             long_option_value_at_short_expiry = long_premium
     
     # Net premium calculation for calendar spread
+    # At short expiration:
+    # - Cash received from selling short options: short_premium_total
+    # - Cash paid for buying long options: long_premium_total
+    # - Value of long options at short expiration: long_premium_at_short_expiry_total
+    # Net profit = cash received - cash paid + remaining asset value
     long_premium_at_short_expiry_total = round(num_contracts * long_option_value_at_short_expiry * 100, 2)
-    net_premium = round(short_premium_total - (long_premium_total - long_premium_at_short_expiry_total), 2)
+    net_premium = round(short_premium_total - long_premium_total + long_premium_at_short_expiry_total, 2)
     
     # Daily premium calculations
-    short_daily_premium = round(short_premium_total / short_days, 2) if short_days > 0 else 0
-    net_daily_premium = round(net_premium / short_days, 2) if short_days > 0 else 0
+    # Use max(short_days, 1) to avoid division by zero
+    short_daily_premium = round(short_premium_total / max(short_days, 1), 2) if short_days > 0 else 0.0
+    net_daily_premium = round(net_premium / max(short_days, 1), 2) if short_days > 0 else 0.0
 
     long_contracts_available = best_long.get('open_interest')
     if pd.notna(long_contracts_available):
@@ -318,6 +392,7 @@ def process_spread_match(args_tuple):
     long_exp_dt = normalize_expiration_date_to_utc(best_long.get('expiration_date'))
     
     spread_row.update({
+        'option_type': short_option_type,  # Add option type to output
         'num_contracts': num_contracts,
         'long_strike_price': round(float(best_long['strike_price']), 2),
         'long_option_premium': long_premium,
@@ -378,8 +453,8 @@ def process_ticker_spread_analysis(args_tuple):
     # Unpack arguments
     (ticker, db_config, start_date, end_date, long_start_date, long_end_date,
      timestamp_lookback_days, position_size, days_to_expiry, min_volume, min_premium,
-     min_write_timestamp, use_market_time, filters, filter_logic, spread_strike_tolerance,
-     spread_long_days, risk_free_rate, enable_cache, redis_url, log_level, debug) = args_tuple
+     min_write_timestamp, use_market_time, filters, filter_logic, option_type, spread_strike_tolerance,
+     spread_long_days, risk_free_rate, enable_cache, redis_url, log_level, debug, sensible_price) = args_tuple
     
     # Get Redis client for timestamp caching in worker process
     redis_client = None
@@ -427,9 +502,13 @@ def process_ticker_spread_analysis(args_tuple):
                 # Ensure ticker column exists
                 short_options_df = ensure_ticker_column(short_options_df)
                 
-                # Filter for call options
+                # Filter by option type
                 if 'option_type' in short_options_df.columns:
-                    short_options_df = short_options_df[short_options_df['option_type'] == 'call'].copy()
+                    if option_type == 'both':
+                        # Keep both calls and puts
+                        pass
+                    else:
+                        short_options_df = short_options_df[short_options_df['option_type'] == option_type].copy()
                 
                 if short_options_df.empty:
                     return pd.DataFrame(), None
@@ -445,6 +524,34 @@ def process_ticker_spread_analysis(args_tuple):
                 df_short = calculate_option_metrics(short_options_df, position_size, days_to_expiry)
                 if df_short.empty:
                     return pd.DataFrame(), None
+                
+                # Apply sensible price filter (strike price relative to current price as percentage multiplier)
+                if sensible_price > 0 and not df_short.empty and 'current_price' in df_short.columns and 'strike_price' in df_short.columns and 'option_type' in df_short.columns:
+                    before_sensible_filter = len(df_short)
+                    if option_type == 'call' or option_type == 'both':
+                        # For calls: only show strikes > current_price * (1 + sensible_price) (OTM calls)
+                        # Example: if current_price=100 and sensible_price=0.05, show strikes > 105
+                        call_mask = (df_short['option_type'] == 'call') & (df_short['strike_price'] > df_short['current_price'] * (1 + sensible_price))
+                        if option_type == 'call':
+                            df_short = df_short[call_mask].copy()
+                        else:  # both
+                            # Keep calls that meet the filter, and all puts (puts will be filtered separately)
+                            put_mask = df_short['option_type'] == 'put'
+                            df_short = df_short[call_mask | put_mask].copy()
+                    
+                    if option_type == 'put' or option_type == 'both':
+                        # For puts: only show strikes < current_price * (1 - sensible_price) (OTM puts)
+                        # Example: if current_price=100 and sensible_price=0.05, show strikes < 95
+                        put_mask = (df_short['option_type'] == 'put') & (df_short['strike_price'] < df_short['current_price'] * (1 - sensible_price))
+                        if option_type == 'put':
+                            df_short = df_short[put_mask].copy()
+                        else:  # both
+                            # Keep puts that meet the filter, and all calls (calls already filtered above)
+                            call_mask = df_short['option_type'] == 'call'
+                            df_short = df_short[call_mask | put_mask].copy()
+                    
+                    if debug and before_sensible_filter != len(df_short):
+                        print(f"DEBUG: After sensible_price filter ({sensible_price*100:.1f}%): {len(df_short)} options (was {before_sensible_filter})", file=sys.stderr)
                 
                 # Apply basic filters
                 df_short = apply_basic_filters(df_short, min_volume, min_premium, min_write_timestamp)
@@ -482,9 +589,13 @@ def process_ticker_spread_analysis(args_tuple):
                 # Ensure ticker column exists
                 long_options_df = ensure_ticker_column(long_options_df)
                 
-                # Filter for call options
+                # Filter by option type
                 if 'option_type' in long_options_df.columns:
-                    long_options_df = long_options_df[long_options_df['option_type'] == 'call'].copy()
+                    if option_type == 'both':
+                        # Keep both calls and puts
+                        pass
+                    else:
+                        long_options_df = long_options_df[long_options_df['option_type'] == option_type].copy()
                 
                 if long_options_df.empty:
                     return pd.DataFrame(), None

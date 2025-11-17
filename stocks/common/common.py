@@ -153,6 +153,54 @@ def black_scholes_call(S: float, K: float, T: float, r: float, sigma: float) -> 
     return max(call_price, 0)  # Ensure non-negative
 
 
+def black_scholes_put(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    """
+    Calculate Black-Scholes put option price.
+    
+    Args:
+        S: Current stock price
+        K: Strike price
+        T: Time to expiration (in years)
+        r: Risk-free rate (annual)
+        sigma: Implied volatility (annual)
+    
+    Returns:
+        Put option price
+    """
+    if T <= 0:
+        # Option expired, intrinsic value only
+        return max(K - S, 0)
+    
+    if sigma <= 0:
+        # No volatility, return intrinsic value
+        return max(K - S, 0)
+    
+    # Calculate d1 and d2 (same as call)
+    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    
+    # Calculate cumulative normal distribution
+    if SCIPY_AVAILABLE and norm is not None:
+        N_d1 = norm.cdf(d1)
+        N_d2 = norm.cdf(d2)
+        N_neg_d1 = norm.cdf(-d1)
+        N_neg_d2 = norm.cdf(-d2)
+    else:
+        # Fallback to basic normal CDF approximation
+        def norm_cdf(x):
+            """Approximate cumulative normal distribution."""
+            return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+        N_d1 = norm_cdf(d1)
+        N_d2 = norm_cdf(d2)
+        N_neg_d1 = norm_cdf(-d1)
+        N_neg_d2 = norm_cdf(-d2)
+    
+    # Black-Scholes formula for put option: K * e^(-r*T) * N(-d2) - S * N(-d1)
+    put_price = K * math.exp(-r * T) * N_neg_d2 - S * N_neg_d1
+    
+    return max(put_price, 0)  # Ensure non-negative
+
+
 # ============================================================================
 # Redis Helper Functions for Refresh Deduplication
 # ============================================================================

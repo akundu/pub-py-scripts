@@ -426,7 +426,9 @@ class OptionsAnalyzer:
         use_market_time: bool,
         filters: Optional[List[FilterExpression]],
         filter_logic: str,
-        max_workers: int
+        option_type: str,
+        max_workers: int,
+        sensible_price: float = 1.0
     ) -> pd.DataFrame:
         """
         Analyze options using multiprocessing where each ticker is processed end-to-end in a separate process.
@@ -455,10 +457,12 @@ class OptionsAnalyzer:
                 use_market_time,
                 filters,  # FilterExpression objects should be picklable
                 filter_logic,
+                option_type,
                 self.enable_cache,
                 self.redis_url,
                 self.log_level,
-                self.debug
+                self.debug,
+                sensible_price
             )
             process_args.append(args)
         
@@ -522,9 +526,11 @@ class OptionsAnalyzer:
         use_market_time: bool,
         filters: Optional[List[FilterExpression]],
         filter_logic: str,
+        option_type: str,
         spread_strike_tolerance: float,
         spread_long_days: int,
-        max_workers: int
+        max_workers: int,
+        sensible_price: float = 0.01
     ) -> pd.DataFrame:
         """
         Analyze spread options using multiprocessing where each ticker is processed end-to-end in a separate process.
@@ -555,13 +561,15 @@ class OptionsAnalyzer:
                 use_market_time,
                 filters,
                 filter_logic,
+                option_type,
                 spread_strike_tolerance,
                 spread_long_days,
                 self.risk_free_rate,
                 self.enable_cache,
                 self.redis_url,
                 self.log_level,
-                self.debug
+                self.debug,
+                sensible_price
             )
             process_args.append(args)
         
@@ -612,6 +620,7 @@ class OptionsAnalyzer:
     async def analyze_options(
         self,
         tickers: List[str],
+        option_type: str = 'call',
         days_to_expiry: Optional[int] = None,
         min_volume: int = 0,
         max_days: Optional[int] = None,
@@ -631,13 +640,15 @@ class OptionsAnalyzer:
         spread_long_days: int = 90,
         spread_long_days_tolerance: int = 14,
         spread_long_min_days: Optional[int] = None,
-        min_write_timestamp: Optional[str] = None
+        min_write_timestamp: Optional[str] = None,
+        sensible_price: float = 1.0
     ) -> pd.DataFrame:
         """
-        Analyze covered call opportunities for the given tickers.
+        Analyze options opportunities for the given tickers.
         
         Args:
             tickers: List of ticker symbols to analyze
+            option_type: Type of options to analyze ('call', 'put', or 'both'). Default: 'call'
             days_to_expiry: Number of days to expiry (if None, analyze all available)
             min_volume: Minimum volume filter
             max_days: Maximum days from today for expiration (convenience param that sets end_date, overrides end_date if both provided)
@@ -704,9 +715,11 @@ class OptionsAnalyzer:
                         use_market_time=use_market_time,
                         filters=filters,
                         filter_logic=filter_logic,
+                        option_type=option_type,
                         spread_strike_tolerance=spread_strike_tolerance,
                         spread_long_days=spread_long_days,
-                        max_workers=max_workers
+                        max_workers=max_workers,
+                        sensible_price=sensible_price
                     )
                 else:
                     return await self._analyze_options_multiprocess(
@@ -722,7 +735,9 @@ class OptionsAnalyzer:
                         use_market_time=use_market_time,
                         filters=filters,
                         filter_logic=filter_logic,
-                        max_workers=max_workers
+                        option_type=option_type,
+                        max_workers=max_workers,
+                        sensible_price=sensible_price
                     )
             
             # 1) Fetch options universe (combined short and long if spread mode, otherwise just short)
@@ -802,7 +817,8 @@ class OptionsAnalyzer:
                             min_write_timestamp=min_write_timestamp,
                             long_start_date=long_start_date,
                             long_end_date=long_end_date,
-                            tickers=tickers_upper
+                            tickers=tickers_upper,
+                            option_type=option_type
                         )
                     
                     # Keep only short-term options in main options_df
@@ -826,10 +842,11 @@ class OptionsAnalyzer:
             if options_df.empty:
                 return pd.DataFrame()
 
-            # 2) Filter to calls
-            options_df = self._filter_call_options(options_df)
+            # 2) Filter by option type
+            options_df = self._filter_options_by_type(options_df, option_type)
             if options_df.empty:
-                self._log("INFO", "No call options found after filtering")
+                option_type_label = option_type if option_type != 'both' else 'call/put'
+                self._log("INFO", f"No {option_type_label} options found after filtering")
                 return pd.DataFrame()
 
             # 3) Attach latest prices (market-time aware)
@@ -845,6 +862,8 @@ class OptionsAnalyzer:
                 min_volume=min_volume,
                 min_premium=min_premium,
                 min_write_timestamp=min_write_timestamp,
+                option_type=option_type,
+                sensible_price=sensible_price,
             )
             if df.empty:
                 return pd.DataFrame()
@@ -882,6 +901,7 @@ class OptionsAnalyzer:
                     max_workers=max_workers,
                     position_size=position_size,
                     min_write_timestamp=min_write_timestamp,
+                    option_type=option_type,
                     long_options_df=long_options_df  # reuse concurrently fetched long options if available
                 )
             
@@ -967,13 +987,19 @@ class OptionsAnalyzer:
         self._log("INFO", f"Finished options fetch: {len(options_df)} options retrieved for {len(tickers_upper)} tickers")
         return options_df
 
-    def _filter_call_options(self, options_df: pd.DataFrame) -> pd.DataFrame:
-        before_call_filter = len(options_df)
+    def _filter_options_by_type(self, options_df: pd.DataFrame, option_type: str = 'call') -> pd.DataFrame:
+        before_filter = len(options_df)
         if 'option_type' in options_df.columns:
-            options_df = options_df[options_df['option_type'] == 'call']
-            self._log("INFO", f"After call filter: {len(options_df)} options (was {before_call_filter})")
-            if self.debug:
-                print(f"DEBUG: After call filter: {len(options_df)} options (was {before_call_filter})", file=sys.stderr)
+            if option_type == 'both':
+                # Don't filter, keep both calls and puts
+                self._log("INFO", f"Keeping both call and put options: {len(options_df)} options")
+                if self.debug:
+                    print(f"DEBUG: Keeping both call and put options: {len(options_df)} options", file=sys.stderr)
+            else:
+                options_df = options_df[options_df['option_type'] == option_type]
+                self._log("INFO", f"After {option_type} filter: {len(options_df)} options (was {before_filter})")
+                if self.debug:
+                    print(f"DEBUG: After {option_type} filter: {len(options_df)} options (was {before_filter})", file=sys.stderr)
         else:
             self._log("WARNING", "'option_type' column not found in options DataFrame")
             if self.debug:
@@ -1122,11 +1148,43 @@ class OptionsAnalyzer:
         days_to_expiry: Optional[int],
         min_volume: int,
         min_premium: float,
-        min_write_timestamp: Optional[str]
+        min_write_timestamp: Optional[str],
+        option_type: str = 'call',
+        sensible_price: float = 1.0
     ) -> pd.DataFrame:
         """Derive metrics and apply filters for short options (uses helper functions)."""
         # Use helper function to calculate metrics
         df = _calculate_option_metrics(df, position_size, days_to_expiry)
+        
+        # Apply sensible price filter (strike price relative to current price as percentage multiplier)
+        if sensible_price > 0 and not df.empty and 'current_price' in df.columns and 'strike_price' in df.columns and 'option_type' in df.columns:
+            before_sensible_filter = len(df)
+            if option_type == 'call' or option_type == 'both':
+                # For calls: only show strikes > current_price * (1 + sensible_price) (OTM calls)
+                # Example: if current_price=100 and sensible_price=0.05, show strikes > 105
+                call_mask = (df['option_type'] == 'call') & (df['strike_price'] > df['current_price'] * (1 + sensible_price))
+                if option_type == 'call':
+                    df = df[call_mask].copy()
+                else:  # both
+                    # Keep calls that meet the filter, and all puts (puts will be filtered separately)
+                    put_mask = df['option_type'] == 'put'
+                    df = df[call_mask | put_mask].copy()
+            
+            if option_type == 'put' or option_type == 'both':
+                # For puts: only show strikes < current_price * (1 - sensible_price) (OTM puts)
+                # Example: if current_price=100 and sensible_price=0.05, show strikes < 95
+                put_mask = (df['option_type'] == 'put') & (df['strike_price'] < df['current_price'] * (1 - sensible_price))
+                if option_type == 'put':
+                    df = df[put_mask].copy()
+                else:  # both
+                    # Keep puts that meet the filter, and all calls (calls already filtered above)
+                    call_mask = df['option_type'] == 'call'
+                    df = df[call_mask | put_mask].copy()
+            
+            if before_sensible_filter != len(df):
+                self._log("INFO", f"After sensible_price filter ({sensible_price*100:.1f}%): {len(df)} options (was {before_sensible_filter})")
+                if self.debug:
+                    print(f"DEBUG: After sensible_price filter ({sensible_price*100:.1f}%): {len(df)} options (was {before_sensible_filter})", file=sys.stderr)
         
         if days_to_expiry is not None and not df.empty:
             before_days_filter = len(df)
@@ -1381,10 +1439,14 @@ class OptionsAnalyzer:
         min_write_timestamp: Optional[str],
         long_start_date: str,
         long_end_date: str,
-        tickers: List[str]
+        tickers: List[str],
+        option_type: str = 'call'
     ) -> pd.DataFrame:
         """
-        Filter and prepare long options DataFrame (call options only, write timestamp filter, etc.).
+        Filter and prepare long options DataFrame (filter by option type, write timestamp filter, etc.).
+        
+        Args:
+            option_type: Type of options to filter ('call', 'put', or 'both'). Default: 'call'
         
         Returns:
             Filtered and prepared DataFrame
@@ -1429,15 +1491,23 @@ class OptionsAnalyzer:
                 print(f"  3. Check database for tickers: {tickers}", file=sys.stderr)
             return pd.DataFrame()
         
-        # Filter for call options only
+        # Filter by option type
+        # Note: When option_type='both', we keep both calls and puts in long_options_df.
+        # The actual matching (in process_spread_match) will ensure that each short option
+        # only matches with long options of the same type (puts with puts, calls with calls).
         if 'option_type' in long_options_df.columns:
-            long_options_df = long_options_df[long_options_df['option_type'] == 'call'].copy()
-        
-        if self.debug:
-            print(f"DEBUG: After filtering for calls: {len(long_options_df)} call options")
+            if option_type == 'both':
+                # Keep both calls and puts (matching will be done by process_spread_match based on each short option's type)
+                if self.debug:
+                    print(f"DEBUG: Keeping both call and put long options: {len(long_options_df)} options")
+            else:
+                long_options_df = long_options_df[long_options_df['option_type'] == option_type].copy()
+                if self.debug:
+                    print(f"DEBUG: After filtering for {option_type} long options: {len(long_options_df)} {option_type} options")
         
         if long_options_df.empty:
-            self._log("WARNING", "No long-term call options found for spread analysis.")
+            option_type_label = option_type if option_type != 'both' else 'call/put'
+            self._log("WARNING", f"No long-term {option_type_label} options found for spread analysis.")
             return pd.DataFrame()
         
         # Ensure we have a copy before modifying
@@ -1562,6 +1632,7 @@ class OptionsAnalyzer:
             max_workers: int,
             position_size: float,
             min_write_timestamp: Optional[str],
+            option_type: str = 'call',
             long_options_df: Optional[pd.DataFrame] = None
         ) -> pd.DataFrame:
         """
@@ -1621,7 +1692,8 @@ class OptionsAnalyzer:
                 min_write_timestamp=min_write_timestamp,
                 long_start_date=long_start_date,
                 long_end_date=long_end_date,
-                tickers=tickers
+                tickers=tickers,
+                option_type=option_type
             )
             
             if long_options_df.empty:
@@ -1741,7 +1813,7 @@ class OptionsAnalyzer:
         
         if is_spread_mode:
             display_columns = [
-                'ticker', 'pe_ratio', 'market_cap_b', 'current_price', 'price_with_change', 'price_change_pct',
+                'ticker', 'option_type', 'pe_ratio', 'market_cap_b', 'current_price', 'price_with_change', 'price_change_pct',
                 # Short option details
                 'strike_price', 'price_above_current', 'option_premium', 'bid_ask',
                 'implied_volatility', 'delta', 'theta', 'expiration_date', 'days_to_expiry',
@@ -1758,7 +1830,7 @@ class OptionsAnalyzer:
             ]
         else:
             display_columns = [
-                'ticker', 'pe_ratio', 'market_cap_b', 'current_price', 'price_with_change', 'price_change_pct', 'strike_price',
+                'ticker', 'option_type', 'pe_ratio', 'market_cap_b', 'current_price', 'price_with_change', 'price_change_pct', 'strike_price',
                 'price_above_current', 'option_premium', 'bid_ask', 'premium_above_diff_percentage',
                 'implied_volatility', 'delta', 'theta',
                 'potential_premium', 'daily_premium', 'expiration_date', 'days_to_expiry',
@@ -1796,13 +1868,19 @@ class OptionsAnalyzer:
                 ascending = (sort_key == 'premium_diff')
                 df_display = df_display.sort_values(by=sort_key, ascending=ascending)
         
-        # Apply top-n limit per ticker if specified
+        # Apply top-n limit per ticker-option_type combination if specified
         if top_n is not None and top_n > 0:
             before_topn = len(df_display)
             if 'ticker' in df_display.columns:
-                # Keep top N per ticker (after sorting)
-                df_display = df_display.groupby('ticker', group_keys=False).head(top_n)
-                self._log("INFO", f"Limiting to top {top_n} options per ticker (after sorting)")
+                # Keep top N per ticker-option_type combination (after sorting)
+                # This ensures that if a ticker has both calls and puts, we show top N of each type
+                if 'option_type' in df_display.columns:
+                    df_display = df_display.groupby(['ticker', 'option_type'], group_keys=False).head(top_n)
+                    self._log("INFO", f"Limiting to top {top_n} options per ticker-option_type combination (after sorting)")
+                else:
+                    # Fallback to per-ticker if option_type column is missing
+                    df_display = df_display.groupby('ticker', group_keys=False).head(top_n)
+                    self._log("INFO", f"Limiting to top {top_n} options per ticker (after sorting)")
             else:
                 # If no ticker column, just take top N overall
                 df_display = df_display.head(top_n)
@@ -1922,6 +2000,7 @@ def _build_analysis_args(args, tickers: List[str], filters: List[FilterExpressio
     """Build arguments dictionary for analyze_options call. Reusable for both initial and refresh analysis."""
     return {
         'tickers': tickers,
+        'option_type': getattr(args, 'option_type', 'call'),
         'days_to_expiry': args.days,
         'min_volume': args.min_volume,
         'max_days': args.max_days,
@@ -1940,7 +2019,8 @@ def _build_analysis_args(args, tickers: List[str], filters: List[FilterExpressio
         'spread_long_days': args.spread_long_days,
         'spread_long_days_tolerance': args.spread_long_days_tolerance,
         'spread_long_min_days': args.spread_long_min_days,
-        'min_write_timestamp': args.min_write_timestamp
+        'min_write_timestamp': args.min_write_timestamp,
+        'sensible_price': getattr(args, 'sensible_price', 0.01)
     }
 
 
@@ -3028,10 +3108,11 @@ Examples:
   # Spread sorted by net daily premium
   python options_analyzer.py --symbols AAPL GOOGL --spread --sort net_daily_premium --max-days 14
 
-  # Limit to top 5 options per ticker
+  # Limit to top 5 options per ticker-option_type combination
+  # If a ticker has both calls and puts, shows top 5 calls AND top 5 puts
   python options_analyzer.py --symbols AAPL MSFT GOOGL --top-n 5 --sort daily_premium
 
-  # Spread mode with top 3 spreads per ticker
+  # Spread mode with top 3 spreads per ticker-option_type combination
   python options_analyzer.py --symbols AAPL MSFT --spread --top-n 3 --sort net_daily_premium
 """
     )
@@ -3118,6 +3199,20 @@ Examples:
         type=str,
         default=None,
         help="Minimum write timestamp for options in EST format (e.g., '2025-11-05 10:00:00'). Filters out options written before this time. Useful for getting only fresh options data.",
+    )
+    
+    parser.add_argument(
+        '--option-type',
+        type=str,
+        choices=['call', 'put', 'both'],
+        default='call',
+        help="Type of options to analyze: 'call' (default, covered calls), 'put' (cash-secured puts), or 'both' (analyze both calls and puts).",
+    )
+    parser.add_argument(
+        '--sensible-price',
+        type=float,
+        default=0.01,
+        help="Filter strikes based on current price as a percentage multiplier. For calls: only show strikes > current_price * (1 + sensible_price). For puts: only show strikes < current_price * (1 - sensible_price). Default: 0.01 (1%%). Set to 0 to disable. Example: 0.05 means 5%% above/below current price.",
     )
     
     # Spread analysis options
@@ -3250,7 +3345,7 @@ Examples:
         '--top-n',
         type=int,
         default=1,
-        help="Limit results to top N options per ticker (based on sort order). Example: --top-n 10 shows only the best 10 options for each ticker. Applied after sorting and filtering. Default: 1."
+        help="Limit results to top N options per ticker-option_type combination (based on sort order). Example: --top-n 10 shows the best 10 calls AND the best 10 puts for each ticker (if both types exist). Applied after sorting and filtering. Default: 1."
     )
     parser.add_argument(
         '--refresh-results',
@@ -3327,6 +3422,7 @@ def _build_analysis_args(args: argparse.Namespace, symbols_list: List[str], filt
     """Build arguments dictionary for analyze_options from parsed args."""
     return {
         'tickers': symbols_list,
+        'option_type': getattr(args, 'option_type', 'call'),
         'days_to_expiry': args.days,
         'min_volume': args.min_volume,
         'max_days': args.max_days,
@@ -3346,7 +3442,8 @@ def _build_analysis_args(args: argparse.Namespace, symbols_list: List[str], filt
         'spread_long_days': args.spread_long_days,
         'spread_long_days_tolerance': args.spread_long_days_tolerance,
         'spread_long_min_days': args.spread_long_min_days,
-        'min_write_timestamp': args.min_write_timestamp
+        'min_write_timestamp': args.min_write_timestamp,
+        'sensible_price': getattr(args, 'sensible_price', 0.01)
     }
 
 

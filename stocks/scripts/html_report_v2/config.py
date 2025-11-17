@@ -51,6 +51,8 @@ HIDDEN_COLUMNS = [
     'spread_impact_pct',
     'liquidity_score',
     'assignment_risk',
+    'option_type',
+    'l_prem_tot',
 ]
 
 # Columns to always hide (never shown, used for sorting only)
