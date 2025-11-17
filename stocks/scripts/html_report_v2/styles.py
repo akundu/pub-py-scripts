@@ -263,6 +263,23 @@ def get_css_styles():
             background: #f9f9f9;
         }
         
+        td .cell-main {
+            font-weight: 600;
+            line-height: 1.2;
+        }
+        
+        td .cell-sub {
+            font-size: 0.8em;
+            color: #6c757d;
+            line-height: 1.1;
+            margin-top: 3px;
+        }
+        
+        td .cell-sub.theta-percent {
+            font-weight: 500;
+            color: #007bff;
+        }
+        
         td.price-positive {
             color: #28a745;
             font-weight: 600;

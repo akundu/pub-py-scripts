@@ -10,7 +10,7 @@ import os
 import sys
 import yaml
 import argparse
-from typing import List, Optional
+from typing import List, Optional, Set, Tuple
 from pathlib import Path
 
 # Import symbol loading functions from fetch_lists_data
@@ -46,7 +46,11 @@ def load_symbols_from_yaml(yaml_file: str, quiet: bool = False) -> List[str]:
         return []
 
 
-async def fetch_lists_data(args: argparse.Namespace, quiet: bool = False) -> List[str]:
+async def fetch_lists_data(
+    args: argparse.Namespace,
+    quiet: bool = False,
+    apply_exclusions: bool = True
+) -> List[str]:
     """
     Fetch symbols using the same logic as fetch_all_data.py
     
@@ -129,6 +133,9 @@ async def fetch_lists_data(args: argparse.Namespace, quiet: bool = False) -> Lis
                 if not quiet:
                     print(f"Info: Could not load symbols for {args.types} from disk. Use --fetch-online to fetch them.")
     
+    if apply_exclusions and all_symbols_list:
+        all_symbols_list = await apply_symbol_exclusions(all_symbols_list, args, quiet)
+
     # Apply limit if specified
     if args.limit and all_symbols_list:
         original_count = len(all_symbols_list)
@@ -176,6 +183,14 @@ def add_symbol_arguments(parser: argparse.ArgumentParser, required: bool = False
         help='Limit symbols for processing (default: None)'
     )
     parser.add_argument(
+        '--exclude',
+        dest='exclude_filters',
+        nargs='+',
+        default=None,
+        help="Exclude items from the resolved symbol list. Use s:SYMBOL to drop individual tickers, "
+             "t:LIST_NAME to drop entire saved types (e.g. --exclude s:MSFT t:stocks_to_track)."
+    )
+    parser.add_argument(
         '--fetch-online',
         action='store_true',
         default=False,
@@ -206,3 +221,109 @@ async def get_symbols_from_args(args: argparse.Namespace, quiet: bool = False) -
 async def fetch_lists_data_legacy(args: argparse.Namespace) -> List[str]:
     """Legacy function name for backward compatibility."""
     return await fetch_lists_data(args, quiet=False)
+
+
+async def apply_symbol_exclusions(
+    symbols: List[str],
+    args: argparse.Namespace,
+    quiet: bool = False
+) -> List[str]:
+    """Remove symbols requested via --exclude filters."""
+    if not symbols:
+        return symbols
+
+    raw_filters = []
+    exclude_attr = getattr(args, 'exclude_filters', None)
+    if exclude_attr:
+        raw_filters.extend(exclude_attr)
+
+    if not raw_filters:
+        return symbols
+
+    parsed_filters = []
+    for token in raw_filters:
+        parsed_filters.extend(_parse_exclude_token(token))
+
+    if not parsed_filters:
+        return symbols
+
+    symbol_excludes: Set[str] = set()
+    type_requests: Set[str] = set()
+
+    for prefix, value in parsed_filters:
+        if prefix == 's' and value:
+            symbol_excludes.add(value.upper())
+        elif prefix == 't' and value:
+            type_requests.add(value)
+
+    if type_requests:
+        for type_name in sorted(type_requests):
+            try:
+                type_symbols = await _load_symbols_for_type(type_name, args, quiet)
+            except Exception as exc:
+                if not quiet:
+                    print(f"Warning: Could not load symbols for exclusion type '{type_name}': {exc}", file=sys.stderr)
+                type_symbols = []
+            symbol_excludes.update(sym.upper() for sym in type_symbols)
+
+    if not symbol_excludes:
+        return symbols
+
+    filtered_symbols = [sym for sym in symbols if sym.upper() not in symbol_excludes]
+    if not quiet:
+        removed = len(symbols) - len(filtered_symbols)
+        if removed > 0:
+            print(f"Excluded {removed} symbol(s) via --exclude filters (remaining: {len(filtered_symbols)})")
+
+    return filtered_symbols
+
+
+def _parse_exclude_token(raw_token: str) -> List[Tuple[str, str]]:
+    """Parse exclusion tokens like s:MSFT, s-MSFT, t:stocks_to_track."""
+    if not raw_token:
+        return []
+
+    cleaned = raw_token.strip()
+    # Allow wrapping characters like [] used in ad-hoc syntax
+    cleaned = cleaned.strip('[]')
+
+    parts = [part.strip() for part in cleaned.replace(';', ',').split(',')]
+    results: List[Tuple[str, str]] = []
+
+    for part in parts:
+        if not part:
+            continue
+
+        token = part
+        if token.startswith(':'):
+            token = token[1:]
+
+        prefix = token[:1].lower()
+        remainder = token[1:]
+
+        if prefix not in ('s', 't'):
+            # Default to symbol exclusion if no explicit prefix
+            prefix = 's'
+            remainder = token
+        else:
+            if remainder.startswith(('-', ':', '=', ' ')):
+                remainder = remainder[1:]
+
+        remainder = remainder.strip()
+        if remainder:
+            results.append((prefix, remainder))
+
+    return results
+
+
+async def _load_symbols_for_type(type_name: str, args: argparse.Namespace, quiet: bool) -> List[str]:
+    """Load symbols for a specific type without reapplying exclusions."""
+    clone_kwargs = vars(args).copy()
+    clone_kwargs['symbols'] = None
+    clone_kwargs['symbols_list'] = None
+    clone_kwargs['types'] = [type_name]
+    clone_kwargs['limit'] = None
+    clone_kwargs['exclude_filters'] = None
+
+    temp_args = argparse.Namespace(**clone_kwargs)
+    return await fetch_lists_data(temp_args, quiet=quiet, apply_exclusions=False)

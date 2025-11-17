@@ -61,6 +61,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 try:
     from fetch_lists_data import FULL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
     from common.stock_db import get_stock_db
+    from common.symbol_loader import apply_symbol_exclusions
 except ImportError as e:
     print(f"Error importing required modules: {e}", file=sys.stderr)
     sys.exit(1)
@@ -1110,6 +1111,10 @@ async def get_all_symbols(args: argparse.Namespace) -> List[str]:
     # Handle traditional types-based symbol loading
     elif args.types:
         all_symbols = await load_symbols_from_types(args)
+
+    # Apply exclusions before limiting
+    if all_symbols:
+        all_symbols = await apply_symbol_exclusions(all_symbols, args, quiet=False)
     
     # Apply limit if specified
     if args.limit and all_symbols:
@@ -1186,6 +1191,12 @@ def parse_args():
         '--limit',
         type=int,
         help='Limit number of symbols to process'
+    )
+    parser.add_argument(
+        '--exclude',
+        dest='exclude_filters',
+        nargs='+',
+        help='Exclude symbols or list types (s:SYM, t:LIST_NAME) from the resolved symbol set'
     )
     
     # Logging

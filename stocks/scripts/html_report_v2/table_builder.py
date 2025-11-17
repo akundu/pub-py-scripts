@@ -11,6 +11,8 @@ from .config import (
 )
 from .data_processor import normalize_col_name
 
+HTML_RICH_COLUMNS = {'theta', 'l_theta', 'long_theta'}
+
 
 def find_column_in_group(df: pd.DataFrame, group_name: str, side: str) -> Optional[str]:
     """Find column name that matches a group definition.
@@ -312,17 +314,47 @@ def build_table_rows(
     """
     html_parts = []
     
+    theta_pct_map = df_raw.attrs.get('theta_pct', {}) or {}
+    l_theta_pct_map = df_raw.attrs.get('l_theta_pct', {}) or {}
+    
     for row_idx, row in df_display.iterrows():
         html_parts.append(f'                    <tr data-row-index="{row_idx}">\n')
         
         for col in df_display.columns:
             cell_value = str(row[col]) if pd.notna(row[col]) else ''
-            cell_value = cell_value.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            normalized_col = normalize_col_name(col)
+            is_rich_html_cell = False
+            rich_html_value = ''
+            
+            # Enhanced display for theta columns (include percent)
+            if normalized_col in HTML_RICH_COLUMNS:
+                pct_map = theta_pct_map if normalized_col == 'theta' else l_theta_pct_map
+                pct_value = pct_map.get(row_idx)
+                if pct_value is not None and pd.notna(pct_value):
+                    pct_display = f"{pct_value:.2f}%"
+                    main_display = cell_value.strip()
+                    main_html = html_escape.escape(main_display) if main_display else '&nbsp;'
+                    pct_html = html_escape.escape(pct_display)
+                    rich_html_value = (
+                        f'<div class="cell-main">{main_html}</div>'
+                        f'<div class="cell-sub theta-percent">{pct_html}</div>'
+                    )
+                    is_rich_html_cell = True
+                else:
+                    cell_value = cell_value.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            else:
+                cell_value = cell_value.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             
             # Get raw value for filtering
             raw_value = None
             if row_idx in df_raw.index and col in df_raw.columns:
                 raw_val = df_raw.loc[row_idx, col]
+                # Override raw value for theta columns to use percentage
+                if normalized_col in HTML_RICH_COLUMNS:
+                    pct_map = theta_pct_map if normalized_col == 'theta' else l_theta_pct_map
+                    pct_value = pct_map.get(row_idx)
+                    if pct_value is not None and pd.notna(pct_value):
+                        raw_val = pct_value
                 if pd.notna(raw_val):
                     try:
                         float_val = float(raw_val)
@@ -331,14 +363,13 @@ def build_table_rows(
                         raw_value = str(raw_val)
             
             # Build cell attributes
-            normalized = normalize_col_name(col)
-            hidden_class = ' is-hidden-col' if normalized in hidden_set else ''
-            always_hidden_class = ' always-hidden' if normalized in always_hidden_set else ''
+            hidden_class = ' is-hidden-col' if normalized_col in hidden_set else ''
+            always_hidden_class = ' always-hidden' if normalized_col in always_hidden_set else ''
             all_classes = (hidden_class + always_hidden_class).strip()
             
             # Price change color class
             price_class = ''
-            if normalized in ['change_pct', 'price_with_change'] and cell_value:
+            if normalized_col in ['change_pct', 'price_with_change'] and cell_value:
                 if '+$' in cell_value or '(+' in cell_value:
                     price_class = ' price-positive'
                 elif '-$' in cell_value or '(-' in cell_value:
@@ -347,7 +378,10 @@ def build_table_rows(
             class_attr = f' class="{all_classes}{price_class}"' if (all_classes or price_class) else ''
             data_attr = f' data-raw="{html_escape.escape(str(raw_value))}"' if raw_value else ''
             
-            html_parts.append(f'                        <td{class_attr}{data_attr}>{cell_value}</td>\n')
+            if is_rich_html_cell:
+                html_parts.append(f'                        <td{class_attr}{data_attr}>{rich_html_value}</td>\n')
+            else:
+                html_parts.append(f'                        <td{class_attr}{data_attr}>{cell_value}</td>\n')
         
         html_parts.append("                    </tr>\n")
     

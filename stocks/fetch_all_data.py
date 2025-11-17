@@ -1271,19 +1271,30 @@ async def main():
                         else:
                             print("Warning: Market is still not open after waiting. Proceeding anyway...")
                     else:
-                        # Wait for market open before starting
-                        hours_to_wait = seconds_to_open / 3600
-                        print(f"Market is closed. Waiting {hours_to_wait:.2f} hours ({seconds_to_open:.0f} seconds) until market opens before starting...")
+                        # Wait until 5 minutes before market open, then start the normal loop
+                        pre_open_buffer = 300  # seconds
+                        if seconds_to_open > pre_open_buffer:
+                            wait_until_buffer = seconds_to_open - pre_open_buffer
+                            hours_to_wait = wait_until_buffer / 3600
+                            print(
+                                f"Market is closed. Waiting {hours_to_wait:.2f} hours "
+                                f"({wait_until_buffer:.0f} seconds) so we wake up 5 minutes before market open..."
+                            )
+                            await asyncio.sleep(wait_until_buffer)
+                            print("Pre-market wake-up reached. Starting data downloads 5 minutes before market open...")
+                        else:
+                            print(
+                                f"Market opens in {seconds_to_open/60:.1f} minutes. "
+                                "Starting data downloads now so they are running before the open..."
+                            )
                         
-                        await asyncio.sleep(seconds_to_open)
-                        
-                        # Re-check market status after waiting
+                        # Re-check market status before starting
                         now_utc = datetime.now(timezone.utc)
                         is_market_open = is_market_hours()
                         if is_market_open:
                             print("Market is now open. Starting data fetch...")
                         else:
-                            print("Warning: Market is still not open after waiting. Proceeding anyway...")
+                            print("Market still closed, beginning pre-open fetch cadence...")
             
             await run_continuous_latest_fetch(all_symbols_list, args, db_configs_for_workers)
         else:

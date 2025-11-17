@@ -94,6 +94,14 @@ def format_numeric_value(value, col_name: str) -> str:
         except (ValueError, TypeError):
             return str(value)
     
+    # Trade quality column - fixed decimal precision
+    if normalized_col == 'trade_quality':
+        try:
+            num_val = float(value)
+            return f"{num_val:.2f}"
+        except (ValueError, TypeError):
+            return str(value)
+    
     # Integer columns
     if any(x in normalized_col for x in ['volume', 'contracts', 'cnt', 'days']):
         try:
@@ -133,6 +141,50 @@ def extract_numeric_value(value) -> Optional[float]:
     return None
 
 
+def find_first_matching_column(df: pd.DataFrame, candidates) -> Optional[str]:
+    """Find the first column in df that matches any of the candidate names (normalized)."""
+    normalized_candidates = {c.replace('.', '').lower() for c in candidates}
+    for col in df.columns:
+        normalized = normalize_col_name(col).replace('.', '')
+        if normalized in normalized_candidates:
+            return col
+    return None
+
+
+def calculate_theta_percentages(df: pd.DataFrame) -> Tuple[Optional[pd.Series], Optional[pd.Series]]:
+    """Calculate theta percentages for short and long term options.
+    
+    Args:
+        df: DataFrame with theta and premium columns
+        
+    Returns:
+        Tuple of (theta_pct_series, l_theta_pct_series)
+    """
+    theta_pct = None
+    l_theta_pct = None
+    
+    # Identify premium columns (short & long)
+    short_prem_col = find_first_matching_column(df, ['option_premium', 'opt_prem', 'opt_prem.'])
+    long_prem_col = find_first_matching_column(df, ['l_opt_prem', 'l_prem', 'long_option_premium'])
+    
+    # Short theta percentage
+    if 'theta' in df.columns and short_prem_col:
+        theta_vals = df['theta'].apply(extract_numeric_value)
+        prem_vals = df[short_prem_col].apply(extract_numeric_value)
+        theta_pct = (theta_vals / prem_vals) * 100
+        theta_pct = theta_pct.where((prem_vals != 0) & pd.notna(theta_vals) & pd.notna(prem_vals))
+    
+    # Long theta percentage
+    long_theta_col = find_first_matching_column(df, ['l_theta', 'long_theta'])
+    if long_theta_col and long_prem_col:
+        l_theta_vals = df[long_theta_col].apply(extract_numeric_value)
+        l_prem_vals = df[long_prem_col].apply(extract_numeric_value)
+        l_theta_pct = (l_theta_vals / l_prem_vals) * 100
+        l_theta_pct = l_theta_pct.where((l_prem_vals != 0) & pd.notna(l_theta_vals) & pd.notna(l_prem_vals))
+    
+    return theta_pct, l_theta_pct
+
+
 def prepare_dataframe_for_display(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Prepare DataFrame for HTML display.
     
@@ -149,6 +201,9 @@ def prepare_dataframe_for_display(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Da
     
     df_display = df.copy()
     df_raw = df.copy()
+    
+    # Calculate theta percentages (used for sorting & display metadata)
+    theta_pct_series, l_theta_pct_series = calculate_theta_percentages(df_raw)
     
     # Normalize column names (handle variations)
     for standard_name, variations in COLUMN_VARIATIONS.items():
@@ -219,6 +274,16 @@ def prepare_dataframe_for_display(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Da
     
     df_display = df_display[ordered_cols]
     df_raw = df_raw[ordered_cols]
+    
+    # Store theta percentages in attrs for downstream renderers
+    if theta_pct_series is not None:
+        theta_pct_map = theta_pct_series.to_dict()
+        df_display.attrs['theta_pct'] = theta_pct_map
+        df_raw.attrs['theta_pct'] = theta_pct_map
+    if l_theta_pct_series is not None:
+        l_theta_pct_map = l_theta_pct_series.to_dict()
+        df_display.attrs['l_theta_pct'] = l_theta_pct_map
+        df_raw.attrs['l_theta_pct'] = l_theta_pct_map
     
     return df_display, df_raw
 
