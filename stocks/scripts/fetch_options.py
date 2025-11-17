@@ -995,12 +995,12 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
                 strike_range_percent=args_namespace.strike_range_percent,
                 max_days_to_expiry=args_namespace.max_days_to_expiry,
                 include_expired=args_namespace.include_expired,
-                # If --fetch-online is set, bypass CSV cache reads even if --use-csv is enabled
-                use_cache=(getattr(args_namespace, 'use_csv', False) and not getattr(args_namespace, 'fetch_online', False)),
+                # If --force-fresh is set, bypass CSV cache reads even if --use-csv is enabled
+                use_cache=(getattr(args_namespace, 'use_csv', False) and not getattr(args_namespace, 'force_fresh', False)),
                 save_to_csv=getattr(args_namespace, 'use_csv', False),
                 use_db=bool(getattr(args_namespace, 'use_db', None)),
                 db_conn=getattr(args_namespace, 'use_db', None),
-                force_fresh=getattr(args_namespace, 'fetch_online', False),
+                force_fresh=getattr(args_namespace, 'force_fresh', False),
                 enable_cache=enable_cache,
                 redis_url=redis_url
             )
@@ -1337,8 +1337,8 @@ async def _execute_options_iteration(
         # Single run: use market_open cache duration as default (20 minutes)
         refresh_threshold_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
     
-    # Check if tickers need refresh (only if using database)
-    if getattr(args, 'use_db', None) and refresh_threshold_seconds:
+    # Check if tickers need refresh (only if using database and not forcing fresh fetch)
+    if getattr(args, 'use_db', None) and refresh_threshold_seconds and not getattr(args, 'force_fresh', False):
         try:
             enable_cache = not getattr(args, 'no_cache', False)
             redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
@@ -1397,6 +1397,11 @@ async def _execute_options_iteration(
                 if getattr(args, 'debug', False):
                     traceback.print_exc(file=sys.stderr)
             symbols_to_fetch = symbols_list
+    elif getattr(args, 'force_fresh', False):
+        # Force fresh is enabled, skip refresh check and fetch all symbols
+        symbols_to_fetch = symbols_list
+        if not args.quiet:
+            print("--force-fresh enabled: Skipping refresh check, will fetch all symbols from Polygon API")
     
     if not symbols_to_fetch:
         if not args.quiet:
@@ -1500,6 +1505,9 @@ Examples:
 
   # Save with custom batch size for large datasets (default: 100)
   python historical_stock_options.py SPX --date 2024-06-05 --db-path localhost:9002 --db-batch-size 50
+
+  # Force fresh fetch from Polygon API and save to database (bypasses cache)
+  python historical_stock_options.py AAPL --date 2024-06-05 --force-fresh --use-db questdb://user:pass@localhost:8812/db
 
   # Quiet mode - suppress output but still save CSV files
   python historical_stock_options.py --symbols AAPL MSFT --date 2024-06-05 --quiet
@@ -1631,6 +1639,11 @@ Examples:
         '--fetch-once-before-wait',
         action='store_true',
         help="If market is closed, fetch once immediately before waiting for market open. Useful since option prices don't change during non-market hours."
+    )
+    parser.add_argument(
+        '--force-fresh',
+        action='store_true',
+        help="Force fresh fetch from Polygon API, bypassing both database cache and CSV cache. Use with --use-db to save to database."
     )
     parser.add_argument(
         '--no-cache',
