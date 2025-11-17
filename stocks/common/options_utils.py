@@ -60,9 +60,18 @@ def calculate_option_metrics(
         ].copy()
     
     # Calculate num_contracts and premiums
+    # For calls (covered calls): num_contracts based on current_price (stock purchase cost)
+    # For puts (cash-secured puts): num_contracts based on strike_price (cash required to secure assignment)
     df['num_contracts'] = df.apply(
-        lambda row: 0 if pd.isna(row.get('current_price')) or row.get('current_price') <= 0 
-                  else math.floor(position_size / (row.get('current_price') * 100)),
+        lambda row: (
+            # For puts: use strike_price (cash-secured puts require cash = strike_price * 100 * contracts)
+            math.floor(position_size / (row.get('strike_price') * 100))
+            if str(row.get('option_type', 'call')).lower() == 'put' 
+               and pd.notna(row.get('strike_price')) and row.get('strike_price') > 0
+            # For calls: use current_price (covered calls require stock purchase = current_price * 100 * contracts)
+            else (0 if pd.isna(row.get('current_price')) or row.get('current_price') <= 0 
+                  else math.floor(position_size / (row.get('current_price') * 100)))
+        ),
         axis=1
     )
     df['potential_premium'] = (df['num_contracts'] * (df['option_premium'] * 100)).round(2)

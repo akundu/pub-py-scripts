@@ -36,8 +36,9 @@ scripts_dir = Path(__file__).parent
 if str(scripts_dir) not in sys.path:
     sys.path.insert(0, str(scripts_dir))
 
-# Import HTML report generator
-from html_report_generator import generate_html_output
+# Import HTML report generator (using new v2 implementation)
+#from html_report_generator import generate_html_output
+from html_report_v2 import generate_html_output
 
 
 def safe_to_numeric(series, col_name=None):

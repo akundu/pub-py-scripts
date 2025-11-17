@@ -4,6 +4,9 @@ HTML Report Generator - Generate HTML reports with sortable tables for covered c
 
 This module handles the generation of HTML output with embedded CSS and JavaScript
 for displaying and sorting tabular data.
+
+NOTE: This file has been refactored. The code now uses modular components from
+scripts.html_report package. For new code, import directly from scripts.html_report.
 """
 
 import pandas as pd
@@ -15,8 +18,23 @@ import re
 from pathlib import Path
 from datetime import datetime
 
-
-COMPACT_HEADER_MAP = {
+# Import from new modular structure
+try:
+    from scripts.html_report import generate_html_output as _generate_html_output
+    from scripts.html_report.constants import COMPACT_HEADER_MAP
+    from scripts.html_report.formatters import (
+        format_age_seconds,
+        format_numeric_value,
+        truncate_header,
+        normalize_col_name as _normalize_col_name_helper
+    )
+    from scripts.html_report.css_generator import get_css_styles
+    from scripts.html_report.js_generator import get_javascript
+    _USE_NEW_MODULES = True
+except ImportError:
+    # Fallback to local definitions if modules don't exist yet
+    _USE_NEW_MODULES = False
+    COMPACT_HEADER_MAP = {
     'ticker': 'ticker',
     'price': 'price',
     'P/E': 'P/E',
@@ -253,12 +271,13 @@ def get_css_styles():
         }
         
         .tab-content.active {
-            display: block;
+            display: block !important;
         }
         
         .table-wrapper {
             overflow-x: auto;
             padding: 20px;
+            display: block;
         }
         
         /* Hidden columns handling */
@@ -888,12 +907,12 @@ def get_css_styles():
             
             /* Hide table on mobile */
             .table-wrapper {
-                display: none;
+                display: none !important;
             }
             
             /* Show cards on mobile */
             .card-wrapper {
-                display: block;
+                display: block !important;
             }
             
             table {
@@ -937,12 +956,12 @@ def get_css_styles():
         @media (min-width: 769px) {
             /* Hide cards on desktop */
             .card-wrapper {
-                display: none;
+                display: none !important;
             }
             
             /* Show table on desktop */
             .table-wrapper {
-                display: block;
+                display: block !important;
             }
             
             /* Show desktop-only messages */
@@ -963,6 +982,16 @@ def get_css_styles():
             display: none;
         }
         
+        /* Ensure table-wrapper is visible in active tabs on desktop */
+        @media (min-width: 769px) {
+            .tab-content.active .table-wrapper {
+                display: block !important;
+            }
+            .tab-content.active .card-wrapper {
+                display: none !important;
+            }
+        }
+        
         @media (max-width: 768px) {
             .desktop-only {
                 display: none;
@@ -981,17 +1010,31 @@ def get_javascript():
     Returns:
         String containing JavaScript code
     """
-    return """        let sortDirection = {};
-        let currentSortColumn = -1;
-        let activeFilters = [];
-        let filterLogic = 'AND';
+    return """        // Namespaced state for calls and puts
+        let sortDirection = {};
+        let currentSortColumn = {};
+        let activeFilters = {};
+        let filterLogic = {};
         
-        // Column name mapping (original names to display names)
+        // Initialize state for a prefix
+        function initStateForPrefix(prefix) {
+            if (!sortDirection[prefix]) sortDirection[prefix] = {};
+            if (currentSortColumn[prefix] === undefined) currentSortColumn[prefix] = -1;
+            if (!activeFilters[prefix]) activeFilters[prefix] = [];
+            if (!filterLogic[prefix]) filterLogic[prefix] = 'AND';
+        }
+        
+        // Column name mapping (original names to display names) - namespaced by table
         const columnMap = {};
         
-        // Initialize column map
-        function initColumnMap() {
-            const table = document.getElementById('resultsTable');
+        // Initialize column map for a specific table
+        function initColumnMap(prefix) {
+            const tableId = prefix + 'resultsTable';
+            const table = document.getElementById(tableId);
+            // Return early if table doesn't exist (prevents null reference errors)
+            if (!table) {
+                return;
+            }
             // Only use column headers from the column-header-row, not group headers
             const headerRow = table.querySelector('tr.column-header-row');
             const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
@@ -1036,7 +1079,7 @@ def get_javascript():
         }
         
         // Evaluate a mathematical expression like "curr_price*1.05" or "strike_price+100"
-        function evaluateMathExpression(expression, row) {
+        function evaluateMathExpression(expression, row, tableId) {
             // Extract field names from expression (alphanumeric + underscore)
             const fieldPattern = /[a-zA-Z_][a-zA-Z0-9_]*/g;
             const fields = expression.match(fieldPattern) || [];
@@ -1051,7 +1094,7 @@ def get_javascript():
                 // Skip if we already processed this field
                 if (fieldValues.hasOwnProperty(field)) continue;
                 
-                const colIndex = findColumnIndex(field);
+                const colIndex = findColumnIndex(field, tableId);
                 if (colIndex >= 0) {
                     const cell = row.cells[colIndex];
                     if (cell) {
@@ -1101,8 +1144,12 @@ def get_javascript():
         }
         
         // Get all available column names for error messages
-        function getAllColumnNames() {
-            const table = document.getElementById('resultsTable');
+        function getAllColumnNames(tableId) {
+            const table = document.getElementById(tableId);
+            // Return empty array if table doesn't exist (prevents null reference errors)
+            if (!table) {
+                return [];
+            }
             // Only get headers from the column-header-row, not group headers
             const headerRow = table.querySelector('tr.column-header-row');
             const headers = headerRow ? Array.from(headerRow.querySelectorAll('th')) : [];
@@ -1131,8 +1178,12 @@ def get_javascript():
         }
         
         // Find column index by field name (supports substring matching)
-        function findColumnIndex(fieldName) {
-            const table = document.getElementById('resultsTable');
+        function findColumnIndex(fieldName, tableId) {
+            const table = document.getElementById(tableId);
+            // Return -1 if table doesn't exist (prevents null reference errors)
+            if (!table) {
+                return -1;
+            }
             // Only get headers from the column-header-row, not group headers
             const headerRow = table.querySelector('tr.column-header-row');
             const headers = headerRow ? Array.from(headerRow.querySelectorAll('th')) : [];
@@ -1210,7 +1261,7 @@ def get_javascript():
         }
         
         // Parse filter expression
-        function parseFilterExpression(expression) {
+        function parseFilterExpression(expression, tableId) {
             expression = expression.trim();
             if (!expression) return null;
             
@@ -1238,42 +1289,47 @@ def get_javascript():
                         const hasMath = /[+\\-*/]/.test(fieldExpr);
                         if (hasMath) {
                             // Check if the value is also a field (field-to-field comparison with math)
-                            const valueColIndex = findColumnIndex(valueStr);
+                            // Only check if tableId is provided
+                            if (tableId) {
+                                const valueColIndex = findColumnIndex(valueStr, tableId);
+                                if (valueColIndex >= 0) {
+                                    // Math expression compared to another field: "curr_price*1.05 < strike_price"
+                                    return {
+                                        field: fieldExpr,
+                                        operator: op,
+                                        value: valueStr,
+                                        isFieldComparison: true,
+                                        hasMath: true
+                                    };
+                                }
+                            }
+                            // Math expression compared to a value: "curr_price*1.05 < 150"
+                            let value = valueStr;
+                            const numValue = parseFloat(valueStr);
+                            if (!isNaN(numValue)) {
+                                value = numValue;
+                            }
+                            return {
+                                field: fieldExpr,
+                                operator: op,
+                                value: value,
+                                isFieldComparison: false,
+                                hasMath: true
+                            };
+                        }
+                        
+                        // Check if value is a field name (field-to-field comparison without math)
+                        // Only check if tableId is provided
+                        if (tableId) {
+                            const valueColIndex = findColumnIndex(valueStr, tableId);
                             if (valueColIndex >= 0) {
-                                // Math expression compared to another field: "curr_price*1.05 < strike_price"
                                 return {
                                     field: fieldExpr,
                                     operator: op,
                                     value: valueStr,
-                                    isFieldComparison: true,
-                                    hasMath: true
-                                };
-                            } else {
-                                // Math expression compared to a value: "curr_price*1.05 < 150"
-                                let value = valueStr;
-                                const numValue = parseFloat(valueStr);
-                                if (!isNaN(numValue)) {
-                                    value = numValue;
-                                }
-                                return {
-                                    field: fieldExpr,
-                                    operator: op,
-                                    value: value,
-                                    isFieldComparison: false,
-                                    hasMath: true
+                                    isFieldComparison: true
                                 };
                             }
-                        }
-                        
-                        // Check if value is a field name (field-to-field comparison without math)
-                        const valueColIndex = findColumnIndex(valueStr);
-                        if (valueColIndex >= 0) {
-                            return {
-                                field: fieldExpr,
-                                operator: op,
-                                value: valueStr,
-                                isFieldComparison: true
-                            };
                         }
                         
                         // Regular value comparison
@@ -1302,11 +1358,11 @@ def get_javascript():
         }
         
         // Evaluate filter expression for a row
-        function evaluateFilter(filter, row) {
+        function evaluateFilter(filter, row, tableId) {
             // Handle exists/not_exists (only works for single fields, not expressions)
             if (filter.operator === 'exists' || filter.operator === 'not_exists') {
                 if (filter.hasMath) return false; // Can't use exists/not_exists with math expressions
-                const colIndex = findColumnIndex(filter.field);
+                const colIndex = findColumnIndex(filter.field, tableId);
                 if (colIndex < 0) {
                     console.warn('Column not found for filter:', filter.field);
                     return false;
@@ -1329,7 +1385,7 @@ def get_javascript():
             // Handle mathematical expressions
             if (filter.hasMath) {
                 // Evaluate the mathematical expression on the left side
-                const leftValue = evaluateMathExpression(filter.field, row);
+                const leftValue = evaluateMathExpression(filter.field, row, tableId);
                 if (leftValue === null) {
                     console.warn('Could not evaluate math expression:', filter.field);
                     return false; // Can't evaluate expression
@@ -1339,7 +1395,7 @@ def get_javascript():
                 let rightValue = null;
                 if (filter.isFieldComparison) {
                     // Right side is also a field: "curr_price*1.05 < strike_price"
-                    const valueColIndex = findColumnIndex(filter.value);
+                    const valueColIndex = findColumnIndex(filter.value, tableId);
                     if (valueColIndex < 0) {
                         console.warn('Column not found for math expression comparison value:', filter.value);
                         return false;
@@ -1371,7 +1427,7 @@ def get_javascript():
             
             // Handle field-to-field comparison (without math)
             if (filter.isFieldComparison) {
-                const colIndex = findColumnIndex(filter.field);
+                const colIndex = findColumnIndex(filter.field, tableId);
                 if (colIndex < 0) {
                     console.warn('Column not found for filter field:', filter.field);
                     return false;
@@ -1379,7 +1435,7 @@ def get_javascript():
                 const cell = row.cells[colIndex];
                 if (!cell) return false;
                 
-                const valueColIndex = findColumnIndex(filter.value);
+                const valueColIndex = findColumnIndex(filter.value, tableId);
                 if (valueColIndex < 0) {
                     console.warn('Column not found for filter comparison value:', filter.value);
                     return false;
@@ -1403,7 +1459,7 @@ def get_javascript():
             }
             
             // Handle value comparison (regular field to value)
-            const colIndex = findColumnIndex(filter.field);
+            const colIndex = findColumnIndex(filter.field, tableId);
             if (colIndex < 0) {
                 console.warn('Column not found for filter field:', filter.field);
                 return false;
@@ -1439,28 +1495,34 @@ def get_javascript():
         }
         
         // Apply all filters to table
-        function applyFilters() {
-            const table = document.getElementById('resultsTable');
+        function applyFilters(prefix) {
+            const tableId = prefix + 'resultsTable';
+            const table = document.getElementById(tableId);
+            if (!table) return;
+            
             const tbody = table.querySelector('tbody');
             const rows = Array.from(tbody.querySelectorAll('tr'));
-            const errorDiv = document.getElementById('filterError');
+            const errorDiv = document.getElementById(prefix + 'filterError');
             
             if (errorDiv) errorDiv.textContent = '';
             
-            if (activeFilters.length === 0) {
+            initStateForPrefix(prefix);
+            
+            if (activeFilters[prefix].length === 0) {
                 rows.forEach(row => {
                     row.style.display = '';
                 });
-                updateVisibleCount();
-                applyRowStriping();
+                updateVisibleCount(prefix);
+                applyRowStriping(prefix);
+                syncCardVisibility(prefix);
                 return;
             }
             
             rows.forEach(row => {
-                let matches = activeFilters.map(filter => evaluateFilter(filter, row));
+                let matches = activeFilters[prefix].map(filter => evaluateFilter(filter, row, tableId));
                 
                 let shouldShow;
-                if (filterLogic === 'AND') {
+                if (filterLogic[prefix] === 'AND') {
                     shouldShow = matches.every(m => m);
                 } else {
                     shouldShow = matches.some(m => m);
@@ -1469,20 +1531,21 @@ def get_javascript():
                 row.style.display = shouldShow ? '' : 'none';
             });
             
-            updateVisibleCount();
-            applyRowStriping();
+            updateVisibleCount(prefix);
+            applyRowStriping(prefix);
+            syncCardVisibility(prefix);
         }
         
         // Validate filter fields exist
-        function validateFilter(filter) {
+        function validateFilter(filter, tableId) {
             const errorMessages = [];
             
             // Check main field
             if (filter.field && !filter.hasMath) {
                 // For non-math expressions, check if field exists
-                const colIndex = findColumnIndex(filter.field);
+                const colIndex = findColumnIndex(filter.field, tableId);
                 if (colIndex < 0) {
-                    const availableColumns = getAllColumnNames();
+                    const availableColumns = getAllColumnNames(tableId);
                     const suggestions = availableColumns.filter(col => 
                         col.toLowerCase().includes(filter.field.toLowerCase()) || 
                         filter.field.toLowerCase().includes(col.toLowerCase())
@@ -1504,7 +1567,7 @@ def get_javascript():
                 const validFields = fields.filter(f => !jsKeywords.includes(f.toLowerCase()));
                 
                 for (const field of validFields) {
-                    const colIndex = findColumnIndex(field);
+                    const colIndex = findColumnIndex(field, tableId);
                     if (colIndex < 0) {
                         errorMessages.push(`Field "${field}" in expression "${filter.field}" not found.`);
                     }
@@ -1513,9 +1576,9 @@ def get_javascript():
             
             // Check comparison field if it's a field-to-field comparison
             if (filter.isFieldComparison && filter.value) {
-                const valueColIndex = findColumnIndex(filter.value);
+                const valueColIndex = findColumnIndex(filter.value, tableId);
                 if (valueColIndex < 0) {
-                    const availableColumns = getAllColumnNames();
+                    const availableColumns = getAllColumnNames(tableId);
                     const suggestions = availableColumns.filter(col => 
                         col.toLowerCase().includes(String(filter.value).toLowerCase()) || 
                         String(filter.value).toLowerCase().includes(col.toLowerCase())
@@ -1535,16 +1598,19 @@ def get_javascript():
         }
         
         // Add filter
-        function addFilter() {
-            const input = document.getElementById('filterInput');
+        function addFilter(prefix) {
+            const input = document.getElementById(prefix + 'filterInput');
             const expression = input.value.trim();
-            const errorDiv = document.getElementById('filterError');
+            const errorDiv = document.getElementById(prefix + 'filterError');
+            const tableId = prefix + 'resultsTable';
             
             if (errorDiv) errorDiv.textContent = '';
             
             if (!expression) return;
             
-            const filter = parseFilterExpression(expression);
+            initStateForPrefix(prefix);
+            
+            const filter = parseFilterExpression(expression, tableId);
             if (!filter) {
                 if (errorDiv) {
                     errorDiv.textContent = 'Invalid filter expression. Format: field operator value (e.g., "pe_ratio > 20", "volume exists")';
@@ -1553,7 +1619,7 @@ def get_javascript():
             }
             
             // Validate filter fields exist
-            const validationErrors = validateFilter(filter);
+            const validationErrors = validateFilter(filter, tableId);
             if (validationErrors.length > 0) {
                 if (errorDiv) {
                     errorDiv.textContent = validationErrors.join(' ');
@@ -1571,44 +1637,47 @@ def get_javascript():
                 errorDiv.style.display = 'none';
             }
             
-            activeFilters.push(filter);
+            activeFilters[prefix].push(filter);
             input.value = '';
             
             // Update filter display
-            updateFilterDisplay();
-            applyFilters();
+            updateFilterDisplay(prefix);
+            applyFilters(prefix);
             updateURL();
         }
         
         // Remove filter
-        function removeFilter(index) {
-            activeFilters.splice(index, 1);
-            updateFilterDisplay();
-            applyFilters();
+        function removeFilter(prefix, index) {
+            initStateForPrefix(prefix);
+            activeFilters[prefix].splice(index, 1);
+            updateFilterDisplay(prefix);
+            applyFilters(prefix);
             updateURL();
         }
         
         // Clear all filters
-        function clearFilters() {
-            activeFilters = [];
-            updateFilterDisplay();
-            applyFilters();
+        function clearFilters(prefix) {
+            initStateForPrefix(prefix);
+            activeFilters[prefix] = [];
+            updateFilterDisplay(prefix);
+            applyFilters(prefix);
             updateURL();
         }
         
         // Update filter display
-        function updateFilterDisplay() {
-            const container = document.getElementById('activeFilters');
+        function updateFilterDisplay(prefix) {
+            const container = document.getElementById(prefix + 'activeFilters');
             if (!container) return;
             
+            initStateForPrefix(prefix);
             container.innerHTML = '';
             
-            if (activeFilters.length === 0) {
+            if (activeFilters[prefix].length === 0) {
                 container.innerHTML = '<p style="color: #6c757d; font-style: italic;">No active filters</p>';
                 return;
             }
             
-            activeFilters.forEach((filter, index) => {
+            activeFilters[prefix].forEach((filter, index) => {
                 const filterDiv = document.createElement('div');
                 filterDiv.style.cssText = 'display: inline-block; margin: 5px; padding: 5px 10px; background: #667eea; color: white; border-radius: 5px; font-size: 0.9em;';
                 
@@ -1619,7 +1688,7 @@ def get_javascript():
                 const removeBtn = document.createElement('button');
                 removeBtn.textContent = '×';
                 removeBtn.style.cssText = 'margin-left: 8px; background: rgba(255,255,255,0.3); border: none; color: white; cursor: pointer; border-radius: 3px; padding: 2px 6px;';
-                removeBtn.onclick = () => removeFilter(index);
+                removeBtn.onclick = () => removeFilter(prefix, index);
                 filterDiv.appendChild(removeBtn);
                 
                 container.appendChild(filterDiv);
@@ -1627,26 +1696,31 @@ def get_javascript():
         }
         
         // Update filter logic
-        function updateFilterLogic(logic) {
-            filterLogic = logic;
-            applyFilters();
+        function updateFilterLogic(prefix, logic) {
+            initStateForPrefix(prefix);
+            filterLogic[prefix] = logic;
+            applyFilters(prefix);
             updateURL();
         }
         
         // Update visible count
-        function updateVisibleCount() {
-            const table = document.getElementById('resultsTable');
+        function updateVisibleCount(prefix) {
+            const tableId = prefix + 'resultsTable';
+            const table = document.getElementById(tableId);
+            if (!table) return;
             const tbody = table.querySelector('tbody');
             const visibleRows = Array.from(tbody.querySelectorAll('tr')).filter(row => row.style.display !== 'none');
-            const visibleCountEl = document.getElementById('visibleCount');
+            const visibleCountEl = document.getElementById(prefix + 'visibleCount');
             if (visibleCountEl) {
                 visibleCountEl.textContent = visibleRows.length;
             }
         }
         
         // Apply row striping based on visible rows
-        function applyRowStriping() {
-            const table = document.getElementById('resultsTable');
+        function applyRowStriping(prefix) {
+            const tableId = prefix + 'resultsTable';
+            const table = document.getElementById(tableId);
+            if (!table) return;
             const tbody = table.querySelector('tbody');
             const rows = Array.from(tbody.querySelectorAll('tr'));
             
@@ -1666,11 +1740,14 @@ def get_javascript():
         }
         
         // Apply column striping based on visible columns
-        function applyColumnStriping() {
-            const table = document.getElementById('resultsTable');
+        function applyColumnStriping(prefix) {
+            const tableId = prefix + 'resultsTable';
+            const table = document.getElementById(tableId);
+            if (!table) return;
             const thead = table.querySelector('thead');
             const tbody = table.querySelector('tbody');
-            const wrapper = document.getElementById('tableWrapper');
+            const wrapperId = prefix + 'tableWrapper';
+            const wrapper = document.getElementById(wrapperId);
             
             if (!thead || !tbody) return;
             
@@ -1720,13 +1797,17 @@ def get_javascript():
             });
         }
         
-        function sortTable(columnIndex) {
-            const table = document.getElementById('resultsTable');
+        function sortTable(prefix, columnIndex) {
+            const tableId = prefix + 'resultsTable';
+            const table = document.getElementById(tableId);
+            if (!table) return;
             const tbody = table.querySelector('tbody');
             const rows = Array.from(tbody.querySelectorAll('tr:not([style*="display: none"])'));
             // Only select headers from the column-header-row (second row), not group headers
             const headerRow = table.querySelector('tr.column-header-row');
             const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
+            
+            initStateForPrefix(prefix);
             
             // Remove sort classes from all column headers
             headers.forEach(h => {
@@ -1734,16 +1815,17 @@ def get_javascript():
             });
             
             // Determine sort direction
-            if (currentSortColumn === columnIndex) {
-                sortDirection[columnIndex] = sortDirection[columnIndex] === 'asc' ? 'desc' : 'asc';
+            if (currentSortColumn[prefix] === columnIndex) {
+                sortDirection[prefix][columnIndex] = sortDirection[prefix][columnIndex] === 'asc' ? 'desc' : 'asc';
             } else {
-                sortDirection[columnIndex] = 'asc';
-                currentSortColumn = columnIndex;
+                if (!sortDirection[prefix]) sortDirection[prefix] = {};
+                sortDirection[prefix][columnIndex] = 'asc';
+                currentSortColumn[prefix] = columnIndex;
             }
             
             // Add sort class to current header
             if (headers[columnIndex]) {
-                headers[columnIndex].classList.add(sortDirection[columnIndex] === 'asc' ? 'sort-asc' : 'sort-desc');
+                headers[columnIndex].classList.add(sortDirection[prefix][columnIndex] === 'asc' ? 'sort-asc' : 'sort-desc');
             }
             
             // Check if sorting by change_pct (renamed from price_with_change)
@@ -1863,7 +1945,7 @@ def get_javascript():
                     }
                 }
                 
-                return sortDirection[columnIndex] === 'asc' ? comparison : -comparison;
+                return sortDirection[prefix][columnIndex] === 'asc' ? comparison : -comparison;
             });
             
             // Re-append sorted rows (only visible ones)
@@ -1872,21 +1954,23 @@ def get_javascript():
             hiddenRows.forEach(row => tbody.appendChild(row));
             
             // Sync card order with table order
-            syncCardOrder();
+            syncCardOrder(prefix);
             
-            updateVisibleCount();
-            applyRowStriping();
+            updateVisibleCount(prefix);
+            applyRowStriping(prefix);
         }
         
         // Sync card order with table row order
-        function syncCardOrder() {
-            const table = document.getElementById('resultsTable');
+        function syncCardOrder(prefix) {
+            const tableId = prefix + 'resultsTable';
+            const table = document.getElementById(tableId);
             const tbody = table ? table.querySelector('tbody') : null;
-            const cardWrapper = document.getElementById('cardWrapper');
+            const cardWrapperId = prefix + 'cardWrapper';
+            const cardWrapper = document.getElementById(cardWrapperId);
             if (!tbody || !cardWrapper) return;
             
             const rows = Array.from(tbody.querySelectorAll('tr'));
-            const cards = Array.from(document.querySelectorAll('.data-card'));
+            const cards = cardWrapper ? Array.from(cardWrapper.querySelectorAll('.data-card')) : [];
             
             // Create a map of row index to card
             const cardMap = new Map();
@@ -1910,29 +1994,38 @@ def get_javascript():
         // Tab switching functionality
         function switchTab(tabIndex) {
             const tabContents = document.querySelectorAll('.tab-content');
-            tabContents.forEach(content => content.classList.remove('active'));
+            tabContents.forEach(content => {
+                content.classList.remove('active');
+                content.style.display = 'none';
+            });
             
             const tabButtons = document.querySelectorAll('.tab-button');
             tabButtons.forEach(button => button.classList.remove('active'));
             
-            tabContents[tabIndex].classList.add('active');
-            tabButtons[tabIndex].classList.add('active');
+            if (tabContents[tabIndex]) {
+                tabContents[tabIndex].classList.add('active');
+                tabContents[tabIndex].style.display = 'block';
+            }
+            if (tabButtons[tabIndex]) {
+                tabButtons[tabIndex].classList.add('active');
+            }
         }
         
         // Handle Enter key in filter input
-        function handleFilterKeyPress(event) {
+        function handleFilterKeyPress(event, prefix) {
             if (event.key === 'Enter') {
-                addFilter();
+                addFilter(prefix);
             }
         }
         
         // Toggle filter section and column names
-        function toggleFilterSection() {
-            const filterSection = document.getElementById('filterSection');
-            const button = document.getElementById('toggleFilterBtn');
+        function toggleFilterSection(prefix) {
+            const filterSection = document.getElementById(prefix + 'filterSection');
+            const button = document.getElementById(prefix + 'toggleFilterBtn');
+            const tableId = prefix + 'resultsTable';
             // Only toggle filterable display on column headers, not group headers
-            const headerRow = document.querySelector('#resultsTable tr.column-header-row');
-            const headers = headerRow ? headerRow.querySelectorAll('th') : document.querySelectorAll('#resultsTable th');
+            const headerRow = document.querySelector('#' + tableId + ' tr.column-header-row');
+            const headers = headerRow ? headerRow.querySelectorAll('th') : document.querySelectorAll('#' + tableId + ' th');
             
             if (!filterSection || !button) return;
             
@@ -1959,9 +2052,10 @@ def get_javascript():
         }
 
         // Toggle hidden columns visibility
-        function toggleHiddenColumns() {
-            const wrapper = document.getElementById('tableWrapper');
-            const btn = document.getElementById('toggleHiddenBtn');
+        function toggleHiddenColumns(prefix) {
+            const wrapperId = prefix + 'tableWrapper';
+            const wrapper = document.getElementById(wrapperId);
+            const btn = document.getElementById(prefix + 'toggleHiddenBtn');
             if (!wrapper || !btn) return;
             const willShow = wrapper.classList.contains('hide-hidden');
             if (willShow) {
@@ -1974,22 +2068,22 @@ def get_javascript():
                 btn.title = 'Show the default-hidden columns';
             }
             // Reapply striping after column visibility changes
-            applyRowStriping();
-            applyColumnStriping();
+            applyRowStriping(prefix);
+            applyColumnStriping(prefix);
         }
         
         // Update URL with current filters
         function updateURL() {
             const params = new URLSearchParams();
             
-            // Add filter logic (only if not default AND)
-            if (filterLogic && filterLogic !== 'AND') {
-                params.set('filterLogic', filterLogic);
+            // Add filter logic for calls (only if not default AND)
+            if (filterLogic['calls'] && filterLogic['calls'] !== 'AND') {
+                params.set('calls_filterLogic', filterLogic['calls']);
             }
             
-            // Add filters
-            if (activeFilters.length > 0) {
-                const filterStrings = activeFilters.map(f => {
+            // Add filters for calls
+            if (activeFilters['calls'] && activeFilters['calls'].length > 0) {
+                const filterStrings = activeFilters['calls'].map(f => {
                     let filterStr = f.field;
                     if (f.operator) {
                         filterStr += ' ' + f.operator;
@@ -1999,7 +2093,27 @@ def get_javascript():
                     }
                     return filterStr;
                 });
-                params.set('filters', filterStrings.join('|'));
+                params.set('calls_filters', filterStrings.join('|'));
+            }
+            
+            // Add filter logic for puts (only if not default AND)
+            if (filterLogic['puts'] && filterLogic['puts'] !== 'AND') {
+                params.set('puts_filterLogic', filterLogic['puts']);
+            }
+            
+            // Add filters for puts
+            if (activeFilters['puts'] && activeFilters['puts'].length > 0) {
+                const filterStrings = activeFilters['puts'].map(f => {
+                    let filterStr = f.field;
+                    if (f.operator) {
+                        filterStr += ' ' + f.operator;
+                        if (f.value !== null) {
+                            filterStr += ' ' + f.value;
+                        }
+                    }
+                    return filterStr;
+                });
+                params.set('puts_filters', filterStrings.join('|'));
             }
             
             // Update URL without reloading page
@@ -2010,40 +2124,53 @@ def get_javascript():
         // Load filters from URL
         function loadFiltersFromURL() {
             const params = new URLSearchParams(window.location.search);
-            const errorDiv = document.getElementById('filterError');
+            
+            // Load filters for calls
+            loadFiltersForPrefix('calls', params);
+            
+            // Load filters for puts
+            loadFiltersForPrefix('puts', params);
+        }
+        
+        // Helper function to load filters for a specific prefix
+        function loadFiltersForPrefix(prefix, params) {
+            const errorDiv = document.getElementById(prefix + 'filterError');
             if (errorDiv) {
                 errorDiv.textContent = '';
                 errorDiv.style.display = 'none';
             }
             
+            initStateForPrefix(prefix);
+            const tableId = prefix + 'resultsTable';
+            
             // Load filter logic
-            const urlFilterLogic = params.get('filterLogic');
+            const urlFilterLogic = params.get(prefix + '_filterLogic');
             if (urlFilterLogic && (urlFilterLogic === 'AND' || urlFilterLogic === 'OR')) {
-                filterLogic = urlFilterLogic;
+                filterLogic[prefix] = urlFilterLogic;
                 // Update radio button
-                const radio = document.querySelector(`input[name="filterLogic"][value="${filterLogic}"]`);
+                const radio = document.querySelector(`input[name="${prefix}filterLogic"][value="${filterLogic[prefix]}"]`);
                 if (radio) {
                     radio.checked = true;
                 }
             }
             
             // Load filters
-            const filtersParam = params.get('filters');
+            const filtersParam = params.get(prefix + '_filters');
             if (filtersParam) {
                 const filterStrings = filtersParam.split('|');
-                activeFilters = [];
+                activeFilters[prefix] = [];
                 const validationErrors = [];
                 
                 for (const filterStr of filterStrings) {
                     if (filterStr.trim()) {
-                        const filter = parseFilterExpression(filterStr.trim());
+                        const filter = parseFilterExpression(filterStr.trim(), tableId);
                         if (filter) {
                             // Validate filter before adding
-                            const errors = validateFilter(filter);
+                            const errors = validateFilter(filter, tableId);
                             if (errors.length > 0) {
                                 validationErrors.push(...errors);
                             } else {
-                                activeFilters.push(filter);
+                                activeFilters[prefix].push(filter);
                             }
                         }
                     }
@@ -2056,12 +2183,12 @@ def get_javascript():
                 }
                 
                 // If filters were loaded from URL, expand the filter section
-                if (activeFilters.length > 0) {
-                    const filterSection = document.getElementById('filterSection');
-                    const button = document.getElementById('toggleFilterBtn');
+                if (activeFilters[prefix].length > 0) {
+                    const filterSection = document.getElementById(prefix + 'filterSection');
+                    const button = document.getElementById(prefix + 'toggleFilterBtn');
                     // Only show filterable names on column headers, not group headers
-                    const headerRow = document.querySelector('#resultsTable tr.column-header-row');
-                    const headers = headerRow ? headerRow.querySelectorAll('th') : document.querySelectorAll('#resultsTable th');
+                    const headerRow = document.querySelector('#' + tableId + ' tr.column-header-row');
+                    const headers = headerRow ? headerRow.querySelectorAll('th') : document.querySelectorAll('#' + tableId + ' th');
                     
                     if (filterSection && button) {
                         filterSection.classList.add('expanded');
@@ -2073,8 +2200,8 @@ def get_javascript():
                     }
                 }
                 
-                updateFilterDisplay();
-                applyFilters();
+                updateFilterDisplay(prefix);
+                applyFilters(prefix);
             }
         }
         
@@ -2148,9 +2275,9 @@ def get_javascript():
         }
         
         // Toggle card details (expand/collapse)
-        function toggleCardDetails(rowIndex) {
-            const detailsEl = document.getElementById('cardDetails_' + rowIndex);
-            const toggleBtn = document.getElementById('cardToggle_' + rowIndex);
+        function toggleCardDetails(prefix, rowIndex) {
+            const detailsEl = document.getElementById(prefix + 'cardDetails_' + rowIndex);
+            const toggleBtn = document.getElementById(prefix + 'cardToggle_' + rowIndex);
             if (!detailsEl || !toggleBtn) return;
             
             const isExpanded = detailsEl.classList.contains('expanded');
@@ -2166,13 +2293,16 @@ def get_javascript():
         }
         
         // Sync card visibility with table row visibility (for filtering)
-        function syncCardVisibility() {
-            const table = document.getElementById('resultsTable');
+        function syncCardVisibility(prefix) {
+            const tableId = prefix + 'resultsTable';
+            const table = document.getElementById(tableId);
             const tbody = table ? table.querySelector('tbody') : null;
             if (!tbody) return;
             
             const rows = Array.from(tbody.querySelectorAll('tr'));
-            const cards = Array.from(document.querySelectorAll('.data-card'));
+            const cardWrapperId = prefix + 'cardWrapper';
+            const cardWrapper = document.getElementById(cardWrapperId);
+            const cards = cardWrapper ? Array.from(cardWrapper.querySelectorAll('.data-card')) : [];
             
             // Create a map of row index to card
             const cardMap = new Map();
@@ -2201,58 +2331,68 @@ def get_javascript():
             
             // Update visible count for cards
             const visibleCards = cards.filter(card => !card.classList.contains('hidden'));
-            const visibleCountEl = document.getElementById('visibleCount');
+            const visibleCountEl = document.getElementById(prefix + 'visibleCount');
             if (visibleCountEl) {
                 visibleCountEl.textContent = visibleCards.length;
             }
         }
         
-        // Override applyFilters to also sync cards
-        const originalApplyFilters = applyFilters;
-        applyFilters = function() {
-            originalApplyFilters();
-            syncCardVisibility();
-        };
-        
         // Initialize
         document.addEventListener('DOMContentLoaded', function() {
+            // Initialize state for both prefixes
+            initStateForPrefix('calls');
+            initStateForPrefix('puts');
+            
             switchTab(0);
-            initColumnMap();
-            updateFilterDisplay();
+            
+            // Initialize column maps for both tables
+            initColumnMap('calls');
+            initColumnMap('puts');
+            
+            // Update filter displays
+            updateFilterDisplay('calls');
+            updateFilterDisplay('puts');
+            
+            // Load filters from URL
             loadFiltersFromURL();
+            
             updateTimeAgo(); // Update time ago on page load
             // Update time ago every minute
             setInterval(updateTimeAgo, 60000);
-            // Ensure hidden columns are hidden on load
-            const wrapper = document.getElementById('tableWrapper');
-            const toggleBtn = document.getElementById('toggleHiddenBtn');
-            const ensureHidden = wrapper && !wrapper.classList.contains('hide-hidden');
-            if (ensureHidden) {
-                wrapper.classList.add('hide-hidden');
-            }
-            if (toggleBtn) {
-                if (wrapper && wrapper.classList.contains('hide-hidden')) {
-                    toggleBtn.textContent = '👁️ Show hidden columns';
-                    toggleBtn.title = 'Show the default-hidden columns';
-                } else {
-                    toggleBtn.textContent = '🙈 Hide hidden columns';
-                    toggleBtn.title = 'Hide the default-hidden columns';
+            
+            // Ensure hidden columns are hidden on load for both tables
+            ['calls', 'puts'].forEach(prefix => {
+                const wrapper = document.getElementById(prefix + 'tableWrapper');
+                const toggleBtn = document.getElementById(prefix + 'toggleHiddenBtn');
+                const ensureHidden = wrapper && !wrapper.classList.contains('hide-hidden');
+                if (ensureHidden) {
+                    wrapper.classList.add('hide-hidden');
                 }
-            }
-            // Apply initial row and column striping
-            applyRowStriping();
-            applyColumnStriping();
-            
-            // Sync card visibility on load
-            syncCardVisibility();
-            
-            // Default sort by net_premium descending
-            const netPremiumColIndex = findColumnIndex('net_premium');
-            if (netPremiumColIndex >= 0) {
-                // Call sortTable twice: first sets to asc, second toggles to desc
-                sortTable(netPremiumColIndex);
-                sortTable(netPremiumColIndex);
-            }
+                if (toggleBtn) {
+                    if (wrapper && wrapper.classList.contains('hide-hidden')) {
+                        toggleBtn.textContent = '👁️ Show hidden columns';
+                        toggleBtn.title = 'Show the default-hidden columns';
+                    } else {
+                        toggleBtn.textContent = '🙈 Hide hidden columns';
+                        toggleBtn.title = 'Hide the default-hidden columns';
+                    }
+                }
+                
+                // Apply initial row and column striping
+                applyRowStriping(prefix);
+                applyColumnStriping(prefix);
+                
+                // Sync card visibility on load
+                syncCardVisibility(prefix);
+                
+                // Default sort by net_premium descending
+                const netPremiumColIndex = findColumnIndex('net_premium', prefix + 'resultsTable');
+                if (netPremiumColIndex >= 0) {
+                    // Call sortTable twice: first sets to asc, second toggles to desc
+                    sortTable(prefix, netPremiumColIndex);
+                    sortTable(prefix, netPremiumColIndex);
+                }
+            });
         });
 """
 
@@ -2428,10 +2568,23 @@ def generate_detailed_analysis_html(df: pd.DataFrame) -> str:
     for idx, (row_idx, row) in enumerate(top_10.iterrows(), 1):
         ticker = row['ticker']
         
+        # Get option type for this row
+        option_type = str(row.get('option_type', 'call')).lower() if pd.notna(row.get('option_type')) else 'call'
+        is_put = (option_type == 'put')
+        
         # Calculate values - use helper function for safe conversion
         curr_price = safe_get_numeric(row, 'curr_price') or safe_get_numeric(row, 'current_price', 0)
         strike_price = safe_get_numeric(row, 'strike_price', 0)
-        moneyness = ((strike_price - curr_price) / curr_price * 100) if curr_price != 0 and strike_price != 0 else 0
+        
+        # Calculate moneyness - for calls: OTM when strike > current, for puts: OTM when strike < current
+        if is_put:
+            # For puts: OTM when strike < current price, ITM when strike > current price
+            moneyness = ((curr_price - strike_price) / curr_price * 100) if curr_price != 0 and strike_price != 0 else 0
+            moneyness_label = "OTM" if moneyness > 0 else ("ITM" if moneyness < 0 else "ATM")
+        else:
+            # For calls: OTM when strike > current price, ITM when strike < current price
+            moneyness = ((strike_price - curr_price) / curr_price * 100) if curr_price != 0 and strike_price != 0 else 0
+            moneyness_label = "OTM" if moneyness > 0 else ("ITM" if moneyness < 0 else "ATM")
         
         l_strike = safe_get_numeric(row, 'l_strike', 0)
         spread_width = l_strike - strike_price if l_strike != 0 and strike_price != 0 else 0
@@ -2457,9 +2610,11 @@ def generate_detailed_analysis_html(df: pd.DataFrame) -> str:
         elif volume > 100: score += 1
         
         delta_score = safe_get_numeric(row, 'delta', 0)
-        if delta_score > 0:
-            if delta_score < 0.35: score += 3
-            elif delta_score < 0.50: score += 2
+        # For puts, delta is negative, so use absolute value
+        delta_abs = abs(delta_score) if delta_score else 0
+        if delta_abs > 0:
+            if delta_abs < 0.35: score += 3
+            elif delta_abs < 0.50: score += 2
             else: score += 1
         
         pe_ratio_score = safe_get_numeric(row, 'pe_ratio', 0)
@@ -2478,15 +2633,23 @@ def generate_detailed_analysis_html(df: pd.DataFrame) -> str:
             recommendation = "PASS - Better opportunities available"
         
         # Assignment risk - use the delta_score we already calculated
-        if delta_score > 0:
-            if delta_score < 0.35:
-                assignment_risk = "LOW - Strike is well OTM"
+        # For puts, delta is negative, so we need to check absolute value
+        delta_abs = abs(delta_score) if delta_score else 0
+        if delta_abs > 0:
+            if delta_abs < 0.35:
+                if is_put:
+                    assignment_risk = "LOW - Strike is well OTM (below current price)"
+                else:
+                    assignment_risk = "LOW - Strike is well OTM (above current price)"
                 risk_class = "risk-low"
-            elif delta_score < 0.50:
+            elif delta_abs < 0.50:
                 assignment_risk = "MODERATE - Near ATM, watch closely"
                 risk_class = "risk-moderate"
             else:
-                assignment_risk = "HIGH - ITM or very close, likely assignment"
+                if is_put:
+                    assignment_risk = "HIGH - ITM or very close (strike above current), likely assignment"
+                else:
+                    assignment_risk = "HIGH - ITM or very close (strike below current), likely assignment"
                 risk_class = "risk-high"
         else:
             assignment_risk = "UNKNOWN"
@@ -2530,8 +2693,10 @@ def generate_detailed_analysis_html(df: pd.DataFrame) -> str:
         html_parts.append('                    <h4>📊 POSITION STRUCTURE</h4>\n')
         # Handle both curr_price and current_price column names
         curr_price_val = safe_get_numeric(row, 'curr_price', 0) or safe_get_numeric(row, 'current_price', 0)
+        option_type_display = option_type.upper() if option_type else "CALL"
+        html_parts.append(f'                    <p><span class="label">Option Type:</span> {option_type_display}</p>\n')
         html_parts.append(f'                    <p><span class="label">Current Price:</span> ${curr_price_val:.2f}</p>\n')
-        html_parts.append(f'                    <p><span class="label">Short Strike:</span> ${strike_price:.2f} ({moneyness:.2f}% OTM)</p>\n')
+        html_parts.append(f'                    <p><span class="label">Short Strike:</span> ${strike_price:.2f} ({abs(moneyness):.2f}% {moneyness_label})</p>\n')
         html_parts.append(f'                    <p><span class="label">Long Strike:</span> ${l_strike:.2f}</p>\n')
         html_parts.append(f'                    <p><span class="label">Spread Width:</span> ${spread_width:.2f}</p>\n')
         html_parts.append('                </div>\n')
@@ -2606,7 +2771,10 @@ def generate_detailed_analysis_html(df: pd.DataFrame) -> str:
         # Greeks & Risk
         html_parts.append('                <div class="analysis-section">\n')
         html_parts.append('                    <h4>📈 GREEKS & RISK</h4>\n')
-        html_parts.append(f'                    <p><span class="label">Short Delta:</span> {delta:.2f} | <span class="label">Long Delta:</span> {l_delta:.2f} | <span class="label">Net:</span> {delta_diff:.3f}</p>\n')
+        # For puts, delta is negative, but display absolute value with note
+        delta_display = delta if not is_put or delta >= 0 else f"{delta:.2f} (put delta)"
+        l_delta_display = l_delta if not is_put or l_delta >= 0 else f"{l_delta:.2f} (put delta)"
+        html_parts.append(f'                    <p><span class="label">Short Delta:</span> {delta_display} | <span class="label">Long Delta:</span> {l_delta_display} | <span class="label">Net:</span> {delta_diff:.3f}</p>\n')
         # Safely get theta values
         theta = safe_get_numeric(row, 'theta', 0)
         l_theta = safe_get_numeric(row, 'l_theta', 0)
@@ -2649,17 +2817,15 @@ def generate_detailed_analysis_html(df: pd.DataFrame) -> str:
     return ''.join(html_parts)
 
 
-def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
-    """Generate HTML output with sortable table.
+def _prepare_dataframe_for_display(df: pd.DataFrame) -> tuple:
+    """Prepare DataFrame for display by formatting columns and renaming.
     
     Args:
-        df: DataFrame with the results
-        output_dir: Directory path where to create the HTML output
+        df: Raw DataFrame to prepare
+        
+    Returns:
+        Tuple of (df_display, df_raw) where df_display is formatted and df_raw is original
     """
-    # Create output directory if it doesn't exist
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    
     # Prepare data for HTML table
     df_display = df.copy()
     
@@ -2923,7 +3089,7 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
     
     # Define desired order with standardized names
     desired_order_names = [
-        'ticker', 'pe_ratio', 'market_cap_b', 'current_price', 'price_with_change',
+        'ticker', 'option_type', 'pe_ratio', 'market_cap_b', 'current_price', 'price_with_change',
         'strike_price', 'option_premium', 'expiration_date', 'bid_ask', 'delta', 'theta',
         'short_premium_total', 'short_daily_premium',
         'long_strike_price', 'long_option_premium', 'long_expiration_date', 'long_bid_ask', 'long_delta', 'long_theta',
@@ -2984,14 +3150,49 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
         if 'l_prem_tot' in df_raw.columns:
             df_raw = df_raw.rename(columns={'l_prem_tot': 'buy_cost'})
     
-    # Apply compact headers to keep column names concise
-    # compact_headers = {}
-    # for col in df_display.columns:
-    #     if col in COMPACT_HEADER_MAP:
-    #         compact_headers[col] = COMPACT_HEADER_MAP[col]
-    #     else:
-    #         compact_headers[col] = col
-    # df_display = df_display.rename(columns=compact_headers)
+    return df_display, df_raw
+
+
+def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
+    """Generate HTML output with sortable table.
+    
+    Args:
+        df: DataFrame with the results
+        output_dir: Directory path where to create the HTML output
+    """
+    # Use new modular implementation if available
+    if _USE_NEW_MODULES:
+        return _generate_html_output(df, output_dir)
+    
+    # Fallback to original implementation below
+    # Create output directory if it doesn't exist
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Helper function to normalize column names (used in helper functions)
+    def _normalize_col_name(name: str) -> str:
+        return str(name).strip().lower().replace(' ', '_')
+    
+    # Split data into calls and puts if option_type column exists
+    df_calls = pd.DataFrame()
+    df_puts = pd.DataFrame()
+    has_calls = False
+    has_puts = False
+    
+    if 'option_type' in df.columns:
+        df_calls = df[df['option_type'].str.lower() == 'call'].copy() if 'option_type' in df.columns else pd.DataFrame()
+        df_puts = df[df['option_type'].str.lower() == 'put'].copy() if 'option_type' in df.columns else pd.DataFrame()
+        has_calls = len(df_calls) > 0
+        has_puts = len(df_puts) > 0
+    else:
+        # If no option_type column, treat all as calls (backward compatibility)
+        df_calls = df.copy()
+        has_calls = True
+    
+    # Prepare DataFrames for display
+    df_calls_display, df_calls_raw = _prepare_dataframe_for_display(df_calls) if has_calls else (pd.DataFrame(), pd.DataFrame())
+    df_puts_display, df_puts_raw = _prepare_dataframe_for_display(df_puts) if has_puts else (pd.DataFrame(), pd.DataFrame())
+    df_display, df_raw = _prepare_dataframe_for_display(df)  # For comprehensive analysis
     
     # Get current timestamp for display
     now = datetime.now()
@@ -3013,7 +3214,7 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Covered Calls Analysis Results</title>
+    <title>Options Analysis Results</title>
     <style>
 """)
     html_parts.append(get_css_styles())
@@ -3022,45 +3223,131 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
 <body>
     <div class="container">
         <div class="header">
-            <h1>📊 Covered Calls Analysis Results</h1>
-            <div class="tabs">
-                <button class="tab-button active" onclick="switchTab(0)">📋 Data Table</button>
-                <button class="tab-button" onclick="switchTab(1)">📊 Comprehensive Analysis</button>
-            </div>
+""")
+    
+    # Detect option type from data for title
+    option_type_detected = 'call'  # Default
+    if has_calls and has_puts:
+        option_type_detected = 'mixed'
+    elif has_puts:
+        option_type_detected = 'put'
+    
+    # Set title based on option type
+    if option_type_detected == 'put':
+        title = "📊 Cash-Secured Puts Analysis Results"
+    elif option_type_detected == 'mixed':
+        title = "📊 Options Analysis Results (Calls & Puts)"
+    else:
+        title = "📊 Covered Calls Analysis Results"
+    
+    html_parts.append(f'            <h1>{title}</h1>\n')
+    html_parts.append("""            <div class="tabs">\n""")
+    
+    # Dynamically create tab buttons based on available data
+    tab_index = 0
+    if has_calls:
+        html_parts.append(f'                <button class="tab-button {"active" if tab_index == 0 else ""}" onclick="switchTab({tab_index})">📞 Calls</button>\n')
+        tab_index += 1
+    if has_puts:
+        html_parts.append(f'                <button class="tab-button {"active" if tab_index == 0 else ""}" onclick="switchTab({tab_index})">📉 Puts</button>\n')
+        tab_index += 1
+    # Always add comprehensive analysis tab
+    html_parts.append(f'                <button class="tab-button" onclick="switchTab({tab_index})">📊 Comprehensive Analysis</button>\n')
+    html_parts.append("""            </div>
             <p id="generatedTime" data-generated="""" + iso_timestamp + """">Generated: """ + timestamp + """ <span id="timeAgo"></span></p>
             <p class="desktop-only">Click column headers to sort • """ + str(len(df)) + """ total results</p>
             <p class="mobile-only">Tap cards to expand details • """ + str(len(df)) + """ total results</p>
         </div>
+""")
+    
+    # Generate tabs for calls and puts
+    tab_index = 0
+    if has_calls:
+        html_parts.append(_generate_table_and_cards_html(df_calls_display, df_calls_raw, 'calls', tab_index == 0, _normalize_col_name))
+        tab_index += 1
+    if has_puts:
+        html_parts.append(_generate_table_and_cards_html(df_puts_display, df_puts_raw, 'puts', tab_index == 0, _normalize_col_name))
+        tab_index += 1
+    
+    # Comprehensive analysis tab
+    html_parts.append(f"""        <div class="tab-content">
+""")
+    html_parts.append(generate_detailed_analysis_html(df_display))
+    html_parts.append("""        </div>
+    </div>
+    
+    <script>
+""")
+    html_parts.append(get_javascript())
+    html_parts.append("""    </script>
+</body>
+</html>
+""")
+    
+    html_content = ''.join(html_parts)
+    
+    # Write HTML file
+    html_file = output_path / 'index.html'
+    with open(html_file, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    
+    print(f"HTML output generated successfully!", file=sys.stderr)
+    print(f"Output directory: {output_path.absolute()}", file=sys.stderr)
+    print(f"Open: {html_file.absolute()}", file=sys.stderr)
+
+
+def _generate_table_and_cards_html(df_display: pd.DataFrame, df_raw: pd.DataFrame, prefix: str, is_active: bool, _normalize_col_name) -> str:
+    """Generate HTML for table, filters, and cards for a given DataFrame and prefix.
+    
+    Args:
+        df_display: Formatted DataFrame for display
+        df_raw: Raw DataFrame with original values for filtering
+        prefix: Prefix for IDs ('calls' or 'puts')
+        is_active: Whether this tab should be active by default
+        _normalize_col_name: Function to normalize column names
         
-        <div class="tab-content active">
+    Returns:
+        String containing HTML for the tab content
+    """
+    if df_display.empty:
+        return f"""        <div class="tab-content{' active' if is_active else ''}">
+            <div style="padding: 20px; text-align: center;">
+                <p>No {prefix} data available.</p>
+            </div>
+        </div>
+"""
+    
+    html_parts = []
+    active_class = ' active' if is_active else ''
+    html_parts.append(f"""        <div class="tab-content{active_class}">
         <div style="margin-bottom: 15px; display: flex; justify-content: space-between; gap: 10px; align-items: center;">
             <div>
-                <button class="filter-button clear" onclick="toggleHiddenColumns()" id="toggleHiddenBtn" title="Show or hide default-hidden columns">
+                <button class="filter-button clear" onclick="toggleHiddenColumns('{prefix}')" id="{prefix}toggleHiddenBtn" title="Show or hide default-hidden columns">
                     👁️ Show hidden columns
                 </button>
             </div>
             <div style="text-align: right;">
-                <button class="filter-button" onclick="toggleFilterSection()" id="toggleFilterBtn" title="Show/hide filter options and filterable column names">
+                <button class="filter-button" onclick="toggleFilterSection('{prefix}')" id="{prefix}toggleFilterBtn" title="Show/hide filter options and filterable column names">
                     🔍 Filter
                 </button>
             </div>
         </div>
-        <div class="filter-section" id="filterSection">
+        <div class="filter-section" id="{prefix}filterSection">
             <h3 style="margin-top: 0; color: #667eea;">🔍 Filter Options</h3>
             <div class="filter-logic">
                 <label>Filter Logic:</label>
-                <label><input type="radio" name="filterLogic" value="AND" checked onchange="updateFilterLogic('AND')"> AND</label>
-                <label><input type="radio" name="filterLogic" value="OR" onchange="updateFilterLogic('OR')"> OR</label>
+                <label><input type="radio" name="{prefix}filterLogic" value="AND" checked onchange="updateFilterLogic('{prefix}', 'AND')"> AND</label>
+                <label><input type="radio" name="{prefix}filterLogic" value="OR" onchange="updateFilterLogic('{prefix}', 'OR')"> OR</label>
             </div>
             <div class="filter-controls">
                 <div class="filter-input-group">
-                    <input type="text" id="filterInput" class="filter-input" placeholder="e.g., pe_ratio > 20, volume exists, net_daily_premium > 100" onkeypress="handleFilterKeyPress(event)">
-                    <button class="filter-button" onclick="addFilter()">Add Filter</button>
-                    <button class="filter-button clear" onclick="clearFilters()">Clear All</button>
+                    <input type="text" id="{prefix}filterInput" class="filter-input" placeholder="e.g., pe_ratio > 20, volume exists, net_daily_premium > 100" onkeypress="handleFilterKeyPress(event, '{prefix}')">
+                    <button class="filter-button" onclick="addFilter('{prefix}')">Add Filter</button>
+                    <button class="filter-button clear" onclick="clearFilters('{prefix}')">Clear All</button>
                 </div>
             </div>
-            <div id="filterError" class="filter-error"></div>
-            <div id="activeFilters" style="margin-top: 10px;"></div>
+            <div id="{prefix}filterError" class="filter-error"></div>
+            <div id="{prefix}activeFilters" style="margin-top: 10px;"></div>
             <div class="filter-help">
                 <strong>Filter Examples:</strong><br>
                 • <code>pe_ratio > 20</code> - P/E ratio greater than 20<br>
@@ -3077,8 +3364,8 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
                 <strong>💡 Tip:</strong> When the filter section is expanded, column headers show their filterable field names. Filters are automatically saved in the URL - share the URL to share your filtered view!
             </div>
         </div>
-        <div class="table-wrapper hide-hidden" id="tableWrapper">
-            <table id="resultsTable">
+        <div class="table-wrapper hide-hidden" id="{prefix}tableWrapper">
+            <table id="{prefix}resultsTable">
                 <thead>
                     <tr>
 """)
@@ -3315,7 +3602,7 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
             elif col == col2:
                 short_long_label = 'Long'
         
-        html_parts.append(f'                        <th class="sortable{grouped_class}{hidden_class}{always_hidden_class}" onclick="sortTable({col_index})" data-filterable-name="{filterable_name}">')
+        html_parts.append(f'                        <th class="sortable{grouped_class}{hidden_class}{always_hidden_class}" onclick="sortTable(\'{prefix}\', {col_index})" data-filterable-name="{filterable_name}">')
         html_parts.append(f'                            <span class="column-name-display">{truncated_title}</span>')
         if short_long_label:
             html_parts.append(f'                            <span class="column-name-short-long">{short_long_label}</span>')
@@ -3559,7 +3846,7 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
         </div>
         
         <!-- Mobile Card Layout -->
-        <div class="card-wrapper" id="cardWrapper">
+        <div class="card-wrapper" id="{prefix}cardWrapper">
 """)
     
     # Define primary columns (always visible on cards) and expandable columns
@@ -3684,7 +3971,7 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
         html_parts.append('                    </div>\n')
         
         # Expandable details section
-        html_parts.append('                    <div class="card-details" id="cardDetails_' + str(row_idx) + '">\n')
+        html_parts.append(f'                    <div class="card-details" id="{prefix}cardDetails_{row_idx}">\n')
         
         # Group columns by category for better organization
         option_cols = []
@@ -3766,7 +4053,7 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
         html_parts.append('                    </div>\n')
         
         # Toggle button
-        html_parts.append(f'                    <button class="card-toggle" onclick="toggleCardDetails({row_idx})" id="cardToggle_{row_idx}">\n')
+        html_parts.append(f'                    <button class="card-toggle" onclick="toggleCardDetails(\'{prefix}\', {row_idx})" id="{prefix}cardToggle_{row_idx}">\n')
         html_parts.append('                        <span>Show More Details</span>\n')
         html_parts.append('                        <span class="card-toggle-icon">▼</span>\n')
         html_parts.append('                    </button>\n')
@@ -3774,48 +4061,22 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
         html_parts.append('                </div>\n')
         html_parts.append('            </div>\n')
     
-    html_parts.append("""        </div>
+        html_parts.append("""        </div>
         
         <div class="stats">
             <div class="stat-item">
-                <div class="stat-value" id="totalCount">""" + str(len(df)) + """</div>
+                <div class="stat-value" id="{prefix}totalCount">""" + str(len(df_display)) + """</div>
                 <div class="stat-label">Total Results</div>
             </div>
             <div class="stat-item">
-                <div class="stat-value" id="visibleCount">""" + str(len(df)) + """</div>
+                <div class="stat-value" id="{prefix}visibleCount">""" + str(len(df_display)) + """</div>
                 <div class="stat-label">Visible Rows</div>
             </div>
         </div>
         </div>
-        
-        <div class="tab-content">
 """)
     
-    # Add comprehensive analysis section in second tab
-    # Use df_display which has the renamed columns (buy_cost instead of l_prem_tot)
-    html_parts.append(generate_detailed_analysis_html(df_display))
-    
-    html_parts.append("""        </div>
-    </div>
-    
-    <script>
-""")
-    html_parts.append(get_javascript())
-    html_parts.append("""    </script>
-</body>
-</html>
-""")
-    
-    html_content = ''.join(html_parts)
-    
-    # Write HTML file
-    html_file = output_path / 'index.html'
-    with open(html_file, 'w', encoding='utf-8') as f:
-        f.write(html_content)
-    
-    print(f"HTML output generated successfully!", file=sys.stderr)
-    print(f"Output directory: {output_path.absolute()}", file=sys.stderr)
-    print(f"Open: {html_file.absolute()}", file=sys.stderr)
+    return ''.join(html_parts).format(prefix=prefix)
 
 
 
