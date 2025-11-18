@@ -88,14 +88,41 @@ def process_ticker_analysis(args_tuple):
     from common.options.options_formatting import normalize_and_select_columns
     FilterParser, FilterExpression = import_filter_classes()
     
+    def _log_cache_stats(ticker_name: str, initial_stats: Optional[Dict], db_instance, enable_cache_flag: bool, debug_flag: bool):
+        """Helper function to log cache statistics for a ticker."""
+        if not debug_flag or not enable_cache_flag or initial_stats is None:
+            return
+        if not hasattr(db_instance, 'get_cache_statistics'):
+            return
+        try:
+            final_cache_stats = db_instance.get_cache_statistics()
+            hits_diff = final_cache_stats.get('hits', 0) - initial_stats.get('hits', 0)
+            misses_diff = final_cache_stats.get('misses', 0) - initial_stats.get('misses', 0)
+            total_diff = hits_diff + misses_diff
+            if total_diff > 0:
+                hit_rate = (hits_diff / total_diff * 100) if total_diff > 0 else 0.0
+                print(f"DEBUG [PID {os.getpid()}]: {ticker_name} - Cache stats: hits={hits_diff}, misses={misses_diff}, hit_rate={hit_rate:.1f}%", file=sys.stderr)
+        except:
+            pass  # Silently ignore if cache stats unavailable
+    
     async def _async_process():
         # Create database connection in worker process
+        # Use INFO level for database to reduce cache message verbosity, even when analyzer is in DEBUG mode
+        db_log_level = "INFO" if log_level == "DEBUG" else log_level
         db = get_stock_db('questdb', db_config=db_config, enable_cache=enable_cache, 
-                        redis_url=redis_url, log_level=log_level)
+                        redis_url=redis_url, log_level=db_log_level)
         
         try:
             # Use database as async context manager
             async with db:
+                # Get initial cache stats for this ticker (if cache is enabled and debug mode)
+                initial_cache_stats = None
+                if debug and enable_cache and hasattr(db, 'get_cache_statistics'):
+                    try:
+                        initial_cache_stats = db.get_cache_statistics()
+                    except:
+                        pass
+                
                 # Fetch options data for this ticker
                 if debug:
                     print(f"DEBUG [PID {os.getpid()}]: Processing ticker {ticker}", file=sys.stderr)
@@ -107,38 +134,70 @@ def process_ticker_analysis(args_tuple):
                     end_datetime=end_date,
                     max_concurrent=1,
                     batch_size=1,
-                    timestamp_lookback_days=timestamp_lookback_days
+                    timestamp_lookback_days=timestamp_lookback_days,
+                    min_write_timestamp=min_write_timestamp
                 )
                 
                 if options_df.empty:
                     if debug:
                         print(f"DEBUG [PID {os.getpid()}]: No options data for {ticker}", file=sys.stderr)
+                    _log_cache_stats(ticker, initial_cache_stats, db, enable_cache, debug)
                     return pd.DataFrame(), None
                 
                 # Ensure ticker column exists
                 options_df = ensure_ticker_column(options_df)
                 
+                # Debug: Check write_timestamp after fetching from DB
+                if debug and 'write_timestamp' in options_df.columns:
+                    write_ts_count = options_df['write_timestamp'].notna().sum()
+                    if write_ts_count > 0:
+                        min_ts = options_df['write_timestamp'].min()
+                        max_ts = options_df['write_timestamp'].max()
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - After DB fetch: {len(options_df)} options, write_timestamp range: {min_ts} to {max_ts} ({write_ts_count} non-null)", file=sys.stderr)
+                    else:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - WARNING: All {len(options_df)} options have null write_timestamp after DB fetch!", file=sys.stderr)
+                
                 # Filter by option type
                 if 'option_type' in options_df.columns:
+                    before_type_filter = len(options_df)
                     if option_type == 'both':
                         # Keep both calls and puts
                         pass
                     else:
                         options_df = options_df[options_df['option_type'] == option_type].copy()
+                        if debug and before_type_filter != len(options_df):
+                            print(f"DEBUG [PID {os.getpid()}]: {ticker} - After {option_type} filter: {len(options_df)} options (was {before_type_filter})", file=sys.stderr)
                 
                 if options_df.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED: No {option_type} options found after type filtering", file=sys.stderr)
+                    _log_cache_stats(ticker, initial_cache_stats, db, enable_cache, debug)
                     return pd.DataFrame(), None
                 
                 # Attach price data
+                before_price_attach = len(options_df)
+                had_write_timestamp_before = 'write_timestamp' in options_df.columns
                 options_df = await attach_price_data(options_df, db, ticker, use_market_time, redis_client=redis_client, debug=debug)
+                has_write_timestamp_after = 'write_timestamp' in options_df.columns if not options_df.empty else False
+                if debug and had_write_timestamp_before and not has_write_timestamp_after:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - WARNING: write_timestamp column was lost during attach_price_data!", file=sys.stderr)
                 if options_df.empty:
                     if debug:
-                        print(f"DEBUG [PID {os.getpid()}]: No price data for {ticker}", file=sys.stderr)
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED: No price data available (had {before_price_attach} options before price attachment)", file=sys.stderr)
+                    _log_cache_stats(ticker, initial_cache_stats, db, enable_cache, debug)
                     return pd.DataFrame(), None
                 
                 # Calculate metrics
+                before_metrics = len(options_df)
+                had_write_timestamp_before_metrics = 'write_timestamp' in options_df.columns
                 df = calculate_option_metrics(options_df, position_size, days_to_expiry)
+                has_write_timestamp_after_metrics = 'write_timestamp' in df.columns if not df.empty else False
+                if debug and had_write_timestamp_before_metrics and not has_write_timestamp_after_metrics:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - WARNING: write_timestamp column was lost during calculate_option_metrics!", file=sys.stderr)
                 if df.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED: No options remaining after metrics calculation (was {before_metrics} options)", file=sys.stderr)
+                    _log_cache_stats(ticker, initial_cache_stats, db, enable_cache, debug)
                     return pd.DataFrame(), None
                 
                 # Apply sensible price filter (strike price relative to current price as percentage multiplier)
@@ -167,23 +226,72 @@ def process_ticker_analysis(args_tuple):
                             df = df[call_mask | put_mask].copy()
                     
                     if debug and before_sensible_filter != len(df):
-                        print(f"DEBUG: After sensible_price filter ({sensible_price*100:.1f}%): {len(df)} options (was {before_sensible_filter})", file=sys.stderr)
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - After sensible_price filter ({sensible_price*100:.1f}%): {len(df)} options (was {before_sensible_filter})", file=sys.stderr)
+                    if debug and df.empty and before_sensible_filter > 0:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED: All {before_sensible_filter} options filtered out by sensible_price filter ({sensible_price*100:.1f}%)", file=sys.stderr)
+                
+                if df.empty:
+                    return pd.DataFrame(), None
                 
                 # Apply basic filters
+                before_basic_filters = len(df)
+                # Debug: Check write_timestamp before applying filters
+                if debug and min_write_timestamp and 'write_timestamp' in df.columns:
+                    write_ts_count = df['write_timestamp'].notna().sum()
+                    if write_ts_count > 0:
+                        min_ts = df['write_timestamp'].min()
+                        max_ts = df['write_timestamp'].max()
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - Before basic filters: {before_basic_filters} options, write_timestamp range: {min_ts} to {max_ts} ({write_ts_count} non-null)", file=sys.stderr)
+                    else:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - WARNING: All {before_basic_filters} options have null write_timestamp!", file=sys.stderr)
                 df = apply_basic_filters(df, min_volume, min_premium, min_write_timestamp)
+                if debug and before_basic_filters != len(df):
+                    filter_reasons = []
+                    if min_volume > 0:
+                        filter_reasons.append(f"min_volume={min_volume}")
+                    if min_premium > 0.0:
+                        filter_reasons.append(f"min_premium={min_premium}")
+                    if min_write_timestamp:
+                        filter_reasons.append(f"min_write_timestamp={min_write_timestamp}")
+                    reasons_str = ", ".join(filter_reasons) if filter_reasons else "basic filters"
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - After basic filters ({reasons_str}): {len(df)} options (was {before_basic_filters})", file=sys.stderr)
+                if debug and df.empty and before_basic_filters > 0:
+                    filter_reasons = []
+                    if min_volume > 0:
+                        filter_reasons.append(f"min_volume={min_volume}")
+                    if min_premium > 0.0:
+                        filter_reasons.append(f"min_premium={min_premium}")
+                    if min_write_timestamp:
+                        filter_reasons.append(f"min_write_timestamp={min_write_timestamp}")
+                    reasons_str = ", ".join(filter_reasons) if filter_reasons else "basic filters"
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED: All {before_basic_filters} options filtered out by basic filters ({reasons_str})", file=sys.stderr)
+                
+                if df.empty:
+                    return pd.DataFrame(), None
                 
                 # Apply custom filters if provided
                 if filters:
+                    before_custom_filters = len(df)
                     df = FilterParser.apply_filters(df, filters, filter_logic)
+                    if debug and before_custom_filters != len(df):
+                        filter_str = ", ".join([str(f) for f in filters])
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - After custom filters ({filter_logic}: {filter_str}): {len(df)} options (was {before_custom_filters})", file=sys.stderr)
+                    if debug and df.empty and before_custom_filters > 0:
+                        filter_str = ", ".join([str(f) for f in filters])
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED: All {before_custom_filters} options filtered out by custom filters ({filter_logic}: {filter_str})", file=sys.stderr)
                 
                 if df.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED: No options remaining after all filters", file=sys.stderr)
+                    _log_cache_stats(ticker, initial_cache_stats, db, enable_cache, debug)
                     return pd.DataFrame(), None
                 
                 # Normalize and select columns
                 df = normalize_and_select_columns(df)
                 
                 if debug:
-                    print(f"DEBUG [PID {os.getpid()}]: {ticker} processed - {len(df)} options", file=sys.stderr)
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - INCLUDED: {len(df)} options passed all filters", file=sys.stderr)
+                    _log_cache_stats(ticker, initial_cache_stats, db, enable_cache, debug)
                 
                 return df, None
                 
@@ -213,7 +321,13 @@ def process_spread_match(args_tuple):
     
     short_row_dict, long_options_dict, spread_strike_tolerance, spread_long_days, position_size, risk_free_rate, debug = args_tuple
     
-    ticker = short_row_dict['ticker']
+    ticker = short_row_dict.get('ticker')
+    # Skip if ticker is NaN or None
+    if pd.isna(ticker) or ticker is None:
+        if debug:
+            print(f"DEBUG: Skipping spread match - ticker is NaN or None", file=sys.stderr)
+        return None
+    
     short_strike = short_row_dict['strike_price']
     
     # Get option type from short option (default to 'call' for backward compatibility)
@@ -226,7 +340,7 @@ def process_spread_match(args_tuple):
     
     if not ticker_long_options_list:
         if debug:
-            print(f"DEBUG: No long options found for ticker {ticker}")
+            print(f"DEBUG: No long options found for ticker {ticker}", file=sys.stderr)
         return None
     
     # Convert list of dicts back to DataFrame for easier filtering
@@ -467,14 +581,41 @@ def process_ticker_spread_analysis(args_tuple):
     from common.options.options_formatting import normalize_and_select_columns
     FilterParser, FilterExpression = import_filter_classes()
     
+    def _log_cache_stats_spread(ticker_name: str, initial_stats: Optional[Dict], db_instance, enable_cache_flag: bool, debug_flag: bool):
+        """Helper function to log cache statistics for a ticker in spread analysis."""
+        if not debug_flag or not enable_cache_flag or initial_stats is None:
+            return
+        if not hasattr(db_instance, 'get_cache_statistics'):
+            return
+        try:
+            final_cache_stats = db_instance.get_cache_statistics()
+            hits_diff = final_cache_stats.get('hits', 0) - initial_stats.get('hits', 0)
+            misses_diff = final_cache_stats.get('misses', 0) - initial_stats.get('misses', 0)
+            total_diff = hits_diff + misses_diff
+            if total_diff > 0:
+                hit_rate = (hits_diff / total_diff * 100) if total_diff > 0 else 0.0
+                print(f"DEBUG [PID {os.getpid()}]: {ticker_name} - Cache stats (spread): hits={hits_diff}, misses={misses_diff}, hit_rate={hit_rate:.1f}%", file=sys.stderr)
+        except:
+            pass  # Silently ignore if cache stats unavailable
+    
     async def _async_process():
         # Create database connection in worker process
+        # Use INFO level for database to reduce cache message verbosity, even when analyzer is in DEBUG mode
+        db_log_level = "INFO" if log_level == "DEBUG" else log_level
         db = get_stock_db('questdb', db_config=db_config, enable_cache=enable_cache, 
-                        redis_url=redis_url, log_level=log_level)
+                        redis_url=redis_url, log_level=db_log_level)
         
         try:
             # Use database as async context manager
             async with db:
+                # Get initial cache stats for this ticker (if cache is enabled and debug mode)
+                initial_cache_stats = None
+                if debug and enable_cache and hasattr(db, 'get_cache_statistics'):
+                    try:
+                        initial_cache_stats = db.get_cache_statistics()
+                    except:
+                        pass
+                
                 if debug:
                     print(f"DEBUG [PID {os.getpid()}]: Processing spread analysis for ticker {ticker}", file=sys.stderr)
                 
@@ -488,7 +629,8 @@ def process_ticker_spread_analysis(args_tuple):
                     end_datetime=end_date,
                     max_concurrent=1,
                     batch_size=1,
-                    timestamp_lookback_days=timestamp_lookback_days
+                    timestamp_lookback_days=timestamp_lookback_days,
+                    min_write_timestamp=min_write_timestamp
                 )
                 
                 if debug:
@@ -496,33 +638,64 @@ def process_ticker_spread_analysis(args_tuple):
                 
                 if short_options_df.empty:
                     if debug:
-                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - No short-term options found in DB", file=sys.stderr)
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): No short-term options found in DB", file=sys.stderr)
+                    _log_cache_stats_spread(ticker, initial_cache_stats, db, enable_cache, debug)
                     return pd.DataFrame(), None
                 
                 # Ensure ticker column exists
                 short_options_df = ensure_ticker_column(short_options_df)
                 
+                # Debug: Check write_timestamp after fetching from DB
+                if debug and 'write_timestamp' in short_options_df.columns:
+                    write_ts_count = short_options_df['write_timestamp'].notna().sum()
+                    if write_ts_count > 0:
+                        min_ts = short_options_df['write_timestamp'].min()
+                        max_ts = short_options_df['write_timestamp'].max()
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - After DB fetch (spread): {len(short_options_df)} short options, write_timestamp range: {min_ts} to {max_ts} ({write_ts_count} non-null)", file=sys.stderr)
+                    else:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - WARNING (spread): All {len(short_options_df)} short options have null write_timestamp after DB fetch!", file=sys.stderr)
+                
                 # Filter by option type
                 if 'option_type' in short_options_df.columns:
+                    before_type_filter = len(short_options_df)
                     if option_type == 'both':
                         # Keep both calls and puts
                         pass
                     else:
                         short_options_df = short_options_df[short_options_df['option_type'] == option_type].copy()
+                        if debug and before_type_filter != len(short_options_df):
+                            print(f"DEBUG [PID {os.getpid()}]: {ticker} - After {option_type} filter: {len(short_options_df)} short-term options (was {before_type_filter})", file=sys.stderr)
                 
                 if short_options_df.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): No {option_type} short-term options found after type filtering", file=sys.stderr)
+                    _log_cache_stats_spread(ticker, initial_cache_stats, db, enable_cache, debug)
                     return pd.DataFrame(), None
                 
                 # Attach price data
+                before_price_attach = len(short_options_df)
+                had_write_timestamp_before = 'write_timestamp' in short_options_df.columns
                 short_options_df = await attach_price_data(short_options_df, db, ticker, use_market_time, redis_client=redis_client, debug=debug)
+                has_write_timestamp_after = 'write_timestamp' in short_options_df.columns if not short_options_df.empty else False
+                if debug and had_write_timestamp_before and not has_write_timestamp_after:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - WARNING (spread): write_timestamp column was lost during attach_price_data!", file=sys.stderr)
                 if short_options_df.empty:
                     if debug:
-                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - No price data for short-term options", file=sys.stderr)
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): No price data for short-term options (had {before_price_attach} options before price attachment)", file=sys.stderr)
+                    _log_cache_stats_spread(ticker, initial_cache_stats, db, enable_cache, debug)
                     return pd.DataFrame(), None
                 
                 # Calculate metrics
+                before_metrics = len(short_options_df)
+                had_write_timestamp_before_metrics = 'write_timestamp' in short_options_df.columns
                 df_short = calculate_option_metrics(short_options_df, position_size, days_to_expiry)
+                has_write_timestamp_after_metrics = 'write_timestamp' in df_short.columns if not df_short.empty else False
+                if debug and had_write_timestamp_before_metrics and not has_write_timestamp_after_metrics:
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - WARNING (spread): write_timestamp column was lost during calculate_option_metrics!", file=sys.stderr)
                 if df_short.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): No short-term options remaining after metrics calculation (was {before_metrics} options)", file=sys.stderr)
+                    _log_cache_stats_spread(ticker, initial_cache_stats, db, enable_cache, debug)
                     return pd.DataFrame(), None
                 
                 # Apply sensible price filter (strike price relative to current price as percentage multiplier)
@@ -551,16 +724,68 @@ def process_ticker_spread_analysis(args_tuple):
                             df_short = df_short[call_mask | put_mask].copy()
                     
                     if debug and before_sensible_filter != len(df_short):
-                        print(f"DEBUG: After sensible_price filter ({sensible_price*100:.1f}%): {len(df_short)} options (was {before_sensible_filter})", file=sys.stderr)
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - After sensible_price filter ({sensible_price*100:.1f}%): {len(df_short)} short-term options (was {before_sensible_filter})", file=sys.stderr)
+                    if debug and df_short.empty and before_sensible_filter > 0:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): All {before_sensible_filter} short-term options filtered out by sensible_price filter ({sensible_price*100:.1f}%)", file=sys.stderr)
+                
+                if df_short.empty:
+                    if debug:
+                        _log_cache_stats_spread(ticker, initial_cache_stats, db, enable_cache, debug)
+                    return pd.DataFrame(), None
                 
                 # Apply basic filters
+                before_basic_filters = len(df_short)
+                # Debug: Check write_timestamp before applying filters
+                if debug and min_write_timestamp and 'write_timestamp' in df_short.columns:
+                    write_ts_count = df_short['write_timestamp'].notna().sum()
+                    if write_ts_count > 0:
+                        min_ts = df_short['write_timestamp'].min()
+                        max_ts = df_short['write_timestamp'].max()
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - Before basic filters (spread): {before_basic_filters} short options, write_timestamp range: {min_ts} to {max_ts} ({write_ts_count} non-null)", file=sys.stderr)
+                    else:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - WARNING (spread): All {before_basic_filters} short options have null write_timestamp!", file=sys.stderr)
                 df_short = apply_basic_filters(df_short, min_volume, min_premium, min_write_timestamp)
+                if debug and before_basic_filters != len(df_short):
+                    filter_reasons = []
+                    if min_volume > 0:
+                        filter_reasons.append(f"min_volume={min_volume}")
+                    if min_premium > 0.0:
+                        filter_reasons.append(f"min_premium={min_premium}")
+                    if min_write_timestamp:
+                        filter_reasons.append(f"min_write_timestamp={min_write_timestamp}")
+                    reasons_str = ", ".join(filter_reasons) if filter_reasons else "basic filters"
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - After basic filters ({reasons_str}): {len(df_short)} short-term options (was {before_basic_filters})", file=sys.stderr)
+                if debug and df_short.empty and before_basic_filters > 0:
+                    filter_reasons = []
+                    if min_volume > 0:
+                        filter_reasons.append(f"min_volume={min_volume}")
+                    if min_premium > 0.0:
+                        filter_reasons.append(f"min_premium={min_premium}")
+                    if min_write_timestamp:
+                        filter_reasons.append(f"min_write_timestamp={min_write_timestamp}")
+                    reasons_str = ", ".join(filter_reasons) if filter_reasons else "basic filters"
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): All {before_basic_filters} short-term options filtered out by basic filters ({reasons_str})", file=sys.stderr)
+                
+                if df_short.empty:
+                    if debug:
+                        _log_cache_stats_spread(ticker, initial_cache_stats, db, enable_cache, debug)
+                    return pd.DataFrame(), None
                 
                 # Apply custom filters if provided
                 if filters:
+                    before_custom_filters = len(df_short)
                     df_short = FilterParser.apply_filters(df_short, filters, filter_logic)
+                    if debug and before_custom_filters != len(df_short):
+                        filter_str = ", ".join([str(f) for f in filters])
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - After custom filters ({filter_logic}: {filter_str}): {len(df_short)} short-term options (was {before_custom_filters})", file=sys.stderr)
+                    if debug and df_short.empty and before_custom_filters > 0:
+                        filter_str = ", ".join([str(f) for f in filters])
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): All {before_custom_filters} short-term options filtered out by custom filters ({filter_logic}: {filter_str})", file=sys.stderr)
                 
                 if df_short.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): No short-term options remaining after all filters", file=sys.stderr)
+                    _log_cache_stats_spread(ticker, initial_cache_stats, db, enable_cache, debug)
                     return pd.DataFrame(), None
                 
                 # ===== STEP 2: Fetch and prepare long-term options =====
@@ -575,7 +800,8 @@ def process_ticker_spread_analysis(args_tuple):
                     end_datetime=long_end_date,
                     max_concurrent=1,
                     batch_size=1,
-                    timestamp_lookback_days=long_timestamp_lookback
+                    timestamp_lookback_days=long_timestamp_lookback,
+                    min_write_timestamp=min_write_timestamp
                 )
                 
                 if debug:
@@ -583,7 +809,8 @@ def process_ticker_spread_analysis(args_tuple):
                 
                 if long_options_df.empty:
                     if debug:
-                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - No long-term options found in DB", file=sys.stderr)
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): No long-term options found in DB", file=sys.stderr)
+                    _log_cache_stats_spread(ticker, initial_cache_stats, db, enable_cache, debug)
                     return pd.DataFrame(), None
                 
                 # Ensure ticker column exists
@@ -591,18 +818,29 @@ def process_ticker_spread_analysis(args_tuple):
                 
                 # Filter by option type
                 if 'option_type' in long_options_df.columns:
+                    before_long_type_filter = len(long_options_df)
                     if option_type == 'both':
                         # Keep both calls and puts
                         pass
                     else:
                         long_options_df = long_options_df[long_options_df['option_type'] == option_type].copy()
+                        if debug and before_long_type_filter != len(long_options_df):
+                            print(f"DEBUG [PID {os.getpid()}]: {ticker} - After {option_type} filter: {len(long_options_df)} long-term options (was {before_long_type_filter})", file=sys.stderr)
                 
                 if long_options_df.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): No {option_type} long-term options found after type filtering", file=sys.stderr)
+                    _log_cache_stats_spread(ticker, initial_cache_stats, db, enable_cache, debug)
                     return pd.DataFrame(), None
                 
                 # Apply write timestamp filter
                 if min_write_timestamp:
+                    before_long_ts_filter = len(long_options_df)
                     long_options_df = apply_basic_filters(long_options_df, 0, 0.0, min_write_timestamp)
+                    if debug and before_long_ts_filter != len(long_options_df):
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - After long-term write timestamp filter: {len(long_options_df)} options (was {before_long_ts_filter})", file=sys.stderr)
+                    if debug and long_options_df.empty and before_long_ts_filter > 0:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): All {before_long_ts_filter} long-term options filtered out by min_write_timestamp={min_write_timestamp}", file=sys.stderr)
                 
                 # Normalize implied_volatility
                 if 'implied_volatility' in long_options_df.columns:
@@ -616,6 +854,9 @@ def process_ticker_spread_analysis(args_tuple):
                 long_options_df['days_to_expiry'] = long_options_df['expiration_date'].apply(lambda x: calculate_days_to_expiry(x, today_ts))
                 
                 if long_options_df.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): No long-term options remaining after date calculations", file=sys.stderr)
+                    _log_cache_stats_spread(ticker, initial_cache_stats, db, enable_cache, debug)
                     return pd.DataFrame(), None
                 
                 # ===== STEP 3: Match short-term with long-term options =====
@@ -623,7 +864,13 @@ def process_ticker_spread_analysis(args_tuple):
                     print(f"DEBUG [PID {os.getpid()}]: {ticker} - Starting spread matching: {len(df_short)} short options vs {len(long_options_df)} long options", file=sys.stderr)
                 
                 # Convert to dictionaries for matching
-                short_rows_list = [row.to_dict() for _, row in df_short.iterrows()]
+                # Filter out rows with NaN tickers before processing
+                df_short_clean = df_short[df_short['ticker'].notna()].copy() if 'ticker' in df_short.columns else df_short
+                if len(df_short_clean) < len(df_short):
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - Filtered out {len(df_short) - len(df_short_clean)} short options with NaN tickers", file=sys.stderr)
+                
+                short_rows_list = [row.to_dict() for _, row in df_short_clean.iterrows()]
                 long_options_dict = {ticker: [row.to_dict() for _, row in long_options_df.iterrows()]}
                 
                 # Process each short option match
@@ -643,14 +890,16 @@ def process_ticker_spread_analysis(args_tuple):
                 
                 if not spread_results:
                     if debug:
-                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - No spread matches found", file=sys.stderr)
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): No spread matches found (tried {len(short_rows_list)} short options against {len(long_options_df)} long options with {spread_strike_tolerance}% strike tolerance)", file=sys.stderr)
+                    _log_cache_stats_spread(ticker, initial_cache_stats, db, enable_cache, debug)
                     return pd.DataFrame(), None
                 
                 # Convert to DataFrame
                 df_spread = pd.DataFrame(spread_results)
                 
                 if debug:
-                    print(f"DEBUG [PID {os.getpid()}]: {ticker} processed - {len(df_spread)} spread matches", file=sys.stderr)
+                    print(f"DEBUG [PID {os.getpid()}]: {ticker} - INCLUDED (spread): {len(df_spread)} spread matches found", file=sys.stderr)
+                    _log_cache_stats_spread(ticker, initial_cache_stats, db, enable_cache, debug)
                 
                 return df_spread, None
                 

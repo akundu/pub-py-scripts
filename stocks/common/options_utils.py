@@ -106,9 +106,35 @@ def apply_basic_filters(
                 min_ts = est.localize(min_ts)
             min_ts_utc = min_ts.astimezone(pytz.UTC)
             if 'write_timestamp' in df.columns:
+                before_normalize = len(df)
                 df['write_timestamp'] = df['write_timestamp'].apply(normalize_timestamp_to_utc)
+                
+                # Debug: Check for any null timestamps after normalization
+                null_count = df['write_timestamp'].isna().sum()
+                if null_count > 0:
+                    import sys
+                    print(f"DEBUG [apply_basic_filters]: Warning - {null_count} records have null write_timestamp after normalization (out of {before_normalize} total)", file=sys.stderr)
+                
+                # Debug: Show timestamp range before filtering
+                if df['write_timestamp'].notna().any():
+                    min_actual_ts = df['write_timestamp'].min()
+                    max_actual_ts = df['write_timestamp'].max()
+                    import sys
+                    print(f"DEBUG [apply_basic_filters]: Timestamp range: {min_actual_ts} to {max_actual_ts}, filter threshold: {min_ts_utc}", file=sys.stderr)
+                    print(f"DEBUG [apply_basic_filters]: Records before filter: {len(df)}, threshold: {min_ts_utc}", file=sys.stderr)
+                
                 df = df[df['write_timestamp'] >= min_ts_utc].copy()
-        except Exception:
+                
+                # Debug: Show filtering result
+                import sys
+                filtered_out = before_normalize - len(df)
+                if filtered_out > 0:
+                    print(f"DEBUG [apply_basic_filters]: Filtered out {filtered_out} records (kept {len(df)}), threshold was {min_ts_utc}", file=sys.stderr)
+        except Exception as e:
+            import sys
+            print(f"DEBUG [apply_basic_filters]: Error applying timestamp filter: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
             pass  # Ignore timestamp filter errors
     
     return df

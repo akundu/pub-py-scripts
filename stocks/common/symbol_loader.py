@@ -146,7 +146,12 @@ async def fetch_lists_data(
     return all_symbols_list
 
 
-def add_symbol_arguments(parser: argparse.ArgumentParser, required: bool = False) -> None:
+def add_symbol_arguments(
+    parser: argparse.ArgumentParser,
+    required: bool = False,
+    allow_positional: bool = True,
+    include_symbols_list: bool = True
+) -> None:
     """
     Add symbol input arguments to an argument parser.
     
@@ -157,20 +162,26 @@ def add_symbol_arguments(parser: argparse.ArgumentParser, required: bool = False
     # Create a mutually exclusive group for symbol input methods
     symbol_group = parser.add_mutually_exclusive_group(required=required)
     
-    if not required:
-        symbol_group.add_argument('symbol', nargs='?', 
-                                help="The stock symbol (e.g., AAPL). Mutually exclusive with --symbols, --symbols-list, and --types.")
+    if allow_positional and not required:
+        symbol_group.add_argument(
+            'symbol',
+            nargs='?', 
+            help="The stock symbol (e.g., AAPL). Mutually exclusive with --symbols, --symbols-list, and --types."
+        )
     
     symbol_group.add_argument(
         '--symbols',
         nargs='+',
         help='One or more stock symbols (e.g., AAPL MSFT GOOGL). Mutually exclusive with symbol, --symbols-list, and --types.'
     )
-    symbol_group.add_argument(
-        '--symbols-list',
-        type=str,
-        help='Path to a YAML file containing a list of symbols under the \'symbols\' key. Mutually exclusive with symbol, --symbols, and --types.'
-    )
+    
+    if include_symbols_list:
+        symbol_group.add_argument(
+            '--symbols-list',
+            type=str,
+            help='Path to a YAML file containing a list of symbols under the \'symbols\' key. Mutually exclusive with symbol, --symbols, and --types.'
+        )
+    
     symbol_group.add_argument('--types', nargs='+', 
                       choices=FULL_AVAILABLE_TYPES + ['all'] if SYMBOL_LOADING_AVAILABLE else [],
                       help='Types of symbol lists to process. \'all\' processes all. Used with --fetch-online for network fetch. Mutually exclusive with symbol, --symbols, and --symbols-list.')

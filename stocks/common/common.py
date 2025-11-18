@@ -15,10 +15,13 @@ except ImportError:
 # Try to import redis for refresh deduplication
 try:
     import redis
+    from redis.cluster import RedisCluster as SyncRedisCluster, ClusterNode as SyncClusterNode
     REDIS_AVAILABLE = True
 except ImportError:
     REDIS_AVAILABLE = False
     redis = None
+    SyncRedisCluster = None
+    SyncClusterNode = None
 
 # Try to import pandas for timestamp functions
 try:
@@ -205,12 +208,72 @@ def black_scholes_put(S: float, K: float, T: float, r: float, sigma: float) -> f
 # Redis Helper Functions for Refresh Deduplication
 # ============================================================================
 
+def _parse_redis_url_to_sync_nodes(redis_url: str) -> Optional[List[Any]]:
+    """Parse Redis URL to extract cluster nodes for synchronous client.
+    
+    Supports multiple formats:
+    1. Single URL: redis://host:port or redis://host:port/db
+    2. Multiple URLs (comma-separated): redis://host1:port1,redis://host2:port2
+    3. Cluster format: redis://host:port (will be used as startup node)
+    
+    Returns:
+        List of ClusterNode objects, or None if parsing fails
+    """
+    if not redis_url or not REDIS_AVAILABLE or SyncClusterNode is None:
+        return None
+    
+    try:
+        # Remove redis:// prefix if present
+        url = redis_url.replace('redis://', '').replace('rediss://', '')
+        
+        # Split by comma to handle multiple URLs
+        urls = [u.strip() for u in url.split(',')]
+        
+        nodes = []
+        for url_part in urls:
+            # Remove database number if present (e.g., /0)
+            if '/' in url_part:
+                url_part = url_part.split('/')[0]
+            
+            # Parse host:port
+            if ':' in url_part:
+                host, port = url_part.rsplit(':', 1)
+                try:
+                    port = int(port)
+                    nodes.append(SyncClusterNode(host, port))
+                except ValueError:
+                    continue
+            else:
+                # Default port 6379
+                nodes.append(SyncClusterNode(url_part, 6379))
+        
+        return nodes if nodes else None
+    except Exception:
+        return None
+
+
 def get_redis_client_for_refresh(redis_url: Optional[str]) -> Optional[Any]:
-    """Get a synchronous Redis client for refresh deduplication."""
+    """Get a synchronous Redis client for refresh deduplication (supports both single-instance and cluster)."""
     if not REDIS_AVAILABLE or not redis_url:
         return None
     try:
-        return redis.from_url(redis_url, decode_responses=True)
+        # Try to parse as cluster nodes
+        cluster_nodes = _parse_redis_url_to_sync_nodes(redis_url)
+        # Only use cluster mode if we have multiple nodes OR if REDIS_CLUSTER_MODE env var is set
+        import os
+        use_cluster_env = os.getenv('REDIS_CLUSTER_MODE', '').lower() in ('1', 'true', 'yes', 'on')
+        if cluster_nodes and SyncRedisCluster is not None and (len(cluster_nodes) > 1 or use_cluster_env):
+            # Use Redis Cluster
+            return SyncRedisCluster(
+                startup_nodes=cluster_nodes,
+                decode_responses=True,
+                socket_connect_timeout=10,
+                socket_timeout=10,
+                require_full_coverage=False
+            )
+        else:
+            # Use single-instance Redis
+            return redis.from_url(redis_url, decode_responses=True)
     except Exception:
         return None
 

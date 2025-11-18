@@ -14,7 +14,7 @@ import pandas as pd
 from datetime import datetime, timezone, timedelta, date
 import asyncio
 import asyncpg
-from typing import List, Dict, Any, Optional, Tuple, Set
+from typing import List, Dict, Any, Optional, Tuple, Set, TYPE_CHECKING
 import logging
 import sys
 import json
@@ -32,14 +32,18 @@ import pytz
 from dateutil import parser as date_parser
 from .market_hours import is_market_hours
 from concurrent.futures import ProcessPoolExecutor
+from .common import normalize_timestamp_to_utc
 
 # Try to import redis, but don't fail if it's not available
 try:
     import redis.asyncio as redis
+    from redis.asyncio.cluster import RedisCluster, ClusterNode
     REDIS_AVAILABLE = True
 except ImportError:
     REDIS_AVAILABLE = False
     redis = None
+    RedisCluster = None
+    ClusterNode = None
 
 def normalize_timestamp(ts: Any) -> datetime:
     """Normalize timestamp to UTC-aware datetime for comparison."""
@@ -433,13 +437,73 @@ class CacheKeyGenerator:
         return f"stocks:financial_info:{ticker}"
 
 
+def _parse_redis_url_to_nodes(redis_url: str) -> Optional[List[Any]]:
+    """Parse Redis URL to extract cluster nodes.
+    
+    Supports multiple formats:
+    1. Single URL: redis://host:port or redis://host:port/db
+    2. Multiple URLs (comma-separated): redis://host1:port1,redis://host2:port2
+    3. Cluster format: redis://host:port (will be used as startup node)
+    
+    Returns:
+        List of ClusterNode objects, or None if parsing fails
+    """
+    if not redis_url or not REDIS_AVAILABLE or ClusterNode is None:
+        return None
+    
+    try:
+        # Remove redis:// prefix if present
+        url = redis_url.replace('redis://', '').replace('rediss://', '')
+        
+        # Split by comma to handle multiple URLs
+        urls = [u.strip() for u in url.split(',')]
+        
+        nodes = []
+        for url_part in urls:
+            # Remove database number if present (e.g., /0)
+            if '/' in url_part:
+                url_part = url_part.split('/')[0]
+            
+            # Parse host:port
+            if ':' in url_part:
+                host, port = url_part.rsplit(':', 1)
+                try:
+                    port = int(port)
+                    nodes.append(ClusterNode(host, port))
+                except ValueError:
+                    continue
+            else:
+                # Default port 6379
+                nodes.append(ClusterNode(url_part, 6379))
+        
+        return nodes if nodes else None
+    except Exception:
+        return None
+
+
 class RedisCache:
-    """Handles Redis caching operations."""
+    """Handles Redis caching operations with support for Redis Cluster."""
     
     def __init__(self, redis_url: Optional[str], logger: logging.Logger):
         self.redis_url = redis_url or os.getenv('REDIS_URL', 'redis://localhost:6379/0')
         self.logger = logger
         self.enable_cache = REDIS_AVAILABLE and redis_url is not None
+        
+        # Parse cluster nodes from URL
+        # Use cluster mode if multiple nodes are provided (comma-separated) or if explicitly configured
+        self._cluster_nodes = _parse_redis_url_to_nodes(self.redis_url)
+        # Only use cluster mode if we have multiple nodes OR if REDIS_CLUSTER_MODE env var is set
+        use_cluster_env = os.getenv('REDIS_CLUSTER_MODE', '').lower() in ('1', 'true', 'yes', 'on')
+        self._use_cluster = (self._cluster_nodes is not None and 
+                            (len(self._cluster_nodes) > 1 or use_cluster_env))
+        
+        if self._use_cluster:
+            self.logger.info(f"Redis Cluster mode enabled with {len(self._cluster_nodes)} startup node(s)")
+            for node in self._cluster_nodes:
+                self.logger.debug(f"  - Cluster node: {node.host}:{node.port}")
+        else:
+            self.logger.debug(f"Redis single-instance mode: {self.redis_url}")
+        
         self._redis_by_loop: Dict[int, redis.Redis] = {}
         self._redis_init_lock = asyncio.Lock()
         
@@ -459,7 +523,7 @@ class RedisCache:
         }
     
     async def _get_redis_client(self) -> Optional[redis.Redis]:
-        """Get Redis client for current event loop (on-demand for twemproxy compatibility)."""
+        """Get Redis client for current event loop (supports both single-instance and cluster)."""
         if not self.enable_cache:
             return None
         
@@ -472,7 +536,21 @@ class RedisCache:
                 client = self._redis_by_loop.get(loop_id)
                 if client is None:
                     try:
-                        client = redis.from_url(self.redis_url, decode_responses=False)
+                        if self._use_cluster and RedisCluster is not None:
+                            # Use Redis Cluster
+                            client = RedisCluster(
+                                startup_nodes=self._cluster_nodes,
+                                decode_responses=False,
+                                socket_connect_timeout=10,
+                                socket_timeout=10,
+                                require_full_coverage=False
+                            )
+                            self.logger.debug(f"Created Redis Cluster client for loop {loop_id}")
+                        else:
+                            # Use single-instance Redis
+                            client = redis.from_url(self.redis_url, decode_responses=False)
+                            self.logger.debug(f"Created Redis single-instance client for loop {loop_id}")
+                        
                         self._redis_by_loop[loop_id] = client
                     except Exception as e:
                         self.logger.warning(f"Failed to connect to Redis: {e}")
@@ -548,18 +626,38 @@ class RedisCache:
             if client is None:
                 return {key: None for key in keys}
             
+            # Check if we're using Redis Cluster (MGET doesn't work with cluster unless all keys hash to same slot)
+            is_cluster = self._use_cluster or (RedisCluster is not None and isinstance(client, RedisCluster))
+            
             # Process in batches
             for i in range(0, len(keys), batch_size):
                 batch_keys = keys[i:i + batch_size]
                 batch_num = i // batch_size + 1
                 
-                # Use mget for batch fetching
-                mget_start = time.time()
-                values = await client.mget(batch_keys)
-                mget_elapsed = time.time() - mget_start
-                self.logger.debug(f"[TIMING] Redis MGET batch {batch_num}: {mget_elapsed:.3f}s for {len(batch_keys)} keys")
+                if is_cluster:
+                    # In cluster mode, use individual GET operations (MGET requires all keys in same slot)
+                    # Use asyncio.gather for parallel GETs
+                    get_start = time.time()
+                    tasks = [client.get(key) for key in batch_keys]
+                    values = await asyncio.gather(*tasks, return_exceptions=True)
+                    get_elapsed = time.time() - get_start
+                    self.logger.debug(f"[TIMING] Redis GET batch {batch_num} (cluster mode): {get_elapsed:.3f}s for {len(batch_keys)} keys")
+                else:
+                    # Use mget for batch fetching (single-instance mode)
+                    mget_start = time.time()
+                    values = await client.mget(batch_keys)
+                    mget_elapsed = time.time() - mget_start
+                    self.logger.debug(f"[TIMING] Redis MGET batch {batch_num}: {mget_elapsed:.3f}s for {len(batch_keys)} keys")
                 
                 for key, data in zip(batch_keys, values):
+                    # Handle exceptions from gather (cluster mode)
+                    if isinstance(data, Exception):
+                        self.logger.debug(f"Cache get error for key {key}: {data}")
+                        self._stats['errors'] += 1
+                        self._stats['misses'] += 1
+                        result[key] = None
+                        continue
+                    
                     if data is None:
                         self._stats['misses'] += 1
                         result[key] = None
@@ -900,7 +998,11 @@ class RedisCache:
         # Close all Redis connections
         for client in list(self._redis_by_loop.values()):
             try:
-                await client.close()
+                # RedisCluster uses aclose(), regular Redis uses close()
+                if hasattr(client, 'aclose'):
+                    await client.aclose()
+                else:
+                    await client.close()
             except Exception:
                 pass
         self._redis_by_loop.clear()
@@ -1472,11 +1574,16 @@ class OptionsDataRepository(BaseRepository):
     async def get_latest(self, ticker: str, expiration_date: Optional[str] = None,
                         start_datetime: Optional[str] = None, end_datetime: Optional[str] = None,
                         option_tickers: Optional[List[str]] = None,
-                        timestamp_lookback_days: int = 7) -> pd.DataFrame:
+                        timestamp_lookback_days: int = 7,
+                        min_write_timestamp: Optional[str] = None) -> pd.DataFrame:
         """Get latest options data per option_ticker using window function.
         
         Uses ROW_NUMBER() window function to get the latest row per 
         (option_ticker, expiration_date, strike_price, option_type) combination.
+        
+        Args:
+            min_write_timestamp: Optional minimum write_timestamp filter (EST timezone string)
+                If provided, filters results to only include records with write_timestamp >= this value.
         """
         if start_datetime is None:
             start_datetime = date.today().strftime('%Y-%m-%d')
@@ -1503,10 +1610,39 @@ class OptionsDataRepository(BaseRepository):
                 params.append(end_dt)
                 next_param += 1
             
-            lookback_date = datetime.now(timezone.utc) - timedelta(days=timestamp_lookback_days)
-            lookback_date = lookback_date.replace(tzinfo=None)
-            clauses.append(f"timestamp >= ${next_param}")
-            params.append(lookback_date)
+            # Filter by timestamp or write_timestamp
+            # If min_write_timestamp is provided, use it instead of timestamp lookback
+            # This ensures we get fresh data even if timestamp column is old
+            if min_write_timestamp:
+                try:
+                    import pytz
+                    est = pytz.timezone('America/New_York')
+                    min_ts = pd.to_datetime(min_write_timestamp)
+                    if min_ts.tz is None:
+                        min_ts = est.localize(min_ts)
+                    min_ts_utc = min_ts.astimezone(pytz.UTC)
+                    min_ts_utc_no_tz = min_ts_utc.replace(tzinfo=None)
+                    # Use write_timestamp filter instead of timestamp when min_write_timestamp is provided
+                    clauses.append(f"write_timestamp >= ${next_param}")
+                    params.append(min_ts_utc_no_tz)
+                    next_param += 1
+                    self.logger.info(f"[DB QUERY] Using write_timestamp filter (>= {min_ts_utc_no_tz} UTC) instead of timestamp lookback for {ticker}")
+                except Exception as e:
+                    self.logger.warning(f"Could not parse min_write_timestamp {min_write_timestamp}: {e}, falling back to timestamp lookback")
+                    # Fall back to timestamp lookback if min_write_timestamp parsing fails
+                    lookback_date = datetime.now(timezone.utc) - timedelta(days=timestamp_lookback_days)
+                    lookback_date = lookback_date.replace(tzinfo=None)
+                    clauses.append(f"timestamp >= ${next_param}")
+                    params.append(lookback_date)
+                    next_param += 1
+            else:
+                # Use timestamp lookback when min_write_timestamp is not provided
+                lookback_date = datetime.now(timezone.utc) - timedelta(days=timestamp_lookback_days)
+                lookback_date = lookback_date.replace(tzinfo=None)
+                clauses.append(f"timestamp >= ${next_param}")
+                params.append(lookback_date)
+                next_param += 1
+            
             where = " AND ".join(clauses)
             
             # Build the window function query
@@ -2748,7 +2884,8 @@ class OptionsDataService:
                  option_tickers: Optional[List[str]] = None,
                  timestamp_lookback_days: Optional[int] = None,
                  use_fire_and_forget: bool = False,
-                 deduplicate: bool = False) -> pd.DataFrame:
+                 deduplicate: bool = False,
+                 min_write_timestamp: Optional[str] = None) -> pd.DataFrame:
         """Get options data with per-option caching.
         
         Flow:
@@ -2768,9 +2905,12 @@ class OptionsDataService:
             timestamp_lookback_days: Optional timestamp lookback days (if provided, uses get_latest repository method)
             use_fire_and_forget: If True, use fire-and-forget caching (non-blocking)
             deduplicate: If True, deduplicate by option_ticker to keep only the latest
+            min_write_timestamp: Optional minimum write_timestamp filter (EST timezone string)
         """
         import time
         method_start = time.time()
+        if min_write_timestamp:
+            self.logger.info(f"[OPTIONS SERVICE] get() called for {ticker} with min_write_timestamp={min_write_timestamp}")
         self.logger.debug(f"[TIMING] OptionsDataService.get START for {ticker}")
         
         # Resolve option_tickers and expiration_dates from metadata cache or DB
@@ -2795,7 +2935,7 @@ class OptionsDataService:
             
             # Negative cache miss - query DB
             if timestamp_lookback_days is not None:
-                df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, option_tickers, timestamp_lookback_days)
+                df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, option_tickers, timestamp_lookback_days, min_write_timestamp)
             else:
                 df = await self.options_repo.get(ticker, expiration_date, start_datetime, end_datetime, option_tickers)
             
@@ -2836,23 +2976,80 @@ class OptionsDataService:
         cached_data = {k: v for k, v in cached_results.items() if k != negative_cache_key and v is not None and not v.empty}
         self.logger.debug(f"[TIMING] Cache batch get for {ticker}: {cache_elapsed:.3f}s, found {len(cached_data)}/{len(cache_keys)}")
         
+        # Filter cached data by min_write_timestamp if provided
+        if min_write_timestamp:
+            self.logger.info(f"[CACHE FILTER] min_write_timestamp={min_write_timestamp} provided, checking {len(cached_data)} cached DataFrames for {ticker}")
+            if cached_data:
+                try:
+                    import pytz
+                    est = pytz.timezone('America/New_York')
+                    min_ts = pd.to_datetime(min_write_timestamp)
+                    if min_ts.tz is None:
+                        min_ts = est.localize(min_ts)
+                    min_ts_utc = min_ts.astimezone(pytz.UTC)
+                    
+                    # Filter each cached DataFrame by write_timestamp
+                    filtered_cached_data = {}
+                    for cache_key, df in cached_data.items():
+                        if not df.empty and 'write_timestamp' in df.columns:
+                            # Normalize write_timestamp to UTC for comparison
+                            df_copy = df.copy()
+                            df_copy['write_timestamp'] = df_copy['write_timestamp'].apply(
+                                lambda x: normalize_timestamp_to_utc(x) if pd.notna(x) else None
+                            )
+                            # Filter rows where write_timestamp >= min_ts_utc
+                            filtered_df = df_copy[df_copy['write_timestamp'].notna() & (df_copy['write_timestamp'] >= min_ts_utc)]
+                            if not filtered_df.empty:
+                                # Restore original write_timestamp column (drop normalized one if we added it)
+                                filtered_cached_data[cache_key] = filtered_df
+                        elif not df.empty:
+                            # If no write_timestamp column, keep the data (let downstream filtering handle it)
+                            filtered_cached_data[cache_key] = df
+                    
+                    filtered_count = len(cached_data) - len(filtered_cached_data)
+                    if filtered_count > 0:
+                        self.logger.info(f"[CACHE FILTER] Filtered out {filtered_count} cached options with write_timestamp < {min_write_timestamp} for {ticker} (kept {len(filtered_cached_data)})")
+                    elif len(cached_data) > 0:
+                        self.logger.info(f"[CACHE FILTER] All {len(cached_data)} cached options passed min_write_timestamp filter for {ticker}")
+                    cached_data = filtered_cached_data
+                except Exception as e:
+                    self.logger.warning(f"Error filtering cached data by min_write_timestamp {min_write_timestamp}: {e}")
+                    import traceback
+                    self.logger.warning(f"Traceback: {traceback.format_exc()}")
+                    # Continue with unfiltered cached data if filtering fails
+            else:
+                self.logger.info(f"[CACHE FILTER] No cached data to filter for {ticker}")
+        
         if deduplicate:
             self.logger.debug(f"[CACHE] Found {len(cached_data)}/{len(cache_keys)} options in cache for {ticker}")
         
         # Determine which options need DB fetch (cache misses)
         missing_keys = [k for k in cache_keys if k not in cached_data]
         
+        if min_write_timestamp and missing_keys:
+            self.logger.info(f"[DB QUERY] Querying DB for {len(missing_keys)} options (cache misses after filtering by min_write_timestamp={min_write_timestamp}) for {ticker}")
+        
         # Fetch missing options from DB and cache them
         if missing_keys:
             # Extract option_tickers from missing keys
             missing_option_tickers = self._extract_option_tickers_from_cache_keys(missing_keys)
             
+            # If min_write_timestamp is provided and we filtered out cached data, query DB without option_tickers filter
+            # This ensures we get all options matching the timestamp filter, not just those in the (possibly stale) metadata cache
+            query_option_tickers = None
+            if min_write_timestamp and len(missing_keys) == len(cache_keys):
+                # All cache keys were filtered out, so query without option_tickers filter to get all matching options
+                self.logger.info(f"[DB QUERY] All cached data filtered out by min_write_timestamp, querying DB without option_tickers filter for {ticker}")
+                query_option_tickers = None
+            else:
+                query_option_tickers = missing_option_tickers
+            
             # Fetch from DB for cache misses
             db_start = time.time()
             if timestamp_lookback_days is not None:
                 if deduplicate:
-                    self.logger.debug(f"[DB] Fetching {len(missing_option_tickers)} options from database (cache misses) for {ticker}")
-                df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, missing_option_tickers, timestamp_lookback_days)
+                    self.logger.debug(f"[DB] Fetching {len(missing_option_tickers) if query_option_tickers else 'all'} options from database (cache misses) for {ticker}")
+                df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, query_option_tickers, timestamp_lookback_days, min_write_timestamp)
                 if deduplicate:
                     self.logger.debug(f"[DB] Fetched {len(df)} rows from database for {ticker} latest options")
             else:
@@ -2917,8 +3114,10 @@ class OptionsDataService:
                                 if 'timestamp' in col.lower():
                                     try:
                                         # Ensure all values in timestamp column are pd.Timestamp or None
-                                        # Convert any non-Timestamp values
-                                        df.loc[:, col] = pd.to_datetime(df[col], errors='coerce')
+                                        # Convert any non-Timestamp values. Drop+reassign to avoid dtype warnings.
+                                        converted_col = pd.to_datetime(df[col], errors='coerce')
+                                        df = df.drop(columns=[col])
+                                        df[col] = converted_col
                                     except Exception as e:
                                         self.logger.warning(f"Error normalizing timestamp column {col} in cached data: {e}")
                                         # If conversion fails, drop the column
@@ -3060,13 +3259,15 @@ class OptionsDataService:
     async def get_latest(self, ticker: str, expiration_date: Optional[str] = None,
                         start_datetime: Optional[str] = None, end_datetime: Optional[str] = None,
                         option_tickers: Optional[List[str]] = None,
-                        timestamp_lookback_days: int = 7) -> pd.DataFrame:
+                        timestamp_lookback_days: int = 7,
+                        min_write_timestamp: Optional[str] = None) -> pd.DataFrame:
         """Get latest options data with per-option caching.
         
         This is a convenience method that calls get() with:
         - timestamp_lookback_days: Uses get_latest repository method
         - use_fire_and_forget: True (non-blocking cache writes)
         - deduplicate: True (deduplicates by option_ticker to keep only the latest)
+        - min_write_timestamp: Optional minimum write_timestamp filter (passed to repository)
         """
         return await self.get(
             ticker=ticker,
@@ -3076,7 +3277,8 @@ class OptionsDataService:
             option_tickers=option_tickers,
             timestamp_lookback_days=timestamp_lookback_days,
             use_fire_and_forget=True,
-            deduplicate=True
+            deduplicate=True,
+            min_write_timestamp=min_write_timestamp
         )
 
 
@@ -3535,15 +3737,17 @@ class StockQuestDB(StockDBBase):
                                      option_tickers: Optional[List[str]] = None,
                                      start_datetime: Optional[str] = None,
                                      end_datetime: Optional[str] = None,
-                                     timestamp_lookback_days: int = 7) -> pd.DataFrame:
+                                     timestamp_lookback_days: int = 7,
+                                     min_write_timestamp: Optional[str] = None) -> pd.DataFrame:
         """Get latest options data."""
-        return await self.options_service.get_latest(ticker, expiration_date, start_datetime, end_datetime, option_tickers, timestamp_lookback_days)
+        return await self.options_service.get_latest(ticker, expiration_date, start_datetime, end_datetime, option_tickers, timestamp_lookback_days, min_write_timestamp)
     
     async def get_latest_options_data_batch(self, tickers: List[str], expiration_date: Optional[str] = None,
                                            start_datetime: Optional[str] = None, end_datetime: Optional[str] = None,
                                            option_tickers: Optional[List[str]] = None,
                                            max_concurrent: int = 10, batch_size: int = 50,
-                                           timestamp_lookback_days: int = 7) -> pd.DataFrame:
+                                           timestamp_lookback_days: int = 7,
+                                           min_write_timestamp: Optional[str] = None) -> pd.DataFrame:
         """Get latest options data for multiple tickers."""
         import time
         method_start = time.time()
@@ -3565,7 +3769,8 @@ class StockQuestDB(StockDBBase):
                         return await self.get_latest_options_data(
                             ticker, expiration_date=expiration_date,
                             start_datetime=start_datetime, end_datetime=end_datetime,
-                            option_tickers=option_tickers, timestamp_lookback_days=timestamp_lookback_days
+                            option_tickers=option_tickers, timestamp_lookback_days=timestamp_lookback_days,
+                            min_write_timestamp=min_write_timestamp
                         )
                     except Exception as e:
                         self.logger.error(f"Error fetching options for {ticker}: {e}")
