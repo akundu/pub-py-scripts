@@ -138,7 +138,6 @@ symbols:
 - DLTR
 - DOCU
 - DOOO
-- DORM
 - DOX
 - DPZ
 - DRS
@@ -150,6 +149,7 @@ symbols:
 - ENLT
 - ENSG
 - ENTG
+- EOSE
 - EQIX
 - ERIC
 - ERIE
@@ -233,7 +233,6 @@ symbols:
 - INDV
 - INSM
 - INTC
-- INTR
 - INTU
 - IONS
 - IREN
@@ -446,6 +445,7 @@ symbols:
 - TGTX
 - TIGO
 - TLN
+- TMDX
 - TMUS
 - TPG
 - TRI

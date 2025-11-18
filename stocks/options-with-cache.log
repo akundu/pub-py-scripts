@@ -1,0 +1,20 @@
+Tue Nov 18 13:03:01 PST 2025
+running python scripts/options_analyzer.py --top-n 2 --stats --max-days 30       --batch-size 300 --max-workers 4        --sort net_daily_premium        --position-size 100000       --types all       --spread --spread-strike-tolerance 5 --spread-long-days 120 --spread-long-min-days 90 --spread-long-days-tolerance 15       --min-write-timestamp "2025-11-15 16:03:01"       --db-conn questdb://stock_user:stock_password@localhost:8812/stock_data       --output ~/Downloads/results.csv       --log-level WARNING       --option-type both       --sensible-price 0.001       --filter "volume > 10"       --sort potential_premium
+Loaded 2 symbols for crypto from data/lists/crypto_symbols.yaml
+Loaded 30 symbols for dow-jones from data/lists/dow-jones_symbols.yaml
+Loaded 100 symbols for etfs from data/lists/etfs_symbols.yaml
+Loaded 500 symbols for nasdaq from data/lists/nasdaq_symbols.yaml
+Loaded 500 symbols for nyse from data/lists/nyse_symbols.yaml
+Loaded 502 symbols for sp-500 from data/lists/sp-500_symbols.yaml
+Loaded 517 symbols for stocks_to_track from data/lists/stocks_to_track_symbols.yaml
+Loaded 16 symbols for stocks_to_track2 from data/lists/stocks_to_track2.yaml
+Total unique symbols loaded from disk for specified types: 1165
+2025-11-18 13:08:58 [PID:80936] [questdb_db] [WARNING] - [DB] Market CLOSED: No daily or hourly price found for SPX
+Elapsed: 377 seconds with result = 0
+INFO: Generating HTML output...
+HTML output generated successfully!
+Output directory: /tmp/stocks_to_buy
+Open: /tmp/stocks_to_buy/index.html
+INFO: HTML output generated successfully in /tmp/stocks_to_buy
+Skipping Gemini analysis: outside market hours
+Sleeping for 3600 seconds...

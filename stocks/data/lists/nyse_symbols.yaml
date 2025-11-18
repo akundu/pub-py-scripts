@@ -14,6 +14,7 @@ symbols:
 - AFL
 - AIG
 - AJG
+- ALB
 - ALC
 - ALL
 - AMCR
@@ -237,7 +238,6 @@ symbols:
 - IR
 - IRM
 - IT
-- ITT
 - ITUB
 - ITW
 - IX

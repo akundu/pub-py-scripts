@@ -228,18 +228,90 @@ class QuestDBConnection:
             async with self._pool_init_lock:
                 pool = self._pool_by_loop.get(loop_id)
                 if pool is None:
+                    # Increase command_timeout significantly for long-running queries
+                    # Default is 30 minutes, but increase to at least 1 hour for large queries
+                    command_timeout = max(self.config.pool_connection_timeout_minutes * 60, 3600)  # At least 1 hour
                     pool = await asyncpg.create_pool(
                         self.db_config,
                         min_size=1,
                         max_size=self.config.pool_max_size,
-                        command_timeout=self.config.pool_connection_timeout_minutes * 60,
+                        command_timeout=command_timeout,
                         timeout=self.config.connection_timeout_seconds,
                         statement_cache_size=0
                     )
                     self._pool_by_loop[loop_id] = pool
+                    self.logger.debug(f"Created connection pool with command_timeout={command_timeout}s")
         
-        async with pool.acquire() as conn:
-            yield conn
+        conn = None
+        try:
+            async with pool.acquire() as conn:
+                # Try to set session-level timeouts to prevent connection drops during long queries
+                # QuestDB may not support all PostgreSQL session settings, so we skip them if they fail
+                # The connection should still work even if these SET commands fail
+                try:
+                    # Set statement timeout to 1 hour (prevents query cancellation)
+                    # Use a short timeout for the SET command itself to avoid hanging
+                    try:
+                        await asyncio.wait_for(conn.execute("SET statement_timeout = '3600s'"), timeout=2.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError, Exception) as e:
+                        # QuestDB may not support this setting - that's okay, continue without it
+                        # Also handle CancelledError in case process is being terminated
+                        if isinstance(e, asyncio.CancelledError):
+                            raise  # Re-raise CancelledError to propagate cancellation
+                        self.logger.debug(f"Could not set statement_timeout (may not be supported by QuestDB): {e}")
+                    
+                    # Only try second SET if connection is still valid and not cancelled
+                    if not conn.is_closed():
+                        try:
+                            # Set idle timeout to 1 hour (prevents connection closure during long queries)
+                            await asyncio.wait_for(conn.execute("SET idle_in_transaction_session_timeout = '3600s'"), timeout=2.0)
+                        except (asyncio.TimeoutError, asyncio.CancelledError, Exception) as e:
+                            # QuestDB may not support this setting - that's okay, continue without it
+                            # Also handle CancelledError in case process is being terminated
+                            if isinstance(e, asyncio.CancelledError):
+                                raise  # Re-raise CancelledError to propagate cancellation
+                            self.logger.debug(f"Could not set idle_in_transaction_session_timeout (may not be supported by QuestDB): {e}")
+                except asyncio.CancelledError:
+                    # Process is being cancelled - re-raise to propagate
+                    raise
+                except Exception as e:
+                    # If connection is closed, we can't use it
+                    if conn.is_closed():
+                        self.logger.warning(f"Connection closed during timeout settings setup: {e}. Will retry with new connection.")
+                        raise
+                    # Other errors - log but continue, connection might still be usable
+                    self.logger.debug(f"Error setting session timeout settings (may not be supported by QuestDB): {e}")
+                
+                # Verify connection is still valid before yielding
+                if conn.is_closed():
+                    self.logger.warning("Connection is closed after setting timeout settings, will retry with new connection")
+                    raise Exception("Connection closed after SET commands")
+                
+                yield conn
+        except asyncio.CancelledError as e:
+            # Process is being cancelled - this can happen during:
+            # 1. Connection acquisition
+            # 2. Query execution (inside the with block)
+            # 3. Connection release (during __aexit__ cleanup)
+            # 
+            # When cancellation happens during cleanup (case 3), we suppress it to avoid
+            # "During handling of the above exception, another exception occurred" errors.
+            # The original CancelledError from the query has already been raised to the caller.
+            #
+            # Check if we're in cleanup phase by seeing if conn was set
+            if conn is not None:
+                # Connection was acquired, so cancellation likely happened during cleanup
+                # Suppress this to avoid double CancelledError
+                self.logger.debug("Connection release cancelled during cleanup (process terminating) - suppressing")
+                # Don't re-raise - the original CancelledError has already been propagated
+                return
+            else:
+                # Cancellation happened during acquisition - re-raise
+                self.logger.debug("Connection acquisition cancelled (process may be terminating)")
+                raise
+        except Exception:
+            # For other exceptions, let them propagate normally
+            raise
     
     async def close(self):
         """Close all connection pools."""
@@ -405,6 +477,31 @@ class CacheKeyGenerator:
         return f"stocks:options_md_index:{ticker}"
     
     @staticmethod
+    def distinct_expiration_dates(ticker: str) -> str:
+        """Generate cache key for cached distinct expiration dates query result.
+        
+        Args:
+            ticker: Stock ticker symbol
+        
+        Returns:
+            Cache key: stocks:distinct_exp_dates:{ticker}
+        """
+        return f"stocks:distinct_exp_dates:{ticker}"
+    
+    @staticmethod
+    def distinct_option_tickers(ticker: str, expiration_date: str) -> str:
+        """Generate cache key for cached distinct option_tickers query result.
+        
+        Args:
+            ticker: Stock ticker symbol
+            expiration_date: Expiration date in YYYY-MM-DD format
+        
+        Returns:
+            Cache key: stocks:distinct_option_tickers:{ticker}:{expiration_date}
+        """
+        return f"stocks:distinct_option_tickers:{ticker}:{expiration_date}"
+    
+    @staticmethod
     def financial_info(ticker: str, date: Optional[str] = None) -> str:
         """Generate cache key for financial info.
         
@@ -467,9 +564,23 @@ class RedisCache:
     """Handles Redis caching operations with support for Redis Cluster."""
     
     def __init__(self, redis_url: Optional[str], logger: logging.Logger):
+        # Get redis_url from parameter, environment variable, or default
         self.redis_url = redis_url or os.getenv('REDIS_URL', 'redis://localhost:6379/0')
         self.logger = logger
-        self.enable_cache = REDIS_AVAILABLE and redis_url is not None
+        # Enable cache if Redis is available AND we have a redis_url (from parameter or env)
+        # Check self.redis_url (not the parameter) since it might come from environment
+        self.enable_cache = REDIS_AVAILABLE and self.redis_url is not None
+        
+        # Log cache initialization status for debugging
+        if self.enable_cache:
+            self.logger.debug(f"RedisCache initialized: enable_cache=True, redis_url={self.redis_url}")
+        else:
+            if not REDIS_AVAILABLE:
+                self.logger.debug(f"RedisCache disabled: REDIS_AVAILABLE=False")
+            elif self.redis_url is None:
+                self.logger.debug(f"RedisCache disabled: redis_url is None (parameter was {redis_url}, env REDIS_URL not set)")
+            else:
+                self.logger.debug(f"RedisCache disabled: unknown reason (REDIS_AVAILABLE={REDIS_AVAILABLE}, redis_url={self.redis_url})")
         
         # Parse cluster nodes from URL
         # Use cluster mode if multiple nodes are provided (comma-separated) or if explicitly configured
@@ -572,6 +683,12 @@ class RedisCache:
                 if 'index' in decoded and decoded['index']:
                     df.index = pd.to_datetime(decoded['index'])
             
+            # Debug: Log columns retrieved from cache for options_data keys
+            if 'options_data' in key:
+                self.logger.debug(f"[CACHE DEBUG] Retrieved from cache {key}: columns={list(df.columns)}")
+                if 'write_timestamp' not in df.columns:
+                    self.logger.warning(f"[CACHE DEBUG] WARNING: 'write_timestamp' column NOT found in cached DataFrame for {key}!")
+            
             self._stats['hits'] += 1
             self.logger.debug(f"[CACHE HIT] Retrieved from cache: {key} (rows: {len(df)})")
             return df
@@ -653,6 +770,12 @@ class RedisCache:
                             df = pd.read_json(StringIO(json_str), orient='split')
                             if 'index' in decoded and decoded['index']:
                                 df.index = pd.to_datetime(decoded['index'])
+                        
+                        # Debug: Log columns retrieved from cache for options_data keys
+                        if 'options_data' in key:
+                            self.logger.debug(f"[CACHE DEBUG] Retrieved from cache (batch) {key}: columns={list(df.columns)}")
+                            if 'write_timestamp' not in df.columns:
+                                self.logger.warning(f"[CACHE DEBUG] WARNING: 'write_timestamp' column NOT found in cached DataFrame for {key}!")
                         
                         self._stats['hits'] += 1
                         result[key] = df
@@ -859,14 +982,45 @@ class RedisCache:
         try:
             client = await self._get_redis_client()
             if client is None:
+                self.logger.warning(f"Redis SADD: client unavailable for key {key}")
                 return 0
             
-            # Encode strings to bytes if needed
-            encoded_members = [m.encode('utf-8') if isinstance(m, str) else m for m in members]
-            added = await client.sadd(key, *encoded_members)
-            return added
+            # Batch large sets to avoid potential issues with too many arguments
+            # Redis can handle large argument lists, but batching is safer and allows better error handling
+            batch_size = 100
+            total_added = 0
+            members_list = list(members)
+            
+            for i in range(0, len(members_list), batch_size):
+                batch = members_list[i:i + batch_size]
+                # Encode strings to bytes if needed (Redis client with decode_responses=False expects bytes)
+                encoded_members = [m.encode('utf-8') if isinstance(m, str) else m for m in batch]
+                try:
+                    added = await client.sadd(key, *encoded_members)
+                    total_added += added
+                except Exception as batch_error:
+                    self.logger.error(f"Redis SADD batch error for key {key} (batch {i//batch_size + 1}): {batch_error}")
+                    # Continue with next batch instead of failing completely
+                    continue
+            
+            # Log the result for debugging
+            if total_added == 0:
+                # Check if key exists - if it does, members might already be in the set
+                exists = await client.exists(key)
+                if exists:
+                    # Verify by checking actual members count
+                    actual_count = await client.scard(key)
+                    self.logger.debug(f"Redis SADD: key={key}, no new members added (all {len(members)} members already exist, set has {actual_count} members)")
+                else:
+                    self.logger.warning(f"Redis SADD: key={key}, no members added and key doesn't exist (operation may have failed)")
+            else:
+                self.logger.info(f"Redis SADD: key={key}, added {total_added}/{len(members)} new members")
+            
+            return total_added
         except Exception as e:
-            self.logger.debug(f"Redis SADD error for key {key}: {e}")
+            self.logger.error(f"Redis SADD error for key {key}: {e}")
+            import traceback
+            self.logger.debug(f"Redis SADD traceback: {traceback.format_exc()}")
             self._stats['errors'] += 1
             return 0
     
@@ -889,9 +1043,41 @@ class RedisCache:
                 return False
             
             result = await client.expire(key, seconds)
+            if not result:
+                self.logger.warning(f"Redis EXPIRE: key={key}, TTL not set (key may not exist)")
+            else:
+                self.logger.debug(f"Redis EXPIRE: key={key}, TTL set to {seconds}s")
             return bool(result)
         except Exception as e:
-            self.logger.debug(f"Redis EXPIRE error for key {key}: {e}")
+            self.logger.error(f"Redis EXPIRE error for key {key}: {e}")
+            self._stats['errors'] += 1
+            return False
+    
+    async def delete(self, key: str) -> bool:
+        """Delete a Redis key.
+        
+        Args:
+            key: Redis key to delete
+        
+        Returns:
+            True if key was deleted, False otherwise
+        """
+        if not self.enable_cache:
+            return False
+        
+        try:
+            client = await self._get_redis_client()
+            if client is None:
+                return False
+            
+            result = await client.delete(key)
+            if result:
+                self.logger.debug(f"Redis DELETE: key={key} deleted")
+            else:
+                self.logger.debug(f"Redis DELETE: key={key} not found (may not exist)")
+            return bool(result)
+        except Exception as e:
+            self.logger.error(f"Redis DELETE error for key {key}: {e}")
             self._stats['errors'] += 1
             return False
     
@@ -1502,17 +1688,14 @@ class OptionsDataRepository(BaseRepository):
                     option_ticker_filter = f" AND option_ticker::text IN ({placeholders})"
             inner_where = where + option_ticker_filter
             
-            # Build the window function query
-            query = f"""SELECT * FROM (
-                            SELECT *, ROW_NUMBER() 
-                                        OVER (
-                                           PARTITION BY option_ticker, expiration_date, strike_price, 
-                                                        option_type ORDER BY write_timestamp DESC
-                                        ) as rn FROM options_data WHERE {inner_where}
-                        ) WHERE rn = 1"""
+            # Use QuestDB LATEST BY for better performance (optimized for time-series data)
+            # LATEST BY is much faster than window functions for getting latest records
+            query = f"""SELECT * FROM options_data
+                        WHERE {inner_where}
+                        LATEST ON timestamp PARTITION BY option_ticker, expiration_date, strike_price, option_type"""
                                             
             # Debug: Log the query and parameters
-            self.logger.debug(f"[DB QUERY] options data for {ticker}")
+            self.logger.debug(f"[DB QUERY] options data for {ticker} (using LATEST BY)")
             self.logger.debug(f"[DB QUERY] SQL: {query}")
             self.logger.debug(f"[DB QUERY] Params: {params}")
             
@@ -1532,6 +1715,13 @@ class OptionsDataRepository(BaseRepository):
                 if 'ticker' not in df.columns and not df.empty:
                     df['ticker'] = ticker
                 
+                # Ensure write_timestamp column exists - it should be in the query results
+                # If it's missing, this might indicate old data or a schema issue
+                # Add it with None values to ensure the column exists for caching
+                if 'write_timestamp' not in df.columns and not df.empty:
+                    self.logger.warning(f"[DB QUERY] WARNING: 'write_timestamp' column NOT found in query results for {ticker} (get method)! This may indicate old data or schema issue. Adding column with None values.")
+                    df['write_timestamp'] = None
+                
                 if 'timestamp' in df.columns:
                     df['timestamp'] = pd.to_datetime(df['timestamp'])
                     df.set_index('timestamp', inplace=True)
@@ -1539,6 +1729,9 @@ class OptionsDataRepository(BaseRepository):
                     # Ensure ticker column is still present after setting index
                     if 'ticker' not in df.columns:
                         df['ticker'] = ticker
+                    # Ensure write_timestamp column is still present after setting index
+                    if 'write_timestamp' not in df.columns:
+                        df['write_timestamp'] = None
                 return df
             except Exception as e:
                 self.logger.error(f"Error retrieving options data: {e}")
@@ -1630,6 +1823,9 @@ class OptionsDataRepository(BaseRepository):
                     option_ticker_filter = f" AND option_ticker::text IN ({placeholders})"
             inner_where = where + option_ticker_filter
             
+            # Build the window function query
+            # Note: Using window function instead of LATEST ON because we need to order by write_timestamp
+            # (not the designated timestamp column), and LATEST ON only works with the designated timestamp
             query = f"""SELECT * FROM (
   SELECT *, 
          ROW_NUMBER() OVER (PARTITION BY option_ticker, expiration_date, strike_price, option_type 
@@ -1640,122 +1836,141 @@ class OptionsDataRepository(BaseRepository):
 WHERE rn = 1"""
             
             # Debug: Log the query and parameters
-            self.logger.debug(f"[DB QUERY] latest options data for {ticker}")
+            self.logger.debug(f"[DB QUERY] latest options data for {ticker} (using window function for write_timestamp ordering)")
             self.logger.debug(f"[DB QUERY] SQL: {query}")
             self.logger.debug(f"[DB QUERY] Params: {params}")
             
+            rows = None
             try:
+                import time
+                query_start = time.time()
                 rows = await conn.fetch(query, *params)
-                self.logger.debug(f"[DB QUERY] Fetched {len(rows)} rows from options_data (latest) for {ticker}")
-                if not rows:
-                    return pd.DataFrame()
-                # Convert rows to dicts, handling any type issues
-                # First, normalize all columns to avoid type comparison issues
-                row_dicts = []
-                for r in rows:
-                    row_dict = {}
+                query_elapsed = time.time() - query_start
+                self.logger.info(f"[DB QUERY] Fetched {len(rows)} rows from options_data (latest) for {ticker} in {query_elapsed:.3f}s")
+            except (asyncpg.exceptions.InterfaceError, asyncpg.exceptions.ConnectionDoesNotExistError) as conn_error:
+                # Connection was released or closed - retry with a new connection
+                error_msg = str(conn_error).lower()
+                if "connection has been released" in error_msg or "connection was closed" in error_msg or "connection does not exist" in error_msg:
+                    self.logger.warning(f"Connection error during query for {ticker}: {conn_error}. Retrying with new connection...")
+                    # Retry once with a new connection
+                    async with self.connection.get_connection() as new_conn:
+                        query_start_retry = time.time()
+                        rows = await new_conn.fetch(query, *params)
+                        query_elapsed_retry = time.time() - query_start_retry
+                        self.logger.info(f"[DB QUERY] Fetched {len(rows)} rows from options_data (latest) for {ticker} in {query_elapsed_retry:.3f}s (retry)")
+                else:
+                    raise
+            
+            if not rows:
+                return pd.DataFrame()
+            
+            # Convert rows to dicts, handling any type issues
+            # First, normalize all columns to avoid type comparison issues
+            row_dicts = []
+            for r in rows:
+                row_dict = {}
+                try:
+                    # Convert asyncpg row to dict - this might raise an error if there are type issues
                     try:
-                        # Convert asyncpg row to dict - this might raise an error if there are type issues
-                        try:
-                            row_data = dict(r)
-                        except (TypeError, ValueError) as dict_error:
-                            # If dict conversion fails, try to handle it
-                            self.logger.warning(f"Error converting row to dict for {ticker}: {dict_error}. Trying alternative method...")
-                            # Try accessing row as a record
-                            row_data = {}
-                            for key in r.keys():
-                                try:
-                                    row_data[key] = r[key]
-                                except:
-                                    row_data[key] = None
-                        
-                        for key, value in row_data.items():
-                            # Normalize timestamp columns to avoid Timestamp/int comparison issues
-                            if 'timestamp' in key.lower() and value is not None:
-                                # Convert all timestamp values to pd.Timestamp or None
-                                if isinstance(value, pd.Timestamp):
-                                    row_dict[key] = value
-                                elif isinstance(value, (int, float)) and not pd.isna(value):
-                                    # Convert numeric timestamps - try different units
-                                    try:
-                                        # Try as seconds (Unix timestamp)
-                                        row_dict[key] = pd.to_datetime(value, unit='s', errors='coerce')
-                                    except:
-                                        try:
-                                            # Try as nanoseconds
-                                            row_dict[key] = pd.to_datetime(value, unit='ns', errors='coerce')
-                                        except:
-                                            # Try as microseconds
-                                            try:
-                                                row_dict[key] = pd.to_datetime(value, unit='us', errors='coerce')
-                                            except:
-                                                # Last resort: try to parse as-is
-                                                row_dict[key] = pd.to_datetime(value, errors='coerce')
-                                elif isinstance(value, (datetime, date)):
-                                    row_dict[key] = pd.to_datetime(value, errors='coerce')
-                                elif isinstance(value, str):
-                                    row_dict[key] = pd.to_datetime(value, errors='coerce')
-                                else:
-                                    # Unknown type, try to convert
-                                    try:
-                                        row_dict[key] = pd.to_datetime(value, errors='coerce')
-                                    except:
-                                        row_dict[key] = None
-                            else:
-                                # For non-timestamp columns, keep as-is but handle None/NaN
-                                if value is None or (isinstance(value, float) and pd.isna(value)):
-                                    row_dict[key] = None
-                                else:
-                                    row_dict[key] = value
-                    except Exception as e:
-                        # If there's an error converting a row, skip it
-                        self.logger.warning(f"Error processing row for {ticker}: {e}. Skipping row.")
-                        import traceback
-                        self.logger.debug(f"Traceback: {traceback.format_exc()}")
-                        continue
-                    row_dicts.append(row_dict)
-                
-                # Now create DataFrame with normalized types
-                if not row_dicts:
-                    return pd.DataFrame()
-                
-                # Before creating DataFrame, ensure all values in each column are of consistent type
-                # This prevents pandas from trying to compare Timestamp with int during DataFrame creation
-                if row_dicts:
-                    # Get all column names
-                    all_keys = set()
-                    for row_dict in row_dicts:
-                        all_keys.update(row_dict.keys())
+                        row_data = dict(r)
+                    except (TypeError, ValueError) as dict_error:
+                        # If dict conversion fails, try to handle it
+                        self.logger.warning(f"Error converting row to dict for {ticker}: {dict_error}. Trying alternative method...")
+                        # Try accessing row as a record
+                        row_data = {}
+                        for key in r.keys():
+                            try:
+                                row_data[key] = r[key]
+                            except:
+                                row_data[key] = None
                     
-                    # Normalize each column to ensure consistent types
-                    for key in all_keys:
-                        # Check if this is a timestamp column
-                        if 'timestamp' in key.lower():
-                            # Ensure all values in this column are pd.Timestamp or None
-                            for row_dict in row_dicts:
-                                if key in row_dict:
-                                    value = row_dict[key]
-                                    if value is not None and not isinstance(value, pd.Timestamp):
-                                        # Convert to Timestamp if not already
+                    for key, value in row_data.items():
+                        # Normalize timestamp columns to avoid Timestamp/int comparison issues
+                        if 'timestamp' in key.lower() and value is not None:
+                            # Convert all timestamp values to pd.Timestamp or None
+                            if isinstance(value, pd.Timestamp):
+                                row_dict[key] = value
+                            elif isinstance(value, (int, float)) and not pd.isna(value):
+                                # Convert numeric timestamps - try different units
+                                try:
+                                    # Try as seconds (Unix timestamp)
+                                    row_dict[key] = pd.to_datetime(value, unit='s', errors='coerce')
+                                except:
+                                    try:
+                                        # Try as nanoseconds
+                                        row_dict[key] = pd.to_datetime(value, unit='ns', errors='coerce')
+                                    except:
+                                        # Try as microseconds
                                         try:
-                                            if isinstance(value, (int, float)) and not pd.isna(value):
-                                                # Try different timestamp units
+                                            row_dict[key] = pd.to_datetime(value, unit='us', errors='coerce')
+                                        except:
+                                            # Last resort: try to parse as-is
+                                            row_dict[key] = pd.to_datetime(value, errors='coerce')
+                            elif isinstance(value, (datetime, date)):
+                                row_dict[key] = pd.to_datetime(value, errors='coerce')
+                            elif isinstance(value, str):
+                                row_dict[key] = pd.to_datetime(value, errors='coerce')
+                            else:
+                                # Unknown type, try to convert
+                                try:
+                                    row_dict[key] = pd.to_datetime(value, errors='coerce')
+                                except:
+                                    row_dict[key] = None
+                        else:
+                            # For non-timestamp columns, keep as-is but handle None/NaN
+                            if value is None or (isinstance(value, float) and pd.isna(value)):
+                                row_dict[key] = None
+                            else:
+                                row_dict[key] = value
+                except Exception as e:
+                    # If there's an error converting a row, skip it
+                    self.logger.warning(f"Error processing row for {ticker}: {e}. Skipping row.")
+                    import traceback
+                    self.logger.debug(f"Traceback: {traceback.format_exc()}")
+                    continue
+                row_dicts.append(row_dict)
+            
+            # Now create DataFrame with normalized types
+            if not row_dicts:
+                return pd.DataFrame()
+            
+            # Before creating DataFrame, ensure all values in each column are of consistent type
+            # This prevents pandas from trying to compare Timestamp with int during DataFrame creation
+            if row_dicts:
+                # Get all column names
+                all_keys = set()
+                for row_dict in row_dicts:
+                    all_keys.update(row_dict.keys())
+                
+                # Normalize each column to ensure consistent types
+                for key in all_keys:
+                    # Check if this is a timestamp column
+                    if 'timestamp' in key.lower():
+                        # Ensure all values in this column are pd.Timestamp or None
+                        for row_dict in row_dicts:
+                            if key in row_dict:
+                                value = row_dict[key]
+                                if value is not None and not isinstance(value, pd.Timestamp):
+                                    # Convert to Timestamp if not already
+                                    try:
+                                        if isinstance(value, (int, float)) and not pd.isna(value):
+                                            # Try different timestamp units
+                                            try:
+                                                row_dict[key] = pd.to_datetime(value, unit='s', errors='coerce')
+                                            except:
                                                 try:
-                                                    row_dict[key] = pd.to_datetime(value, unit='s', errors='coerce')
+                                                    row_dict[key] = pd.to_datetime(value, unit='ns', errors='coerce')
                                                 except:
                                                     try:
-                                                        row_dict[key] = pd.to_datetime(value, unit='ns', errors='coerce')
+                                                        row_dict[key] = pd.to_datetime(value, unit='us', errors='coerce')
                                                     except:
-                                                        try:
-                                                            row_dict[key] = pd.to_datetime(value, unit='us', errors='coerce')
-                                                        except:
-                                                            row_dict[key] = pd.to_datetime(value, errors='coerce')
-                                            else:
-                                                row_dict[key] = pd.to_datetime(value, errors='coerce')
-                                        except:
-                                            row_dict[key] = None
-                                    elif value is None:
+                                                        row_dict[key] = pd.to_datetime(value, errors='coerce')
+                                        else:
+                                            row_dict[key] = pd.to_datetime(value, errors='coerce')
+                                    except:
                                         row_dict[key] = None
+                                elif value is None:
+                                    row_dict[key] = None
                 
                 try:
                     # Before creating DataFrame, verify all timestamp columns are normalized
@@ -1839,6 +2054,13 @@ WHERE rn = 1"""
                 if 'ticker' not in df.columns and not df.empty:
                     df['ticker'] = ticker
                 
+                # Ensure write_timestamp column exists - it should be in the query results
+                # If it's missing, this might indicate old data or a schema issue
+                # Add it with None values to ensure the column exists for caching
+                if 'write_timestamp' not in df.columns and not df.empty:
+                    self.logger.warning(f"[DB QUERY] WARNING: 'write_timestamp' column NOT found in query results for {ticker}! This may indicate old data or schema issue. Adding column with None values.")
+                    df['write_timestamp'] = None
+                
                 if 'timestamp' in df.columns:
                     try:
                         # Before converting, ensure all values are already Timestamps or None
@@ -1864,6 +2086,9 @@ WHERE rn = 1"""
                             # Ensure ticker column is still present after setting index
                             if 'ticker' not in df.columns:
                                 df['ticker'] = ticker
+                            # Ensure write_timestamp column is still present after setting index
+                            if 'write_timestamp' not in df.columns:
+                                df['write_timestamp'] = None
                     except (TypeError, ValueError) as e:
                         # If timestamp conversion fails, drop the timestamp column and continue
                         self.logger.warning(f"Error processing timestamp column for {ticker}: {e}. Dropping timestamp column.")
@@ -1871,12 +2096,93 @@ WHERE rn = 1"""
                         self.logger.debug(f"Traceback: {traceback.format_exc()}")
                         if 'timestamp' in df.columns:
                             df = df.drop(columns=['timestamp'])
-                return df
+                    return df
+    
+    async def get_distinct_expiration_dates(self, ticker: str, 
+                                           expiration_date: Optional[str] = None,
+                                           start_datetime: Optional[str] = None,
+                                           end_datetime: Optional[str] = None) -> List[Any]:
+        """Get distinct expiration dates for a ticker (optimized query).
+        
+        This is much faster than fetching all data and extracting expiration dates.
+        Uses SELECT DISTINCT which is optimized in QuestDB.
+        
+        Args:
+            ticker: Stock ticker symbol
+            expiration_date: Optional expiration date in YYYY-MM-DD format
+            start_datetime: Optional start datetime for DB query
+            end_datetime: Optional end datetime for DB query
+        
+        Returns:
+            List of expiration dates (as datetime objects or strings)
+        """
+        async with self.connection.get_connection() as conn:
+            clauses = ["ticker = $1"]
+            params: List[Any] = [ticker]
+            next_param = 2
+            
+            if expiration_date:
+                clauses.append(f"expiration_date = ${next_param}")
+                params.append(date_parser.parse(expiration_date))
+                next_param += 1
+            
+            if start_datetime:
+                clauses.append(f"expiration_date >= ${next_param}")
+                params.append(date_parser.parse(start_datetime))
+                next_param += 1
+            
+            if end_datetime:
+                end_dt = date_parser.parse(end_datetime)
+                clauses.append(f"expiration_date <= ${next_param}")
+                params.append(end_dt)
+                next_param += 1
+            
+            where = " AND ".join(clauses)
+            
+            # Optimized query: SELECT DISTINCT expiration_date (much faster than fetching all rows)
+            query = f"""SELECT DISTINCT expiration_date 
+                        FROM options_data 
+                        WHERE {where}
+                        ORDER BY expiration_date"""
+            
+            self.logger.debug(f"[DB QUERY] Distinct expiration dates for {ticker}")
+            self.logger.debug(f"[DB QUERY] SQL: {query}")
+            self.logger.debug(f"[DB QUERY] Params: {params}")
+            
+            try:
+                import time
+                query_start = time.time()
+                rows = await conn.fetch(query, *params)
+                query_elapsed = time.time() - query_start
+                self.logger.info(f"[DB QUERY] Found {len(rows)} distinct expiration dates for {ticker} in {query_elapsed:.3f}s")
+                
+                # Extract expiration dates from rows
+                expiration_dates = []
+                for row in rows:
+                    # Row might be a dict or tuple depending on asyncpg version
+                    if isinstance(row, dict):
+                        exp_date = row.get('expiration_date')
+                    else:
+                        exp_date = row[0] if len(row) > 0 else None
+                    
+                    if exp_date:
+                        expiration_dates.append(exp_date)
+                
+                return expiration_dates
+            except asyncio.TimeoutError as e:
+                self.logger.error(f"Query timeout retrieving distinct expiration dates for {ticker}: {e}")
+                self.logger.error(f"Query took longer than connection timeout. Consider increasing timeout or optimizing query.")
+                return []
+            except asyncpg.exceptions.ConnectionDoesNotExistError as e:
+                self.logger.error(f"Connection closed during query for {ticker}: {e}")
+                self.logger.error(f"This usually means the query took longer than the connection timeout.")
+                self.logger.error(f"Consider: 1) Increasing connection timeout, 2) Optimizing the query, 3) Adding indexes")
+                return []
             except Exception as e:
-                self.logger.error(f"Error retrieving latest options data for {ticker}: {e}")
+                self.logger.error(f"Error retrieving distinct expiration dates for {ticker}: {e}")
                 import traceback
                 self.logger.debug(f"Traceback: {traceback.format_exc()}")
-                return pd.DataFrame()
+                return []
 
 
 class FinancialInfoRepository(BaseRepository):
@@ -2223,7 +2529,8 @@ class StockDataService:
             
             historical_df = await self.daily_price_repo.get(ticker, historical_start, historical_end, interval)
             
-            if not historical_df.empty:
+            # Check if historical_df is None or empty
+            if historical_df is not None and not historical_df.empty:
                 historical_df.reset_index(inplace=True)
                 historical_df.columns = [col.lower() for col in historical_df.columns]
                 
@@ -2422,29 +2729,152 @@ class OptionsDataService:
         metadata_key = CacheKeyGenerator.options_metadata(ticker, expiration_date)
         ttl = self._get_random_ttl()
         
-        # Add all option_tickers to the SET
-        await self.cache.sadd(metadata_key, *option_tickers)
-        # Set TTL
-        await self.cache.expire(metadata_key, ttl)
+        # Get existing metadata to compare (to detect truly new option_tickers)
+        existing_metadata = await self._get_options_metadata(ticker, expiration_date)
+        new_option_tickers = set()
+        if existing_metadata:
+            # Only consider option_tickers that are truly new (not in existing metadata)
+            new_option_tickers = option_tickers - existing_metadata
+        # If existing_metadata is None/empty, this is the first time setting metadata,
+        # so we don't need to invalidate the distinct cache (it will be set fresh from DB query)
+        
+        # Add all option_tickers to the SET and verify
+        # Convert Set to list for consistent handling
+        option_tickers_list = list(option_tickers)
+        added_count = await self.cache.sadd(metadata_key, *option_tickers_list)
+        
+        # Only invalidate distinct option_tickers cache if we're adding truly new option_tickers
+        # (not when setting metadata for the first time)
+        if new_option_tickers and existing_metadata:
+            # Check if the distinct cache exists and has data before invalidating
+            cache_key = CacheKeyGenerator.distinct_option_tickers(ticker, expiration_date)
+            cached_df = await self.cache.get(cache_key)
+            if cached_df is not None and not cached_df.empty:
+                cached_option_tickers = set(cached_df['option_ticker'].astype(str).tolist())
+                # Only invalidate if the new option_tickers are not in the cached list
+                new_tickers_not_in_cache = new_option_tickers - cached_option_tickers
+                if new_tickers_not_in_cache:
+                    await self.cache.delete(cache_key)
+                    self.logger.info(f"[CACHE INVALIDATION] Invalidated distinct option_tickers cache for {ticker}:{expiration_date} (new tickers: {len(new_tickers_not_in_cache)})")
+        
+        # Verify metadata SET was created correctly BEFORE setting TTL
+        verify_metadata = await self.cache.smembers(metadata_key)
+        if verify_metadata and len(verify_metadata) > 0:
+            # Key exists and has members - now set TTL
+            expire_result = await self.cache.expire(metadata_key, ttl)
+            if not expire_result:
+                self.logger.warning(f"[CACHE METADATA] EXPIRE failed for {metadata_key} (unexpected - key exists)")
+            else:
+                self.logger.debug(f"[CACHE METADATA] Set TTL={ttl}s for {metadata_key}")
+            
+            if added_count == 0:
+                self.logger.debug(f"[CACHE METADATA] SADD returned 0 for {metadata_key} (all {len(option_tickers_list)} members already exist, verified {len(verify_metadata)} members in set)")
+            else:
+                self.logger.info(f"[CACHE METADATA] Added {added_count}/{len(option_tickers_list)} new members to {metadata_key} (verified {len(verify_metadata)} total members)")
+        else:
+            # Key doesn't exist or is empty - retry
+            self.logger.warning(f"[CACHE METADATA] Verification failed: metadata SET {metadata_key} is empty or doesn't exist after SADD (added={added_count}), retrying...")
+            # Retry once with a small delay to allow Redis to process
+            import asyncio
+            await asyncio.sleep(0.01)  # 10ms delay
+            added_count_retry = await self.cache.sadd(metadata_key, *option_tickers_list)
+            verify_metadata_retry = await self.cache.smembers(metadata_key)
+            if verify_metadata_retry and len(verify_metadata_retry) > 0:
+                # Now set TTL after successful retry
+                expire_result_retry = await self.cache.expire(metadata_key, ttl)
+                if expire_result_retry:
+                    self.logger.info(f"[CACHE METADATA] Retry successful: {metadata_key} now has {len(verify_metadata_retry)} members, TTL set to {ttl}s")
+                else:
+                    self.logger.warning(f"[CACHE METADATA] Retry successful but EXPIRE failed: {metadata_key} has {len(verify_metadata_retry)} members")
+            else:
+                self.logger.error(f"[CACHE METADATA] Retry failed: {metadata_key} still empty after retry (added={added_count_retry})")
         
         # Update expiration date index (for fast discovery without SCAN)
         index_key = CacheKeyGenerator.options_metadata_index(ticker)
-        await self.cache.sadd(index_key, expiration_date)
-        # Set index TTL to max of metadata TTLs (use same random TTL)
-        await self.cache.expire(index_key, ttl)
-        # Verify the index was updated
+        index_added = await self.cache.sadd(index_key, expiration_date)
+        
+        # Verify index was updated BEFORE setting TTL
         verify_index = await self.cache.smembers(index_key)
-        if expiration_date in verify_index:
-            self.logger.debug(f"[CACHE METADATA] Set metadata for {ticker}:{expiration_date} with {len(option_tickers)} option_tickers (TTL: {ttl}s), index verified")
+        if verify_index and expiration_date in verify_index:
+            # Index exists and contains the date - now set TTL
+            index_expire_result = await self.cache.expire(index_key, ttl)
+            if not index_expire_result:
+                self.logger.warning(f"[CACHE METADATA] EXPIRE failed for index {index_key} (unexpected - key exists)")
+            else:
+                self.logger.debug(f"[CACHE METADATA] Set index TTL={ttl}s for {index_key}")
+            
+            if index_added == 0:
+                self.logger.debug(f"[CACHE METADATA] Expiration date {expiration_date} already in index {index_key} (verified {len(verify_index)} dates in index)")
+            else:
+                self.logger.info(f"[CACHE METADATA] Added expiration date {expiration_date} to index {index_key} (verified {len(verify_index)} dates in index)")
+                # New expiration date was added - invalidate distinct expiration dates cache
+                # Only invalidate if the cache exists and the date is truly new
+                cache_key = CacheKeyGenerator.distinct_expiration_dates(ticker)
+                cached_df = await self.cache.get(cache_key)
+                if cached_df is not None and not cached_df.empty:
+                    cached_exp_dates = set(cached_df['expiration_date'].astype(str).str[:10].tolist())
+                    if expiration_date not in cached_exp_dates:
+                        await self.cache.delete(cache_key)
+                        self.logger.info(f"[CACHE INVALIDATION] Invalidated distinct expiration dates cache for {ticker} (new date: {expiration_date})")
         else:
-            self.logger.warning(f"[CACHE METADATA] Index verification failed for {ticker}:{expiration_date}, retrying...")
-            await self.cache.sadd(index_key, expiration_date)
-            await self.cache.expire(index_key, ttl)
+            # Index doesn't contain the date - retry
+            self.logger.warning(f"[CACHE METADATA] Index verification failed for {ticker}:{expiration_date} (added={index_added}), retrying...")
+            import asyncio
+            await asyncio.sleep(0.01)  # 10ms delay
+            index_added_retry = await self.cache.sadd(index_key, expiration_date)
+            verify_index_retry = await self.cache.smembers(index_key)
+            if verify_index_retry and expiration_date in verify_index_retry:
+                # Now set TTL after successful retry
+                index_expire_result_retry = await self.cache.expire(index_key, ttl)
+                if index_expire_result_retry:
+                    self.logger.info(f"[CACHE METADATA] Index retry successful for {ticker}:{expiration_date}, verified {len(verify_index_retry)} dates in index, TTL set to {ttl}s")
+                else:
+                    self.logger.warning(f"[CACHE METADATA] Index retry successful but EXPIRE failed: {index_key} has {len(verify_index_retry)} dates")
+            else:
+                self.logger.error(f"[CACHE METADATA] Index retry failed for {ticker}:{expiration_date}, index may not be available (added={index_added_retry})")
         
         self.logger.debug(f"[CACHE METADATA] Set metadata for {ticker}:{expiration_date} with {len(option_tickers)} option_tickers (TTL: {ttl}s)")
     
+    async def _invalidate_distinct_caches_if_new_data(self, ticker: str, new_exp_dates: Set[str], 
+                                                      new_option_tickers_by_date: Dict[str, Set[str]]) -> None:
+        """Invalidate distinct expiration dates and option_tickers caches if new data is detected.
+        
+        Args:
+            ticker: Stock ticker symbol
+            new_exp_dates: Set of new expiration dates found in the saved data
+            new_option_tickers_by_date: Dict mapping expiration_date -> set of new option_tickers
+        """
+        # Check if there are new expiration dates
+        if new_exp_dates:
+            # Get cached distinct expiration dates
+            cache_key = CacheKeyGenerator.distinct_expiration_dates(ticker)
+            cached_df = await self.cache.get(cache_key)
+            if cached_df is not None and not cached_df.empty:
+                cached_exp_dates = set(cached_df['expiration_date'].astype(str).str[:10].tolist())
+                # Check if any new expiration dates are not in the cached list
+                new_dates_not_in_cache = new_exp_dates - cached_exp_dates
+                if new_dates_not_in_cache:
+                    self.logger.info(f"[CACHE INVALIDATION] Invalidating distinct expiration dates cache for {ticker} (new dates: {new_dates_not_in_cache})")
+                    await self.cache.delete(cache_key)
+        
+        # Check if there are new option_tickers for each expiration date
+        for exp_date_str, new_option_tickers in new_option_tickers_by_date.items():
+            if new_option_tickers:
+                # Get cached distinct option_tickers for this expiration date
+                cache_key = CacheKeyGenerator.distinct_option_tickers(ticker, exp_date_str)
+                cached_df = await self.cache.get(cache_key)
+                if cached_df is not None and not cached_df.empty:
+                    cached_option_tickers = set(cached_df['option_ticker'].astype(str).tolist())
+                    # Check if any new option_tickers are not in the cached list
+                    new_tickers_not_in_cache = new_option_tickers - cached_option_tickers
+                    if new_tickers_not_in_cache:
+                        self.logger.info(f"[CACHE INVALIDATION] Invalidating distinct option_tickers cache for {ticker}:{exp_date_str} (new tickers: {len(new_tickers_not_in_cache)})")
+                        await self.cache.delete(cache_key)
+    
     async def _update_options_metadata_on_save(self, ticker: str, df: pd.DataFrame) -> None:
         """Update options metadata after saving options data.
+        
+        Also invalidates distinct expiration dates and option_tickers caches if new data is detected.
         
         Args:
             ticker: Stock ticker symbol
@@ -2453,8 +2883,11 @@ class OptionsDataService:
         if df.empty:
             return
         
-        # Group by expiration_date
+        # Group by expiration_date and collect new data
         expiration_groups = {}
+        new_exp_dates = set()
+        new_option_tickers_by_date = {}
+        
         for idx, row in df.iterrows():
             if 'option_ticker' in row and 'expiration_date' in row:
                 opt_ticker = row['option_ticker']
@@ -2463,7 +2896,15 @@ class OptionsDataService:
                 
                 if exp_date_str not in expiration_groups:
                     expiration_groups[exp_date_str] = set()
-                expiration_groups[exp_date_str].add(str(opt_ticker))
+                    new_exp_dates.add(exp_date_str)
+                    new_option_tickers_by_date[exp_date_str] = set()
+                
+                opt_ticker_str = str(opt_ticker)
+                expiration_groups[exp_date_str].add(opt_ticker_str)
+                new_option_tickers_by_date[exp_date_str].add(opt_ticker_str)
+        
+        # Check for new data and invalidate caches if needed
+        await self._invalidate_distinct_caches_if_new_data(ticker, new_exp_dates, new_option_tickers_by_date)
         
         # Update metadata for each expiration_date
         for exp_date_str, option_tickers in expiration_groups.items():
@@ -2475,6 +2916,129 @@ class OptionsDataService:
             
             # Save updated metadata
             await self._set_options_metadata(ticker, exp_date_str, option_tickers)
+    
+    async def _get_cached_distinct_expiration_dates(self, ticker: str,
+                                                    expiration_date: Optional[str] = None,
+                                                    start_datetime: Optional[str] = None,
+                                                    end_datetime: Optional[str] = None) -> List[Any]:
+        """Get distinct expiration dates with caching (1 hour TTL).
+        
+        Checks cache first, then queries DB if not found or if filters are applied.
+        Only caches the unfiltered result (no expiration_date/start_datetime/end_datetime filters).
+        
+        Args:
+            ticker: Stock ticker symbol
+            expiration_date: Optional expiration date filter (if provided, bypasses cache)
+            start_datetime: Optional start datetime filter (if provided, bypasses cache)
+            end_datetime: Optional end datetime filter (if provided, bypasses cache)
+        
+        Returns:
+            List of expiration dates (as datetime objects or strings)
+        """
+        # Only cache unfiltered queries (no filters applied)
+        if expiration_date is None and start_datetime is None and end_datetime is None:
+            cache_key = CacheKeyGenerator.distinct_expiration_dates(ticker)
+            cached_df = await self.cache.get(cache_key)
+            if cached_df is not None and not cached_df.empty:
+                # Extract expiration dates from cached DataFrame
+                exp_dates = cached_df['expiration_date'].tolist()
+                self.logger.debug(f"[CACHE] Found cached distinct expiration dates for {ticker}: {len(exp_dates)} dates")
+                return exp_dates
+        
+        # Cache miss or filters applied - query DB
+        self.logger.debug(f"[CACHE] Cache miss for distinct expiration dates for {ticker}, querying DB")
+        expiration_dates = await self.options_repo.get_distinct_expiration_dates(
+            ticker, expiration_date=expiration_date, start_datetime=start_datetime, end_datetime=end_datetime
+        )
+        
+        # Cache the result if no filters were applied (1 hour TTL)
+        if expiration_date is None and start_datetime is None and end_datetime is None and expiration_dates:
+            cache_key = CacheKeyGenerator.distinct_expiration_dates(ticker)
+            # Convert to DataFrame for caching, filtering out None/invalid dates
+            import pandas as pd
+            valid_dates = [d for d in expiration_dates if d is not None]
+            if valid_dates:
+                cache_df = pd.DataFrame({'expiration_date': valid_dates})
+                await self.cache.set(cache_key, cache_df, ttl=3600)  # 1 hour TTL
+                self.logger.debug(f"[CACHE] Cached distinct expiration dates for {ticker}: {len(valid_dates)} dates (TTL: 3600s)")
+        
+        return expiration_dates
+    
+    async def _get_cached_distinct_option_tickers(self, ticker: str, expiration_date: str,
+                                                  start_datetime: Optional[str] = None,
+                                                  end_datetime: Optional[str] = None) -> Set[str]:
+        """Get distinct option_tickers with caching (1 hour TTL).
+        
+        Checks cache first, then queries DB if not found or if filters are applied.
+        Only caches the unfiltered result (no start_datetime/end_datetime filters).
+        
+        Args:
+            ticker: Stock ticker symbol
+            expiration_date: Expiration date in YYYY-MM-DD format
+            start_datetime: Optional start datetime filter (if provided, bypasses cache)
+            end_datetime: Optional end datetime filter (if provided, bypasses cache)
+        
+        Returns:
+            Set of option_tickers
+        """
+        # Only cache unfiltered queries (no filters applied)
+        if start_datetime is None and end_datetime is None:
+            cache_key = CacheKeyGenerator.distinct_option_tickers(ticker, expiration_date)
+            cached_df = await self.cache.get(cache_key)
+            if cached_df is not None and not cached_df.empty:
+                # Extract option_tickers from cached DataFrame
+                option_tickers = set(cached_df['option_ticker'].astype(str).tolist())
+                self.logger.debug(f"[CACHE] Found cached distinct option_tickers for {ticker}:{expiration_date}: {len(option_tickers)} tickers")
+                return option_tickers
+        
+        # Cache miss or filters applied - query DB
+        self.logger.debug(f"[CACHE] Cache miss for distinct option_tickers for {ticker}:{expiration_date}, querying DB")
+        option_tickers = set()  # Initialize outside the async with block
+        async with self.options_repo.connection.get_connection() as conn:
+            clauses = ["ticker = $1", "expiration_date = $2"]
+            params: List[Any] = [ticker, date_parser.parse(expiration_date)]
+            next_param = 3
+            
+            if start_datetime:
+                clauses.append(f"expiration_date >= ${next_param}")
+                params.append(date_parser.parse(start_datetime))
+                next_param += 1
+            
+            if end_datetime:
+                clauses.append(f"expiration_date <= ${next_param}")
+                params.append(date_parser.parse(end_datetime))
+                next_param += 1
+            
+            where = " AND ".join(clauses)
+            
+            # Optimized query: SELECT DISTINCT option_ticker (much faster than fetching all rows)
+            query = f"""SELECT DISTINCT option_ticker 
+                        FROM options_data 
+                        WHERE {where}"""
+            
+            try:
+                rows = await conn.fetch(query, *params)
+                for row in rows:
+                    if isinstance(row, dict):
+                        opt_ticker = row.get('option_ticker')
+                    else:
+                        opt_ticker = row[0] if len(row) > 0 else None
+                    if opt_ticker:
+                        option_tickers.add(str(opt_ticker))
+            except Exception as e:
+                self.logger.error(f"Error fetching distinct option_tickers for {ticker}:{expiration_date}: {e}")
+                option_tickers = set()
+        
+        # Cache the result if no filters were applied (1 hour TTL)
+        if start_datetime is None and end_datetime is None and option_tickers:
+            cache_key = CacheKeyGenerator.distinct_option_tickers(ticker, expiration_date)
+            # Convert to DataFrame for caching
+            import pandas as pd
+            cache_df = pd.DataFrame({'option_ticker': list(option_tickers)})
+            await self.cache.set(cache_key, cache_df, ttl=3600)  # 1 hour TTL
+            self.logger.debug(f"[CACHE] Cached distinct option_tickers for {ticker}:{expiration_date}: {len(option_tickers)} tickers (TTL: 3600s)")
+        
+        return option_tickers
     
     async def _get_or_fetch_options_metadata(self, ticker: str, expiration_date: str,
                                              start_datetime: Optional[str] = None,
@@ -2490,20 +3054,16 @@ class OptionsDataService:
         Returns:
             Set of option_tickers
         """
-        # Try to get from cache first
+        # Try to get from metadata cache first
         metadata = await self._get_options_metadata(ticker, expiration_date)
         if metadata is not None:
             return metadata
         
-        # Metadata not in cache, fetch from DB
-        self.logger.debug(f"[CACHE METADATA] Metadata missing for {ticker}:{expiration_date}, fetching from DB")
-        temp_df = await self.options_repo.get(ticker, expiration_date=expiration_date, start_datetime=start_datetime, end_datetime=end_datetime)
-        
-        option_tickers = set()
-        if not temp_df.empty and 'option_ticker' in temp_df.columns:
-            option_tickers = set(temp_df['option_ticker'].unique().astype(str))
+        # Metadata not in cache, try cached distinct option_tickers query
+        option_tickers = await self._get_cached_distinct_option_tickers(ticker, expiration_date, start_datetime, end_datetime)
         
         if option_tickers:
+            # Save to metadata cache for faster future lookups
             await self._set_options_metadata(ticker, expiration_date, option_tickers)
         
         return option_tickers
@@ -2599,19 +3159,15 @@ class OptionsDataService:
                 if not unique_exp_dates or not option_tickers:
                     # No metadata found in cache, fall back to DB query
                     if not unique_exp_dates:
-                        self.logger.debug(f"[CACHE METADATA] No metadata index found for {ticker} in date range, querying DB")
-                    temp_df = await self.options_repo.get(ticker, expiration_date=expiration_date, start_datetime=start_datetime, end_datetime=end_datetime)
-                    if not temp_df.empty and 'option_ticker' in temp_df.columns and 'expiration_date' in temp_df.columns:
-                        # Get unique expiration_dates
-                        unique_exp_dates = set()
-                        for idx, row in temp_df.iterrows():
-                            exp_date = row.get('expiration_date')
-                            if exp_date:
-                                if isinstance(exp_date, (datetime, pd.Timestamp)):
-                                    exp_date_str = exp_date.strftime('%Y-%m-%d')
-                                else:
-                                    exp_date_str = str(exp_date)[:10]
-                                unique_exp_dates.add(exp_date_str)
+                        self.logger.debug(f"[CACHE METADATA] No metadata index found for {ticker} in date range, querying DB for distinct expiration dates")
+                    # Use cached method to get distinct expiration dates (checks cache first, then queries DB)
+                    unique_exp_dates = await self._get_cached_distinct_expiration_dates(
+                        ticker, expiration_date=expiration_date, start_datetime=start_datetime, end_datetime=end_datetime
+                    )
+                    if unique_exp_dates:
+                        # Convert to set of strings
+                        unique_exp_dates = {exp_date.strftime('%Y-%m-%d') if isinstance(exp_date, (datetime, pd.Timestamp)) else str(exp_date)[:10] 
+                                          for exp_date in unique_exp_dates if exp_date}
                         
                         # Update expiration date index with all discovered dates (for fast future lookups)
                         if unique_exp_dates:
@@ -2742,7 +3298,7 @@ class OptionsDataService:
         index_elapsed = time.time() - index_start
         self.logger.info(f"[CACHE METADATA] Redis SMEMBERS (index) for {ticker}: {index_elapsed:.3f}s, found {len(expiration_dates_set)} expiration_dates (key: {index_key})")
         if not expiration_dates_set:
-            self.logger.warning(f"[CACHE METADATA] Metadata index is empty for {ticker} (key: {index_key}), will query DB")
+            self.logger.debug(f"[CACHE METADATA] Metadata index is empty for {ticker} (key: {index_key}), will query DB")
         
         if not expiration_dates_set:
             elapsed = time.time() - start_time
@@ -2780,16 +3336,41 @@ class OptionsDataService:
         await self.options_repo.save(ticker, df)
         
         # Cache each option individually (cache on write, fire-and-forget)
+        # IMPORTANT: The repository's save() method adds write_timestamp to df_copy before saving,
+        # but we're caching the original df. We need to ensure write_timestamp is in the cached data.
+        # Add write_timestamp to df if it's missing (it should have been added by the repository)
         if not df.empty:
+            # Ensure write_timestamp exists in the DataFrame before caching
+            # The repository adds it, but if the original df doesn't have it, add it here
+            if 'write_timestamp' not in df.columns:
+                # Repository should have added it, but if not, add it with current time
+                self.logger.warning(f"[CACHE DEBUG] write_timestamp missing from df in save() for {ticker}, adding current time")
+                df['write_timestamp'] = datetime.now(timezone.utc)
+            
             for idx, row in df.iterrows():
                 if 'option_ticker' in row and 'expiration_date' in row:
                     opt_ticker = row['option_ticker']
                     exp_date = row['expiration_date']
                     exp_date_str = exp_date.strftime('%Y-%m-%d') if isinstance(exp_date, (datetime, pd.Timestamp)) else str(exp_date)[:10]
                     cache_key = CacheKeyGenerator.options_data(ticker, exp_date_str, opt_ticker)
-                    row_df = pd.DataFrame([row]).set_index(pd.Index([idx]))
+                    
+                    # Convert row to dict to ensure all columns are preserved
+                    row_dict = row.to_dict()
+                    
+                    # CRITICAL: Ensure write_timestamp is in row_dict
+                    if 'write_timestamp' not in row_dict and 'write_timestamp' in df.columns:
+                        row_dict['write_timestamp'] = df.loc[idx, 'write_timestamp']
+                    
+                    row_df = pd.DataFrame([row_dict])
+                    row_df.index = pd.Index([idx])
+                    
+                    # Final check: ensure write_timestamp is in row_df
+                    if 'write_timestamp' not in row_df.columns:
+                        self.logger.warning(f"[CACHE DEBUG] write_timestamp missing from row_df in save() for {cache_key}, adding current time")
+                        row_df['write_timestamp'] = datetime.now(timezone.utc)
+                    
                     self.cache.set_fire_and_forget(cache_key, row_df)
-                    self.logger.debug(f"[CACHE SET] Cached options data on write (fire-and-forget): {cache_key} (rows: 1)")
+                    self.logger.debug(f"[CACHE SET] Cached options data on write (fire-and-forget): {cache_key} (rows: 1, columns: {list(row_df.columns)})")
         
         # Update metadata cache (fire-and-forget)
         if not df.empty:
@@ -2859,10 +3440,29 @@ class OptionsDataService:
         cache_elapsed = time.time() - cache_start
         
         # Process regular cache results
-        cached_data = {k: v for k, v in cached_results.items() if v is not None and not v.empty}
+        # Also check for stale cache entries missing write_timestamp column
+        cached_data = {}
+        stale_cache_keys = []
+        for k, v in cached_results.items():
+            if v is not None and not v.empty:
+                # Check if cached data is missing write_timestamp (stale cache from before column was added)
+                if 'write_timestamp' not in v.columns:
+                    self.logger.debug(f"[CACHE] Stale cache entry detected (missing write_timestamp): {k}, treating as cache miss")
+                    stale_cache_keys.append(k)
+                    # Don't include in cached_data - treat as miss so it gets refreshed from DB
+                else:
+                    cached_data[k] = v
+        
+        # Invalidate stale cache entries
+        if stale_cache_keys:
+            self.logger.debug(f"[CACHE] Invalidating {len(stale_cache_keys)} stale cache entries (missing write_timestamp) for {ticker}")
+            for stale_key in stale_cache_keys:
+                await self.cache.delete(stale_key)
+        
         cache_hits = len(cached_data)
+        # Add stale cache keys to misses count
         cache_misses = len(cache_keys) - cache_hits
-        self.logger.info(f"[CACHE] Cache batch get for {ticker}: {cache_elapsed:.3f}s, found {cache_hits}/{len(cache_keys)} (hits: {cache_hits}, misses: {cache_misses})")
+        self.logger.debug(f"[CACHE] Cache batch get for {ticker}: {cache_elapsed:.3f}s, found {cache_hits}/{len(cache_keys)} (hits: {cache_hits}, misses: {cache_misses}, stale: {len(stale_cache_keys)})")
         if cache_misses > 0 and cache_hits == 0:
             # Log sample of missing keys for debugging
             sample_missing = list(cache_keys[:5])
@@ -2956,6 +3556,11 @@ class OptionsDataService:
             self.logger.debug(f"[TIMING] DB query for {ticker}: {db_elapsed:.3f}s, returned {len(df)} rows")
             
             if not df.empty:
+                # Log columns in the DataFrame before caching
+                self.logger.debug(f"[CACHE DEBUG] DataFrame columns before caching for {ticker}: {list(df.columns)}")
+                if 'write_timestamp' not in df.columns:
+                    self.logger.warning(f"[CACHE DEBUG] WARNING: 'write_timestamp' column NOT found in DataFrame for {ticker} before caching!")
+                
                 # Cache each option individually
                 cache_write_start = time.time()
                 for idx, row in df.iterrows():
@@ -2964,12 +3569,47 @@ class OptionsDataService:
                         exp_date = row['expiration_date']
                         exp_date_str = exp_date.strftime('%Y-%m-%d') if isinstance(exp_date, (datetime, pd.Timestamp)) else str(exp_date)[:10]
                         cache_key = CacheKeyGenerator.options_data(ticker, exp_date_str, opt_ticker)
-                        row_df = pd.DataFrame([row]).set_index(pd.Index([idx]))
+                        
+                        # Convert row Series to dict to ensure all columns are included
+                        # If row is a Series from iterrows(), it should include all columns except the index
+                        row_dict = row.to_dict()
+                        
+                        # CRITICAL: Ensure write_timestamp is preserved
+                        # Check if write_timestamp exists in the original DataFrame but not in row_dict
+                        if 'write_timestamp' in df.columns and 'write_timestamp' not in row_dict:
+                            # This shouldn't happen, but if it does, get it from the original DataFrame
+                            self.logger.warning(f"[CACHE DEBUG] write_timestamp missing from row_dict for {cache_key}, retrieving from DataFrame")
+                            row_dict['write_timestamp'] = df.loc[idx, 'write_timestamp'] if 'write_timestamp' in df.columns else None
+                        
+                        # Add the index value as a column if it's not already there
+                        if df.index.name and df.index.name not in row_dict:
+                            row_dict[df.index.name] = idx
+                        
+                        # Create DataFrame from dict to ensure all columns are preserved
+                        row_df = pd.DataFrame([row_dict])
+                        
+                        # CRITICAL: Double-check that write_timestamp is in row_df
+                        # If it was in the original DataFrame but missing from row_df, add it
+                        if 'write_timestamp' in df.columns and 'write_timestamp' not in row_df.columns:
+                            self.logger.warning(f"[CACHE DEBUG] write_timestamp missing from row_df for {cache_key}, adding from DataFrame")
+                            row_df['write_timestamp'] = df.loc[idx, 'write_timestamp'] if 'write_timestamp' in df.columns else None
+                        
+                        # Set index to match original DataFrame's index structure
+                        if isinstance(df.index, pd.DatetimeIndex):
+                            row_df.index = pd.DatetimeIndex([idx])
+                        else:
+                            row_df.index = pd.Index([idx])
+                        
+                        # Final verification: Log columns in the row_df being cached
+                        if 'write_timestamp' not in row_df.columns:
+                            self.logger.warning(f"[CACHE DEBUG] WARNING: 'write_timestamp' column NOT found in row_df for {cache_key} before caching! Row columns: {list(row_df.columns)}, DataFrame columns: {list(df.columns)}")
+                            # Last resort: add it with None if it's still missing
+                            row_df['write_timestamp'] = None
                         
                         if use_fire_and_forget:
                             self.cache.set_fire_and_forget(cache_key, row_df)
                             if deduplicate:
-                                self.logger.debug(f"[CACHE SET] Cached latest options data on read (fire-and-forget): {cache_key} (rows: 1)")
+                                self.logger.debug(f"[CACHE SET] Cached latest options data on read (fire-and-forget): {cache_key} (rows: 1, columns: {list(row_df.columns)})")
                         else:
                             await self.cache.set(cache_key, row_df)
                         
@@ -3469,6 +4109,20 @@ class StockQuestDB(StockDBBase):
             await conn.execute(StockQuestDB.create_table_realtime_data_sql)
             await conn.execute(StockQuestDB.create_table_options_data_sql)
             await conn.execute(StockQuestDB.create_table_financial_info_sql)
+            
+            # Create indexes for options_data table (if any)
+            if StockQuestDB.create_options_data_indexes_sql:
+                self.logger.debug("Creating indexes for options_data table...")
+                for index_sql in StockQuestDB.create_options_data_indexes_sql:
+                    try:
+                        await conn.execute(index_sql)
+                        self.logger.debug(f"Created index: {index_sql}")
+                    except Exception as e:
+                        # Index might already exist, log as debug
+                        self.logger.debug(f"Index creation (may already exist): {e}")
+            else:
+                self.logger.debug("Skipping index creation for options_data (QuestDB doesn't support indexes on non-designated TIMESTAMP columns)")
+                self.logger.debug("Note: The designated timestamp column `timestamp` is automatically indexed by QuestDB")
         
         self._tables_ensured = True
         self._tables_ensured_at = datetime.now()
@@ -3580,27 +4234,40 @@ class StockQuestDB(StockDBBase):
     
     async def execute_select_sql(self, sql_query: str, params: tuple = ()) -> pd.DataFrame:
         """Execute SELECT SQL."""
-        async with self.connection.get_connection() as conn:
-            try:
-                param_list = list(params)
-                rows = await conn.fetch(sql_query, *param_list)
+        try:
+            async with self.connection.get_connection() as conn:
+                try:
+                    param_list = list(params)
+                    rows = await conn.fetch(sql_query, *param_list)
+                except asyncio.CancelledError:
+                    # Process is being cancelled - re-raise to propagate cancellation
+                    self.logger.debug("Query cancelled (process may be terminating)")
+                    raise
+                except Exception as e:
+                    self.logger.error(f"Error executing SELECT SQL: {e}")
+                    import traceback
+                    self.logger.debug(f"Traceback: {traceback.format_exc()}")
+                    return pd.DataFrame()
+                
                 if rows:
                     # Convert Record objects to dicts to preserve column names
                     # asyncpg Record objects have column names accessible via row.keys()
                     # We need to explicitly get column names to ensure they're preserved
-                    if rows:
-                        # Get column names from the first row
-                        column_names = list(rows[0].keys())
-                        # Convert rows to list of dicts with explicit column names
-                        data = [{col: row[col] for col in column_names} for row in rows]
-                        return pd.DataFrame(data, columns=column_names)
-                    else:
-                        return pd.DataFrame()
+                    # Get column names from the first row
+                    column_names = list(rows[0].keys())
+                    # Convert rows to list of dicts with explicit column names
+                    data = [{col: row[col] for col in column_names} for row in rows]
+                    return pd.DataFrame(data, columns=column_names)
                 else:
                     return pd.DataFrame()
-            except Exception as e:
-                self.logger.error(f"Error executing SELECT query: {e}")
-                return pd.DataFrame()
+        except asyncio.CancelledError:
+            # Process is being cancelled - return empty DataFrame instead of re-raising
+            # This allows the context manager to clean up normally without triggering
+            # a second CancelledError during connection release
+            # The caller (multiprocessing worker) is being terminated anyway, so returning
+            # an empty result is acceptable
+            self.logger.debug("Query cancelled during SELECT SQL execution (process terminating) - returning empty DataFrame")
+            return pd.DataFrame()
     
     async def execute_raw_sql(self, sql_query: str, params: tuple = ()) -> List[Dict[str, Any]]:
         """Execute raw SQL."""
@@ -4031,6 +4698,14 @@ class StockQuestDB(StockDBBase):
         open_interest LONG
     ) TIMESTAMP(timestamp) PARTITION BY MONTH WAL;
     """
+    
+    # Index creation SQL for options_data table
+    # Note: QuestDB doesn't support indexes on TIMESTAMP columns that aren't the designated timestamp.
+    # The designated timestamp column (`timestamp`) is automatically indexed by QuestDB.
+    # For expiration_date and write_timestamp, QuestDB doesn't support additional indexes.
+    # However, the designated timestamp index should help with queries that filter by timestamp.
+    # For expiration_date queries, QuestDB's columnar storage and partitioning should still provide good performance.
+    create_options_data_indexes_sql = []  # Empty - QuestDB doesn't support indexes on non-designated TIMESTAMP columns
     
     create_table_financial_info_sql = """
     CREATE TABLE IF NOT EXISTS financial_info (

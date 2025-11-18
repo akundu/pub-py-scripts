@@ -1,0 +1,722 @@
+Database connection established successfully (cache: enabled).
+Database log level set to INFO to reduce cache message verbosity (analyzer remains in DEBUG mode)
+Analyzing 1 tickers...
+DEBUG: Fetching financial info for 1 tickers
+DEBUG: Fetched financial info for 1/1 tickers (100%) [cache: 1 hits, 0 misses, 100.0% hit rate]
+Applied 1 filter(s) with AND logic:
+  1. volume > 1
+DEBUG: Using max_days=21: filtering options expiring through 2025-12-09
+Long-term options expiring between 90 and 120 days
+  Date range: 2026-02-16 to 2026-03-18
+DEBUG: Calculated long-term date range: 2026-02-16 to 2026-03-18 (from today 2025-11-18)
+Using multiprocessing mode for spread analysis: processing 1 tickers with 5 workers
+Each ticker will be processed end-to-end in a separate process (short-term fetch/process, long-term fetch, matching, spread calculations)
+Using 1 symbols provided via --symbols: GOOG
+DEBUG [PID 90819]: Processing spread analysis for ticker GOOG
+DEBUG [PID 90819]: GOOG - Fetching short-term options (date range: 2025-11-18 to 2025-12-09)
+2025-11-18 00:30:44 [PID:90819] [questdb_db] [INFO] - [OPTIONS SERVICE] get() called for GOOG with min_write_timestamp=2025-11-14 17:52:38
+2025-11-18 00:30:45 [PID:90819] [questdb_db] [INFO] - [CACHE FILTER] min_write_timestamp=2025-11-14 17:52:38 provided, checking 350 cached DataFrames for GOOG
+2025-11-18 00:30:45 [PID:90819] [questdb_db] [INFO] - [CACHE FILTER] All 350 cached options passed min_write_timestamp filter for GOOG
+DEBUG [PID 90819]: GOOG - Fetched 350 short-term options from DB
+DEBUG [PID 90819]: GOOG - After DB fetch (spread): 350 short options, write_timestamp range: 2025-11-16 23:21:37.774000+00:00 to 2025-11-18 08:13:59.098000+00:00 (350 non-null)
+DEBUG: GOOG - Found previous close $276.98 for date 2025-11-14 (before reference date 2025-11-17)
+DEBUG: GOOG - current_price=$285.60, prev_close=$276.98, source=daily, timestamp=2025-11-17 05:00:00
+DEBUG [fetch_latest_option_timestamp_standalone] (Redis): GOOG - age_seconds=1004.411704
+DEBUG [PID 90819]: GOOG - After sensible_price filter (0.1%): 175 short-term options (was 350)
+DEBUG [PID 90819]: GOOG - Before basic filters (spread): 175 short options, write_timestamp range: 2025-11-16 23:21:37.774000+00:00 to 2025-11-18 08:13:59.098000+00:00 (175 non-null)
+DEBUG [apply_basic_filters]: Timestamp range: 2025-11-16 23:21:37.774000+00:00 to 2025-11-18 08:13:59.098000+00:00, filter threshold: 2025-11-14 22:52:38+00:00
+DEBUG [apply_basic_filters]: Records before filter: 175, threshold: 2025-11-14 22:52:38+00:00
+DEBUG [PID 90819]: GOOG - After custom filters (AND: volume > 1): 163 short-term options (was 175)
+DEBUG [PID 90819]: GOOG - Fetching long-term options (date range: 2026-02-16 to 2026-03-18)
+2025-11-18 00:30:46 [PID:90819] [questdb_db] [INFO] - [OPTIONS SERVICE] get() called for GOOG with min_write_timestamp=2025-11-14 17:52:38
+2025-11-18 00:30:46 [PID:90819] [questdb_db] [INFO] - [CACHE FILTER] min_write_timestamp=2025-11-14 17:52:38 provided, checking 76 cached DataFrames for GOOG
+2025-11-18 00:30:46 [PID:90819] [questdb_db] [INFO] - [CACHE FILTER] All 76 cached options passed min_write_timestamp filter for GOOG
+DEBUG [PID 90819]: GOOG - Fetched 76 long-term options from DB
+DEBUG [apply_basic_filters]: Timestamp range: 2025-11-16 23:21:39.333000+00:00 to 2025-11-18 08:13:59.098000+00:00, filter threshold: 2025-11-14 22:52:38+00:00
+DEBUG [apply_basic_filters]: Records before filter: 76, threshold: 2025-11-14 22:52:38+00:00
+DEBUG [PID 90819]: GOOG - Starting spread matching: 163 short options vs 76 long options
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $280.00, 38 long put options available
+DEBUG:   Strike tolerance range: $266.00 to $294.00 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $300.00, 38 long call options available
+DEBUG:   Strike tolerance range: $285.00 to $315.00 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $355.00, 38 long call options available
+DEBUG:   Strike tolerance range: $337.25 to $372.75 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $272.50, 38 long put options available
+DEBUG:   Strike tolerance range: $258.88 to $286.12 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $297.50, 38 long call options available
+DEBUG:   Strike tolerance range: $282.62 to $312.38 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $252.50, 38 long put options available
+DEBUG:   Strike tolerance range: $239.88 to $265.12 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $247.50, 38 long put options available
+DEBUG:   Strike tolerance range: $235.12 to $259.88 (5.0%)
+DEBUG:   Found 4 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $302.50, 38 long call options available
+DEBUG:   Strike tolerance range: $287.38 to $317.62 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $190.00, 38 long put options available
+DEBUG:   Strike tolerance range: $180.50 to $199.50 (5.0%)
+DEBUG:   Found 3 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $232.50, 38 long put options available
+DEBUG:   Strike tolerance range: $220.88 to $244.12 (5.0%)
+DEBUG:   Found 4 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $235.00, 38 long put options available
+DEBUG:   Strike tolerance range: $223.25 to $246.75 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $190.00, 38 long put options available
+DEBUG:   Strike tolerance range: $180.50 to $199.50 (5.0%)
+DEBUG:   Found 3 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $335.00, 38 long call options available
+DEBUG:   Strike tolerance range: $318.25 to $351.75 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $327.50, 38 long call options available
+DEBUG:   Strike tolerance range: $311.12 to $343.88 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $337.50, 38 long call options available
+DEBUG:   Strike tolerance range: $320.62 to $354.38 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $300.00, 38 long call options available
+DEBUG:   Strike tolerance range: $285.00 to $315.00 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $325.00, 38 long call options available
+DEBUG:   Strike tolerance range: $308.75 to $341.25 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $317.50, 38 long call options available
+DEBUG:   Strike tolerance range: $301.62 to $333.38 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $290.00, 38 long call options available
+DEBUG:   Strike tolerance range: $275.50 to $304.50 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $260.00, 38 long put options available
+DEBUG:   Strike tolerance range: $247.00 to $273.00 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $360.00, 38 long call options available
+DEBUG:   Strike tolerance range: $342.00 to $378.00 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $297.50, 38 long call options available
+DEBUG:   Strike tolerance range: $282.62 to $312.38 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $292.50, 38 long call options available
+DEBUG:   Strike tolerance range: $277.88 to $307.12 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $227.50, 38 long put options available
+DEBUG:   Strike tolerance range: $216.12 to $238.88 (5.0%)
+DEBUG:   Found 4 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $307.50, 38 long call options available
+DEBUG:   Strike tolerance range: $292.12 to $322.88 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $335.00, 38 long call options available
+DEBUG:   Strike tolerance range: $318.25 to $351.75 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $262.50, 38 long put options available
+DEBUG:   Strike tolerance range: $249.38 to $275.62 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $265.00, 38 long put options available
+DEBUG:   Strike tolerance range: $251.75 to $278.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $257.50, 38 long put options available
+DEBUG:   Strike tolerance range: $244.62 to $270.38 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $270.00, 38 long put options available
+DEBUG:   Strike tolerance range: $256.50 to $283.50 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $185.00, 38 long put options available
+DEBUG:   Strike tolerance range: $175.75 to $194.25 (5.0%)
+DEBUG:   Found 2 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $310.00, 38 long call options available
+DEBUG:   Strike tolerance range: $294.50 to $325.50 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $365.00, 38 long call options available
+DEBUG:   Strike tolerance range: $346.75 to $383.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $200.00, 38 long put options available
+DEBUG:   Strike tolerance range: $190.00 to $210.00 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $275.00, 38 long put options available
+DEBUG:   Strike tolerance range: $261.25 to $288.75 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $210.00, 38 long put options available
+DEBUG:   Strike tolerance range: $199.50 to $220.50 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $240.00, 38 long put options available
+DEBUG:   Strike tolerance range: $228.00 to $252.00 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $220.00, 38 long put options available
+DEBUG:   Strike tolerance range: $209.00 to $231.00 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $370.00, 38 long call options available
+DEBUG:   Strike tolerance range: $351.50 to $388.50 (5.0%)
+DEBUG:   Found 4 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $242.50, 38 long put options available
+DEBUG:   Strike tolerance range: $230.38 to $254.62 (5.0%)
+DEBUG:   Found 4 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $315.00, 38 long call options available
+DEBUG:   Strike tolerance range: $299.25 to $330.75 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $340.00, 38 long call options available
+DEBUG:   Strike tolerance range: $323.00 to $357.00 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $275.00, 38 long put options available
+DEBUG:   Strike tolerance range: $261.25 to $288.75 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $365.00, 38 long call options available
+DEBUG:   Strike tolerance range: $346.75 to $383.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $307.50, 38 long call options available
+DEBUG:   Strike tolerance range: $292.12 to $322.88 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $245.00, 38 long put options available
+DEBUG:   Strike tolerance range: $232.75 to $257.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $267.50, 38 long put options available
+DEBUG:   Strike tolerance range: $254.12 to $280.88 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $327.50, 38 long call options available
+DEBUG:   Strike tolerance range: $311.12 to $343.88 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $305.00, 38 long call options available
+DEBUG:   Strike tolerance range: $289.75 to $320.25 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $305.00, 38 long call options available
+DEBUG:   Strike tolerance range: $289.75 to $320.25 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $325.00, 38 long call options available
+DEBUG:   Strike tolerance range: $308.75 to $341.25 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $350.00, 38 long call options available
+DEBUG:   Strike tolerance range: $332.50 to $367.50 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $230.00, 38 long put options available
+DEBUG:   Strike tolerance range: $218.50 to $241.50 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $245.00, 38 long put options available
+DEBUG:   Strike tolerance range: $232.75 to $257.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $285.00, 38 long put options available
+DEBUG:   Strike tolerance range: $270.75 to $299.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $265.00, 38 long put options available
+DEBUG:   Strike tolerance range: $251.75 to $278.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $345.00, 38 long call options available
+DEBUG:   Strike tolerance range: $327.75 to $362.25 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $255.00, 38 long put options available
+DEBUG:   Strike tolerance range: $242.25 to $267.75 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $215.00, 38 long put options available
+DEBUG:   Strike tolerance range: $204.25 to $225.75 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $345.00, 38 long call options available
+DEBUG:   Strike tolerance range: $327.75 to $362.25 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $285.00, 38 long put options available
+DEBUG:   Strike tolerance range: $270.75 to $299.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $282.50, 38 long put options available
+DEBUG:   Strike tolerance range: $268.38 to $296.62 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $312.50, 38 long call options available
+DEBUG:   Strike tolerance range: $296.88 to $328.12 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $272.50, 38 long put options available
+DEBUG:   Strike tolerance range: $258.88 to $286.12 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $205.00, 38 long put options available
+DEBUG:   Strike tolerance range: $194.75 to $215.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $332.50, 38 long call options available
+DEBUG:   Strike tolerance range: $315.88 to $349.12 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $195.00, 38 long put options available
+DEBUG:   Strike tolerance range: $185.25 to $204.75 (5.0%)
+DEBUG:   Found 3 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $305.00, 38 long call options available
+DEBUG:   Strike tolerance range: $289.75 to $320.25 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $315.00, 38 long call options available
+DEBUG:   Strike tolerance range: $299.25 to $330.75 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $237.50, 38 long put options available
+DEBUG:   Strike tolerance range: $225.62 to $249.38 (5.0%)
+DEBUG:   Found 4 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $260.00, 38 long put options available
+DEBUG:   Strike tolerance range: $247.00 to $273.00 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $250.00, 38 long put options available
+DEBUG:   Strike tolerance range: $237.50 to $262.50 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $195.00, 38 long put options available
+DEBUG:   Strike tolerance range: $185.25 to $204.75 (5.0%)
+DEBUG:   Found 3 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $272.50, 38 long put options available
+DEBUG:   Strike tolerance range: $258.88 to $286.12 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $280.00, 38 long put options available
+DEBUG:   Strike tolerance range: $266.00 to $294.00 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $257.50, 38 long put options available
+DEBUG:   Strike tolerance range: $244.62 to $270.38 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $247.50, 38 long put options available
+DEBUG:   Strike tolerance range: $235.12 to $259.88 (5.0%)
+DEBUG:   Found 4 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $322.50, 38 long call options available
+DEBUG:   Strike tolerance range: $306.38 to $338.62 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $355.00, 38 long call options available
+DEBUG:   Strike tolerance range: $337.25 to $372.75 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $245.00, 38 long put options available
+DEBUG:   Strike tolerance range: $232.75 to $257.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $255.00, 38 long put options available
+DEBUG:   Strike tolerance range: $242.25 to $267.75 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $337.50, 38 long call options available
+DEBUG:   Strike tolerance range: $320.62 to $354.38 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $320.00, 38 long call options available
+DEBUG:   Strike tolerance range: $304.00 to $336.00 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $277.50, 38 long put options available
+DEBUG:   Strike tolerance range: $263.62 to $291.38 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $210.00, 38 long put options available
+DEBUG:   Strike tolerance range: $199.50 to $220.50 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $262.50, 38 long put options available
+DEBUG:   Strike tolerance range: $249.38 to $275.62 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $205.00, 38 long put options available
+DEBUG:   Strike tolerance range: $194.75 to $215.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $260.00, 38 long put options available
+DEBUG:   Strike tolerance range: $247.00 to $273.00 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $250.00, 38 long put options available
+DEBUG:   Strike tolerance range: $237.50 to $262.50 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $287.50, 38 long call options available
+DEBUG:   Strike tolerance range: $273.12 to $301.88 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $235.00, 38 long put options available
+DEBUG:   Strike tolerance range: $223.25 to $246.75 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $262.50, 38 long put options available
+DEBUG:   Strike tolerance range: $249.38 to $275.62 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $347.50, 38 long call options available
+DEBUG:   Strike tolerance range: $330.12 to $364.88 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $317.50, 38 long call options available
+DEBUG:   Strike tolerance range: $301.62 to $333.38 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $277.50, 38 long put options available
+DEBUG:   Strike tolerance range: $263.62 to $291.38 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $230.00, 38 long put options available
+DEBUG:   Strike tolerance range: $218.50 to $241.50 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $330.00, 38 long call options available
+DEBUG:   Strike tolerance range: $313.50 to $346.50 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $282.50, 38 long put options available
+DEBUG:   Strike tolerance range: $268.38 to $296.62 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $270.00, 38 long put options available
+DEBUG:   Strike tolerance range: $256.50 to $283.50 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $230.00, 38 long put options available
+DEBUG:   Strike tolerance range: $218.50 to $241.50 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $200.00, 38 long put options available
+DEBUG:   Strike tolerance range: $190.00 to $210.00 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $250.00, 38 long put options available
+DEBUG:   Strike tolerance range: $237.50 to $262.50 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $267.50, 38 long put options available
+DEBUG:   Strike tolerance range: $254.12 to $280.88 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $330.00, 38 long call options available
+DEBUG:   Strike tolerance range: $313.50 to $346.50 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $335.00, 38 long call options available
+DEBUG:   Strike tolerance range: $318.25 to $351.75 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $310.00, 38 long call options available
+DEBUG:   Strike tolerance range: $294.50 to $325.50 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $265.00, 38 long put options available
+DEBUG:   Strike tolerance range: $251.75 to $278.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $287.50, 38 long call options available
+DEBUG:   Strike tolerance range: $273.12 to $301.88 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $320.00, 38 long call options available
+DEBUG:   Strike tolerance range: $304.00 to $336.00 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $267.50, 38 long put options available
+DEBUG:   Strike tolerance range: $254.12 to $280.88 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $215.00, 38 long put options available
+DEBUG:   Strike tolerance range: $204.25 to $225.75 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $237.50, 38 long put options available
+DEBUG:   Strike tolerance range: $225.62 to $249.38 (5.0%)
+DEBUG:   Found 4 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $342.50, 38 long call options available
+DEBUG:   Strike tolerance range: $325.38 to $359.62 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $225.00, 38 long put options available
+DEBUG:   Strike tolerance range: $213.75 to $236.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $295.00, 38 long call options available
+DEBUG:   Strike tolerance range: $280.25 to $309.75 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $297.50, 38 long call options available
+DEBUG:   Strike tolerance range: $282.62 to $312.38 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $215.00, 38 long put options available
+DEBUG:   Strike tolerance range: $204.25 to $225.75 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $282.50, 38 long put options available
+DEBUG:   Strike tolerance range: $268.38 to $296.62 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $312.50, 38 long call options available
+DEBUG:   Strike tolerance range: $296.88 to $328.12 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $185.00, 38 long put options available
+DEBUG:   Strike tolerance range: $175.75 to $194.25 (5.0%)
+DEBUG:   Found 2 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $322.50, 38 long call options available
+DEBUG:   Strike tolerance range: $306.38 to $338.62 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $185.00, 38 long put options available
+DEBUG:   Strike tolerance range: $175.75 to $194.25 (5.0%)
+DEBUG:   Found 2 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $292.50, 38 long call options available
+DEBUG:   Strike tolerance range: $277.88 to $307.12 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $240.00, 38 long put options available
+DEBUG:   Strike tolerance range: $228.00 to $252.00 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $195.00, 38 long put options available
+DEBUG:   Strike tolerance range: $185.25 to $204.75 (5.0%)
+DEBUG:   Found 3 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $210.00, 38 long put options available
+DEBUG:   Strike tolerance range: $199.50 to $220.50 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $277.50, 38 long put options available
+DEBUG:   Strike tolerance range: $263.62 to $291.38 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $200.00, 38 long put options availableDEBUG [PID 90819]: GOOG - INCLUDED (spread): 163 spread matches found
+DEBUG [PID 90819]: GOOG - Cache stats (spread): hits=518, misses=2, hit_rate=99.6%
+
+DEBUG:   Strike tolerance range: $190.00 to $210.00 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $252.50, 38 long put options available
+DEBUG:   Strike tolerance range: $239.88 to $265.12 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $205.00, 38 long put options available
+DEBUG:   Strike tolerance range: $194.75 to $215.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $332.50, 38 long call options available
+DEBUG:   Strike tolerance range: $315.88 to $349.12 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $340.00, 38 long call options available
+DEBUG:   Strike tolerance range: $323.00 to $357.00 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $320.00, 38 long call options available
+DEBUG:   Strike tolerance range: $304.00 to $336.00 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $235.00, 38 long put options available
+DEBUG:   Strike tolerance range: $223.25 to $246.75 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $225.00, 38 long put options available
+DEBUG:   Strike tolerance range: $213.75 to $236.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $330.00, 38 long call options available
+DEBUG:   Strike tolerance range: $313.50 to $346.50 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $325.00, 38 long call options available
+DEBUG:   Strike tolerance range: $308.75 to $341.25 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $292.50, 38 long call options available
+DEBUG:   Strike tolerance range: $277.88 to $307.12 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $310.00, 38 long call options available
+DEBUG:   Strike tolerance range: $294.50 to $325.50 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $290.00, 38 long call options available
+DEBUG:   Strike tolerance range: $275.50 to $304.50 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $270.00, 38 long put options available
+DEBUG:   Strike tolerance range: $256.50 to $283.50 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $345.00, 38 long call options available
+DEBUG:   Strike tolerance range: $327.75 to $362.25 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $287.50, 38 long call options available
+DEBUG:   Strike tolerance range: $273.12 to $301.88 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $240.00, 38 long put options available
+DEBUG:   Strike tolerance range: $228.00 to $252.00 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $370.00, 38 long call options available
+DEBUG:   Strike tolerance range: $351.50 to $388.50 (5.0%)
+DEBUG:   Found 4 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $280.00, 38 long put options available
+DEBUG:   Strike tolerance range: $266.00 to $294.00 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $342.50, 38 long call options available
+DEBUG:   Strike tolerance range: $325.38 to $359.62 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $302.50, 38 long call options available
+DEBUG:   Strike tolerance range: $287.38 to $317.62 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $300.00, 38 long call options available
+DEBUG:   Strike tolerance range: $285.00 to $315.00 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $315.00, 38 long call options available
+DEBUG:   Strike tolerance range: $299.25 to $330.75 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $290.00, 38 long call options available
+DEBUG:   Strike tolerance range: $275.50 to $304.50 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $220.00, 38 long put options available
+DEBUG:   Strike tolerance range: $209.00 to $231.00 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $255.00, 38 long put options available
+DEBUG:   Strike tolerance range: $242.25 to $267.75 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $275.00, 38 long put options available
+DEBUG:   Strike tolerance range: $261.25 to $288.75 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $242.50, 38 long put options available
+DEBUG:   Strike tolerance range: $230.38 to $254.62 (5.0%)
+DEBUG:   Found 4 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $295.00, 38 long call options available
+DEBUG:   Strike tolerance range: $280.25 to $309.75 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $302.50, 38 long call options available
+DEBUG:   Strike tolerance range: $287.38 to $317.62 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $295.00, 38 long call options available
+DEBUG:   Strike tolerance range: $280.25 to $309.75 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $285.00, 38 long put options available
+DEBUG:   Strike tolerance range: $270.75 to $299.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $350.00, 38 long call options available
+DEBUG:   Strike tolerance range: $332.50 to $367.50 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $225.00, 38 long put options available
+DEBUG:   Strike tolerance range: $213.75 to $236.25 (5.0%)
+DEBUG:   Found 5 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'put': 76 -> 38
+DEBUG: Processing GOOG - short put strike: $257.50, 38 long put options available
+DEBUG:   Strike tolerance range: $244.62 to $270.38 (5.0%)
+DEBUG:   Found 6 matching long options within strike tolerance
+DEBUG: Filtered long options by type 'call': 76 -> 38
+DEBUG: Processing GOOG - short call strike: $340.00, 38 long call options available
+DEBUG:   Strike tolerance range: $323.00 to $357.00 (5.0%)
+DEBUG:   Found 7 matching long options within strike tolerance
+Combined spread results from 1 tickers: 163 total spread opportunities
+Background refresh: Market is closed. Skipping.
+
+=== Cache Statistics ===
+Cache Status: ENABLED
+Total Requests: 1
+Cache Hits: 1
+Cache Misses: 0
+Hit Rate: 100.00%
+Negative Cache Hits: 0
+Negative Cache Sets: 0
+Cache Sets: 0
+Cache Invalidations: 0
+Cache Errors: 0
+===================================
+
+DEBUG: format_output called with 163 rows
+After filter application: 163 rows (was 163)
+DEBUG: After filter application: 163 rows (was 163)
+Limiting to top 3 options per ticker-option_type combination (after sorting)
+After top-n filter (3): 6 rows (was 163)
+DEBUG: After top-n filter (3): 6 rows (was 163)
+CSV results saved to /Users/akundu/Downloads/results.csv
+ticker,option_type,pe_ratio,market_cap_b,curr_price,price_with_chan,price_change_pc,strike_price,price_above_curr,opt_prem.,bid:ask,iv,delta,theta,expiration_date,days_to_expiry,s_prem_tot,s_day_prem,l_strike,l_prem,l_bid:ask,liv,l_delta,l_theta,l_expiration_date,l_days_to_expiry,l_prem_tot,l_cnt_avl,prem_diff,net_premium,net_daily_premi,volume,num_contracts,option_ticker,l_option_ticker,latest_opt_ts
+GOOG,put,25.49,2945.49,285.60,+$8.62 (+3.11%),3.11,280.00,-5.60,4.22,4.15:4.30,0.33,-0.36,-0.28,2025-11-28 00:00:00,10,23632.00,2363.20,280.00,17.70,17.60:17.80,0.37,-0.41,-0.10,2026-02-20 00:00:00+00:00,94,99120.00,,13.48,12297.24,1229.72,1555.00,56,O:GOOG251128P00280000,O:GOOG260220P00280000,1004.4
+GOOG,call,25.49,2945.49,285.60,+$8.62 (+3.11%),3.11,300.00,14.40,0.95,0.93:0.97,0.47,0.14,-0.42,2025-11-21 00:00:00,3,5510.00,1836.67,300.00,17.20,17.10:17.30,0.39,0.45,-0.13,2026-02-20 00:00:00+00:00,94,99760.00,,16.25,6423.97,2141.32,20584.00,58,O:GOOG251121C00300000,O:GOOG260220C00300000,1004.4
+GOOG,call,25.49,2945.49,285.60,+$8.62 (+3.11%),3.11,355.00,69.40,0.04,0.03:0.05,0.39,0.01,-0.01,2025-12-05 00:00:00,17,932.00,54.82,355.00,4.28,4.20:4.35,0.38,0.16,-0.08,2026-02-20 00:00:00+00:00,94,99724.00,,4.24,-22857.66,-1344.57,5.00,233,O:GOOG251205C00355000,O:GOOG260220C00355000,1004.4
+GOOG,put,25.49,2945.49,285.60,+$8.62 (+3.11%),3.11,272.50,-13.10,3.53,3.45:3.60,0.34,-0.26,-0.19,2025-12-05 00:00:00,17,22945.00,1349.71,275.00,15.28,14.90:15.65,0.36,-0.37,-0.10,2026-02-20 00:00:00+00:00,94,99320.00,,11.75,5620.20,330.60,20.00,65,O:GOOG251205P00272500,O:GOOG260220P00275000,1004.4
+GOOG,call,25.49,2945.49,285.60,+$8.62 (+3.11%),3.11,297.50,11.90,4.28,4.20:4.35,0.35,0.31,-0.23,2025-12-05 00:00:00,17,24824.00,1460.24,300.00,17.20,17.10:17.30,0.39,0.45,-0.13,2026-02-20 00:00:00+00:00,94,99760.00,,12.92,14349.42,844.08,113.00,58,O:GOOG251205C00297500,O:GOOG260220C00300000,1004.4
+GOOG,put,25.49,2945.49,285.60,+$8.62 (+3.11%),3.11,252.50,-33.10,0.11,0.10:0.11,0.58,-0.02,-0.09,2025-11-21 00:00:00,3,1441.00,480.33,250.00,7.58,7.50:7.65,0.39,-0.21,-0.08,2026-02-20 00:00:00+00:00,94,99298.00,,7.47,-8680.84,-2893.61,119.00,131,O:GOOG251121P00252500,O:GOOG260220P00250000,1004.4
+

@@ -100,7 +100,26 @@ def dataframe_to_json_records(df: pd.DataFrame) -> list[Dict[str, Any]]:
                 lambda x: x.isoformat() if isinstance(x, (pd.Timestamp, datetime)) else x
             )
     
-    return df_serializable.to_dict(orient='records')
+    # Convert to records first
+    records = df_serializable.to_dict(orient='records')
+    
+    # Recursively convert any remaining Timestamp/datetime objects in the records
+    # This handles cases where Timestamp objects might still be present after to_dict()
+    def convert_timestamps(obj: Any) -> Any:
+        """Recursively convert Timestamp/datetime objects to ISO strings."""
+        if isinstance(obj, (pd.Timestamp, datetime)):
+            return obj.isoformat()
+        elif isinstance(obj, dict):
+            return {key: convert_timestamps(value) for key, value in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [convert_timestamps(item) for item in obj]
+        else:
+            return obj
+    
+    # Apply conversion to all records
+    records = [convert_timestamps(record) for record in records]
+    
+    return records
 
 
 def serialize_mapping_datetime(data: Dict[str, Any]) -> Dict[str, Any]:

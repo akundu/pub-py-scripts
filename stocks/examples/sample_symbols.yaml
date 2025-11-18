@@ -1,0 +1,35 @@
+# Sample symbols for Polygon Real-time Streamer
+# This file demonstrates the YAML format for symbol lists
+
+symbols:
+  # Major Tech Stocks
+  - AAPL   # Apple Inc.
+  - MSFT   # Microsoft Corporation  
+  - GOOGL  # Alphabet Inc. Class A
+  - AMZN   # Amazon.com Inc.
+  - TSLA   # Tesla Inc.
+  - NVDA   # NVIDIA Corporation
+  - META   # Meta Platforms Inc.
+  - NFLX   # Netflix Inc.
+  
+  # Financial Sector
+  - JPM    # JPMorgan Chase & Co.
+  - BAC    # Bank of America Corp.
+  - WFC    # Wells Fargo & Company
+  - GS     # Goldman Sachs Group Inc.
+  
+  # Healthcare
+  - JNJ    # Johnson & Johnson
+  - PFE    # Pfizer Inc.
+  - UNH    # UnitedHealth Group Inc.
+  - ABBV   # AbbVie Inc.
+  
+  # Consumer Goods
+  - KO     # Coca-Cola Company
+  - PEP    # PepsiCo Inc.
+  - WMT    # Walmart Inc.
+  - PG     # Procter & Gamble Co.
+
+# Usage:
+# python polygon_realtime_streamer.py --symbols-list examples/sample_symbols.yaml --feed both
+

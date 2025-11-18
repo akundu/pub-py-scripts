@@ -10,7 +10,7 @@ QUERY_LOC="questdb://stock_user:stock_password@localhost:8812/stock_data"
 TYPE="types"
 TYPE_input="all"
 
-MAX_WORKERS=5
+MAX_WORKERS=4
 BATCH_SIZE=300
 
 MAX_DAYS=`days=$((6 - $(date +%u)));[ $days -le 0 ] && days=$((days + 7)); echo $days` #count the number of days till the next saturday
@@ -78,7 +78,6 @@ do
       --min-write-timestamp \"$TIME_TO_USE\" \
       --db-conn $QUERY_LOC \
       --output $DOWNLOAD_LOC \
-      --refresh-results-background $refresh_results_background \
       --log-level $log_level \
       --option-type $option_type \
       --sensible-price $SENSIBLE_PRICE \
@@ -91,6 +90,7 @@ do
 
       # --filter \"premium_diff > 0\" \
       # --filter \"net_premium > $MIN_NET_PREMIUM\" \
+      # --refresh-results-background $refresh_results_background \
 
     echo "running $command"
     eval $command
