@@ -2432,6 +2432,14 @@ class OptionsDataService:
         await self.cache.sadd(index_key, expiration_date)
         # Set index TTL to max of metadata TTLs (use same random TTL)
         await self.cache.expire(index_key, ttl)
+        # Verify the index was updated
+        verify_index = await self.cache.smembers(index_key)
+        if expiration_date in verify_index:
+            self.logger.debug(f"[CACHE METADATA] Set metadata for {ticker}:{expiration_date} with {len(option_tickers)} option_tickers (TTL: {ttl}s), index verified")
+        else:
+            self.logger.warning(f"[CACHE METADATA] Index verification failed for {ticker}:{expiration_date}, retrying...")
+            await self.cache.sadd(index_key, expiration_date)
+            await self.cache.expire(index_key, ttl)
         
         self.logger.debug(f"[CACHE METADATA] Set metadata for {ticker}:{expiration_date} with {len(option_tickers)} option_tickers (TTL: {ttl}s)")
     
@@ -2613,7 +2621,20 @@ class OptionsDataService:
                             # Set index TTL (use max TTL from random)
                             max_ttl = self._get_random_ttl()
                             await self.cache.expire(index_key, max_ttl)
-                            self.logger.debug(f"[CACHE METADATA] Updated index for {ticker} with {len(unique_exp_dates)} expiration_dates (TTL: {max_ttl}s)")
+                            # Verify the index was set correctly
+                            verify_set = await self.cache.smembers(index_key)
+                            if verify_set:
+                                self.logger.debug(f"[CACHE METADATA] Updated index for {ticker} with {len(unique_exp_dates)} expiration_dates (TTL: {max_ttl}s), verified {len(verify_set)} dates in index")
+                            else:
+                                self.logger.warning(f"[CACHE METADATA] Index verification failed for {ticker}, retrying...")
+                                # Retry once
+                                await self.cache.sadd(index_key, *unique_exp_dates)
+                                await self.cache.expire(index_key, max_ttl)
+                                verify_set = await self.cache.smembers(index_key)
+                                if verify_set:
+                                    self.logger.debug(f"[CACHE METADATA] Index retry successful for {ticker}, verified {len(verify_set)} dates")
+                                else:
+                                    self.logger.error(f"[CACHE METADATA] Index retry failed for {ticker}, index may not be available")
                         
                         # Get metadata for each expiration_date and save to cache
                         all_option_tickers = set()
@@ -2719,7 +2740,9 @@ class OptionsDataService:
         index_start = time.time()
         expiration_dates_set = await self.cache.smembers(index_key)
         index_elapsed = time.time() - index_start
-        self.logger.debug(f"[TIMING] Redis SMEMBERS (index) for {ticker}: {index_elapsed:.3f}s, found {len(expiration_dates_set)} expiration_dates")
+        self.logger.info(f"[CACHE METADATA] Redis SMEMBERS (index) for {ticker}: {index_elapsed:.3f}s, found {len(expiration_dates_set)} expiration_dates (key: {index_key})")
+        if not expiration_dates_set:
+            self.logger.warning(f"[CACHE METADATA] Metadata index is empty for {ticker} (key: {index_key}), will query DB")
         
         if not expiration_dates_set:
             elapsed = time.time() - start_time
@@ -2837,7 +2860,13 @@ class OptionsDataService:
         
         # Process regular cache results
         cached_data = {k: v for k, v in cached_results.items() if v is not None and not v.empty}
-        self.logger.debug(f"[TIMING] Cache batch get for {ticker}: {cache_elapsed:.3f}s, found {len(cached_data)}/{len(cache_keys)}")
+        cache_hits = len(cached_data)
+        cache_misses = len(cache_keys) - cache_hits
+        self.logger.info(f"[CACHE] Cache batch get for {ticker}: {cache_elapsed:.3f}s, found {cache_hits}/{len(cache_keys)} (hits: {cache_hits}, misses: {cache_misses})")
+        if cache_misses > 0 and cache_hits == 0:
+            # Log sample of missing keys for debugging
+            sample_missing = list(cache_keys[:5])
+            self.logger.debug(f"[CACHE DEBUG] Sample missing cache keys: {sample_missing}")
         
         # Filter cached data by min_write_timestamp if provided
         if min_write_timestamp:
@@ -2947,6 +2976,14 @@ class OptionsDataService:
                         cached_data[cache_key] = row_df
                 cache_write_elapsed = time.time() - cache_write_start
                 self.logger.debug(f"[TIMING] Cache write for {ticker}: {cache_write_elapsed:.3f}s, cached {len(df)} options")
+                
+                # Wait for fire-and-forget cache writes to complete before returning
+                if use_fire_and_forget:
+                    wait_start = time.time()
+                    await self.cache.wait_for_pending_writes(timeout=10.0)
+                    wait_elapsed = time.time() - wait_start
+                    if wait_elapsed > 0.1:  # Only log if it takes significant time
+                        self.logger.debug(f"[TIMING] Waited {wait_elapsed:.3f}s for pending cache writes to complete for {ticker}")
         elif deduplicate:
             self.logger.debug(f"[CACHE] All {len(option_tickers)} options found in cache for {ticker}")
         

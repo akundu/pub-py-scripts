@@ -269,9 +269,12 @@ class HistoricalDataFetcher:
             print(f"Error loading CSV data: {e}")
             return []
 
-    def _handle_api_error(self, error: Exception, data_type: str) -> Dict[str, Any]:
+    def _handle_api_error(self, error: Exception, data_type: str, symbol: str | None = None) -> Dict[str, Any]:
         """Handles API errors gracefully."""
-        error_msg = f"Error fetching {data_type}: {str(error)}"
+        if symbol:
+            error_msg = f"Error fetching {data_type} for {symbol}: {str(error)}"
+        else:
+            error_msg = f"Error fetching {data_type}: {str(error)}"
         print(f"Warning: {error_msg}", file=sys.stderr)
         return {"error": error_msg, "data": None}
 
@@ -303,7 +306,7 @@ class HistoricalDataFetcher:
             )
             
             if not aggs:
-                return self._handle_api_error(Exception(f"No trading data found on or before {target_date_str} in the last 7 days"), "stock price")
+                return self._handle_api_error(Exception(f"No trading data found on or before {target_date_str} in the last 7 days"), "stock price", symbol)
 
             # The first (and only) result is the one we want
             bar = aggs[0]
@@ -323,7 +326,7 @@ class HistoricalDataFetcher:
             }}
 
         except Exception as e:
-            return self._handle_api_error(e, "stock price")
+            return self._handle_api_error(e, "stock price", symbol)
 
     async def get_active_options_for_date(
         self,
@@ -841,7 +844,7 @@ class HistoricalDataFetcher:
                 print(f"  [TIMER] Total time for get_active_options_for_date: {overall_end_time - overall_start_time:.2f} seconds.")
 
         except Exception as e:
-            return self._handle_api_error(e, "options data")
+            return self._handle_api_error(e, "options data", symbol)
         
         # Save to CSV files only when explicitly requested
         if save_to_csv and options_data["contracts"]:

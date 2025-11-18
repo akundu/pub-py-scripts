@@ -428,6 +428,7 @@ symbols:
 - SOLS
 - SOUN
 - SRAD
+- SRRK
 - SSNC
 - SSRM
 - STEP
@@ -474,7 +475,6 @@ symbols:
 - VLY
 - VNOM
 - VOD
-- VRNS
 - VRSK
 - VRSN
 - VRTX
