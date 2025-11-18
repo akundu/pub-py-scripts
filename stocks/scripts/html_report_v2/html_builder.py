@@ -4,6 +4,7 @@ HTML structure generation.
 
 from datetime import datetime
 from typing import List
+from zoneinfo import ZoneInfo
 
 
 def build_html_document(
@@ -117,13 +118,10 @@ def get_timestamp_strings() -> tuple:
     Returns:
         Tuple of (formatted_timestamp, iso_timestamp)
     """
-    now = datetime.now()
-    formatted = now.strftime("%Y-%m-%d %H:%M:%S")
-    
-    if now.tzinfo is None:
-        iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    else:
-        iso = now.isoformat()
+    pacific = ZoneInfo("America/Los_Angeles")
+    now = datetime.now(tz=pacific)
+    formatted = now.strftime("%Y-%m-%d %H:%M:%S %Z")
+    iso = now.isoformat()
     
     return formatted, iso
 

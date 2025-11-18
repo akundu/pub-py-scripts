@@ -8,8 +8,6 @@ GEMINI_PROG="tests/gemini_test.py"
 QUERY_LOC="questdb://stock_user:stock_password@localhost:8812/stock_data"
 
 TYPE="types"
-TYPE_input="stocks_to_track2"
-TYPE_input="stocks_to_track"
 TYPE_input="all"
 
 MAX_WORKERS=5
@@ -108,7 +106,7 @@ do
         current_epoch=$(date +%s)
         time_since_gemini=$((current_epoch - last_gemini_run_epoch))
         if [ $time_since_gemini -ge $GEMINI_COOLDOWN_SECONDS ]; then
-          command="python $GEMINI_PROG --instruction \"given the provided file of spread option trades possible, choose the 5 best set (based on realism of possibility of it happening) of dealing with risk and being aggressive and being conservative. focus on the intrinsic characteristics of each spread (strike prices, premiums, days to expiry and theta and delta), the underlying stock's volatility and market cap, and the reported net_daily_premi as an indicator of potential theta gain/loss. assume these represent **calendar spreads**, where you sell the shorter-dated option and buy the longer-dated option of the same type. the net cost (debit) per share is generally (long leg premium - short leg premium). a positive net_daily_premi suggests a theoretical daily gain from time decay. also, use the short_daily_premium in the analysis. make sure to only pick realistic situations of being able to procure those things. also, give me 3 examples of risky and 3 examples of conservative choices. Write the responses in a HTML form that I can save to a .html file. make sure to cover the examples of 3 per put spread and call spread. \" --file $DOWNLOAD_LOC > $STORE_DIR/$OUTPUT_DIR/$ANALYSIS_FILE 2>&1 "
+          command="python $GEMINI_PROG --instruction \"given the provided file of spread option trades possible, choose the 5 best set (based on realism of possibility of it happening) of dealing with risk and being aggressive and being conservative. focus on the intrinsic characteristics of each spread (strike prices, premiums, days to expiry and theta and delta), the underlying stock's volatility and market cap, and the reported net_daily_premi as an indicator of potential theta gain/loss. assume these represent **calendar spreads**, where you sell the shorter-dated option and buy the longer-dated option of the same type. the net cost (debit) per share is generally (long leg premium - short leg premium). a positive net_daily_premi suggests a theoretical daily gain from time decay. also, use the short_daily_premium in the analysis. make sure to only pick realistic situations of being able to procure those things. also, give me 3 examples of risky and 3 examples of conservative choices. Write the responses in a HTML form that I can save to a .html file. make sure to cover the examples of 3 per put spread and call spread. \" --file $DOWNLOAD_LOC > /tmp/$ANALYSIS_FILE 2>&1 " # $STORE_DIR/$OUTPUT_DIR/$ANALYSIS_FILE 2>&1 "
 
           echo "running $command"
           eval $command
@@ -122,6 +120,7 @@ do
         echo "Skipping Gemini analysis: outside market hours"
       fi
     fi
+    cp /tmp/$ANALYSIS_FILE $STORE_DIR/$OUTPUT_DIR/$ANALYSIS_FILE
 
 
     echo "Sleeping for $SLEEP_TIME seconds..."
