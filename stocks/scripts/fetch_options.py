@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import time
 import csv
+import signal
 import pandas as pd
 import yaml
 from datetime import datetime, timedelta, timezone
@@ -1511,6 +1512,28 @@ async def save_options_via_direct_db(db_save_tasks: list, db_config: str, args) 
                     print(f"Warning: error closing DB connection: {close_e}")
 
 
+def _cancel_executor_futures(futures_map):
+    """Cancel any outstanding futures."""
+    for fut in list(futures_map.keys()):
+        try:
+            fut.cancel()
+        except Exception:
+            pass
+
+
+def _terminate_process_pool(executor):
+    """Forcefully terminate worker processes for a ProcessPoolExecutor."""
+    processes = getattr(executor, "_processes", None)
+    if not processes:
+        return
+    for proc in processes.values():
+        if proc.is_alive():
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+
 async def _execute_options_iteration(
     symbols_list: list[str],
     args: argparse.Namespace,
@@ -1635,8 +1658,12 @@ async def _execute_options_iteration(
     save_count = 0
     save_failures = 0
     
-    with ExecutorCls(max_workers=max_workers) as pool:
-        futures_map = {pool.submit(_run_for_symbol, symbol, args, api_key): symbol for symbol in symbols_to_fetch}
+    pool = ExecutorCls(max_workers=max_workers)
+    shutdown_called = False
+    futures_map = {}
+    try:
+        for symbol in symbols_to_fetch:
+            futures_map[pool.submit(_run_for_symbol, symbol, args, api_key)] = symbol
         for fut in as_completed(futures_map):
             result = fut.result()
             if isinstance(result, dict) and 'formatted_output' in result:
@@ -1650,6 +1677,18 @@ async def _execute_options_iteration(
                     save_failures += 1
             elif not args.quiet and result:
                 print(result)
+    except KeyboardInterrupt:
+        if not args.quiet:
+            print("\nKeyboardInterrupt received. Attempting to cancel outstanding option fetch tasks...", file=sys.stderr)
+        _cancel_executor_futures(futures_map)
+        pool.shutdown(wait=False, cancel_futures=True)
+        shutdown_called = True
+        if ExecutorCls is ProcessPoolExecutor:
+            _terminate_process_pool(pool)
+        raise
+    finally:
+        if not shutdown_called:
+            pool.shutdown(wait=True, cancel_futures=False)
     
     if not args.quiet and getattr(args, 'use_db', None):
         print(f"\n[SUMMARY] Database saves: {save_count} successful, {save_failures} failed (saves performed in worker processes)")

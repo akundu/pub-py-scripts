@@ -88,7 +88,12 @@ def run_iteration_in_subprocess(
         args=(queue, target, args, kwargs),
     )
     process.start()
-    process.join()
+    try:
+        process.join()
+    except KeyboardInterrupt:
+        process.terminate()
+        process.join()
+        raise
 
     payload: Dict[str, Any]
     if not queue.empty():
