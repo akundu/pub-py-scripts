@@ -363,7 +363,7 @@ Examples:
     )
 
     # Symbol inputs
-    add_symbol_arguments(parser, required=False)
+    add_symbol_arguments(parser, required=False, allow_positional=False)
 
     # Database connection
     parser.add_argument(

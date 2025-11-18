@@ -55,6 +55,7 @@ symbols:
 - BE
 - BEKE
 - BEP
+- BEPC
 - BG
 - BHP
 - BIP
@@ -88,6 +89,7 @@ symbols:
 - CFG
 - CHD
 - CHT
+- CHWY
 - CI
 - CIB
 - CIEN
@@ -151,6 +153,7 @@ symbols:
 - EIX
 - EL
 - ELV
+- EMA
 - EME
 - EMR
 - ENB
@@ -201,7 +204,6 @@ symbols:
 - GSK
 - GWRE
 - GWW
-- H
 - HAL
 - HCA
 - HD
@@ -269,7 +271,6 @@ symbols:
 - LOW
 - LUV
 - LVS
-- LYB
 - LYG
 - LYV
 - MA
@@ -391,7 +392,6 @@ symbols:
 - SLF
 - SMFG
 - SNA
-- SNAP
 - SNOW
 - SO
 - SOMN

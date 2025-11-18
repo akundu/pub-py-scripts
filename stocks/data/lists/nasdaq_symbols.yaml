@@ -115,6 +115,7 @@ symbols:
 - CPRT
 - CRDO
 - CRNX
+- CROX
 - CRSP
 - CRUS
 - CRWD
@@ -134,7 +135,6 @@ symbols:
 - DBX
 - DDOG
 - DKNG
-- DLO
 - DLTR
 - DOCU
 - DOOO
@@ -230,6 +230,7 @@ symbols:
 - ILMN
 - IMVT
 - INCY
+- INDV
 - INSM
 - INTC
 - INTR
@@ -310,7 +311,6 @@ symbols:
 - MU
 - MZTI
 - NAMS
-- NAVN
 - NBIS
 - NBIX
 - NDAQ
@@ -416,7 +416,6 @@ symbols:
 - SIGI
 - SIRI
 - SITM
-- SLAB
 - SLM
 - SMCI
 - SMMT
@@ -475,6 +474,7 @@ symbols:
 - VLY
 - VNOM
 - VOD
+- VRNS
 - VRSK
 - VRSN
 - VRTX

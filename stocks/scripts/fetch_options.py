@@ -339,7 +339,8 @@ class HistoricalDataFetcher:
         db_conn: str | None = None,
         force_fresh: bool = False,
         enable_cache: bool = True,
-        redis_url: str | None = None
+        redis_url: str | None = None,
+        db_timeout: float = 60.0
     ) -> Dict[str, Any]:
         """
         Fetches all options contracts that were active on a specific date and gets their
@@ -366,7 +367,8 @@ class HistoricalDataFetcher:
                 elif db_conn.startswith('postgresql://'):
                     db_type = 'postgresql'
                 
-                db = get_stock_db(db_type, db_config=db_config, enable_cache=enable_cache, redis_url=redis_url)
+                # Use db_timeout parameter for remote connections (default 60 seconds)
+                db = get_stock_db(db_type, db_config=db_config, enable_cache=enable_cache, redis_url=redis_url, timeout=db_timeout if db_type == 'remote' else None)
                 latest_df = await db.get_latest_options_data(ticker=symbol)
                 if latest_df is not None and not latest_df.empty:
                     # Map DB dataframe to contracts list in script format
@@ -973,7 +975,7 @@ class HistoricalDataFetcher:
         return rendered
 
 def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: str) -> str:
-    """Worker task: runs fetch for a single symbol and returns formatted output string."""
+    """Worker task: runs fetch for a single symbol, saves to DB in worker process, and returns formatted output string."""
     try:
         fetcher = HistoricalDataFetcher(
             api_key,
@@ -981,6 +983,7 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
             args_namespace.quiet,
             getattr(args_namespace, 'snapshot_max_concurrent', 0)
         )
+        
         async def _inner():
             stock_result = await fetcher.get_stock_price_for_date(symbol, args_namespace.date)
             stock_close_price = stock_result['data'].get('close') if stock_result.get('success') else None
@@ -1002,10 +1005,12 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
                 db_conn=getattr(args_namespace, 'use_db', None),
                 force_fresh=getattr(args_namespace, 'force_fresh', False),
                 enable_cache=enable_cache,
-                redis_url=redis_url
+                redis_url=redis_url,
+                db_timeout=getattr(args_namespace, 'db_timeout', 60.0)
             )
-            # Return data for database saving in main thread
-            db_save_data = None
+            
+            # Save to database in worker process (multi-processed saves)
+            save_success = False
             if getattr(args_namespace, 'use_db', None) and options_result.get('success'):
                 contracts = options_result['data'].get('contracts') or []
                 if contracts:
@@ -1013,7 +1018,6 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
                     # Build DataFrame in expected shape for DB layer
                     df = _pd.DataFrame.from_records(contracts)
                     if not df.empty:
-                        
                         # Map columns to expected names: option_ticker from 'ticker'
                         if 'ticker' in df.columns and 'option_ticker' not in df.columns:
                             df = df.rename(columns={'ticker': 'option_ticker'})
@@ -1047,7 +1051,8 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
                                 break
                         
                         if found_expiration and found_expiration != 'expiration_date':
-                            print(f"DEBUG: Found expiration column as '{found_expiration}', mapping to 'expiration_date'")
+                            if not getattr(args_namespace, 'quiet', False) and getattr(args_namespace, 'debug', False):
+                                print(f"DEBUG: Found expiration column as '{found_expiration}', mapping to 'expiration_date'")
                             df = df.rename(columns={found_expiration: 'expiration_date'})
                         
                         # Rename columns that exist
@@ -1061,11 +1066,54 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
                             if req_col not in df.columns:
                                 df[req_col] = _pd.NA
                         
-                        db_save_data = {
-                            'symbol': symbol,
-                            'df': df,
-                            'contracts_count': len(contracts)
-                        }
+                        # Save in worker process - each worker has its own DB connection
+                        db_config = getattr(args_namespace, 'use_db', None)
+                        if db_config:
+                            # Initialize database connection in worker process
+                            if db_config.startswith('http://') or db_config.startswith('https://'):
+                                # HTTP server - save via HTTP in worker process
+                                import aiohttp
+                                async with aiohttp.ClientSession() as session:
+                                    db_save_task = {
+                                        'symbol': symbol,
+                                        'df': df,
+                                        'contracts_count': len(contracts)
+                                    }
+                                    await save_single_symbol_via_http(db_save_task, db_config, session, args_namespace)
+                                    save_success = True
+                            else:
+                                # Direct database connection - create DB instance in worker
+                                from common.stock_db import get_stock_db
+                                
+                                # Determine database type
+                                db_type = 'questdb'  # default
+                                if db_config.startswith('postgresql://'):
+                                    db_type = 'postgresql'
+                                
+                                # Create DB instance in worker process - each worker has its own connection
+                                worker_db_instance = get_stock_db(
+                                    db_type, 
+                                    db_config=db_config, 
+                                    enable_cache=enable_cache, 
+                                    redis_url=redis_url
+                                )
+                                
+                                # Use async context manager to ensure proper cleanup
+                                async with worker_db_instance:
+                                    await worker_db_instance.save_options_data(df=df, ticker=symbol)
+                                    
+                                    # Update Redis cache
+                                    if enable_cache:
+                                        redis_client = get_redis_client_for_refresh(redis_url) if redis_url else None
+                                        if redis_client:
+                                            from datetime import datetime, timezone
+                                            now_utc = datetime.now(timezone.utc)
+                                            set_redis_last_write_timestamp(redis_client, symbol, now_utc, ttl_seconds=86400)
+                                    
+                                    save_success = True
+                                    if not getattr(args_namespace, 'quiet', False):
+                                        print(f"[SAVE] {symbol}: Successfully saved {len(contracts)} contracts (worker PID: {os.getpid()})")
+            
             formatted_output = fetcher.format_output(
                 symbol=symbol,
                 target_date=args_namespace.date,
@@ -1077,17 +1125,172 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
                 max_days_to_expiry=args_namespace.max_days_to_expiry
             )
             
-            # Return both formatted output and database save data
+            # Return formatted output (save already happened in worker)
             return {
                 'formatted_output': formatted_output,
-                'db_save_data': db_save_data
+                'db_save_data': None,  # Already saved in worker, no need to return
+                'save_success': save_success
             }
+        
         return asyncio.run(_inner())
     except Exception as e:
-        return f"Error processing {symbol}: {e}"
+        import traceback
+        error_msg = f"Error processing {symbol}: {e}"
+        if getattr(args_namespace, 'debug', False):
+            error_msg += f"\n{traceback.format_exc()}"
+        return error_msg
+
+async def save_single_symbol_via_http(db_save_task: dict, http_url: str, session, args) -> None:
+    """Save a single symbol's options data via HTTP request (for incremental saves)."""
+    import aiohttp
+    import json
+    
+    symbol = db_save_task['symbol']
+    df = db_save_task['df']
+    contracts_count = db_save_task['contracts_count']
+    
+    # Get batch size from args, default to 100
+    batch_size = getattr(args, 'db_batch_size', 100)
+    
+    try:
+        # Convert DataFrame to records for HTTP transmission
+        df_for_http = df.copy()
+        for col_name in df_for_http.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
+            df_for_http[col_name] = df_for_http[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+        
+        data_records = df_for_http.to_dict(orient='records')
+        total_records = len(data_records)
+        
+        if total_records <= batch_size:
+            # Single request for small datasets
+            if not args.quiet:
+                print(f"[SAVE] {symbol}: Sending {total_records} records to database...")
+            
+            payload = {
+                "command": "save_options_data",
+                "params": {
+                    "ticker": symbol,
+                    "data": data_records,
+                    "index_col": "expiration_date"
+                }
+            }
+            
+            async with session.post(
+                f"{http_url}/db_command",
+                json=payload,
+                headers={"Content-Type": "application/json"}
+            ) as response:
+                if response.status == 200:
+                    if not args.quiet:
+                        print(f"[SAVE] {symbol}: Successfully saved {contracts_count} contracts")
+                    
+                    # Update Redis cache
+                    enable_cache = not getattr(args, 'no_cache', False)
+                    if enable_cache:
+                        redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+                        redis_client = get_redis_client_for_refresh(redis_url) if redis_url else None
+                        if redis_client:
+                            from datetime import datetime, timezone
+                            now_utc = datetime.now(timezone.utc)
+                            set_redis_last_write_timestamp(redis_client, symbol, now_utc, ttl_seconds=86400)
+                else:
+                    error_text = await response.text()
+                    if not args.quiet:
+                        print(f"[SAVE] {symbol}: Warning - HTTP {response.status} - {error_text}")
+        else:
+            # Split into batches
+            num_batches = (total_records + batch_size - 1) // batch_size
+            if not args.quiet:
+                print(f"[SAVE] {symbol}: Splitting {total_records} records into {num_batches} batches...")
+            
+            successful_batches = 0
+            failed_batches = 0
+            
+            for batch_num in range(num_batches):
+                start_idx = batch_num * batch_size
+                end_idx = min(start_idx + batch_size, total_records)
+                batch_records = data_records[start_idx:end_idx]
+                
+                payload = {
+                    "command": "save_options_data",
+                    "params": {
+                        "ticker": symbol,
+                        "data": batch_records,
+                        "index_col": "expiration_date"
+                    }
+                }
+                
+                try:
+                    async with session.post(
+                        f"{http_url}/db_command",
+                        json=payload,
+                        headers={"Content-Type": "application/json"}
+                    ) as response:
+                        if response.status == 200:
+                            successful_batches += 1
+                            if not args.quiet and (batch_num + 1) % 10 == 0:
+                                print(f"[SAVE] {symbol}: Batch {batch_num + 1}/{num_batches} saved")
+                            
+                            # Update Redis cache after last batch
+                            if batch_num == num_batches - 1:
+                                enable_cache = not getattr(args, 'no_cache', False)
+                                if enable_cache:
+                                    redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+                                    redis_client = get_redis_client_for_refresh(redis_url) if redis_url else None
+                                    if redis_client:
+                                        from datetime import datetime, timezone
+                                        now_utc = datetime.now(timezone.utc)
+                                        set_redis_last_write_timestamp(redis_client, symbol, now_utc, ttl_seconds=86400)
+                        else:
+                            error_text = await response.text()
+                            failed_batches += 1
+                            if not args.quiet:
+                                print(f"[SAVE] {symbol}: Warning - batch {batch_num + 1} failed: HTTP {response.status}")
+                except Exception as batch_e:
+                    failed_batches += 1
+                    if not args.quiet:
+                        print(f"[SAVE] {symbol}: Warning - batch {batch_num + 1} error: {batch_e}")
+            
+            if not args.quiet:
+                if failed_batches == 0:
+                    print(f"[SAVE] {symbol}: Successfully saved all {num_batches} batches ({contracts_count} total contracts)")
+                else:
+                    print(f"[SAVE] {symbol}: Completed - {successful_batches} successful, {failed_batches} failed batches")
+                    
+    except Exception as e:
+        if not args.quiet:
+            print(f"[SAVE] {symbol}: Error saving to DB: {e}")
+
+async def save_single_symbol_via_direct_db(db_save_task: dict, db_instance, args) -> None:
+    """Save a single symbol's options data via direct database connection (for incremental saves)."""
+    symbol = db_save_task['symbol']
+    df = db_save_task['df']
+    contracts_count = db_save_task['contracts_count']
+    
+    try:
+        if not args.quiet:
+            print(f"[SAVE] {symbol}: Saving {contracts_count} contracts to database...")
+        
+        await db_instance.save_options_data(df=df, ticker=symbol)
+        
+        if not args.quiet:
+            print(f"[SAVE] {symbol}: Successfully saved {contracts_count} contracts")
+        
+        # Update Redis cache
+        enable_cache = not getattr(args, 'no_cache', False)
+        if enable_cache:
+            redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+            redis_client = get_redis_client_for_refresh(redis_url) if redis_url else None
+            if redis_client:
+                from datetime import datetime, timezone
+                now_utc = datetime.now(timezone.utc)
+                set_redis_last_write_timestamp(redis_client, symbol, now_utc, ttl_seconds=86400)
+    except Exception as e:
+        if not args.quiet:
+            print(f"[SAVE] {symbol}: Warning - failed to save: {e}")
 
 async def save_options_to_database(db_save_tasks: list, args) -> None:
-    """Save options data to database in main thread."""
+    """Save options data to database in main thread (batch mode - for backward compatibility)."""
     if not db_save_tasks:
         return
     
@@ -1321,21 +1524,24 @@ async def _execute_options_iteration(
 
     # Check if we should skip recently fetched tickers
     symbols_to_fetch = symbols_list
-    refresh_threshold_seconds = None
+    refresh_threshold_seconds = getattr(args, 'refresh_threshold_seconds', None)
     
-    # Calculate refresh threshold based on next fetch interval (if in continuous mode)
-    if getattr(args, 'continuous', False):
-        now_utc = datetime.now(timezone.utc)
-        is_market_open = HistoricalDataFetcher._is_market_open(now_utc)
-        if is_market_open:
-            # Market open: use market_open cache duration (20 minutes)
-            refresh_threshold_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
+    if refresh_threshold_seconds is None:
+        # Calculate refresh threshold based on next fetch interval (if in continuous mode)
+        if getattr(args, 'continuous', False):
+            now_utc = datetime.now(timezone.utc)
+            is_market_open = HistoricalDataFetcher._is_market_open(now_utc)
+            if is_market_open:
+                # Market open: use market_open cache duration (20 minutes)
+                refresh_threshold_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
+            else:
+                # Market closed: use market_closed cache duration (360 minutes)
+                refresh_threshold_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed'] * 60
         else:
-            # Market closed: use market_closed cache duration (360 minutes)
-            refresh_threshold_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed'] * 60
-    else:
-        # Single run: use market_open cache duration as default (20 minutes)
-        refresh_threshold_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
+            # Single run: use market_open cache duration as default (20 minutes)
+            refresh_threshold_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
+    elif not args.quiet:
+        print(f"Using user-specified refresh threshold: {refresh_threshold_seconds}s")
     
     # Check if tickers need refresh (only if using database and not forcing fresh fetch)
     if getattr(args, 'use_db', None) and refresh_threshold_seconds and not getattr(args, 'force_fresh', False):
@@ -1424,7 +1630,11 @@ async def _execute_options_iteration(
         )
 
     ExecutorCls = ProcessPoolExecutor if exec_type == 'process' else ThreadPoolExecutor
-    db_save_tasks = []
+    
+    # Track save results (saves now happen in worker processes, so we just track success/failure)
+    save_count = 0
+    save_failures = 0
+    
     with ExecutorCls(max_workers=max_workers) as pool:
         futures_map = {pool.submit(_run_for_symbol, symbol, args, api_key): symbol for symbol in symbols_to_fetch}
         for fut in as_completed(futures_map):
@@ -1432,17 +1642,21 @@ async def _execute_options_iteration(
             if isinstance(result, dict) and 'formatted_output' in result:
                 if not args.quiet and result['formatted_output']:
                     print(result['formatted_output'])
-                if result.get('db_save_data'):
-                    db_save_tasks.append(result['db_save_data'])
+                
+                # Track save results (saves already happened in worker process)
+                if result.get('save_success'):
+                    save_count += 1
+                elif getattr(args, 'use_db', None) and result.get('save_success') is False:
+                    save_failures += 1
             elif not args.quiet and result:
                 print(result)
-
-    if db_save_tasks and getattr(args, 'use_db', None):
-        await save_options_to_database(db_save_tasks, args)
+    
+    if not args.quiet and getattr(args, 'use_db', None):
+        print(f"\n[SUMMARY] Database saves: {save_count} successful, {save_failures} failed (saves performed in worker processes)")
 
     return {
         "symbols_processed": len(symbols_to_fetch),
-        "db_tasks": len(db_save_tasks),
+        "db_tasks": save_count,  # Count successful saves
     }
 
 
@@ -1517,8 +1731,8 @@ Examples:
 """
     )
     
-    # Add symbol input arguments using common library
-    add_symbol_arguments(parser, required=True)
+    # Add symbol input arguments using common library (disable positional symbols)
+    add_symbol_arguments(parser, required=True, allow_positional=False)
     
     parser.add_argument(
         '--date',
@@ -1593,6 +1807,12 @@ Examples:
         help="Multiplier for cadence-based intervals (e.g., 0.5 twice as fast, 2.0 half as often)."
     )
     parser.add_argument(
+        '--refresh-threshold-seconds',
+        type=int,
+        default=None,
+        help="Override the automatic ticker refresh threshold (seconds) when deciding whether to re-fetch data."
+    )
+    parser.add_argument(
         '--continuous-max-runs',
         type=int,
         default=None,
@@ -1649,6 +1869,12 @@ Examples:
         '--no-cache',
         action='store_true',
         help="Disable Redis caching for QuestDB operations (default: cache enabled)"
+    )
+    parser.add_argument(
+        '--db-timeout',
+        type=float,
+        default=60.0,
+        help="Timeout in seconds for database requests (default: 60.0). Increase for large queries or slow connections."
     )
     parser.add_argument(
         '--debug',
@@ -1737,34 +1963,11 @@ Examples:
                 if not args.quiet:
                     print(f"Market is closed. Fetching once immediately before waiting for market open...")
                 
-                # Run a single fetch
-                from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
-                exec_type = args.executor_type
-                if args.max_concurrent and args.max_concurrent > 0:
-                    max_workers = args.max_concurrent
-                else:
-                    max_workers = (os.cpu_count() or 1) if exec_type == 'process' else (os.cpu_count() or 1) * 5
-                
+                # Use the same iteration function which now handles incremental saves
                 if not args.quiet:
                     print(f"Fetching data for {len(symbols_list)} symbols (one-time fetch before waiting)...")
                 
-                ExecutorCls = ProcessPoolExecutor if exec_type == 'process' else ThreadPoolExecutor
-                with ExecutorCls(max_workers=max_workers) as pool:
-                    futures_map = {pool.submit(_run_for_symbol, symbol, args, api_key): symbol for symbol in symbols_list}
-                    db_save_tasks = []
-                    for fut in as_completed(futures_map):
-                        result = fut.result()
-                        if isinstance(result, dict) and 'formatted_output' in result:
-                            if not args.quiet and result['formatted_output']:
-                                print(result['formatted_output'])
-                            if result.get('db_save_data'):
-                                db_save_tasks.append(result['db_save_data'])
-                        elif not args.quiet and result:
-                            print(result)
-                    
-                    # Save all database data
-                    if db_save_tasks and getattr(args, 'use_db', None):
-                        await save_options_to_database(db_save_tasks, args)
+                await _execute_options_iteration(symbols_list, args, api_key)
                 
                 # Now wait for market open
                 if not args.quiet:

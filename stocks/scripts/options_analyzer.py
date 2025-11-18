@@ -355,9 +355,14 @@ class OptionsAnalyzer:
     async def initialize(self):
         """Initialize database connection."""
         try:
-            self.db = get_stock_db('questdb', db_config=self.db_conn, enable_cache=self.enable_cache, redis_url=self.redis_url, log_level=self.log_level)
+            # Use INFO level for database to reduce cache message verbosity, even when analyzer is in DEBUG mode
+            # This allows us to see ticker exclusion debug messages without being flooded by cache hits/misses
+            db_log_level = "INFO" if self.log_level == "DEBUG" else self.log_level
+            self.db = get_stock_db('questdb', db_config=self.db_conn, enable_cache=self.enable_cache, redis_url=self.redis_url, log_level=db_log_level)
             cache_status = "enabled" if self.enable_cache else "disabled"
             self._log("INFO", f"Database connection established successfully (cache: {cache_status}).")
+            if self.log_level == "DEBUG" and db_log_level == "INFO":
+                self._log("DEBUG", "Database log level set to INFO to reduce cache message verbosity (analyzer remains in DEBUG mode)")
             
             # Initialize Redis client for timestamp caching
             if self.enable_cache and self.redis_url and REDIS_AVAILABLE:
@@ -373,10 +378,35 @@ class OptionsAnalyzer:
         if self.debug:
             print(f"DEBUG: Fetching financial info for {len(tickers)} tickers", file=sys.stderr)
         
-        for ticker in tickers:
+        # Track cache statistics
+        initial_cache_stats = None
+        if self.enable_cache and hasattr(self.db, 'get_cache_statistics'):
+            try:
+                initial_cache_stats = self.db.get_cache_statistics()
+            except:
+                pass
+        
+        total = len(tickers)
+        for idx, ticker in enumerate(tickers, 1):
             try:
                 # Use the cached get_financial_info method instead of direct SQL
                 df = await self.db.get_financial_info(ticker)
+                
+                # Log progress every 100 tickers or at the end with cache stats
+                if self.debug and (idx % 100 == 0 or idx == total):
+                    cache_info = ""
+                    if initial_cache_stats is not None and self.enable_cache and hasattr(self.db, 'get_cache_statistics'):
+                        try:
+                            current_cache_stats = self.db.get_cache_statistics()
+                            hits_diff = current_cache_stats.get('hits', 0) - initial_cache_stats.get('hits', 0)
+                            misses_diff = current_cache_stats.get('misses', 0) - initial_cache_stats.get('misses', 0)
+                            total_requests = hits_diff + misses_diff
+                            if total_requests > 0:
+                                hit_rate = (hits_diff / total_requests * 100) if total_requests > 0 else 0.0
+                                cache_info = f" [cache: {hits_diff} hits, {misses_diff} misses, {hit_rate:.1f}% hit rate]"
+                        except:
+                            pass
+                    print(f"DEBUG: Fetched financial info for {idx}/{total} tickers ({idx*100//total}%){cache_info}", file=sys.stderr)
                 
                 if not df.empty:
                     # Map column names to expected fields
@@ -505,7 +535,13 @@ class OptionsAnalyzer:
             self._log("INFO", "No results from any ticker")
             return pd.DataFrame()
         
-        combined_df = pd.concat(dfs, ignore_index=True)
+        # Filter out empty DataFrames before concatenation to avoid FutureWarning
+        non_empty_dfs = [df for df in dfs if not df.empty]
+        if not non_empty_dfs:
+            self._log("INFO", "No results from any ticker (all DataFrames were empty)")
+            return pd.DataFrame()
+        
+        combined_df = pd.concat(non_empty_dfs, ignore_index=True)
         self._log("INFO", f"Combined results from {len(dfs)} tickers: {len(combined_df)} total options")
         
         return combined_df
@@ -612,7 +648,13 @@ class OptionsAnalyzer:
             self._log("INFO", "No spread results from any ticker")
             return pd.DataFrame()
         
-        combined_df = pd.concat(dfs, ignore_index=True)
+        # Filter out empty DataFrames before concatenation to avoid FutureWarning
+        non_empty_dfs = [df for df in dfs if not df.empty]
+        if not non_empty_dfs:
+            self._log("INFO", "No spread results from any ticker (all DataFrames were empty)")
+            return pd.DataFrame()
+        
+        combined_df = pd.concat(non_empty_dfs, ignore_index=True)
         self._log("INFO", f"Combined spread results from {len(dfs)} tickers: {len(combined_df)} total spread opportunities")
         
         return combined_df
@@ -2024,6 +2066,13 @@ def _build_analysis_args(args, tickers: List[str], filters: List[FilterExpressio
     }
 
 
+def _get_arg_value(args: Union[argparse.Namespace, Dict[str, Any]], key: str, default=None):
+    """Safely retrieve an argument value from either argparse Namespace or dict."""
+    if isinstance(args, dict):
+        return args.get(key, default)
+    return getattr(args, key, default)
+
+
 async def _check_tickers_for_refresh(
     analyzer: OptionsAnalyzer,
     tickers: List[str],
@@ -2080,22 +2129,23 @@ def _calculate_refresh_date_ranges(
     from datetime import date
     
     # Short-term date range (from original analysis)
-    short_start_date = args.start_date if args.start_date else today_str
-    short_end_date = args.end_date
+    start_date = _get_arg_value(args, 'start_date', None)
+    short_start_date = start_date if start_date else today_str
+    short_end_date = _get_arg_value(args, 'end_date', None)
     
     # Calculate long-term date range if in spread mode
     long_start_date = None
     long_end_date = None
-    if args.spread:
+    if _get_arg_value(args, 'spread', False):
         long_start_date, long_end_date = analyzer._calculate_long_options_date_range(
-            args.spread_long_days,
-            args.spread_long_days_tolerance,
-            args.spread_long_min_days
+            _get_arg_value(args, 'spread_long_days', 90),
+            _get_arg_value(args, 'spread_long_days_tolerance', 10),
+            _get_arg_value(args, 'spread_long_min_days', None)
         )
     
     # Determine the maximum end date for combined fetch (if spread mode) or display
     max_end_date = short_end_date
-    if args.spread and long_end_date:
+    if _get_arg_value(args, 'spread', False) and long_end_date:
         # Convert to date objects for comparison
         short_end_dt = datetime.strptime(short_end_date, '%Y-%m-%d').date() if short_end_date else None
         long_end_dt = datetime.strptime(long_end_date, '%Y-%m-%d').date()
@@ -2161,8 +2211,10 @@ def _process_refresh_batch(args_tuple):
         print(f"INFO [PID {process_id}, Process: {process_name}]: Starting refresh batch - Processing {len(tickers)} ticker(s): {ticker_list}", file=sys.stderr)
         
         # Create database connection in worker process
+        # Use INFO level for database to reduce cache message verbosity, even when analyzer is in DEBUG mode
+        db_log_level = "INFO" if log_level == "DEBUG" else log_level
         db = get_stock_db('questdb', db_config=db_conn, enable_cache=enable_cache, 
-                        redis_url=redis_url, log_level=log_level)
+                        redis_url=redis_url, log_level=db_log_level)
         
         # Create fetcher instance
         fetcher = HistoricalDataFetcher(
@@ -2779,11 +2831,17 @@ async def _run_background_refresh(
     filters: List[FilterExpression],
     refresh_threshold_seconds: int,
     redis_client: Optional[Any],
-    timestamp_cache: Optional[Dict[str, pd.Timestamp]] = None
+    timestamp_cache: Optional[Dict[str, pd.Timestamp]] = None,
+    all_tickers: Optional[List[str]] = None
 ) -> None:
     """
     Run refresh in a background process without waiting.
     Main process continues and shows existing results.
+    
+    Args:
+        all_tickers: Optional list of all loaded tickers to check. If provided, checks all tickers
+                     instead of just those in results. This allows refreshing data for tickers that
+                     may not have passed filters yet.
     """
     if not POLYGON_AVAILABLE or HistoricalDataFetcher is None:
         analyzer._log("WARNING", "Background refresh: fetch_options module not available. Skipping.")
@@ -2802,17 +2860,21 @@ async def _run_background_refresh(
         analyzer._log("INFO", "Background refresh: Market is closed. Skipping.")
         return
     
-    # Extract unique tickers from results
-    result_tickers = df['ticker'].unique().tolist() if 'ticker' in df.columns else []
-    
-    if not result_tickers:
-        analyzer._log("INFO", "Background refresh: No tickers found in results. Skipping.")
-        return
+    # Use all_tickers if provided, otherwise fall back to tickers from results
+    if all_tickers:
+        tickers_to_check = all_tickers
+        analyzer._log("INFO", f"Background refresh: Checking freshness for all {len(tickers_to_check)} loaded tickers")
+    else:
+        # Extract unique tickers from results
+        tickers_to_check = df['ticker'].unique().tolist() if 'ticker' in df.columns else []
+        if not tickers_to_check:
+            analyzer._log("INFO", "Background refresh: No tickers found in results. Skipping.")
+            return
     
     # Check which tickers need refresh (with Redis deduplication, reuse timestamp cache if provided)
     min_write_timestamp = getattr(args, 'min_write_timestamp', None)
     tickers_to_refresh = await _check_tickers_for_refresh(
-        analyzer, result_tickers, refresh_threshold_seconds, redis_client, timestamp_cache, min_write_timestamp
+        analyzer, tickers_to_check, refresh_threshold_seconds, redis_client, timestamp_cache, min_write_timestamp
     )
     
     if not tickers_to_refresh:
@@ -2820,18 +2882,27 @@ async def _run_background_refresh(
         return
     
     # Calculate percentage
-    refresh_percentage = (len(tickers_to_refresh) / len(result_tickers) * 100) if result_tickers else 0
+    refresh_percentage = (len(tickers_to_refresh) / len(tickers_to_check) * 100) if tickers_to_check else 0
     
     # Print summary to stderr so it's always visible
     print(f"\n=== Background Refresh Summary ===", file=sys.stderr)
-    print(f"Total tickers in results: {len(result_tickers)}", file=sys.stderr)
+    print(f"Total tickers checked: {len(tickers_to_check)}", file=sys.stderr)
     print(f"Tickers being refreshed: {len(tickers_to_refresh)} ({refresh_percentage:.1f}%)", file=sys.stderr)
-    print(f"\nAll tickers in results: {', '.join(sorted(result_tickers))}", file=sys.stderr)
-    print(f"\nTickers being refreshed: {', '.join(sorted(tickers_to_refresh))}", file=sys.stderr)
+    if len(tickers_to_check) <= 20:
+        print(f"\nAll tickers checked: {', '.join(sorted(tickers_to_check))}", file=sys.stderr)
+    else:
+        print(f"\nAll tickers checked: {', '.join(sorted(tickers_to_check)[:10])} ... ({len(tickers_to_check)} total)", file=sys.stderr)
+    if len(tickers_to_refresh) <= 20:
+        print(f"\nTickers being refreshed: {', '.join(sorted(tickers_to_refresh))}", file=sys.stderr)
+    else:
+        print(f"\nTickers being refreshed: {', '.join(sorted(tickers_to_refresh)[:10])} ... ({len(tickers_to_refresh)} total)", file=sys.stderr)
     print("", file=sys.stderr)
     
-    analyzer._log("WARNING", f"Background refresh initiated for {len(tickers_to_refresh)} ticker(s): {', '.join(tickers_to_refresh)}")
-    analyzer._log("INFO", f"Starting background refresh for {len(tickers_to_refresh)} ticker(s): {', '.join(tickers_to_refresh)}")
+    tickers_display = ', '.join(tickers_to_refresh[:10])
+    if len(tickers_to_refresh) > 10:
+        tickers_display += f" ... ({len(tickers_to_refresh)} total)"
+    analyzer._log("WARNING", f"Background refresh initiated for {len(tickers_to_refresh)} ticker(s): {tickers_display}")
+    analyzer._log("INFO", f"Starting background refresh for {len(tickers_to_refresh)} ticker(s): {tickers_display}")
     
     # Calculate refresh workers and ticker distribution in main process for visibility
     max_workers = getattr(args, 'max_workers', 4)
@@ -3118,7 +3189,7 @@ Examples:
     )
     
     # Add symbol input arguments using common library
-    add_symbol_arguments(parser, required=True)
+    add_symbol_arguments(parser, required=True, allow_positional=False)
     
     # Database connection
     parser.add_argument(
@@ -3565,7 +3636,7 @@ async def main():
         elif args.refresh_results_background is not None:
             refresh_threshold_seconds = args.refresh_results_background
             await _run_background_refresh(
-                analyzer, args, df, filters, refresh_threshold_seconds, redis_client, timestamp_cache
+                analyzer, args, df, filters, refresh_threshold_seconds, redis_client, timestamp_cache, all_tickers=symbols_list
             )
         
         # Print statistics

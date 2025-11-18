@@ -11,8 +11,8 @@ import pandas as pd
 import io
 
 # Define all available concrete types
-FULL_AVAILABLE_TYPES = ['nyse', 'nasdaq', 'nasdaq-new', 'nyse-new', 'dow-jones', 'sp-500', 'etfs', 'crypto', 'stocks_to_track']
-ALL_AVAILABLE_TYPES = ['nyse', 'nasdaq', 'dow-jones', 'sp-500', 'etfs', 'crypto', 'stocks_to_track']
+FULL_AVAILABLE_TYPES = ['nyse', 'nasdaq', 'nasdaq-new', 'nyse-new', 'dow-jones', 'sp-500', 'etfs', 'crypto', 'stocks_to_track', 'stocks_to_track2']
+ALL_AVAILABLE_TYPES = ['nyse', 'nasdaq', 'dow-jones', 'sp-500', 'etfs', 'crypto', 'stocks_to_track', 'stocks_to_track2']
 
 async def fetch_nasdaq_companies():
     """
@@ -370,14 +370,17 @@ async def fetch_types(args):
     os.makedirs(f'{args.data_dir}/lists', exist_ok=True) # For YAML lists
 
     # Separate disk-only curated types vs. network-fetchable types
-    disk_only_types = { 'stocks_to_track' }
+    disk_only_types = { 'stocks_to_track', 'stocks_to_track2' }
     network_types = [t for t in current_types_for_fetching if t not in disk_only_types]
 
     # 1) Handle disk-only types even when --fetch-online is used
     list_dir_path = os.path.join(args.data_dir, 'lists')
     for data_type in current_types_for_fetching:
         if data_type in disk_only_types:
+            # Try both naming patterns: {data_type}_symbols.yaml and {data_type}.yaml
             yaml_file = os.path.join(list_dir_path, f'{data_type}_symbols.yaml')
+            if not os.path.exists(yaml_file):
+                yaml_file = os.path.join(list_dir_path, f'{data_type}.yaml')
             try:
                 with open(yaml_file, 'r') as f:
                     data = yaml.safe_load(f)
@@ -458,7 +461,10 @@ def load_symbols_from_disk(args):
         return {'symbols': [], 'loaded_types': []}
 
     for data_type in current_types_to_load:
+        # Try both naming patterns: {data_type}_symbols.yaml and {data_type}.yaml
         yaml_file = os.path.join(list_dir_path, f'{data_type}_symbols.yaml')
+        if not os.path.exists(yaml_file):
+            yaml_file = os.path.join(list_dir_path, f'{data_type}.yaml')
         try:
             with open(yaml_file, 'r') as f:
                 data = yaml.safe_load(f)
@@ -499,7 +505,7 @@ async def download_list(list_type: str, data_dir: str = './data') -> None:
         print(f"Error: Unknown list type '{list_type}'. Available types: {FULL_AVAILABLE_TYPES}")
         return
     
-    if list_type == 'stocks_to_track':
+    if list_type in ['stocks_to_track', 'stocks_to_track2']:
         print(f"Error: '{list_type}' is a disk-only curated list. Cannot download from network.")
         return
     
@@ -587,10 +593,11 @@ Available list types: {', '.join(FULL_AVAILABLE_TYPES)}
     
     # Determine which lists to download
     lists_to_download = []
+    disk_only_types = {'stocks_to_track', 'stocks_to_track2'}
     if 'all' in args.download:
-        lists_to_download = [t for t in FULL_AVAILABLE_TYPES if t != 'stocks_to_track']
+        lists_to_download = [t for t in FULL_AVAILABLE_TYPES if t not in disk_only_types]
     else:
-        lists_to_download = [t for t in args.download if t != 'all' and t != 'stocks_to_track']
+        lists_to_download = [t for t in args.download if t != 'all' and t not in disk_only_types]
     
     if not lists_to_download:
         print("No valid lists to download.")

@@ -75,6 +75,48 @@ current_worker_id = None
 is_multiprocess_mode = False
 child_shutdown_flag = False
 
+# Utility helpers
+def dataframe_to_json_records(df: pd.DataFrame) -> list[Dict[str, Any]]:
+    """Convert a pandas DataFrame to JSON-serializable records with ISO timestamps."""
+    if df is None or df.empty:
+        return []
+    
+    df_serializable = df.copy()
+    
+    # Convert datetime columns to ISO strings
+    datetime_columns = df_serializable.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns
+    for col in datetime_columns:
+        df_serializable[col] = df_serializable[col].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+    
+    # Handle object columns that may contain Timestamp/datetime objects
+    object_columns = df_serializable.select_dtypes(include=['object']).columns
+    for col in object_columns:
+        series = df_serializable[col].dropna()
+        if series.empty:
+            continue
+        sample_val = series.iloc[0]
+        if isinstance(sample_val, (pd.Timestamp, datetime)):
+            df_serializable[col] = df_serializable[col].apply(
+                lambda x: x.isoformat() if isinstance(x, (pd.Timestamp, datetime)) else x
+            )
+    
+    return df_serializable.to_dict(orient='records')
+
+
+def serialize_mapping_datetime(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert datetime-like values within a dict to ISO strings."""
+    if not data:
+        return data
+    
+    serialized = {}
+    for key, value in data.items():
+        if isinstance(value, (pd.Timestamp, datetime)):
+            serialized[key] = value.isoformat()
+        else:
+            serialized[key] = value
+    return serialized
+
+
 # Global WebSocket connection management
 class WebSocketManager:
     def __init__(self, heartbeat_interval: float = 1.0, stale_data_timeout: float = 120.0):
@@ -1896,7 +1938,8 @@ async def handle_db_command(request: web.Request) -> web.Response:
                     return web.json_response({"error": f"Index column '{index_col}' not found"}, status=400)
                 
                 # Convert index column to datetime if it's not already
-                df_to_save[index_col] = pd.to_datetime(df_to_save[index_col])
+                # Use format='ISO8601' to handle both date-only (YYYY-MM-DD) and datetime strings
+                df_to_save[index_col] = pd.to_datetime(df_to_save[index_col], format='ISO8601', errors='coerce')
                 
                 # Create a copy for QuestDB that keeps the expiration_date as a column
                 df_for_questdb = df_to_save.copy()
@@ -1913,6 +1956,65 @@ async def handle_db_command(request: web.Request) -> web.Response:
             except Exception as e:
                 logger.error(f"Error saving options data for {ticker}: {e}", exc_info=True)
                 return web.json_response({"error": f"Failed to save options data: {str(e)}"}, status=500)
+
+        elif command == "get_options_data":
+            ticker = params.get("ticker")
+            if not ticker:
+                return web.json_response({"error": "Missing 'ticker' for get_options_data"}, status=400)
+            
+            expiration_date = params.get("expiration_date")
+            start_datetime = params.get("start_datetime")
+            end_datetime = params.get("end_datetime")
+            option_tickers = params.get("option_tickers")
+            
+            try:
+                df = await db_instance.get_options_data(
+                    ticker=ticker,
+                    expiration_date=expiration_date,
+                    start_datetime=start_datetime,
+                    end_datetime=end_datetime,
+                    option_tickers=option_tickers,
+                )
+                records = dataframe_to_json_records(df)
+                return web.json_response({"data": records})
+            except Exception as e:
+                logger.error(f"Error getting options data for {ticker}: {e}", exc_info=True)
+                return web.json_response({"error": f"Failed to get options data: {str(e)}"}, status=500)
+
+        elif command == "get_latest_options_data":
+            ticker = params.get("ticker")
+            if not ticker:
+                return web.json_response({"error": "Missing 'ticker' for get_latest_options_data"}, status=400)
+            
+            expiration_date = params.get("expiration_date")
+            option_tickers = params.get("option_tickers")
+            
+            try:
+                df = await db_instance.get_latest_options_data(
+                    ticker=ticker,
+                    expiration_date=expiration_date,
+                    option_tickers=option_tickers,
+                )
+                records = dataframe_to_json_records(df)
+                return web.json_response({"data": records})
+            except Exception as e:
+                logger.error(f"Error getting latest options data for {ticker}: {e}", exc_info=True)
+                return web.json_response({"error": f"Failed to get latest options data: {str(e)}"}, status=500)
+
+        elif command == "get_option_price_feature":
+            ticker = params.get("ticker")
+            option_ticker = params.get("option_ticker")
+            if not ticker or not option_ticker:
+                return web.json_response({"error": "Missing 'ticker' or 'option_ticker' for get_option_price_feature"}, status=400)
+            
+            try:
+                feature = await db_instance.get_option_price_feature(ticker, option_ticker)
+                if feature:
+                    feature = serialize_mapping_datetime(feature)
+                return web.json_response({"data": feature})
+            except Exception as e:
+                logger.error(f"Error getting option price feature for {ticker} / {option_ticker}: {e}", exc_info=True)
+                return web.json_response({"error": f"Failed to get option price feature: {str(e)}"}, status=500)
 
         else:
             return web.json_response({"error": f"Unknown command: {command}"}, status=400)

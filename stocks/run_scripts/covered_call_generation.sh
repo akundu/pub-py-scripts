@@ -10,7 +10,7 @@ QUERY_LOC="questdb://stock_user:stock_password@localhost:8812/stock_data"
 TYPE="types"
 TYPE_input="all"
 
-MAX_WORKERS=7
+MAX_WORKERS=5
 BATCH_SIZE=300
 
 MAX_DAYS=`days=$((6 - $(date +%u)));[ $days -le 0 ] && days=$((days + 7)); echo $days` #count the number of days till the next saturday
@@ -22,7 +22,7 @@ MARKET_HOURS=false
 CUR_HOUR_MIN=$(TZ='America/New_York' date '+%H%M')
 DAY_OF_WEEK=$(TZ='America/New_York' date '+%u')  # 1=Monday, ..., 7=Sunday
 if [ "$DAY_OF_WEEK" -lt 6 ] && [ "$CUR_HOUR_MIN" -ge 930 ] && [ "$CUR_HOUR_MIN" -le 1600 ]; then
-  TIME_TO_USE=`TZ='America/New_York' date -v-30M '+%Y-%m-%d %H:%M:%S'`
+  TIME_TO_USE=`TZ='America/New_York' date -v-2H '+%Y-%m-%d %H:%M:%S'`
   MARKET_HOURS=true
 else
   TIME_TO_USE=`TZ='America/New_York' date -v-72H '+%Y-%m-%d %H:%M:%S'`
@@ -41,12 +41,12 @@ fi
 
 #SORT="DAY_PREM"
 SORT="potential_premium"
-TOP_N=25
+TOP_N=5
 
 MIN_PE=1
-MIN_VOL=50
+MIN_VOL=1
 MIN_LONG_PREMIUM=0.5
-MIN_PREMIUM=0.25
+MIN_PREMIUM=0.10
 MIN_NET_PREMIUM=10
 CURR_PRIC_MULT=1.01
 SENSIBLE_PRICE=0.001
@@ -61,6 +61,7 @@ spread_long_days_tolerance=15
 refresh_results_background=600
 
 log_level="WARNING"
+log_level="DEBUG"
 option_type="both"
 
 while true;

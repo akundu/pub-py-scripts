@@ -699,8 +699,13 @@ def parse_args():
     parser.add_argument('--data-dir', default='./data',
                       help='Directory to store data (default: ./data)')
     
-    # Add symbol input arguments using common library
-    add_symbol_arguments(parser, required=False)
+    # Add symbol input arguments using common library (enforce explicit --symbols or --types)
+    add_symbol_arguments(
+        parser,
+        required=True,
+        allow_positional=False,
+        include_symbols_list=False
+    )
     
     parser.add_argument('--max-concurrent', type=int, default=None,
                       help='Max concurrent workers for market data fetches (default: os.cpu_count() for processes, os.cpu_count()*5 for threads)')
@@ -861,6 +866,10 @@ def parse_args():
                             help='Number of days back to fetch historical market data.')
     
     args = parser.parse_args()
+
+    # The shared parser may or may not include --symbols-list; normalize attribute to simplify downstream logic
+    if not hasattr(args, 'symbols_list'):
+        args.symbols_list = None
 
     # Validate --fetch-ratios parameter
     if args.fetch_ratios and args.data_source != "polygon":
