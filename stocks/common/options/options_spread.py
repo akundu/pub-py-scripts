@@ -163,7 +163,25 @@ def filter_and_prepare_long_options(
     # Apply write timestamp filter to long options if specified
     if min_write_timestamp and not long_options_df.empty:
         before_count = len(long_options_df)
-        long_options_df = apply_basic_filters(long_options_df, 0, 0.0, min_write_timestamp)
+        ticker_label = None
+        if tickers:
+            dedup = []
+            for sym in tickers:
+                if sym and sym not in dedup:
+                    dedup.append(sym)
+            if dedup:
+                if len(dedup) <= 3:
+                    ticker_label = ",".join(dedup)
+                else:
+                    ticker_label = ",".join(dedup[:3]) + f"+{len(dedup)-3}"
+        long_options_df = apply_basic_filters(
+            long_options_df,
+            0,
+            0.0,
+            min_write_timestamp,
+            debug=debug,
+            ticker=ticker_label
+        )
         after_count = len(long_options_df)
         if before_count != after_count and log_func:
             log_func("INFO", f"Filtered long options by write timestamp: {before_count} -> {after_count} options")

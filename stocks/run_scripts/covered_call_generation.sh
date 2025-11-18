@@ -8,6 +8,8 @@ GEMINI_PROG="tests/gemini_test.py"
 QUERY_LOC="questdb://stock_user:stock_password@localhost:8812/stock_data"
 
 TYPE="types"
+TYPE_input="stocks_to_track2"
+TYPE_input="stocks_to_track"
 TYPE_input="all"
 
 MAX_WORKERS=5
@@ -41,13 +43,13 @@ fi
 
 #SORT="DAY_PREM"
 SORT="potential_premium"
-TOP_N=5
+TOP_N=2
 
 MIN_PE=1
-MIN_VOL=1
+MIN_VOL=10
 MIN_LONG_PREMIUM=0.5
-MIN_PREMIUM=0.10
-MIN_NET_PREMIUM=10
+MIN_PREMIUM=0.25
+MIN_NET_PREMIUM=1000
 CURR_PRIC_MULT=1.01
 SENSIBLE_PRICE=0.001
 
@@ -61,7 +63,6 @@ spread_long_days_tolerance=15
 refresh_results_background=600
 
 log_level="WARNING"
-log_level="DEBUG"
 option_type="both"
 
 while true;
@@ -69,6 +70,7 @@ do
     date
 
     start=$(date +%s)
+    #command="python scripts/options_analyzer.py --no-cache --top-n $TOP_N --stats --max-days $MAX_DAYS \
     command="python scripts/options_analyzer.py --top-n $TOP_N --stats --max-days $MAX_DAYS \
       --batch-size $BATCH_SIZE --max-workers $MAX_WORKERS  \
       --sort net_daily_premium  \

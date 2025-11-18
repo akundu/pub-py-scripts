@@ -192,6 +192,32 @@ class OptionsAnalyzer:
         if self._should_log(level):
             print(message, file=file)
     
+    def _infer_ticker_label(
+        self,
+        df: Optional[pd.DataFrame] = None,
+        tickers: Optional[List[str]] = None
+    ) -> Optional[str]:
+        """Generate a compact ticker label for debug logs."""
+        values: List[str] = []
+        if df is not None and 'ticker' in df.columns:
+            try:
+                values = df['ticker'].dropna().astype(str).tolist()
+            except Exception:
+                values = [str(v) for v in df['ticker'].dropna().tolist()]
+        elif tickers:
+            values = [str(t) for t in tickers if t]
+        if not values:
+            return None
+        seen: List[str] = []
+        for val in values:
+            if val and val not in seen:
+                seen.append(val)
+        if not seen:
+            return None
+        if len(seen) <= 3:
+            return ",".join(seen)
+        return ",".join(seen[:3]) + f"+{len(seen)-3}"
+    
     async def _fetch_latest_option_timestamps(
         self,
         tickers: List[str],
@@ -1236,7 +1262,15 @@ class OptionsAnalyzer:
 
         # Apply basic filters using helper function
             before_volume_filter = len(df)
-        df = _apply_basic_filters(df, min_volume, min_premium, min_write_timestamp)
+        ticker_label = self._infer_ticker_label(df)
+        df = _apply_basic_filters(
+            df,
+            min_volume,
+            min_premium,
+            min_write_timestamp,
+            debug=self.debug,
+            ticker=ticker_label
+        )
         
         if min_volume > 0 and before_volume_filter != len(df):
             self._log("INFO", f"After min_volume filter ({min_volume}): {len(df)} options (was {before_volume_filter})")
@@ -1511,7 +1545,15 @@ class OptionsAnalyzer:
         # Apply write timestamp filter to long options if specified
         if min_write_timestamp and not long_options_df.empty:
             before_count = len(long_options_df)
-            long_options_df = _apply_basic_filters(long_options_df, 0, 0.0, min_write_timestamp)
+            ticker_label = self._infer_ticker_label(long_options_df, tickers)
+            long_options_df = _apply_basic_filters(
+                long_options_df,
+                0,
+                0.0,
+                min_write_timestamp,
+                debug=self.debug,
+                ticker=ticker_label
+            )
             after_count = len(long_options_df)
             if before_count != after_count:
                 self._log("INFO", f"Filtered long options by write timestamp: {before_count} -> {after_count} options")

@@ -405,24 +405,6 @@ class CacheKeyGenerator:
         return f"stocks:options_md_index:{ticker}"
     
     @staticmethod
-    def options_negative_cache(ticker: str, expiration_date: Optional[str] = None) -> str:
-        """Generate cache key for negative cache (no options data found).
-        
-        Args:
-            ticker: Stock ticker symbol
-            expiration_date: Optional expiration date in YYYY-MM-DD format
-        
-        Returns:
-            Cache key: stocks:options_negative:{ticker}:{expiration_date} or stocks:options_negative:{ticker} if no expiration_date
-        """
-        # Normalize expiration_date to YYYY-MM-DD format for consistent keys
-        if expiration_date:
-            exp_date_str = expiration_date[:10] if len(expiration_date) >= 10 else expiration_date
-            return f"stocks:options_negative:{ticker}:{exp_date_str}"
-        else:
-            return f"stocks:options_negative:{ticker}"
-    
-    @staticmethod
     def financial_info(ticker: str, date: Optional[str] = None) -> str:
         """Generate cache key for financial info.
         
@@ -515,8 +497,6 @@ class RedisCache:
         self._stats = {
             'hits': 0,
             'misses': 0,
-            'negative_hits': 0,  # Negative cache hits (no data found)
-            'negative_sets': 0,  # Negative cache sets (caching empty results)
             'sets': 0,
             'invalidations': 0,
             'errors': 0
@@ -835,16 +815,6 @@ class RedisCache:
     def get_statistics(self) -> Dict[str, int]:
         """Get cache statistics."""
         return self._stats.copy()
-    
-    def track_negative_hit(self):
-        """Track a negative cache hit (no data found)."""
-        if self.enable_cache:
-            self._stats['negative_hits'] += 1
-    
-    def track_negative_set(self):
-        """Track a negative cache set (caching empty result)."""
-        if self.enable_cache:
-            self._stats['negative_sets'] += 1
     
     async def smembers(self, key: str) -> Set[str]:
         """Get all members of a Redis SET.
@@ -1522,12 +1492,15 @@ class OptionsDataRepository(BaseRepository):
             
             where = " AND ".join(clauses)
             
+            option_ticker_filter = ""
             if option_tickers:
-                placeholders = ",".join([f"${i}" for i in range(next_param, next_param + len(option_tickers))])
-                params.extend(option_tickers)
-                inner_where = f"{where} AND option_ticker IN ({placeholders})"
-            else:
-                inner_where = where
+                option_ticker_param = [str(opt) for opt in option_tickers if opt is not None]
+                if option_ticker_param:
+                    placeholders = ",".join([f"${i}" for i in range(next_param, next_param + len(option_ticker_param))])
+                    params.extend(option_ticker_param)
+                    next_param += len(option_ticker_param)
+                    option_ticker_filter = f" AND option_ticker::text IN ({placeholders})"
+            inner_where = where + option_ticker_filter
             
             # Build the window function query
             query = f"""SELECT * FROM (
@@ -1647,12 +1620,15 @@ class OptionsDataRepository(BaseRepository):
             
             # Build the window function query
             # Use write_timestamp for ordering as per user's example
+            option_ticker_filter = ""
             if option_tickers:
-                placeholders = ",".join([f"${i}" for i in range(next_param + 1, next_param + 1 + len(option_tickers))])
-                params.extend(option_tickers)
-                inner_where = f"{where} AND option_ticker IN ({placeholders})"
-            else:
-                inner_where = where
+                option_ticker_param = [str(opt) for opt in option_tickers if opt is not None]
+                if option_ticker_param:
+                    placeholders = ",".join([f"${i}" for i in range(next_param, next_param + len(option_ticker_param))])
+                    params.extend(option_ticker_param)
+                    next_param += len(option_ticker_param)
+                    option_ticker_filter = f" AND option_ticker::text IN ({placeholders})"
+            inner_where = where + option_ticker_filter
             
             query = f"""SELECT * FROM (
   SELECT *, 
@@ -2005,11 +1981,10 @@ class FinancialInfoRepository(BaseRepository):
 class StockDataService:
     """Service for stock data operations with caching and MA/EMA calculations."""
     
-    def __init__(self, daily_price_repo: DailyPriceRepository, cache: RedisCache, logger: logging.Logger, negative_cache_ttl: int = 3600):
+    def __init__(self, daily_price_repo: DailyPriceRepository, cache: RedisCache, logger: logging.Logger):
         self.daily_price_repo = daily_price_repo
         self.cache = cache
         self.logger = logger
-        self.negative_cache_ttl = negative_cache_ttl  # TTL for negative cache (default: 60 minutes)
     
     async def save(self, ticker: str, df: pd.DataFrame, interval: str,
                    ma_periods: List[int], ema_periods: List[int]) -> None:
@@ -2157,8 +2132,7 @@ class StockDataService:
         cached_data = {}
         if cache_keys:
             cached_results = await self.cache.get_batch(cache_keys, batch_size=500)
-            # Include empty DataFrames (negative cache) as valid cache hits
-            cached_data = {k: v for k, v in cached_results.items() if v is not None}
+            cached_data = {k: v for k, v in cached_results.items() if v is not None and not v.empty}
         
         # Determine which time points need DB fetch
         missing_keys = [k for k in cache_keys if k not in cached_data]
@@ -2194,19 +2168,10 @@ class StockDataService:
                         # If cache_key is in cached_data but was in missing_keys, it means we got it from cache
                         # after the missing_keys list was generated (race condition), so don't re-cache
             
-            # Negative cache: cache empty DataFrames for dates that don't exist in DB
-            # This prevents future DB fetches for non-trading days/hours
-            # Use shorter TTL for hourly (5 min) vs daily (60 min)
-            negative_ttl = 300 if interval == 'hourly' else self.negative_cache_ttl  # 5 min for hourly, 60 min for daily
-            for missing_key in missing_keys:
-                if missing_key not in dates_in_db and missing_key not in cached_data:
-                    # This date/hour doesn't exist in DB - negative cache it with TTL
-                    empty_df = pd.DataFrame()
-                    await self.cache.set(missing_key, empty_df, ttl=negative_ttl)
-                    cached_data[missing_key] = empty_df
+            # Missing cache entries are simply skipped
         
         # Combine all cached data (from cache hits and newly fetched)
-        # Filter out empty DataFrames (negative cache) from the final result
+        # Filter out empty DataFrames from the final result
         if cached_data:
             non_empty_data = {k: v for k, v in cached_data.items() if not v.empty}
             if non_empty_data:
@@ -2522,24 +2487,6 @@ class OptionsDataService:
         if metadata is not None:
             return metadata
         
-        # Check negative cache before querying DB
-        negative_cache_key = CacheKeyGenerator.options_negative_cache(ticker, expiration_date)
-        cached_empty = await self.cache.get(negative_cache_key)
-        if cached_empty is not None:
-            # Negative cache hit - no options data for this ticker/expiration_date
-            self.cache.track_negative_hit()
-            self.logger.debug(f"[CACHE HIT] Negative cache hit for {ticker}:{expiration_date} (no options data found)")
-            return set()
-        
-        # Also check ticker-only negative cache
-        ticker_negative_cache_key = CacheKeyGenerator.options_negative_cache(ticker)
-        cached_empty_ticker = await self.cache.get(ticker_negative_cache_key)
-        if cached_empty_ticker is not None:
-            # Negative cache hit - no options data for this ticker at all
-            self.cache.track_negative_hit()
-            self.logger.debug(f"[CACHE HIT] Negative cache hit for {ticker} (no options data found)")
-            return set()
-        
         # Metadata not in cache, fetch from DB
         self.logger.debug(f"[CACHE METADATA] Metadata missing for {ticker}:{expiration_date}, fetching from DB")
         temp_df = await self.options_repo.get(ticker, expiration_date=expiration_date, start_datetime=start_datetime, end_datetime=end_datetime)
@@ -2548,15 +2495,8 @@ class OptionsDataService:
         if not temp_df.empty and 'option_ticker' in temp_df.columns:
             option_tickers = set(temp_df['option_ticker'].unique().astype(str))
         
-        # Save metadata to cache
         if option_tickers:
             await self._set_options_metadata(ticker, expiration_date, option_tickers)
-        else:
-            # No options found - set negative cache with 1-day TTL
-            empty_df = pd.DataFrame()
-            await self.cache.set(negative_cache_key, empty_df, ttl=86400)  # 1 day TTL
-            self.cache.track_negative_set()
-            self.logger.debug(f"[CACHE SET] Negative cache set for {ticker}:{expiration_date} (no options data, TTL: 86400s)")
         
         return option_tickers
     
@@ -2649,24 +2589,6 @@ class OptionsDataService:
                 
                 # Fall back to DB if no metadata found or all expired
                 if not unique_exp_dates or not option_tickers:
-                    # Check negative cache before querying DB
-                    negative_cache_key = CacheKeyGenerator.options_negative_cache(ticker, expiration_date)
-                    cached_empty = await self.cache.get(negative_cache_key)
-                    if cached_empty is not None:
-                        # Negative cache hit - no options data for this ticker/expiration_date
-                        self.cache.track_negative_hit()
-                        self.logger.debug(f"[CACHE HIT] Negative cache hit for {ticker}:{expiration_date} (no options data found)")
-                        return [], {}
-                    
-                    # Also check ticker-only negative cache
-                    ticker_negative_cache_key = CacheKeyGenerator.options_negative_cache(ticker)
-                    cached_empty_ticker = await self.cache.get(ticker_negative_cache_key)
-                    if cached_empty_ticker is not None:
-                        # Negative cache hit - no options data for this ticker at all
-                        self.cache.track_negative_hit()
-                        self.logger.debug(f"[CACHE HIT] Negative cache hit for {ticker} (no options data found)")
-                        return [], {}
-                    
                     # No metadata found in cache, fall back to DB query
                     if not unique_exp_dates:
                         self.logger.debug(f"[CACHE METADATA] No metadata index found for {ticker} in date range, querying DB")
@@ -2705,32 +2627,9 @@ class OptionsDataService:
                         
                         option_tickers = list(all_option_tickers)
                     else:
-                        # No options found - set negative cache with 1-day TTL
-                        empty_df = pd.DataFrame()
-                        await self.cache.set(negative_cache_key, empty_df, ttl=86400)  # 1 day TTL
-                        self.cache.track_negative_set()
-                        self.logger.debug(f"[CACHE SET] Negative cache set for {ticker}:{expiration_date} (no options data, TTL: 86400s)")
                         return [], {}
         else:
             # option_tickers provided, but we still need their expiration_dates for cache keys
-            # Check negative cache before querying DB
-            negative_cache_key = CacheKeyGenerator.options_negative_cache(ticker, expiration_date)
-            cached_empty = await self.cache.get(negative_cache_key)
-            if cached_empty is not None:
-                # Negative cache hit - no options data for this ticker/expiration_date
-                self.cache.track_negative_hit()
-                self.logger.debug(f"[CACHE HIT] Negative cache hit for {ticker}:{expiration_date} (no options data found)")
-                return [], {}
-            
-            # Also check ticker-only negative cache
-            ticker_negative_cache_key = CacheKeyGenerator.options_negative_cache(ticker)
-            cached_empty_ticker = await self.cache.get(ticker_negative_cache_key)
-            if cached_empty_ticker is not None:
-                # Negative cache hit - no options data for this ticker at all
-                self.cache.track_negative_hit()
-                self.logger.debug(f"[CACHE HIT] Negative cache hit for {ticker} (no options data found)")
-                return [], {}
-            
             # Query DB to get expiration_dates for the provided option_tickers
             temp_df = await self.options_repo.get(ticker, expiration_date=expiration_date, start_datetime=start_datetime, end_datetime=end_datetime, option_tickers=option_tickers)
             if not temp_df.empty and 'option_ticker' in temp_df.columns and 'expiration_date' in temp_df.columns:
@@ -2744,11 +2643,6 @@ class OptionsDataService:
                             exp_date_str = str(exp_date)[:10]
                         option_ticker_exp_map[opt_ticker] = exp_date_str
             else:
-                # No options found - set negative cache with 1-day TTL
-                empty_df = pd.DataFrame()
-                await self.cache.set(negative_cache_key, empty_df, ttl=86400)  # 1 day TTL
-                self.cache.track_negative_set()
-                self.logger.debug(f"[CACHE SET] Negative cache set for {ticker}:{expiration_date} (no options data, TTL: 86400s)")
                 return [], {}
         
         elapsed = time.time() - start_time
@@ -2921,30 +2815,12 @@ class OptionsDataService:
         resolve_elapsed = time.time() - resolve_start
         self.logger.debug(f"[TIMING] _resolve_option_tickers_and_exp_dates completed for {ticker}: {resolve_elapsed:.3f}s")
         
-        # If no option_tickers found, check negative cache first, then query DB
+        # If no option_tickers were resolved, query DB directly
         if not option_tickers:
-            # Check negative cache first
-            negative_cache_key = CacheKeyGenerator.options_negative_cache(ticker, expiration_date)
-            cached_empty = await self.cache.get(negative_cache_key)
-            if cached_empty is not None:
-                # Negative cache hit - key exists in cache (empty DataFrame indicates no data)
-                # Return empty DataFrame to indicate no options data found
-                self.cache.track_negative_hit()
-                self.logger.debug(f"[CACHE HIT] Negative cache hit for {ticker} (no options data found, TTL: 86400s)")
-                return pd.DataFrame()
-            
-            # Negative cache miss - query DB
             if timestamp_lookback_days is not None:
                 df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, option_tickers, timestamp_lookback_days, min_write_timestamp)
             else:
                 df = await self.options_repo.get(ticker, expiration_date, start_datetime, end_datetime, option_tickers)
-            
-            # If DB query returns empty, cache it with 1-day TTL (86400 seconds)
-            if df.empty:
-                empty_df = pd.DataFrame()
-                await self.cache.set(negative_cache_key, empty_df, ttl=86400)  # 1 day TTL
-                self.cache.track_negative_set()
-                self.logger.debug(f"[CACHE SET] Negative cache set for {ticker} (no options data, TTL: 86400s)")
             
             return df
         
@@ -2954,26 +2830,13 @@ class OptionsDataService:
         keygen_elapsed = time.time() - keygen_start
         self.logger.debug(f"[TIMING] Generated {len(cache_keys)} cache keys for {ticker}: {keygen_elapsed:.3f}s")
         
-        # Generate negative cache key and check it in parallel with regular cache keys
-        negative_cache_key = CacheKeyGenerator.options_negative_cache(ticker, expiration_date)
-        
-        # Batch fetch from cache (including negative cache key)
+        # Batch fetch from cache
         cache_start = time.time()
-        all_cache_keys = cache_keys + [negative_cache_key]
-        cached_results = await self.cache.get_batch(all_cache_keys, batch_size=500)
+        cached_results = await self.cache.get_batch(cache_keys, batch_size=500)
         cache_elapsed = time.time() - cache_start
         
-        # Check negative cache first
-        negative_cache_result = cached_results.get(negative_cache_key)
-        if negative_cache_result is not None:
-            # Negative cache hit - key exists in cache (empty DataFrame indicates no data)
-            # Return empty DataFrame to indicate no options data found
-            self.cache.track_negative_hit()
-            self.logger.debug(f"[CACHE HIT] Negative cache hit for {ticker} (no options data found, TTL: 86400s)")
-            return pd.DataFrame()
-        
-        # Process regular cache results (exclude negative cache key)
-        cached_data = {k: v for k, v in cached_results.items() if k != negative_cache_key and v is not None and not v.empty}
+        # Process regular cache results
+        cached_data = {k: v for k, v in cached_results.items() if v is not None and not v.empty}
         self.logger.debug(f"[TIMING] Cache batch get for {ticker}: {cache_elapsed:.3f}s, found {len(cached_data)}/{len(cache_keys)}")
         
         # Filter cached data by min_write_timestamp if provided
@@ -2990,10 +2853,15 @@ class OptionsDataService:
                     
                     # Filter each cached DataFrame by write_timestamp
                     filtered_cached_data = {}
+                    stale_cache_keys: List[str] = []
                     for cache_key, df in cached_data.items():
                         if not df.empty and 'write_timestamp' in df.columns:
                             # Normalize write_timestamp to UTC for comparison
                             df_copy = df.copy()
+                            non_null_mask = df_copy['write_timestamp'].notna()
+                            if not non_null_mask.any():
+                                stale_cache_keys.append(cache_key)
+                                continue
                             df_copy['write_timestamp'] = df_copy['write_timestamp'].apply(
                                 lambda x: normalize_timestamp_to_utc(x) if pd.notna(x) else None
                             )
@@ -3003,10 +2871,11 @@ class OptionsDataService:
                                 # Restore original write_timestamp column (drop normalized one if we added it)
                                 filtered_cached_data[cache_key] = filtered_df
                         elif not df.empty:
-                            # If no write_timestamp column, keep the data (let downstream filtering handle it)
-                            filtered_cached_data[cache_key] = df
+                            stale_cache_keys.append(cache_key)
                     
                     filtered_count = len(cached_data) - len(filtered_cached_data)
+                    if stale_cache_keys:
+                        self.logger.info(f"[CACHE FILTER] Discarded {len(stale_cache_keys)} cached options for {ticker} due to missing write_timestamp (will refetch from DB)")
                     if filtered_count > 0:
                         self.logger.info(f"[CACHE FILTER] Filtered out {filtered_count} cached options with write_timestamp < {min_write_timestamp} for {ticker} (kept {len(filtered_cached_data)})")
                     elif len(cached_data) > 0:
@@ -3078,18 +2947,11 @@ class OptionsDataService:
                         cached_data[cache_key] = row_df
                 cache_write_elapsed = time.time() - cache_write_start
                 self.logger.debug(f"[TIMING] Cache write for {ticker}: {cache_write_elapsed:.3f}s, cached {len(df)} options")
-            else:
-                # DB query returned empty - negative cache this query with 1-day TTL
-                negative_cache_key = CacheKeyGenerator.options_negative_cache(ticker, expiration_date)
-                empty_df = pd.DataFrame()
-                await self.cache.set(negative_cache_key, empty_df, ttl=86400)  # 1 day TTL
-                self.cache.track_negative_set()
-                self.logger.debug(f"[CACHE SET] Negative cache set for {ticker} query (no options data, TTL: 86400s)")
         elif deduplicate:
             self.logger.debug(f"[CACHE] All {len(option_tickers)} options found in cache for {ticker}")
         
         # Combine all cached data (from cache hits and newly fetched)
-        # Filter out empty DataFrames (negative cache) from the final result
+        # Filter out empty DataFrames from the final result
         combine_start = time.time()
         if cached_data:
             # Filter out empty DataFrames and DataFrames with all-NA entries
@@ -3522,7 +3384,11 @@ class StockQuestDB(StockDBBase):
         self.financial_repo = FinancialInfoRepository(self.connection, self.logger)
         
         # Initialize services
-        self.stock_service = StockDataService(self.daily_price_repo, self.cache, self.logger, negative_cache_ttl=3600)
+        self.stock_service = StockDataService(
+            self.daily_price_repo,
+            self.cache,
+            self.logger
+        )
         self.realtime_service = RealtimeDataService(self.realtime_repo, self.cache, self.logger)
         self.options_service = OptionsDataService(self.options_repo, self.cache, self.logger)
         self.financial_service = FinancialDataService(self.financial_repo, self.cache, self.logger)
@@ -4005,8 +3871,6 @@ class StockQuestDB(StockDBBase):
             aggregated = {
                 'hits': sum(s.get('hits', 0) for s in worker_stats),
                 'misses': sum(s.get('misses', 0) for s in worker_stats),
-                'negative_hits': sum(s.get('negative_hits', 0) for s in worker_stats),
-                'negative_sets': sum(s.get('negative_sets', 0) for s in worker_stats),
                 'sets': sum(s.get('sets', 0) for s in worker_stats),
                 'invalidations': sum(s.get('invalidations', 0) for s in worker_stats),
                 'errors': sum(s.get('errors', 0) for s in worker_stats),
@@ -4014,13 +3878,11 @@ class StockQuestDB(StockDBBase):
             # Add worker stats to main process stats
             stats['hits'] = stats.get('hits', 0) + aggregated['hits']
             stats['misses'] = stats.get('misses', 0) + aggregated['misses']
-            stats['negative_hits'] = stats.get('negative_hits', 0) + aggregated['negative_hits']
-            stats['negative_sets'] = stats.get('negative_sets', 0) + aggregated['negative_sets']
             stats['sets'] = stats.get('sets', 0) + aggregated['sets']
             stats['invalidations'] = stats.get('invalidations', 0) + aggregated['invalidations']
             stats['errors'] = stats.get('errors', 0) + aggregated['errors']
         
-        total_requests = stats.get('hits', 0) + stats.get('misses', 0) + stats.get('negative_hits', 0)
+        total_requests = stats.get('hits', 0) + stats.get('misses', 0)
         stats['total_requests'] = total_requests
         if total_requests > 0:
             stats['hit_rate'] = stats.get('hits', 0) / total_requests

@@ -88,7 +88,9 @@ def apply_basic_filters(
     df: pd.DataFrame,
     min_volume: int = 0,
     min_premium: float = 0.0,
-    min_write_timestamp: Optional[str] = None
+    min_write_timestamp: Optional[str] = None,
+    debug: bool = False,
+    ticker: Optional[str] = None
 ) -> pd.DataFrame:
     """Apply basic filters: volume, premium, write timestamp."""
     if min_volume > 0:
@@ -99,6 +101,7 @@ def apply_basic_filters(
     
     if min_write_timestamp:
         try:
+            prefix = f"{ticker} - " if ticker else ""
             import pytz
             est = pytz.timezone('America/New_York')
             min_ts = pd.to_datetime(min_write_timestamp)
@@ -111,30 +114,31 @@ def apply_basic_filters(
                 
                 # Debug: Check for any null timestamps after normalization
                 null_count = df['write_timestamp'].isna().sum()
-                if null_count > 0:
+                if debug and null_count > 0:
                     import sys
-                    print(f"DEBUG [apply_basic_filters]: Warning - {null_count} records have null write_timestamp after normalization (out of {before_normalize} total)", file=sys.stderr)
+                    print(f"DEBUG [apply_basic_filters]: {prefix}Warning - {null_count} records have null write_timestamp after normalization (out of {before_normalize} total)", file=sys.stderr)
                 
                 # Debug: Show timestamp range before filtering
-                if df['write_timestamp'].notna().any():
+                if debug and df['write_timestamp'].notna().any():
                     min_actual_ts = df['write_timestamp'].min()
                     max_actual_ts = df['write_timestamp'].max()
                     import sys
-                    print(f"DEBUG [apply_basic_filters]: Timestamp range: {min_actual_ts} to {max_actual_ts}, filter threshold: {min_ts_utc}", file=sys.stderr)
-                    print(f"DEBUG [apply_basic_filters]: Records before filter: {len(df)}, threshold: {min_ts_utc}", file=sys.stderr)
+                    print(f"DEBUG [apply_basic_filters]: {prefix}Timestamp range: {min_actual_ts} to {max_actual_ts}, filter threshold: {min_ts_utc}", file=sys.stderr)
+                    print(f"DEBUG [apply_basic_filters]: {prefix}Records before filter: {len(df)}, threshold: {min_ts_utc}", file=sys.stderr)
                 
                 df = df[df['write_timestamp'] >= min_ts_utc].copy()
                 
                 # Debug: Show filtering result
-                import sys
                 filtered_out = before_normalize - len(df)
-                if filtered_out > 0:
-                    print(f"DEBUG [apply_basic_filters]: Filtered out {filtered_out} records (kept {len(df)}), threshold was {min_ts_utc}", file=sys.stderr)
+                if debug and filtered_out > 0:
+                    import sys
+                    print(f"DEBUG [apply_basic_filters]: {prefix}Filtered out {filtered_out} records (kept {len(df)}), threshold was {min_ts_utc}", file=sys.stderr)
         except Exception as e:
-            import sys
-            print(f"DEBUG [apply_basic_filters]: Error applying timestamp filter: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc(file=sys.stderr)
+            if debug:
+                import sys
+                print(f"DEBUG [apply_basic_filters]: {prefix}Error applying timestamp filter: {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc(file=sys.stderr)
             pass  # Ignore timestamp filter errors
     
     return df

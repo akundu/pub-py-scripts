@@ -149,10 +149,11 @@ def process_ticker_analysis(args_tuple):
                 
                 # Debug: Check write_timestamp after fetching from DB
                 if debug and 'write_timestamp' in options_df.columns:
-                    write_ts_count = options_df['write_timestamp'].notna().sum()
+                    write_ts_series = pd.to_datetime(options_df['write_timestamp'], errors='coerce')
+                    write_ts_count = write_ts_series.notna().sum()
                     if write_ts_count > 0:
-                        min_ts = options_df['write_timestamp'].min()
-                        max_ts = options_df['write_timestamp'].max()
+                        min_ts = write_ts_series.min()
+                        max_ts = write_ts_series.max()
                         print(f"DEBUG [PID {os.getpid()}]: {ticker} - After DB fetch: {len(options_df)} options, write_timestamp range: {min_ts} to {max_ts} ({write_ts_count} non-null)", file=sys.stderr)
                     else:
                         print(f"DEBUG [PID {os.getpid()}]: {ticker} - WARNING: All {len(options_df)} options have null write_timestamp after DB fetch!", file=sys.stderr)
@@ -237,14 +238,22 @@ def process_ticker_analysis(args_tuple):
                 before_basic_filters = len(df)
                 # Debug: Check write_timestamp before applying filters
                 if debug and min_write_timestamp and 'write_timestamp' in df.columns:
-                    write_ts_count = df['write_timestamp'].notna().sum()
+                    write_ts_series = pd.to_datetime(df['write_timestamp'], errors='coerce')
+                    write_ts_count = write_ts_series.notna().sum()
                     if write_ts_count > 0:
-                        min_ts = df['write_timestamp'].min()
-                        max_ts = df['write_timestamp'].max()
+                        min_ts = write_ts_series.min()
+                        max_ts = write_ts_series.max()
                         print(f"DEBUG [PID {os.getpid()}]: {ticker} - Before basic filters: {before_basic_filters} options, write_timestamp range: {min_ts} to {max_ts} ({write_ts_count} non-null)", file=sys.stderr)
                     else:
                         print(f"DEBUG [PID {os.getpid()}]: {ticker} - WARNING: All {before_basic_filters} options have null write_timestamp!", file=sys.stderr)
-                df = apply_basic_filters(df, min_volume, min_premium, min_write_timestamp)
+                df = apply_basic_filters(
+                    df,
+                    min_volume,
+                    min_premium,
+                    min_write_timestamp,
+                    debug=debug,
+                    ticker=ticker
+                )
                 if debug and before_basic_filters != len(df):
                     filter_reasons = []
                     if min_volume > 0:
@@ -647,10 +656,11 @@ def process_ticker_spread_analysis(args_tuple):
                 
                 # Debug: Check write_timestamp after fetching from DB
                 if debug and 'write_timestamp' in short_options_df.columns:
-                    write_ts_count = short_options_df['write_timestamp'].notna().sum()
+                    write_ts_series = pd.to_datetime(short_options_df['write_timestamp'], errors='coerce')
+                    write_ts_count = write_ts_series.notna().sum()
                     if write_ts_count > 0:
-                        min_ts = short_options_df['write_timestamp'].min()
-                        max_ts = short_options_df['write_timestamp'].max()
+                        min_ts = write_ts_series.min()
+                        max_ts = write_ts_series.max()
                         print(f"DEBUG [PID {os.getpid()}]: {ticker} - After DB fetch (spread): {len(short_options_df)} short options, write_timestamp range: {min_ts} to {max_ts} ({write_ts_count} non-null)", file=sys.stderr)
                     else:
                         print(f"DEBUG [PID {os.getpid()}]: {ticker} - WARNING (spread): All {len(short_options_df)} short options have null write_timestamp after DB fetch!", file=sys.stderr)
@@ -737,14 +747,22 @@ def process_ticker_spread_analysis(args_tuple):
                 before_basic_filters = len(df_short)
                 # Debug: Check write_timestamp before applying filters
                 if debug and min_write_timestamp and 'write_timestamp' in df_short.columns:
-                    write_ts_count = df_short['write_timestamp'].notna().sum()
+                    write_ts_series = pd.to_datetime(df_short['write_timestamp'], errors='coerce')
+                    write_ts_count = write_ts_series.notna().sum()
                     if write_ts_count > 0:
-                        min_ts = df_short['write_timestamp'].min()
-                        max_ts = df_short['write_timestamp'].max()
+                        min_ts = write_ts_series.min()
+                        max_ts = write_ts_series.max()
                         print(f"DEBUG [PID {os.getpid()}]: {ticker} - Before basic filters (spread): {before_basic_filters} short options, write_timestamp range: {min_ts} to {max_ts} ({write_ts_count} non-null)", file=sys.stderr)
                     else:
                         print(f"DEBUG [PID {os.getpid()}]: {ticker} - WARNING (spread): All {before_basic_filters} short options have null write_timestamp!", file=sys.stderr)
-                df_short = apply_basic_filters(df_short, min_volume, min_premium, min_write_timestamp)
+                df_short = apply_basic_filters(
+                    df_short,
+                    min_volume,
+                    min_premium,
+                    min_write_timestamp,
+                    debug=debug,
+                    ticker=ticker
+                )
                 if debug and before_basic_filters != len(df_short):
                     filter_reasons = []
                     if min_volume > 0:
@@ -836,7 +854,14 @@ def process_ticker_spread_analysis(args_tuple):
                 # Apply write timestamp filter
                 if min_write_timestamp:
                     before_long_ts_filter = len(long_options_df)
-                    long_options_df = apply_basic_filters(long_options_df, 0, 0.0, min_write_timestamp)
+                    long_options_df = apply_basic_filters(
+                        long_options_df,
+                        0,
+                        0.0,
+                        min_write_timestamp,
+                        debug=debug,
+                        ticker=ticker
+                    )
                     if debug and before_long_ts_filter != len(long_options_df):
                         print(f"DEBUG [PID {os.getpid()}]: {ticker} - After long-term write timestamp filter: {len(long_options_df)} options (was {before_long_ts_filter})", file=sys.stderr)
                     if debug and long_options_df.empty and before_long_ts_filter > 0:
