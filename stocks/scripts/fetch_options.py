@@ -978,6 +978,130 @@ class HistoricalDataFetcher:
         rendered = "\n".join(output)
         return rendered
 
+
+def split_tickers_into_chunks(tickers: list[str], chunk_size: int = 250) -> list[list[str]]:
+    """Split ticker list into chunks of maximum chunk_size."""
+    chunks = []
+    for i in range(0, len(tickers), chunk_size):
+        chunks.append(tickers[i:i + chunk_size])
+    return chunks
+
+
+def generate_month_ranges(start_date_str: str, num_months: int) -> list[tuple[str, str]]:
+    """Generate 30-day date ranges starting from start_date.
+    
+    Returns list of (start_date, end_date) tuples in YYYY-MM-DD format.
+    """
+    start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
+    ranges = []
+    for i in range(num_months):
+        month_start = start_date + timedelta(days=i * 30)
+        month_end = month_start + timedelta(days=30) - timedelta(days=1)
+        ranges.append((
+            month_start.strftime('%Y-%m-%d'),
+            month_end.strftime('%Y-%m-%d')
+        ))
+    return ranges
+
+
+def allocate_processes_by_proximity(total_processes: int, num_months: int) -> list[int]:
+    """Allocate processes to months using 2.5x exponential decay per month.
+    
+    Month 1 gets 2.5x month 2, month 2 gets 2.5x month 3, etc.
+    Each month gets at least 1 process.
+    Remaining processes after allocation go to month 1 (most recent).
+    """
+    if num_months == 0:
+        return []
+    if total_processes < num_months:
+        # Not enough processes - give 1 to each
+        return [1] * num_months
+    
+    # Calculate base allocations with 2.5x decay per month
+    # Month 0 (most recent) should get the most, with each subsequent month getting 1/2.5
+    # We'll work backwards: start with month n-1 getting 1, month n-2 getting 2.5, etc.
+    allocations = []
+    for i in range(num_months):
+        # Month i gets 2.5^(num_months - 1 - i) relative weight
+        # Month 0 gets 2.5^(num_months-1), month n-1 gets 2.5^0 = 1
+        weight = 2.5 ** (num_months - 1 - i)
+        allocations.append(weight)
+    
+    # Normalize to use available processes
+    total_weight = sum(allocations)
+    
+    # First pass: allocate based on weights, but ensure at least 1 per month
+    # We'll allocate proportionally, then floor at 1
+    allocated = 0
+    for i in range(num_months):
+        # Calculate proportional allocation
+        proportional = int(total_processes * allocations[i] / total_weight)
+        # Ensure at least 1
+        allocations[i] = max(1, proportional)
+        allocated += allocations[i]
+    
+    # Second pass: if we allocated too many, reduce from farthest months first
+    if allocated > total_processes:
+        excess = allocated - total_processes
+        for i in range(num_months - 1, -1, -1):  # Start from farthest month
+            if allocations[i] > 1 and excess > 0:
+                reduction = min(excess, allocations[i] - 1)
+                allocations[i] -= reduction
+                excess -= reduction
+                if excess == 0:
+                    break
+    
+    # Third pass: if we have remaining processes, give them all to month 1 (most recent)
+    allocated = sum(allocations)
+    if allocated < total_processes:
+        remaining = total_processes - allocated
+        allocations[0] += remaining
+    
+    return allocations
+
+
+def _dry_run_worker_standalone(chunk: list[str], target_date: str, worker_id: int, month_idx: int, month_start: str, month_end: str, use_db: bool) -> dict:
+    """Standalone dry-run worker function (must be at module level for ProcessPoolExecutor pickling)."""
+    import os
+    pid = os.getpid()
+    print(f"[DRY-RUN Month {month_idx + 1} Worker {worker_id} PID {pid}] Would process chunk with {len(chunk)} tickers: {chunk[:5]}{'...' if len(chunk) > 5 else ''}")
+    print(f"[DRY-RUN Month {month_idx + 1} Worker {worker_id} PID {pid}] Would fetch options for date range: {month_start} to {month_end}")
+    print(f"[DRY-RUN Month {month_idx + 1} Worker {worker_id} PID {pid}] Would save to DB: {use_db}")
+    print(f"[DRY-RUN Month {month_idx + 1} Worker {worker_id} PID {pid}] All executions would be successful (simulated)")
+    return {
+        'symbols_processed': len(chunk),
+        'save_success_count': len(chunk) if use_db else 0,
+        'save_failure_count': 0,
+        'errors': []
+    }
+
+
+def _run_for_ticker_chunk(ticker_chunk: list[str], target_date_str: str, args_namespace: argparse.Namespace, api_key: str) -> dict:
+    """Worker task: runs fetch for a chunk of tickers for a specific date."""
+    results = {
+        'symbols_processed': 0,
+        'save_success_count': 0,
+        'save_failure_count': 0,
+        'errors': []
+    }
+    
+    for symbol in ticker_chunk:
+        try:
+            result = _run_for_symbol(symbol, args_namespace, api_key)
+            if isinstance(result, dict) and 'save_success' in result:
+                results['symbols_processed'] += 1
+                if result.get('save_success'):
+                    results['save_success_count'] += 1
+                else:
+                    results['save_failure_count'] += 1
+            else:
+                results['errors'].append(f"{symbol}: {result}")
+        except Exception as e:
+            results['errors'].append(f"{symbol}: {str(e)}")
+    
+    return results
+
+
 def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: str) -> str:
     """Worker task: runs fetch for a single symbol, saves to DB in worker process, and returns formatted output string."""
     try:
@@ -1537,17 +1661,369 @@ def _terminate_process_pool(executor):
                 pass
 
 
+async def _execute_month_cluster(
+    month_index: int,
+    month_start_date: str,
+    month_end_date: str,
+    ticker_chunks: list[list[str]],
+    num_processes: int,
+    args: argparse.Namespace,
+    api_key: str,
+    all_pools: list,
+) -> dict:
+    """Execute options fetching for one month cluster with allocated processes."""
+    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+    
+    dry_run = getattr(args, 'dry_run', False)
+    
+    # Respect the user's executor type preference
+    user_executor_type = getattr(args, 'executor_type', 'thread')
+    use_threads = (user_executor_type == 'thread') or (num_processes == 0)
+    
+    # Determine max workers based on executor type
+    if use_threads:
+        max_workers = max(1, len(ticker_chunks))
+    else:
+        max_workers = max(1, num_processes)
+    
+    executor_type_name = 'thread' if use_threads else 'process'
+    
+    if not args.quiet:
+        print(f"[Month {month_index + 1}] Processing {len(ticker_chunks)} ticker chunks "
+              f"for date range {month_start_date} to {month_end_date} "
+              f"using {executor_type_name} executor with {max_workers} workers")
+    
+    # DRY-RUN MODE: Actually fork processes to show what they would do
+    if dry_run:
+        total_symbols = sum(len(chunk) for chunk in ticker_chunks)
+        if not args.quiet:
+            print(f"[DRY-RUN Month {month_index + 1}] Creating {executor_type_name} executor with {max_workers} workers")
+            print(f"[DRY-RUN Month {month_index + 1}] Will process {len(ticker_chunks)} chunks ({total_symbols} total symbols)")
+        
+        # Actually create the executor and fork processes in dry-run mode
+        ExecutorCls = ThreadPoolExecutor if use_threads else ProcessPoolExecutor
+        pool = ExecutorCls(max_workers=max_workers)
+        all_pools.append(pool)
+        
+        # Note: For ProcessPoolExecutor, we need to use module-level function for pickling
+        use_db_flag = bool(getattr(args, 'use_db', None))
+        
+        # Submit tasks to actually fork processes
+        if not args.quiet:
+            print(f"[DRY-RUN Month {month_index + 1}] Submitting {len(ticker_chunks)} tasks to executor (will fork processes)...")
+        
+        futures_map = {}
+        for chunk_idx, chunk in enumerate(ticker_chunks):
+            future = pool.submit(_dry_run_worker_standalone, chunk, month_start_date, chunk_idx + 1, month_index, month_start_date, month_end_date, use_db_flag)
+            futures_map[future] = chunk
+        
+        # Give processes a moment to start and show their PIDs
+        if not args.quiet and ExecutorCls == ProcessPoolExecutor:
+            import time
+            time.sleep(0.3)  # Brief pause to let processes start
+            if hasattr(pool, '_processes') and pool._processes:
+                num_workers = len(pool._processes)
+                worker_pids = [p.pid for p in pool._processes.values() if hasattr(p, 'pid')]
+                print(f"[DRY-RUN Month {month_index + 1}] ProcessPoolExecutor has {num_workers} worker processes active")
+                if worker_pids:
+                    print(f"[DRY-RUN Month {month_index + 1}] Worker PIDs: {worker_pids}")
+        
+        # Wait for all workers to report
+        cluster_results = {
+            'symbols_processed': 0,
+            'save_success_count': 0,
+            'save_failure_count': 0,
+            'errors': []
+        }
+        
+        for future in as_completed(futures_map):
+            try:
+                result = future.result()
+                cluster_results['symbols_processed'] += result.get('symbols_processed', 0)
+                cluster_results['save_success_count'] += result.get('save_success_count', 0)
+                cluster_results['save_failure_count'] += result.get('save_failure_count', 0)
+            except Exception as e:
+                chunk = futures_map[future]
+                error_msg = f"Chunk {chunk[:3] if chunk else 'unknown'}...: {str(e)}"
+                if not args.quiet:
+                    print(f"[DRY-RUN Month {month_index + 1}] ERROR: {error_msg}", file=sys.stderr)
+                cluster_results['errors'].append(error_msg)
+        
+        # Shutdown pool (processes will exit)
+        if pool in all_pools:
+            all_pools.remove(pool)
+        pool.shutdown(wait=True, cancel_futures=False)
+        
+        if not args.quiet:
+            print(f"[DRY-RUN Month {month_index + 1}] All workers completed and exited")
+        
+        return cluster_results
+    
+    # Create executor
+    ExecutorCls = ThreadPoolExecutor if use_threads else ProcessPoolExecutor
+    pool = ExecutorCls(max_workers=max_workers)
+    all_pools.append(pool)
+    
+    if not args.quiet:
+        executor_type_display = "ProcessPoolExecutor" if ExecutorCls == ProcessPoolExecutor else "ThreadPoolExecutor"
+        print(f"[Month {month_index + 1}] Created {executor_type_display} with max_workers={max_workers} (Main PID: {os.getpid()})")
+        if ExecutorCls == ProcessPoolExecutor:
+            print(f"[Month {month_index + 1}] Worker processes will be created lazily when tasks are submitted")
+            print(f"[Month {month_index + 1}] Up to {max_workers} worker processes will be created for this month")
+    
+    # Update args with month date range
+    month_args = argparse.Namespace(**vars(args))
+    month_args.date = month_start_date
+    # Adjust max_days_to_expiry to cover the month range
+    month_start_dt = datetime.strptime(month_start_date, '%Y-%m-%d')
+    month_end_dt = datetime.strptime(month_end_date, '%Y-%m-%d')
+    days_in_month = (month_end_dt - month_start_dt).days
+    month_args.max_days_to_expiry = max(days_in_month, getattr(args, 'max_days_to_expiry', 30))
+    
+    futures_map = {}
+    cluster_results = {
+        'symbols_processed': 0,
+        'save_success_count': 0,
+        'save_failure_count': 0,
+        'errors': []
+    }
+    
+    try:
+        # Submit all ticker chunks
+        if not args.quiet:
+            print(f"[Month {month_index + 1}] Submitting {len(ticker_chunks)} ticker chunk tasks to executor...")
+        for chunk in ticker_chunks:
+            future = pool.submit(_run_for_ticker_chunk, chunk, month_start_date, month_args, api_key)
+            futures_map[future] = chunk
+        
+        if not args.quiet and ExecutorCls == ProcessPoolExecutor:
+            # ProcessPoolExecutor creates workers lazily, so they should be created now
+            import time
+            time.sleep(1.0)  # Give processes more time to start
+            if hasattr(pool, '_processes') and pool._processes:
+                num_workers = len(pool._processes)
+                worker_pids = [p.pid for p in pool._processes.values() if hasattr(p, 'pid')]
+                print(f"[Month {month_index + 1}] ProcessPoolExecutor has {num_workers} worker processes active (expected: up to {max_workers}, tasks: {len(ticker_chunks)})")
+                if worker_pids:
+                    print(f"[Month {month_index + 1}] Worker PIDs: {worker_pids}")
+                if num_workers < min(max_workers, len(ticker_chunks)):
+                    print(f"[Month {month_index + 1}] NOTE: ProcessPoolExecutor creates workers lazily. Only {num_workers} workers created for {len(ticker_chunks)} tasks (max_workers={max_workers})")
+            else:
+                print(f"[Month {month_index + 1}] WARNING: ProcessPoolExecutor worker processes not yet visible (they're created lazily)")
+        
+        # Process results as they complete
+        if not args.quiet:
+            print(f"[Month {month_index + 1}] Processing results as tasks complete...")
+        for future in as_completed(futures_map):
+            try:
+                result = future.result()
+                cluster_results['symbols_processed'] += result.get('symbols_processed', 0)
+                cluster_results['save_success_count'] += result.get('save_success_count', 0)
+                cluster_results['save_failure_count'] += result.get('save_failure_count', 0)
+                cluster_results['errors'].extend(result.get('errors', []))
+            except Exception as e:
+                chunk = futures_map[future]
+                cluster_results['errors'].append(f"Chunk {chunk[:3]}...: {str(e)}")
+    except KeyboardInterrupt:
+        if not args.quiet:
+            print(f"\n[Month {month_index + 1}] KeyboardInterrupt received, cancelling tasks...", file=sys.stderr)
+        for future in futures_map:
+            future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        if pool in all_pools:
+            all_pools.remove(pool)
+        pool.shutdown(wait=True, cancel_futures=False)
+    
+    if not args.quiet:
+        print(f"[Month {month_index + 1}] Completed: {cluster_results['symbols_processed']} symbols, "
+              f"{cluster_results['save_success_count']} saves successful, "
+              f"{cluster_results['save_failure_count']} saves failed")
+    
+    return cluster_results
+
+
 async def _execute_options_iteration(
     symbols_list: list[str],
     args: argparse.Namespace,
     api_key: str,
+    all_pools: list | None = None,
 ) -> dict:
     """
     Execute one iteration of options fetching (without sleeping) and return summary data.
     Checks if tickers were recently fetched and skips them if data is fresh.
+    Supports multi-month processing with weighted process allocation.
     """
     from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+    
+    if all_pools is None:
+        all_pools = []
+    
+    dry_run = getattr(args, 'dry_run', False)
+    months_ahead = getattr(args, 'months_ahead', 0)
+    ticker_chunk_size = getattr(args, 'ticker_chunk_size', 250)
+    
+    # If months_ahead is 0 or not set, use single-date mode (backward compatibility)
+    if months_ahead <= 0:
+        return await _execute_options_iteration_single_date(symbols_list, args, api_key, all_pools)
+    
+    # Multi-month mode: split by time and tickers
+    start_date = getattr(args, 'start_date', None) or args.date
+    month_ranges = generate_month_ranges(start_date, months_ahead)
+    
+    # Allocate processes to months first to determine optimal chunk size
+    if args.max_concurrent and args.max_concurrent > 0:
+        total_processes = args.max_concurrent
+    else:
+        total_processes = (os.cpu_count() or 1) if args.executor_type == 'process' else (os.cpu_count() or 1) * 5
+    
+    process_allocations = allocate_processes_by_proximity(total_processes, months_ahead)
+    
+    # Adjust chunk size to ensure we have enough chunks to utilize all allocated processes
+    # Each month needs at least as many chunks as it has allocated processes
+    max_processes_per_month = max(process_allocations) if process_allocations else 1
+    # Ensure we have at least max_processes_per_month chunks, but respect user's max chunk size
+    optimal_chunk_size = min(ticker_chunk_size, max(1, len(symbols_list) // max(max_processes_per_month, 1)))
+    
+    # Split tickers into chunks
+    ticker_chunks = split_tickers_into_chunks(symbols_list, optimal_chunk_size)
+    
+    # Warn if we had to adjust chunk size
+    if optimal_chunk_size < ticker_chunk_size and not args.quiet:
+        print(f"  NOTE: Adjusted chunk size from {ticker_chunk_size} to {optimal_chunk_size} to create {len(ticker_chunks)} chunks (needed for {max_processes_per_month} processes in Month 1)")
+    
+    if not args.quiet:
+        print(f"\n[MULTI-MONTH MODE] Processing {len(symbols_list)} tickers across {months_ahead} months")
+        print(f"  Ticker chunks: {len(ticker_chunks)} (max {ticker_chunk_size} per chunk)")
+        print(f"  Total processes: {total_processes} (executor type: {args.executor_type})")
+        print(f"  Process allocation by month (all months run in parallel):")
+        total_allocated = 0
+        max_actual_workers = 0
+        for i, (month_range, proc_count) in enumerate(zip(month_ranges, process_allocations)):
+            # ProcessPoolExecutor will only create as many workers as there are tasks
+            actual_workers = min(proc_count, len(ticker_chunks))
+            max_actual_workers += actual_workers
+            print(f"    Month {i+1} ({month_range[0]} to {month_range[1]}): {proc_count} processes allocated, {actual_workers} actual workers (limited by {len(ticker_chunks)} chunks)")
+            total_allocated += proc_count
+        print(f"  Total processes allocated: {total_allocated} (should equal {total_processes})")
+        print(f"  Maximum actual worker processes: {max_actual_workers} (limited by {len(ticker_chunks)} chunks per month)")
+        if args.executor_type == 'process':
+            print(f"  Note: ProcessPoolExecutor creates worker processes lazily when tasks are submitted.")
+            print(f"  Since there are only {len(ticker_chunks)} chunks per month, each month can use at most {len(ticker_chunks)} workers.")
+            print(f"  To use more processes, increase --ticker-chunk-size to create more chunks, or reduce --max-concurrent.")
+            print(f"  You should see up to {max_actual_workers} worker processes in 'ps aux' once tasks start.")
+    
+    # Execute each month cluster in parallel
+    overall_results = {
+        'symbols_processed': 0,
+        'save_success_count': 0,
+        'save_failure_count': 0,
+        'errors': []
+    }
+    
+    async def run_month_cluster(month_index: int, month_start: str, month_end: str) -> dict:
+        """Wrapper to run a month cluster and handle errors."""
+        try:
+            return await _execute_month_cluster(
+                month_index=month_index,
+                month_start_date=month_start,
+                month_end_date=month_end,
+                ticker_chunks=ticker_chunks,
+                num_processes=process_allocations[month_index],
+                args=args,
+                api_key=api_key,
+                all_pools=all_pools
+            )
+        except KeyboardInterrupt:
+            if not args.quiet:
+                print(f"\n[MULTI-MONTH] KeyboardInterrupt at month {month_index + 1}, stopping...", file=sys.stderr)
+            raise
+        except Exception as e:
+            if not args.quiet:
+                print(f"\n[MULTI-MONTH] Error in month {month_index + 1}: {e}", file=sys.stderr)
+            return {
+                'symbols_processed': 0,
+                'save_success_count': 0,
+                'save_failure_count': 0,
+                'errors': [f"Month {month_index + 1}: {str(e)}"]
+            }
+    
+    # Run all month clusters in parallel (truly concurrent)
+    if not args.quiet:
+        print(f"  Running all {months_ahead} month clusters in parallel...")
+        print(f"  Main process PID: {os.getpid()}")
+        print(f"  All month clusters will start simultaneously via asyncio.gather()")
+    
+    # Create all tasks first, then await them all together to ensure true parallelism
+    month_tasks = [
+        asyncio.create_task(run_month_cluster(month_index, month_start, month_end))
+        for month_index, (month_start, month_end) in enumerate(month_ranges)
+    ]
+    
+    if not args.quiet:
+        print(f"  Created {len(month_tasks)} async tasks - all will execute concurrently")
+        print(f"  Expected total worker processes: {sum(process_allocations)} (across all months)")
+        print(f"  To verify parallel execution, run: ps aux | grep -E 'Python|python' | grep fetch_options")
+        print(f"  Or check all Python processes: ps aux | grep -E 'Python|python' | grep -v grep")
+        print(f"  You should see 1 main process + up to {sum(process_allocations)} worker processes")
+        print(f"  Note: ProcessPoolExecutor creates workers lazily when tasks are submitted")
+        print(f"  All months will start simultaneously, but workers may appear gradually")
+    
+    # Wait for all months to complete
+    try:
+        month_results_list = await asyncio.gather(*month_tasks, return_exceptions=True)
+        
+        # Aggregate results
+        for month_results in month_results_list:
+            if isinstance(month_results, Exception):
+                overall_results['errors'].append(f"Month cluster error: {str(month_results)}")
+            else:
+                overall_results['symbols_processed'] += month_results.get('symbols_processed', 0)
+                overall_results['save_success_count'] += month_results.get('save_success_count', 0)
+                overall_results['save_failure_count'] += month_results.get('save_failure_count', 0)
+                overall_results['errors'].extend(month_results.get('errors', []))
+    except KeyboardInterrupt:
+        if not args.quiet:
+            print("\n[MULTI-MONTH] KeyboardInterrupt: Cancelling all month clusters...", file=sys.stderr)
+        for task in month_tasks:
+            task.cancel()
+        await asyncio.gather(*month_tasks, return_exceptions=True)
+        raise
+    
+    if not args.quiet:
+        print(f"\n[MULTI-MONTH SUMMARY] Total: {overall_results['symbols_processed']} symbols processed, "
+              f"{overall_results['save_success_count']} saves successful, "
+              f"{overall_results['save_failure_count']} saves failed")
+        if overall_results['errors']:
+            print(f"  Errors: {len(overall_results['errors'])}")
+            if getattr(args, 'debug', False) or len(overall_results['errors']) > 0:
+                # Show first few errors for debugging
+                for i, error in enumerate(overall_results['errors'][:10]):
+                    print(f"    Error {i+1}: {error}")
+                if len(overall_results['errors']) > 10:
+                    print(f"    ... and {len(overall_results['errors']) - 10} more errors")
+    
+    return {
+        "symbols_processed": overall_results['symbols_processed'],
+        "db_tasks": overall_results['save_success_count'],
+    }
 
+
+async def _execute_options_iteration_single_date(
+    symbols_list: list[str],
+    args: argparse.Namespace,
+    api_key: str,
+    all_pools: list | None = None,
+) -> dict:
+    """Execute one iteration for a single date (original behavior, backward compatible)."""
+    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+    
+    if all_pools is None:
+        all_pools = []
+    
+    dry_run = getattr(args, 'dry_run', False)
+    
     # Check if we should skip recently fetched tickers
     symbols_to_fetch = symbols_list
     refresh_threshold_seconds = getattr(args, 'refresh_threshold_seconds', None)
@@ -1649,6 +2125,64 @@ async def _execute_options_iteration(
     else:
         max_workers = (os.cpu_count() or 1) if exec_type == 'process' else (os.cpu_count() or 1) * 5
 
+    # DRY-RUN MODE: Actually fork processes to show what they would do
+    if dry_run:
+        if not args.quiet:
+            print(f"\n[DRY-RUN] Creating {exec_type} executor with {max_workers} workers")
+            print(f"[DRY-RUN] Will process {len(symbols_to_fetch)} symbols for date: {args.date}")
+        
+        # Actually create the executor and fork processes in dry-run mode
+        ExecutorCls = ProcessPoolExecutor if exec_type == 'process' else ThreadPoolExecutor
+        pool = ExecutorCls(max_workers=max_workers)
+        if all_pools is not None:
+            all_pools.append(pool)
+        
+        # Create a dry-run worker function that just reports what it would do
+        def _dry_run_symbol_worker(symbol: str, target_date: str) -> dict:
+            """Dry-run worker that reports what it would process."""
+            import os
+            pid = os.getpid()
+            print(f"[DRY-RUN Worker PID {pid}] Would process symbol: {symbol}")
+            print(f"[DRY-RUN Worker PID {pid}] Would fetch options for date: {target_date}")
+            print(f"[DRY-RUN Worker PID {pid}] Would save to DB: {bool(getattr(args, 'use_db', None))}")
+            print(f"[DRY-RUN Worker PID {pid}] All executions would be successful (simulated)")
+            return {
+                'formatted_output': f"[DRY-RUN] {symbol} - simulated success",
+                'db_save_data': None,
+                'save_success': True if getattr(args, 'use_db', None) else False
+            }
+        
+        # Submit tasks to actually fork processes
+        futures_map = {}
+        for symbol in symbols_to_fetch:
+            future = pool.submit(_dry_run_symbol_worker, symbol, args.date)
+            futures_map[future] = symbol
+        
+        # Wait for all workers to report
+        save_count = 0
+        for future in as_completed(futures_map):
+            try:
+                result = future.result()
+                if result.get('save_success'):
+                    save_count += 1
+            except Exception as e:
+                symbol = futures_map[future]
+                if not args.quiet:
+                    print(f"[DRY-RUN] Error for {symbol}: {e}")
+        
+        # Shutdown pool (processes will exit)
+        pool.shutdown(wait=True, cancel_futures=False)
+        if all_pools is not None and pool in all_pools:
+            all_pools.remove(pool)
+        
+        if not args.quiet:
+            print(f"[DRY-RUN] All workers completed and exited")
+        
+        return {
+            "symbols_processed": len(symbols_to_fetch),
+            "db_tasks": save_count,
+        }
+
     if not args.quiet:
         print(
             f"Starting concurrent fetch for {len(symbols_to_fetch)} symbols "
@@ -1662,6 +2196,8 @@ async def _execute_options_iteration(
     save_failures = 0
     
     pool = ExecutorCls(max_workers=max_workers)
+    if all_pools is not None:
+        all_pools.append(pool)
     shutdown_called = False
     futures_map = {}
     try:
@@ -1692,6 +2228,8 @@ async def _execute_options_iteration(
     finally:
         if not shutdown_called:
             pool.shutdown(wait=True, cancel_futures=False)
+        if all_pools is not None and pool in all_pools:
+            all_pools.remove(pool)
     
     if not args.quiet and getattr(args, 'use_db', None):
         print(f"\n[SUMMARY] Database saves: {save_count} successful, {save_failures} failed (saves performed in worker processes)")
@@ -1713,7 +2251,7 @@ def _options_iteration_worker(
     iteration_args = argparse.Namespace(**args_dict)
 
     async def _runner() -> dict:
-        return await _execute_options_iteration(symbols_list, iteration_args, api_key)
+        return await _execute_options_iteration(symbols_list, iteration_args, api_key, all_pools=[])
 
     return asyncio.run(_runner())
 
@@ -1779,7 +2317,25 @@ Examples:
     parser.add_argument(
         '--date',
         default=datetime.now().strftime('%Y-%m-%d'),
-        help="The historical date in YYYY-MM-DD format (default: today)."
+        help="The start date in YYYY-MM-DD format (default: today). Used as start date for multi-month mode."
+    )
+    parser.add_argument(
+        '--start-date',
+        type=str,
+        default=None,
+        help="Explicit start date in YYYY-MM-DD format. Overrides --date if provided. Used for multi-month mode."
+    )
+    parser.add_argument(
+        '--months-ahead',
+        type=int,
+        default=6,
+        help="Number of 30-day periods to fetch ahead from start date (default: 6). Set to 0 for single-date mode."
+    )
+    parser.add_argument(
+        '--ticker-chunk-size',
+        type=int,
+        default=250,
+        help="Maximum number of tickers per chunk when processing in multi-month mode (default: 250)."
     )
     parser.add_argument(
         '--option-type',
@@ -1923,6 +2479,11 @@ Examples:
         action='store_true',
         help="Enable debug output with detailed information about data fetching and timestamp checking."
     )
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help="Dry-run mode: actually fork processes and log what would be executed without actually running. Shows process allocation, ticker chunks, and execution sequence."
+    )
     # Backward-compatibility (hidden): legacy --db-conn maps to --use-db
     parser.add_argument(
         '--db-conn',
@@ -1932,6 +2493,10 @@ Examples:
     )
     
     args = parser.parse_args()
+
+    # Handle start_date: if provided, override date
+    if getattr(args, 'start_date', None):
+        args.date = args.start_date
 
     # Backward-compatibility: map deprecated flags to new consolidated flags
     if getattr(args, 'use_csv_cache', False) or getattr(args, 'save_to_csv', False):
@@ -2009,7 +2574,8 @@ Examples:
                 if not args.quiet:
                     print(f"Fetching data for {len(symbols_list)} symbols (one-time fetch before waiting)...")
                 
-                await _execute_options_iteration(symbols_list, args, api_key)
+                all_pools = []
+                await _execute_options_iteration(symbols_list, args, api_key, all_pools)
                 
                 # Now wait for market open
                 if not args.quiet:
@@ -2043,100 +2609,294 @@ Examples:
                     else:
                         print("Warning: Market is still not open after waiting. Proceeding anyway...")
 
+    # Track all pools for graceful shutdown
+    all_pools = []
+    
     if args.continuous:
-        run_num = 0
-        while True:
-            run_num += 1
+        months_ahead = getattr(args, 'months_ahead', 0)
+        
+        # Multi-month continuous mode
+        if months_ahead > 0:
+            start_date = getattr(args, 'start_date', None) or args.date
+            month_ranges = generate_month_ranges(start_date, months_ahead)
+            
+            # Calculate exponential intervals for each month (smaller for near months, larger for far months)
+            # Base interval: 20 minutes for month 1, exponentially increasing up to 60 minutes max
+            base_interval_minutes = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']
+            max_interval_minutes = 60.0
+            month_intervals = []
+            for i in range(months_ahead):
+                # Exponential growth: month 0 gets base, month n-1 gets max
+                if months_ahead == 1:
+                    interval = base_interval_minutes * 60
+                else:
+                    # Exponential: base * (max/base)^(i/(n-1))
+                    ratio = (max_interval_minutes / base_interval_minutes) ** (i / (months_ahead - 1))
+                    interval = base_interval_minutes * ratio * 60
+                month_intervals.append(interval)
+            
             if not args.quiet:
-                print(f"\n--- Continuous run #{run_num} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+                print(f"\n[CONTINUOUS MULTI-MONTH MODE] Starting {months_ahead} month clusters with exponential intervals:")
+                for i, (month_range, interval) in enumerate(zip(month_ranges, month_intervals)):
+                    print(f"  Month {i+1} ({month_range[0]} to {month_range[1]}): {interval/60:.1f} min interval")
+            
+            # Create async tasks for each month cluster
+            # Each month cluster runs independently - when its sleep expires, it starts a new iteration
+            # regardless of what other month clusters are doing
+            async def month_cluster_loop(month_idx: int, month_start: str, month_end: str, sleep_interval: float):
+                """Continuous loop for a single month cluster with market hours awareness.
+                
+                This function runs independently for each month. When its sleep interval expires,
+                it will start a new iteration even if other month clusters are still running.
+                Each iteration creates new process pools that are independent of other months.
+                """
+                run_num = 0
+                market_open_delay_seconds = 2 * 60  # 2 minutes after market opens
+                
+                # Each month cluster maintains its own pool tracking (local to this async function)
+                # This ensures independence - one month's processes don't affect another
+                month_pools = []
+                
+                def get_seconds_until_market_open_plus_delay(now_utc: datetime) -> float | None:
+                    """Calculate seconds until market opens + 2 minutes delay."""
+                    try:
+                        tz = ZoneInfo("America/New_York")
+                        now_local = now_utc.astimezone(tz)
+                        today_open = now_local.replace(hour=9, minute=30, second=0, microsecond=0)
+                        
+                        def next_weekday(dt: datetime) -> datetime:
+                            d = dt
+                            while d.weekday() >= 5:
+                                d = d + timedelta(days=1)
+                            return d
+                        
+                        if now_local < today_open:
+                            next_open = today_open
+                        else:
+                            next_day = next_weekday((now_local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0))
+                            next_open = next_day.replace(hour=9, minute=30, second=0, microsecond=0)
+                        
+                        target_time = next_open + timedelta(seconds=market_open_delay_seconds)
+                        seconds_until = (target_time - now_local).total_seconds()
+                        return max(0, seconds_until)
+                    except Exception:
+                        return None
+                
+                def get_seconds_since_market_opened(now_utc: datetime) -> float | None:
+                    """Calculate seconds since market opened today (if market is open)."""
+                    try:
+                        tz = ZoneInfo("America/New_York")
+                        now_local = now_utc.astimezone(tz)
+                        today_open = now_local.replace(hour=9, minute=30, second=0, microsecond=0)
+                        if now_local < today_open:
+                            return None
+                        if now_local.weekday() < 5:
+                            seconds_since = (now_local - today_open).total_seconds()
+                            return seconds_since
+                        return None
+                    except Exception:
+                        return None
+                
+                while True:
+                    # Check market status before each iteration
+                    now_utc = datetime.now(timezone.utc)
+                    is_market_open = common_is_market_hours(now_utc, "America/New_York")
+                    
+                    # If market is closed, wait until market opens + 2 minutes
+                    if not is_market_open:
+                        seconds_until_wake = get_seconds_until_market_open_plus_delay(now_utc)
+                        if seconds_until_wake is not None:
+                            if not args.quiet:
+                                hours_to_wait = seconds_until_wake / 3600
+                                mins_to_wait = seconds_until_wake / 60
+                                if hours_to_wait >= 1:
+                                    print(f"[Month {month_idx + 1}] Market closed. Waiting {hours_to_wait:.2f} hours until market opens + 2 mins...")
+                                else:
+                                    print(f"[Month {month_idx + 1}] Market closed. Waiting {mins_to_wait:.1f} minutes until market opens + 2 mins...")
+                            
+                            # Sleep in chunks to check for shutdown
+                            sleep_chunk = min(60.0, seconds_until_wake)
+                            elapsed = 0.0
+                            while elapsed < seconds_until_wake:
+                                await asyncio.sleep(sleep_chunk)
+                                elapsed += sleep_chunk
+                                if elapsed + sleep_chunk > seconds_until_wake:
+                                    sleep_chunk = seconds_until_wake - elapsed
+                            
+                            # Re-check market status after waiting
+                            now_utc = datetime.now(timezone.utc)
+                            is_market_open = common_is_market_hours(now_utc, "America/New_York")
+                            continue
+                    
+                    # Market is open - check if we need to wait until 2 minutes after open
+                    seconds_since_open = get_seconds_since_market_opened(now_utc)
+                    if seconds_since_open is not None and seconds_since_open < market_open_delay_seconds:
+                        wait_time = market_open_delay_seconds - seconds_since_open
+                        if not args.quiet:
+                            print(f"[Month {month_idx + 1}] Market just opened. Waiting {wait_time:.0f} seconds until 2 mins after open...")
+                        
+                        sleep_chunk = min(10.0, wait_time)
+                        elapsed = 0.0
+                        while elapsed < wait_time:
+                            await asyncio.sleep(sleep_chunk)
+                            elapsed += sleep_chunk
+                            if elapsed + sleep_chunk > wait_time:
+                                sleep_chunk = wait_time - elapsed
+                        
+                        now_utc = datetime.now(timezone.utc)
+                        is_market_open = common_is_market_hours(now_utc, "America/New_York")
+                    
+                    # Market is open and at least 2 minutes have passed - proceed with fetch
+                    run_num += 1
+                    if not args.quiet:
+                        print(f"\n[Month {month_idx + 1}] Continuous run #{run_num} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    
+                    try:
+                        # Create month-specific args
+                        month_args = argparse.Namespace(**vars(args))
+                        month_args.date = month_start
+                        month_args.months_ahead = 0  # Single month per cluster
+                        month_start_dt = datetime.strptime(month_start, '%Y-%m-%d')
+                        month_end_dt = datetime.strptime(month_end, '%Y-%m-%d')
+                        days_in_month = (month_end_dt - month_start_dt).days
+                        month_args.max_days_to_expiry = max(days_in_month, getattr(args, 'max_days_to_expiry', 30))
+                        
+                        # Execute this month's iteration (processes will exit after completion)
+                        # Each month cluster uses its own pool list to ensure independence
+                        # When this iteration completes, processes exit, and a new iteration can start
+                        # even if other month clusters are still running
+                        await _execute_options_iteration(symbols_list, month_args, api_key, month_pools)
+                        
+                        if not args.quiet:
+                            print(f"[Month {month_idx + 1}] Iteration #{run_num} completed. Processes have exited. Next iteration will start after sleep interval.")
+                    except KeyboardInterrupt:
+                        if not args.quiet:
+                            print(f"[Month {month_idx + 1}] Interrupted", file=sys.stderr)
+                        break
+                    except Exception as e:
+                        if not args.quiet:
+                            print(f"[Month {month_idx + 1}] Error: {e}", file=sys.stderr)
+                    
+                    # After fetch, sleep for this month's interval
+                    # This sleep is independent - when it expires, this month cluster will start
+                    # a new iteration even if other month clusters are still running or sleeping
+                    adjusted_sleep = sleep_interval * (args.interval_multiplier if getattr(args, 'interval_multiplier', None) else 1.0)
+                    if not args.quiet:
+                        print(f"[Month {month_idx + 1}] Sleeping for {adjusted_sleep/60:.1f} minutes. Will start iteration #{run_num + 1} independently when sleep expires.")
+                    
+                    # Sleep in chunks to allow other month clusters to proceed independently
+                    # Each month cluster's sleep timer is independent
+                    sleep_chunk = min(60.0, adjusted_sleep)
+                    elapsed = 0.0
+                    while elapsed < adjusted_sleep:
+                        await asyncio.sleep(sleep_chunk)
+                        elapsed += sleep_chunk
+                        if elapsed + sleep_chunk > adjusted_sleep:
+                            sleep_chunk = adjusted_sleep - elapsed
+                    
+                    # Sleep expired - this month cluster will now start a new iteration
+                    # This happens independently of other month clusters' status
+                    if not args.quiet:
+                        print(f"[Month {month_idx + 1}] Sleep interval expired. Starting new iteration (independent of other months).")
+            
+            # Run all month clusters concurrently
+            tasks = []
+            for month_idx, (month_start, month_end) in enumerate(month_ranges):
+                task = asyncio.create_task(month_cluster_loop(month_idx, month_start, month_end, month_intervals[month_idx]))
+                tasks.append(task)
+            
+            try:
+                await asyncio.gather(*tasks)
+            except KeyboardInterrupt:
+                if not args.quiet:
+                    print("\nKeyboardInterrupt: Cancelling all month clusters...", file=sys.stderr)
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            # Single-date continuous mode (original behavior)
+            run_num = 0
+            while True:
+                run_num += 1
+                if not args.quiet:
+                    print(f"\n--- Continuous run #{run_num} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
 
-            iteration_args_dict = vars(args).copy()
-            payload = await asyncio.to_thread(
-                run_iteration_in_subprocess,
-                _options_iteration_worker,
-                symbols_list,
-                iteration_args_dict,
-                api_key,
-            )
-
-            if payload.get("status") != "ok":
-                error_text = payload.get("error", "Unknown error in options iteration subprocess")
-                print(
-                    f"Error during options iteration (process exit {payload.get('exitcode')}): {error_text}",
-                    file=sys.stderr,
+                iteration_args_dict = vars(args).copy()
+                payload = await asyncio.to_thread(
+                    run_iteration_in_subprocess,
+                    _options_iteration_worker,
+                    symbols_list,
+                    iteration_args_dict,
+                    api_key,
                 )
 
-            # Intelligent sleep based on market transitions (performed in parent)
-            now_utc = datetime.now(timezone.utc)
-            seconds_to_open, seconds_to_close = common_compute_market_transition_times(now_utc, "America/New_York")
-            is_market_open = HistoricalDataFetcher._is_market_open(now_utc)
-
-            sleep_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed'] * 60
-            if is_market_open:
-                base_sleep = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
-                if seconds_to_close is not None:
-                    sleep_seconds = max(min(base_sleep, seconds_to_close), 5)
-                    if not args.quiet:
-                        print(
-                            f"Next run in {sleep_seconds:.0f}s (market open, "
-                            f"{HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']}min interval; "
-                            f"{seconds_to_close:.0f}s until close) [MARKET OPEN]"
-                        )
-                else:
-                    sleep_seconds = base_sleep
-                    if not args.quiet:
-                        print(
-                            f"Next run in {sleep_seconds:.0f}s (market open, "
-                            f"{HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']}min interval) [MARKET OPEN]"
-                        )
-            else:
-                opening_soon_threshold = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
-                if not args.quiet:
+                if payload.get("status") != "ok":
+                    error_text = payload.get("error", "Unknown error in options iteration subprocess")
                     print(
-                        f"opening_soon_threshold: {opening_soon_threshold}, seconds_to_open: {seconds_to_open}",
+                        f"Error during options iteration (process exit {payload.get('exitcode')}): {error_text}",
                         file=sys.stderr,
                     )
-                # If we know when market opens next, sleep until shortly before it opens
-                # (or until it opens if it's very soon)
-                if seconds_to_open is not None:
-                    if seconds_to_open <= opening_soon_threshold:
-                        # Market opens very soon - sleep until it opens
-                        sleep_seconds = seconds_to_open
+
+                # Intelligent sleep based on market transitions
+                now_utc = datetime.now(timezone.utc)
+                seconds_to_open, seconds_to_close = common_compute_market_transition_times(now_utc, "America/New_York")
+                is_market_open = HistoricalDataFetcher._is_market_open(now_utc)
+
+                sleep_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed'] * 60
+                if is_market_open:
+                    base_sleep = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
+                    if seconds_to_close is not None:
+                        sleep_seconds = max(min(base_sleep, seconds_to_close), 5)
                         if not args.quiet:
                             print(
-                                f"Next run in {sleep_seconds:.0f}s (sleeping until market open in "
-                                f"{seconds_to_open:.0f}s) [MARKET CLOSED→OPEN]"
+                                f"Next run in {sleep_seconds:.0f}s (market open, "
+                                f"{HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']}min interval; "
+                                f"{seconds_to_close:.0f}s until close) [MARKET OPEN]"
                             )
                     else:
-                        # Market opens later - sleep until shortly before it opens
-                        # Wake up 20 minutes before market open to be ready
-                        sleep_seconds = seconds_to_open - opening_soon_threshold
+                        sleep_seconds = base_sleep
                         if not args.quiet:
                             print(
-                                f"Next run in {sleep_seconds:.0f}s (markets closed, will wake "
-                                f"{opening_soon_threshold/60:.0f}min before market open in {seconds_to_open:.0f}s) [MARKET CLOSED]"
+                                f"Next run in {sleep_seconds:.0f}s (market open, "
+                                f"{HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']}min interval) [MARKET OPEN]"
                             )
                 else:
-                    # Don't know when market opens - use default closed interval
-                    if not args.quiet:
-                        print(
-                            f"Next run in {sleep_seconds:.0f}s (markets closed, "
-                            f"{HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed']}min interval) [MARKET CLOSED]"
-                        )
+                    opening_soon_threshold = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
+                    if seconds_to_open is not None:
+                        if seconds_to_open <= opening_soon_threshold:
+                            sleep_seconds = seconds_to_open
+                            if not args.quiet:
+                                print(
+                                    f"Next run in {sleep_seconds:.0f}s (sleeping until market open in "
+                                    f"{seconds_to_open:.0f}s) [MARKET CLOSED→OPEN]"
+                                )
+                        else:
+                            sleep_seconds = seconds_to_open - opening_soon_threshold
+                            if not args.quiet:
+                                print(
+                                    f"Next run in {sleep_seconds:.0f}s (markets closed, will wake "
+                                    f"{opening_soon_threshold/60:.0f}min before market open in {seconds_to_open:.0f}s) [MARKET CLOSED]"
+                                )
+                    else:
+                        if not args.quiet:
+                            print(
+                                f"Next run in {sleep_seconds:.0f}s (markets closed, "
+                                f"{HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed']}min interval) [MARKET CLOSED]"
+                            )
 
-            adjusted_sleep = sleep_seconds * (args.interval_multiplier if getattr(args, 'interval_multiplier', None) else 1.0)
-            if not args.quiet:
-                print(f"Next run in {adjusted_sleep:.0f}s")
-            await asyncio.sleep(adjusted_sleep)
-
-            if args.continuous_max_runs and run_num >= args.continuous_max_runs:
+                adjusted_sleep = sleep_seconds * (args.interval_multiplier if getattr(args, 'interval_multiplier', None) else 1.0)
                 if not args.quiet:
-                    print("Reached maximum runs, stopping continuous mode.")
-                break
+                    print(f"Next run in {adjusted_sleep:.0f}s")
+                await asyncio.sleep(adjusted_sleep)
+
+                if args.continuous_max_runs and run_num >= args.continuous_max_runs:
+                    if not args.quiet:
+                        print("Reached maximum runs, stopping continuous mode.")
+                    break
         return
     else:
         # Single run (no sleep)
-        await _execute_options_iteration(symbols_list, args, api_key)
+        await _execute_options_iteration(symbols_list, args, api_key, all_pools)
         return
 
 if __name__ == "__main__":

@@ -1846,7 +1846,7 @@ WHERE rn = 1"""
                 query_start = time.time()
                 rows = await conn.fetch(query, *params)
                 query_elapsed = time.time() - query_start
-                self.logger.info(f"[DB QUERY] Fetched {len(rows)} rows from options_data (latest) for {ticker} in {query_elapsed:.3f}s")
+                self.logger.debug(f"[DB QUERY] Fetched {len(rows)} rows from options_data (latest) for {ticker} in {query_elapsed:.3f}s")
             except (asyncpg.exceptions.InterfaceError, asyncpg.exceptions.ConnectionDoesNotExistError) as conn_error:
                 # Connection was released or closed - retry with a new connection
                 error_msg = str(conn_error).lower()
@@ -1857,7 +1857,7 @@ WHERE rn = 1"""
                         query_start_retry = time.time()
                         rows = await new_conn.fetch(query, *params)
                         query_elapsed_retry = time.time() - query_start_retry
-                        self.logger.info(f"[DB QUERY] Fetched {len(rows)} rows from options_data (latest) for {ticker} in {query_elapsed_retry:.3f}s (retry)")
+                        self.logger.debug(f"[DB QUERY] Fetched {len(rows)} rows from options_data (latest) for {ticker} in {query_elapsed_retry:.3f}s (retry)")
                 else:
                     raise
             
@@ -3296,7 +3296,7 @@ class OptionsDataService:
         index_start = time.time()
         expiration_dates_set = await self.cache.smembers(index_key)
         index_elapsed = time.time() - index_start
-        self.logger.info(f"[CACHE METADATA] Redis SMEMBERS (index) for {ticker}: {index_elapsed:.3f}s, found {len(expiration_dates_set)} expiration_dates (key: {index_key})")
+        self.logger.debug(f"[CACHE METADATA] Redis SMEMBERS (index) for {ticker}: {index_elapsed:.3f}s, found {len(expiration_dates_set)} expiration_dates (key: {index_key})")
         if not expiration_dates_set:
             self.logger.debug(f"[CACHE METADATA] Metadata index is empty for {ticker} (key: {index_key}), will query DB")
         
@@ -3344,7 +3344,7 @@ class OptionsDataService:
             # The repository adds it, but if the original df doesn't have it, add it here
             if 'write_timestamp' not in df.columns:
                 # Repository should have added it, but if not, add it with current time
-                self.logger.warning(f"[CACHE DEBUG] write_timestamp missing from df in save() for {ticker}, adding current time")
+                self.logger.debug(f"[CACHE DEBUG] write_timestamp missing from df in save() for {ticker}, adding current time")
                 df['write_timestamp'] = datetime.now(timezone.utc)
             
             for idx, row in df.iterrows():
@@ -3366,7 +3366,7 @@ class OptionsDataService:
                     
                     # Final check: ensure write_timestamp is in row_df
                     if 'write_timestamp' not in row_df.columns:
-                        self.logger.warning(f"[CACHE DEBUG] write_timestamp missing from row_df in save() for {cache_key}, adding current time")
+                        self.logger.debug(f"[CACHE DEBUG] write_timestamp missing from row_df in save() for {cache_key}, adding current time")
                         row_df['write_timestamp'] = datetime.now(timezone.utc)
                     
                     self.cache.set_fire_and_forget(cache_key, row_df)
@@ -4352,7 +4352,7 @@ class StockQuestDB(StockDBBase):
             gather_elapsed = time.time() - gather_start
             self.logger.debug(f"[TIMING] Batch gather completed: {gather_elapsed:.3f}s for {len(batch_tickers)} tickers")
             
-            non_empty = [df for df in batch_results if not df.empty and not df.isna().all().all()]
+            non_empty = [df for df in batch_results if df is not None and not df.empty and not df.isna().all().all()]
             if non_empty:
                 concat_start = time.time()
                 batch_df = pd.concat(non_empty, ignore_index=True)
