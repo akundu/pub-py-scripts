@@ -83,7 +83,7 @@ def reorder_columns_for_display(df: pd.DataFrame, column_groups: Dict, column_to
     for col in original_cols:
         if col not in column_to_group:
             if col not in COLUMNS_AFTER_DAILY_PREMIUM:
-                if col not in ['latest_option_writets', 'price_change_pct']:
+                if col not in ['latest_option_writets', 'latest_opt_ts', 'price_change_pct']:
                     new_order.append(col)
                     processed.add(col)
     
@@ -104,16 +104,22 @@ def reorder_columns_for_display(df: pd.DataFrame, column_groups: Dict, column_to
             new_order.append(col)
             processed.add(col)
     
-    # Add price_change_pct and latest_option_writets at the end
+    # Add price_change_pct and latest_option_writets at the end (but before latest_opt_ts)
     for col in ['price_change_pct', 'latest_option_writets']:
         if col not in processed and col in original_cols:
             new_order.append(col)
             processed.add(col)
     
-    # Add any remaining columns
+    # Add any remaining columns (except latest_opt_ts which goes last)
     for col in original_cols:
-        if col not in processed:
+        if col not in processed and col != 'latest_opt_ts':
             new_order.append(col)
+            processed.add(col)
+    
+    # Add latest_opt_ts as the rightmost column
+    if 'latest_opt_ts' in original_cols and 'latest_opt_ts' not in processed:
+        new_order.append('latest_opt_ts')
+        processed.add('latest_opt_ts')
     
     return new_order
 
