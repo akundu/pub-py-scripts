@@ -77,6 +77,94 @@ def get_javascript():
             return cell.textContent.trim();
         }
         
+        // Check if a field name is an expiration date column
+        function isExpirationDateColumn(fieldName) {
+            if (!fieldName) return false;
+            const lowerField = fieldName.toLowerCase().replace(/\\s+/g, '_').trim();
+            return (
+                lowerField === 'expiration_date' ||
+                lowerField === 'l_expiration_date' ||
+                lowerField === 'long_expiration_date' ||
+                lowerField === 's_expiration_date' ||
+                lowerField === 'short_expiration_date' ||
+                lowerField.endsWith('_expiration_date') ||
+                lowerField.endsWith('_exp_date')
+            );
+        }
+        
+        // Check if a string is a date in YYYY-MM-DD format
+        function isDateString(value) {
+            if (typeof value !== 'string') return false;
+            const datePattern = /^\\d{4}-\\d{2}-\\d{2}$/;
+            return datePattern.test(value.trim());
+        }
+        
+        // Extract date portion (YYYY-MM-DD) from a value
+        // Handles timestamps (milliseconds), date strings, and other formats
+        function extractDatePortion(value) {
+            if (value === null || value === undefined || value === '') return null;
+            
+            // If it's already a date string in YYYY-MM-DD format
+            if (typeof value === 'string' && /^\\d{4}-\\d{2}-\\d{2}$/.test(value.trim())) {
+                return value.trim();
+            }
+            
+            // Try to parse as timestamp (milliseconds)
+            const numValue = typeof value === 'string' ? parseFloat(value) : value;
+            if (!isNaN(numValue) && numValue > 0) {
+                // Check if it's a reasonable timestamp (milliseconds since epoch)
+                // Timestamps are typically > 1000000000000 (year 2001) and < 9999999999999 (year 2286)
+                if (numValue > 1000000000000 && numValue < 9999999999999) {
+                    const date = new Date(numValue);
+                    if (!isNaN(date.getTime())) {
+                        const year = date.getFullYear();
+                        const month = String(date.getMonth() + 1).padStart(2, '0');
+                        const day = String(date.getDate()).padStart(2, '0');
+                        return `${year}-${month}-${day}`;
+                    }
+                }
+            }
+            
+            // Try to parse as date string (might have time portion)
+            if (typeof value === 'string') {
+                const trimmed = value.trim();
+                // Extract YYYY-MM-DD from strings like "2026-03-01 00:00:00" or "2026-03-01T00:00:00"
+                const dateMatch = trimmed.match(/^(\\d{4}-\\d{2}-\\d{2})/);
+                if (dateMatch) {
+                    return dateMatch[1];
+                }
+                // Try parsing as Date object
+                const date = new Date(trimmed);
+                if (!isNaN(date.getTime())) {
+                    const year = date.getFullYear();
+                    const month = String(date.getMonth() + 1).padStart(2, '0');
+                    const day = String(date.getDate()).padStart(2, '0');
+                    return `${year}-${month}-${day}`;
+                }
+            }
+            
+            return null;
+        }
+        
+        // Get date value from a cell (for expiration date columns)
+        function getDateValue(cell) {
+            // First try data-raw attribute
+            const rawValue = cell.getAttribute('data-raw');
+            if (rawValue !== null && rawValue !== '') {
+                const datePortion = extractDatePortion(rawValue);
+                if (datePortion) return datePortion;
+            }
+            
+            // Fallback to text content
+            const text = cell.textContent.trim();
+            if (text) {
+                const datePortion = extractDatePortion(text);
+                if (datePortion) return datePortion;
+            }
+            
+            return null;
+        }
+        
         // Evaluate a mathematical expression like "curr_price*1.05" or "strike_price+100"
         function evaluateMathExpression(expression, row, tableId) {
             // Extract field names from expression (alphanumeric + underscore)
@@ -333,15 +421,20 @@ def get_javascript():
                         
                         // Regular value comparison
                         let value = valueStr;
-                        // Try to parse as number
-                        if (fieldExpr.toLowerCase().includes('market_cap') || fieldExpr.toLowerCase().includes('market cap')) {
-                            value = parseMarketCapValue(valueStr);
-                        } else {
-                            const numValue = parseFloat(valueStr);
-                            if (!isNaN(numValue)) {
-                                value = numValue;
+                        // Check if this is a date string (YYYY-MM-DD format) - preserve as string
+                        const isDateStr = isDateString(valueStr);
+                        if (!isDateStr) {
+                            // Try to parse as number
+                            if (fieldExpr.toLowerCase().includes('market_cap') || fieldExpr.toLowerCase().includes('market cap')) {
+                                value = parseMarketCapValue(valueStr);
+                            } else {
+                                const numValue = parseFloat(valueStr);
+                                if (!isNaN(numValue)) {
+                                    value = numValue;
+                                }
                             }
                         }
+                        // If it's a date string, keep it as a string (value = valueStr)
                         
                         return {
                             field: fieldExpr,
@@ -442,6 +535,28 @@ def get_javascript():
                 const valueCell = row.cells[valueColIndex];
                 if (!valueCell) return false;
                 
+                // Check if both fields are expiration date columns
+                const isFieldExpDate = isExpirationDateColumn(filter.field);
+                const isValueExpDate = isExpirationDateColumn(filter.value);
+                
+                // Handle date-only comparison for expiration date columns
+                if (isFieldExpDate && isValueExpDate) {
+                    const cellDate = getDateValue(cell);
+                    const compareDate = getDateValue(valueCell);
+                    if (cellDate === null || compareDate === null) return false;
+                    
+                    // Compare date strings directly (YYYY-MM-DD format allows string comparison)
+                    switch (filter.operator) {
+                        case '>': return cellDate > compareDate;
+                        case '>=': return cellDate >= compareDate;
+                        case '<': return cellDate < compareDate;
+                        case '<=': return cellDate <= compareDate;
+                        case '==': return cellDate === compareDate;
+                        case '!=': return cellDate !== compareDate;
+                        default: return false;
+                    }
+                }
+                
                 const cellValue = getRawValue(cell);
                 const compareValue = getRawValue(valueCell);
                 if (cellValue === null || compareValue === null) return false;
@@ -465,6 +580,28 @@ def get_javascript():
             }
             const cell = row.cells[colIndex];
             if (!cell) return false;
+            
+            // Check if this is an expiration date column and filter value is a date string
+            const isExpDateCol = isExpirationDateColumn(filter.field);
+            const filterValueStr = String(filter.value).trim();
+            const isDateFilter = isDateString(filterValueStr);
+            
+            // Handle date-only comparison for expiration date columns
+            if (isExpDateCol && isDateFilter) {
+                const cellDate = getDateValue(cell);
+                if (cellDate === null) return false;
+                
+                // Compare date strings directly (YYYY-MM-DD format allows string comparison)
+                switch (filter.operator) {
+                    case '>': return cellDate > filterValueStr;
+                    case '>=': return cellDate >= filterValueStr;
+                    case '<': return cellDate < filterValueStr;
+                    case '<=': return cellDate <= filterValueStr;
+                    case '==': return cellDate === filterValueStr;
+                    case '!=': return cellDate !== filterValueStr;
+                    default: return false;
+                }
+            }
             
             const cellValue = getRawValue(cell);
             if (cellValue === null) return false;

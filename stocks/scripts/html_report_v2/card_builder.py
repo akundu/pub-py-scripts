@@ -107,7 +107,12 @@ def build_single_card(
     # Card header
     html_parts.append('                <div class="card-header">\n')
     html_parts.append('                    <div class="card-header-main">\n')
-    html_parts.append(f'                        <div class="card-ticker">{html_escape.escape(ticker)}</div>\n')
+    # Make ticker a link
+    if ticker and ticker != 'N/A':
+        ticker_link = f'http://akl.kundu.dev:9100/analyze_ticker?ticker={html_escape.escape(ticker)}&format=html'
+        html_parts.append(f'                        <div class="card-ticker"><a href="{ticker_link}" target="_blank" style="color: inherit; text-decoration: none; font-weight: 500;">{html_escape.escape(ticker)}</a></div>\n')
+    else:
+        html_parts.append(f'                        <div class="card-ticker">{html_escape.escape(ticker)}</div>\n')
     html_parts.append('                        <div class="card-price">\n')
     
     if current_price:

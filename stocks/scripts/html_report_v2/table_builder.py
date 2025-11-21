@@ -384,7 +384,13 @@ def build_table_rows(
             class_attr = f' class="{all_classes}{price_class}"' if (all_classes or price_class) else ''
             data_attr = f' data-raw="{html_escape.escape(str(raw_value))}"' if raw_value else ''
             
-            if is_rich_html_cell:
+            # Make ticker column a link
+            if normalized_col == 'ticker' and cell_value and cell_value.strip():
+                ticker_value = cell_value.strip()
+                ticker_link = f'http://akl.kundu.dev:9100/analyze_ticker?ticker={html_escape.escape(ticker_value)}&format=html'
+                cell_content = f'<a href="{ticker_link}" target="_blank" style="color: #667eea; text-decoration: none; font-weight: 500;">{html_escape.escape(ticker_value)}</a>'
+                html_parts.append(f'                        <td{class_attr}{data_attr}>{cell_content}</td>\n')
+            elif is_rich_html_cell:
                 html_parts.append(f'                        <td{class_attr}{data_attr}>{rich_html_value}</td>\n')
             else:
                 html_parts.append(f'                        <td{class_attr}{data_attr}>{cell_value}</td>\n')
