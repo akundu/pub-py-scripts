@@ -148,7 +148,8 @@ def fetch_comprehensive_data(
             days_back_val,
             db_save_batch_size_val,
             chunk_size=chunk_size_val,
-            save_db_csv=save_db_csv
+            save_db_csv=save_db_csv,
+            log_level=log_level
         ))
         
         result = {
@@ -411,7 +412,8 @@ def fetch_price_and_save(
             end_date,
             db_save_batch_size_val,
             chunk_size=chunk_size_val,  # Pass the new parameter
-            save_db_csv=save_db_csv  # Pass the new parameter with correct name
+            save_db_csv=save_db_csv,  # Pass the new parameter with correct name
+            log_level=log_level  # Pass log_level for debug output
         ))
         return result
     except Exception as e:
