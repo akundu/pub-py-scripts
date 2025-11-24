@@ -966,6 +966,15 @@ class RedisCache:
             self._stats['errors'] += 1
             return set()
     
+    async def _test_redis_connection(self, client: redis.Redis) -> bool:
+        """Test if Redis connection is working by sending a PING command."""
+        try:
+            result = await client.ping()
+            return result is True
+        except Exception as e:
+            self.logger.debug(f"Redis PING failed: {e}")
+            return False
+    
     async def sadd(self, key: str, *members: str) -> int:
         """Add members to a Redis SET.
         
@@ -985,11 +994,18 @@ class RedisCache:
                 self.logger.warning(f"Redis SADD: client unavailable for key {key}")
                 return 0
             
+            # Test connection before attempting operation
+            if not await self._test_redis_connection(client):
+                self.logger.error(f"Redis SADD: connection test failed for key {key}, Redis may be unavailable")
+                self._stats['errors'] += 1
+                return 0
+            
             # Batch large sets to avoid potential issues with too many arguments
             # Redis can handle large argument lists, but batching is safer and allows better error handling
             batch_size = 100
             total_added = 0
             members_list = list(members)
+            batch_errors = 0
             
             for i in range(0, len(members_list), batch_size):
                 batch = members_list[i:i + batch_size]
@@ -997,24 +1013,43 @@ class RedisCache:
                 encoded_members = [m.encode('utf-8') if isinstance(m, str) else m for m in batch]
                 try:
                     added = await client.sadd(key, *encoded_members)
+                    if added is None:
+                        # None return value indicates operation failed
+                        self.logger.error(f"Redis SADD batch {i//batch_size + 1} returned None for key {key}")
+                        batch_errors += 1
+                        continue
                     total_added += added
                 except Exception as batch_error:
                     self.logger.error(f"Redis SADD batch error for key {key} (batch {i//batch_size + 1}): {batch_error}")
+                    batch_errors += 1
                     # Continue with next batch instead of failing completely
                     continue
+            
+            # If all batches failed, this is a real error
+            if batch_errors > 0 and total_added == 0 and len(members_list) > 0:
+                self.logger.error(f"Redis SADD: all {batch_errors} batches failed for key {key} with {len(members_list)} members")
+                self._stats['errors'] += 1
+                return 0
             
             # Log the result for debugging
             if total_added == 0:
                 # Check if key exists - if it does, members might already be in the set
-                exists = await client.exists(key)
-                if exists:
-                    # Verify by checking actual members count
-                    actual_count = await client.scard(key)
-                    self.logger.debug(f"Redis SADD: key={key}, no new members added (all {len(members)} members already exist, set has {actual_count} members)")
-                else:
-                    self.logger.warning(f"Redis SADD: key={key}, no members added and key doesn't exist (operation may have failed)")
+                try:
+                    exists = await client.exists(key)
+                    if exists:
+                        # Verify by checking actual members count
+                        actual_count = await client.scard(key)
+                        self.logger.debug(f"Redis SADD: key={key}, no new members added (all {len(members)} members already exist, set has {actual_count} members)")
+                    else:
+                        # Key doesn't exist and no members were added - this is a failure
+                        # Log at warning level since system can continue without cache
+                        self.logger.warning(f"Redis SADD: key={key}, no members added and key doesn't exist (operation failed, {len(members_list)} members attempted) - continuing without cache")
+                        self._stats['errors'] += 1
+                except Exception as check_error:
+                    self.logger.error(f"Redis SADD: failed to verify key existence for {key}: {check_error}")
+                    self._stats['errors'] += 1
             else:
-                self.logger.info(f"Redis SADD: key={key}, added {total_added}/{len(members)} new members")
+                self.logger.debug(f"Redis SADD: key={key}, added {total_added}/{len(members)} new members")
             
             return total_added
         except Exception as e:
@@ -1023,6 +1058,30 @@ class RedisCache:
             self.logger.debug(f"Redis SADD traceback: {traceback.format_exc()}")
             self._stats['errors'] += 1
             return 0
+    
+    async def exists(self, key: str) -> bool:
+        """Check if a Redis key exists.
+        
+        Args:
+            key: Redis key to check
+        
+        Returns:
+            True if key exists, False otherwise
+        """
+        if not self.enable_cache:
+            return False
+        
+        try:
+            client = await self._get_redis_client()
+            if client is None:
+                return False
+            
+            result = await client.exists(key)
+            return bool(result)
+        except Exception as e:
+            self.logger.debug(f"Redis EXISTS error for key {key}: {e}")
+            self._stats['errors'] += 1
+            return False
     
     async def expire(self, key: str, seconds: int) -> bool:
         """Set TTL on a Redis key.
@@ -3005,6 +3064,10 @@ class OptionsDataService:
         if not option_tickers:
             return
         
+        # Early check: if cache is disabled, skip all operations
+        if not self.cache.enable_cache:
+            return
+        
         metadata_key = CacheKeyGenerator.options_metadata(ticker, expiration_date)
         ttl = self._get_random_ttl()
         
@@ -3020,7 +3083,14 @@ class OptionsDataService:
         # Add all option_tickers to the SET and verify
         # Convert Set to list for consistent handling
         option_tickers_list = list(option_tickers)
-        added_count = await self.cache.sadd(metadata_key, *option_tickers_list)
+        
+        # Attempt to add to cache, but don't fail if Redis is unavailable
+        try:
+            added_count = await self.cache.sadd(metadata_key, *option_tickers_list)
+        except Exception as cache_error:
+            # If cache operation fails completely, log and continue without cache
+            self.logger.warning(f"[CACHE METADATA] Cache operation failed for {metadata_key}: {cache_error}, continuing without cache")
+            added_count = 0
         
         # Only invalidate distinct option_tickers cache if we're adding truly new option_tickers
         # (not when setting metadata for the first time)
@@ -3038,6 +3108,8 @@ class OptionsDataService:
         
         # Verify metadata SET was created correctly BEFORE setting TTL
         verify_metadata = await self.cache.smembers(metadata_key)
+        key_exists = await self.cache.exists(metadata_key)
+        
         if verify_metadata and len(verify_metadata) > 0:
             # Key exists and has members - now set TTL
             expire_result = await self.cache.expire(metadata_key, ttl)
@@ -3050,9 +3122,9 @@ class OptionsDataService:
                 self.logger.debug(f"[CACHE METADATA] SADD returned 0 for {metadata_key} (all {len(option_tickers_list)} members already exist, verified {len(verify_metadata)} members in set)")
             else:
                 self.logger.info(f"[CACHE METADATA] Added {added_count}/{len(option_tickers_list)} new members to {metadata_key} (verified {len(verify_metadata)} total members)")
-        else:
-            # Key doesn't exist or is empty - retry
-            self.logger.warning(f"[CACHE METADATA] Verification failed: metadata SET {metadata_key} is empty or doesn't exist after SADD (added={added_count}), retrying...")
+        elif key_exists:
+            # Key exists but is empty - this shouldn't happen, but handle it gracefully
+            self.logger.warning(f"[CACHE METADATA] Key {metadata_key} exists but is empty after SADD (added={added_count}), retrying...")
             # Retry once with a small delay to allow Redis to process
             import asyncio
             await asyncio.sleep(0.01)  # 10ms delay
@@ -3067,13 +3139,55 @@ class OptionsDataService:
                     self.logger.warning(f"[CACHE METADATA] Retry successful but EXPIRE failed: {metadata_key} has {len(verify_metadata_retry)} members")
             else:
                 self.logger.error(f"[CACHE METADATA] Retry failed: {metadata_key} still empty after retry (added={added_count_retry})")
+        else:
+            # Key doesn't exist - SADD operation likely failed
+            # Check if option_tickers_list is actually empty (shouldn't happen due to early return, but double-check)
+            if not option_tickers_list:
+                self.logger.error(f"[CACHE METADATA] Cannot set metadata for {metadata_key}: option_tickers_list is empty")
+            else:
+                # Only retry if we haven't already determined Redis is failing
+                # If added_count is 0 and key doesn't exist with non-empty members, Redis is likely not working
+                self.logger.warning(f"[CACHE METADATA] Verification failed: metadata SET {metadata_key} doesn't exist after SADD (added={added_count}, members={len(option_tickers_list)})")
+                
+                # Test Redis connection before retrying
+                try:
+                    client = await self.cache._get_redis_client()
+                    if client and await self.cache._test_redis_connection(client):
+                        # Redis is working, retry once
+                        import asyncio
+                        await asyncio.sleep(0.01)  # 10ms delay
+                        added_count_retry = await self.cache.sadd(metadata_key, *option_tickers_list)
+                        verify_metadata_retry = await self.cache.smembers(metadata_key)
+                        key_exists_retry = await self.cache.exists(metadata_key)
+                        if verify_metadata_retry and len(verify_metadata_retry) > 0:
+                            # Now set TTL after successful retry
+                            expire_result_retry = await self.cache.expire(metadata_key, ttl)
+                            if expire_result_retry:
+                                self.logger.info(f"[CACHE METADATA] Retry successful: {metadata_key} now has {len(verify_metadata_retry)} members, TTL set to {ttl}s")
+                            else:
+                                self.logger.warning(f"[CACHE METADATA] Retry successful but EXPIRE failed: {metadata_key} has {len(verify_metadata_retry)} members")
+                        elif key_exists_retry:
+                            self.logger.warning(f"[CACHE METADATA] Retry failed: {metadata_key} exists but is still empty after retry (added={added_count_retry}) - Redis may have issues, continuing without cache")
+                        else:
+                            self.logger.warning(f"[CACHE METADATA] Retry failed: {metadata_key} still doesn't exist after retry (added={added_count_retry}) - Redis operation failed, continuing without cache")
+                    else:
+                        self.logger.warning(f"[CACHE METADATA] Redis connection test failed for {metadata_key}, skipping retry and continuing without cache")
+                except Exception as retry_error:
+                    self.logger.warning(f"[CACHE METADATA] Error during retry for {metadata_key}: {retry_error}, continuing without cache")
         
         # Update expiration date index (for fast discovery without SCAN)
         index_key = CacheKeyGenerator.options_metadata_index(ticker)
-        index_added = await self.cache.sadd(index_key, expiration_date)
+        try:
+            index_added = await self.cache.sadd(index_key, expiration_date)
+        except Exception as cache_error:
+            # If cache operation fails completely, log and continue without cache
+            self.logger.warning(f"[CACHE METADATA] Cache index operation failed for {index_key}: {cache_error}, continuing without cache")
+            index_added = 0
         
         # Verify index was updated BEFORE setting TTL
         verify_index = await self.cache.smembers(index_key)
+        index_key_exists = await self.cache.exists(index_key)
+        
         if verify_index and expiration_date in verify_index:
             # Index exists and contains the date - now set TTL
             index_expire_result = await self.cache.expire(index_key, ttl)
@@ -3095,9 +3209,9 @@ class OptionsDataService:
                     if expiration_date not in cached_exp_dates:
                         await self.cache.delete(cache_key)
                         self.logger.info(f"[CACHE INVALIDATION] Invalidated distinct expiration dates cache for {ticker} (new date: {expiration_date})")
-        else:
-            # Index doesn't contain the date - retry
-            self.logger.warning(f"[CACHE METADATA] Index verification failed for {ticker}:{expiration_date} (added={index_added}), retrying...")
+        elif index_key_exists:
+            # Index exists but doesn't contain the date - retry
+            self.logger.warning(f"[CACHE METADATA] Index verification failed for {ticker}:{expiration_date} (added={index_added}, index exists but date not found), retrying...")
             import asyncio
             await asyncio.sleep(0.01)  # 10ms delay
             index_added_retry = await self.cache.sadd(index_key, expiration_date)
@@ -3110,7 +3224,36 @@ class OptionsDataService:
                 else:
                     self.logger.warning(f"[CACHE METADATA] Index retry successful but EXPIRE failed: {index_key} has {len(verify_index_retry)} dates")
             else:
-                self.logger.error(f"[CACHE METADATA] Index retry failed for {ticker}:{expiration_date}, index may not be available (added={index_added_retry})")
+                self.logger.error(f"[CACHE METADATA] Index retry failed for {ticker}:{expiration_date}, index exists but date still not found (added={index_added_retry})")
+        else:
+            # Index doesn't exist - SADD operation likely failed
+            self.logger.warning(f"[CACHE METADATA] Index verification failed for {ticker}:{expiration_date} (added={index_added}, index doesn't exist)")
+            
+            # Test Redis connection before retrying
+            try:
+                client = await self.cache._get_redis_client()
+                if client and await self.cache._test_redis_connection(client):
+                    # Redis is working, retry once
+                    import asyncio
+                    await asyncio.sleep(0.01)  # 10ms delay
+                    index_added_retry = await self.cache.sadd(index_key, expiration_date)
+                    verify_index_retry = await self.cache.smembers(index_key)
+                    index_key_exists_retry = await self.cache.exists(index_key)
+                    if verify_index_retry and expiration_date in verify_index_retry:
+                        # Now set TTL after successful retry
+                        index_expire_result_retry = await self.cache.expire(index_key, ttl)
+                        if index_expire_result_retry:
+                            self.logger.info(f"[CACHE METADATA] Index retry successful for {ticker}:{expiration_date}, verified {len(verify_index_retry)} dates in index, TTL set to {ttl}s")
+                        else:
+                            self.logger.warning(f"[CACHE METADATA] Index retry successful but EXPIRE failed: {index_key} has {len(verify_index_retry)} dates")
+                    elif index_key_exists_retry:
+                        self.logger.warning(f"[CACHE METADATA] Index retry failed for {ticker}:{expiration_date}, index exists but date still not found (added={index_added_retry}) - Redis may have issues, continuing without cache")
+                    else:
+                        self.logger.warning(f"[CACHE METADATA] Index retry failed for {ticker}:{expiration_date}, index still doesn't exist (added={index_added_retry}) - Redis operation failed, continuing without cache")
+                else:
+                    self.logger.warning(f"[CACHE METADATA] Redis connection test failed for {index_key}, skipping retry and continuing without cache")
+            except Exception as retry_error:
+                self.logger.warning(f"[CACHE METADATA] Error during index retry for {index_key}: {retry_error}, continuing without cache")
         
         self.logger.debug(f"[CACHE METADATA] Set metadata for {ticker}:{expiration_date} with {len(option_tickers)} option_tickers (TTL: {ttl}s)")
     
@@ -3458,18 +3601,35 @@ class OptionsDataService:
                             await self.cache.expire(index_key, max_ttl)
                             # Verify the index was set correctly
                             verify_set = await self.cache.smembers(index_key)
+                            index_key_exists = await self.cache.exists(index_key)
                             if verify_set:
                                 self.logger.debug(f"[CACHE METADATA] Updated index for {ticker} with {len(unique_exp_dates)} expiration_dates (TTL: {max_ttl}s), verified {len(verify_set)} dates in index")
-                            else:
-                                self.logger.warning(f"[CACHE METADATA] Index verification failed for {ticker}, retrying...")
+                            elif index_key_exists:
+                                self.logger.warning(f"[CACHE METADATA] Index verification failed for {ticker} (index exists but is empty), retrying...")
                                 # Retry once
                                 await self.cache.sadd(index_key, *unique_exp_dates)
                                 await self.cache.expire(index_key, max_ttl)
                                 verify_set = await self.cache.smembers(index_key)
+                                index_key_exists_retry = await self.cache.exists(index_key)
                                 if verify_set:
                                     self.logger.debug(f"[CACHE METADATA] Index retry successful for {ticker}, verified {len(verify_set)} dates")
+                                elif index_key_exists_retry:
+                                    self.logger.error(f"[CACHE METADATA] Index retry failed for {ticker}, index exists but is still empty - possible Redis issue")
                                 else:
-                                    self.logger.error(f"[CACHE METADATA] Index retry failed for {ticker}, index may not be available")
+                                    self.logger.error(f"[CACHE METADATA] Index retry failed for {ticker}, index no longer exists - Redis operation may have failed")
+                            else:
+                                self.logger.warning(f"[CACHE METADATA] Index verification failed for {ticker} (index doesn't exist), retrying...")
+                                # Retry once
+                                await self.cache.sadd(index_key, *unique_exp_dates)
+                                await self.cache.expire(index_key, max_ttl)
+                                verify_set = await self.cache.smembers(index_key)
+                                index_key_exists_retry = await self.cache.exists(index_key)
+                                if verify_set:
+                                    self.logger.debug(f"[CACHE METADATA] Index retry successful for {ticker}, verified {len(verify_set)} dates")
+                                elif index_key_exists_retry:
+                                    self.logger.error(f"[CACHE METADATA] Index retry failed for {ticker}, index exists but is empty - possible Redis issue")
+                                else:
+                                    self.logger.error(f"[CACHE METADATA] Index retry failed for {ticker}, index still doesn't exist - Redis operation may have failed")
                         
                         # Get metadata for each expiration_date and save to cache
                         all_option_tickers = set()
