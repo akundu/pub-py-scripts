@@ -506,6 +506,18 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                     redis_url,
                     log_level
                 )
+                if args.fetch_ratios:
+                    financial_task = executor.submit(
+                        fetch_financial_info,
+                        symbol_to_fetch,
+                        db_type,
+                        db_config,
+                        args.client_timeout,
+                        enable_cache,
+                        redis_url,
+                        log_level
+                    )
+                    financial_tasks.append((financial_task, symbol_to_fetch))
             else:
                 task = executor.submit(
                     fetch_price_and_save,
@@ -525,6 +537,18 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
                     redis_url,
                     log_level
                 )
+                if args.fetch_ratios:
+                    financial_task = executor.submit(
+                        fetch_financial_info,
+                        symbol_to_fetch,
+                        db_type,
+                        db_config,
+                        args.client_timeout,
+                        enable_cache,
+                        redis_url,
+                        log_level
+                    )
+                    financial_tasks.append((financial_task, symbol_to_fetch))
             stock_tasks.append((task, symbol_to_fetch))
         
         # Process completed stock-level tasks as they finish

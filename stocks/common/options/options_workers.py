@@ -644,6 +644,15 @@ def process_ticker_spread_analysis(args_tuple):
                 
                 if debug:
                     print(f"DEBUG [PID {os.getpid()}]: {ticker} - Fetched {len(short_options_df)} short-term options from DB", file=sys.stderr)
+                    if not short_options_df.empty and 'expiration_date' in short_options_df.columns:
+                        from datetime import date as date_class
+                        today = date_class.today()
+                        exp_dates = pd.to_datetime(short_options_df['expiration_date']).dt.date
+                        days_to_exp = [(exp_dt - today).days for exp_dt in exp_dates if pd.notna(exp_dt)]
+                        if days_to_exp:
+                            min_days = min(days_to_exp)
+                            max_days = max(days_to_exp)
+                            print(f"DEBUG [PID {os.getpid()}]: {ticker} - Short-term options days to expiry range: {min_days} to {max_days} days", file=sys.stderr)
                 
                 if short_options_df.empty:
                     if debug:

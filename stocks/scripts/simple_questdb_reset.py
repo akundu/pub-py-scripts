@@ -13,6 +13,38 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
 from common.questdb_db import StockQuestDB
+import asyncpg
+
+
+async def list_tables(conn: asyncpg.Connection) -> list:
+    """List all tables in the database, trying multiple approaches."""
+    try:
+        # Try information_schema first (PostgreSQL-compatible)
+        try:
+            rows = await conn.fetch("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public'
+                ORDER BY table_name
+            """)
+            return [row['table_name'] for row in rows]
+        except Exception:
+            # Fallback: try QuestDB-specific query
+            try:
+                rows = await conn.fetch("SELECT name FROM tables()")
+                return [row['name'] for row in rows]
+            except Exception:
+                # Last resort: try pg_tables
+                rows = await conn.fetch("""
+                    SELECT tablename 
+                    FROM pg_tables 
+                    WHERE schemaname = 'public'
+                    ORDER BY tablename
+                """)
+                return [row['tablename'] for row in rows]
+    except Exception as e:
+        print(f"⚠ Warning: Error listing tables: {e}")
+        return []
 
 
 async def simple_reset(db_path: str):
@@ -24,12 +56,10 @@ async def simple_reset(db_path: str):
     try:
         db = StockQuestDB(db_path, pool_max_size=1, connection_timeout_seconds=30)
         
-        async with db.get_connection() as conn:
+        async with db.connection.get_connection() as conn:
             # Check current tables
             print("Current tables:")
-            tables_query = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
-            tables_result = await conn.fetch(tables_query)
-            existing_tables = [row['table_name'] for row in tables_result]
+            existing_tables = await list_tables(conn)
             for table in existing_tables:
                 print(f"  - {table}")
             
@@ -44,8 +74,7 @@ async def simple_reset(db_path: str):
             
             # Verify tables are dropped
             print("\nVerifying tables are dropped...")
-            tables_result_after = await conn.fetch(tables_query)
-            remaining_tables = [row['table_name'] for row in tables_result_after]
+            remaining_tables = await list_tables(conn)
             
             if remaining_tables:
                 print(f"Remaining tables: {remaining_tables}")
@@ -54,13 +83,12 @@ async def simple_reset(db_path: str):
             
             # Recreate tables
             print("\nRecreating tables...")
-            await db._ensure_tables_exist()
+            await db.ensure_tables_exist()
             print("✓ Tables recreated")
             
             # Verify final state
             print("\nFinal tables:")
-            tables_result_final = await conn.fetch(tables_query)
-            final_tables = [row['table_name'] for row in tables_result_final]
+            final_tables = await list_tables(conn)
             for table in final_tables:
                 print(f"  - {table}")
             

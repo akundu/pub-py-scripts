@@ -510,6 +510,10 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     app.router.add_get("/stats/performance", handle_stats_performance)
     app.router.add_get("/stats/pool", handle_stats_pool)
     
+    # Add ticker analysis endpoint
+    app.router.add_get("/analyze_ticker", handle_analyze_ticker)
+    app.router.add_post("/analyze_ticker", handle_analyze_ticker)
+    
     # Add catch-all handler for unknown routes (must be last)
     app.router.add_get("/{path:.*}", handle_catch_all)
     app.router.add_post("/{path:.*}", handle_catch_all)
@@ -1395,6 +1399,274 @@ async def handle_health_check(request: web.Request) -> web.Response:
         "process": process_info
     })
 
+async def handle_analyze_ticker(request: web.Request) -> web.Response:
+    """Analyze a single ticker using options_analyzer and generate JSON or HTML report."""
+    import tempfile
+    from pathlib import Path as PathLib
+    
+    # Get ticker from query parameters or POST body
+    ticker = request.query.get('ticker')
+    if not ticker:
+        # Try POST body
+        try:
+            data = await request.json()
+            ticker = data.get('ticker')
+        except:
+            pass
+    
+    if not ticker:
+        return web.json_response({
+            "error": "Missing required parameter 'ticker'"
+        }, status=400)
+    
+    ticker = ticker.upper().strip()
+    
+    # Get output format from URL parameter (default: json)
+    output_format = request.query.get('format', 'json').lower()
+    if output_format not in ['json', 'html']:
+        output_format = 'json'  # Default to JSON if invalid format specified
+    
+    # Get database connection string from app context
+    db_instance = request.app.get('db_instance')
+    if not db_instance:
+        return web.json_response({
+            "error": "Database instance not available"
+        }, status=500)
+    
+    # Get database connection string
+    db_conn = None
+    if hasattr(db_instance, 'db_config'):
+        db_conn = db_instance.db_config
+    elif hasattr(db_instance, 'db_file_path'):
+        db_conn = db_instance.db_file_path
+    else:
+        return web.json_response({
+            "error": "Could not determine database connection string"
+        }, status=500)
+    
+    try:
+        # Import options_analyzer and html_report_v2
+        # Add project root to path if needed
+        script_path = Path(__file__).resolve()
+        project_root = script_path.parent
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+        
+        from scripts.options_analyzer import OptionsAnalyzer
+        from common.options.options_filters import FilterParser
+        
+        # Try to import html_report_v2, but continue if not available
+        try:
+            from scripts.html_report_v2 import generate_html_output
+            HTML_REPORT_AVAILABLE = True
+        except ImportError:
+            HTML_REPORT_AVAILABLE = False
+            logger.warning("html_report_v2 module not available, HTML generation will be skipped")
+        
+        # Default values from covered_call_generation.py
+        MAX_DAYS = 30
+        BATCH_SIZE = 300
+        MAX_WORKERS = 4
+        POSITION_SIZE = 100000
+        SPREAD = True
+        SPREAD_STRIKE_TOLERANCE = 5
+        SPREAD_LONG_DAYS = 120
+        SPREAD_LONG_MIN_DAYS = 45
+        SPREAD_LONG_DAYS_TOLERANCE = 60
+        LOG_LEVEL = "WARNING"
+        OPTION_TYPE = "both"
+        SENSIBLE_PRICE = 0.001
+        MIN_VOL = 10
+        SORT = "potential_premium"
+        TOP_N = 5
+        REFRESH_RESULTS = 60  # 60 seconds timeout
+        
+        # Get cache settings from database instance or environment
+        enable_cache = True
+        if hasattr(db_instance, 'enable_cache'):
+            enable_cache = db_instance.enable_cache
+        redis_url = None
+        if enable_cache:
+            if hasattr(db_instance, 'redis_url'):
+                redis_url = db_instance.redis_url
+            else:
+                redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+        
+        # Create analyzer instance
+        analyzer = OptionsAnalyzer(
+            db_conn=db_conn,
+            log_level=LOG_LEVEL,
+            debug=False,
+            enable_cache=enable_cache,
+            redis_url=redis_url
+        )
+        await analyzer.initialize()
+        
+        # Parse filters (volume > MIN_VOL)
+        filters = []
+        try:
+            filter_str = f"volume > {MIN_VOL}"
+            filters = FilterParser.parse_filters([filter_str])
+        except Exception as e:
+            logger.warning(f"Could not parse filters: {e}")
+        
+        # Build analysis arguments
+        analysis_args = {
+            'tickers': [ticker],
+            'option_type': OPTION_TYPE,
+            'days_to_expiry': None,
+            'min_volume': MIN_VOL,
+            'max_days': MAX_DAYS,
+            'batch_size': BATCH_SIZE,
+            'min_premium': 0.0,
+            'position_size': POSITION_SIZE,
+            'filters': filters,
+            'filter_logic': 'AND',
+            'use_market_time': True,
+            'start_date': None,
+            'end_date': None,
+            'max_concurrent': 10,
+            'timestamp_lookback_days': 7,
+            'max_workers': MAX_WORKERS,
+            'spread_mode': SPREAD,
+            'spread_strike_tolerance': SPREAD_STRIKE_TOLERANCE,
+            'spread_long_days': SPREAD_LONG_DAYS,
+            'spread_long_days_tolerance': SPREAD_LONG_DAYS_TOLERANCE,
+            'spread_long_min_days': SPREAD_LONG_MIN_DAYS,
+            'min_write_timestamp': None,
+            'sensible_price': SENSIBLE_PRICE
+        }
+        
+        # Run analysis
+        df = await analyzer.analyze_options(**analysis_args)
+        
+        if df.empty:
+            return web.json_response({
+                "ticker": ticker,
+                "status": "success",
+                "message": "No options data found for this ticker",
+                "data": [],
+                "html": None,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+        
+        # Apply refresh if needed (30 second threshold)
+        if REFRESH_RESULTS > 0:
+            try:
+                # Import refresh function (may not be available in all versions)
+                from scripts.options_analyzer import _run_refresh_analysis
+                from common.common import get_redis_client_for_refresh, REDIS_AVAILABLE
+                
+                redis_client = None
+                if enable_cache and redis_url and REDIS_AVAILABLE:
+                    redis_client = get_redis_client_for_refresh(redis_url)
+                
+                # Create a mock args object for refresh
+                class MockArgs:
+                    def __init__(self):
+                        self.spread = SPREAD
+                        self.start_date = None
+                        self.end_date = None
+                        self.max_days = MAX_DAYS
+                        self.spread_long_days = SPREAD_LONG_DAYS
+                        self.spread_long_days_tolerance = SPREAD_LONG_DAYS_TOLERANCE
+                        self.spread_long_min_days = SPREAD_LONG_MIN_DAYS
+                        self.min_write_timestamp = None
+                        self.data_dir = './data'
+                        self.debug = False
+                        self.no_cache = not enable_cache
+                
+                mock_args = MockArgs()
+                
+                # Run refresh analysis
+                df = await _run_refresh_analysis(
+                    analyzer, mock_args, df, filters, REFRESH_RESULTS, redis_client, analyzer._timestamp_cache
+                )
+            except ImportError:
+                logger.warning("Refresh functionality not available, skipping refresh step")
+            except Exception as e:
+                logger.warning(f"Error during refresh: {e}, continuing with original results")
+        
+        # Get financial info for formatting
+        financial_data = await analyzer.get_financial_info([ticker])
+        
+        # Apply sorting and top_n
+        if SORT and SORT in df.columns:
+            df = df.sort_values(by=SORT, ascending=False)
+        if TOP_N and TOP_N > 0:
+            df = df.head(TOP_N)
+        
+        # Handle output format
+        if output_format == 'html':
+            # Generate and return HTML directly
+            if not HTML_REPORT_AVAILABLE:
+                return web.json_response({
+                    "ticker": ticker,
+                    "status": "error",
+                    "error": "HTML report generation not available (html_report_v2 module not found)",
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }, status=503)
+            
+            temp_dir = tempfile.mkdtemp(prefix=f"ticker_analysis_{ticker}_")
+            try:
+                generate_html_output(df, temp_dir)
+                
+                # Read generated HTML
+                html_file = PathLib(temp_dir) / 'index.html'
+                if html_file.exists():
+                    with open(html_file, 'r', encoding='utf-8') as f:
+                        html_content = f.read()
+                    
+                    # Return HTML response
+                    return web.Response(
+                        text=html_content,
+                        content_type='text/html',
+                        charset='utf-8'
+                    )
+                else:
+                    logger.warning(f"HTML file not generated at {html_file}")
+                    return web.json_response({
+                        "ticker": ticker,
+                        "status": "error",
+                        "error": "HTML file was not generated",
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }, status=500)
+            except Exception as e:
+                logger.error(f"Error generating HTML report: {e}", exc_info=True)
+                return web.json_response({
+                    "ticker": ticker,
+                    "status": "error",
+                    "error": f"Error generating HTML report: {str(e)}",
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }, status=500)
+            finally:
+                # Clean up temp directory
+                try:
+                    import shutil
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except:
+                    pass
+        else:
+            # Return JSON response (default)
+            data_records = dataframe_to_json_records(df)
+            
+            return web.json_response({
+                "ticker": ticker,
+                "status": "success",
+                "data": data_records,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "row_count": len(df)
+            })
+        
+    except Exception as e:
+        logger.error(f"Error analyzing ticker {ticker}: {e}", exc_info=True)
+        return web.json_response({
+            "ticker": ticker,
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }, status=500)
+
 async def handle_catch_all(request: web.Request) -> web.Response:
     """Catch-all handler for unknown routes."""
     # Log the request but don't spam the logs for repeated requests
@@ -1411,15 +1683,16 @@ async def handle_catch_all(request: web.Request) -> web.Response:
         return web.json_response({
             "error": "Not Found",
             "message": f"Static resource '{path}' not found. This is a database API server.",
-            "available_endpoints": [
-                "/db_command (POST)", 
-                "/ws (WebSocket)", 
-                "/health (GET)",
-                "/stats/database (GET)",
-                "/stats/tables (GET)",
-                "/stats/performance (GET)", 
-                "/stats/pool (GET)"
-            ]
+        "available_endpoints": [
+            "/db_command (POST)", 
+            "/ws (WebSocket)", 
+            "/health (GET)",
+            "/stats/database (GET)",
+            "/stats/tables (GET)",
+            "/stats/performance (GET)", 
+            "/stats/pool (GET)",
+            "/analyze_ticker (GET/POST)"
+        ]
         }, status=404)
     
     # For other unknown routes, return a helpful 404
@@ -1431,9 +1704,10 @@ async def handle_catch_all(request: web.Request) -> web.Response:
             "/ws (WebSocket)", 
             "/health (GET)",
             "/stats/database (GET)",
-            "/stats/tables (GET)", 
-            "/stats/performance (GET)",
-            "/stats/pool (GET)"
+            "/stats/tables (GET)",
+            "/stats/performance (GET)", 
+            "/stats/pool (GET)",
+            "/analyze_ticker (GET/POST)"
         ]
     }, status=404)
 
@@ -1492,7 +1766,11 @@ async def handle_db_command(request: web.Request) -> web.Response:
                 try:
                     if pd.api.types.is_integer_dtype(df.index):
                         first_val = df.index[0] if len(df) > 0 else 0
-                        if first_val > 1e10:  # Likely milliseconds
+                        # Check if it's a date in YYYYMMDD format (8 digits, between 19000101 and 99991231)
+                        if 19000101 <= first_val <= 99991231 and len(str(int(first_val))) == 8:
+                            # It's a date in YYYYMMDD format - convert it properly
+                            df.index = pd.to_datetime(df.index.astype(str), format='%Y%m%d', errors='coerce')
+                        elif first_val > 1e10:  # Likely milliseconds
                             df.index = pd.to_datetime(df.index, unit='ms', errors='coerce')
                         else:  # Likely seconds
                             df.index = pd.to_datetime(df.index, unit='s', errors='coerce')
@@ -2221,6 +2499,10 @@ async def main_server_runner():
     app.router.add_get("/stats/tables", handle_stats_tables)      # Fast table counts
     app.router.add_get("/stats/performance", handle_stats_performance)  # Performance test results
     app.router.add_get("/stats/pool", handle_stats_pool)          # Connection pool and cache status
+    
+    # Add ticker analysis endpoint
+    app.router.add_get("/analyze_ticker", handle_analyze_ticker)
+    app.router.add_post("/analyze_ticker", handle_analyze_ticker)
     
     # Add catch-all handler for unknown routes (must be last)
     app.router.add_get("/{path:.*}", handle_catch_all)

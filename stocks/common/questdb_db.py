@@ -30,7 +30,7 @@ from .stock_db import StockDBBase
 from .logging_utils import get_logger
 import pytz
 from dateutil import parser as date_parser
-from .market_hours import is_market_hours
+from .market_hours import is_market_hours, is_market_preopen, is_market_postclose
 from concurrent.futures import ProcessPoolExecutor
 from .common import normalize_timestamp_to_utc
 
@@ -1252,6 +1252,39 @@ class DailyPriceRepository(BaseRepository):
             
             if records:
                 await self._bulk_insert(conn, table, records)
+                # QuestDB may need time for data to be visible to SELECT queries
+                # Execute a query to ensure the connection has processed the inserts
+                # and wait for QuestDB to persist the data
+                try:
+                    # Force a flush by executing a query that touches the table
+                    await conn.fetch(f"SELECT COUNT(*) FROM {table} WHERE ticker = $1", ticker)
+                except Exception:
+                    pass
+                # QuestDB may need more time to make data visible across connections
+                # Increase delay to 500ms to ensure persistence
+                await asyncio.sleep(0.5)  # 500ms delay for QuestDB consistency
+                
+                # Verify the data is actually in the DB by querying it back
+                if interval == 'hourly' and len(records) > 0:
+                    # Get a sample datetime from the first record to verify
+                    sample_dt = records[0].get('datetime')
+                    if sample_dt:
+                        # Query for records around this datetime to verify they're visible
+                        verify_query = f"SELECT COUNT(*) as cnt FROM {table} WHERE ticker = $1 AND datetime >= $2 AND datetime <= $3"
+                        # Use the sample datetime ± 1 hour to find the record
+                        if isinstance(sample_dt, datetime):
+                            verify_start = sample_dt - timedelta(hours=1)
+                            verify_end = sample_dt + timedelta(hours=1)
+                        else:
+                            verify_start = sample_dt
+                            verify_end = sample_dt
+                        try:
+                            verify_rows = await conn.fetch(verify_query, ticker, verify_start, verify_end)
+                            if verify_rows:
+                                count = verify_rows[0]['cnt']
+                                self.logger.debug(f"Verification query after insert: found {count} rows in {table} for {ticker} around {sample_dt}")
+                        except Exception as e:
+                            self.logger.debug(f"Verification query failed (non-critical): {e}")
     
     async def _bulk_insert(self, conn: asyncpg.Connection, table: str, records: List[Dict]):
         """Bulk insert records with retry logic."""
@@ -1263,6 +1296,10 @@ class DailyPriceRepository(BaseRepository):
         placeholders = [f'${i+1}' for i in range(len(columns))]
         insert_sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(placeholders)})"
         
+        max_attempts = 5
+        delay = 0.1
+        inserted_count = 0
+        sample_datetime = None
         for record in records:
             record_values = []
             for col in columns:
@@ -1270,19 +1307,40 @@ class DailyPriceRepository(BaseRepository):
                 if col in ['date', 'datetime', 'timestamp', 'write_timestamp']:
                     if isinstance(value, str):
                         try:
-                            record_values.append(date_parser.parse(value))
+                            parsed_val = date_parser.parse(value)
+                            record_values.append(parsed_val)
+                            if col == 'datetime' and sample_datetime is None:
+                                sample_datetime = parsed_val
                         except:
                             record_values.append(None)
                     else:
                         record_values.append(value)
+                        if col == 'datetime' and sample_datetime is None:
+                            sample_datetime = value
                 else:
                     record_values.append(value)
             
-            max_attempts = 5
-            delay = 0.1
             for attempt in range(1, max_attempts + 1):
                 try:
-                    await conn.execute(insert_sql, *record_values)
+                    result = await conn.execute(insert_sql, *record_values)
+                    inserted_count += 1
+                    # Log the first insert result to verify it's working
+                    if inserted_count == 1:
+                        self.logger.debug(f"First insert result for {table}: {result}")
+                        # Log the actual values being inserted for debugging
+                        self.logger.debug(f"  First record values: {dict(zip(columns, record_values))}")
+                    # Check if result indicates rows were actually inserted
+                    # QuestDB returns "INSERT 0 N" where N is number of rows affected
+                    # With DEDUP UPSERT, it might return "INSERT 0 0" if it was a duplicate
+                    if "INSERT" in str(result):
+                        # Parse the result to see how many rows were affected
+                        import re
+                        match = re.search(r'INSERT\s+0\s+(\d+)', str(result))
+                        if match:
+                            rows_affected = int(match.group(1))
+                            if rows_affected == 0 and inserted_count == 1:
+                                self.logger.warning(f"Insert returned 0 rows affected - possible duplicate key: {result}")
+                                self.logger.warning(f"  Record: {dict(zip(columns, record_values))}")
                     break
                 except Exception as e:
                     message = str(e).lower()
@@ -1293,7 +1351,17 @@ class DailyPriceRepository(BaseRepository):
                         await asyncio.sleep(delay)
                         delay = min(delay * 2, 2.0)
                     else:
+                        self.logger.error(f"Error inserting record into {table}: {e}, record_values={record_values}")
+                        # Log the datetime value that failed
+                        for i, col in enumerate(columns):
+                            if col in ['date', 'datetime', 'timestamp', 'write_timestamp']:
+                                self.logger.error(f"  Failed datetime column '{col}': {record_values[i]} (type: {type(record_values[i])})")
                         raise
+        
+        if inserted_count > 0:
+            self.logger.debug(f"Successfully inserted {inserted_count} records into {table}")
+            if sample_datetime is not None:
+                self.logger.debug(f"  Sample datetime value saved: {sample_datetime} (type: {type(sample_datetime)}, tzinfo: {sample_datetime.tzinfo if hasattr(sample_datetime, 'tzinfo') else 'N/A'})")
     
     async def get(self, ticker: str, start_date: Optional[str] = None,
                  end_date: Optional[str] = None, interval: str = "daily") -> pd.DataFrame:
@@ -1308,13 +1376,35 @@ class DailyPriceRepository(BaseRepository):
             if start_date:
                 query += f" AND {date_col} >= ${len(params) + 1}"
                 if isinstance(start_date, str):
-                    params.append(date_parser.parse(start_date))
+                    # For date-only strings (YYYY-MM-DD), parse as UTC midnight to avoid timezone issues
+                    if len(start_date) == 10 and start_date.count('-') == 2:
+                        # It's a date-only string, parse as UTC midnight
+                        parsed = datetime.strptime(start_date, '%Y-%m-%d')
+                        # Already naive, so it's treated as UTC by QuestDB
+                    else:
+                        # It's a datetime string, use date_parser and convert to UTC
+                        parsed = date_parser.parse(start_date)
+                        # Convert timezone-aware datetime to naive UTC for QuestDB compatibility
+                        if isinstance(parsed, datetime) and parsed.tzinfo is not None:
+                            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+                    params.append(parsed)
                 else:
-                    params.append(start_date)
+                    # If it's already a datetime object, ensure it's naive
+                    if isinstance(start_date, datetime) and start_date.tzinfo is not None:
+                        params.append(start_date.astimezone(timezone.utc).replace(tzinfo=None))
+                    else:
+                        params.append(start_date)
             
             if end_date:
                 if interval == 'daily':
-                    parsed_end = date_parser.parse(end_date) if isinstance(end_date, str) else end_date
+                    # For date-only strings (YYYY-MM-DD), parse as UTC midnight to avoid timezone issues
+                    if isinstance(end_date, str) and len(end_date) == 10 and end_date.count('-') == 2:
+                        parsed_end = datetime.strptime(end_date, '%Y-%m-%d')
+                    else:
+                        parsed_end = date_parser.parse(end_date) if isinstance(end_date, str) else end_date
+                        # Convert timezone-aware datetime to naive UTC for QuestDB compatibility
+                        if isinstance(parsed_end, datetime) and parsed_end.tzinfo is not None:
+                            parsed_end = parsed_end.astimezone(timezone.utc).replace(tzinfo=None)
                     if isinstance(parsed_end, datetime) and (
                         (isinstance(end_date, str) and len(end_date) == 10) or
                         (parsed_end.hour == 0 and parsed_end.minute == 0 and parsed_end.second == 0)
@@ -1325,11 +1415,29 @@ class DailyPriceRepository(BaseRepository):
                         query += f" AND {date_col} <= ${len(params) + 1}"
                         params.append(parsed_end)
                 else:
-                    query += f" AND {date_col} <= ${len(params) + 1}"
-                    if isinstance(end_date, str):
-                        params.append(date_parser.parse(end_date))
+                    # For hourly data, if end_date is a date-only string (tomorrow), we want to include all of today's hours
+                    # So use < comparison with tomorrow's midnight to include all of today
+                    if isinstance(end_date, str) and len(end_date) == 10 and end_date.count('-') == 2:
+                        # It's a date-only string (like '2025-11-22'), parse as UTC midnight
+                        parsed = datetime.strptime(end_date, '%Y-%m-%d')
+                        # Use < comparison to include all data up to (but not including) tomorrow's midnight
+                        query += f" AND {date_col} < ${len(params) + 1}"
+                        params.append(parsed)
                     else:
-                        params.append(end_date)
+                        query += f" AND {date_col} <= ${len(params) + 1}"
+                        if isinstance(end_date, str):
+                            # For datetime strings, parse and convert to UTC
+                            parsed = date_parser.parse(end_date)
+                            # Convert timezone-aware datetime to naive UTC for QuestDB compatibility
+                            if isinstance(parsed, datetime) and parsed.tzinfo is not None:
+                                parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+                            params.append(parsed)
+                        else:
+                            # If it's already a datetime object, ensure it's naive
+                            if isinstance(end_date, datetime) and end_date.tzinfo is not None:
+                                params.append(end_date.astimezone(timezone.utc).replace(tzinfo=None))
+                            else:
+                                params.append(end_date)
             
             query += f" ORDER BY {date_col}"
             
@@ -1341,6 +1449,22 @@ class DailyPriceRepository(BaseRepository):
             try:
                 rows = await conn.fetch(query, *params)
                 self.logger.debug(f"[DB QUERY] Fetched {len(rows)} rows from {table} for {ticker}")
+                if interval == 'hourly' and len(rows) == 0:
+                    # If no rows found, try a broader query to see if data exists at all
+                    try:
+                        broad_query = f"SELECT COUNT(*) as cnt, MIN(datetime) as min_dt, MAX(datetime) as max_dt FROM {table} WHERE ticker = $1"
+                        broad_rows = await conn.fetch(broad_query, ticker)
+                        if broad_rows and broad_rows[0]['cnt'] > 0:
+                            self.logger.debug(f"  Data exists in DB: {broad_rows[0]['cnt']} total rows, range: {broad_rows[0]['min_dt']} to {broad_rows[0]['max_dt']}")
+                            self.logger.debug(f"  Query was looking for: start_date={params[1] if len(params) > 1 else 'N/A'}, end_date={params[2] if len(params) > 2 else 'N/A'}")
+                    except Exception as e:
+                        self.logger.debug(f"  Could not check for existing data: {e}")
+                if rows and interval == 'hourly':
+                    # Log sample datetime from first row to debug timestamp matching
+                    first_row = rows[0]
+                    if 'datetime' in first_row:
+                        sample_db_dt = first_row['datetime']
+                        self.logger.debug(f"  Sample datetime from DB: {sample_db_dt} (type: {type(sample_db_dt)})")
                 if rows:
                     columns = list(rows[0].keys()) if rows else []
                     data = [dict(row) for row in rows]
@@ -2310,11 +2434,31 @@ class StockDataService:
         # The freshness check already determined we need to save this data
         date_col = 'date' if interval == 'daily' else 'datetime'
         for idx, row in df.iterrows():
+            # Ensure we use UTC for cache keys - convert timezone-aware timestamps to UTC first
+            if isinstance(idx, pd.Timestamp):
+                if idx.tz is not None:
+                    idx_utc = idx.tz_convert(timezone.utc)
+                else:
+                    idx_utc = idx.tz_localize(timezone.utc)
+            elif isinstance(idx, datetime):
+                if idx.tzinfo is not None:
+                    idx_utc = idx.astimezone(timezone.utc)
+                else:
+                    idx_utc = idx.replace(tzinfo=timezone.utc)
+            else:
+                idx_utc = idx
+            
             if interval == 'daily':
-                date_str = idx.strftime('%Y-%m-%d') if isinstance(idx, (pd.Timestamp, datetime)) else str(idx)[:10]
+                if isinstance(idx_utc, (pd.Timestamp, datetime)):
+                    date_str = idx_utc.strftime('%Y-%m-%d')
+                else:
+                    date_str = str(idx_utc)[:10]
                 cache_key = CacheKeyGenerator.daily_price(ticker, date_str)
             else:
-                dt_str = idx.strftime('%Y-%m-%dT%H:%M:%S') if isinstance(idx, (pd.Timestamp, datetime)) else str(idx).split('.')[0]
+                if isinstance(idx_utc, (pd.Timestamp, datetime)):
+                    dt_str = idx_utc.strftime('%Y-%m-%dT%H:%M:%S')
+                else:
+                    dt_str = str(idx_utc).split('.')[0].split('+')[0].split('Z')[0]
                 cache_key = CacheKeyGenerator.hourly_price(ticker, dt_str)
             
             row_df = pd.DataFrame([row]).set_index(pd.Index([idx]))
@@ -2334,8 +2478,8 @@ class StockDataService:
                 cache_start = (now_utc - timedelta(days=30)).strftime('%Y-%m-%d')
                 cache_end = now_utc.strftime('%Y-%m-%d')
             else:  # hourly
-                cache_start = (now_utc - timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%S')
-                cache_end = now_utc.strftime('%Y-%m-%dT%H:%M:%S')
+                cache_start_dt = (now_utc - timedelta(days=7)).replace(minute=0, second=0, microsecond=0)
+                cache_end_dt = now_utc.replace(minute=0, second=0, microsecond=0)
             
             # Generate cache keys for recent window
             cache_keys = []
@@ -2347,12 +2491,12 @@ class StockDataService:
                     cache_keys.append(CacheKeyGenerator.daily_price(ticker, date_str))
                     current += timedelta(days=1)
             else:  # hourly
-                current = datetime.strptime(cache_start, '%Y-%m-%dT%H:%M:%S')
-                end_dt = datetime.strptime(cache_end, '%Y-%m-%dT%H:%M:%S')
-                while current <= end_dt:
-                    dt_str = current.strftime('%Y-%m-%dT%H:00:00')
-                    cache_keys.append(CacheKeyGenerator.hourly_price(ticker, dt_str))
-                    current += timedelta(hours=1)
+                cache_keys = self._generate_hourly_cache_keys_for_range(
+                    ticker,
+                    cache_start_dt,
+                    cache_end_dt,
+                    clamp_future=True,
+                )
             
             # Check cache first
             cached_data = {}
@@ -2382,15 +2526,39 @@ class StockDataService:
             # Cache miss or no cached data - fetch from DB
             self.logger.debug(f"[DB] Cache miss for {ticker} {interval} (no date constraints), fetching from database")
             df = await self.daily_price_repo.get(ticker, start_date, end_date, interval)
+            # Ensure df is never None - repository should always return a DataFrame
+            if df is None:
+                self.logger.warning(f"Repository returned None for {ticker} ({interval}), using empty DataFrame")
+                df = pd.DataFrame()
             if not df.empty:
                 # Cache each time point individually
                 date_col = 'date' if interval == 'daily' else 'datetime'
                 for idx, row in df.iterrows():
+                    # Ensure we use UTC for cache keys - convert timezone-aware timestamps to UTC first
+                    if isinstance(idx, pd.Timestamp):
+                        if idx.tz is not None:
+                            idx_utc = idx.tz_convert(timezone.utc)
+                        else:
+                            idx_utc = idx.tz_localize(timezone.utc)
+                    elif isinstance(idx, datetime):
+                        if idx.tzinfo is not None:
+                            idx_utc = idx.astimezone(timezone.utc)
+                        else:
+                            idx_utc = idx.replace(tzinfo=timezone.utc)
+                    else:
+                        idx_utc = idx
+                    
                     if interval == 'daily':
-                        date_str = idx.strftime('%Y-%m-%d') if isinstance(idx, (pd.Timestamp, datetime)) else str(idx)[:10]
+                        if isinstance(idx_utc, (pd.Timestamp, datetime)):
+                            date_str = idx_utc.strftime('%Y-%m-%d')
+                        else:
+                            date_str = str(idx_utc)[:10]
                         cache_key = CacheKeyGenerator.daily_price(ticker, date_str)
                     else:
-                        dt_str = idx.strftime('%Y-%m-%dT%H:%M:%S') if isinstance(idx, (pd.Timestamp, datetime)) else str(idx).split('.')[0]
+                        if isinstance(idx_utc, (pd.Timestamp, datetime)):
+                            dt_str = idx_utc.strftime('%Y-%m-%dT%H:%M:%S')
+                        else:
+                            dt_str = str(idx_utc).split('.')[0].split('+')[0].split('Z')[0]
                         cache_key = CacheKeyGenerator.hourly_price(ticker, dt_str)
                     
                     row_df = pd.DataFrame([row]).set_index(pd.Index([idx]))
@@ -2402,8 +2570,30 @@ class StockDataService:
         
         if start_date and end_date:
             # Generate time points between start and end
-            start = date_parser.parse(start_date) if isinstance(start_date, str) else start_date
-            end = date_parser.parse(end_date) if isinstance(end_date, str) else end_date
+            # Parse dates and ensure they're in UTC for cache key generation
+            if isinstance(start_date, str):
+                parsed_start = date_parser.parse(start_date)
+                if isinstance(parsed_start, datetime):
+                    if parsed_start.tzinfo is not None:
+                        start = parsed_start.astimezone(timezone.utc).replace(tzinfo=None)
+                    else:
+                        start = parsed_start  # Assume UTC if naive
+                else:
+                    start = parsed_start
+            else:
+                start = start_date
+            
+            if isinstance(end_date, str):
+                parsed_end = date_parser.parse(end_date)
+                if isinstance(parsed_end, datetime):
+                    if parsed_end.tzinfo is not None:
+                        end = parsed_end.astimezone(timezone.utc).replace(tzinfo=None)
+                    else:
+                        end = parsed_end  # Assume UTC if naive
+                else:
+                    end = parsed_end
+            else:
+                end = end_date
             
             if interval == 'daily':
                 current = start.date() if isinstance(start, datetime) else start
@@ -2413,26 +2603,34 @@ class StockDataService:
                     cache_keys.append(CacheKeyGenerator.daily_price(ticker, date_str))
                     current += timedelta(days=1)
             else:  # hourly
-                # For hourly, use the actual end datetime (not max.time()) to avoid generating unnecessary cache keys
-                current = start if isinstance(start, datetime) else datetime.combine(start, datetime.min.time())
+                start_dt = start if isinstance(start, datetime) else datetime.combine(start, datetime.min.time())
                 end_dt = end if isinstance(end, datetime) else datetime.combine(end, datetime.min.time())
-                # Round end_dt to the next hour boundary to include all hours in the range
-                if end_dt.hour < 23:
-                    end_dt = end_dt.replace(hour=end_dt.hour + 1, minute=0, second=0, microsecond=0)
-                else:
-                    end_dt = end_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-                while current < end_dt:
-                    dt_str = current.strftime('%Y-%m-%dT%H:00:00')
-                    cache_keys.append(CacheKeyGenerator.hourly_price(ticker, dt_str))
-                    current += timedelta(hours=1)
+                cache_keys = self._generate_hourly_cache_keys_for_range(
+                    ticker,
+                    start_dt,
+                    end_dt,
+                    clamp_future=True,
+                )
         elif start_date:
             # Single time point
             if interval == 'daily':
                 date_str = start_date[:10] if len(start_date) > 10 else start_date
                 cache_keys.append(CacheKeyGenerator.daily_price(ticker, date_str))
             else:
-                dt_str = start_date.split('.')[0].split('+')[0].split('Z')[0]
-                cache_keys.append(CacheKeyGenerator.hourly_price(ticker, dt_str))
+                parsed_start = start_date
+                if isinstance(start_date, str):
+                    parsed_start = date_parser.parse(start_date)
+                if isinstance(parsed_start, datetime):
+                    start_dt = parsed_start
+                else:
+                    start_dt = datetime.combine(parsed_start, datetime.min.time())
+                end_dt = start_dt + timedelta(hours=1)
+                cache_keys = self._generate_hourly_cache_keys_for_range(
+                    ticker,
+                    start_dt,
+                    end_dt,
+                    clamp_future=True,
+                )
         
         # Batch fetch from cache
         cached_data = {}
@@ -2448,16 +2646,41 @@ class StockDataService:
             # Fetch from DB for the date range (repository will limit query)
             df = await self.daily_price_repo.get(ticker, start_date, end_date, interval)
             
+            # Ensure df is never None - repository should always return a DataFrame
+            if df is None:
+                self.logger.warning(f"Repository returned None for {ticker} ({interval}), using empty DataFrame")
+                df = pd.DataFrame()
+            
             # Build set of dates that exist in DB result
             dates_in_db = set()
             if not df.empty:
                 date_col = 'date' if interval == 'daily' else 'datetime'
                 for idx, row in df.iterrows():
+                    # Ensure we use UTC for cache keys - convert timezone-aware timestamps to UTC first
+                    if isinstance(idx, pd.Timestamp):
+                        if idx.tz is not None:
+                            idx_utc = idx.tz_convert(timezone.utc)
+                        else:
+                            idx_utc = idx.tz_localize(timezone.utc)
+                    elif isinstance(idx, datetime):
+                        if idx.tzinfo is not None:
+                            idx_utc = idx.astimezone(timezone.utc)
+                        else:
+                            idx_utc = idx.replace(tzinfo=timezone.utc)
+                    else:
+                        idx_utc = idx
+                    
                     if interval == 'daily':
-                        date_str = idx.strftime('%Y-%m-%d') if isinstance(idx, (pd.Timestamp, datetime)) else str(idx)[:10]
+                        if isinstance(idx_utc, (pd.Timestamp, datetime)):
+                            date_str = idx_utc.strftime('%Y-%m-%d')
+                        else:
+                            date_str = str(idx_utc)[:10]
                         cache_key = CacheKeyGenerator.daily_price(ticker, date_str)
                     else:
-                        dt_str = idx.strftime('%Y-%m-%dT%H:%M:%S') if isinstance(idx, (pd.Timestamp, datetime)) else str(idx).split('.')[0]
+                        if isinstance(idx_utc, (pd.Timestamp, datetime)):
+                            dt_str = idx_utc.strftime('%Y-%m-%dT%H:%M:%S')
+                        else:
+                            dt_str = str(idx_utc).split('.')[0].split('+')[0].split('Z')[0]
                         cache_key = CacheKeyGenerator.hourly_price(ticker, dt_str)
                     
                     # Only cache rows that match our requested cache_keys (within the requested range)
@@ -2506,6 +2729,62 @@ class StockDataService:
             df = pd.DataFrame()
         
         return df
+    
+    def _generate_hourly_cache_keys_for_range(
+        self,
+        ticker: str,
+        start_dt: datetime | date | None,
+        end_dt: datetime | date | None,
+        clamp_future: bool = True,
+    ) -> List[str]:
+        """Generate hourly cache keys limited to trading/pre/post-market hours."""
+        if start_dt is None or end_dt is None:
+            return []
+        
+        start_utc = self._normalize_to_utc_hour(start_dt)
+        end_utc = self._normalize_to_utc_hour(end_dt)
+        
+        if end_utc <= start_utc:
+            return []
+        
+        if clamp_future:
+            now_utc = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+            future_limit = now_utc + timedelta(hours=1)
+            if end_utc > future_limit:
+                end_utc = future_limit
+            if start_utc > future_limit:
+                return []
+        
+        keys: List[str] = []
+        current = start_utc
+        while current < end_utc:
+            if self._is_trading_session_hour(current):
+                dt_str = current.strftime('%Y-%m-%dT%H:00:00')
+                keys.append(CacheKeyGenerator.hourly_price(ticker, dt_str))
+            current += timedelta(hours=1)
+        return keys
+    
+    def _normalize_to_utc_hour(self, dt_value: datetime | date) -> datetime:
+        """Normalize date/datetime to UTC hour boundary."""
+        if isinstance(dt_value, date) and not isinstance(dt_value, datetime):
+            dt = datetime.combine(dt_value, datetime.min.time())
+        else:
+            dt = dt_value  # type: ignore[assignment]
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt.replace(minute=0, second=0, microsecond=0)
+    
+    def _is_trading_session_hour(self, dt_utc: datetime) -> bool:
+        """Return True if the given UTC hour overlaps pre/regular/post market."""
+        if dt_utc.tzinfo is None:
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+        return (
+            is_market_preopen(dt_utc)
+            or is_market_hours(dt_utc)
+            or is_market_postclose(dt_utc)
+        )
     
     async def _calculate_ma_ema(self, ticker: str, df: pd.DataFrame, interval: str,
                                ma_periods: List[int], ema_periods: List[int]) -> pd.DataFrame:
@@ -3377,6 +3656,463 @@ class OptionsDataService:
             # Use asyncio.create_task for fire-and-forget metadata update
             asyncio.create_task(self._update_options_metadata_on_save(ticker, df))
     
+    async def _resolve_and_validate_option_tickers(
+        self,
+        ticker: str,
+        expiration_date: Optional[str],
+        start_datetime: Optional[str],
+        end_datetime: Optional[str],
+        option_tickers: Optional[List[str]],
+        timestamp_lookback_days: Optional[int],
+        min_write_timestamp: Optional[str]
+    ) -> Tuple[Optional[List[str]], Optional[Dict[str, str]], Optional[pd.DataFrame]]:
+        """Resolve and validate option tickers, checking if direct DB query is needed.
+        
+        Returns:
+            Tuple of (option_tickers, option_ticker_exp_map, direct_db_result)
+            If direct_db_result is not None, it should be returned directly.
+        """
+        import time
+        resolve_start = time.time()
+        option_tickers, option_ticker_exp_map = await self._resolve_option_tickers_and_exp_dates(
+            ticker, expiration_date, start_datetime, end_datetime, option_tickers
+        )
+        resolve_elapsed = time.time() - resolve_start
+        self.logger.debug(f"[TIMING] _resolve_option_tickers_and_exp_dates completed for {ticker}: {resolve_elapsed:.3f}s")
+        
+        # If no option_tickers were resolved, query DB directly
+        if not option_tickers:
+            if timestamp_lookback_days is not None:
+                df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, option_tickers, timestamp_lookback_days, min_write_timestamp)
+            else:
+                df = await self.options_repo.get(ticker, expiration_date, start_datetime, end_datetime, option_tickers)
+            return None, None, df
+        
+        # Check if resolved expiration dates cover the full requested range
+        if end_datetime and option_ticker_exp_map:
+            from datetime import datetime as dt_class
+            try:
+                end_dt = dt_class.strptime(end_datetime[:10], '%Y-%m-%d').date()
+                resolved_exp_dates = [dt_class.strptime(exp_date[:10], '%Y-%m-%d').date() 
+                                     for exp_date in option_ticker_exp_map.values() 
+                                     if exp_date and len(exp_date) >= 10]
+                if resolved_exp_dates:
+                    max_resolved_exp_date = max(resolved_exp_dates)
+                    if max_resolved_exp_date < end_dt:
+                        self.logger.debug(f"[CACHE] Metadata cache only covers up to {max_resolved_exp_date}, but requested range goes to {end_dt}. Falling back to direct DB query.")
+                        if timestamp_lookback_days is not None:
+                            df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, None, timestamp_lookback_days, min_write_timestamp)
+                        else:
+                            df = await self.options_repo.get(ticker, expiration_date, start_datetime, end_datetime, None)
+                        return None, None, df
+            except (ValueError, TypeError) as e:
+                self.logger.debug(f"[CACHE] Could not verify date range coverage: {e}, continuing with normal flow")
+        
+        return option_tickers, option_ticker_exp_map, None
+    
+    async def _fetch_from_cache(
+        self,
+        ticker: str,
+        cache_keys: List[str],
+        min_write_timestamp: Optional[str]
+    ) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
+        """Fetch data from cache and filter by min_write_timestamp if provided.
+        
+        Returns:
+            Tuple of (cached_data dict, stale_cache_keys list)
+        """
+        import time
+        cache_start = time.time()
+        cached_results = await self.cache.get_batch(cache_keys, batch_size=500)
+        cache_elapsed = time.time() - cache_start
+        
+        # Process cache results and check for stale entries
+        cached_data = {}
+        stale_cache_keys = []
+        for k, v in cached_results.items():
+            if v is not None and not v.empty:
+                if 'write_timestamp' not in v.columns:
+                    self.logger.debug(f"[CACHE] Stale cache entry detected (missing write_timestamp): {k}, treating as cache miss")
+                    stale_cache_keys.append(k)
+                else:
+                    cached_data[k] = v
+        
+        # Invalidate stale cache entries
+        if stale_cache_keys:
+            self.logger.debug(f"[CACHE] Invalidating {len(stale_cache_keys)} stale cache entries (missing write_timestamp) for {ticker}")
+            for stale_key in stale_cache_keys:
+                await self.cache.delete(stale_key)
+        
+        cache_hits = len(cached_data)
+        cache_misses = len(cache_keys) - cache_hits
+        self.logger.debug(f"[CACHE] Cache batch get for {ticker}: {cache_elapsed:.3f}s, found {cache_hits}/{len(cache_keys)} (hits: {cache_hits}, misses: {cache_misses}, stale: {len(stale_cache_keys)})")
+        if cache_misses > 0 and cache_hits == 0:
+            sample_missing = list(cache_keys[:5])
+            self.logger.debug(f"[CACHE DEBUG] Sample missing cache keys: {sample_missing}")
+        
+        # Filter cached data by min_write_timestamp if provided
+        if min_write_timestamp and cached_data:
+            cached_data, additional_stale = await self._filter_cached_data_by_timestamp(
+                ticker, cached_data, min_write_timestamp
+            )
+            stale_cache_keys.extend(additional_stale)
+        
+        return cached_data, stale_cache_keys
+    
+    async def _filter_cached_data_by_timestamp(
+        self,
+        ticker: str,
+        cached_data: Dict[str, pd.DataFrame],
+        min_write_timestamp: str
+    ) -> Tuple[Dict[str, pd.DataFrame], List[str]]:
+        """Filter cached data by min_write_timestamp.
+        
+        Returns:
+            Tuple of (filtered_cached_data, stale_cache_keys)
+        """
+        self.logger.info(f"[CACHE FILTER] min_write_timestamp={min_write_timestamp} provided, checking {len(cached_data)} cached DataFrames for {ticker}")
+        
+        try:
+            import pytz
+            est = pytz.timezone('America/New_York')
+            min_ts = pd.to_datetime(min_write_timestamp)
+            if min_ts.tz is None:
+                min_ts = est.localize(min_ts)
+            min_ts_utc = min_ts.astimezone(pytz.UTC)
+            
+            filtered_cached_data = {}
+            stale_cache_keys = []
+            
+            for cache_key, df in cached_data.items():
+                if not df.empty and 'write_timestamp' in df.columns:
+                    df_copy = df.copy()
+                    non_null_mask = df_copy['write_timestamp'].notna()
+                    if not non_null_mask.any():
+                        stale_cache_keys.append(cache_key)
+                        continue
+                    
+                    df_copy['write_timestamp'] = df_copy['write_timestamp'].apply(
+                        lambda x: normalize_timestamp_to_utc(x) if pd.notna(x) else None
+                    )
+                    filtered_df = df_copy[df_copy['write_timestamp'].notna() & (df_copy['write_timestamp'] >= min_ts_utc)]
+                    if not filtered_df.empty:
+                        filtered_cached_data[cache_key] = filtered_df
+                elif not df.empty:
+                    stale_cache_keys.append(cache_key)
+            
+            filtered_count = len(cached_data) - len(filtered_cached_data)
+            if stale_cache_keys:
+                self.logger.info(f"[CACHE FILTER] Discarded {len(stale_cache_keys)} cached options for {ticker} due to missing write_timestamp (will refetch from DB)")
+            if filtered_count > 0:
+                self.logger.info(f"[CACHE FILTER] Filtered out {filtered_count} cached options with write_timestamp < {min_write_timestamp} for {ticker} (kept {len(filtered_cached_data)})")
+            elif len(cached_data) > 0:
+                self.logger.info(f"[CACHE FILTER] All {len(cached_data)} cached options passed min_write_timestamp filter for {ticker}")
+            
+            return filtered_cached_data, stale_cache_keys
+        except Exception as e:
+            self.logger.warning(f"Error filtering cached data by min_write_timestamp {min_write_timestamp}: {e}")
+            import traceback
+            self.logger.warning(f"Traceback: {traceback.format_exc()}")
+            return cached_data, []
+    
+    async def _fetch_missing_from_db_and_cache(
+        self,
+        ticker: str,
+        missing_keys: List[str],
+        cache_keys: List[str],
+        cached_data: Dict[str, pd.DataFrame],
+        expiration_date: Optional[str],
+        start_datetime: Optional[str],
+        end_datetime: Optional[str],
+        timestamp_lookback_days: Optional[int],
+        min_write_timestamp: Optional[str],
+        use_fire_and_forget: bool,
+        deduplicate: bool
+    ) -> Dict[str, pd.DataFrame]:
+        """Fetch missing options from DB and cache them.
+        
+        Returns:
+            Updated cached_data dict with newly fetched and cached options
+        """
+        if not missing_keys:
+            return cached_data
+        
+        # Extract option_tickers from missing keys
+        missing_option_tickers = self._extract_option_tickers_from_cache_keys(missing_keys)
+        
+        # Determine query option_tickers (may be None if all cache was filtered out)
+        query_option_tickers = None
+        if min_write_timestamp and len(missing_keys) == len(cache_keys):
+            self.logger.info(f"[DB QUERY] All cached data filtered out by min_write_timestamp, querying DB without option_tickers filter for {ticker}")
+        else:
+            query_option_tickers = missing_option_tickers
+        
+        if min_write_timestamp and missing_keys:
+            self.logger.info(f"[DB QUERY] Querying DB for {len(missing_keys)} options (cache misses after filtering by min_write_timestamp={min_write_timestamp}) for {ticker}")
+        
+        # Fetch from DB
+        import time
+        db_start = time.time()
+        if timestamp_lookback_days is not None:
+            if deduplicate:
+                self.logger.debug(f"[DB] Fetching {len(missing_option_tickers) if query_option_tickers else 'all'} options from database (cache misses) for {ticker}")
+            df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, query_option_tickers, timestamp_lookback_days, min_write_timestamp)
+            if deduplicate:
+                self.logger.debug(f"[DB] Fetched {len(df)} rows from database for {ticker} latest options")
+        else:
+            df = await self.options_repo.get(ticker, expiration_date, start_datetime, end_datetime, query_option_tickers)
+        db_elapsed = time.time() - db_start
+        self.logger.debug(f"[TIMING] DB query for {ticker}: {db_elapsed:.3f}s, returned {len(df)} rows")
+        
+        if df.empty:
+            return cached_data
+        
+        # Log columns before caching
+        self.logger.debug(f"[CACHE DEBUG] DataFrame columns before caching for {ticker}: {list(df.columns)}")
+        if 'write_timestamp' not in df.columns:
+            self.logger.warning(f"[CACHE DEBUG] WARNING: 'write_timestamp' column NOT found in DataFrame for {ticker} before caching!")
+        
+        # Cache each option individually
+        cache_write_start = time.time()
+        for idx, row in df.iterrows():
+            if 'option_ticker' in row and 'expiration_date' in row:
+                opt_ticker = row['option_ticker']
+                exp_date = row['expiration_date']
+                exp_date_str = exp_date.strftime('%Y-%m-%d') if isinstance(exp_date, (datetime, pd.Timestamp)) else str(exp_date)[:10]
+                cache_key = CacheKeyGenerator.options_data(ticker, exp_date_str, opt_ticker)
+                
+                row_dict = row.to_dict()
+                
+                # Ensure write_timestamp is preserved
+                if 'write_timestamp' in df.columns and 'write_timestamp' not in row_dict:
+                    self.logger.warning(f"[CACHE DEBUG] write_timestamp missing from row_dict for {cache_key}, retrieving from DataFrame")
+                    row_dict['write_timestamp'] = df.loc[idx, 'write_timestamp'] if 'write_timestamp' in df.columns else None
+                
+                if df.index.name and df.index.name not in row_dict:
+                    row_dict[df.index.name] = idx
+                
+                row_df = pd.DataFrame([row_dict])
+                
+                # Double-check write_timestamp is in row_df
+                if 'write_timestamp' in df.columns and 'write_timestamp' not in row_df.columns:
+                    self.logger.warning(f"[CACHE DEBUG] write_timestamp missing from row_df for {cache_key}, adding from DataFrame")
+                    row_df['write_timestamp'] = df.loc[idx, 'write_timestamp'] if 'write_timestamp' in df.columns else None
+                
+                # Set index to match original DataFrame's index structure
+                if isinstance(df.index, pd.DatetimeIndex):
+                    row_df.index = pd.DatetimeIndex([idx])
+                else:
+                    row_df.index = pd.Index([idx])
+                
+                # Final verification
+                if 'write_timestamp' not in row_df.columns:
+                    self.logger.warning(f"[CACHE DEBUG] WARNING: 'write_timestamp' column NOT found in row_df for {cache_key} before caching! Row columns: {list(row_df.columns)}, DataFrame columns: {list(df.columns)}")
+                    row_df['write_timestamp'] = None
+                
+                if use_fire_and_forget:
+                    self.cache.set_fire_and_forget(cache_key, row_df)
+                    if deduplicate:
+                        self.logger.debug(f"[CACHE SET] Cached latest options data on read (fire-and-forget): {cache_key} (rows: 1, columns: {list(row_df.columns)})")
+                else:
+                    await self.cache.set(cache_key, row_df)
+                
+                cached_data[cache_key] = row_df
+        
+        cache_write_elapsed = time.time() - cache_write_start
+        self.logger.debug(f"[TIMING] Cache write for {ticker}: {cache_write_elapsed:.3f}s, cached {len(df)} options")
+        
+        # Wait for fire-and-forget cache writes if needed
+        if use_fire_and_forget:
+            wait_start = time.time()
+            await self.cache.wait_for_pending_writes(timeout=10.0)
+            wait_elapsed = time.time() - wait_start
+            if wait_elapsed > 0.1:
+                self.logger.debug(f"[TIMING] Waited {wait_elapsed:.3f}s for pending cache writes to complete for {ticker}")
+        
+        return cached_data
+    
+    def _normalize_dataframe_timestamps(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Normalize timestamp columns in a DataFrame to avoid comparison errors.
+        
+        Returns:
+            DataFrame with normalized timestamp columns
+        """
+        if df.empty:
+            return df
+        
+        df = df.copy()
+        
+        # Normalize timestamp columns
+        for col in df.columns:
+            if 'timestamp' in col.lower():
+                try:
+                    converted_col = pd.to_datetime(df[col], errors='coerce')
+                    df = df.drop(columns=[col])
+                    df[col] = converted_col
+                except Exception as e:
+                    self.logger.warning(f"Error normalizing timestamp column {col}: {e}")
+                    df = df.drop(columns=[col], errors='ignore')
+        
+        # Normalize index if it's a timestamp
+        if df.index.name and 'timestamp' in df.index.name.lower():
+            try:
+                df.index = pd.to_datetime(df.index, errors='coerce')
+            except:
+                pass
+        elif isinstance(df.index, pd.DatetimeIndex):
+            try:
+                df.index = pd.to_datetime(df.index, errors='coerce')
+            except:
+                pass
+        
+        # Drop columns that are all-NA
+        df = df.dropna(axis=1, how='all')
+        
+        return df
+    
+    async def _combine_and_deduplicate_results(
+        self,
+        ticker: str,
+        cached_data: Dict[str, pd.DataFrame],
+        deduplicate: bool,
+        method_start: float
+    ) -> pd.DataFrame:
+        """Combine cached data and optionally deduplicate.
+        
+        Returns:
+            Combined DataFrame
+        """
+        import time
+        combine_start = time.time()
+        
+        if not cached_data:
+            total_elapsed = time.time() - method_start
+            self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s, returning empty DataFrame")
+            return pd.DataFrame()
+        
+        # Filter out empty DataFrames
+        non_empty_data = {
+            k: v for k, v in cached_data.items() 
+            if not v.empty and not v.isna().all().all()
+        }
+        
+        if not non_empty_data:
+            total_elapsed = time.time() - method_start
+            self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s, returning empty DataFrame")
+            return pd.DataFrame()
+        
+        # Normalize and prepare DataFrames for concatenation
+        valid_dfs = []
+        for df in non_empty_data.values():
+            try:
+                df_normalized = self._normalize_dataframe_timestamps(df)
+                if not df_normalized.empty and not df_normalized.isna().all().all():
+                    valid_dfs.append(df_normalized)
+            except Exception as e:
+                self.logger.warning(f"Error processing cached DataFrame: {e}. Skipping.")
+                import traceback
+                self.logger.debug(f"Traceback: {traceback.format_exc()}")
+                continue
+        
+        if not valid_dfs:
+            total_elapsed = time.time() - method_start
+            self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s, returning empty DataFrame")
+            return pd.DataFrame()
+        
+        # Normalize all DataFrames before concatenation
+        normalized_dfs = []
+        for df in valid_dfs:
+            try:
+                df_copy = df.copy()
+                
+                # Normalize all timestamp columns
+                for col in df_copy.columns:
+                    if 'timestamp' in col.lower():
+                        try:
+                            df_copy.loc[:, col] = pd.to_datetime(df_copy[col], errors='coerce')
+                        except Exception as e:
+                            try:
+                                df_copy = df_copy.drop(columns=[col])
+                            except:
+                                pass
+                
+                # Reset index to avoid comparison issues
+                df_copy = df_copy.reset_index(drop=True)
+                normalized_dfs.append(df_copy)
+            except Exception as e:
+                self.logger.warning(f"Error normalizing DataFrame: {e}. Skipping.")
+                continue
+        
+        if not normalized_dfs:
+            total_elapsed = time.time() - method_start
+            self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s, returning empty DataFrame")
+            return pd.DataFrame()
+        
+        # Concatenate DataFrames
+        try:
+            combined_df = pd.concat(normalized_dfs, ignore_index=True)
+            
+            # Final normalization pass
+            for col in combined_df.columns:
+                if 'timestamp' in col.lower():
+                    try:
+                        combined_df.loc[:, col] = pd.to_datetime(combined_df[col], errors='coerce')
+                    except:
+                        pass
+        except (TypeError, ValueError) as concat_error:
+            self.logger.warning(f"Error concatenating cached DataFrames: {concat_error}. Trying alternative method...")
+            try:
+                # Retry with reset indices
+                normalized_reset_dfs = []
+                for df in valid_dfs:
+                    df_copy = df.copy()
+                    for col in df_copy.columns:
+                        if 'timestamp' in col.lower():
+                            try:
+                                df_copy.loc[:, col] = pd.to_datetime(df_copy[col], errors='coerce')
+                            except:
+                                pass
+                    df_copy = df_copy.reset_index(drop=True)
+                    normalized_reset_dfs.append(df_copy)
+                
+                combined_df = pd.concat(normalized_reset_dfs, ignore_index=True)
+                
+                for col in combined_df.columns:
+                    if 'timestamp' in col.lower():
+                        try:
+                            combined_df.loc[:, col] = pd.to_datetime(combined_df[col], errors='coerce')
+                        except:
+                            pass
+            except Exception as e2:
+                self.logger.warning(f"Error retrying concatenation: {e2}. Returning empty DataFrame.")
+                import traceback
+                self.logger.debug(f"Retry traceback: {traceback.format_exc()}")
+                total_elapsed = time.time() - method_start
+                self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s, returning empty DataFrame")
+                return pd.DataFrame()
+        
+        if combined_df.empty:
+            total_elapsed = time.time() - method_start
+            self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s, returning empty DataFrame")
+            return pd.DataFrame()
+        
+        # Deduplicate if requested
+        if deduplicate:
+            if 'timestamp' in combined_df.columns:
+                try:
+                    combined_df.loc[:, 'timestamp'] = pd.to_datetime(combined_df['timestamp'], errors='coerce')
+                    combined_df = combined_df.sort_values('timestamp', ascending=False)
+                except (TypeError, ValueError) as sort_error:
+                    self.logger.warning(f"Error sorting by timestamp: {sort_error}. Skipping sort.")
+            
+            if 'option_ticker' in combined_df.columns:
+                combined_df = combined_df.drop_duplicates(subset=['option_ticker'], keep='first')
+        
+        combine_elapsed = time.time() - combine_start
+        total_elapsed = time.time() - method_start
+        self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s (combine: {combine_elapsed:.3f}s), returning {len(combined_df)} rows")
+        return combined_df
+    
     async def get(self, ticker: str, expiration_date: Optional[str] = None,
                  start_datetime: Optional[str] = None, end_datetime: Optional[str] = None,
                  option_tickers: Optional[List[str]] = None,
@@ -3411,389 +4147,44 @@ class OptionsDataService:
             self.logger.info(f"[OPTIONS SERVICE] get() called for {ticker} with min_write_timestamp={min_write_timestamp}")
         self.logger.debug(f"[TIMING] OptionsDataService.get START for {ticker}")
         
-        # Resolve option_tickers and expiration_dates from metadata cache or DB
-        resolve_start = time.time()
-        option_tickers, option_ticker_exp_map = await self._resolve_option_tickers_and_exp_dates(
-            ticker, expiration_date, start_datetime, end_datetime, option_tickers
+        # Step 1: Resolve and validate option tickers
+        option_tickers, option_ticker_exp_map, direct_db_result = await self._resolve_and_validate_option_tickers(
+            ticker, expiration_date, start_datetime, end_datetime, option_tickers,
+            timestamp_lookback_days, min_write_timestamp
         )
-        resolve_elapsed = time.time() - resolve_start
-        self.logger.debug(f"[TIMING] _resolve_option_tickers_and_exp_dates completed for {ticker}: {resolve_elapsed:.3f}s")
         
-        # If no option_tickers were resolved, query DB directly
-        if not option_tickers:
-            if timestamp_lookback_days is not None:
-                df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, option_tickers, timestamp_lookback_days, min_write_timestamp)
-            else:
-                df = await self.options_repo.get(ticker, expiration_date, start_datetime, end_datetime, option_tickers)
-            
-            return df
+        if direct_db_result is not None:
+            total_elapsed = time.time() - method_start
+            self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s, returning direct DB result ({len(direct_db_result)} rows)")
+            return direct_db_result
         
-        # Generate cache keys for each option using expiration_date from map or provided expiration_date
+        # Step 2: Generate cache keys
         keygen_start = time.time()
         cache_keys = self._generate_cache_keys(ticker, option_tickers, option_ticker_exp_map, expiration_date)
         keygen_elapsed = time.time() - keygen_start
         self.logger.debug(f"[TIMING] Generated {len(cache_keys)} cache keys for {ticker}: {keygen_elapsed:.3f}s")
         
-        # Batch fetch from cache
-        cache_start = time.time()
-        cached_results = await self.cache.get_batch(cache_keys, batch_size=500)
-        cache_elapsed = time.time() - cache_start
-        
-        # Process regular cache results
-        # Also check for stale cache entries missing write_timestamp column
-        cached_data = {}
-        stale_cache_keys = []
-        for k, v in cached_results.items():
-            if v is not None and not v.empty:
-                # Check if cached data is missing write_timestamp (stale cache from before column was added)
-                if 'write_timestamp' not in v.columns:
-                    self.logger.debug(f"[CACHE] Stale cache entry detected (missing write_timestamp): {k}, treating as cache miss")
-                    stale_cache_keys.append(k)
-                    # Don't include in cached_data - treat as miss so it gets refreshed from DB
-                else:
-                    cached_data[k] = v
-        
-        # Invalidate stale cache entries
-        if stale_cache_keys:
-            self.logger.debug(f"[CACHE] Invalidating {len(stale_cache_keys)} stale cache entries (missing write_timestamp) for {ticker}")
-            for stale_key in stale_cache_keys:
-                await self.cache.delete(stale_key)
-        
-        cache_hits = len(cached_data)
-        # Add stale cache keys to misses count
-        cache_misses = len(cache_keys) - cache_hits
-        self.logger.debug(f"[CACHE] Cache batch get for {ticker}: {cache_elapsed:.3f}s, found {cache_hits}/{len(cache_keys)} (hits: {cache_hits}, misses: {cache_misses}, stale: {len(stale_cache_keys)})")
-        if cache_misses > 0 and cache_hits == 0:
-            # Log sample of missing keys for debugging
-            sample_missing = list(cache_keys[:5])
-            self.logger.debug(f"[CACHE DEBUG] Sample missing cache keys: {sample_missing}")
-        
-        # Filter cached data by min_write_timestamp if provided
-        if min_write_timestamp:
-            self.logger.info(f"[CACHE FILTER] min_write_timestamp={min_write_timestamp} provided, checking {len(cached_data)} cached DataFrames for {ticker}")
-            if cached_data:
-                try:
-                    import pytz
-                    est = pytz.timezone('America/New_York')
-                    min_ts = pd.to_datetime(min_write_timestamp)
-                    if min_ts.tz is None:
-                        min_ts = est.localize(min_ts)
-                    min_ts_utc = min_ts.astimezone(pytz.UTC)
-                    
-                    # Filter each cached DataFrame by write_timestamp
-                    filtered_cached_data = {}
-                    stale_cache_keys: List[str] = []
-                    for cache_key, df in cached_data.items():
-                        if not df.empty and 'write_timestamp' in df.columns:
-                            # Normalize write_timestamp to UTC for comparison
-                            df_copy = df.copy()
-                            non_null_mask = df_copy['write_timestamp'].notna()
-                            if not non_null_mask.any():
-                                stale_cache_keys.append(cache_key)
-                                continue
-                            df_copy['write_timestamp'] = df_copy['write_timestamp'].apply(
-                                lambda x: normalize_timestamp_to_utc(x) if pd.notna(x) else None
-                            )
-                            # Filter rows where write_timestamp >= min_ts_utc
-                            filtered_df = df_copy[df_copy['write_timestamp'].notna() & (df_copy['write_timestamp'] >= min_ts_utc)]
-                            if not filtered_df.empty:
-                                # Restore original write_timestamp column (drop normalized one if we added it)
-                                filtered_cached_data[cache_key] = filtered_df
-                        elif not df.empty:
-                            stale_cache_keys.append(cache_key)
-                    
-                    filtered_count = len(cached_data) - len(filtered_cached_data)
-                    if stale_cache_keys:
-                        self.logger.info(f"[CACHE FILTER] Discarded {len(stale_cache_keys)} cached options for {ticker} due to missing write_timestamp (will refetch from DB)")
-                    if filtered_count > 0:
-                        self.logger.info(f"[CACHE FILTER] Filtered out {filtered_count} cached options with write_timestamp < {min_write_timestamp} for {ticker} (kept {len(filtered_cached_data)})")
-                    elif len(cached_data) > 0:
-                        self.logger.info(f"[CACHE FILTER] All {len(cached_data)} cached options passed min_write_timestamp filter for {ticker}")
-                    cached_data = filtered_cached_data
-                except Exception as e:
-                    self.logger.warning(f"Error filtering cached data by min_write_timestamp {min_write_timestamp}: {e}")
-                    import traceback
-                    self.logger.warning(f"Traceback: {traceback.format_exc()}")
-                    # Continue with unfiltered cached data if filtering fails
-            else:
-                self.logger.info(f"[CACHE FILTER] No cached data to filter for {ticker}")
+        # Step 3: Fetch from cache
+        cached_data, stale_cache_keys = await self._fetch_from_cache(ticker, cache_keys, min_write_timestamp)
         
         if deduplicate:
             self.logger.debug(f"[CACHE] Found {len(cached_data)}/{len(cache_keys)} options in cache for {ticker}")
         
-        # Determine which options need DB fetch (cache misses)
+        # Step 4: Determine missing keys and fetch from DB
         missing_keys = [k for k in cache_keys if k not in cached_data]
         
-        if min_write_timestamp and missing_keys:
-            self.logger.info(f"[DB QUERY] Querying DB for {len(missing_keys)} options (cache misses after filtering by min_write_timestamp={min_write_timestamp}) for {ticker}")
-        
-        # Fetch missing options from DB and cache them
         if missing_keys:
-            # Extract option_tickers from missing keys
-            missing_option_tickers = self._extract_option_tickers_from_cache_keys(missing_keys)
-            
-            # If min_write_timestamp is provided and we filtered out cached data, query DB without option_tickers filter
-            # This ensures we get all options matching the timestamp filter, not just those in the (possibly stale) metadata cache
-            query_option_tickers = None
-            if min_write_timestamp and len(missing_keys) == len(cache_keys):
-                # All cache keys were filtered out, so query without option_tickers filter to get all matching options
-                self.logger.info(f"[DB QUERY] All cached data filtered out by min_write_timestamp, querying DB without option_tickers filter for {ticker}")
-                query_option_tickers = None
-            else:
-                query_option_tickers = missing_option_tickers
-            
-            # Fetch from DB for cache misses
-            db_start = time.time()
-            if timestamp_lookback_days is not None:
-                if deduplicate:
-                    self.logger.debug(f"[DB] Fetching {len(missing_option_tickers) if query_option_tickers else 'all'} options from database (cache misses) for {ticker}")
-                df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, query_option_tickers, timestamp_lookback_days, min_write_timestamp)
-                if deduplicate:
-                    self.logger.debug(f"[DB] Fetched {len(df)} rows from database for {ticker} latest options")
-            else:
-                df = await self.options_repo.get(ticker, expiration_date, start_datetime, end_datetime, missing_option_tickers)
-            db_elapsed = time.time() - db_start
-            self.logger.debug(f"[TIMING] DB query for {ticker}: {db_elapsed:.3f}s, returned {len(df)} rows")
-            
-            if not df.empty:
-                # Log columns in the DataFrame before caching
-                self.logger.debug(f"[CACHE DEBUG] DataFrame columns before caching for {ticker}: {list(df.columns)}")
-                if 'write_timestamp' not in df.columns:
-                    self.logger.warning(f"[CACHE DEBUG] WARNING: 'write_timestamp' column NOT found in DataFrame for {ticker} before caching!")
-                
-                # Cache each option individually
-                cache_write_start = time.time()
-                for idx, row in df.iterrows():
-                    if 'option_ticker' in row and 'expiration_date' in row:
-                        opt_ticker = row['option_ticker']
-                        exp_date = row['expiration_date']
-                        exp_date_str = exp_date.strftime('%Y-%m-%d') if isinstance(exp_date, (datetime, pd.Timestamp)) else str(exp_date)[:10]
-                        cache_key = CacheKeyGenerator.options_data(ticker, exp_date_str, opt_ticker)
-                        
-                        # Convert row Series to dict to ensure all columns are included
-                        # If row is a Series from iterrows(), it should include all columns except the index
-                        row_dict = row.to_dict()
-                        
-                        # CRITICAL: Ensure write_timestamp is preserved
-                        # Check if write_timestamp exists in the original DataFrame but not in row_dict
-                        if 'write_timestamp' in df.columns and 'write_timestamp' not in row_dict:
-                            # This shouldn't happen, but if it does, get it from the original DataFrame
-                            self.logger.warning(f"[CACHE DEBUG] write_timestamp missing from row_dict for {cache_key}, retrieving from DataFrame")
-                            row_dict['write_timestamp'] = df.loc[idx, 'write_timestamp'] if 'write_timestamp' in df.columns else None
-                        
-                        # Add the index value as a column if it's not already there
-                        if df.index.name and df.index.name not in row_dict:
-                            row_dict[df.index.name] = idx
-                        
-                        # Create DataFrame from dict to ensure all columns are preserved
-                        row_df = pd.DataFrame([row_dict])
-                        
-                        # CRITICAL: Double-check that write_timestamp is in row_df
-                        # If it was in the original DataFrame but missing from row_df, add it
-                        if 'write_timestamp' in df.columns and 'write_timestamp' not in row_df.columns:
-                            self.logger.warning(f"[CACHE DEBUG] write_timestamp missing from row_df for {cache_key}, adding from DataFrame")
-                            row_df['write_timestamp'] = df.loc[idx, 'write_timestamp'] if 'write_timestamp' in df.columns else None
-                        
-                        # Set index to match original DataFrame's index structure
-                        if isinstance(df.index, pd.DatetimeIndex):
-                            row_df.index = pd.DatetimeIndex([idx])
-                        else:
-                            row_df.index = pd.Index([idx])
-                        
-                        # Final verification: Log columns in the row_df being cached
-                        if 'write_timestamp' not in row_df.columns:
-                            self.logger.warning(f"[CACHE DEBUG] WARNING: 'write_timestamp' column NOT found in row_df for {cache_key} before caching! Row columns: {list(row_df.columns)}, DataFrame columns: {list(df.columns)}")
-                            # Last resort: add it with None if it's still missing
-                            row_df['write_timestamp'] = None
-                        
-                        if use_fire_and_forget:
-                            self.cache.set_fire_and_forget(cache_key, row_df)
-                            if deduplicate:
-                                self.logger.debug(f"[CACHE SET] Cached latest options data on read (fire-and-forget): {cache_key} (rows: 1, columns: {list(row_df.columns)})")
-                        else:
-                            await self.cache.set(cache_key, row_df)
-                        
-                        cached_data[cache_key] = row_df
-                cache_write_elapsed = time.time() - cache_write_start
-                self.logger.debug(f"[TIMING] Cache write for {ticker}: {cache_write_elapsed:.3f}s, cached {len(df)} options")
-                
-                # Wait for fire-and-forget cache writes to complete before returning
-                if use_fire_and_forget:
-                    wait_start = time.time()
-                    await self.cache.wait_for_pending_writes(timeout=10.0)
-                    wait_elapsed = time.time() - wait_start
-                    if wait_elapsed > 0.1:  # Only log if it takes significant time
-                        self.logger.debug(f"[TIMING] Waited {wait_elapsed:.3f}s for pending cache writes to complete for {ticker}")
+            cached_data = await self._fetch_missing_from_db_and_cache(
+                ticker, missing_keys, cache_keys, cached_data,
+                expiration_date, start_datetime, end_datetime,
+                timestamp_lookback_days, min_write_timestamp,
+                use_fire_and_forget, deduplicate
+            )
         elif deduplicate:
             self.logger.debug(f"[CACHE] All {len(option_tickers)} options found in cache for {ticker}")
         
-        # Combine all cached data (from cache hits and newly fetched)
-        # Filter out empty DataFrames from the final result
-        combine_start = time.time()
-        if cached_data:
-            # Filter out empty DataFrames and DataFrames with all-NA entries
-            non_empty_data = {
-                k: v for k, v in cached_data.items() 
-                if not v.empty and not v.isna().all().all()
-            }
-            if non_empty_data:
-                dfs = list(non_empty_data.values())
-                # Filter out any remaining empty or all-NA DataFrames before concat
-                # Also drop all-NA columns from each DataFrame to avoid FutureWarning
-                # Normalize timestamp columns to avoid Timestamp/int comparison errors
-                valid_dfs = []
-                for df in dfs:
-                    if not df.empty:
-                        try:
-                            # Make a copy to avoid SettingWithCopyWarning and ensure modifications persist
-                            df = df.copy()
-                            
-                            # Normalize timestamp columns before concatenation
-                            for col in df.columns:
-                                if 'timestamp' in col.lower():
-                                    try:
-                                        # Ensure all values in timestamp column are pd.Timestamp or None
-                                        # Convert any non-Timestamp values. Drop+reassign to avoid dtype warnings.
-                                        converted_col = pd.to_datetime(df[col], errors='coerce')
-                                        df = df.drop(columns=[col])
-                                        df[col] = converted_col
-                                    except Exception as e:
-                                        self.logger.warning(f"Error normalizing timestamp column {col} in cached data: {e}")
-                                        # If conversion fails, drop the column
-                                        df = df.drop(columns=[col], errors='ignore')
-                            
-                            # Normalize index if it's a timestamp
-                            if df.index.name and 'timestamp' in df.index.name.lower():
-                                try:
-                                    df.index = pd.to_datetime(df.index, errors='coerce')
-                                except:
-                                    pass
-                            elif isinstance(df.index, pd.DatetimeIndex):
-                                # Index is already a DatetimeIndex, ensure it's properly typed
-                                try:
-                                    df.index = pd.to_datetime(df.index, errors='coerce')
-                                except:
-                                    pass
-                            
-                            # Drop columns that are all-NA to avoid FutureWarning
-                            df_cleaned = df.dropna(axis=1, how='all')
-                            # Only include if DataFrame still has data after dropping all-NA columns
-                            if not df_cleaned.empty and not df_cleaned.isna().all().all():
-                                valid_dfs.append(df_cleaned)
-                        except Exception as e:
-                            self.logger.warning(f"Error processing cached DataFrame: {e}. Skipping.")
-                            import traceback
-                            self.logger.debug(f"Traceback: {traceback.format_exc()}")
-                            continue
-                
-                if valid_dfs:
-                    try:
-                        # CRITICAL: Normalize ALL timestamp columns in ALL DataFrames BEFORE concatenation
-                        # This prevents pandas from trying to compare Timestamp with int during concat
-                        normalized_dfs = []
-                        for df in valid_dfs:
-                            df_copy = df.copy()
-                            
-                            # Normalize all timestamp columns first
-                            for col in df_copy.columns:
-                                if 'timestamp' in col.lower():
-                                    try:
-                                        # Convert all values to pd.Timestamp or NaT
-                                        df_copy.loc[:, col] = pd.to_datetime(df_copy[col], errors='coerce')
-                                    except Exception as e:
-                                        # If normalization fails, drop the column to avoid issues
-                                        try:
-                                            df_copy = df_copy.drop(columns=[col])
-                                        except:
-                                            pass
-                            
-                            # Reset index to avoid any index-related comparison issues
-                            # This ensures we don't have mixed types in the index
-                            df_copy = df_copy.reset_index(drop=True)
-                            
-                            normalized_dfs.append(df_copy)
-                        
-                        # Now concatenate with all normalized DataFrames
-                        combined_df = pd.concat(normalized_dfs, ignore_index=True)
-                        
-                        # Final normalization pass (shouldn't be needed, but just in case)
-                        for col in combined_df.columns:
-                            if 'timestamp' in col.lower():
-                                try:
-                                    combined_df.loc[:, col] = pd.to_datetime(combined_df[col], errors='coerce')
-                                except:
-                                    pass
-                        
-                        # No need to sort index since we're using ignore_index=True
-                    except (TypeError, ValueError) as concat_error:
-                        self.logger.warning(f"Error concatenating cached DataFrames: {concat_error}. Trying to normalize and reset indices...")
-                        # Try normalizing all DataFrames before resetting indices
-                        try:
-                            normalized_reset_dfs = []
-                            for df in valid_dfs:
-                                df_copy = df.copy()
-                                # Normalize all timestamp columns first
-                                for col in df_copy.columns:
-                                    if 'timestamp' in col.lower():
-                                        try:
-                                            df_copy.loc[:, col] = pd.to_datetime(df_copy[col], errors='coerce')
-                                        except:
-                                            pass
-                                # Reset index to avoid any index-related comparison issues
-                                df_copy = df_copy.reset_index(drop=True)
-                                normalized_reset_dfs.append(df_copy)
-                            
-                            # Now try concatenating with normalized DataFrames
-                            combined_df = pd.concat(normalized_reset_dfs, ignore_index=True)
-                            
-                            # Final normalization pass on the combined DataFrame
-                            for col in combined_df.columns:
-                                if 'timestamp' in col.lower():
-                                    try:
-                                        combined_df.loc[:, col] = pd.to_datetime(combined_df[col], errors='coerce')
-                                    except:
-                                        pass
-                        except Exception as e2:
-                            self.logger.warning(f"Error retrying concatenation: {e2}. Returning empty DataFrame.")
-                            import traceback
-                            self.logger.debug(f"Retry traceback: {traceback.format_exc()}")
-                            combined_df = pd.DataFrame()
-                else:
-                    combined_df = pd.DataFrame()
-                
-                # Deduplicate to get latest per option_ticker if requested
-                if not combined_df.empty:
-                    if deduplicate:
-                        # Sort by timestamp descending first to ensure we keep the latest
-                        if 'timestamp' in combined_df.columns:
-                            try:
-                                # Ensure timestamp column is properly normalized before sorting
-                                combined_df.loc[:, 'timestamp'] = pd.to_datetime(combined_df['timestamp'], errors='coerce')
-                                combined_df = combined_df.sort_values('timestamp', ascending=False)
-                            except (TypeError, ValueError) as sort_error:
-                                self.logger.warning(f"Error sorting by timestamp: {sort_error}. Skipping sort.")
-                                # Continue without sorting
-                        if 'option_ticker' in combined_df.columns:
-                            combined_df = combined_df.drop_duplicates(subset=['option_ticker'], keep='first')
-                    
-                    combine_elapsed = time.time() - combine_start
-                    total_elapsed = time.time() - method_start
-                    self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s (combine: {combine_elapsed:.3f}s), returning {len(combined_df)} rows")
-                    return combined_df
-                else:
-                    # All DataFrames were empty or all-NA
-                    combine_elapsed = time.time() - combine_start
-                    total_elapsed = time.time() - method_start
-                    self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s (combine: {combine_elapsed:.3f}s), returning empty DataFrame")
-                    return pd.DataFrame()
-            else:
-                total_elapsed = time.time() - method_start
-                self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s, returning empty DataFrame")
-                return pd.DataFrame()
-        else:
-            total_elapsed = time.time() - method_start
-            self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s, returning empty DataFrame")
-            return pd.DataFrame()
+        # Step 5: Combine and deduplicate results
+        return await self._combine_and_deduplicate_results(ticker, cached_data, deduplicate, method_start)
     
     async def get_latest(self, ticker: str, expiration_date: Optional[str] = None,
                         start_datetime: Optional[str] = None, end_datetime: Optional[str] = None,

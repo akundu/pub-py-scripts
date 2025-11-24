@@ -4082,3 +4082,4 @@ def _generate_table_and_cards_html(df_display: pd.DataFrame, df_raw: pd.DataFram
 
 
 
+

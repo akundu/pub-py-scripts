@@ -1574,13 +1574,25 @@ class StockDBClient(StockDBBase):
             if pd.api.types.is_integer_dtype(df[index_col]):
                 # Try to convert integer to datetime (Unix timestamp)
                 first_val = df[index_col].iloc[0] if len(df) > 0 else 0
-                if first_val > 1e10:  # Likely milliseconds
+                # Check if it's a date in YYYYMMDD format (8 digits, between 19000101 and 99991231)
+                if 19000101 <= first_val <= 99991231 and len(str(int(first_val))) == 8:
+                    # It's a date in YYYYMMDD format - convert it properly
+                    df[index_col] = df[index_col].astype(str).apply(
+                        lambda x: pd.to_datetime(x, format='%Y%m%d', errors='coerce') if len(x) == 8 else pd.NaT
+                    )
+                elif first_val > 1e10:  # Likely milliseconds
                     df[index_col] = pd.to_datetime(df[index_col], unit='ms', errors='coerce')
                 elif first_val > 1e9:  # Likely seconds
                     df[index_col] = pd.to_datetime(df[index_col], unit='s', errors='coerce')
                 else:
-                    # Try general conversion
+                    # Try general conversion, but validate the result
                     df[index_col] = pd.to_datetime(df[index_col], errors='coerce')
+                    # If the result is before 1900, it's likely wrong (probably epoch time misinterpretation)
+                    if not df[index_col].isna().all() and df[index_col].min().year < 1900:
+                        # Try treating as YYYYMMDD format instead
+                        df[index_col] = df[index_col].astype(str).apply(
+                            lambda x: pd.to_datetime(x, format='%Y%m%d', errors='coerce') if len(x) == 8 else pd.NaT
+                        )
             else:
                 # Try to parse with explicit format first, then fall back to flexible parsing
                 try:

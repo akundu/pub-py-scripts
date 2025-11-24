@@ -111,8 +111,8 @@ def _convert_dataframe_timezone(df: pd.DataFrame, target_timezone: str = None) -
     if df.empty:
         return df
     
-    # Only convert if the index is timezone-aware
-    if df.index.tz is not None:
+    # Only convert if the index is a DatetimeIndex and is timezone-aware
+    if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
         if target_timezone is None:
             # Use local timezone
             if TZLOCAL_AVAILABLE:
@@ -213,22 +213,31 @@ async def _get_last_update_age_seconds(db_instance: StockDBBase, symbol: str) ->
         wt = info.get('write_timestamp')
         ref_dt = None
         if wt:
-            if isinstance(wt, str):
-                ref_dt = datetime.fromisoformat(wt.replace('Z', '+00:00'))
-            else:
-                ref_dt = wt
+            # Normalize write_timestamp (could be datetime, string, or integer)
+            ref_dt = _normalize_index_timestamp(wt)
+            if ref_dt is None:
+                logging.debug(f"Failed to normalize write_timestamp: {wt} (type: {type(wt)})")
         elif ts:
-            if isinstance(ts, str):
-                ref_dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-            else:
-                ref_dt = ts
+            # Normalize timestamp (could be datetime, string, or integer)
+            ref_dt = _normalize_index_timestamp(ts)
+            if ref_dt is None:
+                logging.debug(f"Failed to normalize timestamp: {ts} (type: {type(ts)})")
+        
         if ref_dt is None:
+            logging.debug(f"Could not determine reference datetime for {symbol} (ts={ts}, wt={wt})")
             return None
-        if ref_dt.tzinfo is None:
-            ref_dt = ref_dt.replace(tzinfo=timezone.utc)
-        else:
-            ref_dt = ref_dt.astimezone(timezone.utc)
+        
+        # ref_dt is already timezone-aware UTC from _normalize_index_timestamp
         age = (now_utc - ref_dt).total_seconds()
+        
+        # Sanity check: if age is negative or extremely large (> 100 years), something is wrong
+        if age < 0:
+            logging.warning(f"Negative age calculated for {symbol}: {age}s (ref_dt={ref_dt}, now={now_utc})")
+            return None
+        if age > 3153600000:  # ~100 years
+            logging.warning(f"Extremely large age calculated for {symbol}: {age}s (ref_dt={ref_dt}, now={now_utc}). Likely timestamp normalization issue.")
+            return None
+        
         result = {
             'age_seconds': age,
             'source': 'write' if wt else 'original',
@@ -238,7 +247,10 @@ async def _get_last_update_age_seconds(db_instance: StockDBBase, symbol: str) ->
         if 'latest_data' in info:
             result['latest_data'] = info['latest_data']
         return result
-    except Exception:
+    except Exception as e:
+        logging.debug(f"Error in _get_last_update_age_seconds: {e}")
+        import traceback
+        logging.debug(traceback.format_exc())
         return None
 async def _get_last_bar_age_seconds(db_instance: StockDBBase, symbol: str, interval: str, cached_df: pd.DataFrame | None = None) -> dict | None:
     """Return age info for the latest bar of a given interval ('daily' or 'hourly').
@@ -280,6 +292,55 @@ async def _get_last_bar_age_seconds(db_instance: StockDBBase, symbol: str, inter
         return None
 
 
+def _normalize_index_timestamp(idx_value) -> datetime | None:
+    """
+    Normalize various index timestamp formats (e.g., pandas Timestamp, numpy datetime64, str, int)
+    into a timezone-aware UTC datetime. Returns None if conversion fails.
+    
+    Handles integer dates in YYYYMMDD format (e.g., 20251121).
+    """
+    if idx_value is None:
+        return None
+    try:
+        if isinstance(idx_value, datetime):
+            dt = idx_value
+        elif isinstance(idx_value, (int, float)):
+            # Check if it's a date in YYYYMMDD format (8 digits)
+            int_val = int(idx_value)
+            if 19000101 <= int_val <= 99991231:
+                # Likely a date in YYYYMMDD format
+                date_str = str(int_val)
+                if len(date_str) == 8:
+                    dt = datetime.strptime(date_str, '%Y%m%d')
+                else:
+                    # Try pandas conversion for other integer formats
+                    dt = pd.to_datetime(idx_value).to_pydatetime()
+            else:
+                # Not a date format - could be nanoseconds, milliseconds, or seconds since epoch
+                # Try pandas conversion, but validate the result
+                dt = pd.to_datetime(idx_value).to_pydatetime()
+                # If the result is before 1900, it's likely wrong (probably epoch time misinterpretation)
+                if dt.year < 1900:
+                    logging.warning(f"Timestamp normalization: integer {idx_value} converted to {dt} (before 1900, likely incorrect). Returning None.")
+                    return None
+        else:
+            # Try pandas conversion for strings and other types
+            dt = pd.to_datetime(idx_value).to_pydatetime()
+            # Validate the result
+            if dt.year < 1900:
+                logging.warning(f"Timestamp normalization: {idx_value} (type {type(idx_value)}) converted to {dt} (before 1900, likely incorrect). Returning None.")
+                return None
+        
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt
+    except Exception as e:
+        logging.debug(f"Error normalizing timestamp {idx_value} (type {type(idx_value)}): {e}")
+        return None
+
+
 def _format_price_block(price_info: dict, target_tz: str | None = 'America/New_York') -> list[str]:
     lines: list[str] = []
     try:
@@ -287,17 +348,38 @@ def _format_price_block(price_info: dict, target_tz: str | None = 'America/New_Y
         bid = price_info.get('bid_price')
         ask = price_info.get('ask_price')
         ts = price_info.get('timestamp')
-        dt = datetime.fromisoformat(ts.replace('Z', '+00:00')) if isinstance(ts, str) else ts
+        
+        # Handle timestamp - check if it's a valid datetime string or 'N/A'
+        dt = None
+        if ts is not None and ts != 'N/A':
+            if isinstance(ts, str):
+                try:
+                    # Try to parse ISO format string
+                    dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                except (ValueError, AttributeError):
+                    # If parsing fails, try to parse as datetime object
+                    try:
+                        dt = pd.to_datetime(ts).to_pydatetime()
+                    except (ValueError, TypeError):
+                        dt = None
+            elif isinstance(ts, datetime):
+                dt = ts
+            else:
+                dt = _normalize_index_timestamp(ts)
+        
+        # If we couldn't parse the timestamp, use current time or 'N/A'
         if dt is None:
-            dt = datetime.now(timezone.utc)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        if target_tz:
-            tzname = _normalize_timezone_string(target_tz)
-            dt_disp = dt.astimezone(pytz.timezone(tzname))
+            ts_str = "N/A"
         else:
-            dt_disp = dt
-        ts_str = dt_disp.strftime('%Y-%m-%d %H:%M:%S %Z')
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if target_tz:
+                tzname = _normalize_timezone_string(target_tz)
+                dt_disp = dt.astimezone(pytz.timezone(tzname))
+            else:
+                dt_disp = dt
+            ts_str = dt_disp.strftime('%Y-%m-%d %H:%M:%S %Z')
+        
         def fmt(x):
             try:
                 return f"{float(x):.2f}" if x is not None else "-"
@@ -363,7 +445,8 @@ async def fetch_polygon_data(
     start_date: str,
     end_date: str,
     api_key: str,
-    chunk_size: str = "monthly"  # New parameter: "auto", "daily", "weekly", "monthly"
+    chunk_size: str = "monthly",  # New parameter: "auto", "daily", "weekly", "monthly"
+    log_level: str = "INFO"  # New parameter for controlling debug output
 ) -> pd.DataFrame:
     """Fetch data from Polygon.io using their REST API with pagination support."""
     if not POLYGON_AVAILABLE:
@@ -437,12 +520,19 @@ async def fetch_polygon_data(
                 
                 # Fetch data for this chunk
                 chunk_data = await _fetch_polygon_chunk(
-                    client, symbol, timespan, chunk_start_str, chunk_end_str
+                    client, symbol, timespan, chunk_start_str, chunk_end_str, log_level
                 )
                 
                 if chunk_data:
                     all_data.extend(chunk_data)
                     print(f"Fetched {len(chunk_data)} {timespan} records for chunk {chunk_count + 1}", file=sys.stderr)
+                    # Show sample data in DEBUG mode
+                    if log_level == "DEBUG" and len(chunk_data) > 0:
+                        sample = chunk_data[0]
+                        logging.debug(f"Polygon API response sample for {symbol} chunk {chunk_count + 1}: "
+                                    f"timestamp={sample.timestamp}, open={getattr(sample, 'open', 'N/A')}, "
+                                    f"high={getattr(sample, 'high', 'N/A')}, low={getattr(sample, 'low', 'N/A')}, "
+                                    f"close={getattr(sample, 'close', 'N/A')}, volume={getattr(sample, 'volume', 'N/A')}")
                 else:
                     logging.info(f"No data for chunk {chunk_count + 1}")
                 
@@ -454,7 +544,7 @@ async def fetch_polygon_data(
         else:
             # Original pagination logic for single large request
             all_data = await _fetch_polygon_paginated(
-                client, symbol, timespan, start_date_formatted, end_date_formatted
+                client, symbol, timespan, start_date_formatted, end_date_formatted, log_level
             )
         
         if not all_data:
@@ -480,13 +570,25 @@ async def fetch_polygon_data(
         # Convert all collected data to a pandas DataFrame
         df = pd.DataFrame(all_data)
         
-        # Convert Unix MS timestamp to a readable datetime format
-        if timespan == "hour":
-            # For hourly data, include timezone information for market hours vs. after-hours
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms').dt.tz_localize('UTC').dt.tz_convert('America/New_York')
-        else:
-            # For daily data, use simple datetime conversion
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        # Show raw API response summary in DEBUG mode
+        if log_level == "DEBUG" and not df.empty:
+            logging.debug(f"Polygon API raw response summary for {symbol}: {len(all_data)} records")
+            if len(all_data) > 0:
+                first_record = all_data[0]
+                last_record = all_data[-1]
+                logging.debug(f"  First record: timestamp={first_record.timestamp}, "
+                            f"open={getattr(first_record, 'open', 'N/A')}, "
+                            f"close={getattr(first_record, 'close', 'N/A')}, "
+                            f"volume={getattr(first_record, 'volume', 'N/A')}")
+                logging.debug(f"  Last record: timestamp={last_record.timestamp}, "
+                            f"open={getattr(last_record, 'open', 'N/A')}, "
+                            f"close={getattr(last_record, 'close', 'N/A')}, "
+                            f"volume={getattr(last_record, 'volume', 'N/A')}")
+        
+        # Convert Unix MS timestamp to UTC datetime format
+        # IMPORTANT: Always keep timestamps in UTC for storage. Timezone conversion should only happen for display.
+        # Localize to UTC (Polygon timestamps are in milliseconds since epoch, which is UTC)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         
         # Set timestamp as index and rename to match expected format
         df.set_index('timestamp', inplace=True)
@@ -496,6 +598,21 @@ async def fetch_polygon_data(
             df.index.name = 'datetime'
             
         logging.info(f"Successfully fetched {len(df)} {timespan} records of data for {symbol} from Polygon.io (total across all chunks).")
+        
+        # Show DataFrame summary in DEBUG mode
+        if log_level == "DEBUG" and not df.empty:
+            logging.debug(f"Polygon API DataFrame summary for {symbol}:")
+            logging.debug(f"  Shape: {df.shape}")
+            logging.debug(f"  Columns: {list(df.columns)}")
+            if isinstance(df.index, pd.DatetimeIndex):
+                logging.debug(f"  Date range: {df.index.min()} to {df.index.max()}")
+            else:
+                logging.debug(f"  Index range: {df.index.min()} to {df.index.max()} (index type: {type(df.index).__name__})")
+            if len(df) > 0:
+                logging.debug(f"  First row:\n{df.head(1).to_string()}")
+                if len(df) > 1:
+                    logging.debug(f"  Last row:\n{df.tail(1).to_string()}")
+        
         return df
 
     except Exception as e:
@@ -508,10 +625,15 @@ async def _fetch_polygon_chunk(
     symbol: str,
     timespan: str,
     start_date: str,
-    end_date: str
+    end_date: str,
+    log_level: str = "INFO"
 ) -> list:
     """Fetch a single chunk of data from Polygon.io."""
     try:
+        if log_level == "DEBUG":
+            logging.debug(f"Polygon API request: ticker={symbol}, timespan={timespan}, "
+                        f"from={start_date}, to={end_date}, adjusted=True, sort=asc, limit=50000")
+        
         resp = client.get_aggs(
             ticker=symbol,
             multiplier=1,
@@ -522,9 +644,24 @@ async def _fetch_polygon_chunk(
             sort="asc",
             limit=50000
         )
+        
+        if log_level == "DEBUG":
+            if resp:
+                logging.debug(f"Polygon API response: {len(resp)} records returned")
+                if len(resp) > 0:
+                    logging.debug(f"  Response type: {type(resp)}")
+                    logging.debug(f"  First record type: {type(resp[0])}")
+                    logging.debug(f"  First record attributes: {dir(resp[0])}")
+            else:
+                logging.debug(f"Polygon API response: empty (None or empty list)")
+        
         return resp if resp else []
     except Exception as e:
         print(f"Error fetching chunk for {symbol} from {start_date} to {end_date}: {e}", file=sys.stderr)
+        if log_level == "DEBUG":
+            logging.debug(f"Polygon API error details: {type(e).__name__}: {str(e)}")
+            import traceback
+            logging.debug(f"Traceback: {traceback.format_exc()}")
         return []
 
 async def _fetch_polygon_paginated(
@@ -532,7 +669,8 @@ async def _fetch_polygon_paginated(
     symbol: str,
     timespan: str,
     start_date: str,
-    end_date: str
+    end_date: str,
+    log_level: str = "INFO"
 ) -> list:
     """Original pagination logic for single large requests."""
     all_data = []
@@ -542,6 +680,10 @@ async def _fetch_polygon_paginated(
     print(f"Fetching {timespan} data for {symbol} from {start_date} to {end_date}...", file=sys.stderr)
     
     while current_start_date <= end_date:
+        if log_level == "DEBUG":
+            logging.debug(f"Polygon API paginated request: ticker={symbol}, timespan={timespan}, "
+                        f"from={current_start_date}, to={end_date}, adjusted=True, sort=asc, limit={limit}")
+        
         # Query the aggregates API for current batch
         resp = client.get_aggs(
             ticker=symbol,
@@ -553,6 +695,18 @@ async def _fetch_polygon_paginated(
             sort="asc",
             limit=limit
         )
+
+        if log_level == "DEBUG":
+            if resp:
+                logging.debug(f"Polygon API paginated response: {len(resp)} records returned")
+                if len(resp) > 0:
+                    sample = resp[0]
+                    logging.debug(f"  Sample record: timestamp={sample.timestamp}, "
+                                f"open={getattr(sample, 'open', 'N/A')}, "
+                                f"close={getattr(sample, 'close', 'N/A')}, "
+                                f"volume={getattr(sample, 'volume', 'N/A')}")
+            else:
+                logging.debug(f"Polygon API paginated response: empty (None or empty list)")
 
         if not resp:
             print(f"No more {timespan} data returned for {symbol} from {current_start_date}.", file=sys.stderr)
@@ -713,7 +867,7 @@ def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: s
     csv_path = f'{data_dir}/{interval_type}/{symbol}_{interval_type}.csv'
     
     # Ensure new data has timezone-naive timestamps for consistency
-    if new_data_df.index.tz is not None:
+    if isinstance(new_data_df.index, pd.DatetimeIndex) and new_data_df.index.tz is not None:
         new_data_df.index = new_data_df.index.tz_localize(None)
     
     final_df = new_data_df # Start with new data (guaranteed timezone-naive index)
@@ -722,7 +876,7 @@ def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: s
         try:
             existing_df = pd.read_csv(csv_path, index_col=idx_name, parse_dates=True)
             # Ensure existing_df.index is timezone-naive for consistent merging
-            if existing_df.index.tz is not None:
+            if isinstance(existing_df.index, pd.DatetimeIndex) and existing_df.index.tz is not None:
                 existing_df.index = existing_df.index.tz_localize(None)
             
             final_df = pd.concat([existing_df, new_data_df])
@@ -757,7 +911,8 @@ async def fetch_and_save_data(
     chunk_size: str = "monthly",  # New parameter for chunk size
     save_db_csv: bool = False,  # New parameter for CSV usage control
     fetch_daily: bool = True,  # New parameter to control daily data fetching
-    fetch_hourly: bool = True  # New parameter to control hourly data fetching
+    fetch_hourly: bool = True,  # New parameter to control hourly data fetching
+    log_level: str = "INFO"  # New parameter for controlling debug output
 ) -> bool:
     if data_source == "polygon":
         API_KEY = os.getenv('POLYGON_API_KEY')
@@ -820,7 +975,7 @@ async def fetch_and_save_data(
             logging.info(f"Fetching daily data for {symbol} from {start_date_daily_api_str} to {end_date_api_str} via {data_source}...")
             if data_source == "polygon":
                 new_daily_bars = await fetch_polygon_data(
-                    symbol, "daily", start_date_daily_api_str, end_date_api_str, API_KEY, chunk_size
+                    symbol, "daily", start_date_daily_api_str, end_date_api_str, API_KEY, chunk_size, log_level
                 )
             else:  # alpaca
                 new_daily_bars = await fetch_bars_single_aiohttp_all_pages(
@@ -828,6 +983,12 @@ async def fetch_and_save_data(
                 )
 
             final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, symbol, 'daily', data_dir, save_db_csv)
+            
+            # Log what we got from Polygon
+            if log_level == "DEBUG":
+                logging.debug(f"After merge: new_daily_bars rows={len(new_daily_bars)}, final_daily_bars rows={len(final_daily_bars)}")
+                if not final_daily_bars.empty:
+                    logging.debug(f"  final_daily_bars date range: {final_daily_bars.index.min()} to {final_daily_bars.index.max()}")
 
             # Use the passed db_save_batch_size parameter
             if not final_daily_bars.empty:
@@ -839,12 +1000,23 @@ async def fetch_and_save_data(
                     logging.info(f"Saving daily batch {current_batch_num}/{num_daily_batches} ({len(batch_df)} rows) for {symbol}...")
                     try:
                         await stock_db_instance.save_stock_data(batch_df, symbol, interval='daily')
+                        logging.debug(f"Successfully saved daily batch {current_batch_num} for {symbol} ({len(batch_df)} rows)")
                     except Exception as e_save_daily:
                         logging.error(f"Error saving daily batch {current_batch_num} for {symbol}: {e_save_daily}")
+                        import traceback
+                        logging.error(traceback.format_exc())
                         # Optionally, re-raise, or log and continue to hourly, or skip remaining daily batches
                         # For now, we'll let it fail the symbol fetch if a batch fails.
                         raise
                 logging.info(f"Daily data for {symbol} processed for database.")
+                
+                # Wait for cache writes to complete after saving
+                if hasattr(stock_db_instance, 'cache') and hasattr(stock_db_instance.cache, 'wait_for_pending_writes'):
+                    try:
+                        await stock_db_instance.cache.wait_for_pending_writes(timeout=10.0)
+                        logging.debug(f"Cache writes completed for {symbol} daily data")
+                    except Exception as e:
+                        logging.warning(f"Error waiting for cache writes for {symbol} daily data: {e}")
             elif new_daily_bars.empty: # Check if new data was fetched before merging
                 logging.info(f"No new daily data for {symbol} to process for database.")
             else: # new_daily_bars was not empty, but final_daily_bars is (e.g. all old data)
@@ -857,7 +1029,7 @@ async def fetch_and_save_data(
             logging.info(f"Fetching hourly data for {symbol} from {start_date_hourly_api_str} to {end_date_hourly_api_str} via {data_source}...")
             if data_source == "polygon":
                 new_hourly_bars = await fetch_polygon_data(
-                    symbol, "hourly", start_date_hourly_api_str, end_date_hourly_api_str, API_KEY, chunk_size
+                    symbol, "hourly", start_date_hourly_api_str, end_date_hourly_api_str, API_KEY, chunk_size, log_level
                 )
             else:  # alpaca
                 new_hourly_bars = await fetch_bars_single_aiohttp_all_pages(
@@ -865,6 +1037,12 @@ async def fetch_and_save_data(
                 )
 
             final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, symbol, 'hourly', data_dir, save_db_csv)
+            
+            # Log what we got from Polygon
+            if log_level == "DEBUG":
+                logging.debug(f"After merge: new_hourly_bars rows={len(new_hourly_bars)}, final_hourly_bars rows={len(final_hourly_bars)}")
+                if not final_hourly_bars.empty:
+                    logging.debug(f"  final_hourly_bars date range: {final_hourly_bars.index.min()} to {final_hourly_bars.index.max()}")
 
             # Use the passed db_save_batch_size parameter
             if not final_hourly_bars.empty:
@@ -876,10 +1054,21 @@ async def fetch_and_save_data(
                     logging.info(f"Saving hourly batch {current_batch_num}/{num_hourly_batches} ({len(batch_df)} rows) for {symbol}...")
                     try:
                         await stock_db_instance.save_stock_data(batch_df, symbol, interval='hourly')
+                        logging.debug(f"Successfully saved hourly batch {current_batch_num} for {symbol} ({len(batch_df)} rows)")
                     except Exception as e_save_hourly:
                         logging.error(f"Error saving hourly batch {current_batch_num} for {symbol}: {e_save_hourly}")
+                        import traceback
+                        logging.error(traceback.format_exc())
                         raise # Fail the symbol fetch if a batch fails
                 logging.info(f"Hourly data for {symbol} processed for database.")
+                
+                # Wait for cache writes to complete after saving
+                if hasattr(stock_db_instance, 'cache') and hasattr(stock_db_instance.cache, 'wait_for_pending_writes'):
+                    try:
+                        await stock_db_instance.cache.wait_for_pending_writes(timeout=10.0)
+                        logging.debug(f"Cache writes completed for {symbol} hourly data")
+                    except Exception as e:
+                        logging.warning(f"Error waiting for cache writes for {symbol} hourly data: {e}")
             elif new_hourly_bars.empty: # Check if new data was fetched before merging
                 logging.info(f"No new hourly data for {symbol} to process for database.")
             else: # new_hourly_bars was not empty, but final_hourly_bars is
@@ -972,20 +1161,22 @@ async def process_symbol_data(
             action_taken = f"Data for {symbol} ({timeframe}) retrieved from database."
             logging.info(action_taken)
 
-            min_date_in_df = data_df.index.min().strftime('%Y-%m-%d')
-            if start_date and min_date_in_df > start_date:
-                print(f"Note: Data retrieved from DB starts at {min_date_in_df}, after the requested start date {start_date} (e.g., due to non-trading days).", file=sys.stderr)
-            
-            # Check if we have today's data when end_date is today
-            if end_date == today_str and timeframe == 'daily' and not no_force_today:
-                max_date_in_df = data_df.index.max().strftime('%Y-%m-%d')
-                if max_date_in_df < today_str:
-                    print(f"Note: Latest data in DB is from {max_date_in_df}, but end date is {today_str}. Today's data may not be available yet.", file=sys.stderr)
-                    # If it's a trading day, we should try to fetch today's data
-                    if _is_market_hours() or (not _is_market_hours() and datetime.now().weekday() < 5):
-                        print(f"Trading day detected, will attempt to fetch today's data for {symbol}...", file=sys.stderr)
-                        # Set force_fetch to True to ensure we fetch today's data
-                        force_fetch = True
+            # Only format dates if index is a DatetimeIndex
+            if isinstance(data_df.index, pd.DatetimeIndex):
+                min_date_in_df = data_df.index.min().strftime('%Y-%m-%d')
+                if start_date and min_date_in_df > start_date:
+                    print(f"Note: Data retrieved from DB starts at {min_date_in_df}, after the requested start date {start_date} (e.g., due to non-trading days).", file=sys.stderr)
+                
+                # Check if we have today's data when end_date is today
+                if end_date == today_str and timeframe == 'daily' and not no_force_today:
+                    max_date_in_df = data_df.index.max().strftime('%Y-%m-%d')
+                    if max_date_in_df < today_str:
+                        print(f"Note: Latest data in DB is from {max_date_in_df}, but end date is {today_str}. Today's data may not be available yet.", file=sys.stderr)
+                        # If it's a trading day, we should try to fetch today's data
+                        if _is_market_hours() or (not _is_market_hours() and datetime.now().weekday() < 5):
+                            print(f"Trading day detected, will attempt to fetch today's data for {symbol}...", file=sys.stderr)
+                            # Set force_fetch to True to ensure we fetch today's data
+                            force_fetch = True
         else:
             print(f"No {timeframe} data found for {symbol} in the database for the specified range.", file=sys.stderr)
             if query_only:
@@ -1013,7 +1204,8 @@ async def process_symbol_data(
             db_save_batch_size=db_save_batch_size, # Pass it through
             data_source=data_source,  # Pass the new argument
             chunk_size=chunk_size,  # Pass the new argument
-            save_db_csv=save_db_csv  # Pass the new argument
+            save_db_csv=save_db_csv,  # Pass the new argument
+            log_level=log_level  # Pass log_level for debug output
         ) 
 
         if fetch_success:
@@ -1032,25 +1224,30 @@ async def process_symbol_data(
 
     return data_df
 
-async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str) -> dict | None:
+async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str, use_market_time: bool = True) -> dict | None:
     """
     Get the latest price with timestamp from the database.
     Returns a dictionary with 'price', 'timestamp', 'write_timestamp', and optionally 'latest_data' keys, or None if not found.
+    
+    When market is closed and use_market_time=True, prioritizes daily close price over realtime data.
     """
     try:
+        # Check if market is open (only relevant when use_market_time is True)
+        market_is_open = False
+        if use_market_time:
+            market_is_open = is_market_hours()
+        
         # Try to get realtime data first (most recent)
         # Use get_latest_price_with_data() if available to avoid duplicate queries
-        # Note: This function doesn't have access to args, so we default to True (use market time)
-        # The caller should pass use_market_time parameter if needed
         if hasattr(db_instance, 'get_latest_price_with_data'):
-            latest_data = await db_instance.get_latest_price_with_data(symbol, use_market_time=True)
+            latest_data = await db_instance.get_latest_price_with_data(symbol, use_market_time=use_market_time)
             if latest_data and latest_data.get('realtime_df') is not None:
                 realtime_data = latest_data['realtime_df']
                 # Take the FIRST row (most recent write_timestamp) instead of last
                 latest_row = realtime_data.iloc[0]
                 return {
                     'price': latest_row['price'],
-                    'timestamp': latest_row.name,  # Index is the timestamp
+                    'timestamp': _normalize_index_timestamp(latest_row.name),  # Normalize index value
                     'write_timestamp': latest_row.get('write_timestamp'),  # When it was written to DB
                     'latest_data': latest_data  # Cache the full result for reuse
                 }
@@ -1058,7 +1255,7 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
                 # We have price data but no realtime_df (e.g., from hourly/daily)
                 return {
                     'price': latest_data.get('price'),
-                    'timestamp': latest_data.get('timestamp'),
+                    'timestamp': _normalize_index_timestamp(latest_data.get('timestamp')),
                     'write_timestamp': None,
                     'latest_data': latest_data  # Cache the full result for reuse
                 }
@@ -1067,6 +1264,31 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
                 realtime_data = pd.DataFrame()
         else:
             # Fallback for non-QuestDB instances
+            # When market is closed and use_market_time=True, prioritize daily close over realtime
+            if use_market_time and not market_is_open:
+                # Market closed: prioritize daily close price
+                daily_data = await db_instance.get_stock_data(symbol, interval="daily")
+                if not daily_data.empty:
+                    latest_row = daily_data.iloc[-1]
+                    return {
+                        'price': latest_row['close'],
+                        'timestamp': _normalize_index_timestamp(latest_row.name),
+                        'write_timestamp': None,  # Historical data doesn't have write_timestamp
+                        'source': 'daily'
+                    }
+                
+                # Fallback to hourly if no daily data
+                hourly_data = await db_instance.get_stock_data(symbol, interval="hourly")
+                if not hourly_data.empty:
+                    latest_row = hourly_data.iloc[-1]
+                    return {
+                        'price': latest_row['close'],
+                        'timestamp': _normalize_index_timestamp(latest_row.name),
+                        'write_timestamp': None,  # Historical data doesn't have write_timestamp
+                        'source': 'hourly'
+                    }
+            
+            # Market open or use_market_time=False: try realtime first
             realtime_data = await db_instance.get_realtime_data(symbol, data_type="quote")
         
         if not realtime_data.empty:
@@ -1074,28 +1296,39 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
             latest_row = realtime_data.iloc[0]
             return {
                 'price': latest_row['price'],
-                'timestamp': latest_row.name,  # Index is the timestamp
-                'write_timestamp': latest_row.get('write_timestamp')  # When it was written to DB
+                'timestamp': _normalize_index_timestamp(latest_row.name),
+                'write_timestamp': latest_row.get('write_timestamp'),  # When it was written to DB
+                'source': 'realtime'
             }
         
         # Try hourly data
         hourly_data = await db_instance.get_stock_data(symbol, interval="hourly")
         if not hourly_data.empty:
             latest_row = hourly_data.iloc[-1]
+            idx_value = latest_row.name
+            normalized_ts = _normalize_index_timestamp(idx_value)
+            if normalized_ts is None:
+                logging.debug(f"Failed to normalize hourly index timestamp: {idx_value} (type: {type(idx_value)})")
             return {
                 'price': latest_row['close'],
-                'timestamp': latest_row.name,  # Index is the datetime
-                'write_timestamp': None  # Historical data doesn't have write_timestamp
+                'timestamp': normalized_ts,
+                'write_timestamp': None,  # Historical data doesn't have write_timestamp
+                'source': 'hourly'
             }
         
         # Try daily data
         daily_data = await db_instance.get_stock_data(symbol, interval="daily")
         if not daily_data.empty:
             latest_row = daily_data.iloc[-1]
+            idx_value = latest_row.name
+            normalized_ts = _normalize_index_timestamp(idx_value)
+            if normalized_ts is None:
+                logging.debug(f"Failed to normalize daily index timestamp: {idx_value} (type: {type(idx_value)})")
             return {
                 'price': latest_row['close'],
-                'timestamp': latest_row.name,  # Index is the date
-                'write_timestamp': None  # Historical data doesn't have write_timestamp
+                'timestamp': normalized_ts,
+                'write_timestamp': None,  # Historical data doesn't have write_timestamp
+                'source': 'daily'
             }
         
         return None
@@ -1618,7 +1851,9 @@ def parse_args():
     parser.add_argument(
         "--force-fetch",
         action="store_true",
-        help="Force fetching data from the network, merging with existing data."
+        help="Force fetching data from the network (Polygon/Alpaca API), merging with existing data. "
+             "Use this to bypass database cache and always fetch fresh data from the API. "
+             "Example: python fetch_symbol_data.py AAPL --force-fetch --data-source polygon"
     )
     parser.add_argument(
         "--query-only",
@@ -1840,21 +2075,227 @@ async def main() -> None:
 
             should_refetch_now = False
             cached_latest_data = None  # Cache the result from freshness check
+            
+            # Check if we need to fetch data for today based on write_timestamp vs last possible update time
+            async def _is_today_data_fresh(interval: str) -> bool:
+                """Check if today's data is fresh based on write_timestamp vs last possible update time."""
+                try:
+                    # For freshness checks, query DB directly (bypass cache) to ensure we check actual persistence
+                    # For QuestDB instances, access repository directly; for others, use get_stock_data
+                    if hasattr(db_instance, 'daily_price_repo'):
+                        # QuestDB instance - query repository directly to bypass cache
+                        tomorrow_str = (datetime.strptime(today_str, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+                        if interval == 'hourly':
+                            today_data = await db_instance.daily_price_repo.get(args.symbol, start_date=today_str, end_date=tomorrow_str, interval=interval)
+                        else:
+                            today_data = await db_instance.daily_price_repo.get(args.symbol, start_date=today_str, end_date=today_str, interval=interval)
+                    else:
+                        # Non-QuestDB instance - use get_stock_data (may use cache, but that's okay for other DB types)
+                        if interval == 'hourly':
+                            tomorrow_str = (datetime.strptime(today_str, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+                            today_data = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=tomorrow_str, interval=interval)
+                        else:
+                            today_data = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=today_str, interval=interval)
+                    
+                    # For hourly, filter to only today's data - handle timezone-aware and naive indices
+                    if interval == 'hourly' and not today_data.empty:
+                        # Ensure index is timezone-aware for comparison
+                        if today_data.index.tz is None:
+                            # If index is naive, assume UTC
+                            today_data.index = today_data.index.tz_localize('UTC')
+                        
+                        # Create timezone-aware timestamps for comparison (in UTC)
+                        today_start_ts = pd.Timestamp(today_str, tz='UTC')
+                        tomorrow_start_ts = today_start_ts + pd.Timedelta(days=1)
+                        
+                        # Ensure both sides of comparison are timezone-aware
+                        today_data = today_data[(today_data.index >= today_start_ts) & (today_data.index < tomorrow_start_ts)]
+                    
+                    # Log query details for debugging
+                    logging.debug(f"Freshness check query for {interval} (DB direct): start_date={today_str}, rows_returned={len(today_data)}")
+                    if not today_data.empty:
+                        logging.debug(f"  Data date range: {today_data.index.min()} to {today_data.index.max()}")
+                    
+                    if today_data.empty:
+                        logging.debug(f"Freshness: no {interval} data found for {today_str} (query returned 0 rows)")
+                        return False  # No data for today, need to fetch
+                    
+                    # Get the write_timestamp of the latest row
+                    latest_row = today_data.iloc[-1]
+                    write_ts = latest_row.get('write_timestamp') if 'write_timestamp' in today_data.columns else None
+                    
+                    # If no write_timestamp, use the index timestamp
+                    if write_ts is None or pd.isna(write_ts):
+                        idx_ts = today_data.index[-1]
+                        write_dt = _normalize_index_timestamp(idx_ts)
+                    else:
+                        write_dt = _normalize_index_timestamp(write_ts)
+                    
+                    if write_dt is None:
+                        logging.debug(f"Freshness: could not normalize write_timestamp for {interval} data")
+                        return False  # Can't determine write time, fetch to be safe
+                    
+                    # Get current time in ET
+                    now_et = _get_et_now()
+                    now_utc = datetime.now(timezone.utc)
+                    
+                    # Determine the last possible update time for today based on interval and current time
+                    if interval == 'daily':
+                        # Daily data is complete after market close (16:00 ET) for that date
+                        today_date = datetime.strptime(today_str, '%Y-%m-%d').date()
+                        today_close_et = now_et.replace(year=today_date.year, month=today_date.month, day=today_date.day, hour=16, minute=0, second=0, microsecond=0)
+                        if today_close_et.weekday() >= 5:  # Weekend
+                            # For weekend, check if we have Friday's data
+                            days_back = (today_close_et.weekday() - 4)  # 5=Sat -> 1, 6=Sun -> 2
+                            friday = today_close_et - timedelta(days=days_back)
+                            today_close_et = friday.replace(hour=16, minute=0, second=0, microsecond=0)
+                        last_possible_update_utc = today_close_et.astimezone(timezone.utc)
+                        # Add some buffer (e.g., 30 minutes after market close for data to be available)
+                        last_possible_update_utc += timedelta(minutes=30)
+                    elif interval == 'hourly':
+                        # Hourly data depends on current time:
+                        # - If in premarket: last possible is current hour (up to 9:30 ET)
+                        # - If in regular hours: last possible is current hour
+                        # - If in after-hours: last possible is current hour (up to 20:00 ET)
+                        # - If market closed: last possible is 20:00 ET (end of after-hours)
+                        if session == 'closed':
+                            # Closed session covers two cases:
+                            # 1. Overnight before premarket (00:00–04:00 ET) -> last update was previous trading day's 20:00
+                            # 2. Late night after after-hours (>=20:00 ET) or weekend -> last update was most recent weekday 20:00
+                            premarket_start = now_et.replace(hour=4, minute=0, second=0, microsecond=0)
+                            if now_et.weekday() >= 5:
+                                # Weekend - use last Friday 20:00
+                                days_back = (now_et.weekday() - 4)
+                                reference_day = now_et - timedelta(days=days_back)
+                                last_hour_et = reference_day.replace(hour=20, minute=0, second=0, microsecond=0)
+                            elif now_et < premarket_start:
+                                # Before premarket start - use previous trading day 20:00
+                                reference_day = now_et - timedelta(days=1)
+                                while reference_day.weekday() >= 5:
+                                    reference_day -= timedelta(days=1)
+                                last_hour_et = reference_day.replace(hour=20, minute=0, second=0, microsecond=0)
+                            else:
+                                # After after-hours on a weekday (>=20:00 ET)
+                                last_hour_et = now_et.replace(hour=20, minute=0, second=0, microsecond=0)
+                        else:
+                            # During market hours: last possible is current hour
+                            # Get the current hour in ET, then convert to UTC
+                            current_hour_et = now_et.replace(minute=0, second=0, microsecond=0)
+                            last_hour_et = current_hour_et
+                        # Convert ET to UTC for comparison
+                        # Ensure now_et is timezone-aware before conversion
+                        if last_hour_et.tzinfo is None:
+                            # If somehow naive, assume ET
+                            et_tz = pytz.timezone('US/Eastern')
+                            last_hour_et = et_tz.localize(last_hour_et)
+                        last_possible_update_utc = last_hour_et.astimezone(timezone.utc)
+                        # Add buffer (e.g., 5 minutes after the hour for data to be available)
+                        last_possible_update_utc += timedelta(minutes=5)
+                    else:  # realtime
+                        # For realtime, check based on market session:
+                        # - If in premarket/open/afterhours: last possible is current time (with buffer)
+                        # - If market completely closed: last possible is end of after-hours for last trading day
+                        today_date = datetime.strptime(today_str, '%Y-%m-%d').date()
+                        if session in ('premarket', 'regular', 'afterhours'):
+                            # During market hours: last possible is current time minus a small buffer
+                            # For premarket, add 60s buffer; for regular/afterhours, use max_age
+                            if session == 'premarket':
+                                buffer_seconds = 60
+                            else:
+                                buffer_seconds = max_age if max_age else 60
+                            last_possible_update_utc = now_utc - timedelta(seconds=buffer_seconds)
+                        else:
+                            # Market completely closed: last possible is end of after-hours (20:00 ET) for last trading day
+                            if now_et.weekday() >= 5:  # Weekend
+                                days_back = (now_et.weekday() - 4)
+                                friday = now_et - timedelta(days=days_back)
+                                last_realtime_et = friday.replace(hour=20, minute=0, second=0, microsecond=0)
+                            else:
+                                # Weekday but market closed (before premarket or after after-hours)
+                                if now_et.hour < 4:  # Before premarket starts
+                                    # Use previous day's after-hours end
+                                    yesterday = now_et - timedelta(days=1)
+                                    if yesterday.weekday() >= 5:  # Previous day was weekend
+                                        days_back = (yesterday.weekday() - 4)
+                                        friday = yesterday - timedelta(days=days_back)
+                                        last_realtime_et = friday.replace(hour=20, minute=0, second=0, microsecond=0)
+                                    else:
+                                        last_realtime_et = yesterday.replace(hour=20, minute=0, second=0, microsecond=0)
+                                else:  # After after-hours (after 20:00)
+                                    last_realtime_et = now_et.replace(hour=20, minute=0, second=0, microsecond=0)
+                            last_possible_update_utc = last_realtime_et.astimezone(timezone.utc)
+                            # Add small buffer (e.g., 1 minute after end of after-hours)
+                            last_possible_update_utc += timedelta(minutes=1)
+                    
+                    # Prevent "last possible" from being far in the future relative to now
+                    future_guard = now_utc + timedelta(minutes=5)
+                    if last_possible_update_utc > future_guard:
+                        last_possible_update_utc = future_guard
+                    
+                    # Allow a small slack so data written just before the expected cutoff counts as fresh
+                    if interval == 'daily':
+                        freshness_slack = timedelta(minutes=45)
+                    elif interval == 'hourly':
+                        freshness_slack = timedelta(minutes=10)
+                    else:
+                        freshness_slack = timedelta(minutes=2)
+                    
+                    # Check if write_timestamp is after (last possible - slack)
+                    is_fresh = write_dt >= (last_possible_update_utc - freshness_slack)
+                    if is_fresh:
+                        logging.info(f"Freshness: {interval} data for {today_str} is fresh (write_ts: {write_dt.isoformat()}, last_possible: {last_possible_update_utc.isoformat()}, slack={freshness_slack})")
+                    else:
+                        logging.info(f"Freshness: {interval} data for {today_str} is stale (write_ts: {write_dt.isoformat()}, last_possible: {last_possible_update_utc.isoformat()}, slack={freshness_slack})")
+                    return is_fresh
+                except Exception as e:
+                    logging.debug(f"Error checking freshness for {interval}: {e}")
+                    import traceback
+                    logging.debug(traceback.format_exc())
+                    return False
+            
+            # Check freshness for today's data
             if max_age is not None:
-                rt_info = await _get_last_update_age_seconds(db_instance, args.symbol)
-                if rt_info is None:
-                    logging.info(f"Freshness: realtime not found; will fetch today (threshold {max_age}s, session {session}).")
-                    should_refetch_now = True
-                else:
-                    rt_age = rt_info['age_seconds']
-                    rt_src = rt_info['source']
-                    rt_ts = rt_info['timestamp']
-                    logging.info(f"Freshness: realtime age {rt_age:.1f}s (from {rt_src} ts: {rt_ts}), threshold {max_age}s, session {session}.")
-                    if rt_age > max_age:
+                # For realtime data, check if we have fresh realtime data
+                if session in ('regular', 'premarket', 'afterhours'):
+                    # Check realtime data freshness
+                    rt_info = await _get_last_update_age_seconds(db_instance, args.symbol)
+                    if rt_info is None:
+                        logging.info(f"Freshness: realtime not found; will fetch today (threshold {max_age}s, session {session}).")
                         should_refetch_now = True
                     else:
-                        # Cache the latest_data if available to avoid duplicate query
-                        cached_latest_data = rt_info.get('latest_data')
+                        rt_age = rt_info['age_seconds']
+                        rt_src = rt_info['source']
+                        rt_ts = rt_info['timestamp']
+                        logging.info(f"Freshness: realtime age {rt_age:.1f}s (from {rt_src} ts: {rt_ts}), threshold {max_age}s, session {session}.")
+                        
+                        # If age is extremely large (> 100 years), treat as invalid timestamp and fetch fresh data
+                        if rt_age > 3153600000:  # ~100 years in seconds
+                            logging.warning(f"Freshness: invalid timestamp detected (age {rt_age:.1f}s > 100 years). Will fetch fresh data.")
+                            should_refetch_now = True
+                        elif rt_age > max_age:
+                            # Check if we have fresh hourly data for today (which might be more relevant than realtime)
+                            if await _is_today_data_fresh('hourly'):
+                                logging.info(f"Freshness: today's hourly data is fresh, skipping realtime fetch.")
+                                should_refetch_now = False
+                                cached_latest_data = rt_info.get('latest_data')
+                            else:
+                                should_refetch_now = True
+                        else:
+                            # Cache the latest_data if available to avoid duplicate query
+                            cached_latest_data = rt_info.get('latest_data')
+                else:
+                    # Market closed: check if we have fresh daily data for today
+                    if await _is_today_data_fresh('daily'):
+                        logging.info(f"Freshness: today's daily data is fresh, skipping fetch.")
+                        should_refetch_now = False
+                    else:
+                        # Check hourly data as fallback
+                        if await _is_today_data_fresh('hourly'):
+                            logging.info(f"Freshness: today's hourly data is fresh, skipping fetch.")
+                            should_refetch_now = False
+                        else:
+                            logging.info(f"Freshness: today's data is not fresh, will fetch.")
+                            should_refetch_now = True
 
             if should_refetch_now:
                 if args.query_only:
@@ -1870,19 +2311,37 @@ async def main() -> None:
                             db_save_batch_size=args.db_batch_size,
                             data_source=args.data_source,
                             chunk_size=args.chunk_size,
-                            save_db_csv=args.save_db_csv
+                            save_db_csv=args.save_db_csv,
+                            log_level=args.log_level
                         )
                         if fetch_success:
                             logging.info(f"Freshness fetch: performed because realtime age>{max_age}s during {session} session.")
+                            # Verify data was saved by querying it back
+                            if args.log_level == "DEBUG":
+                                verify_daily = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=today_str, interval='daily')
+                                tomorrow_str = (datetime.strptime(today_str, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+                                verify_hourly = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=tomorrow_str, interval='hourly')
+                                logging.debug(f"Verification after save: daily rows={len(verify_daily)}, hourly rows={len(verify_hourly)}")
+                                if not verify_daily.empty:
+                                    logging.debug(f"  Daily data date range: {verify_daily.index.min()} to {verify_daily.index.max()}")
+                                if not verify_hourly.empty:
+                                    logging.debug(f"  Hourly data date range: {verify_hourly.index.min()} to {verify_hourly.index.max()}")
                         else:
                             logging.warning("Freshness fetch skipped due to failure.")
                     except Exception as e:
                         logging.error(f"Freshness pre-fetch error: {e}")
+                        import traceback
+                        logging.error(traceback.format_exc())
             else:
                 if max_age is not None:
                     logging.info(f"Freshness fetch: skipped (realtime recent enough, age<= {max_age}s for {session} session).")
                 else:
-                    logging.info("Freshness fetch: skipped (market closed).")
+                    # Market closed: check if we already have today's data before deciding to fetch
+                    today_daily_check = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=today_str, interval='daily')
+                    if not today_daily_check.empty:
+                        logging.info("Freshness fetch: skipped (market closed, today's daily data already exists).")
+                    else:
+                        logging.info("Freshness fetch: skipped (market closed, no new data available until market opens).")
 
             print()  # Spacing
 
@@ -1899,11 +2358,39 @@ async def main() -> None:
                         # This returns price, timestamp, source, and realtime_df (if from realtime)
                         # Default to using market time (True) unless --no-market-time is specified
                         use_market_time = not args.no_market_time
-                        latest_data = await db_instance.get_latest_price_with_data(args.symbol, use_market_time=use_market_time)
+                        # Check if the method exists (only available on QuestDB instances)
+                        if hasattr(db_instance, 'get_latest_price_with_data'):
+                            latest_data = await db_instance.get_latest_price_with_data(args.symbol, use_market_time=use_market_time)
+                        else:
+                            # Fallback for non-QuestDB instances (e.g., StockDBClient)
+                            price_data = await _get_latest_price_with_timestamp(db_instance, args.symbol, use_market_time=use_market_time)
+                            # Convert to expected format if we got data
+                            if price_data:
+                                # Convert the format to match what get_latest_price_with_data returns
+                                source = price_data.get('source', 'database')
+                                latest_data = {
+                                    'price': price_data.get('price'),
+                                    'timestamp': price_data.get('timestamp'),
+                                    'source': source,  # Use the source from price_data (daily/hourly/realtime)
+                                    'realtime_df': None  # Not available from fallback
+                                }
+                            else:
+                                latest_data = None
                     
                     if latest_data:
                         # Display the price returned by get_latest_price_with_data
                         # The market hours check is handled in questdb_db.py, so we just display what's returned
+                        source = latest_data.get('source', 'database')
+                        # Normalize source name for display
+                        if source == 'daily':
+                            source_display = 'Daily Close'
+                        elif source == 'hourly':
+                            source_display = 'Hourly'
+                        elif source == 'realtime':
+                            source_display = 'Realtime'
+                        else:
+                            source_display = source.capitalize()
+                        
                         if latest_data.get('realtime_df') is not None:
                             # We have realtime data - display it
                             realtime_df = latest_data['realtime_df']
@@ -1922,7 +2409,6 @@ async def main() -> None:
                         elif latest_data.get('price') is not None:
                             # We have a price but no realtime data (e.g., from daily/hourly when market is closed)
                             # Display the price with the source
-                            source = latest_data.get('source', 'database')
                             timestamp = latest_data.get('timestamp')
                             if timestamp:
                                 if isinstance(timestamp, str):
@@ -1948,7 +2434,7 @@ async def main() -> None:
                                 'source': source,
                                 'data_source': args.data_source
                             }
-                            print(f"{source.capitalize()}:")
+                            print(f"{source_display}:")
                             for line in _format_price_block(price_info, args.timezone or 'America/New_York'):
                                 print(line)
                     elif session in ('regular', 'premarket', 'afterhours') and (not latest_data or latest_data.get('price') is None):
@@ -1978,9 +2464,18 @@ async def main() -> None:
             skip_detailed_checks = False
             if not should_refetch_now and session in ('afterhours', 'closed'):
                 # If we're in afterhours/closed and didn't need to refetch realtime data,
-                # historical data is very unlikely to need refreshing
-                skip_detailed_checks = True
-                logging.info("Skipping detailed age checks (afterhours/closed session, no realtime refetch needed)")
+                # check if we have today's daily data before skipping checks
+                # Only skip if we already have today's data
+                today_daily = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=today_str, interval='daily')
+                if not today_daily.empty:
+                    # We have today's data, skip detailed checks and don't fetch
+                    skip_detailed_checks = True
+                    logging.info("Skipping detailed age checks (afterhours/closed session, today's daily data already exists)")
+                else:
+                    # We don't have today's data, but market is closed so we won't get new data
+                    # Still skip checks since fetching won't help when market is closed
+                    skip_detailed_checks = True
+                    logging.info("Skipping detailed age checks (afterhours/closed session, market closed so no new data available)")
             
             if not skip_detailed_checks and (args.only_fetch in (None, 'daily', 'hourly')):
                 # Log last bar ages for context and check if daily/hourly need refresh
@@ -2049,12 +2544,12 @@ async def main() -> None:
                     need_hourly = False
                     need_daily = False
             else:
-                # Skip detailed checks - assume no fetching needed
+                # Skip detailed checks - assume no fetching needed when market is closed
                 need_hourly = False
                 need_daily = False
-                logging.info("Fetch decision (by last write): hourly=False, daily=False (skipped detailed checks)")
+                logging.info("Fetch decision (by last write): hourly=False, daily=False (skipped detailed checks - market closed)")
                 
-                # Fetch daily and hourly data separately based on their individual needs
+                # When market is closed, don't fetch - no new data available until market opens
                 # Skip fetching if --query-only is set
                 if args.query_only:
                     logging.info("Fetch by last write: skipped (--query-only mode, will only serve from cache/DB).")
@@ -2078,7 +2573,8 @@ async def main() -> None:
                                 chunk_size=args.chunk_size,
                                 save_db_csv=args.save_db_csv,
                                 fetch_daily=True,
-                                fetch_hourly=False
+                                fetch_hourly=False,
+                                log_level=args.log_level
                             )
                             if args.log_level == "DEBUG":
                                 if daily_success:
@@ -2100,7 +2596,8 @@ async def main() -> None:
                                 chunk_size=args.chunk_size,
                                 save_db_csv=args.save_db_csv,
                                 fetch_daily=False,
-                                fetch_hourly=True
+                                fetch_hourly=True,
+                                log_level=args.log_level
                             )
                             if args.log_level == "DEBUG":
                                 if hourly_success:
@@ -2193,7 +2690,8 @@ async def main() -> None:
                             db_save_batch_size=args.db_batch_size,
                             data_source=args.data_source,
                             chunk_size=args.chunk_size,
-                            save_db_csv=args.save_db_csv
+                            save_db_csv=args.save_db_csv,
+                            log_level=args.log_level
                         )
                         
                         if fetch_success:
