@@ -14,13 +14,22 @@ from typing import List, Optional, Set, Tuple
 from pathlib import Path
 
 # Import symbol loading functions from fetch_lists_data
+# Define fallback constants in case import fails
+_FALLBACK_FULL_AVAILABLE_TYPES = ['nyse', 'nasdaq', 'nasdaq-new', 'nyse-new', 'dow-jones', 'sp-500', 'etfs', 'crypto', 'stocks_to_track', 'stocks_to_track2']
+_FALLBACK_ALL_AVAILABLE_TYPES = ['nyse', 'nasdaq', 'dow-jones', 'sp-500', 'etfs', 'crypto', 'stocks_to_track', 'stocks_to_track2']
+
 try:
     from fetch_lists_data import FULL_AVAILABLE_TYPES, ALL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
     SYMBOL_LOADING_AVAILABLE = True
-except ImportError:
+except (ImportError, ModuleNotFoundError) as e:
     SYMBOL_LOADING_AVAILABLE = False
-    FULL_AVAILABLE_TYPES = []
-    ALL_AVAILABLE_TYPES = []
+    # Use fallback constants so argparse choices work even if import fails
+    FULL_AVAILABLE_TYPES = _FALLBACK_FULL_AVAILABLE_TYPES
+    ALL_AVAILABLE_TYPES = _FALLBACK_ALL_AVAILABLE_TYPES
+    # Store the error for better error messages
+    _IMPORT_ERROR = e
+    load_symbols_from_disk = None
+    fetch_types = None
 
 
 def load_symbols_from_yaml(yaml_file: str, quiet: bool = False) -> List[str]:
@@ -83,7 +92,17 @@ async def fetch_lists_data(
     elif args.types:
         if not SYMBOL_LOADING_AVAILABLE:
             if not quiet:
-                print("Error: Symbol loading functions not available. Please ensure fetch_lists_data.py is accessible.", file=sys.stderr)
+                error_msg = "Error: Symbol loading functions not available."
+                if '_IMPORT_ERROR' in globals():
+                    import_error = globals().get('_IMPORT_ERROR')
+                    if isinstance(import_error, ModuleNotFoundError):
+                        missing_module = str(import_error).split("'")[1] if "'" in str(import_error) else "unknown"
+                        error_msg += f" Missing dependency: {missing_module}. Please install required packages (e.g., 'pip install beautifulsoup4 aiohttp pandas pyyaml')."
+                    else:
+                        error_msg += f" Import error: {import_error}"
+                else:
+                    error_msg += " Please ensure fetch_lists_data.py is accessible and all dependencies are installed."
+                print(error_msg, file=sys.stderr)
             return []
             
         if args.fetch_online:
@@ -183,7 +202,7 @@ def add_symbol_arguments(
         )
     
     symbol_group.add_argument('--types', nargs='+', 
-                      choices=FULL_AVAILABLE_TYPES + ['all'] if SYMBOL_LOADING_AVAILABLE else [],
+                      choices=(FULL_AVAILABLE_TYPES + ['all']) if SYMBOL_LOADING_AVAILABLE else ['all'],
                       help='Types of symbol lists to process. \'all\' processes all. Used with --fetch-online for network fetch. Mutually exclusive with symbol, --symbols, and --symbols-list.')
     
     # Add common symbol-related arguments
