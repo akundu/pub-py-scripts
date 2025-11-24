@@ -14,6 +14,7 @@ symbols:
 - ACT
 - ADBE
 - ADI
+- ADMA
 - ADP
 - ADSK
 - AEIS
@@ -61,7 +62,6 @@ symbols:
 - BKNG
 - BKR
 - BLLN
-- BLTE
 - BMRN
 - BNTX
 - BOKF
@@ -78,6 +78,7 @@ symbols:
 - CAR
 - CART
 - CASY
+- CBC
 - CBSH
 - CCC
 - CCEP
@@ -138,6 +139,7 @@ symbols:
 - DLTR
 - DOCU
 - DOOO
+- DORM
 - DOX
 - DPZ
 - DRS
@@ -149,7 +151,6 @@ symbols:
 - ENLT
 - ENSG
 - ENTG
-- EOSE
 - EQIX
 - ERIC
 - ERIE
@@ -218,7 +219,6 @@ symbols:
 - HSIC
 - HST
 - HTHT
-- HUT
 - HWC
 - IBKR
 - IBOC
@@ -228,7 +228,6 @@ symbols:
 - IEP
 - IESC
 - ILMN
-- IMVT
 - INCY
 - INDV
 - INSM
@@ -241,6 +240,7 @@ symbols:
 - ITRI
 - JAZZ
 - JBHT
+- JBS
 - JD
 - JKHY
 - KDP
@@ -255,7 +255,6 @@ symbols:
 - LAUR
 - LBRDA
 - LBRDK
-- LCID
 - LECO
 - LEGN
 - LFUS
@@ -279,7 +278,6 @@ symbols:
 - LYFT
 - MANH
 - MAR
-- MARA
 - MASI
 - MAT
 - MBLY
@@ -316,6 +314,7 @@ symbols:
 - NDSN
 - NFLX
 - NICE
+- NMRK
 - NTAP
 - NTES
 - NTNX
@@ -415,6 +414,7 @@ symbols:
 - SIGI
 - SIRI
 - SITM
+- SLAB
 - SLM
 - SMCI
 - SMMT
@@ -432,11 +432,11 @@ symbols:
 - SSRM
 - STEP
 - STLD
-- STNE
 - STRL
 - STX
 - SWKS
 - SYM
+- TCBI
 - TCOM
 - TEAM
 - TECH
@@ -471,7 +471,6 @@ symbols:
 - UTHR
 - VCTR
 - VFS
-- VKTX
 - VLY
 - VNOM
 - VOD
@@ -485,6 +484,7 @@ symbols:
 - WDAY
 - WDC
 - WFRD
+- WGS
 - WING
 - WIX
 - WMG

@@ -1,5 +1,5 @@
 type: sp-500
-count: 502
+count: 503
 symbols:
 - A
 - AAPL
@@ -188,6 +188,7 @@ symbols:
 - FFIV
 - FICO
 - FIS
+- FISV
 - FITB
 - FOX
 - FOXA

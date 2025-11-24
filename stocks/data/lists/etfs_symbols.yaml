@@ -15,8 +15,10 @@ symbols:
 - DYNF
 - EFA
 - EFV
+- FBND
 - GDX
 - GLD
+- GLDM
 - GOVT
 - IAU
 - IBIT
@@ -67,7 +69,6 @@ symbols:
 - SPYM
 - SPYV
 - TLT
-- TQQQ
 - USHY
 - VB
 - VBR
@@ -100,4 +101,3 @@ symbols:
 - XLI
 - XLK
 - XLV
-- XLY
