@@ -14,7 +14,7 @@ import pytz # Added for market hours checking
 from typing import Any
 from common.market_hours import is_market_hours
 
-logger = None
+logger = logging.getLogger(__name__)
 try:
     import tzlocal
     TZLOCAL_AVAILABLE = True
