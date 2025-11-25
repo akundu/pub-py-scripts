@@ -1,6 +1,14 @@
 import argparse
 import asyncio
 import os
+import warnings
+
+# Suppress fork() and asyncio deprecation warnings in Python 3.14+
+# We handle fork safety explicitly in the child process
+warnings.filterwarnings('ignore', message='.*multi-threaded.*fork.*', category=DeprecationWarning)
+warnings.filterwarnings('ignore', message='.*set_event_loop_policy.*', category=DeprecationWarning)
+warnings.filterwarnings('ignore', message='.*DefaultEventLoopPolicy.*', category=DeprecationWarning)
+
 import pandas as pd
 from aiohttp import web
 from common.stock_db import get_stock_db, StockDBBase 
@@ -736,6 +744,18 @@ class ForkingServer:
                 except Exception:
                     pass
 
+                # CRITICAL: Clean up asyncio state after fork (Python 3.14+ compatibility)
+                # Close any existing event loop from parent process
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop and not loop.is_closed():
+                        loop.close()
+                except RuntimeError:
+                    pass  # No event loop
+                
+                # In Python 3.14+, asyncio automatically handles loop creation after fork
+                # No need to explicitly set event loop policy (it's deprecated anyway)
+
                 # Mark multi-process metadata
                 global current_worker_id, is_multiprocess_mode
                 current_worker_id = index
@@ -1165,7 +1185,8 @@ async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
             await ws_manager.remove_subscriber(symbol, ws)
         if not ws.closed:
             await ws.close()
-        return ws
+    
+    return ws
 
 async def handle_stats_database(request: web.Request) -> web.Response:
     """Get comprehensive database statistics."""
@@ -2321,7 +2342,7 @@ async def handle_db_command(request: web.Request) -> web.Response:
         logger.error(error_message, exc_info=True)
         return web.json_response({"error": "An internal server error occurred.", "details": str(e)}, status=500)
 
-async def main_server_runner():
+def main_server_runner():
     parser = argparse.ArgumentParser(description="HTTP server for stock database operations.")
     parser.add_argument("--db-file", required=True, type=str, 
                         help="Path to the database file or connection string. "
@@ -2451,116 +2472,122 @@ async def main_server_runner():
         forking_server.run()
         return
     
-    # Single-process mode (original behavior)
+    # Single-process mode (original behavior) - run in asyncio context
     logger.info("Starting server in single-process mode")
+    
+    async def run_single_process_server():
+        """Async function to run the single-process server."""
+        try:
+            # Determine cache settings
+            enable_cache = not args.no_cache
+            redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
+            
+            logger.info(f"Initializing database from file: {args.db_file}")
+            app_db_instance = initialize_database(args.db_file, args.log_level,
+                                                   questdb_connection_timeout=args.questdb_connection_timeout,
+                                                   enable_cache=enable_cache, redis_url=redis_url)
+            logger.info(f"Database initialized successfully: {args.db_file}")
+        except Exception as e:
+            logger.critical(f"Fatal Error: Could not initialize database from file '{args.db_file}': {e}", exc_info=True)
+            return
 
-    try:
-        # Determine cache settings
-        enable_cache = not args.no_cache
-        redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
+        # Initialize WebSocket manager with heartbeat interval and stale data timeout
+        global ws_manager
+        ws_manager = WebSocketManager(heartbeat_interval=args.heartbeat_interval, stale_data_timeout=args.stale_data_timeout)
+        ws_manager.set_db_instance(app_db_instance)
+        ws_manager.start_monitoring()
+        logger.info(f"WebSocket manager initialized with heartbeat interval: {args.heartbeat_interval}s, stale data timeout: {args.stale_data_timeout}s")
+
+        app = web.Application(middlewares=[logging_middleware])
+        app['db_instance'] = app_db_instance
+        app['enable_access_log'] = args.enable_access_log
         
-        logger.info(f"Initializing database from file: {args.db_file}")
-        app_db_instance = initialize_database(args.db_file, args.log_level,
-                                               questdb_connection_timeout=args.questdb_connection_timeout,
-                                               enable_cache=enable_cache, redis_url=redis_url)
-        logger.info(f"Database initialized successfully: {args.db_file}")
-    except Exception as e:
-        logger.critical(f"Fatal Error: Could not initialize database from file '{args.db_file}': {e}", exc_info=True)
-        return
+        
+        # Set client_max_size on the application object
+        # This is a common way to try and influence the default server factory
+        max_size_bytes = args.max_body_mb * 1024 * 1024
+        app['client_max_size'] = max_size_bytes
+        # Ensure this is an int, not float, if aiohttp is strict
+        if not isinstance(app['client_max_size'], int):
+            app['client_max_size'] = int(app['client_max_size'])
 
-    # Initialize WebSocket manager with heartbeat interval and stale data timeout
-    global ws_manager
-    ws_manager = WebSocketManager(heartbeat_interval=args.heartbeat_interval, stale_data_timeout=args.stale_data_timeout)
-    ws_manager.set_db_instance(app_db_instance)
-    ws_manager.start_monitoring()
-    logger.info(f"WebSocket manager initialized with heartbeat interval: {args.heartbeat_interval}s, stale data timeout: {args.stale_data_timeout}s")
+        # Add specific endpoints
+        app.router.add_post("/db_command", handle_db_command)
+        app.router.add_get("/ws", handle_websocket)  # Add WebSocket endpoint
+        app.router.add_get("/", handle_health_check)  # Add health check endpoint
+        app.router.add_get("/health", handle_health_check)  # Alternative health check endpoint
+        
+        # Add stats endpoints
+        app.router.add_get("/stats/database", handle_stats_database)  # Comprehensive database statistics
+        app.router.add_get("/stats/tables", handle_stats_tables)      # Fast table counts
+        app.router.add_get("/stats/performance", handle_stats_performance)  # Performance test results
+        app.router.add_get("/stats/pool", handle_stats_pool)          # Connection pool and cache status
+        
+        # Add ticker analysis endpoint
+        app.router.add_get("/analyze_ticker", handle_analyze_ticker)
+        app.router.add_post("/analyze_ticker", handle_analyze_ticker)
+        
+        # Add catch-all handler for unknown routes (must be last)
+        app.router.add_get("/{path:.*}", handle_catch_all)
+        app.router.add_post("/{path:.*}", handle_catch_all)
+        
+        # Remove handler_kwargs from AppRunner if app['client_max_size'] is the preferred method
+        # The handler_args approach might not be effective for client_max_size directly.
+        # runner = web.AppRunner(app, handler_args=handler_kwargs)
+        runner = web.AppRunner(app) # Initialize AppRunner without handler_args for this attempt
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", args.port)
+        
+        logger.info(f"Server starting on http://localhost:{args.port}")
+        # Show database info appropriately based on type
+        if args.db_file.startswith(('postgresql://', 'http://', 'https://')) or '://' in args.db_file:
+            logger.info(f"Using database connection: {args.db_file}")
+        else:
+            logger.info(f"Using database file: {os.path.abspath(args.db_file)}")
+        logger.info(f"Maximum request body size set to: {args.max_body_mb}MB ({max_size_bytes} bytes)")
+        logger.info(f"Access logging: {'Enabled' if args.enable_access_log else 'Disabled'}")
+        logger.info("Listening for POST requests on /db_command")
+        logger.info(f"WebSocket endpoint available at ws://localhost:{args.port}/ws?symbol=SYMBOL")
+        logger.info(f"WebSocket heartbeat interval: {args.heartbeat_interval}s")
+        logger.info("Press Ctrl+C to stop the server.")
+        
+        # Ignore SIGPIPE in single-process mode as well
+        try:
+            signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+        except Exception:
+            pass
 
-    app = web.Application(middlewares=[logging_middleware])
-    app['db_instance'] = app_db_instance
-    app['enable_access_log'] = args.enable_access_log
+        await site.start()
+        
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        except KeyboardInterrupt:
+            logger.info("KeyboardInterrupt received, shutting down...")
+        finally:
+            logger.info("Cleaning up server resources...")
+            if ws_manager:
+                await ws_manager.shutdown()
+            await runner.cleanup()
+            # Close StockDBClient session if server was using one (not in this setup)
+            if hasattr(app_db_instance, 'close_session') and callable(app_db_instance.close_session):
+                logger.info("Closing client session if applicable...")
+                await app_db_instance.close_session() # type: ignore
+            # Close database pool if available
+            if hasattr(app_db_instance, 'close_pool') and callable(app_db_instance.close_pool):
+                logger.info("Closing database connection pool...")
+                await app_db_instance.close_pool()
+            logger.info("Server has been shut down.")
     
-    
-    # Set client_max_size on the application object
-    # This is a common way to try and influence the default server factory
-    max_size_bytes = args.max_body_mb * 1024 * 1024
-    app['client_max_size'] = max_size_bytes
-    # Ensure this is an int, not float, if aiohttp is strict
-    if not isinstance(app['client_max_size'], int):
-        app['client_max_size'] = int(app['client_max_size'])
-
-    # Add specific endpoints
-    app.router.add_post("/db_command", handle_db_command)
-    app.router.add_get("/ws", handle_websocket)  # Add WebSocket endpoint
-    app.router.add_get("/", handle_health_check)  # Add health check endpoint
-    app.router.add_get("/health", handle_health_check)  # Alternative health check endpoint
-    
-    # Add stats endpoints
-    app.router.add_get("/stats/database", handle_stats_database)  # Comprehensive database statistics
-    app.router.add_get("/stats/tables", handle_stats_tables)      # Fast table counts
-    app.router.add_get("/stats/performance", handle_stats_performance)  # Performance test results
-    app.router.add_get("/stats/pool", handle_stats_pool)          # Connection pool and cache status
-    
-    # Add ticker analysis endpoint
-    app.router.add_get("/analyze_ticker", handle_analyze_ticker)
-    app.router.add_post("/analyze_ticker", handle_analyze_ticker)
-    
-    # Add catch-all handler for unknown routes (must be last)
-    app.router.add_get("/{path:.*}", handle_catch_all)
-    app.router.add_post("/{path:.*}", handle_catch_all)
-    
-    # Remove handler_kwargs from AppRunner if app['client_max_size'] is the preferred method
-    # The handler_args approach might not be effective for client_max_size directly.
-    # runner = web.AppRunner(app, handler_args=handler_kwargs)
-    runner = web.AppRunner(app) # Initialize AppRunner without handler_args for this attempt
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", args.port)
-    
-    logger.info(f"Server starting on http://localhost:{args.port}")
-    # Show database info appropriately based on type
-    if args.db_file.startswith(('postgresql://', 'http://', 'https://')) or '://' in args.db_file:
-        logger.info(f"Using database connection: {args.db_file}")
-    else:
-        logger.info(f"Using database file: {os.path.abspath(args.db_file)}")
-    logger.info(f"Maximum request body size set to: {args.max_body_mb}MB ({max_size_bytes} bytes)")
-    logger.info(f"Access logging: {'Enabled' if args.enable_access_log else 'Disabled'}")
-    logger.info("Listening for POST requests on /db_command")
-    logger.info(f"WebSocket endpoint available at ws://localhost:{args.port}/ws?symbol=SYMBOL")
-    logger.info(f"WebSocket heartbeat interval: {args.heartbeat_interval}s")
-    logger.info("Press Ctrl+C to stop the server.")
-    
-    # Ignore SIGPIPE in single-process mode as well
-    try:
-        signal.signal(signal.SIGPIPE, signal.SIG_IGN)
-    except Exception:
-        pass
-
-    await site.start()
-    
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt received, shutting down...")
-    finally:
-        logger.info("Cleaning up server resources...")
-        if ws_manager:
-            await ws_manager.shutdown()
-        await runner.cleanup()
-        # Close StockDBClient session if server was using one (not in this setup)
-        if hasattr(app_db_instance, 'close_session') and callable(app_db_instance.close_session):
-             logger.info("Closing client session if applicable...")
-             await app_db_instance.close_session() # type: ignore
-        # Close database pool if available
-        if hasattr(app_db_instance, 'close_pool') and callable(app_db_instance.close_pool):
-             logger.info("Closing database connection pool...")
-             await app_db_instance.close_pool()
-        logger.info("Server has been shut down.")
+    # Run the single-process server in asyncio context
+    asyncio.run(run_single_process_server())
 
 def main():
     """Main entry point that handles both single-process and multi-process modes."""
     # Just run the main server runner - it handles all argument parsing
+    # Note: main_server_runner is now a regular function, not async
     try:
-        asyncio.run(main_server_runner())
+        main_server_runner()
     except Exception as e:
         print(f"Unhandled exception during server startup: {e}")
         traceback.print_exc()

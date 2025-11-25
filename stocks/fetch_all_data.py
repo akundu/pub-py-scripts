@@ -14,6 +14,8 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 from zoneinfo import ZoneInfo
 import logging
 
+logger = logging.getLogger(__name__)
+
 # moved to common.market_hours.compute_market_transition_times
 
 def get_timezone_aware_time(tz_name: str = "America/New_York") -> datetime:
@@ -382,7 +384,7 @@ def fetch_price_and_save(
     log_level: str = "INFO"
 ) -> bool:
     """Creates a DB instance in the worker thread and runs fetch_and_save_data."""
-    print(f"{os.getpid()} Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr, flush=True)
+    logger.debug(f"{os.getpid()} Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'")
 
     # This function is very similar to the process one. The key is that get_stock_db
     # should provide a connection that is safe for this thread. For SQLite, this means
@@ -391,7 +393,7 @@ def fetch_price_and_save(
     loop = None
     try:
         # Each worker thread creates its own StockDBBase instance.
-        print(f"Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'", file=sys.stderr)
+        logger.debug(f"Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'")
         if client_timeout is not None:
             worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
         else:
