@@ -12,6 +12,7 @@ from .common_strategies import (
     calculate_exponential_moving_average,
 )
 from .stock_db import StockDBBase
+from .redis_cache import RedisCache, CacheKeyGenerator
 import base64
 import sys
 import weakref
@@ -36,7 +37,9 @@ class StockDBPostgreSQL(StockDBBase):
                  historical_batch_size: int = 25,
                  statement_timeout_seconds: int = 300,
                  idle_timeout_seconds: int = 600,
-                 lock_timeout_seconds: int = 60):
+                 lock_timeout_seconds: int = 60,
+                 redis_url: Optional[str] = None,
+                 enable_cache: bool = True):
         """
         Initialize PostgreSQL database connection with connection pooling.
         
@@ -52,6 +55,8 @@ class StockDBPostgreSQL(StockDBBase):
             statement_timeout_seconds: Statement timeout in seconds
             idle_timeout_seconds: Idle transaction timeout in seconds
             lock_timeout_seconds: Lock timeout in seconds
+            redis_url: Redis connection URL for caching (optional)
+            enable_cache: Enable Redis caching (default: True)
         """
         super().__init__(db_config, logger)
         self.logger = get_logger("postgres_db", logger, log_level)
@@ -92,6 +97,9 @@ class StockDBPostgreSQL(StockDBBase):
         # Initialize price cache
         self._price_cache = {}
         self._price_cache_cleanup_time = time.time()
+        
+        # Initialize Redis cache
+        self.cache = RedisCache(redis_url if enable_cache else None, self.logger)
 
     def _init_db(self) -> None:
         """Initialize the PostgreSQL database with required tables if they don't exist."""
@@ -99,15 +107,12 @@ class StockDBPostgreSQL(StockDBBase):
         # This avoids the asyncio.run() issue in the event loop
         pass
 
-<<<<<<< Updated upstream
-=======
     def _get_table_name(self, table_name: str) -> str:
         """Get fully qualified table name with schema."""
         full_name = f"{self.schema}.{table_name}"
         self.logger.debug(f"_get_table_name: {table_name} -> {full_name} (schema: {self.schema})")
         return full_name
 
->>>>>>> Stashed changes
     async def _ensure_tables_exist(self) -> None:
         """Ensure all required tables exist in the PostgreSQL database.
         Uses caching to avoid repeated database calls within the configured timeout period.
@@ -120,10 +125,6 @@ class StockDBPostgreSQL(StockDBBase):
             # Cache is still valid, skip database operations
             return
         
-<<<<<<< Updated upstream
-        # Start cleanup task if not already running
-        await self._start_cleanup_task()
-=======
         # Log the schema we're working with
         self.logger.info(f"_ensure_tables_exist: Using schema '{self.schema}'")
         
@@ -132,7 +133,6 @@ class StockDBPostgreSQL(StockDBBase):
             await self._start_cleanup_task()
         except Exception as e:
             self.logger.warning(f"Could not start cleanup task: {e}")
->>>>>>> Stashed changes
         
         # Start materialized view refresh task if not already running
         await self._start_mv_refresh_task()
@@ -485,6 +485,10 @@ class StockDBPostgreSQL(StockDBBase):
                         await conn.close()
                 except Exception:
                     pass
+        
+        # Close Redis cache
+        if hasattr(self, 'cache'):
+            await self.cache.close()
 
     def get_pool_status(self) -> Dict[str, Any]:
         """Get the current status of the connection pool."""
@@ -1044,6 +1048,17 @@ class StockDBPostgreSQL(StockDBBase):
         if conn is None:
             return None
         else:
+            # Check cache first for single-day queries
+            if interval == 'daily' and start_date and start_date == end_date:
+                cache_key = CacheKeyGenerator.daily_price(ticker, start_date)
+                cached_df = await self.cache.get(cache_key)
+                if cached_df is not None:
+                    self.logger.debug(f"Cache hit for {ticker} daily data on {start_date}")
+                    return cached_df
+            elif interval == 'hourly' and start_date and start_date == end_date:
+                # For hourly, we'd need a specific hour - skip cache for date ranges
+                pass
+            
             table = 'daily_prices' if interval == 'daily' else 'hourly_prices'
             date_col_name = 'date' if interval == 'daily' else 'datetime' # Name of column in DB
 
@@ -1104,6 +1119,12 @@ class StockDBPostgreSQL(StockDBBase):
                 # If we got data without date range, sort by timestamp descending (most recent first)
                 if not start_date and not end_date:
                     df = df.sort_index(ascending=False)
+                
+                # Cache single-day queries
+                if interval == 'daily' and start_date and start_date == end_date and not df.empty:
+                    cache_key = CacheKeyGenerator.daily_price(ticker, start_date)
+                    self.cache.set_fire_and_forget(cache_key, df, ttl=3600)  # 1 hour TTL
+                    self.logger.debug(f"Cached {ticker} daily data for {start_date}")
                 
                 self.logger.debug(f"Retrieved {len(df)} {interval} records for {ticker}")
                 return df
@@ -1207,13 +1228,8 @@ class StockDBPostgreSQL(StockDBBase):
             self.logger.info(f"DEBUG: write_timestamp range: {df_copy['write_timestamp'].min()} to {df_copy['write_timestamp'].max()}")
 
             # Delete existing data in the range to avoid UNIQUE constraint violations
-<<<<<<< Updated upstream
-            await conn.execute('''
-                DELETE FROM realtime_data 
-=======
             delete_sql = f'''
                 DELETE FROM {self._get_table_name('realtime_data')} 
->>>>>>> Stashed changes
                 WHERE ticker = $1 
                 AND type = $2
                 AND timestamp BETWEEN $3 AND $4
@@ -1325,12 +1341,16 @@ class StockDBPostgreSQL(StockDBBase):
         # Ensure tables are initialized
         await self._ensure_tables_exist()
         
+        # Check cache for most recent data (no date range)
+        if not start_datetime and not end_datetime:
+            cache_key = CacheKeyGenerator.realtime_data(ticker)
+            cached_df = await self.cache.get(cache_key)
+            if cached_df is not None:
+                self.logger.debug(f"Cache hit for {ticker} realtime data")
+                return cached_df
+        
         conn = await self._get_connection()
         try:
-<<<<<<< Updated upstream
-            query = "SELECT * FROM realtime_data WHERE ticker = $1 AND type = $2"
-            params: list[str | None] = [ticker, data_type]
-=======
             # If no date range specified, only get the most recent data (LIMIT 100 for safety)
             if not start_datetime and not end_datetime:
                 query = f"""
@@ -1345,7 +1365,6 @@ class StockDBPostgreSQL(StockDBBase):
                 # Full date range query
                 query = f"SELECT * FROM {self._get_table_name('realtime_data')} WHERE ticker = $1 AND type = $2"
                 params = [ticker, data_type]
->>>>>>> Stashed changes
 
                 if start_datetime:
                     query += " AND timestamp >= $3"
@@ -1373,6 +1392,11 @@ class StockDBPostgreSQL(StockDBBase):
                 # If we got data without date range, sort by timestamp descending (most recent first)
                 if not start_datetime and not end_datetime:
                     df = df.sort_index(ascending=False)
+                    # Cache the most recent realtime data
+                    if not df.empty:
+                        cache_key = CacheKeyGenerator.realtime_data(ticker)
+                        self.cache.set_fire_and_forget(cache_key, df, ttl=60)  # 1 minute TTL for realtime data
+                        self.logger.debug(f"Cached {ticker} realtime data")
                 
                 self.logger.debug(f"Retrieved {len(df)} realtime records for {ticker}")
                 return df
@@ -1392,10 +1416,6 @@ class StockDBPostgreSQL(StockDBBase):
             latest_price = None
             # 1. Try realtime_data - use index-optimized query with LIMIT 1
             try:
-<<<<<<< Updated upstream
-                res_rt = await conn.fetchrow("SELECT price FROM realtime_data WHERE ticker = $1 AND type = $2 ORDER BY timestamp DESC LIMIT 1", ticker, 'quote')
-                if res_rt: latest_price = res_rt['price']
-=======
                 res_rt = await conn.fetchrow(f"""
                     SELECT price, timestamp 
                     FROM {self._get_table_name('realtime_data')} 
@@ -1407,17 +1427,12 @@ class StockDBPostgreSQL(StockDBBase):
                     latest_price = res_rt['price']
                     self.logger.debug(f"Found latest price for {ticker} in realtime_data: ${latest_price}")
                     return latest_price  # Early return if we found realtime data
->>>>>>> Stashed changes
             except Exception as e:
                 self.logger.error(f"PostgreSQL error (realtime_data for {ticker}): {e}", exc_info=True)
 
             # 2. Try hourly_prices - only if no realtime data found
             if latest_price is None:
                 try:
-<<<<<<< Updated upstream
-                    res_h = await conn.fetchrow("SELECT close FROM hourly_prices WHERE ticker = $1 ORDER BY datetime DESC LIMIT 1", ticker)
-                    if res_h: latest_price = res_h['close']
-=======
                     res_h = await conn.fetchrow(f"""
                         SELECT close, datetime 
                         FROM {self._get_table_name('hourly_prices')} 
@@ -1429,17 +1444,12 @@ class StockDBPostgreSQL(StockDBBase):
                         latest_price = res_h['close']
                         self.logger.debug(f"Found latest price for {ticker} in hourly_prices: ${latest_price}")
                         return latest_price  # Early return if we found hourly data
->>>>>>> Stashed changes
                 except Exception as e:
                     self.logger.error(f"PostgreSQL error (hourly_prices for {ticker}): {e}", exc_info=True)
 
             # 3. Try daily_prices - only if no other data found
             if latest_price is None:
                 try:
-<<<<<<< Updated upstream
-                    res_d = await conn.fetchrow("SELECT close FROM daily_prices WHERE ticker = $1 ORDER BY date DESC LIMIT 1", ticker)
-                    if res_d: latest_price = res_d['close']
-=======
                     res_d = await conn.fetchrow(f"""
                         SELECT close, date 
                         FROM {self._get_table_name('daily_prices')} 
@@ -1450,7 +1460,6 @@ class StockDBPostgreSQL(StockDBBase):
                     if res_d: 
                         latest_price = res_d['close']
                         self.logger.debug(f"Found latest price for {ticker} in daily_prices: ${latest_price}")
->>>>>>> Stashed changes
                 except Exception as e:
                     self.logger.error(f"PostgreSQL error (daily_prices for {ticker}): {e}", exc_info=True)
         finally:
@@ -2434,4 +2443,22 @@ class StockDBPostgreSQL(StockDBBase):
             finally:
                 await self._return_connection(conn)
         except Exception as e:
-            return {"error": str(e)} 
+            return {"error": str(e)}
+    
+    def get_cache_statistics(self) -> Dict[str, Any]:
+        """Get Redis cache statistics."""
+        if hasattr(self, 'cache'):
+            stats = self.cache.get_statistics()
+            stats['enabled'] = self.cache.enable_cache
+            total_requests = stats.get('hits', 0) + stats.get('misses', 0)
+            stats['total_requests'] = total_requests
+            if total_requests > 0:
+                stats['hit_rate'] = stats.get('hits', 0) / total_requests
+            else:
+                stats['hit_rate'] = 0.0
+            return stats
+        return {'enabled': False}
+    
+    async def close_session(self):
+        """Close database connections and cache."""
+        await self.close_pool() 

@@ -16,8 +16,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List
 
-from zoneinfo import ZoneInfo
-
 BASE_DIR = Path(__file__).resolve().parents[1]
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
@@ -41,6 +39,9 @@ MAX_DAYS = 30
 POSITION_SIZE = 100000
 GEMINI_COOLDOWN_SECONDS = 3600
 LAST_GEMINI_RUN_FILE = TMP_DIR / "covered_call_last_gemini_run_epoch"
+
+MARKET_HOURS_LOOKBACK_SECONDS = 3600  # 1 hours default
+OFF_HOURS_LOOKBACK_SECONDS = 259200  # 72 hours default
 
 MIN_PE = 1
 MIN_VOL = 10
@@ -125,22 +126,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sort", type=str, default=SORT, help=f"Sort field (default: {SORT}).")
     parser.add_argument("--top-n", type=int, default=5, help="Top N results (default: 5).")
     parser.add_argument("--no-stats", action="store_true", help="Disable stats output (default: stats enabled).")
+    parser.add_argument("--market-hours-lookback-seconds", type=int, default=MARKET_HOURS_LOOKBACK_SECONDS, help=f"Seconds to look back during market hours (default: {MARKET_HOURS_LOOKBACK_SECONDS}).")
+    parser.add_argument("--off-hours-lookback-seconds", type=int, default=OFF_HOURS_LOOKBACK_SECONDS, help=f"Seconds to look back outside market hours (default: {OFF_HOURS_LOOKBACK_SECONDS}).")
     
     return parser.parse_args()
 
 
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
-
-
-def format_timestamp(dt: datetime, tz_name: str = "America/New_York") -> str:
-    """Format datetime in the specified timezone (default: EST/EDT)."""
-    if dt.tzinfo is None:
-        # Assume UTC if no timezone info
-        dt = dt.replace(tzinfo=timezone.utc)
-    est_tz = ZoneInfo(tz_name)
-    dt_est = dt.astimezone(est_tz)
-    return dt_est.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def format_sleep_duration(seconds: int) -> str:
@@ -230,7 +223,6 @@ def run_gemini_analysis(
 
 def build_options_analyzer_command(
     download_loc: Path,
-    time_to_use: str,
     db_conn: str,
     no_cache: bool,
     type_flag: str,
@@ -297,7 +289,6 @@ def build_options_analyzer_command(
         "spread_long_days": spread_long_days,
         "spread_long_min_days": spread_long_min_days,
         "spread_long_days_tolerance": spread_long_days_tolerance,
-        "min_write_timestamp": time_to_use,
         "output": str(download_loc),
         "log_level": log_level,
         "option_type": option_type,
@@ -375,6 +366,8 @@ def run_loop(
     sort: str,
     top_n: int,
     stats: bool,
+    market_hours_lookback_seconds: int,
+    off_hours_lookback_seconds: int,
 ) -> None:
     download_loc = DOWNLOAD_LOC_DEFAULT
     store_dir = gemini_store_dir
@@ -409,13 +402,10 @@ def run_loop(
         market_hours = common_is_market_hours(now_utc)
 
         if market_hours:
-            # During market hours: use data from 2 hours ago, sleep for short interval
-            time_to_use = format_timestamp(now_utc - timedelta(hours=2))
+            # During market hours: sleep for short interval
             sleep_time = DEFAULT_SLEEP_SECONDS
         else:
-            # Outside market hours: use data from 72 hours ago
-            time_to_use = format_timestamp(now_utc - timedelta(hours=72))
-            # Calculate time until next market open
+            # Outside market hours: calculate time until next market open
             seconds_to_open, _ = compute_market_transition_times(now_utc)
             if seconds_to_open is None or seconds_to_open <= 0:
                 # Fallback to max sleep if calculation fails
@@ -431,7 +421,6 @@ def run_loop(
         print(datetime.now(), file=sys.stderr, flush=True)
         command = build_options_analyzer_command(
             download_loc,
-            time_to_use,
             db_conn,
             no_cache,
             type_flag,
@@ -551,6 +540,8 @@ def main() -> None:
         sort=args.sort,
         top_n=args.top_n,
         stats=not args.no_stats,
+        market_hours_lookback_seconds=args.market_hours_lookback_seconds,
+        off_hours_lookback_seconds=args.off_hours_lookback_seconds,
     )
 
 

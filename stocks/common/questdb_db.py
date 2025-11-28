@@ -3790,10 +3790,23 @@ class StockQuestDB(StockDBBase):
         if auto_init:
             try:
                 loop = asyncio.get_running_loop()
-            except RuntimeError:
-                asyncio.run(self._init_db())
-            else:
+                # If we have a running loop, schedule the init as a task
                 loop.create_task(self._init_db())
+            except RuntimeError:
+                # No running loop - create one and run the init
+                try:
+                    asyncio.run(self._init_db())
+                except RuntimeError as e:
+                    # If we still can't run (e.g., in a nested context), 
+                    # create a new event loop manually
+                    if "Cannot enter into task" in str(e) or "while another task" in str(e):
+                        loop = asyncio.new_event_loop()
+                        try:
+                            loop.run_until_complete(self._init_db())
+                        finally:
+                            loop.close()
+                    else:
+                        raise
     
     async def _init_db(self) -> None:
         """Initialize database tables."""

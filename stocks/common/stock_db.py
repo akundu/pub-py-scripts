@@ -1938,7 +1938,7 @@ class StockDBSessionManager:
             self._connector = None
 
 
-def get_stock_db(db_type: str, db_config: str | None = None, logger: logging.Logger = None, log_level: str = "INFO", timeout: float = None, historical_batch_size: int = 25, questdb_connection_timeout_seconds: int = 180, enable_cache: bool = True, redis_url: str | None = None) -> StockDBBase:
+def get_stock_db(db_type: str, db_config: str | None = None, logger: logging.Logger = None, log_level: str = "INFO", timeout: float = None, historical_batch_size: int = 25, questdb_connection_timeout_seconds: int = 180, enable_cache: bool = True, redis_url: str | None = None, auto_init: bool = True) -> StockDBBase:
     actual_db_config = db_config
     if actual_db_config is None:
         actual_db_config = get_default_db_path(db_type)
@@ -1958,7 +1958,7 @@ def get_stock_db(db_type: str, db_config: str | None = None, logger: logging.Log
         from .questdb_db import StockQuestDB
         return StockQuestDB(actual_db_config, logger=logger, log_level=log_level, 
                            connection_timeout_seconds=questdb_connection_timeout_seconds,
-                           enable_cache=enable_cache, redis_url=redis_url)
+                           enable_cache=enable_cache, redis_url=redis_url, auto_init=auto_init)
     elif db_type_lower == "remote":
         if timeout is not None:
             return StockDBClient(actual_db_config, logger, response_timeout=timeout)

@@ -51,14 +51,14 @@ def fetch_latest_data_with_volume(
     worker_db_instance = None
     loop = None
     try:
-        if client_timeout is not None:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
-        else:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
-        
-        # Create a new event loop for this thread
+        # Create a new event loop for this thread BEFORE creating the database
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        
+        if client_timeout is not None:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level, auto_init=False)
+        else:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level, auto_init=False)
         
         # Get current price
         result = loop.run_until_complete(get_current_price(
@@ -99,6 +99,14 @@ def fetch_latest_data_with_volume(
     except Exception as e:
         return {"symbol": symbol, "error": str(e)}
     finally:
+        # Wait for pending cache writes to complete
+        if worker_db_instance and hasattr(worker_db_instance, 'cache') and hasattr(worker_db_instance.cache, 'wait_for_pending_writes'):
+            try:
+                if loop and not loop.is_closed():
+                    loop.run_until_complete(worker_db_instance.cache.wait_for_pending_writes(timeout=10))
+            except Exception as e_cache:
+                pass  # Ignore cache cleanup errors
+        
         if worker_db_instance and hasattr(worker_db_instance, 'close_session') and callable(worker_db_instance.close_session):
             try:
                 if loop and not loop.is_closed():
@@ -106,8 +114,14 @@ def fetch_latest_data_with_volume(
             except Exception as e_close:
                 print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
         
-        # Close the event loop
+        # Close the event loop - run pending callbacks first to clean up tasks
         if loop and not loop.is_closed():
+            try:
+                # Run pending callbacks to ensure task cleanup
+                loop.run_until_complete(asyncio.sleep(0))
+                loop.run_until_complete(asyncio.sleep(0))  # Run twice to be sure
+            except Exception:
+                pass
             loop.close()
 
 def fetch_comprehensive_data(
@@ -132,14 +146,14 @@ def fetch_comprehensive_data(
     worker_db_instance = None
     loop = None
     try:
-        if client_timeout is not None:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
-        else:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
-        
-        # Create a new event loop for this thread
+        # Create a new event loop for this thread BEFORE creating the database
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        
+        if client_timeout is not None:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level, auto_init=False)
+        else:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level, auto_init=False)
         
         # Fetch and save historical data
         success = loop.run_until_complete(fetch_and_save_data(
@@ -198,6 +212,14 @@ def fetch_comprehensive_data(
     except Exception as e:
         return {"symbol": symbol, "error": str(e), "success": False}
     finally:
+        # Wait for pending cache writes to complete
+        if worker_db_instance and hasattr(worker_db_instance, 'cache') and hasattr(worker_db_instance.cache, 'wait_for_pending_writes'):
+            try:
+                if loop and not loop.is_closed():
+                    loop.run_until_complete(worker_db_instance.cache.wait_for_pending_writes(timeout=10))
+            except Exception as e_cache:
+                pass  # Ignore cache cleanup errors
+        
         if worker_db_instance and hasattr(worker_db_instance, 'close_session') and callable(worker_db_instance.close_session):
             try:
                 if loop and not loop.is_closed():
@@ -205,8 +227,14 @@ def fetch_comprehensive_data(
             except Exception as e_close:
                 print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
         
-        # Close the event loop
+        # Close the event loop - run pending callbacks first to clean up tasks
         if loop and not loop.is_closed():
+            try:
+                # Run pending callbacks to ensure task cleanup
+                loop.run_until_complete(asyncio.sleep(0))
+                loop.run_until_complete(asyncio.sleep(0))  # Run twice to be sure
+            except Exception:
+                pass
             loop.close()
 
 def fetch_financial_info(
@@ -222,14 +250,14 @@ def fetch_financial_info(
     worker_db_instance = None
     loop = None
     try:
-        if client_timeout is not None:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
-        else:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
-        
-        # Create a new event loop for this thread
+        # Create a new event loop for this thread BEFORE creating the database
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        
+        if client_timeout is not None:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level, auto_init=False)
+        else:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level, auto_init=False)
         
         # Get API key from environment
         api_key = os.getenv('POLYGON_API_KEY')
@@ -265,6 +293,14 @@ def fetch_financial_info(
     except Exception as e:
         return {"symbol": symbol, "success": False, "error": str(e)}
     finally:
+        # Wait for pending cache writes to complete
+        if worker_db_instance and hasattr(worker_db_instance, 'cache') and hasattr(worker_db_instance.cache, 'wait_for_pending_writes'):
+            try:
+                if loop and not loop.is_closed():
+                    loop.run_until_complete(worker_db_instance.cache.wait_for_pending_writes(timeout=10))
+            except Exception as e_cache:
+                pass  # Ignore cache cleanup errors
+        
         if worker_db_instance and hasattr(worker_db_instance, 'close_session') and callable(worker_db_instance.close_session):
             try:
                 if loop and not loop.is_closed():
@@ -272,8 +308,14 @@ def fetch_financial_info(
             except Exception as e_close:
                 print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
         
-        # Close the event loop
+        # Close the event loop - run pending callbacks first to clean up tasks
         if loop and not loop.is_closed():
+            try:
+                # Run pending callbacks to ensure task cleanup
+                loop.run_until_complete(asyncio.sleep(0))
+                loop.run_until_complete(asyncio.sleep(0))  # Run twice to be sure
+            except Exception:
+                pass
             loop.close()
 
 def fetch_latest_data(
@@ -291,14 +333,14 @@ def fetch_latest_data(
     worker_db_instance = None
     loop = None
     try:
-        if client_timeout is not None:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
-        else:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
-        
-        # Create a new event loop for this thread
+        # Create a new event loop for this thread BEFORE creating the database
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        
+        if client_timeout is not None:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level, auto_init=False)
+        else:
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level, auto_init=False)
         
         # Get today's daily data
         today_str = datetime.now().strftime('%Y-%m-%d')
@@ -355,6 +397,14 @@ def fetch_latest_data(
     except Exception as e:
         return {"symbol": symbol, "error": str(e)}
     finally:
+        # Wait for pending cache writes to complete
+        if worker_db_instance and hasattr(worker_db_instance, 'cache') and hasattr(worker_db_instance.cache, 'wait_for_pending_writes'):
+            try:
+                if loop and not loop.is_closed():
+                    loop.run_until_complete(worker_db_instance.cache.wait_for_pending_writes(timeout=10))
+            except Exception as e_cache:
+                pass  # Ignore cache cleanup errors
+        
         if worker_db_instance and hasattr(worker_db_instance, 'close_session') and callable(worker_db_instance.close_session):
             try:
                 if loop and not loop.is_closed():
@@ -362,8 +412,14 @@ def fetch_latest_data(
             except Exception as e_close:
                 print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
         
-        # Close the event loop
+        # Close the event loop - run pending callbacks first to clean up tasks
         if loop and not loop.is_closed():
+            try:
+                # Run pending callbacks to ensure task cleanup
+                loop.run_until_complete(asyncio.sleep(0))
+                loop.run_until_complete(asyncio.sleep(0))  # Run twice to be sure
+            except Exception:
+                pass
             loop.close()
 
 def fetch_price_and_save(
@@ -392,16 +448,16 @@ def fetch_price_and_save(
     worker_db_instance = None
     loop = None
     try:
+        # Create a new event loop for this thread BEFORE creating the database
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
         # Each worker thread creates its own StockDBBase instance.
         logger.debug(f"Worker thread for {symbol}: Initializing DB type '{db_type_for_worker}' with config '{db_config_for_worker}'")
         if client_timeout is not None:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, timeout=client_timeout, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level, auto_init=False)
         else:
-            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level)
-        
-        # Create a new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+            worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level, auto_init=False)
         
         # Run the async function
         result = loop.run_until_complete(fetch_and_save_data(
@@ -422,6 +478,14 @@ def fetch_price_and_save(
         print(f"Error in worker thread for symbol {symbol}: {e}", file=sys.stderr)
         return False
     finally:
+        # Wait for pending cache writes to complete
+        if worker_db_instance and hasattr(worker_db_instance, 'cache') and hasattr(worker_db_instance.cache, 'wait_for_pending_writes'):
+            try:
+                if loop and not loop.is_closed():
+                    loop.run_until_complete(worker_db_instance.cache.wait_for_pending_writes(timeout=10))
+            except Exception as e_cache:
+                pass  # Ignore cache cleanup errors
+        
         # Close database session if needed
         if worker_db_instance and hasattr(worker_db_instance, 'close_session') and callable(worker_db_instance.close_session):
             try:
@@ -432,8 +496,14 @@ def fetch_price_and_save(
             except Exception as e_close:
                 print(f"Error closing DB in worker thread for symbol {symbol}: {e_close}", file=sys.stderr)
         
-        # Close the event loop
+        # Close the event loop - run pending callbacks first to clean up tasks
         if loop and not loop.is_closed():
+            try:
+                # Run pending callbacks to ensure task cleanup
+                loop.run_until_complete(asyncio.sleep(0))
+                loop.run_until_complete(asyncio.sleep(0))  # Run twice to be sure
+            except Exception:
+                pass
             loop.close()
 
 def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Namespace, db_type: str, db_config: str, stock_executor_type: str, max_concurrent: int | None) -> tuple[int, int]:
@@ -653,7 +723,7 @@ def process_symbols_per_output(all_symbols_list: list[str], args: argparse.Names
     print(f"{os.getpid()} Completed processing for database {db_config}: {success_count} stock successes, {failure_count} stock failures, {financial_success_count} financial successes, {financial_failure_count} financial failures", file=sys.stderr, flush=True)
     return (success_count, failure_count)
 
-async def process_symbols(all_symbols_list: list[str], args: argparse.Namespace, db_configs_for_workers: list[tuple[str, str]]):
+def process_symbols(all_symbols_list: list[str], args: argparse.Namespace, db_configs_for_workers: list[tuple[str, str]]):
     executor_max_workers = max(args.max_concurrent if args.max_concurrent and args.max_concurrent > 0 else (os.cpu_count() or 1 * 5), os.cpu_count() or 1)
     
     executor_class = ThreadPoolExecutor if args.executor_type == 'thread' else ProcessPoolExecutor
@@ -712,10 +782,7 @@ def _continuous_iteration_worker(
         Dictionary with ``success_count`` and ``failure_count`` for the iteration.
     """
 
-    async def _runner() -> tuple[int, int]:
-        return await process_symbols(all_symbols_list, iteration_args, db_configs_for_workers)
-
-    success_count, failure_count = asyncio.run(_runner())
+    success_count, failure_count = process_symbols(all_symbols_list, iteration_args, db_configs_for_workers)
     return {
         "success_count": success_count,
         "failure_count": failure_count,
@@ -1338,7 +1405,7 @@ async def main():
             print(f"Fetching market data for {len(all_symbols_list)} symbols using {args.executor_type} pool...")
             print(f"Enhanced features enabled: Volume={args.include_volume}, Comprehensive={args.comprehensive_data}")
             
-            (success_count, failure_count) = await process_symbols(all_symbols_list, args, db_configs_for_workers)
+            (success_count, failure_count) = process_symbols(all_symbols_list, args, db_configs_for_workers)
             
             # Display final results
             end_time = get_timezone_aware_time(args.timezone)

@@ -501,6 +501,10 @@ class RedisCache:
                 task = asyncio.current_task()
                 try:
                     await self.set(key, df, ttl)
+                except asyncio.CancelledError:
+                    # Task was cancelled during shutdown - this is expected
+                    self.logger.debug(f"Fire-and-forget cache write cancelled for key {key}")
+                    raise  # Re-raise to complete cancellation
                 except Exception as e:
                     # Log error but don't propagate (fire-and-forget)
                     self.logger.debug(f"Fire-and-forget cache set error for key {key}: {e}")
@@ -514,16 +518,6 @@ class RedisCache:
             if loop_id not in self._pending_writes:
                 self._pending_writes[loop_id] = set()
             self._pending_writes[loop_id].add(task)
-            
-            # Add done callback to track completion
-            async def _track_task():
-                try:
-                    await task
-                except Exception as e:
-                    self.logger.debug(f"Fire-and-forget task error for key {key}: {e}")
-            
-            # Don't await - just schedule it
-            loop.create_task(_track_task())
             
         except RuntimeError:
             # No event loop running
@@ -543,8 +537,33 @@ class RedisCache:
                 pending_tasks = list(self._pending_writes[loop_id])
                 if pending_tasks:
                     self.logger.debug(f"Waiting for {len(pending_tasks)} pending cache writes...")
-                    await asyncio.wait(pending_tasks, timeout=timeout)
-                    self.logger.debug("All pending cache writes completed")
+                    
+                    try:
+                        # Use asyncio.gather to properly await and clean up all tasks
+                        if timeout:
+                            await asyncio.wait_for(
+                                asyncio.gather(*pending_tasks, return_exceptions=True),
+                                timeout=timeout
+                            )
+                        else:
+                            await asyncio.gather(*pending_tasks, return_exceptions=True)
+                        
+                        self.logger.debug(f"All {len(pending_tasks)} cache writes completed")
+                    except asyncio.TimeoutError:
+                        self.logger.debug(f"Cache write timeout after {timeout}s, cancelling remaining tasks...")
+                        # Cancel any remaining tasks
+                        for task in pending_tasks:
+                            if not task.done():
+                                task.cancel()
+                        
+                        # Wait briefly for cancellations
+                        try:
+                            await asyncio.gather(*pending_tasks, return_exceptions=True)
+                        except Exception:
+                            pass
+                    
+                    # Clear the tracking set for this loop
+                    self._pending_writes[loop_id].clear()
 
         except RuntimeError:
             # No event loop running
