@@ -622,8 +622,26 @@ class RedisCache:
         loop_id = id(loop)
         client = self._redis_by_loop.get(loop_id)
         
+        # Check if cached client is still alive, recreate if not
+        if client is not None:
+            try:
+                # Quick health check - ping with short timeout
+                await asyncio.wait_for(client.ping(), timeout=1.0)
+            except (Exception, asyncio.TimeoutError) as e:
+                # Connection is dead or unresponsive, remove from cache
+                self.logger.debug(f"Redis client for loop {loop_id} is dead ({e}), recreating...")
+                old_client = client
+                self._redis_by_loop.pop(loop_id, None)
+                client = None
+                try:
+                    # Try to close the old client cleanly
+                    await old_client.close()
+                except Exception:
+                    pass
+        
         if client is None:
             async with self._redis_init_lock:
+                # Double-check after acquiring lock
                 client = self._redis_by_loop.get(loop_id)
                 if client is None:
                     try:
@@ -634,12 +652,23 @@ class RedisCache:
                                 decode_responses=False,
                                 socket_connect_timeout=10,
                                 socket_timeout=10,
+                                socket_keepalive=True,
+                                socket_keepalive_options={},
                                 require_full_coverage=False
                             )
                             self.logger.debug(f"Created Redis Cluster client for loop {loop_id}")
                         else:
-                            # Use single-instance Redis
-                            client = redis.from_url(self.redis_url, decode_responses=False)
+                            # Use single-instance Redis with connection pool settings
+                            client = redis.from_url(
+                                self.redis_url, 
+                                decode_responses=False,
+                                socket_connect_timeout=10,
+                                socket_timeout=10,
+                                socket_keepalive=True,
+                                socket_keepalive_options={},
+                                retry_on_timeout=True,
+                                health_check_interval=30
+                            )
                             self.logger.debug(f"Created Redis single-instance client for loop {loop_id}")
                         
                         self._redis_by_loop[loop_id] = client
@@ -1136,7 +1165,8 @@ class RedisCache:
                 self.logger.debug(f"Redis DELETE: key={key} not found (may not exist)")
             return bool(result)
         except Exception as e:
-            self.logger.error(f"Redis DELETE error for key {key}: {e}")
+            # Downgrade to warning since this is handled gracefully and shouldn't alarm users
+            self.logger.warning(f"Redis DELETE error for key {key}: {e} (will retry on next operation)")
             self._stats['errors'] += 1
             return False
     
