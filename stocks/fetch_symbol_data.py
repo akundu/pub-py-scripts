@@ -3576,5 +3576,645 @@ def _get_fetch_meta_age_seconds(data_dir: str, symbol: str, interval: str) -> di
     except Exception:
         return None
 
+
+# ============================================================================
+# Stock Info Data Fetching Functions
+# These functions are used by both stock_info_display.py and db_server.py
+# ============================================================================
+
+async def get_price_info(
+    symbol: str,
+    db_instance: StockDBBase,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    force_fetch: bool = False,
+    data_source: str = "polygon",
+    timezone_str: Optional[str] = None,
+    latest_only: bool = False
+) -> Dict[str, Any]:
+    """Get price information for a symbol.
+    
+    Args:
+        latest_only: If True, only fetch latest price and skip historical data
+    """
+    result = {
+        "symbol": symbol,
+        "current_price": None,
+        "price_data": None,
+        "error": None
+    }
+    
+    try:
+        # Get current/latest price
+        if force_fetch:
+            # Force fetch from API
+            price_info = await get_current_price(
+                symbol,
+                data_source=data_source,
+                stock_db_instance=db_instance,
+                max_age_seconds=0  # Force fresh fetch
+            )
+        else:
+            # Try DB first, then API if needed
+            price_info = await get_current_price(
+                symbol,
+                data_source=data_source,
+                stock_db_instance=db_instance,
+                max_age_seconds=600  # 10 minutes
+            )
+        
+        if price_info:
+            result["current_price"] = price_info
+        
+        # Get historical price data if date range specified and not latest_only
+        if not latest_only and (start_date or end_date):
+            price_df = await process_symbol_data(
+                symbol=symbol,
+                timeframe="daily",
+                start_date=start_date,
+                end_date=end_date,
+                stock_db_instance=db_instance,
+                force_fetch=force_fetch,
+                query_only=not force_fetch,
+                data_source=data_source,
+                log_level="ERROR"  # Suppress verbose logging
+            )
+            
+            if not price_df.empty:
+                result["price_data"] = price_df
+        
+    except Exception as e:
+        result["error"] = str(e)
+        logger.error(f"Error getting price info for {symbol}: {e}")
+    
+    return result
+
+
+async def get_options_info(
+    symbol: str,
+    db_instance: StockDBBase,
+    options_days: int = 180,
+    force_fetch: bool = False,
+    data_source: str = "polygon",
+    option_type: str = "all",
+    strike_range_percent: Optional[int] = None,
+    max_options_per_expiry: int = 10,
+    enable_cache: bool = True,
+    redis_url: Optional[str] = None
+) -> Dict[str, Any]:
+    """Get options information for a symbol."""
+    import time
+    fetch_start = time.time()
+    
+    result = {
+        "symbol": symbol,
+        "options_data": None,
+        "error": None,
+        "source": None,
+        "fetch_time_ms": None
+    }
+    
+    try:
+        # Import here to avoid circular dependencies
+        from scripts.fetch_options import HistoricalDataFetcher
+        
+        # Get current stock price for strike range calculation
+        stock_price = None
+        try:
+            price_info = await get_current_price(
+                symbol,
+                data_source=data_source,
+                stock_db_instance=db_instance,
+                max_age_seconds=3600  # 1 hour is fine for options
+            )
+            if price_info and price_info.get("price"):
+                stock_price = price_info["price"]
+        except Exception:
+            pass  # Continue without stock price
+        
+        # Calculate date range for options
+        today = datetime.now().date()
+        end_date = today + timedelta(days=options_days)
+        target_date_str = today.strftime("%Y-%m-%d")
+        
+        # Check if we should fetch from API or use DB
+        if force_fetch:
+            # Force fetch from Polygon API
+            if not POLYGON_AVAILABLE:
+                result["error"] = "Polygon API client not available"
+                return result
+            
+            api_key = os.getenv("POLYGON_API_KEY")
+            if not api_key:
+                result["error"] = "POLYGON_API_KEY environment variable not set"
+                return result
+            
+            api_fetch_start = time.time()
+            fetcher = HistoricalDataFetcher(api_key, quiet=True)
+            options_result = await fetcher.get_active_options_for_date(
+                symbol=symbol,
+                target_date_str=target_date_str,
+                option_type=option_type,
+                stock_close_price=stock_price,
+                strike_range_percent=strike_range_percent,
+                max_days_to_expiry=options_days,
+                include_expired=False,
+                use_db=False,
+                force_fresh=True
+            )
+            api_fetch_time = (time.time() - api_fetch_start) * 1000
+            fetch_time = (time.time() - fetch_start) * 1000
+            
+            result["options_data"] = options_result
+            result["source"] = "api"
+            result["fetch_time_ms"] = fetch_time
+            logger.info(f"[OPTIONS API FETCH] Options for {symbol} (api_fetch: {api_fetch_time:.1f}ms, total: {fetch_time:.1f}ms)")
+        else:
+            # Try DB first
+            try:
+                # Get options from database
+                db_conn = None
+                if hasattr(db_instance, "db_config"):
+                    db_conn = db_instance.db_config
+                elif hasattr(db_instance, "connection_string"):
+                    db_conn = db_instance.connection_string
+                
+                if db_conn:
+                    # Use HistoricalDataFetcher to query DB
+                    api_key = os.getenv("POLYGON_API_KEY", "")  # Not used when use_db=True
+                    fetcher = HistoricalDataFetcher(api_key, quiet=True)
+                    
+                    db_fetch_start = time.time()
+                    options_result = await fetcher.get_active_options_for_date(
+                        symbol=symbol,
+                        target_date_str=target_date_str,
+                        option_type=option_type,
+                        stock_close_price=stock_price,
+                        strike_range_percent=strike_range_percent,
+                        max_days_to_expiry=options_days,
+                        include_expired=False,
+                        use_db=True,
+                        db_conn=db_conn,
+                        force_fresh=False,
+                        enable_cache=enable_cache,
+                        redis_url=redis_url
+                    )
+                    db_fetch_time = (time.time() - db_fetch_start) * 1000
+                    fetch_time = (time.time() - fetch_start) * 1000
+                    
+                    result["options_data"] = options_result
+                    result["source"] = "database"
+                    result["fetch_time_ms"] = fetch_time
+                    logger.info(f"[OPTIONS DB HIT] Options for {symbol} (db_fetch: {db_fetch_time:.1f}ms, total: {fetch_time:.1f}ms)")
+                else:
+                    # Fallback to API if no DB connection
+                    if POLYGON_AVAILABLE:
+                        api_key = os.getenv("POLYGON_API_KEY")
+                        if api_key:
+                            api_fetch_start = time.time()
+                            fetcher = HistoricalDataFetcher(api_key, quiet=True)
+                            options_result = await fetcher.get_active_options_for_date(
+                                symbol=symbol,
+                                target_date_str=target_date_str,
+                                option_type=option_type,
+                                stock_close_price=stock_price,
+                                strike_range_percent=strike_range_percent,
+                                max_days_to_expiry=options_days,
+                                include_expired=False,
+                                use_db=False,
+                                force_fresh=False
+                            )
+                            api_fetch_time = (time.time() - api_fetch_start) * 1000
+                            fetch_time = (time.time() - fetch_start) * 1000
+                            
+                            result["options_data"] = options_result
+                            result["source"] = "api"
+                            result["fetch_time_ms"] = fetch_time
+                            logger.info(f"[OPTIONS API FETCH] Options for {symbol} (api_fetch: {api_fetch_time:.1f}ms, total: {fetch_time:.1f}ms)")
+                        else:
+                            result["error"] = "POLYGON_API_KEY not set and no DB connection available"
+                    else:
+                        result["error"] = "No database connection and Polygon API not available"
+            except Exception as e:
+                logger.warning(f"[OPTIONS DB ERROR] Error getting options from DB for {symbol}: {e}, trying API...")
+                # Fallback to API
+                if POLYGON_AVAILABLE:
+                    api_key = os.getenv("POLYGON_API_KEY")
+                    if api_key:
+                        api_fetch_start = time.time()
+                        fetcher = HistoricalDataFetcher(api_key, quiet=True)
+                        options_result = await fetcher.get_active_options_for_date(
+                            symbol=symbol,
+                            target_date_str=target_date_str,
+                            option_type=option_type,
+                            stock_close_price=stock_price,
+                            strike_range_percent=strike_range_percent,
+                            max_days_to_expiry=options_days,
+                            include_expired=False,
+                            use_db=False,
+                            force_fresh=False
+                        )
+                        api_fetch_time = (time.time() - api_fetch_start) * 1000
+                        fetch_time = (time.time() - fetch_start) * 1000
+                        
+                        result["options_data"] = options_result
+                        result["source"] = "api"
+                        result["fetch_time_ms"] = fetch_time
+                        logger.info(f"[OPTIONS API FETCH] Options for {symbol} (api_fetch: {api_fetch_time:.1f}ms, total: {fetch_time:.1f}ms)")
+    
+    except Exception as e:
+        result["error"] = str(e)
+        logger.error(f"Error getting options info for {symbol}: {e}")
+    
+    return result
+
+
+async def get_financial_info(
+    symbol: str,
+    db_instance: StockDBBase,
+    force_fetch: bool = False
+) -> Dict[str, Any]:
+    """Get financial ratios/information for a symbol."""
+    import time
+    fetch_start = time.time()
+    
+    result = {
+        "symbol": symbol,
+        "financial_data": None,
+        "error": None,
+        "source": None,
+        "fetch_time_ms": None
+    }
+    
+    try:
+        # Get cache instance if available
+        cache_instance = None
+        if hasattr(db_instance, 'cache') and db_instance.cache:
+            cache_instance = db_instance.cache
+        
+        # Check cache first (if not force_fetch)
+        if not force_fetch and cache_instance:
+            try:
+                from common.redis_cache import CacheKeyGenerator
+                cache_key = CacheKeyGenerator.financial_info(symbol)
+                cache_check_start = time.time()
+                cached_df = await cache_instance.get(cache_key)
+                cache_check_time = (time.time() - cache_check_start) * 1000
+                
+                if cached_df is not None and not cached_df.empty:
+                    # Convert DataFrame back to dict
+                    cached_financial = cached_df.iloc[0].to_dict()
+                    fetch_time = (time.time() - fetch_start) * 1000
+                    result["financial_data"] = cached_financial
+                    result["source"] = "cache"
+                    result["fetch_time_ms"] = fetch_time
+                    logger.info(f"[FINANCIAL CACHE HIT] Financial data for {symbol} (cache_check: {cache_check_time:.1f}ms, total: {fetch_time:.1f}ms)")
+                    return result
+                else:
+                    logger.debug(f"[FINANCIAL CACHE MISS] No cached financial data for {symbol} (cache_check: {cache_check_time:.1f}ms)")
+            except Exception as e:
+                logger.debug(f"[FINANCIAL CACHE ERROR] Cache check failed for {symbol}: {e}")
+        
+        # Try DB first if not forcing fetch
+        if not force_fetch:
+            try:
+                db_check_start = time.time()
+                financial_df = await db_instance.get_financial_info(symbol)
+                db_check_time = (time.time() - db_check_start) * 1000
+                
+                if not financial_df.empty:
+                    # Get the most recent entry
+                    latest = financial_df.iloc[-1].to_dict()
+                    fetch_time = (time.time() - fetch_start) * 1000
+                    result["financial_data"] = latest
+                    result["source"] = "database"
+                    result["fetch_time_ms"] = fetch_time
+                    logger.info(f"[FINANCIAL DB HIT] Financial data for {symbol} (db_check: {db_check_time:.1f}ms, total: {fetch_time:.1f}ms)")
+                    
+                    # Cache the result
+                    if cache_instance:
+                        try:
+                            from common.redis_cache import CacheKeyGenerator
+                            import pandas as pd
+                            cache_key = CacheKeyGenerator.financial_info(symbol)
+                            cache_df = pd.DataFrame([latest])
+                            cache_set_start = time.time()
+                            await cache_instance.set(cache_key, cache_df, ttl=3600)  # 1 hour TTL
+                            cache_set_time = (time.time() - cache_set_start) * 1000
+                            logger.info(f"[FINANCIAL CACHE SET] Cached financial data for {symbol} (set_time: {cache_set_time:.1f}ms, ttl: 3600s)")
+                        except Exception as e:
+                            logger.debug(f"[FINANCIAL CACHE ERROR] Failed to cache financial data for {symbol}: {e}")
+                    
+                    return result
+            except Exception as e:
+                logger.debug(f"[FINANCIAL DB ERROR] Error getting financial info from DB for {symbol}: {e}")
+        
+        # Fetch from API
+        api_key = os.getenv("POLYGON_API_KEY")
+        if not api_key:
+            result["error"] = "POLYGON_API_KEY environment variable not set"
+            return result
+        
+        api_fetch_start = time.time()
+        ratios = await get_financial_ratios(symbol, api_key)
+        api_fetch_time = (time.time() - api_fetch_start) * 1000
+        fetch_time = (time.time() - fetch_start) * 1000
+        
+        if ratios:
+            result["financial_data"] = ratios
+            result["source"] = "api"
+            result["fetch_time_ms"] = fetch_time
+            logger.info(f"[FINANCIAL API FETCH] Financial data for {symbol} (api_fetch: {api_fetch_time:.1f}ms, total: {fetch_time:.1f}ms)")
+            
+            # Save to DB if we have a DB instance
+            try:
+                await db_instance.save_financial_info(symbol, ratios)
+            except Exception as e:
+                logger.debug(f"[FINANCIAL DB SAVE ERROR] Error saving financial info to DB for {symbol}: {e}")
+            
+            # Cache the result
+            if cache_instance:
+                try:
+                    from common.redis_cache import CacheKeyGenerator
+                    import pandas as pd
+                    cache_key = CacheKeyGenerator.financial_info(symbol)
+                    cache_df = pd.DataFrame([ratios])
+                    cache_set_start = time.time()
+                    await cache_instance.set(cache_key, cache_df, ttl=3600)  # 1 hour TTL
+                    cache_set_time = (time.time() - cache_set_start) * 1000
+                    logger.info(f"[FINANCIAL CACHE SET] Cached financial data for {symbol} (set_time: {cache_set_time:.1f}ms, ttl: 3600s)")
+                except Exception as e:
+                    logger.debug(f"[FINANCIAL CACHE ERROR] Failed to cache financial data for {symbol}: {e}")
+        else:
+            result["error"] = "No financial ratios data available"
+    
+    except Exception as e:
+        result["error"] = str(e)
+        logger.error(f"[FINANCIAL ERROR] Error getting financial info for {symbol}: {e}")
+    
+    return result
+
+
+async def get_news_info(
+    symbol: str,
+    db_instance: StockDBBase,
+    force_fetch: bool = False,
+    enable_cache: bool = True
+) -> Dict[str, Any]:
+    """Get latest news for a symbol."""
+    import time
+    fetch_start = time.time()
+    
+    result = {
+        "symbol": symbol,
+        "news_data": None,
+        "error": None,
+        "freshness": None
+    }
+    
+    try:
+        api_key = os.getenv("POLYGON_API_KEY")
+        if not api_key:
+            result["error"] = "POLYGON_API_KEY environment variable not set"
+            return result
+        
+        # Get cache instance if available
+        cache_instance = None
+        if enable_cache and hasattr(db_instance, 'cache') and db_instance.cache:
+            cache_instance = db_instance.cache
+        
+        news_data = await get_latest_news(
+            symbol,
+            api_key,
+            max_items=10,
+            cache_instance=cache_instance if not force_fetch else None,
+            cache_ttl=3600  # 1 hour TTL
+        )
+        
+        fetch_time = (time.time() - fetch_start) * 1000
+        
+        if news_data:
+            logger.info(f"[NEWS] Fetched {news_data.get('count', 0)} news articles for {symbol} (fetch_time: {fetch_time:.1f}ms, cached: {not force_fetch and cache_instance is not None})")
+            result["news_data"] = news_data
+            
+            # Calculate freshness
+            if news_data.get('fetched_at'):
+                try:
+                    fetched_dt = datetime.fromisoformat(news_data['fetched_at'].replace('Z', '+00:00'))
+                    age_seconds = (datetime.now(timezone.utc) - fetched_dt).total_seconds()
+                    result["freshness"] = {
+                        "age_seconds": age_seconds,
+                        "age_minutes": age_seconds / 60,
+                        "is_fresh": age_seconds < 3600,  # Fresh if less than 1 hour old
+                        "needs_refetch": age_seconds > 7200  # Needs refetch if older than 2 hours
+                    }
+                except Exception:
+                    pass
+        else:
+            result["error"] = "No news data available"
+    
+    except Exception as e:
+        result["error"] = str(e)
+        logger.error(f"Error getting news info for {symbol}: {e}")
+    
+    return result
+
+
+async def get_iv_info(
+    symbol: str,
+    db_instance: StockDBBase,
+    force_fetch: bool = False,
+    enable_cache: bool = True
+) -> Dict[str, Any]:
+    """Get latest IV information for a symbol."""
+    result = {
+        "symbol": symbol,
+        "iv_data": None,
+        "error": None,
+        "freshness": None
+    }
+    
+    try:
+        # Get cache instance if available
+        cache_instance = None
+        if enable_cache and hasattr(db_instance, 'cache') and db_instance.cache:
+            cache_instance = db_instance.cache
+        
+        import time
+        iv_fetch_start = time.time()
+        iv_data = await get_latest_iv(
+            symbol,
+            db_instance=db_instance,
+            cache_instance=cache_instance if not force_fetch else None,
+            cache_ttl=300  # 5 minutes TTL
+        )
+        iv_fetch_time = (time.time() - iv_fetch_start) * 1000
+        
+        if iv_data:
+            iv_source = iv_data.get('source', 'unknown')
+            logger.info(f"[IV] Fetched IV data for {symbol} from {iv_source} (count: {iv_data.get('statistics', {}).get('count', 0)}, fetch_time: {iv_fetch_time:.1f}ms)")
+            result["iv_data"] = iv_data
+            result["source"] = iv_source
+            result["fetch_time_ms"] = iv_fetch_time
+            
+            # Calculate freshness
+            if iv_data.get('fetched_at'):
+                try:
+                    fetched_dt = datetime.fromisoformat(iv_data['fetched_at'].replace('Z', '+00:00'))
+                    age_seconds = (datetime.now(timezone.utc) - fetched_dt).total_seconds()
+                    result["freshness"] = {
+                        "age_seconds": age_seconds,
+                        "age_minutes": age_seconds / 60,
+                        "is_fresh": age_seconds < 300,  # Fresh if less than 5 minutes old
+                        "needs_refetch": age_seconds > 600  # Needs refetch if older than 10 minutes
+                    }
+                except Exception:
+                    pass
+        else:
+            result["error"] = "No IV data available (options data may not be available)"
+    
+    except Exception as e:
+        result["error"] = str(e)
+        logger.error(f"Error getting IV info for {symbol}: {e}")
+    
+    return result
+
+
+async def get_stock_info_parallel(
+    symbol: str,
+    db_instance: StockDBBase,
+    *,
+    # Price parameters
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    force_fetch: bool = False,
+    data_source: str = "polygon",
+    timezone_str: Optional[str] = None,
+    latest_only: bool = False,
+    # Options parameters
+    options_days: int = 180,
+    option_type: str = "all",
+    strike_range_percent: Optional[int] = None,
+    max_options_per_expiry: int = 10,
+    # Financial parameters (no additional params)
+    # News parameters (no additional params)
+    # IV parameters (no additional params)
+    # Common parameters
+    show_news: bool = False,
+    show_iv: bool = False,
+    enable_cache: bool = True,
+    redis_url: Optional[str] = None
+) -> Dict[str, Any]:
+    """Get all stock information in parallel.
+    
+    This function fetches price, options, financial, news (if requested), and IV (if requested)
+    data simultaneously using asyncio.gather for optimal performance.
+    
+    Returns:
+        Dictionary with keys: price_info, options_info, financial_info, news_info (if show_news),
+        iv_info (if show_iv), and fetch_time_ms
+    """
+    import time
+    parallel_start = time.time()
+    
+    result = {
+        "symbol": symbol,
+        "price_info": None,
+        "options_info": None,
+        "financial_info": None,
+        "news_info": None,
+        "iv_info": None,
+        "fetch_time_ms": None
+    }
+    
+    # Create all tasks
+    tasks = []
+    task_keys = []
+    
+    # Price info (always needed)
+    tasks.append(get_price_info(
+        symbol,
+        db_instance,
+        start_date=start_date,
+        end_date=end_date,
+        force_fetch=force_fetch,
+        data_source=data_source,
+        timezone_str=timezone_str,
+        latest_only=latest_only
+    ))
+    task_keys.append('price')
+    
+    # Options info (always needed)
+    tasks.append(get_options_info(
+        symbol,
+        db_instance,
+        options_days=options_days,
+        force_fetch=force_fetch,
+        data_source=data_source,
+        option_type=option_type,
+        strike_range_percent=strike_range_percent,
+        max_options_per_expiry=max_options_per_expiry,
+        enable_cache=enable_cache,
+        redis_url=redis_url
+    ))
+    task_keys.append('options')
+    
+    # Financial info (always needed)
+    tasks.append(get_financial_info(
+        symbol,
+        db_instance,
+        force_fetch=force_fetch
+    ))
+    task_keys.append('financial')
+    
+    # News info (if requested)
+    if show_news:
+        tasks.append(get_news_info(
+            symbol,
+            db_instance,
+            force_fetch=force_fetch,
+            enable_cache=enable_cache
+        ))
+        task_keys.append('news')
+    else:
+        async def return_none_news():
+            return None
+        tasks.append(return_none_news())
+        task_keys.append('news')
+    
+    # IV info (if requested)
+    if show_iv:
+        tasks.append(get_iv_info(
+            symbol,
+            db_instance,
+            force_fetch=force_fetch,
+            enable_cache=enable_cache
+        ))
+        task_keys.append('iv')
+    else:
+        async def return_none_iv():
+            return None
+        tasks.append(return_none_iv())
+        task_keys.append('iv')
+    
+    # Execute all tasks in parallel
+    logger.debug(f"[PARALLEL] Starting {len(tasks)} parallel data fetches for {symbol}")
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    parallel_time = (time.time() - parallel_start) * 1000
+    logger.debug(f"[PARALLEL] Completed all {len(tasks)} parallel fetches for {symbol} in {parallel_time:.1f}ms")
+    
+    # Map results to keys
+    for key, res in zip(task_keys, results):
+        if isinstance(res, Exception):
+            logger.error(f"Error fetching {key} info for {symbol}: {res}")
+            result[f"{key}_info"] = {"error": str(res)}
+        else:
+            result[f"{key}_info"] = res
+    
+    result["fetch_time_ms"] = parallel_time
+    
+    return result
+
+
 if __name__ == "__main__":
     asyncio.run(main())
