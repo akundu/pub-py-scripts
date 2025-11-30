@@ -1353,6 +1353,7 @@ async def get_current_price(
         stock_db_instance: Optional database instance
         db_type: Database type if no instance provided
         db_path: Database path if no instance provided
+        max_age_seconds: Maximum age of cached data in seconds
         
     Returns:
         Dictionary containing price information:
@@ -1363,9 +1364,13 @@ async def get_current_price(
             'ask_price': float,
             'timestamp': str,
             'source': str,
-            'data_source': str
+            'data_source': str,
+            'cache_hit': bool,
+            'fetch_time_ms': float
         }
     """
+    import time
+    fetch_start = time.time()
     
     # Initialize database instance if not provided
     current_db_instance = stock_db_instance
@@ -1399,13 +1404,34 @@ async def get_current_price(
             # Local database - use specified type
             current_db_instance = get_stock_db(db_type, actual_db_path, log_level=log_level)
     
+    # Check if market is open to adjust age tolerance
+    from common.market_hours import is_market_hours
+    market_is_open = is_market_hours()
+    
     # First, try to get the latest price from the database
+    # The service method (get_latest_price_with_data) handles caching internally
+    # Adjust max_age_seconds when market is closed - daily close prices are valid even if old
+    effective_max_age = max_age_seconds
+    
+    # When market is closed, be more lenient with age checks for daily/hourly data
+    # Daily close prices from the last trading day are perfectly valid
+    if not market_is_open:
+        # Accept daily/hourly data up to 7 days old when market is closed
+        # This covers weekends and holidays
+        effective_max_age = max(max_age_seconds, 7 * 24 * 3600)  # At least 7 days
+        logging.debug(f"[DB] Market CLOSED: Using relaxed max_age of {effective_max_age}s for {symbol}")
+    else:
+        logging.debug(f"[DB] Market OPEN: Using max_age of {max_age_seconds}s for {symbol}")
+    
+    logging.debug(f"[DB] Checking database for latest price for {symbol} (max_age: {effective_max_age}s)")
+    db_check_start = time.time()
     try:
         db_price_data = await _get_latest_price_with_timestamp(current_db_instance, symbol)
         if db_price_data and db_price_data['price'] is not None:
             # Check if the price is recent enough using both timestamp and write_timestamp
             price_timestamp = db_price_data['timestamp']
             write_timestamp = db_price_data.get('write_timestamp')
+            source = db_price_data.get('source', 'unknown')
             current_time = datetime.now(timezone.utc)
             
             # Calculate age of the price data (original timestamp) - ensure UTC comparison
@@ -1457,7 +1483,18 @@ async def get_current_price(
                 max_age_check_seconds = age_seconds
                 used_timestamp = "original"
             
-            if max_age_check_seconds <= max_age_seconds:
+            db_check_time = (time.time() - db_check_start) * 1000
+            
+            # When market is closed and data is from daily/hourly, be more lenient
+            # Daily close prices from last trading day are valid even if hours/days old
+            if not market_is_open and source in ('daily', 'hourly'):
+                # Accept daily/hourly data when market is closed, regardless of age
+                # (as long as it's not ridiculously old, e.g., > 30 days)
+                if max_age_check_seconds <= (30 * 24 * 3600):  # 30 days max
+                    max_age_check_seconds = 0  # Force acceptance by setting to 0
+                    logging.debug(f"[DB] Market CLOSED: Accepting {source} price for {symbol} (age: {age_seconds:.1f}s, source: {source})")
+            
+            if max_age_check_seconds <= effective_max_age:
                 # Show which age was used for the decision
                 if write_age_seconds is not None:
                     age_info = f"{used_timestamp} age: {max_age_check_seconds:.1f}s (used for decision)"
@@ -1465,8 +1502,11 @@ async def get_current_price(
                         age_info += f", write age: {write_age_seconds:.1f}s, original age: {age_seconds:.1f}s"
                 else:
                     age_info = f"price age: {age_seconds:.1f}s"
-                print(f"Found recent price for {symbol} in database: ${db_price_data['price']:.2f} ({age_info})", file=sys.stderr)
-                return {
+                
+                fetch_time = (time.time() - fetch_start) * 1000
+                logging.info(f"[DB HIT] Price for {symbol}: ${db_price_data['price']:.2f} (age: {age_info}, db_check: {db_check_time:.1f}ms, total: {fetch_time:.1f}ms)")
+                
+                result = {
                     'symbol': symbol,
                     'price': db_price_data['price'],
                     'bid_price': None,
@@ -1474,8 +1514,16 @@ async def get_current_price(
                     'timestamp': price_timestamp.isoformat() if hasattr(price_timestamp, 'isoformat') else str(price_timestamp),
                     'write_timestamp': write_timestamp.isoformat() if write_timestamp and hasattr(write_timestamp, 'isoformat') else str(write_timestamp) if write_timestamp else None,
                     'source': 'database',
-                    'data_source': data_source
+                    'data_source': data_source,
+                    'cache_hit': False,
+                    'fetch_time_ms': fetch_time,
+                    'db_check_time_ms': db_check_time
                 }
+                
+                # Note: Caching is handled by PriceService.get_latest_price_with_data() internally
+                # No need to cache here - the service method already does it
+                
+                return result
             else:
                 # Show which age was used for the decision
                 if write_age_seconds is not None:
@@ -1484,20 +1532,69 @@ async def get_current_price(
                         age_info += f", write age: {write_age_seconds:.1f}s, original age: {age_seconds:.1f}s"
                 else:
                     age_info = f"price age: {age_seconds:.1f}s"
-                logging.info(f"Database price for {symbol} is too old ({age_info} > {max_age_seconds}s), fetching fresh data")
+                db_check_time = (time.time() - db_check_start) * 1000
+                
+                # Only fetch from API if market is open or if data is really old (> 30 days)
+                if market_is_open or max_age_check_seconds > (30 * 24 * 3600):
+                    logging.info(f"[DB STALE] Price for {symbol} too old ({age_info} > {effective_max_age}s), fetching from API (db_check: {db_check_time:.1f}ms)")
+                else:
+                    # Market closed and data is reasonable age - use it anyway
+                    logging.debug(f"[DB] Market CLOSED: Using {source} price for {symbol} despite age ({age_info}) - market closed, so this is expected")
+                    fetch_time = (time.time() - fetch_start) * 1000
+                    result = {
+                        'symbol': symbol,
+                        'price': db_price_data['price'],
+                        'bid_price': None,
+                        'ask_price': None,
+                        'timestamp': price_timestamp.isoformat() if hasattr(price_timestamp, 'isoformat') else str(price_timestamp),
+                        'write_timestamp': write_timestamp.isoformat() if write_timestamp and hasattr(write_timestamp, 'isoformat') else str(write_timestamp) if write_timestamp else None,
+                        'source': f'database_{source}',
+                        'data_source': data_source,
+                        'cache_hit': False,
+                        'fetch_time_ms': fetch_time,
+                        'db_check_time_ms': db_check_time
+                    }
+                    
+                    # Note: Caching is handled by PriceService.get_latest_price_with_data() internally
+                    # No need to cache here - the service method already does it
+                    
+                    return result
     except Exception as e:
-        logging.error(f"Error getting price from database for {symbol}: {e}")
+        db_check_time = (time.time() - db_check_start) * 1000
+        logging.error(f"[DB ERROR] Error getting price from database for {symbol}: {e} (db_check: {db_check_time:.1f}ms)")
     
     # If no database price, fetch from API
+    logging.info(f"[API] Fetching price for {symbol} from {data_source} API (DB check completed)")
+    api_fetch_start = time.time()
     if data_source == "polygon":
-        return await _get_current_price_polygon(symbol, current_db_instance)
+        result = await _get_current_price_polygon(symbol, current_db_instance)
     elif data_source == "alpaca":
-        return await _get_current_price_alpaca(symbol, current_db_instance)
+        result = await _get_current_price_alpaca(symbol, current_db_instance)
     else:
         raise ValueError(f"Unsupported data source: {data_source}")
+    
+    # Add timing and cache info to result
+    api_fetch_time = (time.time() - api_fetch_start) * 1000
+    total_fetch_time = (time.time() - fetch_start) * 1000
+    result['cache_hit'] = False
+    result['fetch_time_ms'] = total_fetch_time
+    result['api_fetch_time_ms'] = api_fetch_time
+    
+    logging.info(f"[API FETCH] Price for {symbol}: ${result.get('price', 'N/A'):.2f} from {result.get('source', 'API')} (api_fetch: {api_fetch_time:.1f}ms, total: {total_fetch_time:.1f}ms)")
+    
+    # Note: For API results, we could cache them, but typically API results should go through
+    # the database first (which then gets cached by PriceService). However, if we're fetching
+    # directly from API (e.g., when DB is unavailable), we should still cache it.
+    # For now, let PriceService handle caching when data is saved to DB.
+    # If needed, we can add API result caching here, but it's better to save to DB first.
+    
+    return result
 
 async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBase | None = None) -> dict:
     """Get current price from Polygon.io API."""
+    import time
+    api_start = time.time()
+    
     if not POLYGON_AVAILABLE:
         raise ImportError("Polygon API client not available. Install with: pip install polygon-api-client")
     
@@ -1509,7 +1606,10 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
         client = PolygonRESTClient(API_KEY)
         
         # Get the latest quote
+        quote_start = time.time()
         quote = client.get_last_quote(ticker=symbol)
+        quote_time = (time.time() - quote_start) * 1000
+        logging.debug(f"[API] Polygon get_last_quote for {symbol} took {quote_time:.1f}ms")
         if quote:
             # Create DataFrame for saving to realtime table
             if hasattr(quote, 'sip_timestamp'):
@@ -1528,11 +1628,12 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
                 try:
 
                     await current_db_instance.save_realtime_data(quote_df, symbol, data_type="quote")
-                    logging.info(f"Saved quote data for {symbol} to realtime table")
+                    logging.debug(f"[DB SAVE] Saved quote data for {symbol} to realtime table")
                     
                 except Exception as e:
-                    logging.warning(f"Failed to save quote data for {symbol} to realtime table: {e}")
+                    logging.warning(f"[DB SAVE ERROR] Failed to save quote data for {symbol} to realtime table: {e}")
             
+            api_total_time = (time.time() - api_start) * 1000
             return {
                 'symbol': symbol,
                 'price': quote.bid_price,  # Use bid price as primary price
@@ -1543,7 +1644,8 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
                 'timestamp': timestamp.isoformat(),
                 'write_timestamp': datetime.now(timezone.utc).isoformat(),
                 'source': 'polygon_quote',
-                'data_source': 'polygon'
+                'data_source': 'polygon',
+                'api_call_time_ms': api_total_time
             }
         
         # If no quote, try to get the latest trade
@@ -1789,6 +1891,354 @@ async def get_financial_ratios(ticker: str, api_key: str) -> dict[str, Any] | No
         logger.error(f"Error fetching financial ratios for {ticker}: {e}")
         return None
 
+async def get_latest_news(
+    ticker: str,
+    api_key: str,
+    max_items: int = 10,
+    cache_instance=None,
+    cache_ttl: int = 3600  # 1 hour default TTL
+) -> dict[str, Any] | None:
+    """Fetch latest news for a ticker from Polygon.io and optionally cache it.
+    
+    Args:
+        ticker: Stock ticker symbol
+        api_key: Polygon API key
+        max_items: Maximum number of news items to fetch (default: 10)
+        cache_instance: Optional Redis cache instance for caching
+        cache_ttl: Cache TTL in seconds (default: 3600 = 1 hour)
+    
+    Returns:
+        Dictionary with news data including articles list and metadata, or None if error
+    """
+    if not POLYGON_AVAILABLE:
+        logger.error("Polygon API client not available for news fetching")
+        return None
+    
+    try:
+        # Check cache first if available
+        if cache_instance:
+            try:
+                from common.redis_cache import CacheKeyGenerator
+                cache_key = CacheKeyGenerator.latest_news(ticker)
+                cached_df = await cache_instance.get(cache_key)
+                if cached_df is not None and not cached_df.empty:
+                    # Convert DataFrame back to dictionary
+                    cached_data = cached_df.iloc[0].to_dict()
+                    # Restore nested structures (articles, date_range)
+                    import json
+                    try:
+                        if 'articles' in cached_data:
+                            articles_str = cached_data['articles']
+                            if isinstance(articles_str, str):
+                                cached_data['articles'] = json.loads(articles_str)
+                            elif pd.isna(articles_str):
+                                cached_data['articles'] = []
+                    except (json.JSONDecodeError, TypeError) as e:
+                        logger.debug(f"Failed to parse cached articles for {ticker}: {e}")
+                        cached_data['articles'] = []
+                    
+                    try:
+                        if 'date_range' in cached_data:
+                            date_range_str = cached_data['date_range']
+                            if isinstance(date_range_str, str):
+                                cached_data['date_range'] = json.loads(date_range_str)
+                    except (json.JSONDecodeError, TypeError) as e:
+                        logger.debug(f"Failed to parse cached date_range for {ticker}: {e}")
+                        cached_data['date_range'] = {}
+                    
+                    logger.info(f"Found cached news for {ticker} (count: {cached_data.get('count', 0)})")
+                    return cached_data
+                else:
+                    logger.debug(f"Cache miss for news {ticker} (cached_df is None or empty)")
+            except Exception as e:
+                logger.debug(f"Cache check failed for news {ticker}: {e}")
+        
+        # Fetch from Polygon API
+        client = PolygonRESTClient(api_key)
+        
+        # Get news from last 7 days
+        end_date = datetime.now(timezone.utc)
+        start_date = end_date - timedelta(days=7)
+        start_iso = start_date.strftime('%Y-%m-%d')
+        end_iso = end_date.strftime('%Y-%m-%d')
+        
+        news_articles = []
+        try:
+            news_generator = client.list_ticker_news(
+                ticker=ticker,
+                published_utc_gte=start_iso,
+                published_utc_lte=end_iso,
+                limit=max_items,
+                order="desc"
+            )
+            
+            article_count = 0
+            for article in news_generator:
+                if article_count >= max_items:
+                    break
+                
+                news_articles.append({
+                    'id': getattr(article, 'id', None),
+                    'title': getattr(article, 'title', None),
+                    'author': getattr(article, 'author', None),
+                    'published_utc': getattr(article, 'published_utc', None),
+                    'article_url': getattr(article, 'article_url', None),
+                    'image_url': getattr(article, 'image_url', None),
+                    'description': getattr(article, 'description', None),
+                    'keywords': getattr(article, 'keywords', []),
+                    'publisher': {
+                        'name': getattr(article.publisher, 'name', None),
+                        'homepage_url': getattr(article.publisher, 'homepage_url', None),
+                        'logo_url': getattr(article.publisher, 'logo_url', None),
+                        'favicon_url': getattr(article.publisher, 'favicon_url', None)
+                    } if hasattr(article, 'publisher') and article.publisher else None
+                })
+                article_count += 1
+        except Exception as e:
+            logger.warning(f"Error fetching news articles for {ticker}: {e}")
+        
+        result = {
+            'ticker': ticker,
+            'articles': news_articles,
+            'count': len(news_articles),
+            'fetched_at': datetime.now(timezone.utc).isoformat(),
+            'date_range': {
+                'start': start_iso,
+                'end': end_iso
+            }
+        }
+        
+        # Cache the result if cache instance available
+        if cache_instance and result['count'] > 0:
+            try:
+                from common.redis_cache import CacheKeyGenerator
+                import json
+                cache_key = CacheKeyGenerator.latest_news(ticker)
+                # Convert dictionary to DataFrame for caching
+                # Serialize nested structures (articles, date_range) as JSON strings
+                cache_dict = result.copy()
+                if 'articles' in cache_dict:
+                    cache_dict['articles'] = json.dumps(cache_dict['articles'])
+                if 'date_range' in cache_dict:
+                    cache_dict['date_range'] = json.dumps(cache_dict['date_range'])
+                cache_df = pd.DataFrame([cache_dict])
+                await cache_instance.set(cache_key, cache_df, ttl=cache_ttl)
+                logger.info(f"Cached news for {ticker} with TTL {cache_ttl}s (count: {result['count']})")
+            except Exception as e:
+                logger.debug(f"Failed to cache news for {ticker}: {e}")
+        
+        return result if result['count'] > 0 else None
+        
+    except Exception as e:
+        logger.error(f"Error fetching latest news for {ticker}: {e}")
+        return None
+
+async def get_latest_iv(
+    ticker: str,
+    db_instance: StockDBBase | None = None,
+    cache_instance=None,
+    cache_ttl: int = 300  # 5 minutes default TTL (IV changes frequently)
+) -> dict[str, Any] | None:
+    """Get latest implied volatility data for a ticker from options data.
+    
+    This aggregates IV from the most recent options data, calculating:
+    - Average IV across all active options
+    - ATM (at-the-money) IV
+    - IV by option type (call/put)
+    
+    Args:
+        ticker: Stock ticker symbol
+        db_instance: Database instance to query options data
+        cache_instance: Optional Redis cache instance for caching
+        cache_ttl: Cache TTL in seconds (default: 300 = 5 minutes)
+    
+    Returns:
+        Dictionary with IV statistics, or None if no data available
+    """
+    import time
+    fetch_start = time.time()
+    
+    try:
+        # Check cache first if available
+        if cache_instance:
+            try:
+                from common.redis_cache import CacheKeyGenerator
+                cache_key = CacheKeyGenerator.latest_iv(ticker)
+                cached_df = await cache_instance.get(cache_key)
+                if cached_df is not None and not cached_df.empty:
+                    # Convert DataFrame back to dictionary
+                    cached_data = cached_df.iloc[0].to_dict()
+                    # Restore nested structures (statistics, atm_iv, call_iv, put_iv)
+                    import json
+                    for key in ['statistics', 'atm_iv', 'call_iv', 'put_iv']:
+                        if key in cached_data:
+                            value = cached_data[key]
+                            if isinstance(value, str):
+                                try:
+                                    cached_data[key] = json.loads(value)
+                                except (json.JSONDecodeError, TypeError) as e:
+                                    logger.debug(f"Failed to parse cached {key} for {ticker}: {e}")
+                                    cached_data[key] = {}
+                            elif pd.isna(value):
+                                cached_data[key] = {}
+                    logger.info(f"[IV CACHE HIT] Found cached IV for {ticker}")
+                    cached_data['source'] = 'cache'
+                    return cached_data
+                else:
+                    logger.debug(f"[IV CACHE MISS] Cache miss for IV {ticker} (cached_df is None or empty)")
+            except Exception as e:
+                logger.debug(f"[IV CACHE ERROR] Cache check failed for IV {ticker}: {e}")
+        
+        if not db_instance:
+            logger.warning(f"[IV ERROR] No database instance provided for IV lookup for {ticker}")
+            return None
+        
+        # Get latest options data from database
+        logger.debug(f"[IV DB] Fetching IV data from database for {ticker}")
+        # Look back only 1 day for options data (much faster, and IV doesn't change that much day-to-day)
+        # Use get_latest_options_data if available (optimized method)
+        if hasattr(db_instance, 'get_latest_options_data'):
+            # Use optimized method that gets latest data per contract
+            options_df = await db_instance.get_latest_options_data(ticker=ticker)
+        else:
+            # Fallback: look back 1 day instead of 7 for better performance
+            end_date = datetime.now(timezone.utc)
+            start_date = end_date - timedelta(days=1)  # Reduced from 7 days
+            start_datetime = start_date.strftime('%Y-%m-%dT%H:%M:%S')
+            end_datetime = end_date.strftime('%Y-%m-%dT%H:%M:%S')
+            
+            options_df = await db_instance.get_options_data(
+                ticker=ticker,
+                start_datetime=start_datetime,
+                end_datetime=end_datetime
+            )
+        
+        if options_df.empty:
+            logger.debug(f"No options data found for {ticker} in last 7 days")
+            return None
+        
+        # Filter to only rows with valid IV
+        iv_df = options_df[options_df['implied_volatility'].notna() & (options_df['implied_volatility'] > 0)]
+        
+        if iv_df.empty:
+            logger.debug(f"No valid IV data found for {ticker}")
+            return None
+        
+        # Get the latest timestamp
+        if isinstance(iv_df.index, pd.DatetimeIndex):
+            latest_timestamp = iv_df.index.max()
+            latest_iv_data = iv_df[iv_df.index == latest_timestamp]
+        else:
+            # If no timestamp index, use write_timestamp if available
+            if 'write_timestamp' in iv_df.columns:
+                # Sort by write_timestamp and get the latest
+                latest_iv_data = iv_df.sort_values('write_timestamp', ascending=False).head(1)
+            else:
+                # Fallback: just get the last row
+                latest_iv_data = iv_df.tail(1)
+        
+        # If still empty after filtering, use all data
+        if latest_iv_data.empty:
+            latest_iv_data = iv_df.tail(1)
+        
+        if latest_iv_data.empty:
+            return None
+        
+        # Calculate statistics
+        iv_values = latest_iv_data['implied_volatility'].dropna()
+        
+        # Get current stock price for ATM calculation
+        current_price = None
+        try:
+            price_info = await get_current_price(ticker, stock_db_instance=db_instance, max_age_seconds=3600)
+            if price_info:
+                current_price = price_info.get('price')
+        except Exception:
+            pass
+        
+        # Get timestamp for result
+        data_timestamp = None
+        if isinstance(iv_df.index, pd.DatetimeIndex) and not latest_iv_data.empty:
+            data_timestamp = latest_iv_data.index.max()
+        elif 'write_timestamp' in latest_iv_data.columns and not latest_iv_data.empty:
+            data_timestamp = latest_iv_data['write_timestamp'].iloc[0]
+        
+        result = {
+            'ticker': ticker,
+            'fetched_at': datetime.now(timezone.utc).isoformat(),
+            'data_timestamp': data_timestamp.isoformat() if isinstance(data_timestamp, datetime) else (str(data_timestamp) if data_timestamp else 'N/A'),
+            'current_price': current_price,
+            'statistics': {
+                'count': len(iv_values),
+                'mean': float(iv_values.mean()) if len(iv_values) > 0 else None,
+                'median': float(iv_values.median()) if len(iv_values) > 0 else None,
+                'min': float(iv_values.min()) if len(iv_values) > 0 else None,
+                'max': float(iv_values.max()) if len(iv_values) > 0 else None,
+                'std': float(iv_values.std()) if len(iv_values) > 0 else None,
+            }
+        }
+        
+        # Calculate ATM IV if we have current price
+        if current_price:
+            # Find options closest to current price (within 5% strike range)
+            strike_range = current_price * 0.05
+            atm_options = latest_iv_data[
+                (latest_iv_data['strike_price'] >= current_price - strike_range) &
+                (latest_iv_data['strike_price'] <= current_price + strike_range)
+            ]
+            
+            if not atm_options.empty:
+                atm_iv_values = atm_options['implied_volatility'].dropna()
+                result['atm_iv'] = {
+                    'mean': float(atm_iv_values.mean()) if len(atm_iv_values) > 0 else None,
+                    'count': len(atm_iv_values)
+                }
+        
+        # Calculate by option type
+        if 'option_type' in latest_iv_data.columns:
+            for opt_type in ['call', 'put']:
+                type_data = latest_iv_data[latest_iv_data['option_type'].str.lower() == opt_type.lower()]
+                if not type_data.empty:
+                    type_iv = type_data['implied_volatility'].dropna()
+                    if len(type_iv) > 0:
+                        result[f'{opt_type}_iv'] = {
+                            'mean': float(type_iv.mean()),
+                            'count': len(type_iv)
+                        }
+        
+        # Cache the result if cache instance available
+        if cache_instance:
+            try:
+                from common.redis_cache import CacheKeyGenerator
+                import json
+                cache_key = CacheKeyGenerator.latest_iv(ticker)
+                # Convert dictionary to DataFrame for caching
+                # Serialize nested structures (statistics, atm_iv, call_iv, put_iv) as JSON strings
+                cache_dict = result.copy()
+                # Don't cache the source field
+                cache_dict.pop('source', None)
+                for key in ['statistics', 'atm_iv', 'call_iv', 'put_iv']:
+                    if key in cache_dict and isinstance(cache_dict[key], dict):
+                        cache_dict[key] = json.dumps(cache_dict[key])
+                cache_df = pd.DataFrame([cache_dict])
+                cache_set_start = time.time()
+                await cache_instance.set(cache_key, cache_df, ttl=cache_ttl)
+                cache_set_time = (time.time() - cache_set_start) * 1000
+                logger.info(f"[IV CACHE SET] Cached IV for {ticker} (set_time: {cache_set_time:.1f}ms, ttl: {cache_ttl}s)")
+            except Exception as e:
+                logger.debug(f"[IV CACHE ERROR] Failed to cache IV for {ticker}: {e}")
+        
+        result['source'] = 'database'
+        fetch_time = (time.time() - fetch_start) * 1000
+        logger.info(f"[IV DB HIT] IV data for {ticker} from database (fetch_time: {fetch_time:.1f}ms)")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error fetching latest IV for {ticker}: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+        return None
+
 def get_stock_price_simple(symbol: str, data_source: str = "polygon", max_age_seconds: int = 600) -> float:
     """
     Simple synchronous wrapper to get current stock price.
@@ -1930,6 +2380,16 @@ def parse_args():
         help="Fetch financial ratios (P/E, P/B, etc.) from Polygon.io for the symbol. Implies --latest mode."
     )
     parser.add_argument(
+        "--fetch-news",
+        action="store_true",
+        help="Fetch latest news articles from Polygon.io for the symbol. Implies --latest mode."
+    )
+    parser.add_argument(
+        "--fetch-iv",
+        action="store_true",
+        help="Fetch latest implied volatility data from options for the symbol. Implies --latest mode."
+    )
+    parser.add_argument(
         "--log-level",
         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
         default='ERROR',
@@ -1968,14 +2428,19 @@ async def main() -> None:
         print("Or use --data-source alpaca to use Alpaca instead.", file=sys.stderr)
         exit(1)
 
-    # Handle --fetch-ratios parameter
-    if args.fetch_ratios:
+    # Handle --fetch-ratios, --fetch-news, --fetch-iv parameters
+    if args.fetch_ratios or args.fetch_news or args.fetch_iv:
         if args.data_source != "polygon":
-            print("Error: --fetch-ratios requires --data-source polygon", file=sys.stderr)
+            print("Error: --fetch-ratios, --fetch-news, and --fetch-iv require --data-source polygon", file=sys.stderr)
             exit(1)
-        # Imply --latest mode when fetching ratios
+        # Imply --latest mode when fetching these
         args.latest = True
-        print("--fetch-ratios specified, enabling --latest mode", file=sys.stderr)
+        if args.fetch_ratios:
+            print("--fetch-ratios specified, enabling --latest mode", file=sys.stderr)
+        if args.fetch_news:
+            print("--fetch-news specified, enabling --latest mode", file=sys.stderr)
+        if args.fetch_iv:
+            print("--fetch-iv specified, enabling --latest mode", file=sys.stderr)
 
 
     # Handle start-date and end-date logic based on user requirements
@@ -2821,6 +3286,108 @@ async def main() -> None:
                             print("No financial ratios data available")
                 except Exception as e:
                     print(f"Error fetching financial ratios: {e}")
+            
+            # Display latest news if requested
+            if args.fetch_news:
+                print()  # Spacing
+                print("Latest News:")
+                try:
+                    api_key = os.getenv('POLYGON_API_KEY')
+                    if not api_key:
+                        print("Error: POLYGON_API_KEY environment variable not set")
+                    else:
+                        # Get cache instance if available
+                        cache_instance = None
+                        if hasattr(db_instance, 'cache') and db_instance.cache:
+                            cache_instance = db_instance.cache
+                        
+                        news_data = await get_latest_news(
+                            args.symbol,
+                            api_key,
+                            max_items=10,
+                            cache_instance=cache_instance
+                        )
+                        
+                        if news_data and news_data.get('articles'):
+                            print(f"Found {news_data['count']} news articles (from {news_data['date_range']['start']} to {news_data['date_range']['end']})")
+                            print(f"Fetched at: {news_data.get('fetched_at', 'N/A')}")
+                            print()
+                            for i, article in enumerate(news_data['articles'][:5], 1):  # Show top 5
+                                print(f"{i}. {article.get('title', 'No title')}")
+                                if article.get('published_utc'):
+                                    print(f"   Published: {article['published_utc']}")
+                                if article.get('publisher', {}).get('name'):
+                                    print(f"   Source: {article['publisher']['name']}")
+                                if article.get('article_url'):
+                                    print(f"   URL: {article['article_url']}")
+                                print()
+                        else:
+                            print("No news articles available")
+                except Exception as e:
+                    print(f"Error fetching news: {e}")
+            
+            # Display latest IV if requested
+            if args.fetch_iv:
+                print()  # Spacing
+                print("Latest Implied Volatility:")
+                try:
+                    # Get cache instance if available
+                    cache_instance = None
+                    if hasattr(db_instance, 'cache') and db_instance.cache:
+                        cache_instance = db_instance.cache
+                    
+                    iv_data = await get_latest_iv(
+                        args.symbol,
+                        db_instance=db_instance,
+                        cache_instance=cache_instance
+                    )
+                    
+                    if iv_data:
+                        stats = iv_data.get('statistics', {})
+                        print(f"Data timestamp: {iv_data.get('data_timestamp', 'N/A')}")
+                        print(f"Fetched at: {iv_data.get('fetched_at', 'N/A')}")
+                        if iv_data.get('current_price'):
+                            print(f"Current price: ${iv_data['current_price']:.2f}")
+                        print()
+                        print("IV Statistics:")
+                        print(f"  Count: {stats.get('count', 'N/A')}")
+                        if stats.get('mean') is not None:
+                            print(f"  Mean IV: {stats['mean']:.4f} ({stats['mean']*100:.2f}%)")
+                        if stats.get('median') is not None:
+                            print(f"  Median IV: {stats['median']:.4f} ({stats['median']*100:.2f}%)")
+                        if stats.get('min') is not None:
+                            print(f"  Min IV: {stats['min']:.4f} ({stats['min']*100:.2f}%)")
+                        if stats.get('max') is not None:
+                            print(f"  Max IV: {stats['max']:.4f} ({stats['max']*100:.2f}%)")
+                        if stats.get('std') is not None:
+                            print(f"  Std Dev: {stats['std']:.4f}")
+                        
+                        if 'atm_iv' in iv_data:
+                            atm = iv_data['atm_iv']
+                            if atm.get('mean') is not None:
+                                print(f"\nATM IV (within 5% of current price):")
+                                print(f"  Mean: {atm['mean']:.4f} ({atm['mean']*100:.2f}%)")
+                                print(f"  Count: {atm.get('count', 'N/A')}")
+                        
+                        if 'call_iv' in iv_data:
+                            call = iv_data['call_iv']
+                            if call.get('mean') is not None:
+                                print(f"\nCall Options IV:")
+                                print(f"  Mean: {call['mean']:.4f} ({call['mean']*100:.2f}%)")
+                                print(f"  Count: {call.get('count', 'N/A')}")
+                        
+                        if 'put_iv' in iv_data:
+                            put = iv_data['put_iv']
+                            if put.get('mean') is not None:
+                                print(f"\nPut Options IV:")
+                                print(f"  Mean: {put['mean']:.4f} ({put['mean']*100:.2f}%)")
+                                print(f"  Count: {put.get('count', 'N/A')}")
+                    else:
+                        print("No IV data available (options data may not be available)")
+                except Exception as e:
+                    print(f"Error fetching IV: {e}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
             
             print()  # Spacing
             print("--- End Latest ---")

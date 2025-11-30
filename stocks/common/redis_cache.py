@@ -158,6 +158,61 @@ class CacheKeyGenerator:
         if date:
             return f"stocks:financial_info:{ticker}:{date}"
         return f"stocks:financial_info:{ticker}"
+    
+    @staticmethod
+    def latest_news(ticker: str) -> str:
+        """Generate cache key for latest news data.
+        
+        Args:
+            ticker: Stock ticker symbol
+        
+        Returns:
+            Cache key: stocks:latest_news:{ticker}
+        """
+        return f"stocks:latest_news:{ticker}"
+    
+    @staticmethod
+    def latest_iv(ticker: str) -> str:
+        """Generate cache key for latest implied volatility data.
+        
+        Args:
+            ticker: Stock ticker symbol
+        
+        Returns:
+            Cache key: stocks:latest_iv:{ticker}
+        """
+        return f"stocks:latest_iv:{ticker}"
+    
+    @staticmethod
+    def latest_price_data(ticker: str) -> str:
+        """Generate cache key for latest price data (from get_latest_price_with_data).
+        
+        Args:
+            ticker: Stock ticker symbol
+        
+        Returns:
+            Cache key: stocks:latest_price_data:{ticker}
+        """
+        return f"stocks:latest_price_data:{ticker}"
+    
+    @staticmethod
+    def options_query_result(ticker: str, expiration_date: Optional[str] = None, days: Optional[int] = None) -> str:
+        """Generate cache key for options query results.
+        
+        Args:
+            ticker: Stock ticker symbol
+            expiration_date: Optional expiration date filter
+            days: Optional days ahead filter
+        
+        Returns:
+            Cache key: stocks:options_query:{ticker}[:{expiration_date}][:{days}]
+        """
+        key = f"stocks:options_query:{ticker}"
+        if expiration_date:
+            key += f":{expiration_date}"
+        if days:
+            key += f":{days}d"
+        return key
 
 
 def _parse_redis_url_to_nodes(redis_url: str) -> Optional[List[Any]]:

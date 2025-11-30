@@ -3509,15 +3509,47 @@ class OptionsDataService:
                         option_tickers: Optional[List[str]] = None,
                         timestamp_lookback_days: int = 7,
                         min_write_timestamp: Optional[str] = None) -> pd.DataFrame:
-        """Get latest options data with per-option caching.
+        """Get latest options data with per-option caching and aggregated query result caching.
         
         This is a convenience method that calls get() with:
         - timestamp_lookback_days: Uses get_latest repository method
         - use_fire_and_forget: True (non-blocking cache writes)
         - deduplicate: True (deduplicates by option_ticker to keep only the latest)
         - min_write_timestamp: Optional minimum write_timestamp filter (passed to repository)
+        
+        Also caches the aggregated query result for faster subsequent queries.
         """
-        return await self.get(
+        # Check cache for aggregated query result first (if no min_write_timestamp filter)
+        # Note: We only cache when there are no special filters to keep cache keys simple
+        if not min_write_timestamp and not expiration_date and self.cache and self.cache.enable_cache:
+            try:
+                # Generate cache key based on query parameters
+                days = timestamp_lookback_days
+                cache_key = CacheKeyGenerator.options_query_result(ticker, days=days)
+                cached_df = await self.cache.get(cache_key)
+                if cached_df is not None and not cached_df.empty:
+                    # Check if this is a cached DataFrame (from service) or a cached dict (from HistoricalDataFetcher)
+                    # If it has a 'query_result' column, it's from HistoricalDataFetcher format
+                    if 'query_result' in cached_df.columns:
+                        # This is the HistoricalDataFetcher format - deserialize it
+                        import json
+                        query_result_str = cached_df.iloc[0]['query_result']
+                        if isinstance(query_result_str, str):
+                            query_data = json.loads(query_result_str)
+                            # Reconstruct DataFrame from the serialized format
+                            if 'data' in query_data and 'columns' in query_data:
+                                result_df = pd.read_json(json.dumps(query_data), orient='split')
+                                self.logger.debug(f"[CACHE HIT] Options query result for {ticker} (days={days}) from HistoricalDataFetcher format")
+                                return result_df
+                    else:
+                        # This is a direct DataFrame cache from service
+                        self.logger.debug(f"[CACHE HIT] Options query result for {ticker} (days={days})")
+                        return cached_df
+            except Exception as e:
+                self.logger.debug(f"[CACHE ERROR] Cache check failed for options query {ticker}: {e}")
+        
+        # Fetch from underlying get() method
+        result_df = await self.get(
             ticker=ticker,
             expiration_date=expiration_date,
             start_datetime=start_datetime,
@@ -3528,6 +3560,19 @@ class OptionsDataService:
             deduplicate=True,
             min_write_timestamp=min_write_timestamp
         )
+        
+        # Cache the aggregated query result (if no special filters)
+        if not min_write_timestamp and not expiration_date and not result_df.empty and self.cache and self.cache.enable_cache:
+            try:
+                days = timestamp_lookback_days
+                cache_key = CacheKeyGenerator.options_query_result(ticker, days=days)
+                # Cache the DataFrame directly (service-level caching)
+                await self.cache.set(cache_key, result_df, ttl=300)  # 5 minutes TTL
+                self.logger.debug(f"[CACHE SET] Cached options query result for {ticker} (days={days}, rows={len(result_df)})")
+            except Exception as e:
+                self.logger.debug(f"[CACHE ERROR] Failed to cache options query result for {ticker}: {e}")
+        
+        return result_df
 
 
 class FinancialDataService:
@@ -3575,9 +3620,10 @@ class FinancialDataService:
 class PriceService:
     """Service for price queries with market hours awareness."""
     
-    def __init__(self, stock_data_service: StockDataService, realtime_data_service: RealtimeDataService, logger: logging.Logger):
+    def __init__(self, stock_data_service: StockDataService, realtime_data_service: RealtimeDataService, cache: RedisCache, logger: logging.Logger):
         self.stock_data_service = stock_data_service
         self.realtime_data_service = realtime_data_service
+        self.cache = cache
         self.logger = logger
     
     async def get_latest_price(self, ticker: str, use_market_time: bool = True) -> Optional[float]:
@@ -3592,6 +3638,38 @@ class PriceService:
             Dict with keys: 'price', 'timestamp', 'source', 'realtime_df' (if from realtime)
             or None if no price found
         """
+        # Check cache first
+        if self.cache and self.cache.enable_cache:
+            try:
+                cache_key = CacheKeyGenerator.latest_price_data(ticker)
+                cached_df = await self.cache.get(cache_key)
+                if cached_df is not None and not cached_df.empty:
+                    # Convert DataFrame back to dict
+                    cached_data = cached_df.iloc[0].to_dict()
+                    # Restore nested structures
+                    if 'realtime_df' in cached_data and isinstance(cached_data['realtime_df'], str):
+                        import json
+                        try:
+                            cached_data['realtime_df'] = json.loads(cached_data['realtime_df'])
+                        except:
+                            cached_data['realtime_df'] = None
+                    # Check freshness (5 minute TTL)
+                    if 'fetched_at' in cached_data:
+                        try:
+                            fetched_at = pd.to_datetime(cached_data['fetched_at'])
+                            age_seconds = (datetime.now(timezone.utc) - fetched_at.tz_localize(timezone.utc) if fetched_at.tz is None else fetched_at.tz_convert(timezone.utc)).total_seconds()
+                            if age_seconds < 300:  # 5 minutes
+                                self.logger.debug(f"[CACHE HIT] Latest price for {ticker}: ${cached_data.get('price', 'N/A'):.2f} (age: {age_seconds:.1f}s)")
+                                return cached_data
+                        except:
+                            pass
+                    else:
+                        # No timestamp, but data exists - use it (could be from older cache format)
+                        self.logger.debug(f"[CACHE HIT] Latest price for {ticker}: ${cached_data.get('price', 'N/A'):.2f} (no timestamp)")
+                        return cached_data
+            except Exception as e:
+                self.logger.debug(f"[CACHE ERROR] Cache check failed for {ticker}: {e}")
+        
         self.logger.debug(f"[DB] Fetching latest price for {ticker} (use_market_time={use_market_time})")
         market_is_open = is_market_hours() if use_market_time else True
         
@@ -3673,14 +3751,38 @@ class PriceService:
                     daily_df = r[3]
             
             self.logger.debug(f"[DB] Market OPEN: Using {source} price ${price:.2f} for {ticker} (timestamp: {timestamp})")
-            return {
+            result = {
                 'price': price,
                 'timestamp': timestamp,
                 'source': source,
                 'realtime_df': data_df if source == 'realtime' else None,
                 'hourly_df': hourly_df,  # Include for reuse
-                'daily_df': daily_df  # Include for reuse
+                'daily_df': daily_df,  # Include for reuse
+                'fetched_at': datetime.now(timezone.utc).isoformat()
             }
+            
+            # Cache the result
+            if self.cache and self.cache.enable_cache:
+                try:
+                    cache_key = CacheKeyGenerator.latest_price_data(ticker)
+                    cache_dict = result.copy()
+                    # Serialize nested DataFrames
+                    if 'realtime_df' in cache_dict and cache_dict['realtime_df'] is not None:
+                        if isinstance(cache_dict['realtime_df'], pd.DataFrame):
+                            cache_dict['realtime_df'] = cache_dict['realtime_df'].to_json(orient='records')
+                    if 'hourly_df' in cache_dict and cache_dict['hourly_df'] is not None:
+                        if isinstance(cache_dict['hourly_df'], pd.DataFrame):
+                            cache_dict['hourly_df'] = cache_dict['hourly_df'].to_json(orient='records')
+                    if 'daily_df' in cache_dict and cache_dict['daily_df'] is not None:
+                        if isinstance(cache_dict['daily_df'], pd.DataFrame):
+                            cache_dict['daily_df'] = cache_dict['daily_df'].to_json(orient='records')
+                    cache_df = pd.DataFrame([cache_dict])
+                    await self.cache.set(cache_key, cache_df, ttl=300)  # 5 minutes TTL
+                    self.logger.debug(f"[CACHE SET] Cached latest price for {ticker}")
+                except Exception as e:
+                    self.logger.debug(f"[CACHE ERROR] Failed to cache latest price for {ticker}: {e}")
+            
+            return result
         else:
             # Market closed: use last close price from daily data (most reliable)
             # Fetch both daily and hourly in parallel to get both DataFrames for reuse
@@ -3692,28 +3794,50 @@ class PriceService:
                 source, timestamp, price, daily_df = daily_result
                 hourly_df = hourly_result[3] if hourly_result and hourly_result[3] is not None else None
                 self.logger.debug(f"[DB] Market CLOSED: Using daily close price ${price:.2f} for {ticker} (timestamp: {timestamp})")
-                return {
+                result = {
                     'price': price,
                     'timestamp': timestamp,
                     'source': source,
                     'realtime_df': None,  # No realtime data when market is closed
                     'hourly_df': hourly_df,
-                    'daily_df': daily_df
+                    'daily_df': daily_df,
+                    'fetched_at': datetime.now(timezone.utc).isoformat()
                 }
             elif hourly_result:
                 source, timestamp, price, hourly_df = hourly_result
                 self.logger.debug(f"[DB] Market CLOSED: Using hourly close price ${price:.2f} for {ticker} (timestamp: {timestamp})")
-                return {
+                result = {
                     'price': price,
                     'timestamp': timestamp,
                     'source': source,
                     'realtime_df': None,  # No realtime data when market is closed
                     'hourly_df': hourly_df,
-                    'daily_df': None
+                    'daily_df': None,
+                    'fetched_at': datetime.now(timezone.utc).isoformat()
                 }
             else:
                 self.logger.warning(f"[DB] Market CLOSED: No daily or hourly price found for {ticker}")
                 return None
+            
+            # Cache the result
+            if self.cache and self.cache.enable_cache and result:
+                try:
+                    cache_key = CacheKeyGenerator.latest_price_data(ticker)
+                    cache_dict = result.copy()
+                    # Serialize nested DataFrames
+                    if 'hourly_df' in cache_dict and cache_dict['hourly_df'] is not None:
+                        if isinstance(cache_dict['hourly_df'], pd.DataFrame):
+                            cache_dict['hourly_df'] = cache_dict['hourly_df'].to_json(orient='records')
+                    if 'daily_df' in cache_dict and cache_dict['daily_df'] is not None:
+                        if isinstance(cache_dict['daily_df'], pd.DataFrame):
+                            cache_dict['daily_df'] = cache_dict['daily_df'].to_json(orient='records')
+                    cache_df = pd.DataFrame([cache_dict])
+                    await self.cache.set(cache_key, cache_df, ttl=300)  # 5 minutes TTL
+                    self.logger.debug(f"[CACHE SET] Cached latest price for {ticker}")
+                except Exception as e:
+                    self.logger.debug(f"[CACHE ERROR] Failed to cache latest price for {ticker}: {e}")
+            
+            return result
 
 
 # ============================================================================
@@ -3778,7 +3902,7 @@ class StockQuestDB(StockDBBase):
         self.realtime_service = RealtimeDataService(self.realtime_repo, self.cache, self.logger)
         self.options_service = OptionsDataService(self.options_repo, self.cache, self.logger)
         self.financial_service = FinancialDataService(self.financial_repo, self.cache, self.logger)
-        self.price_service = PriceService(self.stock_service, self.realtime_service, self.logger)
+        self.price_service = PriceService(self.stock_service, self.realtime_service, self.cache, self.logger)
         
         # Table management
         self._tables_ensured = False
