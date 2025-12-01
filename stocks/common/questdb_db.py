@@ -3785,7 +3785,7 @@ class PriceService:
             Dict with keys: 'price', 'timestamp', 'source', 'realtime_df' (if from realtime)
             or None if no price found
         """
-        # Check cache first
+        # Check cache first (but only use it when data is still "fresh" for the current market context)
         cached_data = None
         last_save_time = None
         if self.cache and self.cache.enable_cache:
@@ -3803,37 +3803,93 @@ class PriceService:
                                 last_save_time = last_save_time.replace(tzinfo=timezone.utc)
                             elif last_save_time.tzinfo != timezone.utc:
                                 last_save_time = last_save_time.astimezone(timezone.utc)
-                        except:
+                        except Exception:
                             last_save_time = None
                     # Restore nested structures
-                    if 'realtime_df' in cached_data and isinstance(cached_data['realtime_df'], str):
-                        import json
-                        try:
-                            cached_data['realtime_df'] = json.loads(cached_data['realtime_df'])
-                        except:
-                            cached_data['realtime_df'] = None
-                    
-                    # Always return cached data (no TTL check)
-                    self.logger.debug(f"[CACHE HIT] Latest price for {ticker}: ${cached_data.get('price', 'N/A'):.2f}")
-                    
-                    # Check if background fetch should be triggered
-                    from fetch_symbol_data import _should_trigger_background_fetch, _trigger_background_fetch
-                    if _should_trigger_background_fetch(last_save_time, "price", ticker):
-                        # Trigger background fetch but return cached data immediately
-                        async def _fetch_price_background():
+                    import json
+                    # Note: cached realtime_df/hourly_df/daily_df are stored as JSON strings of records
+                    # Convert them back into DataFrames when possible
+                    for key in ('realtime_df', 'hourly_df', 'daily_df'):
+                        if key in cached_data and isinstance(cached_data[key], str):
                             try:
-                                # Re-fetch price data
-                                price_result = await self.get_latest_price_with_data(ticker, use_market_time)
-                                return price_result
-                            except Exception as e:
-                                self.logger.warning(f"Background price fetch failed for {ticker}: {e}")
-                                return None
-                        
-                        asyncio.create_task(_trigger_background_fetch(
-                            ticker, self, "price", _fetch_price_background
-                        ))
+                                records = json.loads(cached_data[key])
+                                # Only convert to DataFrame if we actually have records
+                                cached_data[key] = pd.DataFrame.from_records(records) if records else pd.DataFrame()
+                            except Exception:
+                                cached_data[key] = None
                     
-                    return cached_data
+                    # Decide whether cached data is fresh enough to use
+                    use_cached = True
+                    try:
+                        now_utc = datetime.now(timezone.utc)
+                        ts = normalize_timestamp(cached_data.get('timestamp'))
+                        age_seconds = (now_utc - ts).total_seconds() if ts else float('inf')
+                        source = cached_data.get('source', 'unknown')
+                        market_is_open = is_market_hours() if use_market_time else True
+
+                        # When market is open, we only want very fresh realtime data,
+                        # somewhat fresh hourly data, and avoid stale daily closes.
+                        if market_is_open:
+                            if source == 'realtime':
+                                # Require very fresh realtime (e.g., 60s)
+                                use_cached = age_seconds <= 60
+                            elif source == 'hourly':
+                                # Up to 1 hour old is acceptable for hourly bars
+                                use_cached = age_seconds <= 3600
+                            elif source == 'daily':
+                                # During market hours, don't trust cached daily closes from prior days
+                                # Require same-calendar-day data and age < 24h
+                                use_cached = (
+                                    age_seconds <= 86400 and
+                                    ts.date() == now_utc.date()
+                                )
+                            else:
+                                # Unknown source: be conservative and refetch
+                                use_cached = False
+                        else:
+                            # Market closed: cached daily/hourly data is usually fine for a couple of days
+                            if source == 'realtime':
+                                # When market is closed, realtime prices are not expected; prefer refetch
+                                use_cached = age_seconds <= 300
+                            elif source == 'hourly':
+                                use_cached = age_seconds <= 172800  # 48 hours
+                            elif source == 'daily':
+                                use_cached = age_seconds <= 259200  # 72 hours
+                            else:
+                                use_cached = False
+
+                        if not use_cached:
+                            self.logger.debug(
+                                f"[CACHE SKIP] Latest price cache for {ticker} is too old or "
+                                f"not appropriate for current market session "
+                                f"(source={source}, age={age_seconds:.1f}s). Refetching from DB."
+                            )
+                    except Exception as e:
+                        # On any error computing freshness, fall back to refetching from DB
+                        self.logger.debug(f"[CACHE ERROR] Freshness check failed for {ticker}: {e}")
+                        use_cached = False
+
+                    if use_cached:
+                        self.logger.debug(f"[CACHE HIT] Latest price for {ticker}: ${cached_data.get('price', 'N/A'):.2f}")
+                        
+                        # Check if background fetch should be triggered
+                        from fetch_symbol_data import _should_trigger_background_fetch, _trigger_background_fetch
+                        if _should_trigger_background_fetch(last_save_time, "price", ticker):
+                            # Trigger background fetch but return cached data immediately
+                            async def _fetch_price_background():
+                                try:
+                                    # Re-fetch price data
+                                    price_result = await self.get_latest_price_with_data(ticker, use_market_time)
+                                    return price_result
+                                except Exception as e:
+                                    self.logger.warning(f"Background price fetch failed for {ticker}: {e}")
+                                    return None
+                            
+                            asyncio.create_task(_trigger_background_fetch(
+                                ticker, self, "price", _fetch_price_background
+                            ))
+                        
+                        return cached_data
             except Exception as e:
                 self.logger.debug(f"[CACHE ERROR] Cache check failed for {ticker}: {e}")
         

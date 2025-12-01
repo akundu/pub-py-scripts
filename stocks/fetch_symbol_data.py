@@ -3019,23 +3019,35 @@ async def main() -> None:
                             source_display = 'Realtime'
                         else:
                             source_display = source.capitalize()
-                        
+
+                        # Track whether we've already displayed a realtime row
+                        displayed_realtime = False
+
                         if latest_data.get('realtime_df') is not None:
                             # We have realtime data - display it
                             realtime_df = latest_data['realtime_df']
-                            latest_row = realtime_df.iloc[0]  # First row is most recent (sorted DESC)
-                            price_info = {
-                                'price': latest_row.get('price') or latest_data.get('price'),
-                                'bid_price': latest_row.get('ask_price'),  # Note: realtime table may not have bid/ask
-                                'ask_price': latest_row.get('ask_price'),
-                                'timestamp': realtime_df.index[0].isoformat() if isinstance(realtime_df.index, pd.DatetimeIndex) else str(realtime_df.index[0]),
-                                'source': 'database',
-                                'data_source': args.data_source
-                            }
-                            print("Realtime:")
-                            for line in _format_price_block(price_info, args.timezone or 'America/New_York'):
-                                print(line)
-                        elif latest_data.get('price') is not None:
+                            # Ensure realtime_df is actually a DataFrame before using .iloc
+                            if isinstance(realtime_df, pd.DataFrame) and not realtime_df.empty:
+                                latest_row = realtime_df.iloc[0]  # First row is most recent (sorted DESC)
+                                price_info = {
+                                    'price': latest_row.get('price') or latest_data.get('price'),
+                                    'bid_price': latest_row.get('ask_price'),  # Note: realtime table may not have bid/ask
+                                    'ask_price': latest_row.get('ask_price'),
+                                    'timestamp': realtime_df.index[0].isoformat() if isinstance(realtime_df.index, pd.DatetimeIndex) else str(realtime_df.index[0]),
+                                    'source': 'database',
+                                    'data_source': args.data_source
+                                }
+                                print("Realtime:")
+                                for line in _format_price_block(price_info, args.timezone or 'America/New_York'):
+                                    print(line)
+                                displayed_realtime = True
+                            else:
+                                # If realtime_df is not a valid DataFrame (e.g., float), fall through to price-only path below
+                                logging.debug(f"Unexpected realtime_df type in latest_data for {args.symbol}: {type(realtime_df)}")
+
+                        # If we didn't successfully display a realtime row but we have a price,
+                        # show the price/timestamp summary instead (daily/hourly/realtime fallback)
+                        if not displayed_realtime and latest_data.get('price') is not None:
                             # We have a price but no realtime data (e.g., from daily/hourly when market is closed)
                             # Display the price with the source
                             timestamp = latest_data.get('timestamp')
@@ -3081,6 +3093,16 @@ async def main() -> None:
                             print("Realtime:")
                             for line in _format_price_block(price_info, args.timezone or 'America/New_York'):
                                 print(line)
+                        else:
+                            # Explicitly inform the user when no realtime data is available from the API
+                            print("No realtime price available from API for this symbol/session.")
+                    else:
+                        # Final fallback: no data from DB or API for this symbol/session
+                        # Give the user a clear message instead of a blank block
+                        if session in ('closed',):
+                            print("No price data available (market session: closed).")
+                        else:
+                            print("No latest price data available for this symbol.")
                 except Exception as e:
                     print(f"Realtime fetch/display error: {e}")
             
