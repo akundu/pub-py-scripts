@@ -3573,7 +3573,7 @@ class OptionsDataService:
                                 
                                 # Check if background fetch should be triggered
                                 from fetch_symbol_data import _should_trigger_background_fetch, _trigger_background_fetch
-                                if _should_trigger_background_fetch(last_save_time, "options"):
+                                if _should_trigger_background_fetch(last_save_time, "options", ticker):
                                     # Trigger background fetch but return cached data immediately
                                     async def _fetch_options_background():
                                         try:
@@ -3620,7 +3620,7 @@ class OptionsDataService:
                         
                         # Check if background fetch should be triggered
                         from fetch_symbol_data import _should_trigger_background_fetch, _trigger_background_fetch
-                        if _should_trigger_background_fetch(last_save_time, "options"):
+                        if _should_trigger_background_fetch(last_save_time, "options", ticker):
                             # Trigger background fetch but return cached data immediately
                             async def _fetch_options_background():
                                 try:
@@ -3733,7 +3733,7 @@ class FinancialDataService:
             
             # Check if background fetch should be triggered
             from fetch_symbol_data import _should_trigger_background_fetch, _trigger_background_fetch
-            if _should_trigger_background_fetch(last_save_time, "financial"):
+            if _should_trigger_background_fetch(last_save_time, "financial", ticker):
                 # Trigger background fetch but return cached data immediately
                 async def _fetch_financial_background():
                     try:
@@ -3818,7 +3818,7 @@ class PriceService:
                     
                     # Check if background fetch should be triggered
                     from fetch_symbol_data import _should_trigger_background_fetch, _trigger_background_fetch
-                    if _should_trigger_background_fetch(last_save_time, "price"):
+                    if _should_trigger_background_fetch(last_save_time, "price", ticker):
                         # Trigger background fetch but return cached data immediately
                         async def _fetch_price_background():
                             try:

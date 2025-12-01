@@ -29,7 +29,7 @@ def parse_args():
     parser.add_argument("--start", required=False, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", required=False, help="End date (YYYY-MM-DD). Defaults to today if not provided.")
     parser.add_argument("--days-back", type=int, help="If provided, analyze the last N days ending at --end (or today if --end is not provided)")
-    parser.add_argument("--port", type=int, default=9001, help="Port for StockDBClient (default: 9001)")
+    parser.add_argument("--port", type=int, default=9100, help="Port for StockDBClient (default: 9100)")
     parser.add_argument("--interval", choices=['daily', 'hourly'], default='daily', help="Data interval to analyze (default: daily)")
     parser.add_argument("--debug", action="store_true", help="Print detailed streak date ranges and lengths.")
     parser.add_argument("--raw", action="store_true", help="Show raw price data downloaded from server.")

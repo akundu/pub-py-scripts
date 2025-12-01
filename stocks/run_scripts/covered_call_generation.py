@@ -92,7 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gemini-store-dir", type=str, default="", help="Directory to store Gemini outputs.")
     parser.add_argument("--no-cache", action="store_true", help="Forward --no-cache to options_analyzer.")
     parser.add_argument("--db-server-host", type=str, default="mm.kundu.dev", help="Database server hostname for cache warmup (default: mm.kundu.dev).")
-    parser.add_argument("--db-server-port", type=int, default=9001, help="Database server port for cache warmup (default: 9001).")
+    parser.add_argument("--db-server-port", type=int, default=9100, help="Database server port for cache warmup (default: 9100).")
     
     execution_group = parser.add_mutually_exclusive_group()
     execution_group.add_argument(

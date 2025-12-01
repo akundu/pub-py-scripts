@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import os
 import asyncio
+import threading
 import argparse
 import sys # Added for sys.path manipulation
 from pathlib import Path # Added for path manipulation
@@ -2063,13 +2064,13 @@ async def get_latest_news(
                     logger.info(f"Found cached news for {ticker} (count: {cached_data.get('count', 0)})")
                     
                     # Check if background fetch should be triggered
-                    if _should_trigger_background_fetch(last_save_time, "news"):
+                    if _should_trigger_background_fetch(last_save_time, "news", ticker):
                         # Trigger background fetch but return cached data immediately
                         async def _fetch_news_background():
                             try:
-                                # Re-fetch news
+                                # Re-fetch news - bypass cache to prevent infinite loop
                                 news_result = await get_latest_news(
-                                    ticker, api_key, max_items, cache_instance, cache_ttl=None
+                                    ticker, api_key, max_items, cache_instance=None, cache_ttl=None
                                 )
                                 return news_result
                             except Exception as e:
@@ -2225,13 +2226,13 @@ async def get_latest_iv(
                     cached_data['source'] = 'cache'
                     
                     # Check if background fetch should be triggered
-                    if _should_trigger_background_fetch(last_save_time, "iv") and db_instance:
+                    if _should_trigger_background_fetch(last_save_time, "iv", ticker) and db_instance:
                         # Trigger background fetch but return cached data immediately
                         async def _fetch_iv_background():
                             try:
-                                # Re-fetch IV
+                                # Re-fetch IV - bypass cache to prevent infinite loop
                                 iv_result = await get_latest_iv(
-                                    ticker, db_instance, cache_instance, cache_ttl=None
+                                    ticker, db_instance, cache_instance=None, cache_ttl=None
                                 )
                                 return iv_result
                             except Exception as e:
@@ -2441,7 +2442,7 @@ def parse_args():
     parser.add_argument(
         "--db-path",
         type=str,
-        default='ms1.kundu.dev:9001',
+        default='ms1.kundu.dev:9100',
         help="Path to the database file or PostgreSQL connection string (e.g., postgresql://user:pass@host:port/db). If not provided, uses default for selected db-type."
     )
     parser.add_argument(
@@ -3744,16 +3745,29 @@ def _get_fetch_meta_age_seconds(data_dir: str, symbol: str, interval: str) -> di
 # These functions are used by both stock_info_display.py and db_server.py
 # ============================================================================
 
-def _should_trigger_background_fetch(last_save_time: Optional[datetime], data_type: str = "price") -> bool:
+# Track active background fetches to prevent infinite loops
+_active_background_fetches: set = set()  # Set of (symbol, data_type) tuples
+_background_fetch_lock = threading.Lock()  # Thread lock for thread-safe set operations
+
+def _should_trigger_background_fetch(last_save_time: Optional[datetime], data_type: str = "price", symbol: str = "") -> bool:
     """Check if background fetch should be triggered based on last save time and market hours.
     
     Args:
         last_save_time: Last time data was saved (UTC datetime or None)
         data_type: Type of data ("price", "options", "financial", "news", "iv")
+        symbol: Stock symbol (used to prevent duplicate background fetches)
     
     Returns:
         True if background fetch should be triggered, False otherwise
     """
+    # Check if a background fetch is already in progress for this symbol/data_type
+    if symbol:
+        fetch_key = (symbol.upper(), data_type)
+        with _background_fetch_lock:
+            if fetch_key in _active_background_fetches:
+                logger.debug(f"[BACKGROUND FETCH] Skipping background fetch for {symbol} {data_type} - already in progress")
+                return False
+    
     if last_save_time is None:
         return True  # No data cached, should fetch
     
@@ -3826,6 +3840,13 @@ async def _trigger_background_fetch(
         fetch_func: Async function to call for fetching
         *args, **kwargs: Arguments to pass to fetch_func
     """
+    # Check if already in progress
+    fetch_key = (symbol.upper(), data_type)
+    with _background_fetch_lock:
+        if fetch_key in _active_background_fetches:
+            logger.debug(f"[BACKGROUND FETCH] Skipping duplicate background fetch for {symbol} {data_type}")
+            return
+        _active_background_fetches.add(fetch_key)
     # Log at DEBUG level and also print to stderr to ensure visibility
     # Include call stack information to show where this is being called from
     import traceback
@@ -3923,19 +3944,21 @@ async def _trigger_background_fetch(
     
     debug_msg = f"[BACKGROUND FETCH] Handling background fetch call for {data_type} data: {symbol}"
     logger.debug(debug_msg)
-    print(debug_msg, file=sys.stderr)
-    print(f"[BACKGROUND FETCH] Called from:\n{call_stack_str}", file=sys.stderr)
-    print(f"[BACKGROUND FETCH] Fetch destination: {fetch_destination}", file=sys.stderr)
-    print(f"[BACKGROUND FETCH] HTTP endpoint URL: {fetch_url}", file=sys.stderr)
+    if logger.isEnabledFor(logging.DEBUG):
+        print(debug_msg, file=sys.stderr)
+        print(f"[BACKGROUND FETCH] Called from:\n{call_stack_str}", file=sys.stderr)
+        print(f"[BACKGROUND FETCH] Fetch destination: {fetch_destination}", file=sys.stderr)
+        print(f"[BACKGROUND FETCH] HTTP endpoint URL: {fetch_url}", file=sys.stderr)
     
     try:
         # Create background task (fire-and-forget)
         async def _background_fetch():
             try:
                 start_msg = f"[BACKGROUND FETCH] Starting background fetch for {data_type} data: {symbol} -> {fetch_destination}"
-                logger.info(start_msg)
-                print(start_msg, file=sys.stderr)
-                print(f"[BACKGROUND FETCH] Expected HTTP endpoint: {fetch_url}", file=sys.stderr)
+                logger.debug(start_msg)
+                if logger.isEnabledFor(logging.DEBUG):
+                    print(start_msg, file=sys.stderr)
+                    print(f"[BACKGROUND FETCH] Expected HTTP endpoint: {fetch_url}", file=sys.stderr)
                 
                 # Use aiohttp trace config to capture actual HTTP request URLs
                 import aiohttp
@@ -3952,7 +3975,8 @@ async def _trigger_background_fetch(
                             url = f"{url}?{param_str}" if '?' not in url else f"{url}&{param_str}"
                     full_url = f"{method} {url}"
                     captured_urls.append(full_url)
-                    print(f"[BACKGROUND FETCH] HTTP {full_url}", file=sys.stderr)
+                    if logger.isEnabledFor(logging.DEBUG):
+                        print(f"[BACKGROUND FETCH] HTTP {full_url}", file=sys.stderr)
                 
                 # Create trace config
                 trace_config = aiohttp.TraceConfig()
@@ -3963,26 +3987,34 @@ async def _trigger_background_fetch(
                 await fetch_func(*args, **kwargs)
                 
                 complete_msg = f"[BACKGROUND FETCH] Completed background fetch for {data_type} data: {symbol} -> {fetch_destination}"
-                logger.info(complete_msg)
-                print(complete_msg, file=sys.stderr)
-                if captured_urls:
-                    print(f"[BACKGROUND FETCH] Total HTTP requests made: {len(captured_urls)}", file=sys.stderr)
+                logger.debug(complete_msg)
+                if logger.isEnabledFor(logging.DEBUG):
+                    print(complete_msg, file=sys.stderr)
+                    if captured_urls:
+                        print(f"[BACKGROUND FETCH] Total HTTP requests made: {len(captured_urls)}", file=sys.stderr)
             except Exception as e:
                 error_msg = f"[BACKGROUND FETCH] Error in background fetch for {data_type} data {symbol} -> {fetch_destination}: {e}"
                 logger.warning(error_msg)
-                print(error_msg, file=sys.stderr)
-                import traceback
-                print(f"[BACKGROUND FETCH] Error traceback:\n{traceback.format_exc()}", file=sys.stderr)
+                if logger.isEnabledFor(logging.DEBUG):
+                    print(error_msg, file=sys.stderr)
+                    import traceback
+                    print(f"[BACKGROUND FETCH] Error traceback:\n{traceback.format_exc()}", file=sys.stderr)
+            finally:
+                # Remove from active fetches when done
+                with _background_fetch_lock:
+                    _active_background_fetches.discard(fetch_key)
         
         # Create task without awaiting (fire-and-forget)
         asyncio.create_task(_background_fetch())
         triggered_msg = f"[BACKGROUND FETCH] Triggered background fetch task for {data_type} data: {symbol} -> {fetch_destination}"
         logger.debug(triggered_msg)
-        print(triggered_msg, file=sys.stderr)
+        if logger.isEnabledFor(logging.DEBUG):
+            print(triggered_msg, file=sys.stderr)
     except Exception as e:
         error_msg = f"[BACKGROUND FETCH] Failed to trigger background fetch for {data_type} data {symbol} -> {fetch_destination}: {e}"
         logger.debug(error_msg)
-        print(error_msg, file=sys.stderr)
+        if logger.isEnabledFor(logging.DEBUG):
+            print(error_msg, file=sys.stderr)
 
 async def get_price_info(
     symbol: str,
@@ -4277,13 +4309,13 @@ async def get_financial_info(
                     logger.info(f"[FINANCIAL CACHE HIT] Financial data for {symbol} (cache_check: {cache_check_time:.1f}ms, total: {fetch_time:.1f}ms)")
                     
                     # Check if background fetch should be triggered
-                    if _should_trigger_background_fetch(last_save_time, "financial"):
+                    if _should_trigger_background_fetch(last_save_time, "financial", symbol):
                         # Trigger background fetch but return cached data immediately
                         async def _fetch_financial_background():
                             try:
-                                # Re-fetch financial data
+                                # Re-fetch financial data - use force_fetch=True to bypass cache and prevent infinite loop
                                 financial_result = await get_financial_info(
-                                    symbol, db_instance, force_fetch=False
+                                    symbol, db_instance, force_fetch=True
                                 )
                                 return financial_result
                             except Exception as e:

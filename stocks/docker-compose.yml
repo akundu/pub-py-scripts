@@ -88,14 +88,14 @@ volumes:
   #     - stock-network
   #   restart: unless-stopped
 
-  # Database server for SQLite (port 9001)
+  # Database server for SQLite (port 9100)
   # db-server-sqlite:
   #   build: .
   #   command: >
   #     sh -c "ulimit -n 65536 && 
-  #             python db_server.py --db-file data/stock_data.db --port 9001 --log-level INFO --heartbeat-interval 60"
+  #             python db_server.py --db-file data/stock_data.db --port 9100 --log-level INFO --heartbeat-interval 60"
   #   ports:
-  #     - "9001:9001"
+  #     - "9100:9100"
   #   volumes:
   #     - ./data:/app/data:rw
   #     - ./data/daily:/app/data/daily:rw

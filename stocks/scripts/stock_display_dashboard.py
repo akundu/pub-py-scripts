@@ -9,13 +9,13 @@ display and real-time data reception.
 
 Usage Examples:
     # Display dashboard for specific symbols
-    python stock_display_dashboard.py --symbols AAPL MSFT GOOGL --db-server ms1.kundu.dev:9001
+    python stock_display_dashboard.py --symbols AAPL MSFT GOOGL --db-server ms1.kundu.dev:9100
 
     # Display from YAML file with custom refresh rate
-    python stock_display_dashboard.py --symbols-list symbols.yaml --display-refresh 2 --db-server ms1.kundu.dev:9001
+    python stock_display_dashboard.py --symbols-list symbols.yaml --display-refresh 2 --db-server ms1.kundu.dev:9100
 
     # Display S&P 500 symbols with 1-second refresh
-    python stock_display_dashboard.py --types sp500 --display-refresh 1 --db-server ms1.kundu.dev:9001
+    python stock_display_dashboard.py --types sp500 --display-refresh 1 --db-server ms1.kundu.dev:9100
 """
 
 import os
@@ -1163,8 +1163,8 @@ def parse_args():
     parser.add_argument(
         '--db-server',
         type=str,
-        default='ms1.kundu.dev:9001',
-        help='Database server address in host:port format (default: ms1.kundu.dev:9001)'
+        default='ms1.kundu.dev:9100',
+        help='Database server address in host:port format (default: ms1.kundu.dev:9100)'
     )
     
     parser.add_argument(

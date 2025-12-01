@@ -718,8 +718,8 @@ Examples:
     parser.add_argument(
         '--db-server-port',
         type=int,
-        default=9001,
-        help="Database server port for cache warmup (default: 9001)"
+        default=9100,
+        help="Database server port for cache warmup (default: 9100)"
     )
     
     parser.add_argument(
@@ -755,7 +755,7 @@ Examples:
             try:
                 logger.info("Generating HTML output...")
                 # Log cache warmup configuration
-                warmup_url = f"http://{args.db_server_host}:{args.db_server_port}/api/stock_info/{{ticker}}?show_iv=true&show_news=false"
+                warmup_url = f"http://{args.db_server_host}:{args.db_server_port}/api/stock_info/{{ticker}}?show_iv=true&show_news=true"
                 logger.debug(f"[CACHE WARMUP] Will trigger background HTTP requests to: {args.db_server_host}:{args.db_server_port}")
                 logger.debug(f"[CACHE WARMUP] HTTP endpoint pattern: {warmup_url}")
                 print(f"[CACHE WARMUP] Initiating cache warmup from evaluate_covered_calls.py", file=sys.stderr)

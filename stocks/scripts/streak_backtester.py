@@ -185,7 +185,7 @@ class StreakBacktester:
                  max_total_investment: float = 10000.0,
                  streak_multiplier: float = 1.5,
                  debug: bool = False,
-                 port: int = 9001):
+                 port: int = 9100):
         """
         Initialize the backtester.
         
@@ -252,9 +252,9 @@ class StreakBacktester:
         if not self.port:
             # Prompt user for port if not provided
             try:
-                self.port = int(input("Enter database server port (default: 9001): ") or "9001")
+                self.port = int(input("Enter database server port (default: 9100): ") or "9100")
             except (ValueError, KeyboardInterrupt):
-                self.port = 9001
+                self.port = 9100
                 print(f"Using default port: {self.port}")
         
         server_addr = f"localhost:{self.port}"
@@ -588,7 +588,7 @@ Examples:
     parser.add_argument("--streak-multiplier", type=float, default=1.5, metavar="MULTIPLIER",
                        help="Multiplier for each consecutive streak day (default: 1.5)")
     parser.add_argument("--debug", action="store_true", help="Enable debug output and transaction log")
-    parser.add_argument("--port", type=int, default=9001, help="Port for database server (default: 9001)")
+    parser.add_argument("--port", type=int, default=9100, help="Port for database server (default: 9100)")
     
     return parser.parse_args()
 

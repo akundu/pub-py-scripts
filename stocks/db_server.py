@@ -1828,7 +1828,26 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
     
     # Get news data
     news_data = news_info.get('news_data', {}) if news_info else {}
-    news_items = news_data.get('results', []) if isinstance(news_data, dict) else []
+    # News data structure: {'articles': [...], 'count': N, 'fetched_at': ..., 'date_range': {...}}
+    news_items = news_data.get('articles', []) if isinstance(news_data, dict) else []
+    
+    # Format news items HTML
+    def format_news_item(item):
+        title = item.get("title", "No title")
+        published = item.get("published_utc", "")[:10] if item.get("published_utc") else ""
+        description = item.get("description", "")
+        article_url = item.get("article_url", "#")
+        desc_html = f'<p>{description[:200]}...</p>' if description else ""
+        return f'<li style="margin-bottom: 15px; padding: 10px; background: #f9fafb; border-radius: 4px;"><strong>{title}</strong><br><small>{published}</small><br>{desc_html}<a href="{article_url}" target="_blank" style="color: #667eea;">Read more</a></li>'
+    
+    news_html = ""
+    if news_items:
+        news_list_items = ''.join([format_news_item(item) for item in news_items[:10]])
+        news_html = f'<ul style="list-style: none; padding: 0;">{news_list_items}</ul>'
+    elif news_info and news_info.get('error'):
+        news_html = f'<p>Error fetching news: {news_info.get("error")}</p>'
+    else:
+        news_html = '<p>No news available</p>'
     
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -2096,7 +2115,7 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
         <div class="data-section">
             <h2>Latest News</h2>
             <div id="newsDisplay">
-                {'<ul style="list-style: none; padding: 0;">' + ''.join([f'<li style="margin-bottom: 15px; padding: 10px; background: #f9fafb; border-radius: 4px;"><strong>{item.get("title", "No title")}</strong><br><small>{item.get("published_utc", "")[:10]}</small><br><a href="{item.get("article_url", "#")}" target="_blank" style="color: #667eea;">Read more</a></li>' for item in news_items[:10]]) + '</ul>' if news_items else '<p>No news available</p>'}
+                {news_html}
             </div>
         </div>
         ''' if news_info else ''}
@@ -2337,6 +2356,60 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
     GET /stock_info/{symbol}
     
     Returns a Yahoo Finance-like HTML page with stock information, charts, and real-time updates.
+    
+    Path Parameters:
+        symbol (required): Stock ticker symbol (e.g., AAPL, MSFT, GOOGL)
+    
+    Query Parameters:
+        Price Data:
+            - latest: bool (default: false)
+                If true, only fetch latest price and skip historical data
+            - start_date: str (YYYY-MM-DD, optional)
+                Start date for historical price data (default: 1 year ago)
+            - end_date: str (YYYY-MM-DD, optional)
+                End date for historical price data (default: today)
+        
+        Options Data:
+            - options_days: int (default: 90)
+                Number of days ahead to fetch options data
+            - options_type: str (default: "all")
+                Filter options by type: "all", "call", or "put"
+            - strike_range_percent: int (optional)
+                Filter options by strike range (±percent from stock price, e.g., 20 for ±20%)
+            - max_options_per_expiry: int (default: 10)
+                Maximum number of options to return per expiration date
+        
+        Data Source & Fetching:
+            - data_source: str (default: "polygon")
+                Data source to use: "polygon" or "alpaca"
+            - force_fetch: bool (default: false)
+                If true, force fetch from API bypassing cache/DB
+            - no_cache: bool (default: false)
+                If true, disable Redis caching
+        
+        Display Options:
+            - timezone: str (default: "America/New_York")
+                Timezone for displaying timestamps (e.g., "America/New_York", "UTC", "EST")
+            - show_news: bool (default: true)
+                If true, include latest news articles in response
+            - show_iv: bool (default: true)
+                If true, include implied volatility statistics in response
+    
+    Example Requests:
+        # Basic request with defaults
+        GET /stock_info/AAPL
+        
+        # Request with specific options parameters
+        GET /stock_info/AAPL?options_days=180&options_type=call&strike_range_percent=20
+        
+        # Request with custom date range
+        GET /stock_info/AAPL?start_date=2024-01-01&end_date=2024-12-31
+        
+        # Request without news or IV
+        GET /stock_info/AAPL?show_news=false&show_iv=false
+        
+        # Force fetch from API
+        GET /stock_info/AAPL?force_fetch=true
     """
     # Get symbol from path
     symbol = request.match_info.get('symbol', '').upper().strip()
@@ -2360,10 +2433,22 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         # Import functions from fetch_symbol_data
         from fetch_symbol_data import get_stock_info_parallel
         
-        # Parse query parameters - fetch comprehensive data
+        # Parse query parameters - same as API endpoint
+        latest = request.query.get('latest', 'false').lower() == 'true'
+        start_date = request.query.get('start_date')
+        end_date = request.query.get('end_date')
+        options_days = int(request.query.get('options_days', '90'))  # Default 90 for HTML view
+        force_fetch = request.query.get('force_fetch', 'false').lower() == 'true'
+        data_source = request.query.get('data_source', 'polygon')
+        timezone_str = request.query.get('timezone', 'America/New_York')
         show_price_history = True  # Always show price history for chart
-        show_news = request.query.get('show_news', 'true').lower() == 'true'  # Default to true
-        show_iv = request.query.get('show_iv', 'true').lower() == 'true'  # Default to true
+        option_type = request.query.get('options_type', 'all')
+        strike_range_percent = request.query.get('strike_range_percent')
+        if strike_range_percent:
+            strike_range_percent = int(strike_range_percent)
+        max_options_per_expiry = int(request.query.get('max_options_per_expiry', '10'))
+        show_news = request.query.get('show_news', 'true').lower() == 'true'  # Default to true for HTML
+        show_iv = request.query.get('show_iv', 'true').lower() == 'true'  # Default to true for HTML
         no_cache = request.query.get('no_cache', 'false').lower() == 'true'
         
         # Get cache settings
@@ -2374,23 +2459,25 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         
         # Get date range for historical data (default: last 1 year for better chart)
         from datetime import datetime, timedelta
-        end_date = datetime.now().strftime('%Y-%m-%d')
-        start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')  # 1 year default
+        if not end_date:
+            end_date = datetime.now().strftime('%Y-%m-%d')
+        if not start_date:
+            start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')  # 1 year default
         
         # Call the parallel helper function
         result = await get_stock_info_parallel(
             symbol,
             db_instance,
-            start_date=start_date,
-            end_date=end_date,
-            force_fetch=False,
-            data_source='polygon',
-            timezone_str='America/New_York',
-            latest_only=False,
-            options_days=90,  # 90 days for options by default
-            option_type='all',
-            strike_range_percent=None,
-            max_options_per_expiry=10,
+            start_date=start_date if not latest else None,
+            end_date=end_date if not latest else None,
+            force_fetch=force_fetch,
+            data_source=data_source,
+            timezone_str=timezone_str,
+            latest_only=latest,
+            options_days=options_days,
+            option_type=option_type,
+            strike_range_percent=strike_range_percent,
+            max_options_per_expiry=max_options_per_expiry,
             show_news=show_news,
             show_iv=show_iv,
             enable_cache=enable_cache,

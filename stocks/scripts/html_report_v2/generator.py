@@ -6,6 +6,7 @@ import logging
 import pandas as pd
 import sys
 import threading
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -28,9 +29,9 @@ _warmup_tickers_lock = threading.Lock()
 _warmup_tickers_in_progress = set()
 
 
-def _warmup_cache_for_ticker(ticker: str, host: str = "mm.kundu.dev", port: int = 9001) -> None:
+def _warmup_cache_for_ticker(ticker: str, host: str = "mm.kundu.dev", port: int = 9100) -> None:
     """Fire-and-forget cache warmup for a single ticker."""
-    url = f"http://{host}:{port}/api/stock_info/{ticker}?show_iv=true&show_news=false"
+    url = f"http://{host}:{port}/api/stock_info/{ticker}?show_iv=true&show_news=true"
     
     # Log the HTTP request destination
     import traceback
@@ -65,7 +66,7 @@ def _warmup_cache_for_ticker(ticker: str, host: str = "mm.kundu.dev", port: int 
         pass
 
 
-def _warmup_stock_info_cache(df: pd.DataFrame, host: str = "mm.kundu.dev", port: int = 9001) -> None:
+def _warmup_stock_info_cache(df: pd.DataFrame, host: str = "mm.kundu.dev", port: int = 9100) -> None:
     """Background cache warmup: Extract unique tickers and fetch stock_info in background.
     
     This function ensures each ticker is only fetched once, even if called multiple times.
@@ -116,10 +117,12 @@ def _warmup_stock_info_cache(df: pd.DataFrame, host: str = "mm.kundu.dev", port:
             # This ensures we only try once per ticker per process
             pass
     
+    threads = []
     for ticker in new_tickers:
-        # Start a daemon thread for each new ticker (fire-and-forget)
-        thread = threading.Thread(target=warmup_worker, args=(ticker,), daemon=True)
+        # Start a non-daemon thread for each new ticker so we can wait for HTTP requests to be sent
+        thread = threading.Thread(target=warmup_worker, args=(ticker,), daemon=False)
         thread.start()
+        threads.append(thread)
     
     if len(new_tickers) > 0:
         print(f"Background cache warmup: Fetching stock info for {len(new_tickers)} new tickers (skipped {len(unique_tickers) - len(new_tickers)} already in progress)", file=sys.stderr)
@@ -129,16 +132,33 @@ def _warmup_stock_info_cache(df: pd.DataFrame, host: str = "mm.kundu.dev", port:
         print(f"[CACHE WARMUP] Database server: {host}:{port}", file=sys.stderr)
         print(f"[CACHE WARMUP] HTTP endpoint base: http://{host}:{port}/api/stock_info/", file=sys.stderr)
         print(f"[CACHE WARMUP] Tickers to warmup: {', '.join(new_tickers[:20])}{'...' if len(new_tickers) > 20 else ''}", file=sys.stderr)
+        
+        # Wait for threads to send HTTP requests (with timeout)
+        # We wait up to 2 seconds per ticker, but cap at 5 seconds total
+        # This ensures the HTTP requests are actually sent before the script exits
+        max_wait = min(2.0 * len(new_tickers), 5.0)
+        start_time = time.time()
+        
+        for thread in threads:
+            remaining_time = max_wait - (time.time() - start_time)
+            if remaining_time <= 0:
+                break
+            thread.join(timeout=remaining_time)
+        
+        elapsed = time.time() - start_time
+        if elapsed > 0:
+            logger.debug(f"[CACHE WARMUP] Waited {elapsed:.2f}s for HTTP requests to be sent")
+            print(f"[CACHE WARMUP] Waited {elapsed:.2f}s for HTTP requests to be sent", file=sys.stderr)
 
 
-def generate_html_output(df: pd.DataFrame, output_dir: str, db_server_host: str = "mm.kundu.dev", db_server_port: int = 9001) -> None:
+def generate_html_output(df: pd.DataFrame, output_dir: str, db_server_host: str = "mm.kundu.dev", db_server_port: int = 9100) -> None:
     """Generate HTML output with sortable table.
     
     Args:
         df: DataFrame with the results
         output_dir: Directory path where to create the HTML output
         db_server_host: Database server hostname (default: "mm.kundu.dev")
-        db_server_port: Database server port (default: 9001)
+        db_server_port: Database server port (default: 9100)
     """
     # Create output directory if it doesn't exist
     output_path = Path(output_dir)
