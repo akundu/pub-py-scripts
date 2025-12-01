@@ -3759,11 +3759,11 @@ def _jitter_threshold(base_threshold: int | float) -> float:
     factor = random.uniform(0.9, 1.1)
     return base_threshold * factor
 
-MARKET_DEFAULT_THRESHOLD = 12 * 60 * 60  # 1 hour
+MARKET_DEFAULT_THRESHOLD = 12 * 60 * 60
 MARKET_CLOSE_THRESHOLD = MARKET_DEFAULT_THRESHOLD
-MARKET_OPEN_THRESHOLD = 1 * 60 * 60  # 2 hours
-MARKET_PREOPEN_THRESHOLD = 2 * 60 * 60  # 1 hour
-MARKET_POSTCLOSE_THRESHOLD = 2 * 60 * 60  # 1 hour
+MARKET_OPEN_THRESHOLD = 30 * 60
+MARKET_PREOPEN_THRESHOLD = 2 * 60 * 60
+MARKET_POSTCLOSE_THRESHOLD = MARKET_PREOPEN_THRESHOLD
 def _should_trigger_background_fetch(last_save_time: Optional[datetime], data_type: str = "price", symbol: str = "") -> bool:
     """Check if background fetch should be triggered based on last save time and market hours.
     
@@ -3797,14 +3797,13 @@ def _should_trigger_background_fetch(last_save_time: Optional[datetime], data_ty
     now_utc = datetime.now(timezone.utc)
     age_seconds = (now_utc - last_save_time).total_seconds()
 
+    effective_threshold = _jitter_threshold(MARKET_DEFAULT_THRESHOLD)
     if is_market_hours():  # Check if market is open
         effective_threshold = _jitter_threshold(MARKET_OPEN_THRESHOLD)
     elif is_market_preopen():
         effective_threshold = _jitter_threshold(MARKET_PREOPEN_THRESHOLD)
     elif is_market_postclose():
         effective_threshold = _jitter_threshold(MARKET_POSTCLOSE_THRESHOLD)
-    else:
-        effective_threshold = _jitter_threshold(MARKET_CLOSE_THRESHOLD)
 
     return age_seconds > effective_threshold
 
