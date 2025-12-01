@@ -24,11 +24,6 @@ from pathlib import Path
 from typing import Optional
 
 # Set up logging - use INFO level by default, DEBUG for troubleshooting
-import sys as sys_module
-if '--debug' in sys_module.argv:
-    logging.basicConfig(level=logging.DEBUG, format='%(levelname)s: %(message)s')
-else:
-    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 # Add scripts directory to path for imports
@@ -713,7 +708,33 @@ Examples:
         help="Directory path for HTML output (default: html_output)"
     )
     
+    parser.add_argument(
+        '--db-server-host',
+        type=str,
+        default='mm.kundu.dev',
+        help="Database server hostname for cache warmup (default: mm.kundu.dev)"
+    )
+    
+    parser.add_argument(
+        '--db-server-port',
+        type=int,
+        default=9001,
+        help="Database server port for cache warmup (default: 9001)"
+    )
+    
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help="Enable debug logging"
+    )
+    
     args = parser.parse_args()
+    
+    # Set up logging based on debug flag
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG, format='%(levelname)s: %(message)s')
+    else:
+        logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     
     # Determine input source
     file_path = args.file
@@ -733,7 +754,15 @@ Examples:
         if args.html:
             try:
                 logger.info("Generating HTML output...")
-                generate_html_output(df, args.output_dir)
+                # Log cache warmup configuration
+                warmup_url = f"http://{args.db_server_host}:{args.db_server_port}/api/stock_info/{{ticker}}?show_iv=true&show_news=false"
+                logger.debug(f"[CACHE WARMUP] Will trigger background HTTP requests to: {args.db_server_host}:{args.db_server_port}")
+                logger.debug(f"[CACHE WARMUP] HTTP endpoint pattern: {warmup_url}")
+                print(f"[CACHE WARMUP] Initiating cache warmup from evaluate_covered_calls.py", file=sys.stderr)
+                print(f"[CACHE WARMUP] Database server: {args.db_server_host}:{args.db_server_port}", file=sys.stderr)
+                print(f"[CACHE WARMUP] HTTP endpoint pattern: {warmup_url}", file=sys.stderr)
+                
+                generate_html_output(df, args.output_dir, db_server_host=args.db_server_host, db_server_port=args.db_server_port)
                 logger.info(f"HTML output generated successfully in {args.output_dir}")
             except Exception as e:
                 logger.error(f"Error generating HTML output: {e}")

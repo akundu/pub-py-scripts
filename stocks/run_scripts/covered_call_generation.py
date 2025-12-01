@@ -91,6 +91,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gemini-output-dir", type=str, default="", help="Gemini output directory name.")
     parser.add_argument("--gemini-store-dir", type=str, default="", help="Directory to store Gemini outputs.")
     parser.add_argument("--no-cache", action="store_true", help="Forward --no-cache to options_analyzer.")
+    parser.add_argument("--db-server-host", type=str, default="mm.kundu.dev", help="Database server hostname for cache warmup (default: mm.kundu.dev).")
+    parser.add_argument("--db-server-port", type=int, default=9001, help="Database server port for cache warmup (default: 9001).")
     
     execution_group = parser.add_mutually_exclusive_group()
     execution_group.add_argument(
@@ -368,6 +370,8 @@ def run_loop(
     stats: bool,
     market_hours_lookback_seconds: int,
     off_hours_lookback_seconds: int,
+    db_server_host: str,
+    db_server_port: int,
 ) -> None:
     download_loc = DOWNLOAD_LOC_DEFAULT
     store_dir = gemini_store_dir
@@ -457,6 +461,10 @@ def run_loop(
                 "--html",
                 "--output-dir",
                 str(TMP_DIR / OUTPUT_DIR_NAME),
+                "--db-server-host",
+                str(db_server_host),
+                "--db-server-port",
+                str(db_server_port),
             ]
             print(f"Executing: {' '.join(evaluate_cmd)}", file=sys.stderr, flush=True)
             eval_result = subprocess.run(evaluate_cmd, cwd=str(BASE_DIR))
@@ -542,6 +550,8 @@ def main() -> None:
         stats=not args.no_stats,
         market_hours_lookback_seconds=args.market_hours_lookback_seconds,
         off_hours_lookback_seconds=args.off_hours_lookback_seconds,
+        db_server_host=args.db_server_host,
+        db_server_port=args.db_server_port,
     )
 
 

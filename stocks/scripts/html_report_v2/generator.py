@@ -2,12 +2,15 @@
 Main HTML report generator - orchestrates all modules.
 """
 
+import logging
 import pandas as pd
 import sys
 import threading
 import urllib.request
 import urllib.error
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 from .data_processor import prepare_dataframe_for_display, split_calls_and_puts
 from .html_builder import (
     build_html_document, build_header, build_tab_button,
@@ -25,19 +28,44 @@ _warmup_tickers_lock = threading.Lock()
 _warmup_tickers_in_progress = set()
 
 
-def _warmup_cache_for_ticker(ticker: str, port: int = 9100) -> None:
+def _warmup_cache_for_ticker(ticker: str, host: str = "mm.kundu.dev", port: int = 9001) -> None:
     """Fire-and-forget cache warmup for a single ticker."""
+    url = f"http://{host}:{port}/api/stock_info/{ticker}?show_iv=true&show_news=false"
+    
+    # Log the HTTP request destination
+    import traceback
     try:
-        url = f"http://localhost:{port}/api/stock_info/{ticker}?show_iv=true&show_news=false"
+        # Get call stack to show where this is being called from
+        stack = traceback.extract_stack()[-3:-1]
+        caller_info = []
+        for frame in stack:
+            caller_info.append(f"  {frame.filename}:{frame.lineno} in {frame.name}")
+        call_stack_str = '\n'.join(caller_info) if caller_info else "  (call stack unavailable)"
+    except Exception:
+        call_stack_str = "  (call stack unavailable)"
+    
+    logger.debug(f"[CACHE WARMUP] Sending HTTP request for {ticker}")
+    print(f"[CACHE WARMUP] Sending HTTP request for {ticker}", file=sys.stderr)
+    print(f"[CACHE WARMUP] HTTP endpoint URL: {url}", file=sys.stderr)
+    print(f"[CACHE WARMUP] Called from:\n{call_stack_str}", file=sys.stderr)
+    
+    try:
         # Make request with short timeout, don't wait for response
         req = urllib.request.Request(url)
+        print(f"[CACHE WARMUP] Making HTTP GET request to: {url}", file=sys.stderr)
         urllib.request.urlopen(req, timeout=1.0)
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError):
-        # Silently ignore all errors - this is fire-and-forget
+        success_msg = f"[CACHE WARMUP] Successfully sent request for {ticker} to {host}:{port}"
+        logger.debug(success_msg)
+        print(success_msg, file=sys.stderr)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as e:
+        # Log errors in debug mode, but still ignore them (fire-and-forget)
+        error_msg = f"[CACHE WARMUP] Error sending request for {ticker} to {url}: {type(e).__name__}: {e}"
+        logger.debug(error_msg)
+        print(error_msg, file=sys.stderr)
         pass
 
 
-def _warmup_stock_info_cache(df: pd.DataFrame, port: int = 9100) -> None:
+def _warmup_stock_info_cache(df: pd.DataFrame, host: str = "mm.kundu.dev", port: int = 9001) -> None:
     """Background cache warmup: Extract unique tickers and fetch stock_info in background.
     
     This function ensures each ticker is only fetched once, even if called multiple times.
@@ -81,7 +109,7 @@ def _warmup_stock_info_cache(df: pd.DataFrame, port: int = 9100) -> None:
     # Fire-and-forget: Start background threads only for new tickers
     def warmup_worker(ticker: str) -> None:
         try:
-            _warmup_cache_for_ticker(ticker, port)
+            _warmup_cache_for_ticker(ticker, host, port)
         finally:
             # Remove from in-progress set after fetch completes (or fails)
             # Note: We keep it in the set to prevent re-fetching, even if it failed
@@ -95,14 +123,22 @@ def _warmup_stock_info_cache(df: pd.DataFrame, port: int = 9100) -> None:
     
     if len(new_tickers) > 0:
         print(f"Background cache warmup: Fetching stock info for {len(new_tickers)} new tickers (skipped {len(unique_tickers) - len(new_tickers)} already in progress)", file=sys.stderr)
+        logger.debug(f"[CACHE WARMUP] Starting warmup for {len(new_tickers)} tickers via {host}:{port}")
+        logger.debug(f"[CACHE WARMUP] Tickers: {', '.join(new_tickers[:10])}{'...' if len(new_tickers) > 10 else ''}")
+        print(f"[CACHE WARMUP] Starting warmup for {len(new_tickers)} tickers", file=sys.stderr)
+        print(f"[CACHE WARMUP] Database server: {host}:{port}", file=sys.stderr)
+        print(f"[CACHE WARMUP] HTTP endpoint base: http://{host}:{port}/api/stock_info/", file=sys.stderr)
+        print(f"[CACHE WARMUP] Tickers to warmup: {', '.join(new_tickers[:20])}{'...' if len(new_tickers) > 20 else ''}", file=sys.stderr)
 
 
-def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
+def generate_html_output(df: pd.DataFrame, output_dir: str, db_server_host: str = "mm.kundu.dev", db_server_port: int = 9001) -> None:
     """Generate HTML output with sortable table.
     
     Args:
         df: DataFrame with the results
         output_dir: Directory path where to create the HTML output
+        db_server_host: Database server hostname (default: "mm.kundu.dev")
+        db_server_port: Database server port (default: 9001)
     """
     # Create output directory if it doesn't exist
     output_path = Path(output_dir)
@@ -191,7 +227,7 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
     body_content = header_html + '\n'.join(tab_contents) + '\n    </div>\n'
     
     # Background cache warmup: Start fetching stock_info for all tickers (fire-and-forget)
-    _warmup_stock_info_cache(df_display)
+    _warmup_stock_info_cache(df_display, host=db_server_host, port=db_server_port)
     
     # Get CSS and JavaScript
     css_content = get_css_styles()

@@ -3777,21 +3777,149 @@ async def _trigger_background_fetch(
         fetch_func: Async function to call for fetching
         *args, **kwargs: Arguments to pass to fetch_func
     """
+    # Log at DEBUG level and also print to stderr to ensure visibility
+    # Include call stack information to show where this is being called from
+    import traceback
+    try:
+        # Get the caller information (skip this function and _trigger_background_fetch wrapper)
+        stack = traceback.extract_stack()[-3:-1]  # Get last 2 frames before this function
+        caller_info = []
+        for frame in stack:
+            caller_info.append(f"  {frame.filename}:{frame.lineno} in {frame.name}")
+        call_stack_str = '\n'.join(caller_info) if caller_info else "  (call stack unavailable)"
+    except Exception:
+        call_stack_str = "  (call stack unavailable)"
+    
+    # Determine fetch destination/endpoint and actual HTTP URL
+    fetch_destination = "unknown"
+    fetch_url = "unknown"
+    try:
+        # Try to extract from function name and construct actual URLs
+        func_name = getattr(fetch_func, '__name__', 'unknown')
+        
+        if 'news' in func_name.lower() or 'news' in data_type.lower():
+            # Polygon news endpoint
+            fetch_destination = "Polygon.io API (news endpoint)"
+            fetch_url = f"https://api.polygon.io/v2/reference/news?ticker={symbol}"
+        elif 'financial' in func_name.lower() or 'financial' in data_type.lower():
+            # Polygon financial ratios endpoint
+            fetch_destination = "Polygon.io API (financial ratios endpoint)"
+            fetch_url = f"https://api.polygon.io/stocks/financials/v1/ratios?ticker={symbol}"
+        elif 'iv' in func_name.lower() or 'iv' in data_type.lower():
+            fetch_destination = "Database (IV calculation from options data)"
+            fetch_url = "Database query (IV calculation)"
+        elif 'price' in func_name.lower() or 'price' in data_type.lower():
+            # Check if it's polygon or alpaca
+            data_source = kwargs.get('data_source', 'polygon')
+            if data_source == 'alpaca':
+                fetch_destination = "Alpaca API (market data endpoint)"
+                # Alpaca uses different endpoints - try to determine which one
+                fetch_url = f"https://data.alpaca.markets/v2/stocks/{symbol}/quotes/latest"
+            else:
+                fetch_destination = "Polygon.io API (market data endpoint)"
+                # Polygon last quote endpoint
+                fetch_url = f"https://api.polygon.io/v2/last/nbbo/{symbol}"
+        
+        # Try to get more specific info from function's code object
+        if hasattr(fetch_func, '__code__'):
+            import inspect
+            try:
+                source = inspect.getsource(fetch_func)
+                # Look for actual URL patterns in the source
+                import re
+                url_pattern = r'https?://[^\s\'"]+'
+                urls_found = re.findall(url_pattern, source)
+                if urls_found:
+                    # Use the first URL found, but replace ticker placeholder if needed
+                    fetch_url = urls_found[0]
+                    if '{symbol}' in fetch_url or '{ticker}' in fetch_url:
+                        fetch_url = fetch_url.replace('{symbol}', symbol).replace('{ticker}', symbol)
+                    elif 'ticker=' in fetch_url or 'symbol=' in fetch_url:
+                        # URL already has ticker parameter, use as-is
+                        pass
+                    else:
+                        # Try to append ticker parameter
+                        separator = '&' if '?' in fetch_url else '?'
+                        fetch_url = f"{fetch_url}{separator}ticker={symbol}"
+                
+                # Also check for Polygon client method calls to construct URLs
+                if 'list_ticker_news' in source:
+                    fetch_url = f"https://api.polygon.io/v2/reference/news?ticker={symbol}"
+                elif 'get_last_quote' in source:
+                    fetch_url = f"https://api.polygon.io/v2/last/nbbo/{symbol}"
+                elif 'get_last_trade' in source:
+                    fetch_url = f"https://api.polygon.io/v2/last/trade/{symbol}"
+                elif 'get_aggs' in source:
+                    fetch_url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/day"
+            except Exception:
+                pass
+    except Exception as e:
+        # If detection fails, at least show what we know
+        fetch_destination = f"Unknown (detection error: {e})"
+        fetch_url = "Unknown"
+    
+    debug_msg = f"[BACKGROUND FETCH] Handling background fetch call for {data_type} data: {symbol}"
+    logger.debug(debug_msg)
+    print(debug_msg, file=sys.stderr)
+    print(f"[BACKGROUND FETCH] Called from:\n{call_stack_str}", file=sys.stderr)
+    print(f"[BACKGROUND FETCH] Fetch destination: {fetch_destination}", file=sys.stderr)
+    print(f"[BACKGROUND FETCH] HTTP endpoint URL: {fetch_url}", file=sys.stderr)
+    
     try:
         # Create background task (fire-and-forget)
         async def _background_fetch():
             try:
-                logger.info(f"[BACKGROUND FETCH] Starting background fetch for {data_type} data: {symbol}")
+                start_msg = f"[BACKGROUND FETCH] Starting background fetch for {data_type} data: {symbol} -> {fetch_destination}"
+                logger.info(start_msg)
+                print(start_msg, file=sys.stderr)
+                print(f"[BACKGROUND FETCH] Expected HTTP endpoint: {fetch_url}", file=sys.stderr)
+                
+                # Use aiohttp trace config to capture actual HTTP request URLs
+                import aiohttp
+                captured_urls = []
+                
+                async def on_request_start(session, trace_config_ctx, params):
+                    """Capture the actual URL when HTTP request starts."""
+                    url = str(params.url)
+                    method = params.method
+                    # Add query parameters if present
+                    if hasattr(params, 'params') and params.params:
+                        if isinstance(params.params, dict):
+                            param_str = '&'.join([f"{k}={v}" for k, v in params.params.items()])
+                            url = f"{url}?{param_str}" if '?' not in url else f"{url}&{param_str}"
+                    full_url = f"{method} {url}"
+                    captured_urls.append(full_url)
+                    print(f"[BACKGROUND FETCH] HTTP {full_url}", file=sys.stderr)
+                
+                # Create trace config
+                trace_config = aiohttp.TraceConfig()
+                trace_config.on_request_start.append(on_request_start)
+                
+                # Note: This only works if the fetch function creates new aiohttp sessions
+                # For functions using existing sessions or Polygon client, we log the expected URL above
                 await fetch_func(*args, **kwargs)
-                logger.info(f"[BACKGROUND FETCH] Completed background fetch for {data_type} data: {symbol}")
+                
+                complete_msg = f"[BACKGROUND FETCH] Completed background fetch for {data_type} data: {symbol} -> {fetch_destination}"
+                logger.info(complete_msg)
+                print(complete_msg, file=sys.stderr)
+                if captured_urls:
+                    print(f"[BACKGROUND FETCH] Total HTTP requests made: {len(captured_urls)}", file=sys.stderr)
             except Exception as e:
-                logger.warning(f"[BACKGROUND FETCH] Error in background fetch for {data_type} data {symbol}: {e}")
+                error_msg = f"[BACKGROUND FETCH] Error in background fetch for {data_type} data {symbol} -> {fetch_destination}: {e}"
+                logger.warning(error_msg)
+                print(error_msg, file=sys.stderr)
+                import traceback
+                print(f"[BACKGROUND FETCH] Error traceback:\n{traceback.format_exc()}", file=sys.stderr)
         
         # Create task without awaiting (fire-and-forget)
         asyncio.create_task(_background_fetch())
-        logger.debug(f"[BACKGROUND FETCH] Triggered background fetch task for {data_type} data: {symbol}")
+        triggered_msg = f"[BACKGROUND FETCH] Triggered background fetch task for {data_type} data: {symbol} -> {fetch_destination}"
+        logger.debug(triggered_msg)
+        print(triggered_msg, file=sys.stderr)
     except Exception as e:
-        logger.debug(f"[BACKGROUND FETCH] Failed to trigger background fetch for {data_type} data {symbol}: {e}")
+        error_msg = f"[BACKGROUND FETCH] Failed to trigger background fetch for {data_type} data {symbol} -> {fetch_destination}: {e}"
+        logger.debug(error_msg)
+        print(error_msg, file=sys.stderr)
 
 async def get_price_info(
     symbol: str,
