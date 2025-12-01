@@ -30,9 +30,16 @@ from fetch_symbol_data import (
     _get_et_now,
     get_default_db_path,
     StockDBBase,
+    # New imports for stock info functions
+    get_price_info,
+    get_options_info,
+    get_financial_info,
+    get_news_info,
+    get_iv_info,
+    get_stock_info_parallel,
 )
-from scripts.fetch_options import HistoricalDataFetcher
 from common.stock_db import get_stock_db
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
@@ -195,572 +202,88 @@ Examples:
         help="Show latest implied volatility statistics"
     )
     
+    parser.add_argument(
+        "--api-server",
+        type=str,
+        default=None,
+        help="API server URL to fetch data from (e.g., http://localhost:8080). If not provided, uses --db-path directly."
+    )
+    
     return parser.parse_args()
 
 
-async def get_price_info(
+async def get_stock_info_from_api(
     symbol: str,
-    db_instance: StockDBBase,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    force_fetch: bool = False,
-    data_source: str = "polygon",
-    timezone_str: Optional[str] = None,
-    latest_only: bool = False
+    api_server: str,
+    **kwargs
 ) -> Dict[str, Any]:
-    """Get price information for a symbol.
+    """Get stock information from API server.
     
     Args:
-        latest_only: If True, only fetch latest price and skip historical data
+        symbol: Stock symbol
+        api_server: Base URL of the API server (e.g., http://localhost:8080)
+        **kwargs: Additional query parameters to pass to the API
+    
+    Returns:
+        Dictionary with stock information (same format as get_stock_info_parallel)
     """
-    result = {
-        "symbol": symbol,
-        "current_price": None,
-        "price_data": None,
-        "error": None
-    }
-    
-    try:
-        # Get cache instance if available
-        cache_instance = None
-        if hasattr(db_instance, 'cache') and db_instance.cache:
-            cache_instance = db_instance.cache
-        
-        # Check cache for latest price data first (if not force_fetch)
-        cached_price_data = None
-        if not force_fetch and cache_instance:
-            try:
-                from common.redis_cache import CacheKeyGenerator
-                cache_key = CacheKeyGenerator.latest_price_data(symbol)
-                cached_df = await cache_instance.get(cache_key)
-                if cached_df is not None and not cached_df.empty:
-                    # Convert DataFrame back to dict
-                    cached_price_data = cached_df.iloc[0].to_dict()
-                    # Restore nested structures if any
-                    if 'realtime_df' in cached_price_data and isinstance(cached_price_data['realtime_df'], str):
-                        import json
-                        try:
-                            cached_price_data['realtime_df'] = json.loads(cached_price_data['realtime_df'])
-                        except:
-                            cached_price_data['realtime_df'] = None
-                    logger.debug(f"Found cached latest price data for {symbol}")
-            except Exception as e:
-                logger.debug(f"Cache check failed for price data {symbol}: {e}")
-        
-        # Get current/latest price
-        if cached_price_data and not force_fetch:
-            # Use cached data
-            price_info = {
-                'symbol': symbol,
-                'price': cached_price_data.get('price'),
-                'bid_price': cached_price_data.get('bid_price'),
-                'ask_price': cached_price_data.get('ask_price'),
-                'timestamp': cached_price_data.get('timestamp'),
-                'source': cached_price_data.get('source', 'cache'),
-                'data_source': data_source
-            }
-        elif force_fetch:
-            # Force fetch from API
-            price_info = await get_current_price(
-                symbol,
-                data_source=data_source,
-                stock_db_instance=db_instance,
-                max_age_seconds=0  # Force fresh fetch
-            )
-        else:
-            # Try DB first, then API if needed
-            price_info = await get_current_price(
-                symbol,
-                data_source=data_source,
-                stock_db_instance=db_instance,
-                max_age_seconds=600  # 10 minutes
-            )
-        
-        if price_info:
-            result["current_price"] = price_info
-            
-            # Cache the price data if we have a cache instance and it's not from cache
-            if cache_instance and price_info.get('source') != 'cache':
-                try:
-                    from common.redis_cache import CacheKeyGenerator
-                    import json
-                    import pandas as pd
-                    cache_key = CacheKeyGenerator.latest_price_data(symbol)
-                    # Convert price_info dict to DataFrame for caching
-                    cache_dict = price_info.copy()
-                    # Serialize nested structures
-                    if 'realtime_df' in cache_dict and cache_dict['realtime_df'] is not None:
-                        # Store as JSON string if it's a DataFrame
-                        if isinstance(cache_dict['realtime_df'], pd.DataFrame):
-                            cache_dict['realtime_df'] = cache_dict['realtime_df'].to_json(orient='records')
-                    cache_df = pd.DataFrame([cache_dict])
-                    await cache_instance.set(cache_key, cache_df, ttl=300)  # 5 minutes TTL
-                    logger.debug(f"Cached latest price data for {symbol}")
-                except Exception as e:
-                    logger.debug(f"Failed to cache price data for {symbol}: {e}")
-        
-        # Get historical price data if date range specified and not latest_only
-        if not latest_only and (start_date or end_date):
-            price_df = await process_symbol_data(
-                symbol=symbol,
-                timeframe="daily",
-                start_date=start_date,
-                end_date=end_date,
-                stock_db_instance=db_instance,
-                force_fetch=force_fetch,
-                query_only=not force_fetch,
-                data_source=data_source,
-                log_level="ERROR"  # Suppress verbose logging
-            )
-            
-            if not price_df.empty:
-                result["price_data"] = price_df
-        
-    except Exception as e:
-        result["error"] = str(e)
-        logger.error(f"Error getting price info for {symbol}: {e}")
-    
-    return result
-
-
-async def get_options_info(
-    symbol: str,
-    db_instance: StockDBBase,
-    options_days: int = 180,
-    force_fetch: bool = False,
-    data_source: str = "polygon",
-    option_type: str = "all",
-    strike_range_percent: Optional[int] = None,
-    max_options_per_expiry: int = 10,
-    enable_cache: bool = True,
-    redis_url: Optional[str] = None
-) -> Dict[str, Any]:
-    """Get options information for a symbol."""
     import time
     fetch_start = time.time()
     
-    result = {
-        "symbol": symbol,
-        "options_data": None,
-        "error": None,
-        "source": None,
-        "fetch_time_ms": None
-    }
+    # Build URL
+    url = f"{api_server.rstrip('/')}/api/stock_info/{symbol}"
+    
+    # Build query parameters from kwargs
+    params = {}
+    for key, value in kwargs.items():
+        if value is not None:
+            if isinstance(value, bool):
+                params[key] = "true" if value else "false"
+            else:
+                params[key] = str(value)
     
     try:
-        # Note: Caching is handled by OptionsDataService.get_latest() internally
-        # HistoricalDataFetcher.get_active_options_for_date() calls db.get_latest_options_data()
-        # which uses the service method that handles caching
-        
-        # Get current stock price for strike range calculation
-        stock_price = None
-        try:
-            price_info = await get_current_price(
-                symbol,
-                data_source=data_source,
-                stock_db_instance=db_instance,
-                max_age_seconds=3600  # 1 hour is fine for options
-            )
-            if price_info and price_info.get("price"):
-                stock_price = price_info["price"]
-        except Exception:
-            pass  # Continue without stock price
-        
-        # Calculate date range for options
-        today = datetime.now().date()
-        end_date = today + timedelta(days=options_days)
-        target_date_str = today.strftime("%Y-%m-%d")
-        
-        # Check if we should fetch from API or use DB
-        db_check_start = time.time()
-        if force_fetch:
-            # Force fetch from Polygon API
-            if not POLYGON_AVAILABLE:
-                result["error"] = "Polygon API client not available"
-                return result
-            
-            api_key = os.getenv("POLYGON_API_KEY")
-            if not api_key:
-                result["error"] = "POLYGON_API_KEY environment variable not set"
-                return result
-            
-            api_fetch_start = time.time()
-            fetcher = HistoricalDataFetcher(api_key, quiet=True)
-            options_result = await fetcher.get_active_options_for_date(
-                symbol=symbol,
-                target_date_str=target_date_str,
-                option_type=option_type,
-                stock_close_price=stock_price,
-                strike_range_percent=strike_range_percent,
-                max_days_to_expiry=options_days,
-                include_expired=False,
-                use_db=False,
-                force_fresh=True
-            )
-            api_fetch_time = (time.time() - api_fetch_start) * 1000
-            fetch_time = (time.time() - fetch_start) * 1000
-            
-            result["options_data"] = options_result
-            result["source"] = "api"
-            result["fetch_time_ms"] = fetch_time
-            logger.info(f"[OPTIONS API FETCH] Options for {symbol} (api_fetch: {api_fetch_time:.1f}ms, total: {fetch_time:.1f}ms)")
-        else:
-            # Try DB first
-            try:
-                # Get options from database
-                db_conn = None
-                if hasattr(db_instance, "db_config"):
-                    db_conn = db_instance.db_config
-                elif hasattr(db_instance, "connection_string"):
-                    db_conn = db_instance.connection_string
-                
-                if db_conn:
-                    # Use HistoricalDataFetcher to query DB
-                    api_key = os.getenv("POLYGON_API_KEY", "")  # Not used when use_db=True
-                    fetcher = HistoricalDataFetcher(api_key, quiet=True)
-                    
-                    db_fetch_start = time.time()
-                    options_result = await fetcher.get_active_options_for_date(
-                        symbol=symbol,
-                        target_date_str=target_date_str,
-                        option_type=option_type,
-                        stock_close_price=stock_price,
-                        strike_range_percent=strike_range_percent,
-                        max_days_to_expiry=options_days,
-                        include_expired=False,
-                        use_db=True,
-                        db_conn=db_conn,
-                        force_fresh=False,
-                        enable_cache=enable_cache,
-                        redis_url=redis_url
-                    )
-                    db_fetch_time = (time.time() - db_fetch_start) * 1000
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
                     fetch_time = (time.time() - fetch_start) * 1000
-                    
-                    result["options_data"] = options_result
-                    result["source"] = "database"
-                    result["fetch_time_ms"] = fetch_time
-                    logger.info(f"[OPTIONS DB HIT] Options for {symbol} (db_fetch: {db_fetch_time:.1f}ms, total: {fetch_time:.1f}ms)")
-                    
-                    # Note: Caching is handled by OptionsDataService.get_latest() internally
-                    # HistoricalDataFetcher.get_active_options_for_date() calls db.get_latest_options_data()
-                    # which uses the service method that handles caching
+                    data["fetch_time_ms"] = fetch_time
+                    return data
                 else:
-                    # Fallback to API if no DB connection
-                    if POLYGON_AVAILABLE:
-                        api_key = os.getenv("POLYGON_API_KEY")
-                        if api_key:
-                            api_fetch_start = time.time()
-                            fetcher = HistoricalDataFetcher(api_key, quiet=True)
-                            options_result = await fetcher.get_active_options_for_date(
-                                symbol=symbol,
-                                target_date_str=target_date_str,
-                                option_type=option_type,
-                                stock_close_price=stock_price,
-                                strike_range_percent=strike_range_percent,
-                                max_days_to_expiry=options_days,
-                                include_expired=False,
-                                use_db=False,
-                                force_fresh=False
-                            )
-                            api_fetch_time = (time.time() - api_fetch_start) * 1000
-                            fetch_time = (time.time() - fetch_start) * 1000
-                            
-                            result["options_data"] = options_result
-                            result["source"] = "api"
-                            result["fetch_time_ms"] = fetch_time
-                            logger.info(f"[OPTIONS API FETCH] Options for {symbol} (api_fetch: {api_fetch_time:.1f}ms, total: {fetch_time:.1f}ms)")
-                            
-                            # Note: For API results, caching should happen when data is saved to DB
-                            # The service method will handle caching when the data is stored
-                        else:
-                            result["error"] = "POLYGON_API_KEY not set and no DB connection available"
-                    else:
-                        result["error"] = "No database connection and Polygon API not available"
-            except Exception as e:
-                logger.warning(f"[OPTIONS DB ERROR] Error getting options from DB for {symbol}: {e}, trying API...")
-                # Fallback to API
-                if POLYGON_AVAILABLE:
-                    api_key = os.getenv("POLYGON_API_KEY")
-                    if api_key:
-                        api_fetch_start = time.time()
-                        fetcher = HistoricalDataFetcher(api_key, quiet=True)
-                        options_result = await fetcher.get_active_options_for_date(
-                            symbol=symbol,
-                            target_date_str=target_date_str,
-                            option_type=option_type,
-                            stock_close_price=stock_price,
-                            strike_range_percent=strike_range_percent,
-                            max_days_to_expiry=options_days,
-                            include_expired=False,
-                            use_db=False,
-                            force_fresh=False
-                        )
-                        api_fetch_time = (time.time() - api_fetch_start) * 1000
-                        fetch_time = (time.time() - fetch_start) * 1000
-                        
-                        result["options_data"] = options_result
-                        result["source"] = "api"
-                        result["fetch_time_ms"] = fetch_time
-                        logger.info(f"[OPTIONS API FETCH] Options for {symbol} (api_fetch: {api_fetch_time:.1f}ms, total: {fetch_time:.1f}ms)")
-                        
-                        # Note: For API results, caching should happen when data is saved to DB
-                        # The service method will handle caching when the data is stored
-    
-    except Exception as e:
-        result["error"] = str(e)
-        logger.error(f"Error getting options info for {symbol}: {e}")
-    
-    return result
-
-
-async def get_financial_info(
-    symbol: str,
-    db_instance: StockDBBase,
-    force_fetch: bool = False
-) -> Dict[str, Any]:
-    """Get financial ratios/information for a symbol."""
-    import time
-    fetch_start = time.time()
-    
-    result = {
-        "symbol": symbol,
-        "financial_data": None,
-        "error": None,
-        "source": None,
-        "fetch_time_ms": None
-    }
-    
-    try:
-        # Get cache instance if available
-        cache_instance = None
-        if hasattr(db_instance, 'cache') and db_instance.cache:
-            cache_instance = db_instance.cache
-        
-        # Check cache first (if not force_fetch)
-        if not force_fetch and cache_instance:
-            try:
-                from common.redis_cache import CacheKeyGenerator
-                cache_key = CacheKeyGenerator.financial_info(symbol)
-                cache_check_start = time.time()
-                cached_df = await cache_instance.get(cache_key)
-                cache_check_time = (time.time() - cache_check_start) * 1000
-                
-                if cached_df is not None and not cached_df.empty:
-                    # Convert DataFrame back to dict
-                    cached_financial = cached_df.iloc[0].to_dict()
-                    fetch_time = (time.time() - fetch_start) * 1000
-                    result["financial_data"] = cached_financial
-                    result["source"] = "cache"
-                    result["fetch_time_ms"] = fetch_time
-                    logger.info(f"[FINANCIAL CACHE HIT] Financial data for {symbol} (cache_check: {cache_check_time:.1f}ms, total: {fetch_time:.1f}ms)")
-                    return result
-                else:
-                    logger.debug(f"[FINANCIAL CACHE MISS] No cached financial data for {symbol} (cache_check: {cache_check_time:.1f}ms)")
-            except Exception as e:
-                logger.debug(f"[FINANCIAL CACHE ERROR] Cache check failed for {symbol}: {e}")
-        
-        # Try DB first if not forcing fetch
-        if not force_fetch:
-            try:
-                db_check_start = time.time()
-                financial_df = await db_instance.get_financial_info(symbol)
-                db_check_time = (time.time() - db_check_start) * 1000
-                
-                if not financial_df.empty:
-                    # Get the most recent entry
-                    latest = financial_df.iloc[-1].to_dict()
-                    fetch_time = (time.time() - fetch_start) * 1000
-                    result["financial_data"] = latest
-                    result["source"] = "database"
-                    result["fetch_time_ms"] = fetch_time
-                    logger.info(f"[FINANCIAL DB HIT] Financial data for {symbol} (db_check: {db_check_time:.1f}ms, total: {fetch_time:.1f}ms)")
-                    
-                    # Cache the result
-                    if cache_instance:
-                        try:
-                            from common.redis_cache import CacheKeyGenerator
-                            import pandas as pd
-                            cache_key = CacheKeyGenerator.financial_info(symbol)
-                            cache_df = pd.DataFrame([latest])
-                            cache_set_start = time.time()
-                            await cache_instance.set(cache_key, cache_df, ttl=3600)  # 1 hour TTL
-                            cache_set_time = (time.time() - cache_set_start) * 1000
-                            logger.info(f"[FINANCIAL CACHE SET] Cached financial data for {symbol} (set_time: {cache_set_time:.1f}ms, ttl: 3600s)")
-                        except Exception as e:
-                            logger.debug(f"[FINANCIAL CACHE ERROR] Failed to cache financial data for {symbol}: {e}")
-                    
-                    return result
-            except Exception as e:
-                logger.debug(f"[FINANCIAL DB ERROR] Error getting financial info from DB for {symbol}: {e}")
-        
-        # Fetch from API
-        api_key = os.getenv("POLYGON_API_KEY")
-        if not api_key:
-            result["error"] = "POLYGON_API_KEY environment variable not set"
-            return result
-        
-        api_fetch_start = time.time()
-        ratios = await get_financial_ratios(symbol, api_key)
-        api_fetch_time = (time.time() - api_fetch_start) * 1000
-        fetch_time = (time.time() - fetch_start) * 1000
-        
-        if ratios:
-            result["financial_data"] = ratios
-            result["source"] = "api"
-            result["fetch_time_ms"] = fetch_time
-            logger.info(f"[FINANCIAL API FETCH] Financial data for {symbol} (api_fetch: {api_fetch_time:.1f}ms, total: {fetch_time:.1f}ms)")
-            
-            # Save to DB if we have a DB instance
-            try:
-                await db_instance.save_financial_info(symbol, ratios)
-            except Exception as e:
-                logger.debug(f"[FINANCIAL DB SAVE ERROR] Error saving financial info to DB for {symbol}: {e}")
-            
-            # Cache the result
-            if cache_instance:
-                try:
-                    from common.redis_cache import CacheKeyGenerator
-                    import pandas as pd
-                    cache_key = CacheKeyGenerator.financial_info(symbol)
-                    cache_df = pd.DataFrame([ratios])
-                    cache_set_start = time.time()
-                    await cache_instance.set(cache_key, cache_df, ttl=3600)  # 1 hour TTL
-                    cache_set_time = (time.time() - cache_set_start) * 1000
-                    logger.info(f"[FINANCIAL CACHE SET] Cached financial data for {symbol} (set_time: {cache_set_time:.1f}ms, ttl: 3600s)")
-                except Exception as e:
-                    logger.debug(f"[FINANCIAL CACHE ERROR] Failed to cache financial data for {symbol}: {e}")
-        else:
-            result["error"] = "No financial ratios data available"
-    
-    except Exception as e:
-        result["error"] = str(e)
-        logger.error(f"[FINANCIAL ERROR] Error getting financial info for {symbol}: {e}")
-    
-    return result
-
-async def get_news_info(
-    symbol: str,
-    db_instance: StockDBBase,
-    force_fetch: bool = False,
-    enable_cache: bool = True
-) -> Dict[str, Any]:
-    """Get latest news for a symbol."""
-    import time
-    fetch_start = time.time()
-    
-    result = {
-        "symbol": symbol,
-        "news_data": None,
-        "error": None,
-        "freshness": None
-    }
-    
-    try:
-        api_key = os.getenv("POLYGON_API_KEY")
-        if not api_key:
-            result["error"] = "POLYGON_API_KEY environment variable not set"
-            return result
-        
-        # Get cache instance if available
-        cache_instance = None
-        if enable_cache and hasattr(db_instance, 'cache') and db_instance.cache:
-            cache_instance = db_instance.cache
-        
-        news_data = await get_latest_news(
-            symbol,
-            api_key,
-            max_items=10,
-            cache_instance=cache_instance if not force_fetch else None,
-            cache_ttl=3600  # 1 hour TTL
-        )
-        
-        fetch_time = (time.time() - fetch_start) * 1000
-        
-        if news_data:
-            logger.info(f"[NEWS] Fetched {news_data.get('count', 0)} news articles for {symbol} (fetch_time: {fetch_time:.1f}ms, cached: {not force_fetch and cache_instance is not None})")
-            result["news_data"] = news_data
-            
-            # Calculate freshness
-            if news_data.get('fetched_at'):
-                try:
-                    fetched_dt = datetime.fromisoformat(news_data['fetched_at'].replace('Z', '+00:00'))
-                    age_seconds = (datetime.now(timezone.utc) - fetched_dt).total_seconds()
-                    result["freshness"] = {
-                        "age_seconds": age_seconds,
-                        "age_minutes": age_seconds / 60,
-                        "is_fresh": age_seconds < 3600,  # Fresh if less than 1 hour old
-                        "needs_refetch": age_seconds > 7200  # Needs refetch if older than 2 hours
+                    error_text = await response.text()
+                    logger.error(f"API request failed with status {response.status}: {error_text}")
+                    return {
+                        "symbol": symbol,
+                        "error": f"API request failed: {response.status} - {error_text}",
+                        "price_info": {"error": f"API error: {response.status}"},
+                        "options_info": {"error": f"API error: {response.status}"},
+                        "financial_info": {"error": f"API error: {response.status}"},
+                        "news_info": {"error": f"API error: {response.status}"},
+                        "iv_info": {"error": f"API error: {response.status}"},
                     }
-                except Exception:
-                    pass
-        else:
-            result["error"] = "No news data available"
-    
+    except aiohttp.ClientError as e:
+        logger.error(f"API request error for {symbol}: {e}")
+        return {
+            "symbol": symbol,
+            "error": f"API request error: {str(e)}",
+            "price_info": {"error": f"API connection error: {str(e)}"},
+            "options_info": {"error": f"API connection error: {str(e)}"},
+            "financial_info": {"error": f"API connection error: {str(e)}"},
+            "news_info": {"error": f"API connection error: {str(e)}"},
+            "iv_info": {"error": f"API connection error: {str(e)}"},
+        }
     except Exception as e:
-        result["error"] = str(e)
-        logger.error(f"Error getting news info for {symbol}: {e}")
-    
-    return result
-
-async def get_iv_info(
-    symbol: str,
-    db_instance: StockDBBase,
-    force_fetch: bool = False,
-    enable_cache: bool = True
-) -> Dict[str, Any]:
-    """Get latest IV information for a symbol."""
-    result = {
-        "symbol": symbol,
-        "iv_data": None,
-        "error": None,
-        "freshness": None
-    }
-    
-    try:
-        # Get cache instance if available
-        cache_instance = None
-        if enable_cache and hasattr(db_instance, 'cache') and db_instance.cache:
-            cache_instance = db_instance.cache
-        
-        import time
-        iv_fetch_start = time.time()
-        iv_data = await get_latest_iv(
-            symbol,
-            db_instance=db_instance,
-            cache_instance=cache_instance if not force_fetch else None,
-            cache_ttl=300  # 5 minutes TTL
-        )
-        iv_fetch_time = (time.time() - iv_fetch_start) * 1000
-        
-        if iv_data:
-            iv_source = iv_data.get('source', 'unknown')
-            logger.info(f"[IV] Fetched IV data for {symbol} from {iv_source} (count: {iv_data.get('statistics', {}).get('count', 0)}, fetch_time: {iv_fetch_time:.1f}ms)")
-            result["iv_data"] = iv_data
-            result["source"] = iv_source
-            result["fetch_time_ms"] = iv_fetch_time
-            
-            # Calculate freshness
-            if iv_data.get('fetched_at'):
-                try:
-                    fetched_dt = datetime.fromisoformat(iv_data['fetched_at'].replace('Z', '+00:00'))
-                    age_seconds = (datetime.now(timezone.utc) - fetched_dt).total_seconds()
-                    result["freshness"] = {
-                        "age_seconds": age_seconds,
-                        "age_minutes": age_seconds / 60,
-                        "is_fresh": age_seconds < 300,  # Fresh if less than 5 minutes old
-                        "needs_refetch": age_seconds > 600  # Needs refetch if older than 10 minutes
-                    }
-                except Exception:
-                    pass
-        else:
-            result["error"] = "No IV data available (options data may not be available)"
-    
-    except Exception as e:
-        result["error"] = str(e)
-        logger.error(f"Error getting IV info for {symbol}: {e}")
-    
-    return result
+        logger.error(f"Unexpected error fetching from API for {symbol}: {e}")
+        return {
+            "symbol": symbol,
+            "error": f"Unexpected error: {str(e)}",
+            "price_info": {"error": str(e)},
+            "options_info": {"error": str(e)},
+            "financial_info": {"error": str(e)},
+            "news_info": {"error": str(e)},
+            "iv_info": {"error": str(e)},
+        }
 
 
 def format_price_display(price_info: Dict[str, Any], timezone_str: Optional[str] = None, latest_only: bool = False) -> List[str]:
@@ -1170,33 +693,55 @@ def format_iv_display(iv_info: Dict[str, Any]) -> List[str]:
 
 async def process_symbol(
     symbol: str,
-    db_instance: StockDBBase,
+    db_instance: Optional[StockDBBase],
     args: argparse.Namespace
 ) -> Dict[str, Any]:
-    """Process a single symbol and gather all information."""
-    result = {
-        "symbol": symbol,
-        "price_info": None,
-        "options_info": None,
-        "financial_info": None,
-        "news_info": None,
-        "iv_info": None
-    }
+    """Process a single symbol and gather all information.
     
-    # If --latest is set, clear start_date and end_date
+    Supports both API mode (--api-server) and direct DB mode (--db-path).
+    """
+    # If --api-server is provided, use API mode
+    if args.api_server:
+        # Build parameters for API call
+        api_params = {
+            "latest": args.latest,
+            "start_date": args.start_date if not args.latest else None,
+            "end_date": args.end_date if not args.latest else None,
+            "options_days": args.options_days,
+            "force_fetch": args.force_fetch,
+            "data_source": args.data_source,
+            "timezone": args.timezone,
+            "show_price_history": args.show_price_history,
+            "options_type": args.options_type,
+            "strike_range_percent": args.strike_range_percent,
+            "max_options_per_expiry": args.max_options_per_expiry,
+            "show_news": args.show_news,
+            "show_iv": args.show_iv,
+            "no_cache": args.no_cache,
+        }
+        
+        # Remove None values
+        api_params = {k: v for k, v in api_params.items() if v is not None}
+        
+        return await get_stock_info_from_api(symbol, args.api_server, **api_params)
+    
+    # Direct DB mode - use parallel helper function
+    if db_instance is None:
+        return {
+            "symbol": symbol,
+            "error": "No database instance provided and no API server specified",
+            "price_info": {"error": "No database instance"},
+            "options_info": {"error": "No database instance"},
+            "financial_info": {"error": "No database instance"},
+            "news_info": {"error": "No database instance"},
+            "iv_info": {"error": "No database instance"},
+        }
+    
+    # Use the parallel helper function from fetch_symbol_data
     start_date = None if args.latest else args.start_date
     end_date = None if args.latest else args.end_date
     
-    # Gather all information in parallel
-    # Create all tasks first to ensure they start simultaneously
-    import time
-    parallel_start = time.time()
-    
-    tasks = []
-    task_indices = {}
-    
-    # Price info (always needed)
-    tasks.append(get_price_info(
+    result = await get_stock_info_parallel(
         symbol,
         db_instance,
         start_date=start_date,
@@ -1204,76 +749,16 @@ async def process_symbol(
         force_fetch=args.force_fetch,
         data_source=args.data_source,
         timezone_str=args.timezone,
-        latest_only=args.latest
-    ))
-    task_indices['price'] = len(tasks) - 1
-    
-    # Options info (always needed for display)
-    tasks.append(get_options_info(
-        symbol,
-        db_instance,
+        latest_only=args.latest,
         options_days=args.options_days,
-        force_fetch=args.force_fetch,
-        data_source=args.data_source,
         option_type=args.options_type,
         strike_range_percent=args.strike_range_percent,
         max_options_per_expiry=args.max_options_per_expiry,
+        show_news=args.show_news,
+        show_iv=args.show_iv,
         enable_cache=not args.no_cache,
         redis_url=os.getenv("REDIS_URL") if not args.no_cache else None
-    ))
-    task_indices['options'] = len(tasks) - 1
-    
-    # Financial info (always needed)
-    tasks.append(get_financial_info(
-        symbol,
-        db_instance,
-        force_fetch=args.force_fetch
-    ))
-    task_indices['financial'] = len(tasks) - 1
-    
-    # Add news and IV tasks if requested
-    if args.show_news:
-        tasks.append(get_news_info(
-            symbol,
-            db_instance,
-            force_fetch=args.force_fetch,
-            enable_cache=not args.no_cache
-        ))
-        task_indices['news'] = len(tasks) - 1
-    else:
-        # Create a completed future that returns None immediately
-        async def return_none_news():
-            return None
-        tasks.append(return_none_news())
-        task_indices['news'] = len(tasks) - 1
-    
-    if args.show_iv:
-        tasks.append(get_iv_info(
-            symbol,
-            db_instance,
-            force_fetch=args.force_fetch,
-            enable_cache=not args.no_cache
-        ))
-        task_indices['iv'] = len(tasks) - 1
-    else:
-        # Create a completed future that returns None immediately
-        async def return_none_iv():
-            return None
-        tasks.append(return_none_iv())
-        task_indices['iv'] = len(tasks) - 1
-    
-    # Execute all tasks in parallel - asyncio.gather runs them concurrently
-    logger.debug(f"[PARALLEL] Starting {len(tasks)} parallel data fetches for {symbol}")
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    parallel_time = (time.time() - parallel_start) * 1000
-    logger.debug(f"[PARALLEL] Completed all {len(tasks)} parallel fetches for {symbol} in {parallel_time:.1f}ms")
-    
-    # Handle exceptions and extract results
-    result["price_info"] = results[task_indices['price']] if not isinstance(results[task_indices['price']], Exception) else {"error": str(results[task_indices['price']])}
-    result["options_info"] = results[task_indices['options']] if not isinstance(results[task_indices['options']], Exception) else {"error": str(results[task_indices['options']])}
-    result["financial_info"] = results[task_indices['financial']] if not isinstance(results[task_indices['financial']], Exception) else {"error": str(results[task_indices['financial']])}
-    result["news_info"] = results[task_indices['news']] if len(results) > task_indices['news'] and not isinstance(results[task_indices['news']], Exception) and results[task_indices['news']] else None
-    result["iv_info"] = results[task_indices['iv']] if len(results) > task_indices['iv'] and not isinstance(results[task_indices['iv']], Exception) and results[task_indices['iv']] else None
+    )
     
     return result
 

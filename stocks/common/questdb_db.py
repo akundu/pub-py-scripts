@@ -1743,9 +1743,12 @@ class StockDataService:
             # Cache miss or no cached data - fetch from DB
             self.logger.debug(f"[DB] Cache miss for {ticker} {interval} (no date constraints), fetching from database")
             df = await self.daily_price_repo.get(ticker, start_date, end_date, interval)
-            # Ensure df is never None - repository should always return a DataFrame
-            if df is None:
-                self.logger.warning(f"Repository returned None for {ticker} ({interval}), using empty DataFrame")
+            # Ensure df is a DataFrame, not None, float, or other type
+            if df is None or not isinstance(df, pd.DataFrame):
+                if df is not None:
+                    self.logger.warning(f"Repository returned non-DataFrame type {type(df)} for {ticker} ({interval}), using empty DataFrame")
+                else:
+                    self.logger.warning(f"Repository returned None for {ticker} ({interval}), using empty DataFrame")
                 df = pd.DataFrame()
             if not df.empty:
                 # Cache each time point individually
@@ -1863,9 +1866,12 @@ class StockDataService:
             # Fetch from DB for the date range (repository will limit query)
             df = await self.daily_price_repo.get(ticker, start_date, end_date, interval)
             
-            # Ensure df is never None - repository should always return a DataFrame
-            if df is None:
-                self.logger.warning(f"Repository returned None for {ticker} ({interval}), using empty DataFrame")
+            # Ensure df is a DataFrame, not None, float, or other type
+            if df is None or not isinstance(df, pd.DataFrame):
+                if df is not None:
+                    self.logger.warning(f"Repository returned non-DataFrame type {type(df)} for {ticker} ({interval}), using empty DataFrame")
+                else:
+                    self.logger.warning(f"Repository returned None for {ticker} ({interval}), using empty DataFrame")
                 df = pd.DataFrame()
             
             # Build set of dates that exist in DB result
@@ -2025,8 +2031,14 @@ class StockDataService:
             
             historical_df = await self.daily_price_repo.get(ticker, historical_start, historical_end, interval)
             
-            # Check if historical_df is None or empty
-            if historical_df is not None and not historical_df.empty:
+            # Ensure historical_df is a DataFrame, not None, float, or other type
+            if historical_df is None or not isinstance(historical_df, pd.DataFrame):
+                if historical_df is not None:
+                    self.logger.warning(f"Repository returned non-DataFrame type {type(historical_df)} for {ticker} ({interval}), using empty DataFrame")
+                historical_df = pd.DataFrame()
+            
+            # Check if historical_df is empty
+            if not historical_df.empty:
                 historical_df.reset_index(inplace=True)
                 historical_df.columns = [col.lower() for col in historical_df.columns]
                 
@@ -2152,12 +2164,15 @@ class RealtimeDataService:
             
             # Try cache first
             cached_df = await self.cache.get(cache_key)
-            if cached_df is not None and not cached_df.empty:
+            if cached_df is not None and isinstance(cached_df, pd.DataFrame) and not cached_df.empty:
                 self.logger.debug(f"[DB] Returning cached realtime data for {ticker}")
                 return cached_df
             
             # Cache miss - fetch from DB
             df = await self.realtime_repo.get(ticker, start_datetime, end_datetime, data_type)
+            # Ensure df is a DataFrame, not a float or other type
+            if not isinstance(df, pd.DataFrame):
+                df = pd.DataFrame()
             if not df.empty:
                 # Cache the latest value
                 latest_row = df.iloc[-1]
@@ -2168,6 +2183,9 @@ class RealtimeDataService:
         
         # For date range queries, fetch from DB directly (don't cache range queries)
         df = await self.realtime_repo.get(ticker, start_datetime, end_datetime, data_type)
+        # Ensure df is a DataFrame, not a float or other type
+        if not isinstance(df, pd.DataFrame):
+            df = pd.DataFrame()
         return df
 
 
@@ -3521,6 +3539,8 @@ class OptionsDataService:
         """
         # Check cache for aggregated query result first (if no min_write_timestamp filter)
         # Note: We only cache when there are no special filters to keep cache keys simple
+        cached_options_df = None
+        last_save_time = None
         if not min_write_timestamp and not expiration_date and self.cache and self.cache.enable_cache:
             try:
                 # Generate cache key based on query parameters
@@ -3538,13 +3558,92 @@ class OptionsDataService:
                             query_data = json.loads(query_result_str)
                             # Reconstruct DataFrame from the serialized format
                             if 'data' in query_data and 'columns' in query_data:
-                                result_df = pd.read_json(json.dumps(query_data), orient='split')
+                                cached_options_df = pd.read_json(json.dumps(query_data), orient='split')
+                                # Get last_save_time from cached_df
+                                if 'last_save_time' in cached_df.columns:
+                                    try:
+                                        last_save_time = pd.to_datetime(cached_df.iloc[0]['last_save_time'])
+                                        if last_save_time.tzinfo is None:
+                                            last_save_time = last_save_time.replace(tzinfo=timezone.utc)
+                                        elif last_save_time.tzinfo != timezone.utc:
+                                            last_save_time = last_save_time.astimezone(timezone.utc)
+                                    except:
+                                        last_save_time = None
                                 self.logger.debug(f"[CACHE HIT] Options query result for {ticker} (days={days}) from HistoricalDataFetcher format")
-                                return result_df
+                                
+                                # Check if background fetch should be triggered
+                                from fetch_symbol_data import _should_trigger_background_fetch, _trigger_background_fetch
+                                if _should_trigger_background_fetch(last_save_time, "options"):
+                                    # Trigger background fetch but return cached data immediately
+                                    async def _fetch_options_background():
+                                        try:
+                                            # Re-fetch options data
+                                            options_result = await self.get_latest(
+                                                ticker=ticker,
+                                                expiration_date=expiration_date,
+                                                start_datetime=start_datetime,
+                                                end_datetime=end_datetime,
+                                                option_tickers=option_tickers,
+                                                timestamp_lookback_days=timestamp_lookback_days,
+                                                min_write_timestamp=min_write_timestamp
+                                            )
+                                            return options_result
+                                        except Exception as e:
+                                            self.logger.warning(f"Background options fetch failed for {ticker}: {e}")
+                                            return None
+                                    
+                                    asyncio.create_task(_trigger_background_fetch(
+                                        ticker, self, "options", _fetch_options_background
+                                    ))
+                                
+                                return cached_options_df
                     else:
                         # This is a direct DataFrame cache from service
+                        cached_options_df = cached_df
+                        # Get last_save_time from metadata cache
+                        try:
+                            metadata_key = f"{cache_key}:metadata"
+                            metadata_df = await self.cache.get(metadata_key)
+                            if metadata_df is not None and not metadata_df.empty:
+                                try:
+                                    last_save_time = pd.to_datetime(metadata_df.iloc[0]['last_save_time'])
+                                    if last_save_time.tzinfo is None:
+                                        last_save_time = last_save_time.replace(tzinfo=timezone.utc)
+                                    elif last_save_time.tzinfo != timezone.utc:
+                                        last_save_time = last_save_time.astimezone(timezone.utc)
+                                except:
+                                    last_save_time = None
+                        except:
+                            last_save_time = None
+                        
                         self.logger.debug(f"[CACHE HIT] Options query result for {ticker} (days={days})")
-                        return cached_df
+                        
+                        # Check if background fetch should be triggered
+                        from fetch_symbol_data import _should_trigger_background_fetch, _trigger_background_fetch
+                        if _should_trigger_background_fetch(last_save_time, "options"):
+                            # Trigger background fetch but return cached data immediately
+                            async def _fetch_options_background():
+                                try:
+                                    # Re-fetch options data
+                                    options_result = await self.get_latest(
+                                        ticker=ticker,
+                                        expiration_date=expiration_date,
+                                        start_datetime=start_datetime,
+                                        end_datetime=end_datetime,
+                                        option_tickers=option_tickers,
+                                        timestamp_lookback_days=timestamp_lookback_days,
+                                        min_write_timestamp=min_write_timestamp
+                                    )
+                                    return options_result
+                                except Exception as e:
+                                    self.logger.warning(f"Background options fetch failed for {ticker}: {e}")
+                                    return None
+                            
+                            asyncio.create_task(_trigger_background_fetch(
+                                ticker, self, "options", _fetch_options_background
+                            ))
+                        
+                        return cached_options_df
             except Exception as e:
                 self.logger.debug(f"[CACHE ERROR] Cache check failed for options query {ticker}: {e}")
         
@@ -3566,9 +3665,20 @@ class OptionsDataService:
             try:
                 days = timestamp_lookback_days
                 cache_key = CacheKeyGenerator.options_query_result(ticker, days=days)
-                # Cache the DataFrame directly (service-level caching)
-                await self.cache.set(cache_key, result_df, ttl=300)  # 5 minutes TTL
-                self.logger.debug(f"[CACHE SET] Cached options query result for {ticker} (days={days}, rows={len(result_df)})")
+                # Add last_save_time as a metadata column (store in a separate row or as DataFrame attribute)
+                # For simplicity, we'll create a metadata dict and cache it separately
+                # But since we're caching a DataFrame, we'll store last_save_time in a metadata cache key
+                metadata_key = f"{cache_key}:metadata"
+                metadata = {
+                    'last_save_time': datetime.now(timezone.utc).isoformat(),
+                    'row_count': len(result_df)
+                }
+                metadata_df = pd.DataFrame([metadata])
+                # Cache metadata separately
+                await self.cache.set(metadata_key, metadata_df, ttl=None)  # No TTL
+                # Cache the DataFrame directly (service-level caching) - no TTL
+                await self.cache.set(cache_key, result_df, ttl=None)  # No TTL (infinite cache)
+                self.logger.debug(f"[CACHE SET] Cached options query result for {ticker} (days={days}, rows={len(result_df)}, no TTL)")
             except Exception as e:
                 self.logger.debug(f"[CACHE ERROR] Failed to cache options query result for {ticker}: {e}")
         
@@ -3592,27 +3702,64 @@ class FinancialDataService:
         # Financial info cache key doesn't include date
         cache_key = CacheKeyGenerator.financial_info(ticker)
         # Convert financial_data dict to DataFrame for caching
-        df = pd.DataFrame([financial_data])
-        self.cache.set_fire_and_forget(cache_key, df, ttl=3600)  # 1 hour TTL for financial info
-        self.logger.debug(f"[CACHE SET] Cached financial info on write (fire-and-forget): {cache_key} (rows: 1, ttl: 3600)")
+        # Add last_save_time
+        financial_data_with_time = financial_data.copy()
+        financial_data_with_time['last_save_time'] = datetime.now(timezone.utc).isoformat()
+        df = pd.DataFrame([financial_data_with_time])
+        self.cache.set_fire_and_forget(cache_key, df, ttl=None)  # No TTL (infinite cache)
+        self.logger.debug(f"[CACHE SET] Cached financial info on write (fire-and-forget): {cache_key} (rows: 1, no TTL)")
     
     async def get(self, ticker: str, start_date: Optional[str] = None,
                  end_date: Optional[str] = None) -> pd.DataFrame:
-        """Get financial info with caching (1 hour TTL)."""
+        """Get financial info with caching (no TTL, infinite cache)."""
         # Financial info cache key doesn't include date
         cache_key = CacheKeyGenerator.financial_info(ticker)
         
         cached_df = await self.cache.get(cache_key)
-        if cached_df is not None:
+        last_save_time = None
+        if cached_df is not None and not cached_df.empty:
+            # Get last_save_time from cached data
+            if 'last_save_time' in cached_df.columns:
+                try:
+                    last_save_time = pd.to_datetime(cached_df.iloc[0]['last_save_time'])
+                    if last_save_time.tzinfo is None:
+                        last_save_time = last_save_time.replace(tzinfo=timezone.utc)
+                    elif last_save_time.tzinfo != timezone.utc:
+                        last_save_time = last_save_time.astimezone(timezone.utc)
+                except:
+                    last_save_time = None
+            
             self.logger.debug(f"[DB] Returning cached financial info for {ticker}")
+            
+            # Check if background fetch should be triggered
+            from fetch_symbol_data import _should_trigger_background_fetch, _trigger_background_fetch
+            if _should_trigger_background_fetch(last_save_time, "financial"):
+                # Trigger background fetch but return cached data immediately
+                async def _fetch_financial_background():
+                    try:
+                        # Re-fetch financial data
+                        financial_result = await self.get(ticker, start_date, end_date)
+                        return financial_result
+                    except Exception as e:
+                        self.logger.warning(f"Background financial fetch failed for {ticker}: {e}")
+                        return None
+                
+                asyncio.create_task(_trigger_background_fetch(
+                    ticker, self, "financial", _fetch_financial_background
+                ))
+            
             return cached_df
         
         self.logger.debug(f"[DB] Fetching financial info from database: {ticker}")
         df = await self.financial_repo.get(ticker, start_date, end_date)
         self.logger.debug(f"[DB] Fetched {len(df)} rows from database for {ticker} financial info")
         
-        # Cache the result with 1 hour TTL (3600 seconds)
-        await self.cache.set(cache_key, df, ttl=3600)
+        # Cache the result with no TTL (infinite cache)
+        # Add last_save_time to each row
+        if not df.empty:
+            df = df.copy()
+            df['last_save_time'] = datetime.now(timezone.utc).isoformat()
+        await self.cache.set(cache_key, df, ttl=None)  # No TTL (infinite cache)
         
         return df
 
@@ -3639,6 +3786,8 @@ class PriceService:
             or None if no price found
         """
         # Check cache first
+        cached_data = None
+        last_save_time = None
         if self.cache and self.cache.enable_cache:
             try:
                 cache_key = CacheKeyGenerator.latest_price_data(ticker)
@@ -3646,6 +3795,16 @@ class PriceService:
                 if cached_df is not None and not cached_df.empty:
                     # Convert DataFrame back to dict
                     cached_data = cached_df.iloc[0].to_dict()
+                    # Get last_save_time
+                    if 'last_save_time' in cached_data:
+                        try:
+                            last_save_time = pd.to_datetime(cached_data['last_save_time'])
+                            if last_save_time.tzinfo is None:
+                                last_save_time = last_save_time.replace(tzinfo=timezone.utc)
+                            elif last_save_time.tzinfo != timezone.utc:
+                                last_save_time = last_save_time.astimezone(timezone.utc)
+                        except:
+                            last_save_time = None
                     # Restore nested structures
                     if 'realtime_df' in cached_data and isinstance(cached_data['realtime_df'], str):
                         import json
@@ -3653,20 +3812,28 @@ class PriceService:
                             cached_data['realtime_df'] = json.loads(cached_data['realtime_df'])
                         except:
                             cached_data['realtime_df'] = None
-                    # Check freshness (5 minute TTL)
-                    if 'fetched_at' in cached_data:
-                        try:
-                            fetched_at = pd.to_datetime(cached_data['fetched_at'])
-                            age_seconds = (datetime.now(timezone.utc) - fetched_at.tz_localize(timezone.utc) if fetched_at.tz is None else fetched_at.tz_convert(timezone.utc)).total_seconds()
-                            if age_seconds < 300:  # 5 minutes
-                                self.logger.debug(f"[CACHE HIT] Latest price for {ticker}: ${cached_data.get('price', 'N/A'):.2f} (age: {age_seconds:.1f}s)")
-                                return cached_data
-                        except:
-                            pass
-                    else:
-                        # No timestamp, but data exists - use it (could be from older cache format)
-                        self.logger.debug(f"[CACHE HIT] Latest price for {ticker}: ${cached_data.get('price', 'N/A'):.2f} (no timestamp)")
-                        return cached_data
+                    
+                    # Always return cached data (no TTL check)
+                    self.logger.debug(f"[CACHE HIT] Latest price for {ticker}: ${cached_data.get('price', 'N/A'):.2f}")
+                    
+                    # Check if background fetch should be triggered
+                    from fetch_symbol_data import _should_trigger_background_fetch, _trigger_background_fetch
+                    if _should_trigger_background_fetch(last_save_time, "price"):
+                        # Trigger background fetch but return cached data immediately
+                        async def _fetch_price_background():
+                            try:
+                                # Re-fetch price data
+                                price_result = await self.get_latest_price_with_data(ticker, use_market_time)
+                                return price_result
+                            except Exception as e:
+                                self.logger.warning(f"Background price fetch failed for {ticker}: {e}")
+                                return None
+                        
+                        asyncio.create_task(_trigger_background_fetch(
+                            ticker, self, "price", _fetch_price_background
+                        ))
+                    
+                    return cached_data
             except Exception as e:
                 self.logger.debug(f"[CACHE ERROR] Cache check failed for {ticker}: {e}")
         
@@ -3776,9 +3943,11 @@ class PriceService:
                     if 'daily_df' in cache_dict and cache_dict['daily_df'] is not None:
                         if isinstance(cache_dict['daily_df'], pd.DataFrame):
                             cache_dict['daily_df'] = cache_dict['daily_df'].to_json(orient='records')
+                    # Add last_save_time
+                    cache_dict['last_save_time'] = datetime.now(timezone.utc).isoformat()
                     cache_df = pd.DataFrame([cache_dict])
-                    await self.cache.set(cache_key, cache_df, ttl=300)  # 5 minutes TTL
-                    self.logger.debug(f"[CACHE SET] Cached latest price for {ticker}")
+                    await self.cache.set(cache_key, cache_df, ttl=None)  # No TTL (infinite cache)
+                    self.logger.debug(f"[CACHE SET] Cached latest price for {ticker} (no TTL)")
                 except Exception as e:
                     self.logger.debug(f"[CACHE ERROR] Failed to cache latest price for {ticker}: {e}")
             
@@ -3831,9 +4000,11 @@ class PriceService:
                     if 'daily_df' in cache_dict and cache_dict['daily_df'] is not None:
                         if isinstance(cache_dict['daily_df'], pd.DataFrame):
                             cache_dict['daily_df'] = cache_dict['daily_df'].to_json(orient='records')
+                    # Add last_save_time
+                    cache_dict['last_save_time'] = datetime.now(timezone.utc).isoformat()
                     cache_df = pd.DataFrame([cache_dict])
-                    await self.cache.set(cache_key, cache_df, ttl=300)  # 5 minutes TTL
-                    self.logger.debug(f"[CACHE SET] Cached latest price for {ticker}")
+                    await self.cache.set(cache_key, cache_df, ttl=None)  # No TTL (infinite cache)
+                    self.logger.debug(f"[CACHE SET] Cached latest price for {ticker} (no TTL)")
                 except Exception as e:
                     self.logger.debug(f"[CACHE ERROR] Failed to cache latest price for {ticker}: {e}")
             

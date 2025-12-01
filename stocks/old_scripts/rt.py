@@ -248,8 +248,8 @@ def load_symbols_from_yaml(yaml_file: str) -> list[str]:
 
 async def main():
     parser = argparse.ArgumentParser(description="Minimal Realtime Feed Client")
-    parser.add_argument("--server", type=str, default="localhost:9001", 
-                        help="WebSocket server (default: localhost:9001)")
+    parser.add_argument("--server", type=str, default="ms1.kundu.dev:9001", 
+                        help="WebSocket server (default: ms1.kundu.dev:9001)")
     
     # Create a mutually exclusive group for symbol input methods
     symbol_group = parser.add_mutually_exclusive_group()

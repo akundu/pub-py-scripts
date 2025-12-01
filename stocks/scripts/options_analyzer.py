@@ -424,12 +424,12 @@ class OptionsAnalyzer:
             print(f"Error connecting to database: {e}", file=sys.stderr)
             sys.exit(1)
     
-    async def get_financial_info(self, tickers: List[str]) -> Dict[str, Dict[str, Any]]:
-        """Get financial information (P/E, market_cap) for the given tickers."""
+    async def get_financial_info(self, tickers: List[str], max_workers: int = 4) -> Dict[str, Dict[str, Any]]:
+        """Get financial information (P/E, market_cap) for the given tickers using multiprocessing."""
         financial_data = {}
         
         if self.debug:
-            print(f"DEBUG: Fetching financial info for {len(tickers)} tickers", file=sys.stderr)
+            print(f"DEBUG: Fetching financial info for {len(tickers)} tickers using {max_workers} processes", file=sys.stderr)
         
         # Track cache statistics
         initial_cache_stats = None
@@ -440,58 +440,61 @@ class OptionsAnalyzer:
                 pass
         
         total = len(tickers)
-        for idx, ticker in enumerate(tickers, 1):
-            try:
-                # Use the cached get_financial_info method instead of direct SQL
-                df = await self.db.get_financial_info(ticker)
-                
-                # Log progress every 100 tickers or at the end with cache stats
-                if self.debug and (idx % 100 == 0 or idx == total):
-                    cache_info = ""
-                    if initial_cache_stats is not None and self.enable_cache and hasattr(self.db, 'get_cache_statistics'):
-                        try:
-                            current_cache_stats = self.db.get_cache_statistics()
-                            hits_diff = current_cache_stats.get('hits', 0) - initial_cache_stats.get('hits', 0)
-                            misses_diff = current_cache_stats.get('misses', 0) - initial_cache_stats.get('misses', 0)
-                            total_requests = hits_diff + misses_diff
-                            if total_requests > 0:
-                                hit_rate = (hits_diff / total_requests * 100) if total_requests > 0 else 0.0
-                                cache_info = f" [cache: {hits_diff} hits, {misses_diff} misses, {hit_rate:.1f}% hit rate]"
-                        except:
-                            pass
-                    print(f"DEBUG: Fetched financial info for {idx}/{total} tickers ({idx*100//total}%){cache_info}", file=sys.stderr)
-                
-                if not df.empty:
-                    # Map column names to expected fields
-                    row = df.iloc[0]
-                    # Try different possible column names
-                    pe_ratio = None
-                    if 'price_to_earnings' in df.columns:
-                        pe_ratio = row['price_to_earnings']
-                    elif 'pe_ratio' in df.columns:
-                        pe_ratio = row['pe_ratio']
-                    
-                    market_cap = row['market_cap'] if 'market_cap' in df.columns else None
-                    price = row['price'] if 'price' in df.columns else None
-                    
-                    financial_data[ticker] = {
-                        'pe_ratio': pe_ratio,
-                        'market_cap': market_cap,
-                        'price': price
-                    }
-                else:
-                    financial_data[ticker] = {
-                        'pe_ratio': None,
-                        'market_cap': None,
-                        'price': None
-                    }
-            except Exception as e:
-                self._log("WARNING", f"Could not fetch financial info for {ticker}: {e}")
+        
+        # Prepare arguments for each ticker
+        process_args = []
+        for ticker in tickers:
+            args = (
+                ticker,
+                self.db_conn,
+                self.enable_cache,
+                self.redis_url,
+                self.log_level,
+                self.debug
+            )
+            process_args.append(args)
+        
+        # Execute in parallel using ProcessPoolExecutor
+        loop = asyncio.get_event_loop()
+        
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                loop.run_in_executor(executor, _process_ticker_financial_info, args)
+                for args in process_args
+            ]
+            
+            # Wait for all results
+            results = await asyncio.gather(*futures, return_exceptions=True)
+        
+        # Process results and build financial_data dictionary
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                ticker = tickers[i]
+                self._log("WARNING", f"Error processing financial info for {ticker}: {result}")
                 financial_data[ticker] = {
                     'pe_ratio': None,
                     'market_cap': None,
                     'price': None
                 }
+            else:
+                ticker, data = result
+                financial_data[ticker] = data
+        
+        # Log final cache stats if debug is enabled
+        if self.debug:
+            cache_info = ""
+            if initial_cache_stats is not None and self.enable_cache and hasattr(self.db, 'get_cache_statistics'):
+                try:
+                    current_cache_stats = self.db.get_cache_statistics()
+                    hits_diff = current_cache_stats.get('hits', 0) - initial_cache_stats.get('hits', 0)
+                    misses_diff = current_cache_stats.get('misses', 0) - initial_cache_stats.get('misses', 0)
+                    total_requests = hits_diff + misses_diff
+                    if total_requests > 0:
+                        hit_rate = (hits_diff / total_requests * 100) if total_requests > 0 else 0.0
+                        cache_info = f" [cache: {hits_diff} hits, {misses_diff} misses, {hit_rate:.1f}% hit rate]"
+                except:
+                    pass
+            print(f"DEBUG: Fetched financial info for {total}/{total} tickers (100%){cache_info}", file=sys.stderr)
         
         return financial_data
     
@@ -2206,6 +2209,89 @@ def _calculate_refresh_date_ranges(
     return short_start_date, max_end_date, combined_max_days
 
 
+def _process_ticker_financial_info(args_tuple):
+    """
+    Process financial info for a single ticker in a separate process.
+    
+    Args:
+        args_tuple: Tuple containing:
+            - ticker: Ticker symbol
+            - db_conn: Database connection string
+            - enable_cache: Whether caching is enabled
+            - redis_url: Redis URL for caching
+            - log_level: Logging level
+            - debug: Whether debug output is enabled
+    
+    Returns:
+        Tuple of (ticker, financial_data_dict)
+    """
+    import asyncio
+    import sys
+    import os
+    import pandas as pd
+    from pathlib import Path
+    from typing import Dict, Any
+    
+    # Unpack arguments
+    (ticker, db_conn, enable_cache, redis_url, log_level, debug) = args_tuple
+    
+    # Re-import needed modules in worker process
+    CURRENT_DIR = Path(__file__).resolve().parent
+    PROJECT_ROOT = CURRENT_DIR.parent
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    
+    from common.stock_db import get_stock_db
+    
+    async def _async_process():
+        # Create database connection in worker process
+        # Use INFO level for database to reduce cache message verbosity, even when analyzer is in DEBUG mode
+        db_log_level = "INFO" if log_level == "DEBUG" else log_level
+        db = get_stock_db('questdb', db_config=db_conn, enable_cache=enable_cache, 
+                        redis_url=redis_url, log_level=db_log_level)
+        
+        try:
+            async with db:
+                # Fetch financial info
+                df = await db.get_financial_info(ticker)
+                
+                if not df.empty:
+                    # Map column names to expected fields
+                    row = df.iloc[0]
+                    # Try different possible column names
+                    pe_ratio = None
+                    if 'price_to_earnings' in df.columns:
+                        pe_ratio = row['price_to_earnings']
+                    elif 'pe_ratio' in df.columns:
+                        pe_ratio = row['pe_ratio']
+                    
+                    market_cap = row['market_cap'] if 'market_cap' in df.columns else None
+                    price = row['price'] if 'price' in df.columns else None
+                    
+                    return (ticker, {
+                        'pe_ratio': pe_ratio,
+                        'market_cap': market_cap,
+                        'price': price
+                    })
+                else:
+                    return (ticker, {
+                        'pe_ratio': None,
+                        'market_cap': None,
+                        'price': None
+                    })
+        except Exception as e:
+            if debug:
+                print(f"WARNING [PID {os.getpid()}]: Could not fetch financial info for {ticker}: {e}", file=sys.stderr)
+            return (ticker, {
+                'pe_ratio': None,
+                'market_cap': None,
+                'price': None
+            })
+    
+    # Run async function in worker process
+    return asyncio.run(_async_process())
+
+
 def _process_refresh_batch(args_tuple):
     """
     Process a batch of tickers for refresh in a separate process.
@@ -3267,7 +3353,8 @@ async def main():
             print(f"DEBUG: Symbols list: {symbols_list[:10]}{'...' if len(symbols_list) > 10 else ''}", file=sys.stderr)
         
         # Get financial information
-        financial_data = await analyzer.get_financial_info(symbols_list)
+        max_workers = getattr(args, 'max_workers', 4)
+        financial_data = await analyzer.get_financial_info(symbols_list, max_workers=max_workers)
         
         # Parse filters
         filters = []

@@ -522,6 +522,12 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     app.router.add_get("/analyze_ticker", handle_analyze_ticker)
     app.router.add_post("/analyze_ticker", handle_analyze_ticker)
     
+    # Add stock info API endpoint
+    app.router.add_get("/api/stock_info/{symbol}", handle_stock_info)
+    
+    # Add stock info HTML page endpoint
+    app.router.add_get("/stock_info/{symbol}", handle_stock_info_html)
+    
     # Add catch-all handler for unknown routes (must be last)
     app.router.add_get("/{path:.*}", handle_catch_all)
     app.router.add_post("/{path:.*}", handle_catch_all)
@@ -1419,6 +1425,995 @@ async def handle_health_check(request: web.Request) -> web.Response:
         "database": db_info,
         "process": process_info
     })
+
+async def handle_stock_info(request: web.Request) -> web.Response:
+    """Handle stock info API requests.
+    
+    GET /api/stock_info/{symbol}
+    
+    Returns comprehensive stock information including price, options, financial ratios,
+    news (optional), and implied volatility (optional) data.
+    
+    Path Parameters:
+        symbol (required): Stock ticker symbol (e.g., AAPL, MSFT, GOOGL)
+    
+    Query Parameters:
+        Price Data:
+            - latest: bool (default: false)
+                If true, only fetch latest price and skip historical data
+            - start_date: str (YYYY-MM-DD, optional)
+                Start date for historical price data
+            - end_date: str (YYYY-MM-DD, optional)
+                End date for historical price data
+            - show_price_history: bool (default: false)
+                Whether to include historical price data in response
+        
+        Options Data:
+            - options_days: int (default: 180)
+                Number of days ahead to fetch options data
+            - option_type: str (default: "all")
+                Filter options by type: "all", "call", or "put"
+            - strike_range_percent: int (optional)
+                Filter options by strike range (±percent from stock price, e.g., 20 for ±20%)
+            - max_options_per_expiry: int (default: 10)
+                Maximum number of options to return per expiration date
+        
+        Data Source & Fetching:
+            - data_source: str (default: "polygon")
+                Data source to use: "polygon" or "alpaca"
+            - force_fetch: bool (default: false)
+                If true, force fetch from API bypassing cache/DB
+            - no_cache: bool (default: false)
+                If true, disable Redis caching
+        
+        Display Options:
+            - timezone: str (default: "America/New_York")
+                Timezone for displaying timestamps (e.g., "America/New_York", "UTC", "EST")
+            - show_news: bool (default: false)
+                If true, include latest news articles in response
+            - show_iv: bool (default: false)
+                If true, include implied volatility statistics in response
+    
+    Response Format:
+        {
+            "symbol": str,
+            "price_info": {
+                "symbol": str,
+                "current_price": dict,
+                "price_data": list (if historical data requested),
+                "error": str (if error occurred)
+            },
+            "options_info": {
+                "symbol": str,
+                "options_data": dict,
+                "source": str,
+                "fetch_time_ms": float,
+                "error": str (if error occurred)
+            },
+            "financial_info": {
+                "symbol": str,
+                "financial_data": dict,
+                "source": str,
+                "fetch_time_ms": float,
+                "error": str (if error occurred)
+            },
+            "news_info": {
+                "symbol": str,
+                "news_data": dict,
+                "freshness": dict,
+                "error": str (if error occurred)
+            } (only if show_news=true),
+            "iv_info": {
+                "symbol": str,
+                "iv_data": dict,
+                "source": str,
+                "fetch_time_ms": float,
+                "freshness": dict,
+                "error": str (if error occurred)
+            } (only if show_iv=true),
+            "fetch_time_ms": float
+        }
+    
+    Example Requests:
+        # Get latest price, options, and financial data
+        GET /api/stock_info/AAPL
+        
+        # Get all data including news and IV
+        GET /api/stock_info/AAPL?show_news=true&show_iv=true
+        
+        # Get options for next 90 days with ±20% strike range
+        GET /api/stock_info/AAPL?options_days=90&strike_range_percent=20
+        
+        # Force fetch from API (bypass cache/DB)
+        GET /api/stock_info/AAPL?force_fetch=true
+        
+        # Get historical price data
+        GET /api/stock_info/AAPL?start_date=2024-01-01&end_date=2024-12-31&show_price_history=true
+        
+        # Get only call options
+        GET /api/stock_info/AAPL?option_type=call
+        
+        # Disable caching
+        GET /api/stock_info/AAPL?no_cache=true
+    """
+    # Get symbol from path
+    symbol = request.match_info.get('symbol', '').upper().strip()
+    if not symbol:
+        return web.json_response({
+            "error": "Missing required parameter 'symbol' in path"
+        }, status=400)
+    
+    # Get database instance from app context
+    db_instance = request.app.get('db_instance')
+    if not db_instance:
+        return web.json_response({
+            "error": "Database instance not available"
+        }, status=500)
+    
+    try:
+        # Import functions from fetch_symbol_data
+        from fetch_symbol_data import get_stock_info_parallel
+        
+        # Parse query parameters
+        latest = request.query.get('latest', 'false').lower() == 'true'
+        start_date = request.query.get('start_date')
+        end_date = request.query.get('end_date')
+        options_days = int(request.query.get('options_days', '180'))
+        force_fetch = request.query.get('force_fetch', 'false').lower() == 'true'
+        data_source = request.query.get('data_source', 'polygon')
+        timezone_str = request.query.get('timezone', 'America/New_York')
+        show_price_history = request.query.get('show_price_history', 'false').lower() == 'true'
+        option_type = request.query.get('options_type', 'all')
+        strike_range_percent = request.query.get('strike_range_percent')
+        if strike_range_percent:
+            strike_range_percent = int(strike_range_percent)
+        max_options_per_expiry = int(request.query.get('max_options_per_expiry', '10'))
+        show_news = request.query.get('show_news', 'false').lower() == 'true'
+        show_iv = request.query.get('show_iv', 'false').lower() == 'true'
+        no_cache = request.query.get('no_cache', 'false').lower() == 'true'
+        
+        # Get cache settings
+        enable_cache = not no_cache
+        redis_url = None
+        if enable_cache:
+            redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+        
+        # Call the parallel helper function
+        result = await get_stock_info_parallel(
+            symbol,
+            db_instance,
+            start_date=start_date if not latest else None,
+            end_date=end_date if not latest else None,
+            force_fetch=force_fetch,
+            data_source=data_source,
+            timezone_str=timezone_str,
+            latest_only=latest,
+            options_days=options_days,
+            option_type=option_type,
+            strike_range_percent=strike_range_percent,
+            max_options_per_expiry=max_options_per_expiry,
+            show_news=show_news,
+            show_iv=show_iv,
+            enable_cache=enable_cache,
+            redis_url=redis_url
+        )
+        
+        # Convert DataFrames to JSON-serializable format
+        if result.get('price_info') and result['price_info'].get('price_data') is not None:
+            price_df = result['price_info']['price_data']
+            if hasattr(price_df, 'to_dict'):
+                # Convert DataFrame to records format
+                result['price_info']['price_data'] = dataframe_to_json_records(price_df)
+        
+        # Convert all Timestamp objects in the result to ISO strings for JSON serialization
+        def convert_timestamps_recursive(obj: Any) -> Any:
+            """Recursively convert Timestamp/datetime objects to ISO strings."""
+            import pandas as pd
+            from datetime import datetime
+            if isinstance(obj, pd.Timestamp):
+                return obj.isoformat()
+            elif isinstance(obj, datetime):
+                return obj.isoformat()
+            elif isinstance(obj, dict):
+                return {key: convert_timestamps_recursive(value) for key, value in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [convert_timestamps_recursive(item) for item in obj]
+            elif hasattr(obj, 'isoformat') and not isinstance(obj, (str, int, float, bool, type(None))):  # Handle other datetime-like objects
+                try:
+                    return obj.isoformat()
+                except:
+                    return str(obj)
+            else:
+                return obj
+        
+        # Apply conversion to entire result
+        result = convert_timestamps_recursive(result)
+        
+        # Return JSON response
+        return web.json_response(result)
+        
+    except Exception as e:
+        logger.error(f"Error handling stock info request for {symbol}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return web.json_response({
+            "error": "An internal server error occurred",
+            "details": str(e)
+        }, status=500)
+
+
+def _format_options_html(options_data: Dict[str, Any]) -> str:
+    """Format options data as HTML table."""
+    if not options_data or not options_data.get('success', False):
+        return '<p>No options data available</p>'
+    
+    contracts = options_data.get('data', {}).get('contracts', [])
+    if not contracts:
+        return '<p>No options contracts found</p>'
+    
+    # Group by expiration date
+    by_expiry = {}
+    for contract in contracts:
+        exp = contract.get('expiration', 'Unknown')
+        if exp not in by_expiry:
+            by_expiry[exp] = []
+        by_expiry[exp].append(contract)
+    
+    html_parts = []
+    for exp_date in sorted(by_expiry.keys())[:10]:  # Show first 10 expirations
+        contracts_list = by_expiry[exp_date]
+        html_parts.append(f'<h3 style="margin-top: 20px; color: #667eea;">Expiration: {exp_date}</h3>')
+        html_parts.append('<table class="data-table" style="width: 100%; margin-bottom: 20px;">')
+        html_parts.append('<tr><th>Type</th><th>Strike</th><th>Bid</th><th>Ask</th><th>Last</th><th>Volume</th><th>Open Interest</th><th>IV</th></tr>')
+        
+        for contract in contracts_list[:20]:  # Show first 20 contracts per expiry
+            option_type = contract.get('option_type', 'N/A')
+            strike = contract.get('strike', 'N/A')
+            bid = contract.get('bid', 'N/A')
+            ask = contract.get('ask', 'N/A')
+            last = contract.get('last', 'N/A')
+            volume = contract.get('volume', 'N/A')
+            open_interest = contract.get('open_interest', 'N/A')
+            iv = contract.get('implied_volatility', 'N/A')
+            
+            html_parts.append('<tr>')
+            html_parts.append(f'<td>{option_type}</td>')
+            html_parts.append(f'<td>${strike:.2f}</td>' if isinstance(strike, (int, float)) else f'<td>{strike}</td>')
+            html_parts.append(f'<td>${bid:.2f}</td>' if isinstance(bid, (int, float)) else f'<td>{bid}</td>')
+            html_parts.append(f'<td>${ask:.2f}</td>' if isinstance(ask, (int, float)) else f'<td>{ask}</td>')
+            html_parts.append(f'<td>${last:.2f}</td>' if isinstance(last, (int, float)) else f'<td>{last}</td>')
+            html_parts.append(f'<td>{volume}</td>')
+            html_parts.append(f'<td>{open_interest}</td>')
+            html_parts.append(f'<td>{iv:.2%}</td>' if isinstance(iv, (int, float)) else f'<td>{iv}</td>')
+            html_parts.append('</tr>')
+        
+        html_parts.append('</table>')
+    
+    return ''.join(html_parts)
+
+
+def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
+    """Generate Yahoo Finance-like HTML page for stock information."""
+    import json
+    from datetime import datetime, timedelta
+    import pandas as pd
+    
+    def format_value(val):
+        """Format a value for display."""
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            return 'N/A'
+        if isinstance(val, (int, float)):
+            if val >= 1e9:
+                return f"${val/1e9:.2f}B"
+            elif val >= 1e6:
+                return f"${val/1e6:.2f}M"
+            elif val >= 1e3:
+                return f"${val/1e3:.2f}K"
+            else:
+                return f"{val:.2f}"
+        return str(val)
+    
+    # Extract data
+    price_info = data.get('price_info', {})
+    financial_info = data.get('financial_info', {})
+    options_info = data.get('options_info', {})
+    iv_info = data.get('iv_info', {})
+    news_info = data.get('news_info', {})
+    
+    # Get current price
+    current_price_data = price_info.get('current_price', {})
+    if isinstance(current_price_data, dict):
+        current_price = current_price_data.get('price') or current_price_data.get('close') or current_price_data.get('last_price') or 'N/A'
+        price_change = current_price_data.get('change', 0) or current_price_data.get('change_amount', 0)
+        price_change_pct = current_price_data.get('change_percent', 0) or current_price_data.get('change_pct', 0)
+        volume = current_price_data.get('volume') or current_price_data.get('size')
+    else:
+        # If current_price is a number directly
+        current_price = current_price_data if isinstance(current_price_data, (int, float)) else 'N/A'
+        price_change = 0
+        price_change_pct = 0
+        volume = None
+    
+    # Format price
+    if isinstance(current_price, (int, float)):
+        current_price_str = f"{current_price:.2f}"
+    else:
+        current_price_str = str(current_price)
+    
+    # Get price history for chart
+    price_history = price_info.get('price_data', [])
+    
+    # Get financial data - handle both dict and DataFrame
+    financial_data = {}
+    if financial_info:
+        fin_data = financial_info.get('financial_data')
+        if isinstance(fin_data, dict):
+            financial_data = fin_data
+        elif hasattr(fin_data, 'to_dict'):
+            # It's a DataFrame - get the latest row
+            if not fin_data.empty:
+                financial_data = fin_data.iloc[-1].to_dict()
+    
+    # Calculate 52 week high/low from price history
+    week_52_high = None
+    week_52_low = None
+    if price_history is not None:
+        # Convert DataFrame to list if needed
+        if hasattr(price_history, 'to_dict'):
+            price_history = dataframe_to_json_records(price_history)
+        
+        if isinstance(price_history, list) and len(price_history) > 0:
+            # Get last 365 days of data
+            prices = []
+            for record in price_history:
+                if isinstance(record, dict):
+                    close = record.get('close') or record.get('price')
+                    if close:
+                        try:
+                            prices.append(float(close))
+                        except (ValueError, TypeError):
+                            pass
+            if prices:
+                week_52_high = max(prices)
+                week_52_low = min(prices)
+    
+    # Format price change
+    change_color = 'positive' if price_change >= 0 else 'negative'
+    change_sign = '+' if price_change >= 0 else ''
+    
+    # Prepare chart data - extract all data points, not just last 100
+    chart_data = []
+    chart_labels = []
+    all_price_records = []
+    
+    # Handle price_history - could be DataFrame or list
+    if price_history is not None:
+        # Convert DataFrame to list of records if needed
+        if hasattr(price_history, 'to_dict'):
+            # It's a DataFrame - convert to records
+            price_history = dataframe_to_json_records(price_history)
+        
+        # Now price_history should be a list
+        if isinstance(price_history, list) and len(price_history) > 0:
+            for record in price_history:
+                if isinstance(record, dict):
+                    date = record.get('date') or record.get('timestamp', '')
+                    close = record.get('close') or record.get('price', 0)
+                    if date and close:
+                        try:
+                            close_val = float(close)
+                            all_price_records.append({
+                                'date': date,
+                                'close': close_val
+                            })
+                        except (ValueError, TypeError):
+                            pass
+    
+    # Sort by date and prepare chart data
+    if all_price_records:
+        # Sort by date
+        all_price_records.sort(key=lambda x: x['date'])
+    
+    # Convert to JSON for JavaScript - use all data, JavaScript will filter
+    all_chart_data = [r['close'] for r in all_price_records]
+    all_chart_labels = [r['date'][:10] if len(r['date']) > 10 else r['date'] for r in all_price_records]
+    all_chart_data_json = json.dumps(all_chart_data)
+    all_chart_labels_json = json.dumps(all_chart_labels)
+    
+    # Get IV data
+    iv_data = iv_info.get('iv_data', {}) if iv_info else {}
+    
+    # Get options data
+    options_data = options_info.get('options_data', {}) if options_info else {}
+    
+    # Get news data
+    news_data = news_info.get('news_data', {}) if news_info else {}
+    news_items = news_data.get('results', []) if isinstance(news_data, dict) else []
+    
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{symbol} - Stock Information</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            line-height: 1.6;
+        }}
+        .container {{
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .header {{
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .header h1 {{
+            font-size: 32px;
+            margin-bottom: 10px;
+        }}
+        .price-section {{
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            margin: 20px 0;
+        }}
+        .price {{
+            font-size: 48px;
+            font-weight: bold;
+        }}
+        .change {{
+            font-size: 24px;
+            font-weight: 500;
+        }}
+        .change.positive {{
+            color: #16a34a;
+        }}
+        .change.negative {{
+            color: #dc2626;
+        }}
+        .metrics-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }}
+        .metric-card {{
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .metric-label {{
+            font-size: 12px;
+            color: #666;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+        }}
+        .metric-value {{
+            font-size: 20px;
+            font-weight: 600;
+        }}
+        .chart-section {{
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .chart-controls {{
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }}
+        .chart-btn {{
+            padding: 8px 16px;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }}
+        .chart-btn.active {{
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }}
+        .chart-container {{
+            position: relative;
+            height: 400px;
+        }}
+        .data-section {{
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        .data-section h2 {{
+            margin-bottom: 15px;
+            color: #667eea;
+        }}
+        .data-table {{
+            width: 100%;
+            border-collapse: collapse;
+        }}
+        .data-table th,
+        .data-table td {{
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }}
+        .data-table th {{
+            background: #f9fafb;
+            font-weight: 600;
+            color: #666;
+        }}
+        .status-indicator {{
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }}
+        .status-indicator.connected {{
+            background: #16a34a;
+        }}
+        .status-indicator.disconnected {{
+            background: #dc2626;
+        }}
+        .realtime-section {{
+            background: #f9fafb;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>{symbol}</h1>
+            <div class="price-section">
+                <div class="price">${current_price_str}</div>
+                <div class="change {change_color}">
+                    {change_sign}${abs(price_change):.2f} ({change_sign}{price_change_pct:.2f}%)
+                </div>
+            </div>
+            <div class="realtime-section">
+                <span class="status-indicator disconnected" id="wsStatus"></span>
+                <span id="wsStatusText">Connecting to real-time data...</span>
+                <span id="realtimePrice" style="margin-left: 20px; font-weight: 600;"></span>
+            </div>
+        </div>
+        
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-label">Market Cap</div>
+                <div class="metric-value">{format_value(financial_data.get('market_cap'))}</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">P/E Ratio</div>
+                <div class="metric-value">{format_value(financial_data.get('price_to_earnings') or financial_data.get('pe_ratio'))}</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">52 Week High</div>
+                <div class="metric-value">{format_value(week_52_high)}</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">52 Week Low</div>
+                <div class="metric-value">{format_value(week_52_low)}</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Volume</div>
+                <div class="metric-value">{format_value(volume)}</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Implied Volatility</div>
+                <div class="metric-value">{format_value(iv_data.get('current_iv') if iv_data else None)}</div>
+            </div>
+        </div>
+        
+        <div class="chart-section">
+            <h2>Price Chart</h2>
+            <div class="chart-controls" style="display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px;">
+                <button class="chart-btn active" onclick="switchTimePeriod('1d')" id="btn-1d">1D</button>
+                <button class="chart-btn" onclick="switchTimePeriod('1w')" id="btn-1w">1W</button>
+                <button class="chart-btn" onclick="switchTimePeriod('1m')" id="btn-1m">1M</button>
+                <button class="chart-btn" onclick="switchTimePeriod('3m')" id="btn-3m">3M</button>
+                <button class="chart-btn" onclick="switchTimePeriod('6m')" id="btn-6m">6M</button>
+                <button class="chart-btn" onclick="switchTimePeriod('ytd')" id="btn-ytd">YTD</button>
+                <button class="chart-btn" onclick="switchTimePeriod('1y')" id="btn-1y">1Y</button>
+                <button class="chart-btn" onclick="switchTimePeriod('2y')" id="btn-2y">2Y</button>
+            </div>
+            <div class="chart-controls" style="display: flex; gap: 10px; margin-bottom: 20px;">
+                <button class="chart-btn active" onclick="switchChartType('daily')" id="btn-daily">Daily</button>
+                <button class="chart-btn" onclick="switchChartType('hourly')" id="btn-hourly">Hourly</button>
+            </div>
+            <div class="chart-container">
+                <canvas id="priceChart"></canvas>
+            </div>
+        </div>
+        
+        <div class="data-section">
+            <h2>Financial Data</h2>
+            <table class="data-table">
+                <tr>
+                    <th>Metric</th>
+                    <th>Value</th>
+                </tr>
+                <tr><td>Market Cap</td><td>{format_value(financial_data.get('market_cap'))}</td></tr>
+                <tr><td>P/E Ratio</td><td>{format_value(financial_data.get('price_to_earnings') or financial_data.get('pe_ratio'))}</td></tr>
+                <tr><td>EPS</td><td>{format_value(financial_data.get('earnings_per_share') or financial_data.get('eps'))}</td></tr>
+                <tr><td>Dividend Yield</td><td>{format_value(financial_data.get('dividend_yield'))}</td></tr>
+                <tr><td>52 Week High</td><td>{format_value(week_52_high)}</td></tr>
+                <tr><td>52 Week Low</td><td>{format_value(week_52_low)}</td></tr>
+                <tr><td>Volume</td><td>{format_value(volume)}</td></tr>
+            </table>
+        </div>
+        
+        {f'''
+        <div class="data-section">
+            <h2>Implied Volatility</h2>
+            <table class="data-table">
+                <tr>
+                    <th>Metric</th>
+                    <th>Value</th>
+                </tr>
+                <tr><td>Current IV</td><td>{format_value(iv_data.get('current_iv'))}</td></tr>
+                <tr><td>IV Percentile</td><td>{format_value(iv_data.get('iv_percentile'))}</td></tr>
+                <tr><td>IV Rank</td><td>{format_value(iv_data.get('iv_rank'))}</td></tr>
+                <tr><td>30-Day IV</td><td>{format_value(iv_data.get('30d_iv'))}</td></tr>
+                <tr><td>60-Day IV</td><td>{format_value(iv_data.get('60d_iv'))}</td></tr>
+                <tr><td>90-Day IV</td><td>{format_value(iv_data.get('90d_iv'))}</td></tr>
+            </table>
+        </div>
+        ''' if iv_data else ''}
+        
+        {f'''
+        <div class="data-section">
+            <h2>Options (90 Days)</h2>
+            <div id="optionsDisplay">
+                {_format_options_html(options_data) if options_data else '<p>No options data available</p>'}
+            </div>
+        </div>
+        ''' if options_data else ''}
+        
+        {f'''
+        <div class="data-section">
+            <h2>Latest News</h2>
+            <div id="newsDisplay">
+                {'<ul style="list-style: none; padding: 0;">' + ''.join([f'<li style="margin-bottom: 15px; padding: 10px; background: #f9fafb; border-radius: 4px;"><strong>{item.get("title", "No title")}</strong><br><small>{item.get("published_utc", "")[:10]}</small><br><a href="{item.get("article_url", "#")}" target="_blank" style="color: #667eea;">Read more</a></li>' for item in news_items[:10]]) + '</ul>' if news_items else '<p>No news available</p>'}
+            </div>
+        </div>
+        ''' if news_info else ''}
+    </div>
+    
+    <script>
+        // Chart data - all available data
+        const allChartData = {all_chart_data_json};
+        const allChartLabels = {all_chart_labels_json};
+        let currentTimePeriod = '1d';
+        let chartType = 'daily';
+        
+        // Calculate date ranges
+        const now = new Date();
+        const getDateRange = (period) => {{
+            const ranges = {{
+                '1d': 1,
+                '1w': 7,
+                '1m': 30,
+                '3m': 90,
+                '6m': 180,
+                'ytd': Math.floor((now - new Date(now.getFullYear(), 0, 1)) / (1000 * 60 * 60 * 24)),
+                '1y': 365,
+                '2y': 730
+            }};
+            return ranges[period] || 365;
+        }};
+        
+        const ctx = document.getElementById('priceChart').getContext('2d');
+        let priceChart = null;
+        
+        function initChart() {{
+            if (priceChart) {{
+                priceChart.destroy();
+            }}
+            
+            // Filter data for initial view (1 day)
+            const filteredData = [];
+            const filteredLabels = [];
+            const days = getDateRange('1d');
+            const cutoffDate = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+            
+            for (let i = 0; i < allChartLabels.length; i++) {{
+                const labelDate = new Date(allChartLabels[i]);
+                if (labelDate >= cutoffDate) {{
+                    filteredLabels.push(allChartLabels[i]);
+                    filteredData.push(allChartData[i]);
+                }}
+            }}
+            
+            priceChart = new Chart(ctx, {{
+                type: 'line',
+                data: {{
+                    labels: filteredLabels,
+                    datasets: [{{
+                        label: '{symbol} Price',
+                        data: filteredData,
+                        borderColor: '#667eea',
+                        backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.4
+                    }}]
+                }},
+                options: {{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {{
+                        legend: {{
+                            display: false
+                        }}
+                    }},
+                    scales: {{
+                        y: {{
+                            beginAtZero: false
+                        }},
+                        x: {{
+                            ticks: {{
+                                maxTicksLimit: 20
+                            }}
+                        }}
+                    }}
+                }}
+            }});
+        }}
+        
+        function switchTimePeriod(period) {{
+            currentTimePeriod = period;
+            document.querySelectorAll('[id^="btn-"]').forEach(btn => {{
+                if (btn.id.startsWith('btn-1d') || btn.id.startsWith('btn-1w') || btn.id.startsWith('btn-1m') || 
+                    btn.id.startsWith('btn-3m') || btn.id.startsWith('btn-6m') || btn.id.startsWith('btn-ytd') || 
+                    btn.id.startsWith('btn-1y') || btn.id.startsWith('btn-2y')) {{
+                    btn.classList.remove('active');
+                }}
+            }});
+            document.getElementById(`btn-${{period}}`).classList.add('active');
+            
+            const days = getDateRange(period);
+            const cutoffDate = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+            
+            // Filter data based on time period
+            const filteredData = [];
+            const filteredLabels = [];
+            
+            for (let i = 0; i < allChartLabels.length; i++) {{
+                try {{
+                    const labelDate = new Date(allChartLabels[i]);
+                    if (!isNaN(labelDate.getTime()) && labelDate >= cutoffDate) {{
+                        filteredLabels.push(allChartLabels[i]);
+                        filteredData.push(allChartData[i]);
+                    }}
+                }} catch (e) {{
+                    // Skip invalid dates
+                }}
+            }}
+            
+            if (priceChart) {{
+                priceChart.data.labels = filteredLabels;
+                priceChart.data.datasets[0].data = filteredData;
+                priceChart.update();
+            }}
+        }}
+        
+        function switchChartType(type) {{
+            chartType = type;
+            document.getElementById('btn-daily').classList.toggle('active', type === 'daily');
+            document.getElementById('btn-hourly').classList.toggle('active', type === 'hourly');
+            
+            // For hourly, we'd need to fetch hourly data - for now just show daily
+            // In a real implementation, you would fetch hourly data via API
+            switchTimePeriod(currentTimePeriod);
+        }}
+        
+        // Initialize chart
+        initChart();
+        
+        // WebSocket connection for real-time updates
+        const wsPort = 9102;
+        let ws = null;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+        
+        function connectWebSocket() {{
+            try {{
+                // Connect to WebSocket server on port 9102
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const host = window.location.hostname || 'localhost';
+                const wsUrl = `${{protocol}}//${{host}}:${{wsPort}}/ws?symbol={symbol}`;
+                console.log('Connecting to WebSocket:', wsUrl);
+                ws = new WebSocket(wsUrl);
+                
+                ws.onopen = function() {{
+                    console.log('WebSocket connected');
+                    document.getElementById('wsStatus').classList.remove('disconnected');
+                    document.getElementById('wsStatus').classList.add('connected');
+                    document.getElementById('wsStatusText').textContent = 'Connected to real-time data';
+                    reconnectAttempts = 0;
+                }};
+                
+                ws.onmessage = function(event) {{
+                    try {{
+                        const data = JSON.parse(event.data);
+                        if (data.symbol === '{symbol}' && data.data) {{
+                            updateRealtimePrice(data.data);
+                        }}
+                    }} catch (e) {{
+                        console.error('Error parsing WebSocket message:', e);
+                    }}
+                }};
+                
+                ws.onerror = function(error) {{
+                    console.error('WebSocket error:', error);
+                    document.getElementById('wsStatus').classList.remove('connected');
+                    document.getElementById('wsStatus').classList.add('disconnected');
+                    document.getElementById('wsStatusText').textContent = 'Connection error';
+                }};
+                
+                ws.onclose = function() {{
+                    console.log('WebSocket closed');
+                    document.getElementById('wsStatus').classList.remove('connected');
+                    document.getElementById('wsStatus').classList.add('disconnected');
+                    document.getElementById('wsStatusText').textContent = 'Disconnected';
+                    
+                    // Attempt to reconnect
+                    if (reconnectAttempts < maxReconnectAttempts) {{
+                        reconnectAttempts++;
+                        setTimeout(connectWebSocket, 3000);
+                    }}
+                }};
+            }} catch (e) {{
+                console.error('Error connecting WebSocket:', e);
+                document.getElementById('wsStatusText').textContent = 'WebSocket not available';
+            }}
+        }}
+        
+        function updateRealtimePrice(data) {{
+            if (data.type === 'quote' && data.payload && data.payload.length > 0) {{
+                const quote = data.payload[0];
+                const price = quote.bid_price || quote.price;
+                if (price) {{
+                    document.getElementById('realtimePrice').textContent = `Real-time: ${{price}}`;
+                    
+                    // Update chart with new data point
+                    const timestamp = new Date(quote.timestamp).toLocaleTimeString();
+                    priceChart.data.labels.push(timestamp);
+                    priceChart.data.datasets[0].data.push(parseFloat(price));
+                    
+                    // Keep only last 100 data points
+                    if (priceChart.data.labels.length > 100) {{
+                        priceChart.data.labels.shift();
+                        priceChart.data.datasets[0].data.shift();
+                    }}
+                    
+                    priceChart.update('none');
+                }}
+            }}
+        }}
+        
+        // Connect on page load
+        connectWebSocket();
+        
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', function() {{
+            if (ws) {{
+                ws.close();
+            }}
+        }});
+    </script>
+</body>
+</html>"""
+    
+    return html
+
+
+async def handle_stock_info_html(request: web.Request) -> web.Response:
+    """Handle stock info HTML page requests.
+    
+    GET /stock_info/{symbol}
+    
+    Returns a Yahoo Finance-like HTML page with stock information, charts, and real-time updates.
+    """
+    # Get symbol from path
+    symbol = request.match_info.get('symbol', '').upper().strip()
+    if not symbol:
+        return web.Response(
+            text="<html><body><h1>Error: Missing symbol</h1></body></html>",
+            content_type='text/html',
+            status=400
+        )
+    
+    # Get database instance from app context
+    db_instance = request.app.get('db_instance')
+    if not db_instance:
+        return web.Response(
+            text="<html><body><h1>Error: Database instance not available</h1></body></html>",
+            content_type='text/html',
+            status=500
+        )
+    
+    try:
+        # Import functions from fetch_symbol_data
+        from fetch_symbol_data import get_stock_info_parallel
+        
+        # Parse query parameters - fetch comprehensive data
+        show_price_history = True  # Always show price history for chart
+        show_news = request.query.get('show_news', 'true').lower() == 'true'  # Default to true
+        show_iv = request.query.get('show_iv', 'true').lower() == 'true'  # Default to true
+        no_cache = request.query.get('no_cache', 'false').lower() == 'true'
+        
+        # Get cache settings
+        enable_cache = not no_cache
+        redis_url = None
+        if enable_cache:
+            redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+        
+        # Get date range for historical data (default: last 1 year for better chart)
+        from datetime import datetime, timedelta
+        end_date = datetime.now().strftime('%Y-%m-%d')
+        start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')  # 1 year default
+        
+        # Call the parallel helper function
+        result = await get_stock_info_parallel(
+            symbol,
+            db_instance,
+            start_date=start_date,
+            end_date=end_date,
+            force_fetch=False,
+            data_source='polygon',
+            timezone_str='America/New_York',
+            latest_only=False,
+            options_days=90,  # 90 days for options by default
+            option_type='all',
+            strike_range_percent=None,
+            max_options_per_expiry=10,
+            show_news=show_news,
+            show_iv=show_iv,
+            enable_cache=enable_cache,
+            redis_url=redis_url
+        )
+        
+        # Generate HTML page
+        html_content = generate_stock_info_html(symbol, result)
+        
+        return web.Response(
+            text=html_content,
+            content_type='text/html',
+            charset='utf-8'
+        )
+        
+    except Exception as e:
+        logger.error(f"Error generating stock info HTML for {symbol}: {e}", exc_info=True)
+        return web.Response(
+            text=f"<html><body><h1>Error: {str(e)}</h1></body></html>",
+            content_type='text/html',
+            status=500
+        )
+
 
 async def handle_analyze_ticker(request: web.Request) -> web.Response:
     """Analyze a single ticker using options_analyzer and generate JSON or HTML report."""
@@ -2526,6 +3521,12 @@ def main_server_runner():
         # Add ticker analysis endpoint
         app.router.add_get("/analyze_ticker", handle_analyze_ticker)
         app.router.add_post("/analyze_ticker", handle_analyze_ticker)
+        
+        # Add stock info API endpoint
+        app.router.add_get("/api/stock_info/{symbol}", handle_stock_info)
+        
+        # Add stock info HTML page endpoint
+        app.router.add_get("/stock_info/{symbol}", handle_stock_info_html)
         
         # Add catch-all handler for unknown routes (must be last)
         app.router.add_get("/{path:.*}", handle_catch_all)

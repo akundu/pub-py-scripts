@@ -11,7 +11,7 @@ from common.stock_db import get_stock_db, StockDBBase, get_default_db_path, DEFA
 import aiohttp # Added for fully async HTTP calls
 import pytz # Added for market hours checking
 # Try to import tzlocal for local timezone detection
-from typing import Any
+from typing import Any, Optional, Dict
 from common.market_hours import is_market_hours
 
 logger = logging.getLogger(__name__)
@@ -1239,18 +1239,24 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
         
         # Try to get realtime data first (most recent)
         # Use get_latest_price_with_data() if available to avoid duplicate queries
+        # Initialize realtime_data as empty DataFrame to ensure it's always a DataFrame
+        realtime_data = pd.DataFrame()
+        
         if hasattr(db_instance, 'get_latest_price_with_data'):
             latest_data = await db_instance.get_latest_price_with_data(symbol, use_market_time=use_market_time)
             if latest_data and latest_data.get('realtime_df') is not None:
-                realtime_data = latest_data['realtime_df']
-                # Take the FIRST row (most recent write_timestamp) instead of last
-                latest_row = realtime_data.iloc[0]
-                return {
-                    'price': latest_row['price'],
-                    'timestamp': _normalize_index_timestamp(latest_row.name),  # Normalize index value
-                    'write_timestamp': latest_row.get('write_timestamp'),  # When it was written to DB
-                    'latest_data': latest_data  # Cache the full result for reuse
-                }
+                realtime_df_value = latest_data['realtime_df']
+                # Ensure realtime_df_value is a DataFrame, not a float or other type
+                if isinstance(realtime_df_value, pd.DataFrame) and not realtime_df_value.empty:
+                    # Take the FIRST row (most recent write_timestamp) instead of last
+                    latest_row = realtime_df_value.iloc[0]
+                    return {
+                        'price': latest_row['price'],
+                        'timestamp': _normalize_index_timestamp(latest_row.name),  # Normalize index value
+                        'write_timestamp': latest_row.get('write_timestamp'),  # When it was written to DB
+                        'latest_data': latest_data  # Cache the full result for reuse
+                    }
+                # If realtime_df is not a valid DataFrame, fall through to try other sources
             elif latest_data and latest_data.get('price') is not None:
                 # We have price data but no realtime_df (e.g., from hourly/daily)
                 return {
@@ -1259,16 +1265,22 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
                     'write_timestamp': None,
                     'latest_data': latest_data  # Cache the full result for reuse
                 }
-            else:
-                # No realtime data from get_latest_price_with_data, try other sources
-                realtime_data = pd.DataFrame()
         else:
             # Fallback for non-QuestDB instances
             # When market is closed and use_market_time=True, prioritize daily close over realtime
             if use_market_time and not market_is_open:
                 # Market closed: prioritize daily close price
-                daily_data = await db_instance.get_stock_data(symbol, interval="daily")
-                if not daily_data.empty:
+                fetched_daily = await db_instance.get_stock_data(symbol, interval="daily")
+                # Ensure fetched_daily is a DataFrame, not a float or other type
+                if isinstance(fetched_daily, pd.DataFrame):
+                    daily_data = fetched_daily
+                else:
+                    # If it's not a DataFrame, log warning and use empty DataFrame
+                    if fetched_daily is not None:
+                        logging.warning(f"get_stock_data returned non-DataFrame type {type(fetched_daily)} for {symbol} (daily), using empty DataFrame")
+                    daily_data = pd.DataFrame()
+                # Double-check that daily_data is a DataFrame before using .empty
+                if isinstance(daily_data, pd.DataFrame) and not daily_data.empty:
                     latest_row = daily_data.iloc[-1]
                     return {
                         'price': latest_row['close'],
@@ -1278,8 +1290,17 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
                     }
                 
                 # Fallback to hourly if no daily data
-                hourly_data = await db_instance.get_stock_data(symbol, interval="hourly")
-                if not hourly_data.empty:
+                fetched_hourly = await db_instance.get_stock_data(symbol, interval="hourly")
+                # Ensure fetched_hourly is a DataFrame, not a float or other type
+                if isinstance(fetched_hourly, pd.DataFrame):
+                    hourly_data = fetched_hourly
+                else:
+                    # If it's not a DataFrame, log warning and use empty DataFrame
+                    if fetched_hourly is not None:
+                        logging.warning(f"get_stock_data returned non-DataFrame type {type(fetched_hourly)} for {symbol} (hourly), using empty DataFrame")
+                    hourly_data = pd.DataFrame()
+                # Double-check that hourly_data is a DataFrame before using .empty
+                if isinstance(hourly_data, pd.DataFrame) and not hourly_data.empty:
                     latest_row = hourly_data.iloc[-1]
                     return {
                         'price': latest_row['close'],
@@ -1289,9 +1310,19 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
                     }
             
             # Market open or use_market_time=False: try realtime first
-            realtime_data = await db_instance.get_realtime_data(symbol, data_type="quote")
+            fetched_realtime = await db_instance.get_realtime_data(symbol, data_type="quote")
+            # Ensure fetched_realtime is a DataFrame, not a float or other type
+            if isinstance(fetched_realtime, pd.DataFrame):
+                realtime_data = fetched_realtime
+            else:
+                # If it's not a DataFrame, log warning and use empty DataFrame
+                if fetched_realtime is not None:
+                    logging.warning(f"get_realtime_data returned non-DataFrame type {type(fetched_realtime)} for {symbol}, using empty DataFrame")
+                realtime_data = pd.DataFrame()
         
-        if not realtime_data.empty:
+        # If we haven't returned yet, try realtime_data (if we have it)
+        # Double-check that realtime_data is a DataFrame before using .empty
+        if isinstance(realtime_data, pd.DataFrame) and not realtime_data.empty:
             # Take the FIRST row (most recent write_timestamp) instead of last
             latest_row = realtime_data.iloc[0]
             return {
@@ -1302,8 +1333,17 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
             }
         
         # Try hourly data
-        hourly_data = await db_instance.get_stock_data(symbol, interval="hourly")
-        if not hourly_data.empty:
+        fetched_hourly = await db_instance.get_stock_data(symbol, interval="hourly")
+        # Ensure fetched_hourly is a DataFrame, not a float or other type
+        if isinstance(fetched_hourly, pd.DataFrame):
+            hourly_data = fetched_hourly
+        else:
+            # If it's not a DataFrame, log warning and use empty DataFrame
+            if fetched_hourly is not None:
+                logging.warning(f"get_stock_data returned non-DataFrame type {type(fetched_hourly)} for {symbol} (hourly), using empty DataFrame")
+            hourly_data = pd.DataFrame()
+        # Double-check that hourly_data is a DataFrame before using .empty
+        if isinstance(hourly_data, pd.DataFrame) and not hourly_data.empty:
             latest_row = hourly_data.iloc[-1]
             idx_value = latest_row.name
             normalized_ts = _normalize_index_timestamp(idx_value)
@@ -1317,8 +1357,17 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
             }
         
         # Try daily data
-        daily_data = await db_instance.get_stock_data(symbol, interval="daily")
-        if not daily_data.empty:
+        fetched_daily = await db_instance.get_stock_data(symbol, interval="daily")
+        # Ensure fetched_daily is a DataFrame, not a float or other type
+        if isinstance(fetched_daily, pd.DataFrame):
+            daily_data = fetched_daily
+        else:
+            # If it's not a DataFrame, log warning and use empty DataFrame
+            if fetched_daily is not None:
+                logging.warning(f"get_stock_data returned non-DataFrame type {type(fetched_daily)} for {symbol} (daily), using empty DataFrame")
+            daily_data = pd.DataFrame()
+        # Double-check that daily_data is a DataFrame before using .empty
+        if isinstance(daily_data, pd.DataFrame) and not daily_data.empty:
             latest_row = daily_data.iloc[-1]
             idx_value = latest_row.name
             normalized_ts = _normalize_index_timestamp(idx_value)
@@ -1882,7 +1931,19 @@ async def get_financial_ratios(ticker: str, api_key: str) -> dict[str, Any] | No
                             logger.warning(f"Unexpected results format for {ticker}: {type(results)}")
                             return None
                     else:
-                        logger.warning(f"No financial ratios data available for {ticker}: {data.get('message', 'Unknown error')}")
+                        # More detailed error logging
+                        status = data.get("status", "UNKNOWN")
+                        message = data.get("message", "")
+                        results_count = len(data.get("results", [])) if isinstance(data.get("results"), (list, dict)) else 0
+                        
+                        if message:
+                            logger.debug(f"No financial ratios data available for {ticker}: status={status}, message={message}")
+                        elif status != "OK":
+                            logger.debug(f"No financial ratios data available for {ticker}: status={status} (not OK)")
+                        elif results_count == 0:
+                            logger.debug(f"No financial ratios data available for {ticker}: status={status}, but no results returned (this is normal for ETFs and some tickers)")
+                        else:
+                            logger.debug(f"No financial ratios data available for {ticker}: status={status}, results_count={results_count}")
                         return None
                 else:
                     logger.error(f"Failed to fetch financial ratios for {ticker}: HTTP {response.status}")
@@ -1896,8 +1957,8 @@ async def get_latest_news(
     api_key: str,
     max_items: int = 10,
     cache_instance=None,
-    cache_ttl: int = 3600  # 1 hour default TTL
-) -> dict[str, Any] | None:
+    cache_ttl: Optional[int] = None  # No TTL (infinite cache)
+) -> Optional[Dict[str, Any]]:
     """Fetch latest news for a ticker from Polygon.io and optionally cache it.
     
     Args:
@@ -1916,6 +1977,8 @@ async def get_latest_news(
     
     try:
         # Check cache first if available
+        cached_data = None
+        last_save_time = None
         if cache_instance:
             try:
                 from common.redis_cache import CacheKeyGenerator
@@ -1924,6 +1987,8 @@ async def get_latest_news(
                 if cached_df is not None and not cached_df.empty:
                     # Convert DataFrame back to dictionary
                     cached_data = cached_df.iloc[0].to_dict()
+                    # Get last_save_time
+                    last_save_time = _get_last_save_time_from_cache(cached_df)
                     # Restore nested structures (articles, date_range)
                     import json
                     try:
@@ -1947,6 +2012,26 @@ async def get_latest_news(
                         cached_data['date_range'] = {}
                     
                     logger.info(f"Found cached news for {ticker} (count: {cached_data.get('count', 0)})")
+                    
+                    # Check if background fetch should be triggered
+                    if _should_trigger_background_fetch(last_save_time, "news"):
+                        # Trigger background fetch but return cached data immediately
+                        async def _fetch_news_background():
+                            try:
+                                # Re-fetch news
+                                news_result = await get_latest_news(
+                                    ticker, api_key, max_items, cache_instance, cache_ttl=None
+                                )
+                                return news_result
+                            except Exception as e:
+                                logger.warning(f"Background news fetch failed for {ticker}: {e}")
+                                return None
+                        
+                        # Fire-and-forget: create task without awaiting
+                        asyncio.create_task(_trigger_background_fetch(
+                            ticker, None, "news", _fetch_news_background
+                        ))
+                    
                     return cached_data
                 else:
                     logger.debug(f"Cache miss for news {ticker} (cached_df is None or empty)")
@@ -2021,9 +2106,11 @@ async def get_latest_news(
                     cache_dict['articles'] = json.dumps(cache_dict['articles'])
                 if 'date_range' in cache_dict:
                     cache_dict['date_range'] = json.dumps(cache_dict['date_range'])
+                # Add last_save_time
+                cache_dict['last_save_time'] = datetime.now(timezone.utc).isoformat()
                 cache_df = pd.DataFrame([cache_dict])
-                await cache_instance.set(cache_key, cache_df, ttl=cache_ttl)
-                logger.info(f"Cached news for {ticker} with TTL {cache_ttl}s (count: {result['count']})")
+                await cache_instance.set(cache_key, cache_df, ttl=None)  # No TTL (infinite cache)
+                logger.info(f"Cached news for {ticker} (no TTL, count: {result['count']})")
             except Exception as e:
                 logger.debug(f"Failed to cache news for {ticker}: {e}")
         
@@ -2035,10 +2122,10 @@ async def get_latest_news(
 
 async def get_latest_iv(
     ticker: str,
-    db_instance: StockDBBase | None = None,
+    db_instance: Optional[StockDBBase] = None,
     cache_instance=None,
-    cache_ttl: int = 300  # 5 minutes default TTL (IV changes frequently)
-) -> dict[str, Any] | None:
+    cache_ttl: Optional[int] = None  # No TTL (infinite cache)
+) -> Optional[Dict[str, Any]]:
     """Get latest implied volatility data for a ticker from options data.
     
     This aggregates IV from the most recent options data, calculating:
@@ -2060,6 +2147,8 @@ async def get_latest_iv(
     
     try:
         # Check cache first if available
+        cached_data = None
+        last_save_time = None
         if cache_instance:
             try:
                 from common.redis_cache import CacheKeyGenerator
@@ -2068,6 +2157,8 @@ async def get_latest_iv(
                 if cached_df is not None and not cached_df.empty:
                     # Convert DataFrame back to dictionary
                     cached_data = cached_df.iloc[0].to_dict()
+                    # Get last_save_time
+                    last_save_time = _get_last_save_time_from_cache(cached_df)
                     # Restore nested structures (statistics, atm_iv, call_iv, put_iv)
                     import json
                     for key in ['statistics', 'atm_iv', 'call_iv', 'put_iv']:
@@ -2083,6 +2174,26 @@ async def get_latest_iv(
                                 cached_data[key] = {}
                     logger.info(f"[IV CACHE HIT] Found cached IV for {ticker}")
                     cached_data['source'] = 'cache'
+                    
+                    # Check if background fetch should be triggered
+                    if _should_trigger_background_fetch(last_save_time, "iv") and db_instance:
+                        # Trigger background fetch but return cached data immediately
+                        async def _fetch_iv_background():
+                            try:
+                                # Re-fetch IV
+                                iv_result = await get_latest_iv(
+                                    ticker, db_instance, cache_instance, cache_ttl=None
+                                )
+                                return iv_result
+                            except Exception as e:
+                                logger.warning(f"Background IV fetch failed for {ticker}: {e}")
+                                return None
+                        
+                        # Fire-and-forget: create task without awaiting
+                        asyncio.create_task(_trigger_background_fetch(
+                            ticker, db_instance, "iv", _fetch_iv_background
+                        ))
+                    
                     return cached_data
                 else:
                     logger.debug(f"[IV CACHE MISS] Cache miss for IV {ticker} (cached_df is None or empty)")
@@ -2220,11 +2331,13 @@ async def get_latest_iv(
                 for key in ['statistics', 'atm_iv', 'call_iv', 'put_iv']:
                     if key in cache_dict and isinstance(cache_dict[key], dict):
                         cache_dict[key] = json.dumps(cache_dict[key])
+                # Add last_save_time
+                cache_dict['last_save_time'] = datetime.now(timezone.utc).isoformat()
                 cache_df = pd.DataFrame([cache_dict])
                 cache_set_start = time.time()
-                await cache_instance.set(cache_key, cache_df, ttl=cache_ttl)
+                await cache_instance.set(cache_key, cache_df, ttl=None)  # No TTL (infinite cache)
                 cache_set_time = (time.time() - cache_set_start) * 1000
-                logger.info(f"[IV CACHE SET] Cached IV for {ticker} (set_time: {cache_set_time:.1f}ms, ttl: {cache_ttl}s)")
+                logger.info(f"[IV CACHE SET] Cached IV for {ticker} (set_time: {cache_set_time:.1f}ms, no TTL)")
             except Exception as e:
                 logger.debug(f"[IV CACHE ERROR] Failed to cache IV for {ticker}: {e}")
         
@@ -2279,7 +2392,7 @@ def parse_args():
     parser.add_argument(
         "--db-path",
         type=str,
-        default='localhost:9001',
+        default='ms1.kundu.dev:9001',
         help="Path to the database file or PostgreSQL connection string (e.g., postgresql://user:pass@host:port/db). If not provided, uses default for selected db-type."
     )
     parser.add_argument(
@@ -3582,6 +3695,104 @@ def _get_fetch_meta_age_seconds(data_dir: str, symbol: str, interval: str) -> di
 # These functions are used by both stock_info_display.py and db_server.py
 # ============================================================================
 
+def _should_trigger_background_fetch(last_save_time: Optional[datetime], data_type: str = "price") -> bool:
+    """Check if background fetch should be triggered based on last save time and market hours.
+    
+    Args:
+        last_save_time: Last time data was saved (UTC datetime or None)
+        data_type: Type of data ("price", "options", "financial", "news", "iv")
+    
+    Returns:
+        True if background fetch should be triggered, False otherwise
+    """
+    if last_save_time is None:
+        return True  # No data cached, should fetch
+    
+    # Ensure last_save_time is timezone-aware UTC
+    if isinstance(last_save_time, str):
+        last_save_time = datetime.fromisoformat(last_save_time.replace('Z', '+00:00'))
+    if last_save_time.tzinfo is None:
+        last_save_time = last_save_time.replace(tzinfo=timezone.utc)
+    elif last_save_time.tzinfo != timezone.utc:
+        last_save_time = last_save_time.astimezone(timezone.utc)
+    
+    now_utc = datetime.now(timezone.utc)
+    age_seconds = (now_utc - last_save_time).total_seconds()
+    
+    # Check if market is open
+    market_is_open = is_market_hours()
+    
+    if market_is_open:
+        # During market hours: fetch if > 15 minutes old
+        return age_seconds > (15 * 60)  # 15 minutes
+    else:
+        # Market closed: fetch if > 2 hours old
+        return age_seconds > (2 * 60 * 60)  # 2 hours
+
+
+def _get_last_save_time_from_cache(cached_df: Optional[pd.DataFrame]) -> Optional[datetime]:
+    """Extract last_save_time from cached DataFrame.
+    
+    Args:
+        cached_df: Cached DataFrame that may contain last_save_time column
+    
+    Returns:
+        last_save_time as datetime or None
+    """
+    if cached_df is None or cached_df.empty:
+        return None
+    
+    try:
+        # Check if last_save_time is in the DataFrame
+        if 'last_save_time' in cached_df.columns:
+            last_save = cached_df.iloc[0]['last_save_time']
+            if pd.isna(last_save) or last_save is None:
+                return None
+            # Convert to datetime if it's a string
+            if isinstance(last_save, str):
+                return datetime.fromisoformat(last_save.replace('Z', '+00:00'))
+            elif isinstance(last_save, pd.Timestamp):
+                return last_save.to_pydatetime()
+            elif isinstance(last_save, datetime):
+                return last_save
+        return None
+    except Exception:
+        return None
+
+
+async def _trigger_background_fetch(
+    symbol: str,
+    db_instance: StockDBBase,
+    data_type: str,
+    fetch_func,
+    *args,
+    **kwargs
+) -> None:
+    """Trigger a background fetch for data.
+    
+    Args:
+        symbol: Stock symbol
+        db_instance: Database instance
+        data_type: Type of data being fetched
+        fetch_func: Async function to call for fetching
+        *args, **kwargs: Arguments to pass to fetch_func
+    """
+    try:
+        # Create background task (fire-and-forget)
+        async def _background_fetch():
+            try:
+                logger.info(f"[BACKGROUND FETCH] Starting background fetch for {data_type} data: {symbol}")
+                await fetch_func(*args, **kwargs)
+                logger.info(f"[BACKGROUND FETCH] Completed background fetch for {data_type} data: {symbol}")
+            except Exception as e:
+                logger.warning(f"[BACKGROUND FETCH] Error in background fetch for {data_type} data {symbol}: {e}")
+        
+        # Create task without awaiting (fire-and-forget)
+        asyncio.create_task(_background_fetch())
+        logger.debug(f"[BACKGROUND FETCH] Triggered background fetch task for {data_type} data: {symbol}")
+    except Exception as e:
+        logger.debug(f"[BACKGROUND FETCH] Failed to trigger background fetch for {data_type} data {symbol}: {e}")
+
 async def get_price_info(
     symbol: str,
     db_instance: StockDBBase,
@@ -3853,6 +4064,8 @@ async def get_financial_info(
             cache_instance = db_instance.cache
         
         # Check cache first (if not force_fetch)
+        cached_financial = None
+        last_save_time = None
         if not force_fetch and cache_instance:
             try:
                 from common.redis_cache import CacheKeyGenerator
@@ -3864,11 +4077,33 @@ async def get_financial_info(
                 if cached_df is not None and not cached_df.empty:
                     # Convert DataFrame back to dict
                     cached_financial = cached_df.iloc[0].to_dict()
+                    # Get last_save_time
+                    last_save_time = _get_last_save_time_from_cache(cached_df)
                     fetch_time = (time.time() - fetch_start) * 1000
                     result["financial_data"] = cached_financial
                     result["source"] = "cache"
                     result["fetch_time_ms"] = fetch_time
                     logger.info(f"[FINANCIAL CACHE HIT] Financial data for {symbol} (cache_check: {cache_check_time:.1f}ms, total: {fetch_time:.1f}ms)")
+                    
+                    # Check if background fetch should be triggered
+                    if _should_trigger_background_fetch(last_save_time, "financial"):
+                        # Trigger background fetch but return cached data immediately
+                        async def _fetch_financial_background():
+                            try:
+                                # Re-fetch financial data
+                                financial_result = await get_financial_info(
+                                    symbol, db_instance, force_fetch=False
+                                )
+                                return financial_result
+                            except Exception as e:
+                                logger.warning(f"Background financial fetch failed for {symbol}: {e}")
+                                return None
+                        
+                        # Fire-and-forget: create task without awaiting
+                        asyncio.create_task(_trigger_background_fetch(
+                            symbol, db_instance, "financial", _fetch_financial_background
+                        ))
+                    
                     return result
                 else:
                     logger.debug(f"[FINANCIAL CACHE MISS] No cached financial data for {symbol} (cache_check: {cache_check_time:.1f}ms)")
@@ -3897,11 +4132,14 @@ async def get_financial_info(
                             from common.redis_cache import CacheKeyGenerator
                             import pandas as pd
                             cache_key = CacheKeyGenerator.financial_info(symbol)
-                            cache_df = pd.DataFrame([latest])
+                            # Add last_save_time to cached data
+                            latest_with_time = latest.copy()
+                            latest_with_time['last_save_time'] = datetime.now(timezone.utc).isoformat()
+                            cache_df = pd.DataFrame([latest_with_time])
                             cache_set_start = time.time()
-                            await cache_instance.set(cache_key, cache_df, ttl=3600)  # 1 hour TTL
+                            await cache_instance.set(cache_key, cache_df, ttl=None)  # No TTL (infinite cache)
                             cache_set_time = (time.time() - cache_set_start) * 1000
-                            logger.info(f"[FINANCIAL CACHE SET] Cached financial data for {symbol} (set_time: {cache_set_time:.1f}ms, ttl: 3600s)")
+                            logger.info(f"[FINANCIAL CACHE SET] Cached financial data for {symbol} (set_time: {cache_set_time:.1f}ms, no TTL)")
                         except Exception as e:
                             logger.debug(f"[FINANCIAL CACHE ERROR] Failed to cache financial data for {symbol}: {e}")
                     
@@ -3938,11 +4176,14 @@ async def get_financial_info(
                     from common.redis_cache import CacheKeyGenerator
                     import pandas as pd
                     cache_key = CacheKeyGenerator.financial_info(symbol)
-                    cache_df = pd.DataFrame([ratios])
+                    # Add last_save_time to cached data
+                    ratios_with_time = ratios.copy()
+                    ratios_with_time['last_save_time'] = datetime.now(timezone.utc).isoformat()
+                    cache_df = pd.DataFrame([ratios_with_time])
                     cache_set_start = time.time()
-                    await cache_instance.set(cache_key, cache_df, ttl=3600)  # 1 hour TTL
+                    await cache_instance.set(cache_key, cache_df, ttl=None)  # No TTL (infinite cache)
                     cache_set_time = (time.time() - cache_set_start) * 1000
-                    logger.info(f"[FINANCIAL CACHE SET] Cached financial data for {symbol} (set_time: {cache_set_time:.1f}ms, ttl: 3600s)")
+                    logger.info(f"[FINANCIAL CACHE SET] Cached financial data for {symbol} (set_time: {cache_set_time:.1f}ms, no TTL)")
                 except Exception as e:
                     logger.debug(f"[FINANCIAL CACHE ERROR] Failed to cache financial data for {symbol}: {e}")
         else:

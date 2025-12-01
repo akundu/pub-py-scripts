@@ -387,7 +387,7 @@ def build_table_rows(
             # Make ticker column a link
             if normalized_col == 'ticker' and cell_value and cell_value.strip():
                 ticker_value = cell_value.strip()
-                ticker_link = f'http://akl.kundu.dev:9100/analyze_ticker?ticker={html_escape.escape(ticker_value)}&format=html'
+                ticker_link = f'/stock_info/{html_escape.escape(ticker_value)}'
                 cell_content = f'<a href="{ticker_link}" target="_blank" style="color: #667eea; text-decoration: none; font-weight: 500;">{html_escape.escape(ticker_value)}</a>'
                 html_parts.append(f'                        <td{class_attr}{data_attr}>{cell_content}</td>\n')
             elif is_rich_html_cell:

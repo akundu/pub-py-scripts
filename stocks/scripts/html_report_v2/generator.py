@@ -4,6 +4,9 @@ Main HTML report generator - orchestrates all modules.
 
 import pandas as pd
 import sys
+import threading
+import urllib.request
+import urllib.error
 from pathlib import Path
 from .data_processor import prepare_dataframe_for_display, split_calls_and_puts
 from .html_builder import (
@@ -15,6 +18,83 @@ from .card_builder import build_cards_html
 from .analysis_builder import generate_detailed_analysis_html
 from .styles import get_css_styles
 from .scripts import get_javascript
+
+# Module-level set to track tickers that are being/have been fetched
+# This ensures we only fetch each ticker once, even across multiple calls
+_warmup_tickers_lock = threading.Lock()
+_warmup_tickers_in_progress = set()
+
+
+def _warmup_cache_for_ticker(ticker: str, port: int = 9100) -> None:
+    """Fire-and-forget cache warmup for a single ticker."""
+    try:
+        url = f"http://localhost:{port}/api/stock_info/{ticker}?show_iv=true&show_news=false"
+        # Make request with short timeout, don't wait for response
+        req = urllib.request.Request(url)
+        urllib.request.urlopen(req, timeout=1.0)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError):
+        # Silently ignore all errors - this is fire-and-forget
+        pass
+
+
+def _warmup_stock_info_cache(df: pd.DataFrame, port: int = 9100) -> None:
+    """Background cache warmup: Extract unique tickers and fetch stock_info in background.
+    
+    This function ensures each ticker is only fetched once, even if called multiple times.
+    Uses a module-level set with thread-safe locking to prevent duplicate fetches.
+    """
+    if df.empty:
+        return
+    
+    # Extract unique ticker symbols from DataFrame
+    ticker_col = None
+    for col in ['ticker', 'TICKER', 'Ticker']:
+        if col in df.columns:
+            ticker_col = col
+            break
+    
+    if not ticker_col:
+        return
+    
+    # Get unique tickers (excluding NaN/None/empty values)
+    tickers = df[ticker_col].dropna().astype(str).str.strip()
+    tickers = tickers[tickers != '']
+    tickers = tickers[tickers != 'N/A']
+    unique_tickers = tickers.unique()
+    
+    if len(unique_tickers) == 0:
+        return
+    
+    # Thread-safe check: Only fetch tickers that haven't been fetched yet
+    with _warmup_tickers_lock:
+        # Filter out tickers that are already being/have been fetched
+        new_tickers = [t for t in unique_tickers if t not in _warmup_tickers_in_progress]
+        
+        if len(new_tickers) == 0:
+            # All tickers are already being fetched
+            return
+        
+        # Mark new tickers as in-progress
+        for ticker in new_tickers:
+            _warmup_tickers_in_progress.add(ticker)
+    
+    # Fire-and-forget: Start background threads only for new tickers
+    def warmup_worker(ticker: str) -> None:
+        try:
+            _warmup_cache_for_ticker(ticker, port)
+        finally:
+            # Remove from in-progress set after fetch completes (or fails)
+            # Note: We keep it in the set to prevent re-fetching, even if it failed
+            # This ensures we only try once per ticker per process
+            pass
+    
+    for ticker in new_tickers:
+        # Start a daemon thread for each new ticker (fire-and-forget)
+        thread = threading.Thread(target=warmup_worker, args=(ticker,), daemon=True)
+        thread.start()
+    
+    if len(new_tickers) > 0:
+        print(f"Background cache warmup: Fetching stock info for {len(new_tickers)} new tickers (skipped {len(unique_tickers) - len(new_tickers)} already in progress)", file=sys.stderr)
 
 
 def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
@@ -109,6 +189,9 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
     
     # Combine all content
     body_content = header_html + '\n'.join(tab_contents) + '\n    </div>\n'
+    
+    # Background cache warmup: Start fetching stock_info for all tickers (fire-and-forget)
+    _warmup_stock_info_cache(df_display)
     
     # Get CSS and JavaScript
     css_content = get_css_styles()

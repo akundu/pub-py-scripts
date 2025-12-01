@@ -254,7 +254,7 @@ def generate_detailed_analysis_html(df: pd.DataFrame) -> str:
         html_parts.append(f'            <div class="analysis-item">\n')
         # Make ticker a link
         if ticker and ticker != 'N/A':
-            ticker_link = f'http://akl.kundu.dev:9100/analyze_ticker?ticker={html_escape.escape(ticker)}&format=html'
+            ticker_link = f'/stock_info/{html_escape.escape(ticker)}'
             html_parts.append(f'                <h3>#{idx}: <a href="{ticker_link}" target="_blank" style="color: #667eea; text-decoration: none;">{html_escape.escape(ticker)}</a></h3>\n')
         else:
             html_parts.append(f'                <h3>#{idx}: {html_escape.escape(ticker)}</h3>\n')
