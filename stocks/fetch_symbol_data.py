@@ -10,6 +10,7 @@ import random  # Added for randomized threshold jitter
 from pathlib import Path # Added for path manipulation
 import logging
 import re
+from io import StringIO
 from common.stock_db import get_stock_db, StockDBBase, get_default_db_path, DEFAULT_DATA_DIR
 import aiohttp # Added for fully async HTTP calls
 import pytz # Added for market hours checking
@@ -2977,6 +2978,8 @@ async def main() -> None:
             # Realtime section - use get_latest_price_with_data() which handles realtime, hourly, and daily queries
             # This returns the price along with the realtime DataFrame (if available) to avoid duplicate queries
             # Reuse cached result from freshness check if available to avoid duplicate queries
+            # Store latest_data in outer scope so it can be reused for hourly/daily display
+            latest_data_for_display = None
             if args.only_fetch in (None, 'realtime'):
                 try:
                     # Use cached result if available, otherwise fetch fresh
@@ -3005,6 +3008,9 @@ async def main() -> None:
                                 }
                             else:
                                 latest_data = None
+                    
+                    # Store for later use in hourly/daily display
+                    latest_data_for_display = latest_data
                     
                     if latest_data:
                         # Display the price returned by get_latest_price_with_data
@@ -3271,20 +3277,63 @@ async def main() -> None:
             if args.log_level == "DEBUG":
                 print()  # Spacing
             
+            # OPTIMIZATION: Reuse hourly_df and daily_df from latest_data if available (already fetched by get_latest_price_with_data)
+            # This avoids duplicate queries and ensures we use the same data that was used for price selection
+            hourly_df_from_latest = None
+            daily_df_from_latest = None
+            if latest_data_for_display:
+                # Extract hourly_df and daily_df from latest_data if available
+                hourly_df_from_latest = latest_data_for_display.get('hourly_df')
+                daily_df_from_latest = latest_data_for_display.get('daily_df')
+                # Ensure they are DataFrames (they might be JSON strings from cache that need deserialization)
+                if hourly_df_from_latest is not None:
+                    if isinstance(hourly_df_from_latest, str):
+                        try:
+                            import json
+                            # Try to parse as JSON string
+                            hourly_df_from_latest = pd.read_json(StringIO(hourly_df_from_latest), orient='records')
+                        except Exception as e:
+                            logging.debug(f"Failed to parse hourly_df from cache string: {e}")
+                            hourly_df_from_latest = None
+                    elif not isinstance(hourly_df_from_latest, pd.DataFrame):
+                        # Not a DataFrame and not a string - invalid, set to None
+                        hourly_df_from_latest = None
+                if daily_df_from_latest is not None:
+                    if isinstance(daily_df_from_latest, str):
+                        try:
+                            import json
+                            # Try to parse as JSON string
+                            daily_df_from_latest = pd.read_json(StringIO(daily_df_from_latest), orient='records')
+                        except Exception as e:
+                            logging.debug(f"Failed to parse daily_df from cache string: {e}")
+                            daily_df_from_latest = None
+                    elif not isinstance(daily_df_from_latest, pd.DataFrame):
+                        # Not a DataFrame and not a string - invalid, set to None
+                        daily_df_from_latest = None
+            
             # OPTIMIZATION: Combine all data queries into a single batch
             # This reduces database round trips from 6+ queries to 2 queries
             # For daily, query last 7 days (not future dates)
-            # For hourly, query last 3 days to limit data
+            # For hourly, query last 7 days and extend to end of today to ensure we get today's latest hourly bar
             daily_cutoff = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-            hourly_cutoff = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%dT%H:%M:%S')
-            hourly_end = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+            # For hourly: use 7 days back and extend to tomorrow to ensure we capture all of today's hourly bars
+            hourly_cutoff = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%S')
+            # Extend to end of today (or tomorrow) to ensure we get today's latest hourly bar
+            tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%S')
             
+            # Only fetch if we don't already have the data from latest_data
             # Fetch both daily and hourly data in parallel (filtered by only_fetch)
-            daily_task = db_instance.get_stock_data(args.symbol, start_date=daily_cutoff, end_date=today_str, interval='daily') if args.only_fetch in (None, 'daily') else asyncio.create_task(asyncio.sleep(0, result=pd.DataFrame()))
-            hourly_task = db_instance.get_stock_data(args.symbol, start_date=hourly_cutoff, end_date=hourly_end, interval='hourly') if args.only_fetch in (None, 'hourly') else asyncio.create_task(asyncio.sleep(0, result=pd.DataFrame()))
+            daily_task = db_instance.get_stock_data(args.symbol, start_date=daily_cutoff, end_date=today_str, interval='daily') if (args.only_fetch in (None, 'daily') and daily_df_from_latest is None) else asyncio.create_task(asyncio.sleep(0, result=pd.DataFrame()))
+            hourly_task = db_instance.get_stock_data(args.symbol, start_date=hourly_cutoff, end_date=tomorrow, interval='hourly') if (args.only_fetch in (None, 'hourly') and hourly_df_from_latest is None) else asyncio.create_task(asyncio.sleep(0, result=pd.DataFrame()))
             
             # Wait for both queries to complete
             daily_df, hourly_df = await asyncio.gather(daily_task, hourly_task)
+            
+            # Prefer DataFrames from latest_data (already fetched and used for price selection)
+            if hourly_df_from_latest is not None and not hourly_df_from_latest.empty:
+                hourly_df = hourly_df_from_latest
+            if daily_df_from_latest is not None and not daily_df_from_latest.empty:
+                daily_df = daily_df_from_latest
             
             # Display daily data - check if we have today's data first
             # Only show in DEBUG mode, otherwise just show realtime price
@@ -3416,15 +3465,24 @@ async def main() -> None:
                 print()  # Spacing
 
             # Display hourly data
+            # Always show the true latest hourly bar (from the DataFrame that was used for price selection)
             # Only show in DEBUG mode, otherwise just show realtime price
-            if args.log_level == "DEBUG" and not hourly_df.empty:
-                # Convert timezone for display
-                hourly_display_df = _convert_dataframe_timezone(hourly_df, args.timezone)
-                last_hourly = hourly_display_df.tail(1)
-                print("Most Recent Hourly:")
-                print(last_hourly[['open','high','low','close','volume']] if 'volume' in last_hourly.columns else last_hourly[['open','high','low','close']])
-            elif args.log_level == "DEBUG" and args.only_fetch in (None, 'hourly'):
-                print("No hourly rows found in DB.")
+            if args.log_level == "DEBUG":
+                if not hourly_df.empty:
+                    # Ensure DataFrame is sorted by datetime (ascending) so tail(1) gets the latest
+                    if isinstance(hourly_df.index, pd.DatetimeIndex):
+                        hourly_df_sorted = hourly_df.sort_index()
+                    else:
+                        # If no DatetimeIndex, try to sort by a datetime column
+                        hourly_df_sorted = hourly_df.copy()
+                    # Convert timezone for display
+                    hourly_display_df = _convert_dataframe_timezone(hourly_df_sorted, args.timezone)
+                    # Get the last row (most recent hourly bar)
+                    last_hourly = hourly_display_df.tail(1)
+                    print("Most Recent Hourly:")
+                    print(last_hourly[['open','high','low','close','volume']] if 'volume' in last_hourly.columns else last_hourly[['open','high','low','close']])
+                elif args.only_fetch in (None, 'hourly'):
+                    print("No hourly rows found in DB.")
             
             # Display financial ratios if requested
             if args.fetch_ratios:
