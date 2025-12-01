@@ -3854,6 +3854,11 @@ async def _trigger_background_fetch(
             # Polygon financial ratios endpoint
             fetch_destination = "Polygon.io API (financial ratios endpoint)"
             fetch_url = f"https://api.polygon.io/stocks/financials/v1/ratios?ticker={symbol}"
+        elif 'options' in func_name.lower() or 'options' in data_type.lower():
+            # Options data can be from database or Polygon API
+            # Default to database query, but will check function source below
+            fetch_destination = "Database (options data query)"
+            fetch_url = "Database query (options data)"
         elif 'iv' in func_name.lower() or 'iv' in data_type.lower():
             fetch_destination = "Database (IV calculation from options data)"
             fetch_url = "Database query (IV calculation)"
@@ -3900,6 +3905,15 @@ async def _trigger_background_fetch(
                     fetch_url = f"https://api.polygon.io/v2/last/trade/{symbol}"
                 elif 'get_aggs' in source:
                     fetch_url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/day"
+                elif 'list_options_contracts' in source or 'get_options_chain' in source:
+                    # Polygon options chain endpoint
+                    fetch_destination = "Polygon.io API (options chain endpoint)"
+                    fetch_url = f"https://api.polygon.io/v3/snapshot/options/{symbol}"
+                elif (re.search(r'self\.get_latest|get_options_data|await.*get_latest|await.*get_options', source)):
+                    # Likely a database query method
+                    if 'options' in data_type.lower():
+                        fetch_destination = "Database (options data query)"
+                        fetch_url = f"Database query (SELECT from options_data table for {symbol})"
             except Exception:
                 pass
     except Exception as e:
