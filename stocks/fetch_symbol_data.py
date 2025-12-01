@@ -6,6 +6,7 @@ import asyncio
 import threading
 import argparse
 import sys # Added for sys.path manipulation
+import random  # Added for randomized threshold jitter
 from pathlib import Path # Added for path manipulation
 import logging
 import re
@@ -14,7 +15,7 @@ import aiohttp # Added for fully async HTTP calls
 import pytz # Added for market hours checking
 # Try to import tzlocal for local timezone detection
 from typing import Any, Optional, Dict
-from common.market_hours import is_market_hours
+from common.market_hours import is_market_hours, is_market_preopen, is_market_postclose
 
 logger = logging.getLogger(__name__)
 try:
@@ -3749,6 +3750,20 @@ def _get_fetch_meta_age_seconds(data_dir: str, symbol: str, interval: str) -> di
 _active_background_fetches: set = set()  # Set of (symbol, data_type) tuples
 _background_fetch_lock = threading.Lock()  # Thread lock for thread-safe set operations
 
+# Apply a ±10% randomization to the threshold so that checks are slightly
+# staggered instead of all firing exactly at the same threshold boundary.
+def _jitter_threshold(base_threshold: int | float) -> float:
+    if base_threshold <= 0:
+        return base_threshold
+    # Random factor in [0.9, 1.1]
+    factor = random.uniform(0.9, 1.1)
+    return base_threshold * factor
+
+MARKET_DEFAULT_THRESHOLD = 12 * 60 * 60  # 1 hour
+MARKET_CLOSE_THRESHOLD = MARKET_DEFAULT_THRESHOLD
+MARKET_OPEN_THRESHOLD = 1 * 60 * 60  # 2 hours
+MARKET_PREOPEN_THRESHOLD = 2 * 60 * 60  # 1 hour
+MARKET_POSTCLOSE_THRESHOLD = 2 * 60 * 60  # 1 hour
 def _should_trigger_background_fetch(last_save_time: Optional[datetime], data_type: str = "price", symbol: str = "") -> bool:
     """Check if background fetch should be triggered based on last save time and market hours.
     
@@ -3781,16 +3796,17 @@ def _should_trigger_background_fetch(last_save_time: Optional[datetime], data_ty
     
     now_utc = datetime.now(timezone.utc)
     age_seconds = (now_utc - last_save_time).total_seconds()
-    
-    # Check if market is open
-    market_is_open = is_market_hours()
-    
-    if market_is_open:
-        # During market hours: fetch if > 15 minutes old
-        return age_seconds > (15 * 60)  # 15 minutes
+
+    if is_market_hours():  # Check if market is open
+        effective_threshold = _jitter_threshold(MARKET_OPEN_THRESHOLD)
+    elif is_market_preopen():
+        effective_threshold = _jitter_threshold(MARKET_PREOPEN_THRESHOLD)
+    elif is_market_postclose():
+        effective_threshold = _jitter_threshold(MARKET_POSTCLOSE_THRESHOLD)
     else:
-        # Market closed: fetch if > 2 hours old
-        return age_seconds > (2 * 60 * 60)  # 2 hours
+        effective_threshold = _jitter_threshold(MARKET_CLOSE_THRESHOLD)
+
+    return age_seconds > effective_threshold
 
 
 def _get_last_save_time_from_cache(cached_df: Optional[pd.DataFrame]) -> Optional[datetime]:
