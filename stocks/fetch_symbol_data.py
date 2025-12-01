@@ -7,6 +7,7 @@ import argparse
 import sys # Added for sys.path manipulation
 from pathlib import Path # Added for path manipulation
 import logging
+import re
 from common.stock_db import get_stock_db, StockDBBase, get_default_db_path, DEFAULT_DATA_DIR
 import aiohttp # Added for fully async HTTP calls
 import pytz # Added for market hours checking
@@ -1382,7 +1383,55 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
         
         return None
     except Exception as e:
-        print(f"Error getting latest price with timestamp for {symbol}: {e}", file=sys.stderr)
+        # Extract database host information for error logging
+        db_host_info = "unknown"
+        try:
+            if hasattr(db_instance, 'db_config'):
+                db_config = db_instance.db_config
+                # Parse connection string to extract host
+                # Format: postgresql://user:pass@host:port/database or questdb://user:pass@host:port/database
+                from urllib.parse import urlparse
+                parsed = urlparse(db_config)
+                if parsed.hostname:
+                    port = f":{parsed.port}" if parsed.port else ""
+                    db_host_info = f"{parsed.hostname}{port}"
+                elif '@' in db_config:
+                    # Fallback: Extract host:port from connection string manually
+                    # postgresql://user:pass@host:port/database
+                    parts = db_config.split('@')
+                    if len(parts) > 1:
+                        host_port = parts[1].split('/')[0]  # Get host:port part
+                        db_host_info = host_port
+                else:
+                    # Might be a file path
+                    db_host_info = "local file"
+        except Exception as parse_error:
+            # If parsing fails, try to extract any host-like information
+            try:
+                if hasattr(db_instance, 'db_config'):
+                    db_config = str(db_instance.db_config)
+                    # Try to find host:port pattern
+                    match = re.search(r'@([^:/]+(?::\d+)?)', db_config)
+                    if match:
+                        db_host_info = match.group(1)
+                    else:
+                        db_host_info = f"unknown (parse error: {type(parse_error).__name__})"
+            except Exception:
+                db_host_info = "unknown (could not parse)"
+        
+        error_msg = f"Error getting latest price with timestamp for {symbol}: {e}"
+        host_info_msg = f"Database host: {db_host_info}"
+        print(error_msg, file=sys.stderr)
+        print(host_info_msg, file=sys.stderr)
+        
+        # If it's a network error, provide more context
+        if "No route to host" in str(e) or "errno 65" in str(e).lower():
+            print(f"Network error: Cannot reach database host '{db_host_info}' for symbol {symbol}", file=sys.stderr)
+            print(f"  This may indicate:", file=sys.stderr)
+            print(f"    - Database server is down or unreachable", file=sys.stderr)
+            print(f"    - Network connectivity issue to {db_host_info}", file=sys.stderr)
+            print(f"    - Firewall blocking connection to {db_host_info}", file=sys.stderr)
+        
         return None
 
 async def get_current_price(
