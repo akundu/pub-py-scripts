@@ -480,7 +480,7 @@ class PolygonStreamManager:
                 logger.warning(f"Connection {connection_id}: Disconnected unexpectedly")
                 
             except Exception as e:
-                logger.error(f"Connection {connection_id}: Error: {e}")
+                logger.debug(f"Connection {connection_id}: Error: {e}")
                 for symbol in symbols:
                     self.symbol_stats[symbol]['errors'] += 1
                     
@@ -552,7 +552,7 @@ class PolygonStreamManager:
                     pass
                     
         except Exception as e:
-            logger.error(f"Connection {connection_id}: WebSocket connection failed: {e}")
+            logger.debug(f"Connection {connection_id}: WebSocket connection failed: {e}")
             raise
             
     async def _handle_message(self, connection_id: int, msg):
