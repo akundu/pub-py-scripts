@@ -198,6 +198,10 @@ def build_table_html(
                 • <code>net_daily_premium > 100</code> - Net daily premium greater than 100<br>
                 • <code>delta < 0.5</code> - Delta less than 0.5<br>
                 • <code>days_to_expiry >= 7</code> - Days to expiry at least 7<br>
+                • <code>spread < 0.1</code> - Short leg bid/ask spread less than $0.10<br>
+                • <code>spread < 10%</code> - Short leg spread less than 10% of option premium<br>
+                • <code>l_spread < 0.1</code> - Long leg bid/ask spread less than $0.10<br>
+                • <code>l_spread < 10%</code> - Long leg spread less than 10% of option premium<br>
                 • <code>num_contracts > volume</code> - Field-to-field comparison<br>
                 • <code>curr_price*1.05 < strike_price</code> - Mathematical expression (5% above current price less than strike)<br>
                 • <code>strike_price*0.95 > curr_price</code> - Mathematical expression (strike 5% below current)<br>

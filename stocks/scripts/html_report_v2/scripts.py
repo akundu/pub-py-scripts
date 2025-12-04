@@ -77,6 +77,85 @@ def get_javascript():
             return cell.textContent.trim();
         }
         
+        // Parse bid:ask string and return {bid, ask} or null
+        function parseBidAsk(bidAskStr) {
+            if (!bidAskStr || typeof bidAskStr !== 'string') return null;
+            const parts = bidAskStr.trim().split(':');
+            if (parts.length !== 2) return null;
+            const bid = parseFloat(parts[0]);
+            const ask = parseFloat(parts[1]);
+            if (isNaN(bid) || isNaN(ask)) return null;
+            return {bid: bid, ask: ask};
+        }
+        
+        // Calculate spread (absolute difference between bid and ask) from bid:ask string
+        function calculateSpread(bidAskStr) {
+            const parsed = parseBidAsk(bidAskStr);
+            if (!parsed) return null;
+            return Math.abs(parsed.ask - parsed.bid);
+        }
+        
+        // Get virtual field value (spread, l_spread) from a row
+        function getVirtualFieldValue(fieldName, row, tableId) {
+            const lowerField = fieldName.toLowerCase().replace(/\\s+/g, '_').trim();
+            
+            if (lowerField === 'spread') {
+                // Find bid_ask column (short leg)
+                const bidAskColIndex = findColumnIndex('bid_ask', tableId);
+                if (bidAskColIndex < 0) {
+                    // Try alternative names
+                    const altIndex = findColumnIndex('bid:ask', tableId);
+                    if (altIndex < 0) return null;
+                    const cell = row.cells[altIndex];
+                    if (!cell) return null;
+                    const bidAskStr = getRawText(cell);
+                    return calculateSpread(bidAskStr);
+                }
+                const cell = row.cells[bidAskColIndex];
+                if (!cell) return null;
+                const bidAskStr = getRawText(cell);
+                return calculateSpread(bidAskStr);
+            }
+            
+            if (lowerField === 'l_spread' || lowerField === 'long_spread') {
+                // Find long bid_ask column
+                const longBidAskColIndex = findColumnIndex('l_bid_ask', tableId);
+                if (longBidAskColIndex < 0) {
+                    // Try alternative names
+                    const altIndex = findColumnIndex('l_bid:ask', tableId);
+                    if (altIndex < 0) {
+                        const altIndex2 = findColumnIndex('long_bid_ask', tableId);
+                        if (altIndex2 < 0) return null;
+                        const cell = row.cells[altIndex2];
+                        if (!cell) return null;
+                        const bidAskStr = getRawText(cell);
+                        return calculateSpread(bidAskStr);
+                    }
+                    const cell = row.cells[altIndex];
+                    if (!cell) return null;
+                    const bidAskStr = getRawText(cell);
+                    return calculateSpread(bidAskStr);
+                }
+                const cell = row.cells[longBidAskColIndex];
+                if (!cell) return null;
+                const bidAskStr = getRawText(cell);
+                return calculateSpread(bidAskStr);
+            }
+            
+            return null;
+        }
+        
+        // Check if a field name is a virtual field (calculated on-the-fly)
+        function isVirtualField(fieldName) {
+            if (!fieldName) return false;
+            const lowerField = fieldName.toLowerCase().replace(/\\s+/g, '_').trim();
+            return (
+                lowerField === 'spread' ||
+                lowerField === 'l_spread' ||
+                lowerField === 'long_spread'
+            );
+        }
+        
         // Check if a field name is an expiration date column
         function isExpirationDateColumn(fieldName) {
             if (!fieldName) return false;
@@ -261,6 +340,8 @@ def get_javascript():
                     }
                 }
             });
+            // Add virtual fields
+            columnNames.push('spread', 'l_spread', 'long_spread');
             return columnNames;
         }
         
@@ -454,6 +535,18 @@ def get_javascript():
             // Handle exists/not_exists (only works for single fields, not expressions)
             if (filter.operator === 'exists' || filter.operator === 'not_exists') {
                 if (filter.hasMath) return false; // Can't use exists/not_exists with math expressions
+                
+                // Check if this is a virtual field
+                if (isVirtualField(filter.field)) {
+                    const virtualValue = getVirtualFieldValue(filter.field, row, tableId);
+                    if (filter.operator === 'exists') {
+                        return virtualValue !== null && !isNaN(virtualValue);
+                    }
+                    if (filter.operator === 'not_exists') {
+                        return virtualValue === null || isNaN(virtualValue);
+                    }
+                }
+                
                 const colIndex = findColumnIndex(filter.field, tableId);
                 if (colIndex < 0) {
                     console.warn('Column not found for filter:', filter.field);
@@ -519,46 +612,67 @@ def get_javascript():
             
             // Handle field-to-field comparison (without math)
             if (filter.isFieldComparison) {
-                const colIndex = findColumnIndex(filter.field, tableId);
-                if (colIndex < 0) {
-                    console.warn('Column not found for filter field:', filter.field);
-                    return false;
+                // Check if either field is a virtual field
+                const isFieldVirtual = isVirtualField(filter.field);
+                const isValueVirtual = isVirtualField(filter.value);
+                
+                let cellValue = null;
+                let compareValue = null;
+                
+                if (isFieldVirtual) {
+                    cellValue = getVirtualFieldValue(filter.field, row, tableId);
+                } else {
+                    const colIndex = findColumnIndex(filter.field, tableId);
+                    if (colIndex < 0) {
+                        console.warn('Column not found for filter field:', filter.field);
+                        return false;
+                    }
+                    const cell = row.cells[colIndex];
+                    if (!cell) return false;
+                    cellValue = getRawValue(cell);
                 }
-                const cell = row.cells[colIndex];
-                if (!cell) return false;
                 
-                const valueColIndex = findColumnIndex(filter.value, tableId);
-                if (valueColIndex < 0) {
-                    console.warn('Column not found for filter comparison value:', filter.value);
-                    return false;
+                if (isValueVirtual) {
+                    compareValue = getVirtualFieldValue(filter.value, row, tableId);
+                } else {
+                    const valueColIndex = findColumnIndex(filter.value, tableId);
+                    if (valueColIndex < 0) {
+                        console.warn('Column not found for filter comparison value:', filter.value);
+                        return false;
+                    }
+                    const valueCell = row.cells[valueColIndex];
+                    if (!valueCell) return false;
+                    compareValue = getRawValue(valueCell);
                 }
-                const valueCell = row.cells[valueColIndex];
-                if (!valueCell) return false;
                 
-                // Check if both fields are expiration date columns
-                const isFieldExpDate = isExpirationDateColumn(filter.field);
-                const isValueExpDate = isExpirationDateColumn(filter.value);
-                
-                // Handle date-only comparison for expiration date columns
-                if (isFieldExpDate && isValueExpDate) {
-                    const cellDate = getDateValue(cell);
-                    const compareDate = getDateValue(valueCell);
-                    if (cellDate === null || compareDate === null) return false;
+                // Check if both fields are expiration date columns (only if neither is virtual)
+                if (!isFieldVirtual && !isValueVirtual) {
+                    const isFieldExpDate = isExpirationDateColumn(filter.field);
+                    const isValueExpDate = isExpirationDateColumn(filter.value);
                     
-                    // Compare date strings directly (YYYY-MM-DD format allows string comparison)
-                    switch (filter.operator) {
-                        case '>': return cellDate > compareDate;
-                        case '>=': return cellDate >= compareDate;
-                        case '<': return cellDate < compareDate;
-                        case '<=': return cellDate <= compareDate;
-                        case '==': return cellDate === compareDate;
-                        case '!=': return cellDate !== compareDate;
-                        default: return false;
+                    // Handle date-only comparison for expiration date columns
+                    if (isFieldExpDate && isValueExpDate) {
+                        const colIndex = findColumnIndex(filter.field, tableId);
+                        const valueColIndex = findColumnIndex(filter.value, tableId);
+                        const cell = row.cells[colIndex];
+                        const valueCell = row.cells[valueColIndex];
+                        const cellDate = getDateValue(cell);
+                        const compareDate = getDateValue(valueCell);
+                        if (cellDate === null || compareDate === null) return false;
+                        
+                        // Compare date strings directly (YYYY-MM-DD format allows string comparison)
+                        switch (filter.operator) {
+                            case '>': return cellDate > compareDate;
+                            case '>=': return cellDate >= compareDate;
+                            case '<': return cellDate < compareDate;
+                            case '<=': return cellDate <= compareDate;
+                            case '==': return cellDate === compareDate;
+                            case '!=': return cellDate !== compareDate;
+                            default: return false;
+                        }
                     }
                 }
                 
-                const cellValue = getRawValue(cell);
-                const compareValue = getRawValue(valueCell);
                 if (cellValue === null || compareValue === null) return false;
                 
                 switch (filter.operator) {
@@ -573,6 +687,111 @@ def get_javascript():
             }
             
             // Handle value comparison (regular field to value)
+            // Check if this is a virtual field first
+            if (isVirtualField(filter.field)) {
+                const virtualValue = getVirtualFieldValue(filter.field, row, tableId);
+                if (virtualValue === null || isNaN(virtualValue)) return false;
+                
+                // Handle percentage-based filtering (e.g., "spread < 10%" means spread < 10% of option premium)
+                let filterValue = typeof filter.value === 'string' ? parseFloat(filter.value) : filter.value;
+                const filterValueStr = String(filter.value).trim();
+                
+                // Check if the filter value ends with % for percentage-based comparison
+                if (filterValueStr.endsWith('%')) {
+                    const percentValue = parseFloat(filterValueStr.slice(0, -1));
+                    if (!isNaN(percentValue)) {
+                        // For spread percentage, we need to compare against option premium
+                        // Try to find option_premium column to calculate percentage
+                        const lowerField = filter.field.toLowerCase().replace(/\\s+/g, '_').trim();
+                        if (lowerField === 'spread') {
+                            // Find option_premium for short leg
+                            const premColIndex = findColumnIndex('option_premium', tableId);
+                            if (premColIndex < 0) {
+                                const altIndex = findColumnIndex('opt_prem', tableId);
+                                if (altIndex >= 0) {
+                                    const premCell = row.cells[altIndex];
+                                    if (premCell) {
+                                        const premValue = getRawValue(premCell);
+                                        if (premValue !== null && !isNaN(premValue) && premValue > 0) {
+                                            filterValue = (percentValue / 100) * premValue;
+                                        } else {
+                                            return false; // Can't calculate percentage without premium
+                                        }
+                                    } else {
+                                        return false;
+                                    }
+                                } else {
+                                    return false; // Can't find premium column
+                                }
+                            } else {
+                                const premCell = row.cells[premColIndex];
+                                if (premCell) {
+                                    const premValue = getRawValue(premCell);
+                                    if (premValue !== null && !isNaN(premValue) && premValue > 0) {
+                                        filterValue = (percentValue / 100) * premValue;
+                                    } else {
+                                        return false; // Can't calculate percentage without premium
+                                    }
+                                } else {
+                                    return false;
+                                }
+                            }
+                        } else if (lowerField === 'l_spread' || lowerField === 'long_spread') {
+                            // Find option_premium for long leg
+                            const premColIndex = findColumnIndex('long_option_premium', tableId);
+                            if (premColIndex < 0) {
+                                const altIndex = findColumnIndex('l_prem', tableId);
+                                if (altIndex >= 0) {
+                                    const premCell = row.cells[altIndex];
+                                    if (premCell) {
+                                        const premValue = getRawValue(premCell);
+                                        if (premValue !== null && !isNaN(premValue) && premValue > 0) {
+                                            filterValue = (percentValue / 100) * premValue;
+                                        } else {
+                                            return false; // Can't calculate percentage without premium
+                                        }
+                                    } else {
+                                        return false;
+                                    }
+                                } else {
+                                    return false; // Can't find premium column
+                                }
+                            } else {
+                                const premCell = row.cells[premColIndex];
+                                if (premCell) {
+                                    const premValue = getRawValue(premCell);
+                                    if (premValue !== null && !isNaN(premValue) && premValue > 0) {
+                                        filterValue = (percentValue / 100) * premValue;
+                                    } else {
+                                        return false; // Can't calculate percentage without premium
+                                    }
+                                } else {
+                                    return false;
+                                }
+                            }
+                        } else {
+                            // For other virtual fields, just use the percentage as-is (not implemented yet)
+                            filterValue = percentValue;
+                        }
+                    }
+                }
+                
+                // Numeric comparison for virtual field
+                if (isNaN(filterValue)) {
+                    return false;
+                }
+                
+                switch (filter.operator) {
+                    case '>': return virtualValue > filterValue;
+                    case '>=': return virtualValue >= filterValue;
+                    case '<': return virtualValue < filterValue;
+                    case '<=': return virtualValue <= filterValue;
+                    case '==': return Math.abs(virtualValue - filterValue) < 0.0001;
+                    case '!=': return Math.abs(virtualValue - filterValue) >= 0.0001;
+                    default: return false;
+                }
+            }
+            
             const colIndex = findColumnIndex(filter.field, tableId);
             if (colIndex < 0) {
                 console.warn('Column not found for filter field:', filter.field);
@@ -678,22 +897,25 @@ def get_javascript():
             
             // Check main field
             if (filter.field && !filter.hasMath) {
-                // For non-math expressions, check if field exists
-                const colIndex = findColumnIndex(filter.field, tableId);
-                if (colIndex < 0) {
-                    const availableColumns = getAllColumnNames(tableId);
-                    const suggestions = availableColumns.filter(col => 
-                        col.toLowerCase().includes(filter.field.toLowerCase()) || 
-                        filter.field.toLowerCase().includes(col.toLowerCase())
-                    ).slice(0, 5);
-                    
-                    let errorMsg = `Column "${filter.field}" not found. `;
-                    if (suggestions.length > 0) {
-                        errorMsg += `Did you mean: ${suggestions.join(', ')}? `;
+                // Check if it's a virtual field first
+                if (!isVirtualField(filter.field)) {
+                    // For non-math expressions, check if field exists
+                    const colIndex = findColumnIndex(filter.field, tableId);
+                    if (colIndex < 0) {
+                        const availableColumns = getAllColumnNames(tableId);
+                        const suggestions = availableColumns.filter(col => 
+                            col.toLowerCase().includes(filter.field.toLowerCase()) || 
+                            filter.field.toLowerCase().includes(col.toLowerCase())
+                        ).slice(0, 5);
+                        
+                        let errorMsg = `Column "${filter.field}" not found. `;
+                        if (suggestions.length > 0) {
+                            errorMsg += `Did you mean: ${suggestions.join(', ')}? `;
+                        }
+                        // Show all available columns (not just first 10) so user can see what's available
+                        errorMsg += `Available columns: ${availableColumns.join(', ')}`;
+                        errorMessages.push(errorMsg);
                     }
-                    // Show all available columns (not just first 10) so user can see what's available
-                    errorMsg += `Available columns: ${availableColumns.join(', ')}`;
-                    errorMessages.push(errorMsg);
                 }
             } else if (filter.hasMath) {
                 // For math expressions, extract field names and validate them
@@ -703,30 +925,36 @@ def get_javascript():
                 const validFields = fields.filter(f => !jsKeywords.includes(f.toLowerCase()));
                 
                 for (const field of validFields) {
-                    const colIndex = findColumnIndex(field, tableId);
-                    if (colIndex < 0) {
-                        errorMessages.push(`Field "${field}" in expression "${filter.field}" not found.`);
+                    // Skip validation for virtual fields
+                    if (!isVirtualField(field)) {
+                        const colIndex = findColumnIndex(field, tableId);
+                        if (colIndex < 0) {
+                            errorMessages.push(`Field "${field}" in expression "${filter.field}" not found.`);
+                        }
                     }
                 }
             }
             
             // Check comparison field if it's a field-to-field comparison
             if (filter.isFieldComparison && filter.value) {
-                const valueColIndex = findColumnIndex(filter.value, tableId);
-                if (valueColIndex < 0) {
-                    const availableColumns = getAllColumnNames(tableId);
-                    const suggestions = availableColumns.filter(col => 
-                        col.toLowerCase().includes(String(filter.value).toLowerCase()) || 
-                        String(filter.value).toLowerCase().includes(col.toLowerCase())
-                    ).slice(0, 5);
-                    
-                    let errorMsg = `Column "${filter.value}" not found for comparison. `;
-                    if (suggestions.length > 0) {
-                        errorMsg += `Did you mean: ${suggestions.join(', ')}? `;
+                // Check if it's a virtual field first
+                if (!isVirtualField(filter.value)) {
+                    const valueColIndex = findColumnIndex(filter.value, tableId);
+                    if (valueColIndex < 0) {
+                        const availableColumns = getAllColumnNames(tableId);
+                        const suggestions = availableColumns.filter(col => 
+                            col.toLowerCase().includes(String(filter.value).toLowerCase()) || 
+                            String(filter.value).toLowerCase().includes(col.toLowerCase())
+                        ).slice(0, 5);
+                        
+                        let errorMsg = `Column "${filter.value}" not found for comparison. `;
+                        if (suggestions.length > 0) {
+                            errorMsg += `Did you mean: ${suggestions.join(', ')}? `;
+                        }
+                        // Show all available columns so user can see what's available
+                        errorMsg += `Available columns: ${availableColumns.join(', ')}`;
+                        errorMessages.push(errorMsg);
                     }
-                    // Show all available columns so user can see what's available
-                    errorMsg += `Available columns: ${availableColumns.join(', ')}`;
-                    errorMessages.push(errorMsg);
                 }
             }
             
