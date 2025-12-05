@@ -30,6 +30,18 @@ try:
 except ImportError:
     NUMPY_AVAILABLE = False
     np = None
+
+# Try to import Redis for Pub/Sub
+try:
+    import redis.asyncio as redis
+    REDIS_PUBSUB_AVAILABLE = True
+except ImportError:
+    try:
+        import redis
+        REDIS_PUBSUB_AVAILABLE = True
+    except ImportError:
+        REDIS_PUBSUB_AVAILABLE = False
+        redis = None
 # multiprocessing not used for workers anymore; keep only for Queue import
 import signal
 # Removed ProcessPoolExecutor and threading imports; using native fork model
@@ -146,7 +158,8 @@ def serialize_mapping_datetime(data: Dict[str, Any]) -> Dict[str, Any]:
 
 # Global WebSocket connection management
 class WebSocketManager:
-    def __init__(self, heartbeat_interval: float = 1.0, stale_data_timeout: float = 120.0):
+    def __init__(self, heartbeat_interval: float = 1.0, stale_data_timeout: float = 120.0, 
+                 redis_url: Optional[str] = None, enable_redis: bool = True):
         self.connections: Dict[str, Set[web.WebSocketResponse]] = {}  # symbol -> set of websockets
         self.lock = asyncio.Lock()
         self.heartbeat_interval = heartbeat_interval
@@ -156,10 +169,209 @@ class WebSocketManager:
         self.stale_data_timeout = stale_data_timeout  # seconds before considering data stale
         self.monitoring_task: Optional[asyncio.Task] = None
         self.db_instance: Optional[StockDBBase] = None
+        
+        # Redis Pub/Sub support
+        self.redis_url = redis_url or os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+        self.enable_redis = enable_redis and REDIS_PUBSUB_AVAILABLE
+        self.redis_client: Optional[redis.Redis] = None
+        self.redis_pubsub: Optional[redis.client.PubSub] = None
+        self.redis_subscriber_task: Optional[asyncio.Task] = None
+        self.subscribed_channels: Set[str] = set()  # Track which channels we're subscribed to
+        self.redis_messages_received: int = 0  # Counter for received messages
+        self.redis_messages_processed: int = 0  # Counter for successfully processed messages
 
     def set_db_instance(self, db_instance: StockDBBase) -> None:
         """Set the database instance for fetching data."""
         self.db_instance = db_instance
+    
+    async def _init_redis(self) -> bool:
+        """Initialize Redis connection for Pub/Sub."""
+        if not self.enable_redis:
+            return False
+            
+        try:
+            self.redis_client = redis.from_url(
+                self.redis_url,
+                decode_responses=False,  # Keep binary for JSON
+                socket_connect_timeout=10,
+                socket_timeout=10,
+                socket_keepalive=True,
+                retry_on_timeout=True,
+                health_check_interval=30
+            )
+            # Test connection
+            await self.redis_client.ping()
+            self.redis_pubsub = self.redis_client.pubsub()
+            logger.info(f"[REDIS] Pub/Sub initialized successfully: {self.redis_url}")
+            logger.info(f"[REDIS] Ready to receive messages from Redis channels")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to initialize Redis Pub/Sub: {e}")
+            self.enable_redis = False
+            return False
+    
+    async def _subscribe_to_symbol(self, symbol: str) -> None:
+        """Subscribe to Redis channels for a symbol."""
+        if not self.enable_redis or not self.redis_pubsub:
+            return
+            
+        try:
+            # Subscribe to both quote and trade channels for this symbol
+            quote_channel = f"realtime:quote:{symbol}"
+            trade_channel = f"realtime:trade:{symbol}"
+            
+            if quote_channel not in self.subscribed_channels:
+                await self.redis_pubsub.subscribe(quote_channel)
+                self.subscribed_channels.add(quote_channel)
+                logger.info(f"[REDIS] Subscribed to channel: {quote_channel}")
+                
+            if trade_channel not in self.subscribed_channels:
+                await self.redis_pubsub.subscribe(trade_channel)
+                self.subscribed_channels.add(trade_channel)
+                logger.info(f"[REDIS] Subscribed to channel: {trade_channel}")
+                
+        except Exception as e:
+            logger.error(f"Error subscribing to Redis channels for {symbol}: {e}")
+    
+    async def _unsubscribe_from_symbol(self, symbol: str) -> None:
+        """Unsubscribe from Redis channels for a symbol."""
+        if not self.enable_redis or not self.redis_pubsub:
+            return
+            
+        try:
+            quote_channel = f"realtime:quote:{symbol}"
+            trade_channel = f"realtime:trade:{symbol}"
+            
+            if quote_channel in self.subscribed_channels:
+                await self.redis_pubsub.unsubscribe(quote_channel)
+                self.subscribed_channels.discard(quote_channel)
+                logger.info(f"[REDIS] Unsubscribed from channel: {quote_channel}")
+                
+            if trade_channel in self.subscribed_channels:
+                await self.redis_pubsub.unsubscribe(trade_channel)
+                self.subscribed_channels.discard(trade_channel)
+                logger.info(f"[REDIS] Unsubscribed from channel: {trade_channel}")
+                
+        except Exception as e:
+            logger.error(f"Error unsubscribing from Redis channels for {symbol}: {e}")
+    
+    async def _redis_subscriber_loop(self) -> None:
+        """Main loop for processing Redis Pub/Sub messages."""
+        if not self.enable_redis or not self.redis_pubsub:
+            return
+            
+        logger.info("Starting Redis Pub/Sub subscriber loop")
+        
+        while self.running:
+            try:
+                # Check if we have any subscriptions before trying to get messages
+                # If no subscriptions, wait a bit and check again
+                async with self.lock:
+                    has_subscriptions = len(self.subscribed_channels) > 0
+                
+                if not has_subscriptions:
+                    # No subscriptions yet, wait a bit before checking again
+                    await asyncio.sleep(1.0)
+                    continue
+                
+                # Get message with timeout to allow checking self.running
+                message = await asyncio.wait_for(
+                    self.redis_pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0),
+                    timeout=1.0
+                )
+                
+                if message and message['type'] == 'message':
+                    await self._handle_redis_message(message)
+                    
+            except asyncio.TimeoutError:
+                # Timeout is expected, continue loop
+                continue
+            except asyncio.CancelledError:
+                break
+            except RuntimeError as e:
+                # Handle "pubsub connection not set" error gracefully
+                # This can happen if subscriptions are removed while we're waiting
+                error_msg = str(e)
+                if "pubsub connection not set" in error_msg.lower() or "did you forget to call subscribe" in error_msg.lower():
+                    # No subscriptions active, wait and retry
+                    await asyncio.sleep(1.0)
+                    continue
+                else:
+                    logger.error(f"Error in Redis subscriber loop: {e}", exc_info=True)
+                    await asyncio.sleep(1.0)  # Wait before retrying
+            except Exception as e:
+                logger.error(f"Error in Redis subscriber loop: {e}", exc_info=True)
+                await asyncio.sleep(1.0)  # Wait before retrying
+                
+        logger.info("Redis Pub/Sub subscriber loop stopped")
+    
+    async def _handle_redis_message(self, message: Dict) -> None:
+        """Handle a message from Redis Pub/Sub."""
+        try:
+            channel = message['channel'].decode('utf-8') if isinstance(message['channel'], bytes) else message['channel']
+            data = message['data']
+            
+            # Parse JSON message
+            if isinstance(data, bytes):
+                data = data.decode('utf-8')
+            message_data = json.loads(data)
+            
+            symbol = message_data.get('symbol')
+            data_type = message_data.get('data_type')
+            records = message_data.get('records', [])
+            
+            if not symbol or not data_type or not records:
+                logger.warning(f"[REDIS] Invalid message format: {message_data}")
+                return
+            
+            self.redis_messages_received += 1
+            logger.info(f"[REDIS] Received {data_type} message for {symbol} from channel {channel} ({len(records)} records) [Total: {self.redis_messages_received}]")
+            
+            # Save to database
+            if self.db_instance:
+                try:
+                    # Convert records to DataFrame
+                    df = pd.DataFrame.from_records(records)
+                    if 'timestamp' in df.columns:
+                        df['timestamp'] = pd.to_datetime(df['timestamp'])
+                        df.set_index('timestamp', inplace=True)
+                    
+                    # Save to database
+                    await self.db_instance.save_realtime_data(df, symbol, data_type)
+                    self.redis_messages_processed += 1
+                    logger.info(f"[REDIS] Saved {data_type} data for {symbol} to database (from Redis) [Processed: {self.redis_messages_processed}]")
+                except Exception as e:
+                    logger.error(f"Error saving {data_type} data for {symbol} to database: {e}", exc_info=True)
+            
+            # Broadcast to WebSocket subscribers
+            # Format the data like save_realtime_data does
+            if records:
+                transformed_payload = []
+                for record in records:
+                    if data_type == "quote":
+                        transformed_payload.append({
+                            "timestamp": record.get("timestamp"),
+                            "bid_price": record.get("price") or record.get("bid_price"),
+                            "bid_size": record.get("size") or record.get("bid_size"),
+                            "ask_price": record.get("ask_price"),
+                            "ask_size": record.get("ask_size")
+                        })
+                    else:  # trade
+                        transformed_payload.append(record)
+                
+                if transformed_payload:
+                    broadcast_data = {
+                        "type": data_type,
+                        "timestamp": transformed_payload[0].get("timestamp"),
+                        "event_type": f"{data_type}_update",
+                        "payload": transformed_payload
+                    }
+                    await self.broadcast(symbol, broadcast_data)
+                    
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing Redis message JSON: {e}")
+        except Exception as e:
+            logger.error(f"Error handling Redis message: {e}", exc_info=True)
     
     def update_last_update_time(self, symbol: str) -> None:
         """Update the last update time for a symbol."""
@@ -176,6 +388,8 @@ class WebSocketManager:
                 # Start heartbeat task for this symbol if it doesn't exist
                 if symbol not in self.heartbeat_tasks:
                     self.heartbeat_tasks[symbol] = asyncio.create_task(self._heartbeat_loop(symbol))
+                # Subscribe to Redis channels for this symbol
+                await self._subscribe_to_symbol(symbol)
             self.connections[symbol].add(ws)
             logger.info(f"Added subscriber for {symbol}. Total subscribers: {len(self.connections[symbol])}")
 
@@ -190,6 +404,8 @@ class WebSocketManager:
                     if symbol in self.heartbeat_tasks:
                         self.heartbeat_tasks[symbol].cancel()
                         del self.heartbeat_tasks[symbol]
+                    # Unsubscribe from Redis channels if no more subscribers
+                    await self._unsubscribe_from_symbol(symbol)
                 logger.info(f"Removed subscriber for {symbol}")
 
     async def _heartbeat_loop(self, symbol: str) -> None:
@@ -383,12 +599,36 @@ class WebSocketManager:
                 logger.error(f"Error in monitoring loop: {e}", exc_info=True)
                 await asyncio.sleep(check_interval)
     
-    def start_monitoring(self) -> None:
-        """Start the background monitoring task."""
+    async def start_monitoring(self) -> None:
+        """Start the background monitoring task and Redis subscriber."""
         if self.monitoring_task is None or self.monitoring_task.done():
             self.monitoring_task = asyncio.create_task(self._monitoring_loop())
             fetch_status = "enabled" if FETCH_AVAILABLE else "disabled (fetch_symbol_data module not available)"
             logger.info(f"Started stale data monitoring (timeout: {self.stale_data_timeout}s, fetch: {fetch_status})")
+        
+        # Start Redis subscriber if enabled
+        if self.enable_redis:
+            if await self._init_redis():
+                if self.redis_subscriber_task is None or self.redis_subscriber_task.done():
+                    self.redis_subscriber_task = asyncio.create_task(self._redis_subscriber_loop())
+                    logger.info("[REDIS] Started Pub/Sub subscriber loop - ready to receive messages")
+            else:
+                logger.warning("[REDIS] Pub/Sub not available, continuing without it")
+        else:
+            logger.info("[REDIS] Redis Pub/Sub disabled")
+    
+    def get_redis_stats(self) -> Dict[str, Any]:
+        """Get Redis Pub/Sub statistics."""
+        return {
+            "enabled": self.enable_redis,
+            "redis_url": self.redis_url if self.enable_redis else None,
+            "connected": self.redis_client is not None and self.redis_pubsub is not None,
+            "subscribed_channels": len(self.subscribed_channels),
+            "channels": list(self.subscribed_channels),
+            "messages_received": self.redis_messages_received,
+            "messages_processed": self.redis_messages_processed,
+            "subscriber_task_running": self.redis_subscriber_task is not None and not self.redis_subscriber_task.done() if self.redis_subscriber_task else False
+        }
     
     def stop_monitoring(self) -> None:
         """Stop the background monitoring task."""
@@ -404,6 +644,29 @@ class WebSocketManager:
                 await self.monitoring_task
             except asyncio.CancelledError:
                 pass
+        
+        # Stop Redis subscriber
+        if self.redis_subscriber_task and not self.redis_subscriber_task.done():
+            self.redis_subscriber_task.cancel()
+            try:
+                await self.redis_subscriber_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Close Redis connections
+        if self.redis_pubsub:
+            try:
+                await self.redis_pubsub.unsubscribe()
+                await self.redis_pubsub.close()
+            except Exception as e:
+                logger.warning(f"Error closing Redis pubsub: {e}")
+        
+        if self.redis_client:
+            try:
+                await self.redis_client.close()
+            except Exception as e:
+                logger.warning(f"Error closing Redis client: {e}")
+        
         for task in self.heartbeat_tasks.values():
             task.cancel()
         await asyncio.gather(*self.heartbeat_tasks.values(), return_exceptions=True)
@@ -492,10 +755,16 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
         return
 
     # Initialize WebSocket manager with heartbeat interval and stale data timeout
-    ws_manager = WebSocketManager(heartbeat_interval=heartbeat_interval, stale_data_timeout=stale_data_timeout)
+    enable_redis = redis_url is not None
+    ws_manager = WebSocketManager(
+        heartbeat_interval=heartbeat_interval, 
+        stale_data_timeout=stale_data_timeout,
+        redis_url=redis_url,
+        enable_redis=enable_redis
+    )
     ws_manager.set_db_instance(app_db_instance)
-    ws_manager.start_monitoring()
-    logger.info(f"Worker {worker_id}: WebSocket manager initialized with heartbeat interval: {heartbeat_interval}s, stale data timeout: {stale_data_timeout}s")
+    await ws_manager.start_monitoring()
+    logger.info(f"Worker {worker_id}: WebSocket manager initialized with heartbeat interval: {heartbeat_interval}s, stale data timeout: {stale_data_timeout}s, Redis: {'enabled' if enable_redis else 'disabled'}")
 
     app = web.Application(middlewares=[logging_middleware])
     app['db_instance'] = app_db_instance
@@ -517,6 +786,7 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     app.router.add_get("/stats/tables", handle_stats_tables)
     app.router.add_get("/stats/performance", handle_stats_performance)
     app.router.add_get("/stats/pool", handle_stats_pool)
+    app.router.add_get("/stats/redis", handle_stats_redis)
     
     # Add ticker analysis endpoint
     app.router.add_get("/analyze_ticker", handle_analyze_ticker)
@@ -1381,6 +1651,39 @@ async def handle_stats_pool(request: web.Request) -> web.Response:
         logger.error(f"Error getting pool stats: {e}", exc_info=True)
         return web.json_response({
             "error": f"Failed to get pool stats: {str(e)}",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }, status=500)
+
+async def handle_stats_redis(request: web.Request) -> web.Response:
+    """Get Redis Pub/Sub statistics."""
+    global ws_manager
+    
+    try:
+        start_time = time.time()
+        
+        if ws_manager is None:
+            return web.json_response({
+                "error": "WebSocket manager not initialized",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }, status=503)
+        
+        # Get Redis stats from WebSocket manager
+        redis_stats = ws_manager.get_redis_stats()
+        
+        execution_time = (time.time() - start_time) * 1000  # Convert to milliseconds
+        
+        response_data = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "execution_time_ms": round(execution_time, 2),
+            "redis_pubsub": redis_stats
+        }
+        
+        return web.json_response(response_data)
+        
+    except Exception as e:
+        logger.error(f"Error getting Redis stats: {e}", exc_info=True)
+        return web.json_response({
+            "error": f"Failed to get Redis stats: {str(e)}",
             "timestamp": datetime.now(timezone.utc).isoformat()
         }, status=500)
 
@@ -4554,10 +4857,16 @@ def main_server_runner():
 
         # Initialize WebSocket manager with heartbeat interval and stale data timeout
         global ws_manager
-        ws_manager = WebSocketManager(heartbeat_interval=args.heartbeat_interval, stale_data_timeout=args.stale_data_timeout)
+        enable_redis = redis_url is not None
+        ws_manager = WebSocketManager(
+            heartbeat_interval=args.heartbeat_interval, 
+            stale_data_timeout=args.stale_data_timeout,
+            redis_url=redis_url,
+            enable_redis=enable_redis
+        )
         ws_manager.set_db_instance(app_db_instance)
-        ws_manager.start_monitoring()
-        logger.info(f"WebSocket manager initialized with heartbeat interval: {args.heartbeat_interval}s, stale data timeout: {args.stale_data_timeout}s")
+        await ws_manager.start_monitoring()
+        logger.info(f"WebSocket manager initialized with heartbeat interval: {args.heartbeat_interval}s, stale data timeout: {args.stale_data_timeout}s, Redis: {'enabled' if enable_redis else 'disabled'}")
 
         app = web.Application(middlewares=[logging_middleware])
         app['db_instance'] = app_db_instance
@@ -4583,6 +4892,7 @@ def main_server_runner():
         app.router.add_get("/stats/tables", handle_stats_tables)      # Fast table counts
         app.router.add_get("/stats/performance", handle_stats_performance)  # Performance test results
         app.router.add_get("/stats/pool", handle_stats_pool)          # Connection pool and cache status
+        app.router.add_get("/stats/redis", handle_stats_redis)        # Redis Pub/Sub statistics
         
         # Add ticker analysis endpoint
         app.router.add_get("/analyze_ticker", handle_analyze_ticker)

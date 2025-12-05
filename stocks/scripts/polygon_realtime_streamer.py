@@ -48,6 +48,18 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 import logging
 
+# Try to import Redis for Pub/Sub
+try:
+    import redis.asyncio as redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    try:
+        import redis
+        REDIS_AVAILABLE = True
+    except ImportError:
+        REDIS_AVAILABLE = False
+        redis = None
+
 # Add project root to path for imports
 _SCRIPT_DIR = Path(__file__).resolve().parent  
 _PROJECT_ROOT = _SCRIPT_DIR.parent  # Go up one level to reach project root
@@ -74,7 +86,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class DatabaseClient:
-    """Client for sending data to the database server."""
+    """Client for sending data to the database server via HTTP."""
     
     def __init__(self, server_url: str, timeout: float = 30.0):
         self.server_url = server_url
@@ -132,6 +144,71 @@ class DatabaseClient:
                     return False
         except Exception as e:
             logger.error(f"Error sending data for {symbol}: {e}")
+            return False
+
+
+class RedisPublisher:
+    """Publisher for sending realtime data to Redis Pub/Sub channels."""
+    
+    def __init__(self, redis_url: Optional[str] = None):
+        self.redis_url = redis_url or os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+        self.redis_client: Optional[redis.Redis] = None
+        self.available = REDIS_AVAILABLE
+        
+    async def __aenter__(self):
+        if not self.available:
+            logger.warning("Redis not available, RedisPublisher will not work")
+            return self
+            
+        try:
+            self.redis_client = redis.from_url(
+                self.redis_url,
+                decode_responses=False,  # Keep binary for JSON
+                socket_connect_timeout=10,
+                socket_timeout=10,
+                socket_keepalive=True,
+                retry_on_timeout=True,
+                health_check_interval=30
+            )
+            # Test connection
+            await self.redis_client.ping()
+            logger.info(f"[REDIS] Publisher connected successfully to {self.redis_url}")
+            logger.info(f"[REDIS] Ready to publish messages to Redis Pub/Sub channels")
+        except Exception as e:
+            logger.error(f"Failed to connect to Redis: {e}")
+            self.available = False
+            self.redis_client = None
+            
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.redis_client:
+            await self.redis_client.close()
+            
+    async def publish_realtime_data(self, symbol: str, data_type: str, records: List[Dict]) -> bool:
+        """Publish realtime data to Redis channel."""
+        if not self.available or not self.redis_client:
+            return False
+            
+        try:
+            # Channel format: realtime:{data_type}:{symbol}
+            channel = f"realtime:{data_type}:{symbol}"
+            
+            # Create message payload
+            message = {
+                "symbol": symbol,
+                "data_type": data_type,
+                "records": records,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            
+            # Publish to Redis channel
+            await self.redis_client.publish(channel, json.dumps(message))
+            logger.info(f"[REDIS] Published {data_type} data for {symbol} to channel {channel} ({len(records)} records)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error publishing to Redis for {symbol}: {e}")
             return False
 
 def load_symbols_from_yaml(yaml_file: str) -> List[str]:
@@ -263,17 +340,28 @@ async def fetch_option_contracts_for_ticker(
 class PolygonStreamManager:
     """Manages multiple Polygon WebSocket connections."""
     
-    def __init__(self, api_key: str, db_client: DatabaseClient, feed_types: List[str],
+    def __init__(self, api_key: str, db_client: Optional[DatabaseClient], 
+                 redis_publisher: Optional[RedisPublisher], feed_types: List[str],
                  market: str = "stocks", symbols_per_connection: int = 10, max_retries: int = 3, 
                  retry_delay: float = 5.0, batch_interval: float = 5.0):
         self.api_key = api_key
         self.db_client = db_client
+        self.redis_publisher = redis_publisher
         self.feed_types = feed_types
         self.market = market  # "stocks" or "options"
         self.symbols_per_connection = symbols_per_connection
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.batch_interval = batch_interval
+        
+        # Determine which method to use (Redis preferred if available)
+        self.use_redis = redis_publisher is not None and redis_publisher.available
+        if self.use_redis:
+            logger.info("Using Redis Pub/Sub for data distribution")
+        elif db_client:
+            logger.info("Using HTTP for data distribution")
+        else:
+            logger.warning("No data distribution method available (no Redis or HTTP client)")
         
         # Connection tracking
         self.connections: List[Tuple[List[str], asyncio.Task]] = []
@@ -393,31 +481,48 @@ class PolygonStreamManager:
     async def _send_quotes_batch(self, quote_updates: Dict[str, Dict]):
         """Send a batch of quote updates."""
         try:
-            # Convert to list format expected by db_server
-            records = []
-            for symbol, quote_data in quote_updates.items():
-                records.append({
-                    'symbol': symbol,
-                    **quote_data
-                })
-                
-            # Send to database (we'll send individual updates for now)
-            # TODO: Implement batch save endpoint in db_server if needed
-            for record in records:
-                symbol = record.pop('symbol')
-                success = await self.db_client.save_realtime_data(
-                    symbol=symbol,
-                    data_type="quote",
-                    records=[record],
-                    index_col="timestamp"
-                )
-                
-                if success:
-                    self.successful_saves += 1
-                    logger.debug(f"Quote batch saved for {symbol}")
-                else:
-                    self.failed_saves += 1
-                    self.symbol_stats[symbol]['errors'] += 1
+            if self.use_redis and self.redis_publisher:
+                # Publish to Redis
+                for symbol, quote_data in quote_updates.items():
+                    success = await self.redis_publisher.publish_realtime_data(
+                        symbol=symbol,
+                        data_type="quote",
+                        records=[quote_data]
+                    )
+                    
+                    if success:
+                        self.successful_saves += 1
+                        logger.debug(f"Quote published to Redis for {symbol}")
+                    else:
+                        self.failed_saves += 1
+                        self.symbol_stats[symbol]['errors'] += 1
+            elif self.db_client:
+                # Fallback to HTTP
+                records = []
+                for symbol, quote_data in quote_updates.items():
+                    records.append({
+                        'symbol': symbol,
+                        **quote_data
+                    })
+                    
+                # Send to database (we'll send individual updates for now)
+                for record in records:
+                    symbol = record.pop('symbol')
+                    success = await self.db_client.save_realtime_data(
+                        symbol=symbol,
+                        data_type="quote",
+                        records=[record],
+                        index_col="timestamp"
+                    )
+                    
+                    if success:
+                        self.successful_saves += 1
+                        logger.debug(f"Quote batch saved for {symbol}")
+                    else:
+                        self.failed_saves += 1
+                        self.symbol_stats[symbol]['errors'] += 1
+            else:
+                logger.warning("No data distribution method available for quotes batch")
                     
         except Exception as e:
             logger.error(f"Error sending quotes batch: {e}")
@@ -425,31 +530,48 @@ class PolygonStreamManager:
     async def _send_trades_batch(self, trade_updates: Dict[str, Dict]):
         """Send a batch of trade updates."""
         try:
-            # Convert to list format expected by db_server
-            records = []
-            for symbol, trade_data in trade_updates.items():
-                records.append({
-                    'symbol': symbol,
-                    **trade_data
-                })
-                
-            # Send to database (we'll send individual updates for now)
-            # TODO: Implement batch save endpoint in db_server if needed
-            for record in records:
-                symbol = record.pop('symbol')
-                success = await self.db_client.save_realtime_data(
-                    symbol=symbol,
-                    data_type="trade",
-                    records=[record],
-                    index_col="timestamp"
-                )
-                
-                if success:
-                    self.successful_saves += 1
-                    logger.debug(f"Trade batch saved for {symbol}")
-                else:
-                    self.failed_saves += 1
-                    self.symbol_stats[symbol]['errors'] += 1
+            if self.use_redis and self.redis_publisher:
+                # Publish to Redis
+                for symbol, trade_data in trade_updates.items():
+                    success = await self.redis_publisher.publish_realtime_data(
+                        symbol=symbol,
+                        data_type="trade",
+                        records=[trade_data]
+                    )
+                    
+                    if success:
+                        self.successful_saves += 1
+                        logger.debug(f"Trade published to Redis for {symbol}")
+                    else:
+                        self.failed_saves += 1
+                        self.symbol_stats[symbol]['errors'] += 1
+            elif self.db_client:
+                # Fallback to HTTP
+                records = []
+                for symbol, trade_data in trade_updates.items():
+                    records.append({
+                        'symbol': symbol,
+                        **trade_data
+                    })
+                    
+                # Send to database (we'll send individual updates for now)
+                for record in records:
+                    symbol = record.pop('symbol')
+                    success = await self.db_client.save_realtime_data(
+                        symbol=symbol,
+                        data_type="trade",
+                        records=[record],
+                        index_col="timestamp"
+                    )
+                    
+                    if success:
+                        self.successful_saves += 1
+                        logger.debug(f"Trade batch saved for {symbol}")
+                    else:
+                        self.failed_saves += 1
+                        self.symbol_stats[symbol]['errors'] += 1
+            else:
+                logger.warning("No data distribution method available for trades batch")
                     
         except Exception as e:
             logger.error(f"Error sending trades batch: {e}")
@@ -620,19 +742,46 @@ class PolygonStreamManager:
             self.symbol_stats[symbol]['last_update'] = current_time
             
             # Try different possible attribute names for price and size
-            price = getattr(trade_msg, 'price', getattr(trade_msg, 'p', 0))
-            size = getattr(trade_msg, 'size', getattr(trade_msg, 's', 0))
+            price = getattr(trade_msg, 'price', getattr(trade_msg, 'p', None))
+            size = getattr(trade_msg, 'size', getattr(trade_msg, 's', None))
+            
+            # Skip trades with no valid price data
+            if price is None:
+                logger.debug(f"Connection {connection_id}: Skipping trade for {symbol} - no price")
+                return
+            
+            # Convert to float/int, handling None values
+            def safe_float(val, default=None):
+                if val is None:
+                    return default
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    return default
+            
+            def safe_int(val, default=0):
+                if val is None:
+                    return default
+                try:
+                    return int(val)
+                except (ValueError, TypeError):
+                    return default
+            
+            price_float = safe_float(price)
+            if price_float is None:
+                logger.debug(f"Connection {connection_id}: Skipping trade for {symbol} - invalid price value")
+                return
             
             # Create trade record
             trade_record = {
                 'timestamp': current_time.isoformat(),
-                'price': float(price),
-                'size': int(size)
+                'price': price_float,
+                'size': safe_int(size, 0)
             }
             
             # Add to batch instead of immediate save
             self._add_to_batch(symbol, 'trade', trade_record)
-            logger.debug(f"Trade queued for {symbol}: ${price:.2f} x {size}")
+            logger.debug(f"Trade queued for {symbol}: ${price_float:.2f} x {safe_int(size, 0)}")
                 
         except Exception as e:
             logger.error(f"Connection {connection_id}: Error handling trade: {e}")
@@ -661,23 +810,51 @@ class PolygonStreamManager:
             self.symbol_stats[symbol]['last_update'] = current_time
             
             # Try different possible attribute names for price and size
-            bid_price = getattr(quote_msg, 'bid_price', getattr(quote_msg, 'bp', 0))
-            bid_size = getattr(quote_msg, 'bid_size', getattr(quote_msg, 'bs', 0))
-            ask_price = getattr(quote_msg, 'ask_price', getattr(quote_msg, 'ap', 0))
-            ask_size = getattr(quote_msg, 'ask_size', getattr(quote_msg, 'as', 0))
+            bid_price = getattr(quote_msg, 'bid_price', getattr(quote_msg, 'bp', None))
+            bid_size = getattr(quote_msg, 'bid_size', getattr(quote_msg, 'bs', None))
+            ask_price = getattr(quote_msg, 'ask_price', getattr(quote_msg, 'ap', None))
+            ask_size = getattr(quote_msg, 'ask_size', getattr(quote_msg, 'as', None))
+            
+            # Skip quotes with no valid price data (common after market close)
+            if bid_price is None and ask_price is None:
+                logger.debug(f"Connection {connection_id}: Skipping quote for {symbol} - no bid or ask price")
+                return
+            
+            # Convert to float/int, handling None values
+            def safe_float(val, default=None):
+                if val is None:
+                    return default
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    return default
+            
+            def safe_int(val, default=None):
+                if val is None:
+                    return default
+                try:
+                    return int(val)
+                except (ValueError, TypeError):
+                    return default
+            
+            # Use bid_price as primary price, fallback to ask_price if bid is None
+            primary_price = safe_float(bid_price) if bid_price is not None else safe_float(ask_price)
+            if primary_price is None:
+                logger.debug(f"Connection {connection_id}: Skipping quote for {symbol} - no valid price")
+                return
             
             # Create quote record
             quote_record = {
                 'timestamp': current_time.isoformat(),
-                'price': float(bid_price),      # Use bid_price as primary price
-                'size': int(bid_size),          # Use bid_size as primary size
-                'ask_price': float(ask_price),
-                'ask_size': int(ask_size)
+                'price': primary_price,
+                'size': safe_int(bid_size, 0),  # Default to 0 if None
+                'ask_price': safe_float(ask_price),
+                'ask_size': safe_int(ask_size)
             }
             
             # Add to batch instead of immediate save
             self._add_to_batch(symbol, 'quote', quote_record)
-            logger.debug(f"Quote queued for {symbol}: Bid ${bid_price:.2f} x {bid_size}, Ask ${ask_price:.2f} x {ask_size}")
+            logger.debug(f"Quote queued for {symbol}: Bid ${bid_price or 'N/A'} x {bid_size or 'N/A'}, Ask ${ask_price or 'N/A'} x {ask_size or 'N/A'}")
                 
         except Exception as e:
             logger.error(f"Connection {connection_id}: Error handling quote: {e}")
@@ -898,7 +1075,7 @@ def parse_args():
         '--db-server',
         type=str,
         default='localhost:8080',
-        help='Database server address in host:port format (default: localhost:8080)'
+        help='Database server address in host:port format (default: localhost:8080). Used as fallback if Redis is not available.'
     )
     
     parser.add_argument(
@@ -906,6 +1083,19 @@ def parse_args():
         type=float,
         default=30.0,
         help='Database request timeout in seconds (default: 30.0)'
+    )
+    
+    parser.add_argument(
+        '--redis-url',
+        type=str,
+        default=None,
+        help='Redis URL for Pub/Sub (default: from REDIS_URL env var or redis://localhost:6379/0). If not provided and Redis is available, will use Redis for distribution.'
+    )
+    
+    parser.add_argument(
+        '--no-redis',
+        action='store_true',
+        help='Disable Redis Pub/Sub and use HTTP instead (for backward compatibility)'
     )
     
     # Symbol loading options
@@ -999,6 +1189,68 @@ async def print_stats_periodically(stream_manager: PolygonStreamManager, interva
         if not shutdown_flag:
             stream_manager.print_stats()
 
+async def _run_streaming(api_key: str, redis_publisher: Optional[RedisPublisher], 
+                        db_client: Optional[DatabaseClient], feed_types: List[str],
+                        args: argparse.Namespace, all_symbols: List[str]):
+    """Helper function to run streaming with given clients."""
+    # Create stream manager with available clients
+    stream_manager = PolygonStreamManager(
+        api_key=api_key,
+        db_client=db_client,
+        redis_publisher=redis_publisher,
+        feed_types=feed_types,
+        market=args.market,
+        symbols_per_connection=args.symbols_per_connection,
+        max_retries=args.max_retries,
+        retry_delay=args.retry_delay,
+        batch_interval=args.batch_interval
+    )
+    
+    # Start statistics task
+    stats_task = asyncio.create_task(
+        print_stats_periodically(stream_manager, args.stats_interval)
+    )
+    
+    # Add test mode timer if specified
+    test_timer_task = None
+    if args.test_mode:
+        async def test_timer():
+            await asyncio.sleep(args.test_mode)
+            global shutdown_flag
+            shutdown_flag = True
+            logger.info(f"Test mode: {args.test_mode} seconds elapsed, shutting down...")
+        
+        test_timer_task = asyncio.create_task(test_timer())
+        logger.info(f"Test mode enabled: will run for {args.test_mode} seconds")
+    
+    try:
+        # Start streaming (no display functionality)
+        await stream_manager.start_streaming(all_symbols)
+            
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+    except Exception as e:
+        logger.error(f"Streaming error: {e}")
+    finally:
+        # Cancel all tasks
+        stats_task.cancel()
+        if test_timer_task:
+            test_timer_task.cancel()
+            
+        try:
+            await stats_task
+        except asyncio.CancelledError:
+            pass
+            
+        if test_timer_task:
+            try:
+                await test_timer_task
+            except asyncio.CancelledError:
+                pass
+                
+        # Print final stats
+        stream_manager.print_stats()
+
 async def main():
     """Main function."""
     args = parse_args()
@@ -1041,64 +1293,33 @@ async def main():
         if args.feed in ['trades', 'both']:
             feed_types.append('trades')
     
-    # Create database client and stream manager
-    async with DatabaseClient(args.db_server, args.db_timeout) as db_client:
-        # Normal streaming mode
-        stream_manager = PolygonStreamManager(
-            api_key=api_key,
-            db_client=db_client,
-            feed_types=feed_types,
-            market=args.market,
-            symbols_per_connection=args.symbols_per_connection,
-            max_retries=args.max_retries,
-            retry_delay=args.retry_delay,
-            batch_interval=args.batch_interval # Pass the batch interval to the stream manager
-        )
-        
-        # Start statistics task
-        stats_task = asyncio.create_task(
-            print_stats_periodically(stream_manager, args.stats_interval)
-        )
-        
-        # Add test mode timer if specified
-        test_timer_task = None
-        if args.test_mode:
-            async def test_timer():
-                await asyncio.sleep(args.test_mode)
-                global shutdown_flag
-                shutdown_flag = True
-                logger.info(f"Test mode: {args.test_mode} seconds elapsed, shutting down...")
-            
-            test_timer_task = asyncio.create_task(test_timer())
-            logger.info(f"Test mode enabled: will run for {args.test_mode} seconds")
-        
-        try:
-            # Start streaming (no display functionality)
-            await stream_manager.start_streaming(all_symbols)
-                
-        except KeyboardInterrupt:
-            logger.info("Interrupted by user")
-        except Exception as e:
-            logger.error(f"Streaming error: {e}")
-        finally:
-            # Cancel all tasks
-            stats_task.cancel()
-            if test_timer_task:
-                test_timer_task.cancel()
-                
-            try:
-                await stats_task
-            except asyncio.CancelledError:
-                pass
-                
-            if test_timer_task:
-                try:
-                    await test_timer_task
-                except asyncio.CancelledError:
-                    pass
-                    
-            # Print final stats
-            stream_manager.print_stats()
+    # Create Redis publisher (preferred) and database client (fallback)
+    redis_publisher = None
+    db_client = None
+    
+    # Try to create Redis publisher if not disabled
+    if not args.no_redis:
+        redis_url = args.redis_url or os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+        redis_publisher = RedisPublisher(redis_url=redis_url)
+    
+    # Create database client as fallback
+    db_client = DatabaseClient(args.db_server, args.db_timeout)
+    
+    # Use context managers - handle both Redis and HTTP clients
+    if redis_publisher:
+        async with redis_publisher:
+            # Check if Redis is actually available
+            if not redis_publisher.available:
+                logger.warning("Redis not available, falling back to HTTP")
+                async with db_client:
+                    await _run_streaming(api_key, None, db_client, feed_types, args, all_symbols)
+            else:
+                # Use Redis
+                await _run_streaming(api_key, redis_publisher, None, feed_types, args, all_symbols)
+    else:
+        # No Redis, use HTTP only
+        async with db_client:
+            await _run_streaming(api_key, None, db_client, feed_types, args, all_symbols)
     
     logger.info("Polygon Real-time Streamer stopped")
     return 0
