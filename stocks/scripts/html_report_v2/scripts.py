@@ -481,6 +481,7 @@ def get_javascript():
                                 field: fieldExpr,
                                 operator: op,
                                 value: value,
+                                valueStr: valueStr,  // Preserve original string for percentage detection
                                 isFieldComparison: false,
                                 hasMath: true
                             };
@@ -521,6 +522,7 @@ def get_javascript():
                             field: fieldExpr,
                             operator: op,
                             value: value,
+                            valueStr: valueStr,  // Preserve original string for percentage detection
                             isFieldComparison: false
                         };
                     }
@@ -693,8 +695,9 @@ def get_javascript():
                 if (virtualValue === null || isNaN(virtualValue)) return false;
                 
                 // Handle percentage-based filtering (e.g., "spread < 10%" means spread < 10% of option premium)
+                // Use original string value if available, otherwise convert to string
+                const filterValueStr = (filter.valueStr !== undefined) ? filter.valueStr.trim() : String(filter.value).trim();
                 let filterValue = typeof filter.value === 'string' ? parseFloat(filter.value) : filter.value;
-                const filterValueStr = String(filter.value).trim();
                 
                 // Check if the filter value ends with % for percentage-based comparison
                 if (filterValueStr.endsWith('%')) {
@@ -704,26 +707,16 @@ def get_javascript():
                         // Try to find option_premium column to calculate percentage
                         const lowerField = filter.field.toLowerCase().replace(/\\s+/g, '_').trim();
                         if (lowerField === 'spread') {
-                            // Find option_premium for short leg
-                            const premColIndex = findColumnIndex('option_premium', tableId);
+                            // Find option_premium for short leg - try multiple variations
+                            let premColIndex = findColumnIndex('option_premium', tableId);
                             if (premColIndex < 0) {
-                                const altIndex = findColumnIndex('opt_prem', tableId);
-                                if (altIndex >= 0) {
-                                    const premCell = row.cells[altIndex];
-                                    if (premCell) {
-                                        const premValue = getRawValue(premCell);
-                                        if (premValue !== null && !isNaN(premValue) && premValue > 0) {
-                                            filterValue = (percentValue / 100) * premValue;
-                                        } else {
-                                            return false; // Can't calculate percentage without premium
-                                        }
-                                    } else {
-                                        return false;
-                                    }
-                                } else {
-                                    return false; // Can't find premium column
-                                }
-                            } else {
+                                premColIndex = findColumnIndex('opt_prem', tableId);
+                            }
+                            if (premColIndex < 0) {
+                                premColIndex = findColumnIndex('opt_prem.', tableId);
+                            }
+                            
+                            if (premColIndex >= 0) {
                                 const premCell = row.cells[premColIndex];
                                 if (premCell) {
                                     const premValue = getRawValue(premCell);
@@ -735,28 +728,20 @@ def get_javascript():
                                 } else {
                                     return false;
                                 }
+                            } else {
+                                return false; // Can't find premium column
                             }
                         } else if (lowerField === 'l_spread' || lowerField === 'long_spread') {
-                            // Find option_premium for long leg
-                            const premColIndex = findColumnIndex('long_option_premium', tableId);
+                            // Find option_premium for long leg - try multiple variations
+                            let premColIndex = findColumnIndex('long_option_premium', tableId);
                             if (premColIndex < 0) {
-                                const altIndex = findColumnIndex('l_prem', tableId);
-                                if (altIndex >= 0) {
-                                    const premCell = row.cells[altIndex];
-                                    if (premCell) {
-                                        const premValue = getRawValue(premCell);
-                                        if (premValue !== null && !isNaN(premValue) && premValue > 0) {
-                                            filterValue = (percentValue / 100) * premValue;
-                                        } else {
-                                            return false; // Can't calculate percentage without premium
-                                        }
-                                    } else {
-                                        return false;
-                                    }
-                                } else {
-                                    return false; // Can't find premium column
-                                }
-                            } else {
+                                premColIndex = findColumnIndex('l_prem', tableId);
+                            }
+                            if (premColIndex < 0) {
+                                premColIndex = findColumnIndex('l_opt_prem', tableId);
+                            }
+                            
+                            if (premColIndex >= 0) {
                                 const premCell = row.cells[premColIndex];
                                 if (premCell) {
                                     const premValue = getRawValue(premCell);
@@ -768,6 +753,8 @@ def get_javascript():
                                 } else {
                                     return false;
                                 }
+                            } else {
+                                return false; // Can't find premium column
                             }
                         } else {
                             // For other virtual fields, just use the percentage as-is (not implemented yet)
@@ -1046,7 +1033,9 @@ def get_javascript():
                 filterDiv.style.cssText = 'display: inline-block; margin: 5px; padding: 5px 10px; background: #667eea; color: white; border-radius: 5px; font-size: 0.9em;';
                 
                 const filterText = document.createElement('span');
-                filterText.textContent = `${filter.field} ${filter.operator} ${filter.value !== null ? filter.value : ''}`;
+                // Use valueStr if available (preserves % sign), otherwise use value
+                const valueToDisplay = (filter.valueStr !== undefined) ? filter.valueStr : (filter.value !== null ? filter.value : '');
+                filterText.textContent = `${filter.field} ${filter.operator} ${valueToDisplay}`;
                 filterDiv.appendChild(filterText);
                 
                 const removeBtn = document.createElement('button');
@@ -1473,7 +1462,9 @@ def get_javascript():
                     if (f.operator) {
                         filterStr += ' ' + f.operator;
                         if (f.value !== null) {
-                            filterStr += ' ' + f.value;
+                            // Use valueStr if available (preserves % sign), otherwise use value
+                            const valueToUse = (f.valueStr !== undefined) ? f.valueStr : String(f.value);
+                            filterStr += ' ' + valueToUse;
                         }
                     }
                     return filterStr;
@@ -1493,7 +1484,9 @@ def get_javascript():
                     if (f.operator) {
                         filterStr += ' ' + f.operator;
                         if (f.value !== null) {
-                            filterStr += ' ' + f.value;
+                            // Use valueStr if available (preserves % sign), otherwise use value
+                            const valueToUse = (f.valueStr !== undefined) ? f.valueStr : String(f.value);
+                            filterStr += ' ' + valueToUse;
                         }
                     }
                     return filterStr;
