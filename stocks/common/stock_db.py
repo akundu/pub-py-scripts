@@ -156,6 +156,28 @@ class StockDBBase(metaclass=ABCMeta):
         """Retrieve financial info data from the database."""
         pass
 
+    # ---- Combined price-series helper (optional, can be overridden by backends) ----
+    async def get_merged_price_series(
+        self,
+        ticker: str,
+        lookback_days: int = 365,
+        hourly_days: int = 7,
+        realtime_hours: int = 24,
+    ) -> pd.DataFrame:
+        """
+        Return a merged time series for a ticker composed of:
+        - Last `realtime_hours` hours from realtime quotes (highest resolution)
+        - Previous `hourly_days` days from hourly bars
+        - Up to `lookback_days` days of daily bars before that
+        
+        The default implementation raises NotImplementedError and should be
+        overridden by backends that support realtime + aggregated data
+        (e.g. QuestDB). Callers should be prepared for NotImplementedError.
+        """
+        raise NotImplementedError(
+            "get_merged_price_series is not implemented for this StockDB backend"
+        )
+
     async def _get_historical_data(
         self,
         ticker: str,

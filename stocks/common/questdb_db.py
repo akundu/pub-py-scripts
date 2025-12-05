@@ -810,16 +810,24 @@ class RealtimeDataRepository(BaseRepository):
                 if start_datetime:
                     query += f" AND timestamp >= ${len(params) + 1}"
                     if isinstance(start_datetime, str):
-                        params.append(date_parser.parse(start_datetime))
+                        dt = date_parser.parse(start_datetime)
                     else:
-                        params.append(start_datetime)
+                        dt = start_datetime
+                    # Normalize to naive UTC for QuestDB compatibility
+                    if isinstance(dt, datetime) and dt.tzinfo is not None:
+                        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                    params.append(dt)
                 
                 if end_datetime:
                     query += f" AND timestamp <= ${len(params) + 1}"
                     if isinstance(end_datetime, str):
-                        params.append(date_parser.parse(end_datetime))
+                        dt = date_parser.parse(end_datetime)
                     else:
-                        params.append(end_datetime)
+                        dt = end_datetime
+                    # Normalize to naive UTC for QuestDB compatibility
+                    if isinstance(dt, datetime) and dt.tzinfo is not None:
+                        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                    params.append(dt)
                 
                 query += " ORDER BY write_timestamp DESC, timestamp DESC"
             else:
@@ -4215,6 +4223,208 @@ class StockQuestDB(StockDBBase):
                             end_date: Optional[str] = None, interval: str = "daily", conn=None) -> pd.DataFrame:
         """Get stock data."""
         return await self.stock_service.get(ticker, start_date, end_date, interval)
+
+    async def get_merged_price_series(
+        self,
+        ticker: str,
+        lookback_days: int = 365,
+        hourly_days: int = 7,
+        realtime_hours: int = 24,
+    ) -> pd.DataFrame:
+        """
+        Return a merged time series for a ticker composed of:
+        - Last `realtime_hours` hours of realtime quotes
+        - Previous `hourly_days` days of hourly bars
+        - Up to `lookback_days` days of daily bars before that
+        
+        The returned DataFrame:
+            index: datetime (UTC, timezone-naive)
+            columns:
+                - close: float price
+                - source: 'realtime' | 'hourly' | 'daily'
+                - is_daily_open: bool
+                - is_daily_close: bool
+        """
+        now_utc = datetime.now(timezone.utc)
+        # Segments: [now - realtime_hours, now] realtime,
+        #           (now - hourly_days, now - realtime_hours] hourly,
+        #           (now - lookback_days, now - hourly_days] daily
+        realtime_start = now_utc - timedelta(hours=realtime_hours)
+        hourly_start = now_utc - timedelta(days=hourly_days)
+        daily_start = now_utc - timedelta(days=lookback_days)
+
+        self.logger.debug(
+            f"[MERGED SERIES] Building merged series for {ticker}: "
+            f"daily_start={daily_start}, hourly_start={hourly_start}, "
+            f"realtime_start={realtime_start}, now={now_utc}"
+        )
+
+        def _ensure_df(df: Any) -> pd.DataFrame:
+            if isinstance(df, pd.DataFrame):
+                return df
+            return pd.DataFrame()
+
+        # --- Realtime segment (last N hours) ---
+        realtime_df = await self.realtime_service.get(
+            ticker,
+            start_datetime=realtime_start.isoformat(),
+            end_datetime=now_utc.isoformat(),
+            data_type="quote",
+        )
+        realtime_df = _ensure_df(realtime_df)
+
+        # --- Hourly segment (previous N days before realtime window) ---
+        hourly_df = await self.stock_service.get(
+            ticker,
+            start_date=hourly_start.isoformat(),
+            end_date=realtime_start.isoformat(),
+            interval="hourly",
+        )
+        hourly_df = _ensure_df(hourly_df)
+
+        # --- Daily segment (older history) ---
+        daily_df = await self.stock_service.get(
+            ticker,
+            start_date=daily_start.strftime("%Y-%m-%d"),
+            end_date=hourly_start.strftime("%Y-%m-%d"),
+            interval="daily",
+        )
+        daily_df = _ensure_df(daily_df)
+
+        frames: list[pd.DataFrame] = []
+
+        # Normalize realtime: index -> timestamp, column 'close', flags false
+        if not realtime_df.empty and "price" in realtime_df.columns:
+            rt = realtime_df.copy()
+            if isinstance(rt.index, pd.DatetimeIndex):
+                ts = rt.index
+            elif "timestamp" in rt.columns:
+                ts = pd.to_datetime(rt["timestamp"], errors="coerce")
+            else:
+                ts = pd.to_datetime(rt.index, errors="coerce")
+            rt_indexed = pd.DataFrame(
+                {
+                    "close": pd.to_numeric(rt["price"], errors="coerce"),
+                    "source": "realtime",
+                    "is_daily_open": False,
+                    "is_daily_close": False,
+                },
+                index=ts,
+            )
+            rt_indexed = rt_indexed.dropna(subset=["close"])
+            if not rt_indexed.empty:
+                # Normalize to timezone-naive UTC
+                if isinstance(rt_indexed.index, pd.DatetimeIndex) and rt_indexed.index.tz is not None:
+                    rt_indexed.index = rt_indexed.index.tz_convert(timezone.utc).tz_localize(None)
+                frames.append(rt_indexed)
+
+        # Normalize hourly: index already datetime, use 'close'
+        if not hourly_df.empty and "close" in hourly_df.columns:
+            hr = hourly_df.copy()
+            ts = hr.index
+            if not isinstance(ts, pd.DatetimeIndex):
+                ts = pd.to_datetime(ts, errors="coerce")
+            hr_indexed = pd.DataFrame(
+                {
+                    "close": pd.to_numeric(hr["close"], errors="coerce"),
+                    "source": "hourly",
+                    "is_daily_open": False,
+                    "is_daily_close": False,
+                },
+                index=ts,
+            )
+            hr_indexed = hr_indexed.dropna(subset=["close"])
+            if not hr_indexed.empty:
+                if isinstance(hr_indexed.index, pd.DatetimeIndex) and hr_indexed.index.tz is not None:
+                    hr_indexed.index = hr_indexed.index.tz_convert(timezone.utc).tz_localize(None)
+                frames.append(hr_indexed)
+
+        # Normalize daily: synthesize open/close points at 9:30/16:00 ET
+        if not daily_df.empty and {"open", "close"}.issubset(daily_df.columns):
+            dd = daily_df.copy()
+            ts = dd.index
+            if not isinstance(ts, pd.DatetimeIndex):
+                ts = pd.to_datetime(ts, errors="coerce")
+            dd.index = ts
+            rows: list[dict[str, Any]] = []
+            try:
+                import pytz  # type: ignore
+                et = pytz.timezone("America/New_York")
+            except Exception:
+                et = None
+
+            for idx, row in dd.iterrows():
+                try:
+                    day = idx
+                    if not isinstance(day, (pd.Timestamp, datetime)):
+                        day = pd.to_datetime(day, errors="coerce")
+                    if pd.isna(day):
+                        continue
+                    day = day.to_pydatetime()
+                    o = row.get("open")
+                    c = row.get("close")
+                    if pd.isna(o) and pd.isna(c):
+                        continue
+
+                    # Build ET datetimes then convert to UTC-naive
+                    if et is not None:
+                        open_et = et.localize(datetime(day.year, day.month, day.day, 9, 30))
+                        close_et = et.localize(datetime(day.year, day.month, day.day, 16, 0))
+                        open_utc = open_et.astimezone(timezone.utc).replace(tzinfo=None)
+                        close_utc = close_et.astimezone(timezone.utc).replace(tzinfo=None)
+                    else:
+                        # Fallback: assume given index is already UTC date
+                        open_utc = datetime(day.year, day.month, day.day, 9, 30)
+                        close_utc = datetime(day.year, day.month, day.day, 16, 0)
+
+                    if not pd.isna(o):
+                        rows.append(
+                            {
+                                "timestamp": open_utc,
+                                "close": float(o),
+                                "source": "daily",
+                                "is_daily_open": True,
+                                "is_daily_close": False,
+                            }
+                        )
+                    if not pd.isna(c):
+                        rows.append(
+                            {
+                                "timestamp": close_utc,
+                                "close": float(c),
+                                "source": "daily",
+                                "is_daily_open": False,
+                                "is_daily_close": True,
+                            }
+                        )
+                except Exception as e:
+                    self.logger.debug(f"[MERGED SERIES] Skipping daily row for {ticker}: {e}")
+
+            if rows:
+                daily_points = pd.DataFrame(rows)
+                daily_points.set_index("timestamp", inplace=True)
+                frames.append(daily_points)
+
+        if not frames:
+            self.logger.debug(f"[MERGED SERIES] No data available to build merged series for {ticker}")
+            return pd.DataFrame()
+
+        merged = pd.concat(frames)
+        # Drop any rows with invalid index
+        if not isinstance(merged.index, pd.DatetimeIndex):
+            merged.index = pd.to_datetime(merged.index, errors="coerce")
+        merged = merged[merged.index.notna()]
+        # Ensure timezone-naive UTC
+        if merged.index.tz is not None:
+            merged.index = merged.index.tz_convert(timezone.utc).tz_localize(None)
+
+        merged = merged.sort_index()
+        self.logger.debug(
+            f"[MERGED SERIES] Built merged series for {ticker}: rows={len(merged)}, "
+            f"from={merged.index.min() if not merged.empty else 'N/A'} "
+            f"to={merged.index.max() if not merged.empty else 'N/A'}"
+        )
+        return merged
     
     async def save_realtime_data(self, df: pd.DataFrame, ticker: str, data_type: str = "quote") -> None:
         """Save realtime data."""

@@ -1563,6 +1563,11 @@ async def handle_stock_info(request: web.Request) -> web.Response:
         data_source = request.query.get('data_source', 'polygon')
         timezone_str = request.query.get('timezone', 'America/New_York')
         show_price_history = request.query.get('show_price_history', 'false').lower() == 'true'
+        # New: timeframe for historical price data (daily or hourly) – currently kept for
+        # backward compatibility, but merged series is preferred for charts.
+        timeframe = request.query.get('timeframe', 'daily').lower()
+        if timeframe not in ('daily', 'hourly'):
+            timeframe = 'daily'
         option_type = request.query.get('options_type', 'all')
         strike_range_percent = request.query.get('strike_range_percent')
         if strike_range_percent:
@@ -1577,6 +1582,16 @@ async def handle_stock_info(request: web.Request) -> web.Response:
         redis_url = None
         if enable_cache:
             redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+        
+        # Set default date range if show_price_history is true but no dates provided
+        # This ensures historical data is fetched for the chart
+        if show_price_history and not start_date and not end_date and not latest:
+            from datetime import datetime, timedelta
+            if not end_date:
+                # Set end_date to tomorrow to ensure we cover all of today
+                end_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+            if not start_date:
+                start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')  # 1 year default
         
         # Call the parallel helper function
         result = await get_stock_info_parallel(
@@ -1595,15 +1610,82 @@ async def handle_stock_info(request: web.Request) -> web.Response:
             show_news=show_news,
             show_iv=show_iv,
             enable_cache=enable_cache,
-            redis_url=redis_url
+            redis_url=redis_url,
+            price_timeframe=timeframe,
         )
+
+        # Attach merged price series (realtime + hourly + daily) for consumers that
+        # want a single time-ordered series (e.g. the HTML chart/frontend).
+        try:
+            merged_df = await db_instance.get_merged_price_series(symbol)
+        except NotImplementedError:
+            merged_df = None
+        except Exception as e:
+            logger.warning(f"Error fetching merged price series for {symbol}: {e}")
+            merged_df = None
+
+        if merged_df is not None and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
+            try:
+                # Ensure index is available as 'timestamp' column
+                mdf = merged_df.copy()
+                if not isinstance(mdf.index, pd.DatetimeIndex):
+                    mdf.index = pd.to_datetime(mdf.index, errors='coerce')
+                mdf = mdf[mdf.index.notna()]
+                mdf = mdf.reset_index().rename(columns={mdf.index.name or 'index': 'timestamp'})
+                # Convert to JSON records
+                merged_records = dataframe_to_json_records(mdf)
+                price_info = result.setdefault('price_info', {})
+                price_info['merged_price_series'] = merged_records
+            except Exception as e:
+                logger.warning(f"Error serializing merged price series for {symbol}: {e}")
         
         # Convert DataFrames to JSON-serializable format
         if result.get('price_info') and result['price_info'].get('price_data') is not None:
             price_df = result['price_info']['price_data']
             if hasattr(price_df, 'to_dict'):
+                # Ensure the index (date) is included as a column before converting
+                df = price_df.copy()
+                
+                # Check if 'date' column already exists (some databases return it as a column)
+                if 'date' not in df.columns:
+                    # Always reset index to include it as a column (the index typically contains the date)
+                    # Only skip if it's a simple RangeIndex (0, 1, 2, ...)
+                    if not df.index.empty:
+                        is_range_index = isinstance(df.index, pd.RangeIndex)
+                        
+                        # Reset index unless it's a RangeIndex
+                        # Most databases set date as index, so we should reset it
+                        if not is_range_index:
+                            # Get the index name before resetting
+                            index_name = df.index.name if df.index.name else 'date'
+                            df = df.reset_index()
+                            # Rename the index column to 'date' for consistency
+                            if index_name in df.columns and index_name != 'date':
+                                df = df.rename(columns={index_name: 'date'})
+                            elif 'index' in df.columns:
+                                df = df.rename(columns={'index': 'date'})
+                            # If still no date column, check first column (might be datetime index converted)
+                            if 'date' not in df.columns and len(df.columns) > 0:
+                                first_col = df.columns[0]
+                                standard_cols = ['ticker', 'open', 'high', 'low', 'close', 'volume', 'ma_10', 'ma_50', 'ma_100', 'ma_200', 'ema_8', 'ema_21', 'ema_34', 'ema_55', 'ema_89', 'write_timestamp']
+                                if first_col not in standard_cols:
+                                    df = df.rename(columns={first_col: 'date'})
+                        else:
+                            # It's a RangeIndex - the date might be in a column already
+                            # Check if there's a datetime column
+                            for col in df.columns:
+                                if col in ['date', 'datetime', 'timestamp'] or ('date' in col.lower() and col != 'update_date'):
+                                    df = df.rename(columns={col: 'date'})
+                                    break
+                    else:
+                        # Empty index - check if there's a date column
+                        for col in df.columns:
+                            if col in ['date', 'datetime', 'timestamp'] or ('date' in col.lower() and col != 'update_date'):
+                                df = df.rename(columns={col: 'date'})
+                                break
+                
                 # Convert DataFrame to records format
-                result['price_info']['price_data'] = dataframe_to_json_records(price_df)
+                result['price_info']['price_data'] = dataframe_to_json_records(df)
         
         # Convert all Timestamp objects in the result to ISO strings for JSON serialization
         def convert_timestamps_recursive(obj: Any) -> Any:
@@ -1740,8 +1822,22 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
     else:
         current_price_str = str(current_price)
     
-    # Get price history for chart
+    # Get price history for chart (daily) and merged series (realtime+hourly+daily)
     price_history = price_info.get('price_data', [])
+    merged_price_series = price_info.get('merged_price_series')
+    
+    # Debug: Log price_history info
+    if price_history is None:
+        logger.warning(f"No price_history for {symbol} - price_data is None")
+    elif hasattr(price_history, 'empty'):
+        if price_history.empty:
+            logger.warning(f"price_history is empty DataFrame for {symbol}")
+        else:
+            logger.info(f"price_history is DataFrame: rows={len(price_history)}, shape={price_history.shape}, columns={list(price_history.columns)}")
+    elif isinstance(price_history, list):
+        logger.info(f"price_history is list: length={len(price_history)}")
+    else:
+        logger.warning(f"price_history type: {type(price_history)} for {symbol}")
     
     # Get financial data - handle both dict and DataFrame
     financial_data = {}
@@ -1758,14 +1854,35 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
     week_52_high = None
     week_52_low = None
     if price_history is not None:
-        # Convert DataFrame to list if needed
-        if hasattr(price_history, 'to_dict'):
-            price_history = dataframe_to_json_records(price_history)
+        # Don't convert here - let the chart data extraction handle it
+        # This avoids double conversion and ensures date field is preserved
+        temp_price_history = price_history
+        if hasattr(temp_price_history, 'to_dict'):
+            # It's a DataFrame - convert it properly with date field
+            df = temp_price_history.copy()
+            # Check if 'date' column already exists
+            if 'date' not in df.columns:
+                # Always reset index to include it as a column
+                if not df.index.empty:
+                    is_range_index = isinstance(df.index, pd.RangeIndex)
+                    if not is_range_index:
+                        index_name = df.index.name if df.index.name else 'date'
+                        df = df.reset_index()
+                        if index_name in df.columns and index_name != 'date':
+                            df = df.rename(columns={index_name: 'date'})
+                        elif 'index' in df.columns:
+                            df = df.rename(columns={'index': 'date'})
+                        if 'date' not in df.columns and len(df.columns) > 0:
+                            first_col = df.columns[0]
+                            standard_cols = ['ticker', 'open', 'high', 'low', 'close', 'volume', 'ma_10', 'ma_50', 'ma_100', 'ma_200', 'ema_8', 'ema_21', 'ema_34', 'ema_55', 'ema_89', 'write_timestamp']
+                            if first_col not in standard_cols:
+                                df = df.rename(columns={first_col: 'date'})
+            temp_price_history = dataframe_to_json_records(df)
         
-        if isinstance(price_history, list) and len(price_history) > 0:
+        if isinstance(temp_price_history, list) and len(temp_price_history) > 0:
             # Get last 365 days of data
             prices = []
-            for record in price_history:
+            for record in temp_price_history:
                 if isinstance(record, dict):
                     close = record.get('close') or record.get('price')
                     if close:
@@ -1781,44 +1898,155 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
     change_color = 'positive' if price_change >= 0 else 'negative'
     change_sign = '+' if price_change >= 0 else ''
     
-    # Prepare chart data - extract all data points, not just last 100
+    # Prepare chart data - prefer merged series if available
     chart_data = []
     chart_labels = []
     all_price_records = []
     
-    # Handle price_history - could be DataFrame or list
-    if price_history is not None:
+    # If we have a merged price series (from DB helper), use it for chart data.
+    # merged_price_series is expected to be a list of dicts with at least:
+    #   timestamp, close, source, is_daily_open, is_daily_close
+    if isinstance(merged_price_series, list) and merged_price_series:
+        logger.info(f"[HTML] Using merged_price_series for chart, records={len(merged_price_series)}")
+        for rec in merged_price_series:
+            if not isinstance(rec, dict):
+                continue
+            ts = rec.get('timestamp') or rec.get('date') or rec.get('datetime')
+            close = rec.get('close') or rec.get('price') or rec.get('last_price')
+            if not ts or close is None:
+                continue
+            try:
+                close_val = float(close)
+            except (TypeError, ValueError):
+                continue
+            # Normalize timestamp to ISO string for JS
+            if not isinstance(ts, str):
+                if hasattr(ts, 'isoformat'):
+                    ts = ts.isoformat()
+                else:
+                    ts = str(ts)
+            all_price_records.append({
+                'timestamp': ts,
+                'close': close_val,
+                'source': rec.get('source', 'unknown'),
+                'is_daily_open': bool(rec.get('is_daily_open', False)),
+                'is_daily_close': bool(rec.get('is_daily_close', False)),
+            })
+    # Fallback: use daily price_history if merged series is not available
+    elif price_history is not None:
         # Convert DataFrame to list of records if needed
         if hasattr(price_history, 'to_dict'):
-            # It's a DataFrame - convert to records
-            price_history = dataframe_to_json_records(price_history)
+            # It's a DataFrame - need to preserve the index (date) in records
+            df = price_history.copy()
+            logger.info(f"[HTML] Converting DataFrame for chart: index_type={type(df.index).__name__}, index_name={df.index.name}, columns={list(df.columns)}, has_date_col={'date' in df.columns}")
+            # Check if 'date' column already exists (some databases return it as a column)
+            if 'date' not in df.columns:
+                # Always reset index to include it as a column (the index typically contains the date)
+                # Only skip if it's a simple RangeIndex (0, 1, 2, ...)
+                if not df.index.empty:
+                    is_range_index = isinstance(df.index, pd.RangeIndex)
+                    logger.info(f"[HTML] is_range_index={is_range_index}")
+                    
+                    # Reset index unless it's a RangeIndex
+                    # Most databases set date as index, so we should reset it
+                    if not is_range_index:
+                        # Get the index name before resetting
+                        index_name = df.index.name if df.index.name else 'date'
+                        logger.info(f"[HTML] Resetting index with name: {index_name}")
+                        df = df.reset_index()
+                        logger.info(f"[HTML] After reset_index, columns: {list(df.columns)}")
+                        # Rename the index column to 'date' for consistency
+                        if index_name in df.columns and index_name != 'date':
+                            df = df.rename(columns={index_name: 'date'})
+                            logger.info(f"[HTML] Renamed {index_name} to 'date'")
+                        elif 'index' in df.columns:
+                            df = df.rename(columns={'index': 'date'})
+                            logger.info(f"[HTML] Renamed 'index' to 'date'")
+                        # If still no date column, check first column (might be datetime index converted)
+                        if 'date' not in df.columns and len(df.columns) > 0:
+                            first_col = df.columns[0]
+                            standard_cols = ['ticker', 'open', 'high', 'low', 'close', 'volume', 'ma_10', 'ma_50', 'ma_100', 'ma_200', 'ema_8', 'ema_21', 'ema_34', 'ema_55', 'ema_89', 'write_timestamp']
+                            if first_col not in standard_cols:
+                                df = df.rename(columns={first_col: 'date'})
+                                logger.info(f"[HTML] Renamed first column {first_col} to 'date'")
+                    else:
+                        # It's a RangeIndex - the date might be in a column already
+                        # Check if there's a datetime column
+                        logger.info(f"[HTML] RangeIndex detected, checking for date column")
+                        for col in df.columns:
+                            if col in ['date', 'datetime', 'timestamp'] or ('date' in col.lower() and col != 'update_date'):
+                                df = df.rename(columns={col: 'date'})
+                                logger.info(f"[HTML] Found and renamed {col} to 'date'")
+                                break
+            logger.info(f"[HTML] Final DataFrame columns before conversion: {list(df.columns)}, has_date={'date' in df.columns}")
+            # Convert to records
+            price_history = dataframe_to_json_records(df)
+            logger.info(f"[HTML] After conversion, price_history type: {type(price_history)}, length: {len(price_history) if isinstance(price_history, list) else 'N/A'}")
+            if isinstance(price_history, list) and len(price_history) > 0:
+                logger.info(f"[HTML] First record keys: {list(price_history[0].keys())}, has_date: {'date' in price_history[0]}")
         
         # Now price_history should be a list
         if isinstance(price_history, list) and len(price_history) > 0:
+            logger.info(f"[HTML] Processing {len(price_history)} records for chart")
+            records_with_date = 0
+            records_without_date = 0
             for record in price_history:
                 if isinstance(record, dict):
-                    date = record.get('date') or record.get('timestamp', '')
-                    close = record.get('close') or record.get('price', 0)
+                    # Try multiple possible date column names
+                    date = (record.get('date') or 
+                           record.get('timestamp') or 
+                           record.get('datetime') or
+                           record.get('time') or '')
+                    # Try multiple possible price column names
+                    close = (record.get('close') or 
+                            record.get('price') or 
+                            record.get('last_price') or 0)
+                    if date:
+                        records_with_date += 1
+                    else:
+                        records_without_date += 1
+                        if records_without_date == 1:
+                            logger.warning(f"[HTML] First record without date field. Keys: {list(record.keys())}")
                     if date and close:
                         try:
                             close_val = float(close)
+                            # Ensure date is a string in ISO format for JavaScript
+                            if not isinstance(date, str):
+                                if hasattr(date, 'isoformat'):
+                                    date = date.isoformat()
+                                elif hasattr(date, 'strftime'):
+                                    date = date.strftime('%Y-%m-%d')
+                                else:
+                                    date = str(date)
+                            # Keep full timestamp string; JS will handle formatting
                             all_price_records.append({
-                                'date': date,
-                                'close': close_val
+                                'timestamp': date,
+                                'close': close_val,
+                                'source': 'daily',
+                                'is_daily_open': False,
+                                'is_daily_close': False,
                             })
-                        except (ValueError, TypeError):
+                        except (ValueError, TypeError) as e:
+                            logger.debug(f"Error processing price record: date={date}, close={close}, error={e}")
                             pass
+            logger.info(f"[HTML] Chart data extraction: records_with_date={records_with_date}, records_without_date={records_without_date}, all_price_records={len(all_price_records)}")
     
-    # Sort by date and prepare chart data
+    # Sort by timestamp and prepare chart data
     if all_price_records:
-        # Sort by date
-        all_price_records.sort(key=lambda x: x['date'])
+        # Sort by timestamp
+        try:
+            all_price_records.sort(key=lambda x: x['timestamp'])
+        except Exception:
+            pass
     
-    # Convert to JSON for JavaScript - use all data, JavaScript will filter
+    # Convert to JSON for JavaScript - use all data, JavaScript will filter.
+    # We keep simple arrays for backward compatibility, but also embed the full
+    # merged records for richer styling (daily open/close markers).
     all_chart_data = [r['close'] for r in all_price_records]
-    all_chart_labels = [r['date'][:10] if len(r['date']) > 10 else r['date'] for r in all_price_records]
+    all_chart_labels = [r['timestamp'] for r in all_price_records]
     all_chart_data_json = json.dumps(all_chart_data)
     all_chart_labels_json = json.dumps(all_chart_labels)
+    merged_series_json = json.dumps(all_price_records)
     
     # Get IV data
     iv_data = iv_info.get('iv_data', {}) if iv_info else {}
@@ -1851,11 +2079,13 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
     
     html = f"""<!DOCTYPE html>
 <html lang="en">
-<head>
+    <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{symbol} - Stock Information</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
     <style>
         * {{
             margin: 0;
@@ -2042,7 +2272,7 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
             </div>
             <div class="metric-card">
                 <div class="metric-label">Implied Volatility</div>
-                <div class="metric-value">{format_value(iv_data.get('current_iv') if iv_data else None)}</div>
+                <div class="metric-value">{format_value((iv_data.get('statistics', {}).get('mean') or iv_data.get('atm_iv', {}).get('mean')) if iv_data else None)}</div>
             </div>
         </div>
         
@@ -2058,12 +2288,12 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
                 <button class="chart-btn" onclick="switchTimePeriod('1y')" id="btn-1y">1Y</button>
                 <button class="chart-btn" onclick="switchTimePeriod('2y')" id="btn-2y">2Y</button>
             </div>
-            <div class="chart-controls" style="display: flex; gap: 10px; margin-bottom: 20px;">
-                <button class="chart-btn active" onclick="switchChartType('daily')" id="btn-daily">Daily</button>
-                <button class="chart-btn" onclick="switchChartType('hourly')" id="btn-hourly">Hourly</button>
-            </div>
             <div class="chart-container">
                 <canvas id="priceChart"></canvas>
+                <div id="chartNoDataMessage" style="display: none; text-align: center; padding: 40px; color: #666;">
+                    <p>No historical price data available for this symbol.</p>
+                    <p style="font-size: 12px; margin-top: 10px;">Try adding <code>?force_fetch=true</code> to the URL to fetch data from the API.</p>
+                </div>
             </div>
         </div>
         
@@ -2092,12 +2322,12 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
                     <th>Metric</th>
                     <th>Value</th>
                 </tr>
-                <tr><td>Current IV</td><td>{format_value(iv_data.get('current_iv'))}</td></tr>
-                <tr><td>IV Percentile</td><td>{format_value(iv_data.get('iv_percentile'))}</td></tr>
-                <tr><td>IV Rank</td><td>{format_value(iv_data.get('iv_rank'))}</td></tr>
-                <tr><td>30-Day IV</td><td>{format_value(iv_data.get('30d_iv'))}</td></tr>
-                <tr><td>60-Day IV</td><td>{format_value(iv_data.get('60d_iv'))}</td></tr>
-                <tr><td>90-Day IV</td><td>{format_value(iv_data.get('90d_iv'))}</td></tr>
+                <tr><td>Mean IV</td><td>{format_value(iv_data.get('statistics', {}).get('mean'))}</td></tr>
+                <tr><td>Median IV</td><td>{format_value(iv_data.get('statistics', {}).get('median'))}</td></tr>
+                <tr><td>ATM IV</td><td>{format_value(iv_data.get('atm_iv', {}).get('mean'))}</td></tr>
+                <tr><td>Call IV</td><td>{format_value(iv_data.get('call_iv', {}).get('mean'))}</td></tr>
+                <tr><td>Put IV</td><td>{format_value(iv_data.get('put_iv', {}).get('mean'))}</td></tr>
+                <tr><td>IV Count</td><td>{format_value(iv_data.get('statistics', {}).get('count'))}</td></tr>
             </table>
         </div>
         ''' if iv_data else ''}
@@ -2122,11 +2352,121 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
     </div>
     
     <script>
-        // Chart data - all available data
+        // Global symbol for API requests
+        const symbol = "{symbol}";
+        
+        // Merged chart data - close values & timestamps with source metadata
         const allChartData = {all_chart_data_json};
         const allChartLabels = {all_chart_labels_json};
+        const mergedSeries = {merged_series_json};
+        
         let currentTimePeriod = '1d';
-        let chartType = 'daily';
+        
+        // Find reference price (previous day's close) for calculating change
+        let referencePrice = null;
+        if (Array.isArray(mergedSeries) && mergedSeries.length > 0) {{
+            // Sort by timestamp to ensure chronological order
+            const sortedSeries = [...mergedSeries].sort((a, b) => {{
+                const dateA = parseDate(a.timestamp);
+                const dateB = parseDate(b.timestamp);
+                if (!dateA || !dateB) return 0;
+                return dateA.getTime() - dateB.getTime();
+            }});
+            
+            // Get today's date (in local timezone, but we'll compare dates)
+            const now = new Date();
+            const todayDate = now.toISOString().slice(0, 10); // YYYY-MM-DD
+            
+            // Find the most recent daily close from a previous day
+            let previousDayClose = null;
+            let previousDayDate = null;
+            
+            for (let i = sortedSeries.length - 1; i >= 0; i--) {{
+                const r = sortedSeries[i];
+                if (!r || !r.timestamp) continue;
+                
+                const dt = parseDate(r.timestamp);
+                if (!dt) continue;
+                
+                const recordDate = dt.toISOString().slice(0, 10); // YYYY-MM-DD
+                
+                // If this is from a previous day (before today)
+                if (recordDate < todayDate) {{
+                    // If it's a daily close or from daily source, use it
+                    if (r.is_daily_close || r.source === 'daily') {{
+                        previousDayClose = parseFloat(r.close);
+                        previousDayDate = recordDate;
+                        break;
+                    }}
+                    // Otherwise, keep track of the latest price from previous day
+                    if (!previousDayClose) {{
+                        previousDayClose = parseFloat(r.close);
+                        previousDayDate = recordDate;
+                    }}
+                }}
+            }}
+            
+            // If we found a previous day's close, use it
+            if (previousDayClose) {{
+                referencePrice = previousDayClose;
+                console.log('Reference price (previous day close):', referencePrice, 'from date:', previousDayDate);
+            }} else {{
+                // Fallback: find the most recent daily close regardless of date
+                for (let i = sortedSeries.length - 1; i >= 0; i--) {{
+                    const r = sortedSeries[i];
+                    if (r && (r.is_daily_close || r.source === 'daily')) {{
+                        referencePrice = parseFloat(r.close);
+                        console.log('Reference price (fallback daily close):', referencePrice);
+                        break;
+                    }}
+                }}
+            }}
+            
+            // Last resort: use first available price
+            if (!referencePrice && sortedSeries.length > 0) {{
+                referencePrice = parseFloat(sortedSeries[0].close) || null;
+                console.log('Reference price (first available):', referencePrice);
+            }}
+        }}
+        
+        console.log('Final reference price:', referencePrice);
+        
+        // Update initial price display with change from reference price if available
+        if (referencePrice && referencePrice > 0) {{
+            const currentPriceElement = document.querySelector('.price');
+            const changeElement = document.querySelector('.change');
+            
+            if (currentPriceElement && changeElement) {{
+                const currentPriceText = currentPriceElement.textContent.replace('$', '').trim();
+                const currentPrice = parseFloat(currentPriceText);
+                
+                if (!isNaN(currentPrice) && currentPrice > 0) {{
+                    const change = currentPrice - referencePrice;
+                    const changePct = (change / referencePrice) * 100;
+                    const changeSign = change >= 0 ? '+' : '';
+                    
+                    // Update change display
+                    changeElement.textContent = `${{changeSign}}$${{Math.abs(change).toFixed(2)}} (${{changeSign}}${{changePct.toFixed(2)}}%)`;
+                    changeElement.classList.remove('positive', 'negative');
+                    changeElement.classList.add(change >= 0 ? 'positive' : 'negative');
+                    
+                    console.log('Updated price change display:', {{
+                        currentPrice: currentPrice,
+                        referencePrice: referencePrice,
+                        change: change,
+                        changePct: changePct
+                    }});
+                }}
+            }}
+        }}
+        
+        // Debug logging
+        console.log('Chart data loaded:', {{
+            dataLength: allChartData.length,
+            labelsLength: allChartLabels.length,
+            sampleData: allChartData.slice(0, 5),
+            sampleLabels: allChartLabels.slice(0, 5)
+        }});
         
         // Calculate date ranges
         const now = new Date();
@@ -2144,35 +2484,390 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
             return ranges[period] || 365;
         }};
         
+        // Helper function to parse date string
+        function parseDate(dateStr) {{
+            if (!dateStr) return null;
+            // Try parsing as-is first
+            let date = new Date(dateStr);
+            if (!isNaN(date.getTime())) return date;
+            
+            // Try common date formats
+            // Format: YYYY-MM-DD
+            if (/^\\d{{4}}-\\d{{2}}-\\d{{2}}$/.test(dateStr)) {{
+                date = new Date(dateStr + 'T00:00:00');
+                if (!isNaN(date.getTime())) return date;
+            }}
+            
+            // Format: YYYY-MM-DD HH:MM:SS
+            if (/^\\d{{4}}-\\d{{2}}-\\d{{2}} \\d{{2}}:\\d{{2}}:\\d{{2}}$/.test(dateStr)) {{
+                date = new Date(dateStr.replace(' ', 'T'));
+                if (!isNaN(date.getTime())) return date;
+            }}
+            
+            return null;
+        }}
+        
+        // Format label based on period: time-only for 1D, date for longer ranges
+        function formatLabel(dateObj, period) {{
+            if (!(dateObj instanceof Date) || isNaN(dateObj.getTime())) return '';
+            if (period === '1d') {{
+                const h = String(dateObj.getHours()).padStart(2, '0');
+                const m = String(dateObj.getMinutes()).padStart(2, '0');
+                return `${{h}}:${{m}}`;
+            }} else {{
+                // YYYY-MM-DD
+                const y = dateObj.getFullYear();
+                const mo = String(dateObj.getMonth() + 1).padStart(2, '0');
+                const d = String(dateObj.getDate()).padStart(2, '0');
+                return `${{y}}-${{mo}}-${{d}}`;
+            }}
+        }}
+
+        // Build a downsampled series for a given period using mergedSeries.
+        // Rules:
+        // - 1D: use intraday data (realtime/hourly/daily) with time-bucketed sampling.
+        // - >1D: use one point per day from daily data only, so days are evenly represented.
+        function buildSeriesForPeriod(period) {{
+            if (!Array.isArray(mergedSeries) || mergedSeries.length === 0) {{
+                return {{ labels: [], data: [], dateMarkers: [] }};
+            }}
+
+            const days = getDateRange(period);
+            const nowMs = Date.now();
+            const windowStartMs = nowMs - days * 24 * 60 * 60 * 1000;
+
+            // Multi-day windows: use one point per calendar day (based on the
+            // latest available sample for that day, regardless of source).
+            if (days > 1) {{
+                const dailyMap = new Map(); // key: YYYY-MM-DD -> {{dt, val}}
+                for (const r of mergedSeries) {{
+                    if (!r || typeof r !== 'object') continue;
+                    const dt = parseDate(r.timestamp);
+                    if (!dt) continue;
+                    const t = dt.getTime();
+                    if (t < windowStartMs) continue;
+                    const key = dt.toISOString().slice(0, 10); // YYYY-MM-DD
+                    const val = Number(r.close);
+                    if (Number.isNaN(val)) continue;
+                    const existing = dailyMap.get(key);
+                    // Keep the latest point for that day
+                    if (!existing || dt > existing.dt) {{
+                        dailyMap.set(key, {{ dt, val }});
+                    }}
+                }}
+
+                const entries = Array.from(dailyMap.values()).sort((a, b) => a.dt - b.dt);
+                if (entries.length === 0) {{
+                    return {{ labels: [], data: [], dateMarkers: [] }};
+                }}
+
+                const labels = [];
+                const data = [];
+                const dateMarkers = [];
+                let lastDate = null;
+                
+                for (let i = 0; i < entries.length; i++) {{
+                    const p = entries[i];
+                    const currentDate = p.dt.toISOString().slice(0, 10); // YYYY-MM-DD
+                    
+                    // Check if this is the first occurrence of a new date
+                    if (lastDate !== null && currentDate !== lastDate) {{
+                        dateMarkers.push(i);
+                    }}
+                    
+                    labels.push(formatLabel(p.dt, period));
+                    data.push(p.val);
+                    lastDate = currentDate;
+                }}
+                
+                // Only show markers if they won't clutter (less than 50% of labels)
+                // But always show at least the first date marker if there are multiple dates
+                let finalMarkers = [];
+                if (dateMarkers.length <= labels.length * 0.5) {{
+                    finalMarkers = dateMarkers;
+                }} else if (dateMarkers.length > 0 && labels.length > 10) {{
+                    // If too many markers, show only significant ones (first, middle, last)
+                    finalMarkers = [
+                        dateMarkers[0],
+                        ...(dateMarkers.length > 2 ? [dateMarkers[Math.floor(dateMarkers.length / 2)]] : []),
+                        dateMarkers[dateMarkers.length - 1]
+                    ].filter((v, i, arr) => arr.indexOf(v) === i); // Remove duplicates
+                }} else if (dateMarkers.length > 0) {{
+                    // For small datasets, show all markers
+                    finalMarkers = dateMarkers;
+                }}
+                
+                return {{ labels, data, dateMarkers: finalMarkers }};
+            }}
+
+            // 1D window: use full merged intraday data with time-bucketed sampling.
+            let windowed = [];
+            for (const r of mergedSeries) {{
+                if (!r || typeof r !== 'object') continue;
+                const dt = parseDate(r.timestamp);
+                if (!dt) continue;
+                const t = dt.getTime();
+                if (t < windowStartMs) continue;
+                const val = Number(r.close);
+                if (!Number.isNaN(val)) {{
+                    windowed.push({{ dt, val }});
+                }}
+            }}
+
+            if (windowed.length === 0) {{
+                return {{ labels: [], data: [], dateMarkers: [] }};
+            }}
+
+            // Sort by time
+            windowed.sort((a, b) => a.dt - b.dt);
+
+            // Decide maximum number of buckets/points we want to display
+            let maxPoints = 600;
+            if (windowed.length <= maxPoints) {{
+                const labelsDirect = [];
+                const dataDirect = [];
+                const dateMarkers = [];
+                let lastDate = null;
+                
+                for (let i = 0; i < windowed.length; i++) {{
+                    const p = windowed[i];
+                    const currentDate = p.dt.toISOString().slice(0, 10); // YYYY-MM-DD
+                    
+                    // Check if this is the first occurrence of a new date
+                    if (lastDate !== null && currentDate !== lastDate) {{
+                        dateMarkers.push(i);
+                    }}
+                    
+                    labelsDirect.push(formatLabel(p.dt, period));
+                    dataDirect.push(p.val);
+                    lastDate = currentDate;
+                }}
+                
+                // Only show markers if they won't clutter (less than 50% of labels)
+                const finalMarkers = dateMarkers.length <= labelsDirect.length * 0.5 ? dateMarkers : [];
+                
+                return {{ labels: labelsDirect, data: dataDirect, dateMarkers: finalMarkers }};
+            }}
+
+            const firstMs = windowed[0].dt.getTime();
+            const lastMs = windowed[windowed.length - 1].dt.getTime();
+            const totalMs = Math.max(lastMs - firstMs, 1);
+            const bucketCount = Math.min(maxPoints, windowed.length);
+            const bucketSize = totalMs / (bucketCount - 1);
+
+            const buckets = new Array(bucketCount);
+            const bucketDates = new Array(bucketCount);
+            for (const p of windowed) {{
+                const t = p.dt.getTime();
+                const rawIndex = (t - firstMs) / bucketSize;
+                let idx = Math.round(rawIndex);
+                if (idx < 0 || idx >= bucketCount) {{
+                    continue;
+                }}
+                buckets[idx] = p;
+                // Store the date for this bucket (use the point's date)
+                if (!bucketDates[idx] || p.dt < bucketDates[idx]) {{
+                    bucketDates[idx] = p.dt;
+                }}
+            }}
+
+            const labels = [];
+            const data = [];
+            const dateMarkers = [];
+            let lastDate = null;
+            
+            for (let i = 0; i < bucketCount; i++) {{
+                const point = buckets[i];
+                if (!point) continue;
+                const bucketCenterMs = firstMs + i * bucketSize;
+                const labelDate = bucketDates[i] || new Date(bucketCenterMs);
+                const currentDate = labelDate.toISOString().slice(0, 10); // YYYY-MM-DD
+                
+                // Check if this is the first occurrence of a new date
+                if (lastDate !== null && currentDate !== lastDate) {{
+                    dateMarkers.push(i);
+                }}
+                
+                labels.push(formatLabel(labelDate, period));
+                data.push(point.val);
+                lastDate = currentDate;
+            }}
+            
+            // Only show markers if they won't clutter (less than 50% of labels)
+            const finalMarkers = dateMarkers.length <= labels.length * 0.5 ? dateMarkers : [];
+
+            return {{ labels, data, dateMarkers: finalMarkers }};
+        }}
+
         const ctx = document.getElementById('priceChart').getContext('2d');
         let priceChart = null;
+        
+        // Register annotation plugin before creating charts
+        function registerAnnotationPlugin() {{
+            try {{
+                // Chart.js annotation plugin v3 is available as window.Chart.Annotation
+                // or as a global variable after loading from CDN
+                if (window.Chart && window.Chart.register) {{
+                    // Try to find the annotation plugin
+                    let annotationPlugin = null;
+                    
+                    // Check various possible locations
+                    if (window.Chart.Annotation) {{
+                        annotationPlugin = window.Chart.Annotation;
+                    }} else if (window.chartjsPluginAnnotation) {{
+                        annotationPlugin = window.chartjsPluginAnnotation;
+                    }} else if (window['chartjs-plugin-annotation']) {{
+                        annotationPlugin = window['chartjs-plugin-annotation'];
+                    }} else if (typeof annotation !== 'undefined') {{
+                        annotationPlugin = annotation;
+                    }}
+                    
+                    if (annotationPlugin) {{
+                        window.Chart.register(annotationPlugin);
+                        console.log('Annotation plugin registered successfully');
+                        return true;
+                    }} else {{
+                        console.warn('Annotation plugin not found. Available globals:', Object.keys(window).filter(k => k.toLowerCase().includes('chart')));
+                        return false;
+                    }}
+                }} else {{
+                    console.warn('Chart.js not available or Chart.register not available');
+                    return false;
+                }}
+            }} catch (e) {{
+                console.warn('Could not register annotation plugin', e);
+                return false;
+            }}
+        }}
         
         function initChart() {{
             if (priceChart) {{
                 priceChart.destroy();
             }}
             
-            // Filter data for initial view (1 day)
-            const filteredData = [];
-            const filteredLabels = [];
-            const days = getDateRange('1d');
-            const cutoffDate = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+            // Register annotation plugin before creating chart
+            registerAnnotationPlugin();
             
-            for (let i = 0; i < allChartLabels.length; i++) {{
-                const labelDate = new Date(allChartLabels[i]);
-                if (labelDate >= cutoffDate) {{
-                    filteredLabels.push(allChartLabels[i]);
-                    filteredData.push(allChartData[i]);
+            // If no data, show message
+            if (!Array.isArray(mergedSeries) || mergedSeries.length === 0) {{
+                console.warn('No chart data available');
+                const noDataMsg = document.getElementById('chartNoDataMessage');
+                if (noDataMsg) {{
+                    noDataMsg.style.display = 'block';
                 }}
+                priceChart = new Chart(ctx, {{
+                    type: 'line',
+                    data: {{
+                        labels: [],
+                        datasets: [{{
+                            label: '{symbol} Price',
+                            data: [],
+                            borderColor: '#667eea',
+                            backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                            borderWidth: 2
+                        }}]
+                    }},
+                    options: {{
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {{
+                            legend: {{
+                                display: false
+                            }},
+                            tooltip: {{
+                                enabled: false
+                            }},
+                            zoom: {{
+                                zoom: {{
+                                    wheel: {{
+                                        enabled: true
+                                    }},
+                                    drag: {{
+                                        enabled: true
+                                    }},
+                                    mode: 'x'
+                                }},
+                                pan: {{
+                                    enabled: true,
+                                    mode: 'x'
+                                }}
+                            }}
+                        }},
+                        scales: {{
+                            y: {{
+                                beginAtZero: false
+                            }}
+                        }}
+                    }}
+                }});
+                return;
+            }}
+            
+            // Hide no data message if we have data
+            const noDataMsg = document.getElementById('chartNoDataMessage');
+            if (noDataMsg) {{
+                noDataMsg.style.display = 'none';
+            }}
+            
+            // Build initial 1D series using merged data (with 30-day rule)
+            const initialSeries = buildSeriesForPeriod('1d');
+            console.log('Initializing chart with', initialSeries.data.length, 'data points');
+            console.log('Date markers found:', initialSeries.dateMarkers);
+            
+            // Build date marker annotations
+            const dateMarkerAnnotations = buildDateMarkerAnnotations(initialSeries.dateMarkers, initialSeries.labels);
+            console.log('Date marker annotations:', dateMarkerAnnotations);
+            
+            // Build plugins object with annotations
+            const pluginsConfig = {{
+                legend: {{
+                    display: false
+                }},
+                zoom: {{
+                    zoom: {{
+                        wheel: {{
+                            enabled: true
+                        }},
+                        drag: {{
+                            enabled: true
+                        }},
+                        mode: 'x'
+                    }},
+                    pan: {{
+                        enabled: true,
+                        mode: 'x'
+                    }}
+                }}
+            }};
+            
+            // Add annotations if available
+            if (dateMarkerAnnotations.annotations && Object.keys(dateMarkerAnnotations.annotations).length > 0) {{
+                // Check if annotation plugin is available
+                const hasAnnotationPlugin = window.Chart && 
+                    (window.Chart.Annotation || 
+                     window.chartjsPluginAnnotation || 
+                     window['chartjs-plugin-annotation']);
+                
+                if (hasAnnotationPlugin) {{
+                    pluginsConfig.annotation = {{
+                        annotations: dateMarkerAnnotations.annotations
+                    }};
+                    console.log('Added', Object.keys(dateMarkerAnnotations.annotations).length, 'date marker annotations to chart');
+                }} else {{
+                    console.warn('Annotation plugin not available - date markers will not be displayed');
+                    console.warn('Available Chart.js plugins:', Object.keys(window).filter(k => k.toLowerCase().includes('chart')));
+                }}
+            }} else {{
+                console.log('No date marker annotations to add (dateMarkers:', initialSeries.dateMarkers, ')');
             }}
             
             priceChart = new Chart(ctx, {{
                 type: 'line',
                 data: {{
-                    labels: filteredLabels,
+                    labels: initialSeries.labels,
                     datasets: [{{
                         label: '{symbol} Price',
-                        data: filteredData,
+                        data: initialSeries.data,
                         borderColor: '#667eea',
                         backgroundColor: 'rgba(102, 126, 234, 0.1)',
                         borderWidth: 2,
@@ -2183,11 +2878,7 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
                 options: {{
                     responsive: true,
                     maintainAspectRatio: false,
-                    plugins: {{
-                        legend: {{
-                            display: false
-                        }}
-                    }},
+                    plugins: pluginsConfig,
                     scales: {{
                         y: {{
                             beginAtZero: false
@@ -2200,6 +2891,164 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
                     }}
                 }}
             }});
+
+            // Register zoom plugin for drag-to-zoom selection
+            try {{
+                const zoomPlugin = window.ChartZoom || window['chartjs-plugin-zoom'] || window.Zoom;
+                if (zoomPlugin && window.Chart && typeof window.Chart.register === 'function') {{
+                    window.Chart.register(zoomPlugin);
+                }}
+            }} catch (e) {{
+                console.warn('Could not register zoom plugin', e);
+            }}
+        }}
+        
+        // Helper function to build annotation configuration from date markers
+        function buildDateMarkerAnnotations(dateMarkers, labels) {{
+            if (!dateMarkers || dateMarkers.length === 0) {{
+                console.log('No date markers to display');
+                return {{}};
+            }}
+            
+            console.log('Building annotations for', dateMarkers.length, 'date markers');
+            
+            const annotations = {{}};
+            dateMarkers.forEach((index, idx) => {{
+                if (index < 0 || index >= labels.length) return;
+                
+                // Use unique key for each annotation
+                const key = `dateMarker_${{idx}}`;
+                const labelValue = labels[index];
+                
+                // Extract the actual date from mergedSeries for this index
+                // The label might be a time (HH:MM) or a date (YYYY-MM-DD)
+                let dateLabel = labelValue;
+                
+                // Check if label is already a date (YYYY-MM-DD format)
+                if (/^\\d{{4}}-\\d{{2}}-\\d{{2}}$/.test(labelValue)) {{
+                    // Already a date, use it
+                    dateLabel = labelValue;
+                }} else {{
+                    // It's a time, need to get the date from mergedSeries at this index
+                    // We'll look up the date by matching the index to the built series
+                    if (Array.isArray(mergedSeries) && mergedSeries.length > 0) {{
+                        const days = getDateRange(currentTimePeriod);
+                        const nowMs = Date.now();
+                        const windowStartMs = nowMs - days * 24 * 60 * 60 * 1000;
+                        
+                        let foundDate = null;
+                        
+                        if (days > 1) {{
+                            // Multi-day: build daily map and get date at index
+                            const dailyMap = new Map();
+                            for (const r of mergedSeries) {{
+                                if (!r || typeof r !== 'object') continue;
+                                const dt = parseDate(r.timestamp);
+                                if (!dt) continue;
+                                const t = dt.getTime();
+                                if (t < windowStartMs) continue;
+                                const key = dt.toISOString().slice(0, 10);
+                                const val = Number(r.close);
+                                if (Number.isNaN(val)) continue;
+                                const existing = dailyMap.get(key);
+                                if (!existing || dt > existing.dt) {{
+                                    dailyMap.set(key, {{ dt, val }});
+                                }}
+                            }}
+                            const entries = Array.from(dailyMap.values()).sort((a, b) => a.dt - b.dt);
+                            if (index < entries.length) {{
+                                foundDate = entries[index].dt;
+                            }}
+                        }} else {{
+                            // 1D: get windowed data and find date at index
+                            const windowed = [];
+                            for (const r of mergedSeries) {{
+                                if (!r || typeof r !== 'object') continue;
+                                const dt = parseDate(r.timestamp);
+                                if (!dt) continue;
+                                const t = dt.getTime();
+                                if (t < windowStartMs) continue;
+                                const val = Number(r.close);
+                                if (!Number.isNaN(val)) {{
+                                    windowed.push({{ dt, val }});
+                                }}
+                            }}
+                            windowed.sort((a, b) => a.dt - b.dt);
+                            
+                            // For 1D, if we have bucketed data, we need to estimate
+                            // But for simplicity, use the point at index if available
+                            if (index < windowed.length) {{
+                                foundDate = windowed[index].dt;
+                            }} else if (windowed.length > 0) {{
+                                // For bucketed data beyond windowed length, use proportional estimate
+                                const maxPoints = 600;
+                                if (windowed.length > maxPoints) {{
+                                    const firstMs = windowed[0].dt.getTime();
+                                    const lastMs = windowed[windowed.length - 1].dt.getTime();
+                                    const totalMs = Math.max(lastMs - firstMs, 1);
+                                    const bucketCount = Math.min(maxPoints, windowed.length);
+                                    const bucketSize = totalMs / (bucketCount - 1);
+                                    const bucketCenterMs = firstMs + index * bucketSize;
+                                    // Find closest point
+                                    let closestPoint = windowed[0];
+                                    let minDiff = Math.abs(windowed[0].dt.getTime() - bucketCenterMs);
+                                    for (const p of windowed) {{
+                                        const diff = Math.abs(p.dt.getTime() - bucketCenterMs);
+                                        if (diff < minDiff) {{
+                                            minDiff = diff;
+                                            closestPoint = p;
+                                        }}
+                                    }}
+                                    foundDate = closestPoint.dt;
+                                }} else {{
+                                    // Use last point if index is beyond
+                                    foundDate = windowed[windowed.length - 1].dt;
+                                }}
+                            }}
+                        }}
+                        
+                        // Format the date for display
+                        if (foundDate) {{
+                            const dateStr = foundDate.toISOString().slice(0, 10); // YYYY-MM-DD
+                            dateLabel = dateStr;
+                        }}
+                    }}
+                }}
+                
+                // For category scale, use xMin/xMax with index
+                annotations[key] = {{
+                    type: 'line',
+                    xMin: index,
+                    xMax: index,
+                    borderColor: 'rgba(100, 100, 100, 0.7)',
+                    borderWidth: 2,
+                    borderDash: [8, 4],
+                    label: {{
+                        display: true,
+                        content: dateLabel,
+                        position: 'start',
+                        yAdjust: 10,
+                        backgroundColor: 'rgba(100, 100, 100, 0.9)',
+                        color: '#fff',
+                        font: {{
+                            size: 11,
+                            weight: 'bold'
+                        }},
+                        padding: {{
+                            top: 5,
+                            bottom: 5,
+                            left: 8,
+                            right: 8
+                        }},
+                        textAlign: 'center'
+                    }}
+                }};
+            }});
+            
+            console.log('Created', Object.keys(annotations).length, 'annotations');
+            return {{
+                annotations: annotations
+            }};
         }}
         
         function switchTimePeriod(period) {{
@@ -2213,44 +3062,68 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
             }});
             document.getElementById(`btn-${{period}}`).classList.add('active');
             
-            const days = getDateRange(period);
-            const cutoffDate = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+            const series = buildSeriesForPeriod(period);
+            if (!priceChart || !series.data || series.data.length === 0) {{
+                console.warn('Cannot switch time period: chart not initialized or no data for this period');
+                return;
+            }}
+
+            // Reset zoom on period change so selection always reflects the new window
+            if (typeof priceChart.resetZoom === 'function') {{
+                priceChart.resetZoom();
+            }}
+
+            // Update chart data - remove any extra datasets (like regression lines) and keep only the main price dataset
+            priceChart.data.labels = series.labels;
+            // Keep only the first dataset (main price line), remove any others
+            if (priceChart.data.datasets.length > 1) {{
+                priceChart.data.datasets = [priceChart.data.datasets[0]];
+            }}
+            priceChart.data.datasets[0].data = series.data;
             
-            // Filter data based on time period
-            const filteredData = [];
-            const filteredLabels = [];
-            
-            for (let i = 0; i < allChartLabels.length; i++) {{
-                try {{
-                    const labelDate = new Date(allChartLabels[i]);
-                    if (!isNaN(labelDate.getTime()) && labelDate >= cutoffDate) {{
-                        filteredLabels.push(allChartLabels[i]);
-                        filteredData.push(allChartData[i]);
+            // Update date marker annotations
+            const dateMarkerAnnotations = buildDateMarkerAnnotations(series.dateMarkers, series.labels);
+            if (priceChart.options.plugins) {{
+                // Remove old date marker annotations
+                if (priceChart.options.plugins.annotation && priceChart.options.plugins.annotation.annotations) {{
+                    Object.keys(priceChart.options.plugins.annotation.annotations).forEach(key => {{
+                        if (key.startsWith('dateMarker_')) {{
+                            delete priceChart.options.plugins.annotation.annotations[key];
+                        }}
+                    }});
+                }}
+                // Add new annotations
+                if (dateMarkerAnnotations.annotations && Object.keys(dateMarkerAnnotations.annotations).length > 0) {{
+                    if (!priceChart.options.plugins.annotation) {{
+                        priceChart.options.plugins.annotation = {{}};
                     }}
-                }} catch (e) {{
-                    // Skip invalid dates
+                    if (!priceChart.options.plugins.annotation.annotations) {{
+                        priceChart.options.plugins.annotation.annotations = {{}};
+                    }}
+                    Object.assign(priceChart.options.plugins.annotation.annotations, dateMarkerAnnotations.annotations);
+                    console.log('Updated date marker annotations:', Object.keys(dateMarkerAnnotations.annotations).length);
+                }} else {{
+                    // Clear annotations if none to show
+                    if (priceChart.options.plugins.annotation && priceChart.options.plugins.annotation.annotations) {{
+                        Object.keys(priceChart.options.plugins.annotation.annotations).forEach(key => {{
+                            if (key.startsWith('dateMarker_')) {{
+                                delete priceChart.options.plugins.annotation.annotations[key];
+                            }}
+                        }});
+                    }}
                 }}
             }}
             
-            if (priceChart) {{
-                priceChart.data.labels = filteredLabels;
-                priceChart.data.datasets[0].data = filteredData;
-                priceChart.update();
-            }}
+            priceChart.update();
         }}
         
-        function switchChartType(type) {{
-            chartType = type;
-            document.getElementById('btn-daily').classList.toggle('active', type === 'daily');
-            document.getElementById('btn-hourly').classList.toggle('active', type === 'hourly');
-            
-            // For hourly, we'd need to fetch hourly data - for now just show daily
-            // In a real implementation, you would fetch hourly data via API
-            switchTimePeriod(currentTimePeriod);
+        // Initialize chart after page loads
+        if (document.readyState === 'loading') {{
+            document.addEventListener('DOMContentLoaded', initChart);
+        }} else {{
+            // DOM already loaded
+            initChart();
         }}
-        
-        // Initialize chart
-        initChart();
         
         // WebSocket connection for real-time updates
         const wsPort = 9102;
@@ -2315,18 +3188,90 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
             if (data.type === 'quote' && data.payload && data.payload.length > 0) {{
                 const quote = data.payload[0];
                 const price = quote.bid_price || quote.price;
-                if (price) {{
-                    document.getElementById('realtimePrice').textContent = `Real-time: ${{price}}`;
+                if (price && priceChart) {{
+                    const priceFloat = parseFloat(price);
+                    if (isNaN(priceFloat)) return;
                     
-                    // Update chart with new data point
-                    const timestamp = new Date(quote.timestamp).toLocaleTimeString();
-                    priceChart.data.labels.push(timestamp);
-                    priceChart.data.datasets[0].data.push(parseFloat(price));
+                    // Update the small realtime price display
+                    document.getElementById('realtimePrice').textContent = `Real-time: ${{priceFloat.toFixed(2)}}`;
                     
-                    // Keep only last 100 data points
-                    if (priceChart.data.labels.length > 100) {{
-                        priceChart.data.labels.shift();
-                        priceChart.data.datasets[0].data.shift();
+                    // Update the main price display
+                    const priceElement = document.querySelector('.price');
+                    if (priceElement) {{
+                        priceElement.textContent = `$${{priceFloat.toFixed(2)}}`;
+                    }}
+                    
+                    // Calculate change and change percentage from reference price
+                    let change = 0;
+                    let changePct = 0;
+                    if (referencePrice && !isNaN(referencePrice) && referencePrice > 0) {{
+                        change = priceFloat - referencePrice;
+                        changePct = (change / referencePrice) * 100;
+                    }}
+                    
+                    // Update the change display
+                    const changeElement = document.querySelector('.change');
+                    if (changeElement) {{
+                        const changeSign = change >= 0 ? '+' : '';
+                        changeElement.textContent = `${{changeSign}}$${{Math.abs(change).toFixed(2)}} (${{changeSign}}${{changePct.toFixed(2)}}%)`;
+                        // Update color class
+                        changeElement.classList.remove('positive', 'negative');
+                        changeElement.classList.add(change >= 0 ? 'positive' : 'negative');
+                    }}
+                    
+                    // Add new realtime point to mergedSeries array
+                    const newPoint = {{
+                        timestamp: quote.timestamp,
+                        close: priceFloat,
+                        source: 'realtime',
+                        is_daily_open: false,
+                        is_daily_close: false
+                    }};
+                    
+                    // Add to mergedSeries (append, then re-sort by timestamp if needed)
+                    mergedSeries.push(newPoint);
+                    
+                    // Rebuild the chart data using the downsampling logic
+                    const sampled = buildSeriesForPeriod(currentTimePeriod);
+                    
+                    // Update chart with newly sampled data - remove any extra datasets
+                    priceChart.data.labels = sampled.labels;
+                    // Keep only the first dataset (main price line), remove any others
+                    if (priceChart.data.datasets.length > 1) {{
+                        priceChart.data.datasets = [priceChart.data.datasets[0]];
+                    }}
+                    priceChart.data.datasets[0].data = sampled.data;
+                    
+                    // Update date marker annotations
+                    const dateMarkerAnnotations = buildDateMarkerAnnotations(sampled.dateMarkers, sampled.labels);
+                    if (priceChart.options.plugins) {{
+                        // Remove old date marker annotations
+                        if (priceChart.options.plugins.annotation && priceChart.options.plugins.annotation.annotations) {{
+                            Object.keys(priceChart.options.plugins.annotation.annotations).forEach(key => {{
+                                if (key.startsWith('dateMarker_')) {{
+                                    delete priceChart.options.plugins.annotation.annotations[key];
+                                }}
+                            }});
+                        }}
+                        // Add new annotations
+                        if (dateMarkerAnnotations.annotations && Object.keys(dateMarkerAnnotations.annotations).length > 0) {{
+                            if (!priceChart.options.plugins.annotation) {{
+                                priceChart.options.plugins.annotation = {{}};
+                            }}
+                            if (!priceChart.options.plugins.annotation.annotations) {{
+                                priceChart.options.plugins.annotation.annotations = {{}};
+                            }}
+                            Object.assign(priceChart.options.plugins.annotation.annotations, dateMarkerAnnotations.annotations);
+                        }} else {{
+                            // Clear annotations if none to show
+                            if (priceChart.options.plugins.annotation && priceChart.options.plugins.annotation.annotations) {{
+                                Object.keys(priceChart.options.plugins.annotation.annotations).forEach(key => {{
+                                    if (key.startsWith('dateMarker_')) {{
+                                        delete priceChart.options.plugins.annotation.annotations[key];
+                                    }}
+                                }});
+                            }}
+                        }}
                     }}
                     
                     priceChart.update('none');
@@ -2460,9 +3405,14 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         # Get date range for historical data (default: last 1 year for better chart)
         from datetime import datetime, timedelta
         if not end_date:
-            end_date = datetime.now().strftime('%Y-%m-%d')
+            # Set end_date to today (or tomorrow to ensure we cover all of today)
+            end_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
         if not start_date:
+            # Default to 1 year ago
             start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')  # 1 year default
+        
+        # If we have dates but no data is found, we'll try a wider range in the fallback
+        # For now, let's try to get any available data if the initial query fails
         
         # Call the parallel helper function
         result = await get_stock_info_parallel(
@@ -2483,6 +3433,35 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
             enable_cache=enable_cache,
             redis_url=redis_url
         )
+        
+        # Attach merged price series for the HTML view (used by the chart JS).
+        try:
+            merged_df = await db_instance.get_merged_price_series(symbol)
+        except NotImplementedError:
+            merged_df = None
+        except Exception as e:
+            logger.warning(f"Error fetching merged price series for HTML view {symbol}: {e}")
+            merged_df = None
+
+        if merged_df is not None and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
+            try:
+                mdf = merged_df.copy()
+                if not isinstance(mdf.index, pd.DatetimeIndex):
+                    mdf.index = pd.to_datetime(mdf.index, errors='coerce')
+                mdf = mdf[mdf.index.notna()]
+                mdf = mdf.reset_index().rename(columns={mdf.index.name or 'index': 'timestamp'})
+                merged_records = dataframe_to_json_records(mdf)
+                price_info = result.setdefault('price_info', {})
+                price_info['merged_price_series'] = merged_records
+            except Exception as e:
+                logger.warning(f"Error serializing merged price series for HTML {symbol}: {e}")
+        
+        # If no price_data was fetched and we're not in latest_only mode, try to fetch it
+        # This handles the case where the database doesn't have historical data yet
+        if not latest and result.get('price_info') and result['price_info'].get('price_data') is None:
+            logger.info(f"No price_data found for {symbol}, attempting to fetch from database or API")
+            # The fallback in get_price_info should have already tried, but if it still failed,
+            # we could trigger a background fetch here if needed
         
         # Generate HTML page
         html_content = generate_stock_info_html(symbol, result)

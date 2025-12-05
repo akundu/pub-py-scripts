@@ -4114,6 +4114,7 @@ async def _trigger_background_fetch(
 async def get_price_info(
     symbol: str,
     db_instance: StockDBBase,
+    timeframe: str = "daily",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     force_fetch: bool = False,
@@ -4154,23 +4155,102 @@ async def get_price_info(
         
         if price_info:
             result["current_price"] = price_info
-        
-        # Get historical price data if date range specified and not latest_only
-        if not latest_only and (start_date or end_date):
-            price_df = await process_symbol_data(
-                symbol=symbol,
-                timeframe="daily",
-                start_date=start_date,
-                end_date=end_date,
-                stock_db_instance=db_instance,
-                force_fetch=force_fetch,
-                query_only=not force_fetch,
-                data_source=data_source,
-                log_level="ERROR"  # Suppress verbose logging
-            )
             
-            if not price_df.empty:
-                result["price_data"] = price_df
+            # Try to get volume from today's daily data
+            try:
+                from datetime import datetime
+                today = datetime.now().strftime('%Y-%m-%d')
+                volume_df = await db_instance.get_stock_data(
+                    symbol, today, today, "daily"
+                )
+                if not volume_df.empty and 'volume' in volume_df.columns:
+                    volume_value = float(volume_df['volume'].iloc[0])
+                    if volume_value and volume_value > 0:
+                        # Add volume to current_price dict
+                        if isinstance(result["current_price"], dict):
+                            result["current_price"]["volume"] = volume_value
+            except Exception as vol_e:
+                # Volume fetch failed, but that's okay - continue without it
+                logger.debug(f"Could not fetch volume for {symbol}: {vol_e}")
+        
+        # Get historical price data if not latest_only
+        # If no dates provided, try to get any available data
+        if not latest_only:
+            # If no dates provided, we still want to try to get data for the chart
+            if not start_date and not end_date:
+                # Try to get recent data (last 365 days) as default
+                from datetime import datetime, timedelta
+                end_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')  # Tomorrow to cover today
+                start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')  # 1 year ago
+                logger.info(f"No date range specified for {symbol}, using default range: {start_date} to {end_date}")
+            
+            if start_date or end_date:
+                logger.info(f"Fetching historical {timeframe} price data for {symbol} from {start_date} to {end_date}")
+                try:
+                    if timeframe == "daily":
+                        # Existing behaviour: use process_symbol_data (API + DB) for daily
+                        price_df = await process_symbol_data(
+                            symbol=symbol,
+                            timeframe="daily",
+                            start_date=start_date,
+                            end_date=end_date,
+                            stock_db_instance=db_instance,
+                            force_fetch=force_fetch,
+                            query_only=not force_fetch,
+                            data_source=data_source,
+                            log_level="INFO"  # Use INFO to see what's happening
+                        )
+                    elif timeframe == "hourly":
+                        # For hourly, prefer querying the database directly
+                        # This avoids fetching a huge number of bars from the API on every request
+                        price_df = await db_instance.get_stock_data(
+                            symbol,
+                            start_date=start_date,
+                            end_date=end_date,
+                            interval="hourly"
+                        )
+                    else:
+                        raise ValueError(f"Unsupported timeframe for get_price_info: {timeframe}")
+                    
+                    if price_df is not None and not price_df.empty:
+                        logger.info(f"Retrieved {len(price_df)} rows of {timeframe} price data for {symbol}")
+                        result["price_data"] = price_df
+                    else:
+                        logger.warning(f"No {timeframe} price data found for {symbol} in date range {start_date} to {end_date}")
+                        # Try to get any available data as fallback (without date constraints)
+                        try:
+                            interval = "daily" if timeframe == "daily" else "hourly"
+                            logger.info(f"Attempting fallback: fetching any available {interval} data for {symbol} (no date constraints)")
+                            # Query without date constraints to get all available data
+                            fallback_df = await db_instance.get_stock_data(symbol, start_date=None, end_date=None, interval=interval)
+                            if fallback_df is not None and not fallback_df.empty:
+                                logger.info(
+                                    f"Fallback: Retrieved {len(fallback_df)} rows of {interval} data for {symbol} "
+                                    f"(date range: {fallback_df.index.min()} to {fallback_df.index.max()})"
+                                )
+                                # If we have a requested date range, filter to that range if possible
+                                if start_date or end_date:
+                                    try:
+                                        if start_date:
+                                            start_dt = pd.to_datetime(start_date)
+                                            fallback_df = fallback_df[fallback_df.index >= start_dt]
+                                        if end_date:
+                                            end_dt = pd.to_datetime(end_date)
+                                            fallback_df = fallback_df[fallback_df.index <= end_dt]
+                                        if not fallback_df.empty:
+                                            logger.info(f"Filtered fallback data to {len(fallback_df)} rows within requested range")
+                                    except Exception as filter_e:
+                                        logger.debug(f"Could not filter fallback data: {filter_e}, using all available data")
+                                result["price_data"] = fallback_df
+                            else:
+                                logger.warning(f"No {interval} data available in database for {symbol}")
+                                result["price_data"] = None
+                        except Exception as fallback_e:
+                            logger.error(f"Fallback data fetch failed for {symbol}: {fallback_e}", exc_info=True)
+                            result["price_data"] = None
+                except Exception as e:
+                    logger.error(f"Error fetching historical {timeframe} price data for {symbol}: {e}", exc_info=True)
+                    result["price_data"] = None
         
     except Exception as e:
         result["error"] = str(e)
@@ -4662,7 +4742,9 @@ async def get_stock_info_parallel(
     show_news: bool = False,
     show_iv: bool = False,
     enable_cache: bool = True,
-    redis_url: Optional[str] = None
+    redis_url: Optional[str] = None,
+    # Price resolution for historical data
+    price_timeframe: str = "daily",
 ) -> Dict[str, Any]:
     """Get all stock information in parallel.
     
@@ -4694,6 +4776,7 @@ async def get_stock_info_parallel(
     tasks.append(get_price_info(
         symbol,
         db_instance,
+        timeframe=price_timeframe,
         start_date=start_date,
         end_date=end_date,
         force_fetch=force_fetch,
