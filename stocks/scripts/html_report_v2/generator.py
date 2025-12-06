@@ -33,36 +33,22 @@ def _warmup_cache_for_ticker(ticker: str, host: str = "mm.kundu.dev", port: int 
     """Fire-and-forget cache warmup for a single ticker."""
     url = f"http://{host}:{port}/api/stock_info/{ticker}?show_iv=true&show_news=true"
     
-    # Log the HTTP request destination
-    import traceback
-    try:
-        # Get call stack to show where this is being called from
-        stack = traceback.extract_stack()[-3:-1]
-        caller_info = []
-        for frame in stack:
-            caller_info.append(f"  {frame.filename}:{frame.lineno} in {frame.name}")
-        call_stack_str = '\n'.join(caller_info) if caller_info else "  (call stack unavailable)"
-    except Exception:
-        call_stack_str = "  (call stack unavailable)"
-    
-    logger.debug(f"[CACHE WARMUP] Sending HTTP request for {ticker}")
-    print(f"[CACHE WARMUP] Sending HTTP request for {ticker}", file=sys.stderr)
-    print(f"[CACHE WARMUP] HTTP endpoint URL: {url}", file=sys.stderr)
-    print(f"[CACHE WARMUP] Called from:\n{call_stack_str}", file=sys.stderr)
+    logger.debug(f"[CACHE WARMUP] Sending HTTP request for {ticker} to {url}")
     
     try:
-        # Make request with short timeout, don't wait for response
+        # Make request with timeout - fire and forget, errors are expected
         req = urllib.request.Request(url)
-        print(f"[CACHE WARMUP] Making HTTP GET request to: {url}", file=sys.stderr)
-        urllib.request.urlopen(req, timeout=1.0)
+        logger.debug(f"[CACHE WARMUP] Making HTTP GET request to: {url}")
+        urllib.request.urlopen(req, timeout=5.0)
         success_msg = f"[CACHE WARMUP] Successfully sent request for {ticker} to {host}:{port}"
         logger.debug(success_msg)
-        print(success_msg, file=sys.stderr)
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as e:
-        # Log errors in debug mode, but still ignore them (fire-and-forget)
-        error_msg = f"[CACHE WARMUP] Error sending request for {ticker} to {url}: {type(e).__name__}: {e}"
-        logger.debug(error_msg)
-        print(error_msg, file=sys.stderr)
+    except TimeoutError:
+        # Timeout errors are expected and ignored (fire-and-forget)
+        logger.debug(f"[CACHE WARMUP] Timeout for {ticker} (expected, ignoring)")
+        pass
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
+        # Other errors are also ignored (fire-and-forget), but log at debug level
+        logger.debug(f"[CACHE WARMUP] Error sending request for {ticker} to {url}: {type(e).__name__}: {e}")
         pass
 
 
@@ -134,9 +120,10 @@ def _warmup_stock_info_cache(df: pd.DataFrame, host: str = "mm.kundu.dev", port:
         print(f"[CACHE WARMUP] Tickers to warmup: {', '.join(new_tickers[:20])}{'...' if len(new_tickers) > 20 else ''}", file=sys.stderr)
         
         # Wait for threads to send HTTP requests (with timeout)
-        # We wait up to 2 seconds per ticker, but cap at 5 seconds total
+        # Wait at least 5 seconds to give jobs a chance to run (fire-and-forget)
         # This ensures the HTTP requests are actually sent before the script exits
-        max_wait = min(2.0 * len(new_tickers), 5.0)
+        min_wait = 5.0
+        max_wait = max(min_wait, 2.0 * len(new_tickers))
         start_time = time.time()
         
         for thread in threads:
@@ -145,29 +132,34 @@ def _warmup_stock_info_cache(df: pd.DataFrame, host: str = "mm.kundu.dev", port:
                 break
             thread.join(timeout=remaining_time)
         
+        # Ensure we've waited at least min_wait seconds
         elapsed = time.time() - start_time
-        if elapsed > 0:
-            logger.debug(f"[CACHE WARMUP] Waited {elapsed:.2f}s for HTTP requests to be sent")
-            print(f"[CACHE WARMUP] Waited {elapsed:.2f}s for HTTP requests to be sent", file=sys.stderr)
+        if elapsed < min_wait:
+            time.sleep(min_wait - elapsed)
+            elapsed = time.time() - start_time
+        
+        logger.debug(f"[CACHE WARMUP] Waited {elapsed:.2f}s for HTTP requests to be sent")
+        print(f"[CACHE WARMUP] Waited {elapsed:.2f}s for HTTP requests to be sent", file=sys.stderr)
 
 
-def generate_html_output(df: pd.DataFrame, output_dir: str, db_server_host: str = "mm.kundu.dev", db_server_port: int = 9100) -> None:
+def generate_html_output(df: pd.DataFrame, output_dir: str, db_server_host: str = "mm.kundu.dev", db_server_port: int = 9100, csv_source: str = None) -> None:
     """Generate HTML output with sortable table.
     
     Args:
-        df: DataFrame with the results
+        df: DataFrame with the results (used only for structure/metadata, not embedded in HTML)
         output_dir: Directory path where to create the HTML output
         db_server_host: Database server hostname (default: "mm.kundu.dev")
         db_server_port: Database server port (default: 9100)
+        csv_source: Path to CSV file or URL (default: None, will use default location)
     """
     # Create output directory if it doesn't exist
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Split data into calls and puts
+    # Split data into calls and puts (for metadata only)
     df_calls, df_puts, has_calls, has_puts = split_calls_and_puts(df)
     
-    # Prepare DataFrames for display
+    # Prepare DataFrames for display (only for structure/metadata)
     df_calls_display, df_calls_raw = prepare_dataframe_for_display(df_calls) if has_calls else (pd.DataFrame(), pd.DataFrame())
     df_puts_display, df_puts_raw = prepare_dataframe_for_display(df_puts) if has_puts else (pd.DataFrame(), pd.DataFrame())
     df_display, df_raw = prepare_dataframe_for_display(df)  # For comprehensive analysis
@@ -195,22 +187,22 @@ def generate_html_output(df: pd.DataFrame, output_dir: str, db_server_host: str 
     # Build header
     header_html = build_header(title, timestamp, iso_timestamp, len(df), tab_buttons)
     
-    # Build tab contents
+    # Build tab contents (with empty table structures - data will be loaded via API)
     tab_contents = []
     tab_index = 0
     
     if has_calls:
-        # Build calls tab content
-        table_html = build_table_html(df_calls_display, df_calls_raw, 'calls')
-        cards_html = build_cards_html(df_calls_display, df_calls_raw, 'calls')
+        # Build calls tab content with empty table structure
+        table_html = build_table_html(df_calls_display, df_calls_raw, 'calls', empty=True)
+        cards_html = '<div id="callscardsContainer" class="cards-container"></div>'
         # Add stats section at bottom
         stats_html = f"""        <div class="stats">
             <div class="stat-item">
-                <div class="stat-value" id="callstotalCount">{len(df_calls_display)}</div>
+                <div class="stat-value" id="callstotalCount">0</div>
                 <div class="stat-label">Total Results</div>
             </div>
             <div class="stat-item">
-                <div class="stat-value" id="callsvisibleCount">{len(df_calls_display)}</div>
+                <div class="stat-value" id="callsvisibleCount">0</div>
                 <div class="stat-label">Visible Rows</div>
             </div>
         </div>
@@ -220,17 +212,17 @@ def generate_html_output(df: pd.DataFrame, output_dir: str, db_server_host: str 
         tab_index += 1
     
     if has_puts:
-        # Build puts tab content
-        table_html = build_table_html(df_puts_display, df_puts_raw, 'puts')
-        cards_html = build_cards_html(df_puts_display, df_puts_raw, 'puts')
+        # Build puts tab content with empty table structure
+        table_html = build_table_html(df_puts_display, df_puts_raw, 'puts', empty=True)
+        cards_html = '<div id="putscardsContainer" class="cards-container"></div>'
         # Add stats section at bottom
         stats_html = f"""        <div class="stats">
             <div class="stat-item">
-                <div class="stat-value" id="putstotalCount">{len(df_puts_display)}</div>
+                <div class="stat-value" id="putstotalCount">0</div>
                 <div class="stat-label">Total Results</div>
             </div>
             <div class="stat-item">
-                <div class="stat-value" id="putsvisibleCount">{len(df_puts_display)}</div>
+                <div class="stat-value" id="putsvisibleCount">0</div>
                 <div class="stat-label">Visible Rows</div>
             </div>
         </div>
@@ -239,8 +231,26 @@ def generate_html_output(df: pd.DataFrame, output_dir: str, db_server_host: str 
         tab_contents.append(build_tab_content(puts_content, 'puts', is_active=(not has_calls)))
         tab_index += 1
     
-    # Build comprehensive analysis tab
-    analysis_content = generate_detailed_analysis_html(df_display)
+    # Build comprehensive analysis tab (empty initially, will be loaded dynamically)
+    analysis_content = '''        <div class="analysis-controls" style="margin-bottom: 20px; padding: 15px; background: #f5f5f5; border-radius: 8px;">
+            <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                    <input type="checkbox" id="useGeminiAnalysis" style="width: 18px; height: 18px; cursor: pointer;">
+                    <span style="font-weight: 500;">Use Gemini AI Analysis</span>
+                </label>
+                <button id="loadAnalysisBtn" onclick="loadComprehensiveAnalysis()" style="padding: 8px 16px; background: #667eea; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 500;">
+                    🔄 Load Analysis
+                </button>
+                <span id="analysisStatus" style="color: #666; font-size: 14px;"></span>
+            </div>
+            <div style="margin-top: 10px; font-size: 12px; color: #888;">
+                <strong>Rule-based:</strong> Fast, deterministic analysis based on scoring algorithm (loads automatically)<br>
+                <strong>Gemini AI:</strong> AI-powered analysis with risk/aggressive/conservative recommendations (check box and click button, slower, requires API key)
+            </div>
+        </div>
+        <div id="analysisContent">
+            <div class="loading-indicator"><div class="spinner"></div><div class="loading-text">Loading rule-based analysis...</div></div>
+        </div>'''
     tab_contents.append(build_tab_content(analysis_content, 'analysis', is_active=(not has_calls and not has_puts)))
     
     # Combine all content
@@ -253,13 +263,36 @@ def generate_html_output(df: pd.DataFrame, output_dir: str, db_server_host: str 
     css_content = get_css_styles()
     js_content = get_javascript()
     
-    # Build complete HTML document
-    html_content = build_html_document(title, css_content, js_content, body_content)
+    # Determine CSV source (default to a standard location if not provided)
+    if csv_source is None:
+        # Default to a standard location - can be overridden by client
+        csv_source = "/tmp/results.csv"
+    
+    # Build API configuration (only CSV source needed - API uses same host)
+    api_config = {
+        "csv_source": csv_source
+    }
+    
+    # Build complete HTML document with external JS
+    html_content = build_html_document(
+        title, 
+        css_content, 
+        js_content, 
+        body_content,
+        external_js=True,
+        js_file="app.js",
+        api_config=api_config
+    )
     
     # Write HTML file
     html_file = output_path / 'index.html'
     with open(html_file, 'w', encoding='utf-8') as f:
         f.write(html_content)
+    
+    # Write JavaScript file
+    js_file = output_path / 'app.js'
+    with open(js_file, 'w', encoding='utf-8') as f:
+        f.write(js_content)
     
     print(f"HTML output generated successfully!", file=sys.stderr)
     print(f"Output directory: {output_path.absolute()}", file=sys.stderr)

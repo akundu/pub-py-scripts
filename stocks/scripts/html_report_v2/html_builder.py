@@ -5,25 +5,48 @@ HTML structure generation.
 from datetime import datetime
 from typing import List
 from zoneinfo import ZoneInfo
+import json
 
 
 def build_html_document(
     title: str,
     css_content: str,
     js_content: str,
-    body_content: str
+    body_content: str,
+    external_js: bool = False,
+    js_file: str = "app.js",
+    api_config: dict = None
 ) -> str:
     """Build complete HTML document.
     
     Args:
         title: Page title
         css_content: CSS styles as string
-        js_content: JavaScript code as string
+        js_content: JavaScript code as string (used if external_js=False)
         body_content: HTML body content
+        external_js: If True, use external JS file instead of inline
+        js_file: Name of external JS file (if external_js=True)
+        api_config: Dictionary with API configuration (server_host, server_port, csv_source)
         
     Returns:
         Complete HTML document as string
     """
+    if external_js:
+        # Use external JS file
+        js_tag = f'    <script src="{js_file}"></script>'
+        if api_config:
+            # Inject API config as a script tag before the external JS
+            api_config_json = json.dumps(api_config)
+            js_tag = f"""    <script>
+        window.API_CONFIG = {api_config_json};
+    </script>
+    <script src="{js_file}"></script>"""
+    else:
+        # Inline JS
+        js_tag = f"""    <script>
+{js_content}
+    </script>"""
+    
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -36,9 +59,7 @@ def build_html_document(
 </head>
 <body>
 {body_content}
-    <script>
-{js_content}
-    </script>
+{js_tag}
 </body>
 </html>
 """

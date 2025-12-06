@@ -127,18 +127,169 @@ def reorder_columns_for_display(df: pd.DataFrame, column_groups: Dict, column_to
 def build_table_html(
     df_display: pd.DataFrame,
     df_raw: pd.DataFrame,
-    prefix: str
+    prefix: str,
+    empty: bool = False
 ) -> str:
     """Build complete table HTML.
     
     Args:
-        df_display: Formatted DataFrame for display
-        df_raw: Raw DataFrame for filtering/sorting
+        df_display: Formatted DataFrame for display (used for structure if empty=False)
+        df_raw: Raw DataFrame for filtering/sorting (used for structure if empty=False)
         prefix: Tab prefix ('calls' or 'puts')
+        empty: If True, create empty table structure (no rows, data loaded via API)
         
     Returns:
         Table HTML as string
     """
+    if empty:
+        # Create empty table structure - will be populated by JavaScript via API
+        # We still need column structure, so use df_display if available
+        if not df_display.empty:
+            # Build proper table structure with headers from df_display
+            column_groups, column_to_group = build_column_groups(df_display)
+            new_order = reorder_columns_for_display(df_display, column_groups, column_to_group)
+            df_display = df_display[new_order]
+            hidden_set = {normalize_col_name(col) for col in HIDDEN_COLUMNS}
+            always_hidden_set = {normalize_col_name(col) for col in ALWAYS_HIDDEN_COLUMNS}
+            
+            html_parts = []
+            html_parts.append("""        <div style="margin-bottom: 15px; display: flex; justify-content: space-between; gap: 10px; align-items: center;">
+            <div>
+                <button class="filter-button clear" onclick="toggleHiddenColumns('{prefix}')" id="{prefix}toggleHiddenBtn">
+                    👁️ Show hidden columns
+                </button>
+            </div>
+            <div style="text-align: right;">
+                <button class="filter-button" onclick="toggleFilterSection('{prefix}')" id="{prefix}toggleFilterBtn">
+                    🔍 Filter
+                </button>
+            </div>
+        </div>
+""".format(prefix=prefix))
+            html_parts.append(f"""        <div class="filter-section" id="{prefix}filterSection">
+            <h3 style="margin-top: 0; color: #667eea;">🔍 Filter Options</h3>
+            <div class="filter-logic">
+                <label>Filter Logic:</label>
+                <label><input type="radio" name="{prefix}filterLogic" value="AND" checked onchange="updateFilterLogic('{prefix}', 'AND')"> AND</label>
+                <label><input type="radio" name="{prefix}filterLogic" value="OR" onchange="updateFilterLogic('{prefix}', 'OR')"> OR</label>
+            </div>
+            <div class="filter-controls">
+                <div class="filter-input-group">
+                    <input type="text" id="{prefix}filterInput" class="filter-input" placeholder="e.g., pe_ratio > 20, volume exists, net_daily_premium > 100" onkeypress="handleFilterKeyPress(event, '{prefix}')">
+                    <button class="filter-button" onclick="addFilter('{prefix}')">Add Filter</button>
+                    <button class="filter-button clear" onclick="clearFilters('{prefix}')">Clear All</button>
+                </div>
+            </div>
+            <div id="{prefix}filterError" class="filter-error"></div>
+            <div id="{prefix}activeFilters" style="margin-top: 10px;"></div>
+            <div class="filter-help">
+                <strong>Filter Examples:</strong><br>
+                • <code>pe_ratio > 20</code> - P/E ratio greater than 20<br>
+                • <code>market_cap_b < 3.5</code> - Market cap less than 3.5B<br>
+                • <code>volume exists</code> - Volume data exists<br>
+                • <code>net_daily_premium > 100</code> - Net daily premium greater than 100<br>
+                • <code>delta < 0.5</code> - Delta less than 0.5<br>
+                • <code>days_to_expiry >= 7</code> - Days to expiry at least 7<br>
+                <strong>Spread Filters:</strong><br>
+                • <code>spread < 0.1</code> - Short leg bid/ask spread less than $0.10 (absolute value)<br>
+                • <code>spread < 10%</code> - Short leg spread less than 10% of option premium (percentage-based)<br>
+                • <code>l_spread < 0.1</code> - Long leg bid/ask spread less than $0.10 (absolute value)<br>
+                • <code>l_spread < 10%</code> - Long leg spread less than 10% of option premium (percentage-based)<br>
+                <strong>💡 Spread Filter Tip:</strong> Use percentage-based spread filters (e.g., <code>spread < 20%</code>) to filter by spread relative to option premium. This helps find liquid options where the bid/ask spread is a small percentage of the premium value.<br>
+                <strong>Advanced Filters:</strong><br>
+                • <code>num_contracts > volume</code> - Field-to-field comparison<br>
+                • <code>curr_price*1.05 < strike_price</code> - Mathematical expression (5% above current price less than strike)<br>
+                • <code>strike_price*0.95 > curr_price</code> - Mathematical expression (strike 5% below current)<br>
+                <strong>Operators:</strong> <code>&gt;</code> <code>&gt;=</code> <code>&lt;</code> <code>&lt;=</code> <code>==</code> <code>!=</code> <code>exists</code> <code>not_exists</code><br>
+                <strong>Math Operations:</strong> Use <code>+</code> <code>-</code> <code>*</code> <code>/</code> in expressions (e.g., <code>field*1.05</code>, <code>field+100</code>)<br>
+                <strong>💡 Tip:</strong> When the filter section is expanded, column headers show their filterable field names. Filters are automatically saved in the URL - share the URL to share your filtered view!
+            </div>
+        </div>
+""")
+            # Loading indicator
+            html_parts.append(f"""        <div class="loading-indicator" id="{prefix}loadingIndicator">
+            <div class="loading-spinner"></div>
+            <div class="loading-text">Loading data...</div>
+        </div>
+""")
+            html_parts.append(f'        <div class="table-wrapper hide-hidden" id="{prefix}tableWrapper">\n')
+            html_parts.append(f'            <table id="{prefix}resultsTable">\n')
+            html_parts.append("                <thead>\n")
+            html_parts.extend(build_table_headers(df_display, column_groups, column_to_group, hidden_set, always_hidden_set, prefix))
+            html_parts.append("                </thead>\n")
+            html_parts.append("                <tbody>\n")
+            html_parts.append('                    <tr><td colspan="100%" style="text-align: center; padding: 20px;">Loading data...</td></tr>\n')
+            html_parts.append("                </tbody>\n")
+            html_parts.append("            </table>\n")
+            html_parts.append("        </div>\n")
+            return ''.join(html_parts)
+        else:
+            # Create minimal table structure if no data available
+            return f"""        <div style="margin-bottom: 15px; display: flex; justify-content: space-between; gap: 10px; align-items: center;">
+            <div>
+                <button class="filter-button clear" onclick="toggleHiddenColumns('{prefix}')" id="{prefix}toggleHiddenBtn">
+                    👁️ Show hidden columns
+                </button>
+            </div>
+            <div style="text-align: right;">
+                <button class="filter-button" onclick="toggleFilterSection('{prefix}')" id="{prefix}toggleFilterBtn">
+                    🔍 Filter
+                </button>
+            </div>
+        </div>
+        <div class="filter-section" id="{prefix}filterSection">
+            <h3 style="margin-top: 0; color: #667eea;">🔍 Filter Options</h3>
+            <div class="filter-logic">
+                <label>Filter Logic:</label>
+                <label><input type="radio" name="{prefix}filterLogic" value="AND" checked onchange="updateFilterLogic('{prefix}', 'AND')"> AND</label>
+                <label><input type="radio" name="{prefix}filterLogic" value="OR" onchange="updateFilterLogic('{prefix}', 'OR')"> OR</label>
+            </div>
+            <div class="filter-controls">
+                <div class="filter-input-group">
+                    <input type="text" id="{prefix}filterInput" class="filter-input" placeholder="e.g., pe_ratio > 20, volume exists, net_daily_premium > 100" onkeypress="handleFilterKeyPress(event, '{prefix}')">
+                    <button class="filter-button" onclick="addFilter('{prefix}')">Add Filter</button>
+                    <button class="filter-button clear" onclick="clearFilters('{prefix}')">Clear All</button>
+                </div>
+            </div>
+            <div id="{prefix}filterError" class="filter-error"></div>
+            <div id="{prefix}activeFilters" style="margin-top: 10px;"></div>
+            <div class="filter-help">
+                <strong>Filter Examples:</strong><br>
+                • <code>pe_ratio > 20</code> - P/E ratio greater than 20<br>
+                • <code>market_cap_b < 3.5</code> - Market cap less than 3.5B<br>
+                • <code>volume exists</code> - Volume data exists<br>
+                • <code>net_daily_premium > 100</code> - Net daily premium greater than 100<br>
+                • <code>delta < 0.5</code> - Delta less than 0.5<br>
+                • <code>days_to_expiry >= 7</code> - Days to expiry at least 7<br>
+                <strong>Spread Filters:</strong><br>
+                • <code>spread < 0.1</code> - Short leg bid/ask spread less than $0.10 (absolute value)<br>
+                • <code>spread < 10%</code> - Short leg spread less than 10% of option premium (percentage-based)<br>
+                • <code>l_spread < 0.1</code> - Long leg bid/ask spread less than $0.10 (absolute value)<br>
+                • <code>l_spread < 10%</code> - Long leg spread less than 10% of option premium (percentage-based)<br>
+                <strong>💡 Spread Filter Tip:</strong> Use percentage-based spread filters (e.g., <code>spread < 20%</code>) to filter by spread relative to option premium. This helps find liquid options where the bid/ask spread is a small percentage of the premium value.<br>
+                <strong>Advanced Filters:</strong><br>
+                • <code>num_contracts > volume</code> - Field-to-field comparison<br>
+                • <code>curr_price*1.05 < strike_price</code> - Mathematical expression (5% above current price less than strike)<br>
+                • <code>strike_price*0.95 > curr_price</code> - Mathematical expression (strike 5% below current)<br>
+                <strong>Operators:</strong> <code>&gt;</code> <code>&gt;=</code> <code>&lt;</code> <code>&lt;=</code> <code>==</code> <code>!=</code> <code>exists</code> <code>not_exists</code><br>
+                <strong>Math Operations:</strong> Use <code>+</code> <code>-</code> <code>*</code> <code>/</code> in expressions (e.g., <code>field*1.05</code>, <code>field+100</code>)<br>
+                <strong>💡 Tip:</strong> When the filter section is expanded, column headers show their filterable field names. Filters are automatically saved in the URL - share the URL to share your filtered view!
+            </div>
+        </div>
+        <div class="table-wrapper hide-hidden" id="{prefix}tableWrapper">
+            <table id="{prefix}resultsTable">
+                <thead>
+                    <tr class="column-header-row">
+                        <th>Loading...</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td colspan="100%" style="text-align: center; padding: 20px;">Loading data...</td></tr>
+                </tbody>
+            </table>
+        </div>
+"""
+    
     if df_display.empty:
         return '<div style="padding: 20px; text-align: center;"><p>No data available.</p></div>'
     
@@ -198,10 +349,13 @@ def build_table_html(
                 • <code>net_daily_premium > 100</code> - Net daily premium greater than 100<br>
                 • <code>delta < 0.5</code> - Delta less than 0.5<br>
                 • <code>days_to_expiry >= 7</code> - Days to expiry at least 7<br>
-                • <code>spread < 0.1</code> - Short leg bid/ask spread less than $0.10<br>
-                • <code>spread < 10%</code> - Short leg spread less than 10% of option premium<br>
-                • <code>l_spread < 0.1</code> - Long leg bid/ask spread less than $0.10<br>
-                • <code>l_spread < 10%</code> - Long leg spread less than 10% of option premium<br>
+                <strong>Spread Filters:</strong><br>
+                • <code>spread < 0.1</code> - Short leg bid/ask spread less than $0.10 (absolute value)<br>
+                • <code>spread < 10%</code> - Short leg spread less than 10% of option premium (percentage-based)<br>
+                • <code>l_spread < 0.1</code> - Long leg bid/ask spread less than $0.10 (absolute value)<br>
+                • <code>l_spread < 10%</code> - Long leg spread less than 10% of option premium (percentage-based)<br>
+                <strong>💡 Spread Filter Tip:</strong> Use percentage-based spread filters (e.g., <code>spread < 20%</code>) to filter by spread relative to option premium. This helps find liquid options where the bid/ask spread is a small percentage of the premium value.<br>
+                <strong>Advanced Filters:</strong><br>
                 • <code>num_contracts > volume</code> - Field-to-field comparison<br>
                 • <code>curr_price*1.05 < strike_price</code> - Mathematical expression (5% above current price less than strike)<br>
                 • <code>strike_price*0.95 > curr_price</code> - Mathematical expression (strike 5% below current)<br>
@@ -209,6 +363,13 @@ def build_table_html(
                 <strong>Math Operations:</strong> Use <code>+</code> <code>-</code> <code>*</code> <code>/</code> in expressions (e.g., <code>field*1.05</code>, <code>field+100</code>)<br>
                 <strong>💡 Tip:</strong> When the filter section is expanded, column headers show their filterable field names. Filters are automatically saved in the URL - share the URL to share your filtered view!
             </div>
+        </div>
+""")
+    
+    # Loading indicator
+    html_parts.append(f"""        <div class="loading-indicator" id="{prefix}loadingIndicator">
+            <div class="loading-spinner"></div>
+            <div class="loading-text">Loading data...</div>
         </div>
 """)
     

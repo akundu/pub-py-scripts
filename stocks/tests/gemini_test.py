@@ -1,7 +1,7 @@
 import os
 import argparse
 import sys # Import sys for file operations
-from google import genai
+import google.genai as genai
 from google.genai.errors import APIError
 
 # --- 1. Model Configuration ---

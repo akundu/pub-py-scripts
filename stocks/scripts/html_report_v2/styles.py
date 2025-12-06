@@ -542,6 +542,97 @@ def get_css_styles():
             font-family: 'Courier New', monospace;
         }
         
+        /* Loading indicator */
+        .loading-indicator {
+            display: none;
+            position: relative;
+            text-align: center;
+            padding: 40px 20px;
+            background: white;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        
+        .loading-indicator.active {
+            display: block;
+        }
+        
+        .loading-spinner {
+            display: inline-block;
+            width: 50px;
+            height: 50px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 15px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .pulse-dots {
+            display: inline-block;
+        }
+        
+        .pulse-dots span {
+            display: inline-block;
+            animation: pulse 1.4s ease-in-out infinite;
+            margin: 0 2px;
+            font-size: 20px;
+            color: #667eea;
+        }
+        
+        .pulse-dots span:nth-child(1) {
+            animation-delay: 0s;
+        }
+        
+        .pulse-dots span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+        
+        .pulse-dots span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+        
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 0.3;
+                transform: scale(1);
+            }
+            50% {
+                opacity: 1;
+                transform: scale(1.2);
+            }
+        }
+        
+        .loading-text {
+            color: #667eea;
+            font-size: 1.1em;
+            font-weight: 600;
+            margin-top: 10px;
+        }
+        
+        /* Mobile loading indicator */
+        @media (max-width: 768px) {
+            .loading-indicator {
+                padding: 30px 15px;
+                margin: 15px 0;
+            }
+            
+            .loading-spinner {
+                width: 40px;
+                height: 40px;
+                border-width: 3px;
+            }
+            
+            .loading-text {
+                font-size: 1em;
+            }
+        }
+        
         .filter-error {
             color: #dc3545;
             font-size: 0.9em;

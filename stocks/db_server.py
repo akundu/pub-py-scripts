@@ -22,6 +22,10 @@ import json
 from datetime import datetime, timezone
 import time
 import socket
+import re
+import urllib.request
+import urllib.error
+from io import StringIO
 
 # Try to import numpy for type conversion
 try:
@@ -797,6 +801,10 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     
     # Add stock info HTML page endpoint
     app.router.add_get("/stock_info/{symbol}", handle_stock_info_html)
+    
+    # Add covered calls data API endpoint
+    app.router.add_get("/stock_info/api/covered_calls/data", handle_covered_calls_data)
+    app.router.add_get("/stock_info/api/covered_calls/analysis", handle_covered_calls_analysis)
     
     # Add catch-all handler for unknown routes (must be last)
     app.router.add_get("/{path:.*}", handle_catch_all)
@@ -1728,6 +1736,920 @@ async def handle_health_check(request: web.Request) -> web.Response:
         "database": db_info,
         "process": process_info
     })
+
+
+# Module-level cache for CSV data
+_covered_calls_cache: Dict[str, tuple] = {}  # {source: (df, timestamp)}
+
+
+def _parse_filter_strings(filter_str: str) -> list:
+    """Parse pipe-separated filter strings into filter objects.
+    
+    Args:
+        filter_str: Pipe-separated filter expressions (e.g., "delta < 0.35|l_delta > 0.48|spread < 20%")
+        
+    Returns:
+        List of filter dictionaries compatible with _apply_filters
+    """
+    filters = []
+    if not filter_str:
+        return filters
+    
+    # Split by pipe
+    filter_expressions = filter_str.split('|')
+    
+    for expr in filter_expressions:
+        expr = expr.strip()
+        if not expr:
+            continue
+        
+        # Debug: log the original expression
+        logger.debug(f"Parsing filter expression: '{expr}'")
+        
+        # Handle exists/not_exists
+        exists_match = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s+(exists|not_exists)$', expr, re.IGNORECASE)
+        if exists_match:
+            filters.append({
+                'field': exists_match.group(1),
+                'operator': exists_match.group(2).lower(),
+                'value': None,
+                'isFieldComparison': False
+            })
+            continue
+        
+        # Parse comparison operators (check longer ones first)
+        operators = ['>=', '<=', '==', '!=', '>', '<']
+        for op in operators:
+            if op in expr:
+                parts = expr.split(op, 1)
+                if len(parts) == 2:
+                    field_expr = parts[0].strip()
+                    value_str = parts[1].strip()
+                    
+                    # Check for mathematical expressions in field
+                    has_math = bool(re.search(r'[+\-*/]', field_expr))
+                    
+                    # Check if value is a field name (field-to-field comparison)
+                    # We'll check this later when we have the DataFrame
+                    is_field_comparison = False
+                    value = value_str
+                    
+                    # Try to parse value as number
+                    if not has_math:
+                        # Check if value is a date string (YYYY-MM-DD)
+                        date_match = re.match(r'^(\d{4}-\d{2}-\d{2})', value_str)
+                        if date_match:
+                            value = value_str
+                        else:
+                            # Try parsing as number - handle negative numbers correctly
+                            # Remove any extra whitespace that might separate the minus sign
+                            # This handles cases like " -0.1" (space before minus) from URL decoding
+                            value_str_clean = value_str.replace(' ', '').replace('\t', '')
+                            try:
+                                num_value = float(value_str_clean)
+                                value = num_value
+                                logger.debug(f"Parsed numeric value: {num_value} from '{value_str}' (cleaned: '{value_str_clean}')")
+                            except ValueError:
+                                # If that fails, try the original string (in case of special formats)
+                                try:
+                                    num_value = float(value_str)
+                                    value = num_value
+                                    logger.debug(f"Parsed numeric value: {num_value} from '{value_str}' (original)")
+                                except ValueError:
+                                    # Keep as string
+                                    value = value_str
+                                    logger.debug(f"Keeping as string: '{value_str}'")
+                    
+                    filter_obj = {
+                        'field': field_expr,
+                        'operator': op,
+                        'value': value,
+                        'valueStr': value_str,  # Preserve original for percentage detection
+                        'isFieldComparison': is_field_comparison,
+                        'hasMath': has_math
+                    }
+                    logger.debug(f"Created filter: {field_expr} {op} {value} (type: {type(value).__name__})")
+                    filters.append(filter_obj)
+                    break
+        
+    return filters
+
+
+async def handle_covered_calls_data(request: web.Request) -> web.Response:
+    """Handle covered calls data API requests.
+    
+    GET /stock_info/api/covered_calls/data
+    
+    Query Parameters:
+        source: str (required)
+            - Local file path (e.g., "/tmp/results.csv")
+            - HTTP/HTTPS URL (e.g., "https://example.com/results.csv")
+        option_type: str (optional, default: "all")
+            - "call", "put", or "all"
+        filters: str (optional)
+            - JSON-encoded array of filter objects
+            - Format: [{"field": "net_daily_premi", "operator": ">", "value": 1000}, ...]
+        calls_filters: str (optional)
+            - Pipe-separated filter expressions for calls
+            - Format: "delta < 0.35|l_delta > 0.48|pe_ratio > 0|spread < 20%"
+            - Operators: >, <, >=, <=, ==, !=, exists, not_exists
+            - Supports math expressions: "curr_price*1.05 < strike_price"
+            - Supports percentages: "spread < 20%" (percentage of option premium)
+        puts_filters: str (optional)
+            - Same format as calls_filters but for puts
+        filter_logic: str (optional, default: "AND")
+            - "AND" or "OR" logic for combining filters
+        calls_filterLogic: str (optional)
+            - Filter logic specifically for calls (overrides filter_logic)
+        puts_filterLogic: str (optional)
+            - Filter logic specifically for puts (overrides filter_logic)
+        sort: str (optional, default: "net_daily_premi")
+            - Column name to sort by
+        sort_direction: str (optional, default: "desc")
+            - "asc" or "desc"
+        limit: int (optional)
+            - Maximum rows to return
+        offset: int (optional, default: 0)
+            - Pagination offset
+    
+    Returns:
+        JSON response with data, metadata, and timestamp
+    """
+    try:
+        # Get query parameters
+        source = request.query.get('source')
+        if not source:
+            return web.json_response({
+                "error": "Missing required parameter: source",
+                "message": "Please provide 'source' parameter (file path or URL)"
+            }, status=400)
+        
+        option_type = request.query.get('option_type', 'all').lower()
+        filters_json = request.query.get('filters', '[]')
+        # Support simple string format: calls_filters or puts_filters (pipe-separated)
+        calls_filters_str = request.query.get('calls_filters', '')
+        puts_filters_str = request.query.get('puts_filters', '')
+        # Note: aiohttp's request.query already URL-decodes parameters automatically
+        # However, we need to ensure that any '+' signs that became spaces are handled correctly
+        # Log raw values for debugging
+        logger.debug(f"Raw calls_filters_str from request.query: {repr(calls_filters_str)}")
+        logger.debug(f"Raw puts_filters_str from request.query: {repr(puts_filters_str)}")
+        # aiohttp already decodes, but if the value still contains % encoded characters,
+        # we need to decode again (shouldn't happen, but being safe)
+        if puts_filters_str and '%' in puts_filters_str:
+            import urllib.parse
+            puts_filters_str = urllib.parse.unquote_plus(puts_filters_str)
+            logger.debug(f"After explicit decoding, puts_filters_str: {repr(puts_filters_str)}")
+        if calls_filters_str and '%' in calls_filters_str:
+            import urllib.parse
+            calls_filters_str = urllib.parse.unquote_plus(calls_filters_str)
+            logger.debug(f"After explicit decoding, calls_filters_str: {repr(calls_filters_str)}")
+        filter_logic = request.query.get('filter_logic', 'AND').upper()  # AND or OR
+        # Also support prefix-specific filter logic
+        calls_filter_logic = request.query.get('calls_filterLogic', filter_logic).upper()
+        puts_filter_logic = request.query.get('puts_filterLogic', filter_logic).upper()
+        sort_col = request.query.get('sort', 'net_daily_premi')
+        sort_direction = request.query.get('sort_direction', 'desc').lower()
+        limit = request.query.get('limit')
+        offset = int(request.query.get('offset', 0))
+        
+        # Parse filters - support both JSON format and simple string format
+        filters = []
+        if filters_json and filters_json != '[]':
+            # Try JSON format first
+            try:
+                filters = json.loads(filters_json) if filters_json else []
+            except json.JSONDecodeError:
+                return web.json_response({
+                    "error": "Invalid filters parameter",
+                    "message": "Filters must be valid JSON"
+                }, status=400)
+        elif calls_filters_str or puts_filters_str:
+            # Use simple string format - determine which one based on option_type
+            filter_str = ''
+            if option_type == 'call' and calls_filters_str:
+                filter_str = calls_filters_str
+                filter_logic = calls_filter_logic
+            elif option_type == 'put' and puts_filters_str:
+                filter_str = puts_filters_str
+                filter_logic = puts_filter_logic
+            elif calls_filters_str:
+                # Default to calls if option_type is 'all'
+                filter_str = calls_filters_str
+                filter_logic = calls_filter_logic
+            elif puts_filters_str:
+                filter_str = puts_filters_str
+                filter_logic = puts_filter_logic
+            
+            if filter_str:
+                # Parse pipe-separated filter strings
+                logger.debug(f"Parsing filter string: {repr(filter_str)}")
+                filters = _parse_filter_strings(filter_str)
+                logger.debug(f"Parsed {len(filters)} filters: {filters}")
+        
+        # Load and cache CSV data
+        cache_key = source
+        cache_entry = _covered_calls_cache.get(cache_key)
+        
+        # Check if cache is valid (refresh if older than 60 seconds)
+        current_time = time.time()
+        if cache_entry and (current_time - cache_entry[1]) < 60:
+            df = cache_entry[0].copy()
+        else:
+            # Load CSV from file or URL
+            try:
+                if source.startswith(('http://', 'https://')):
+                    # Download from URL
+                    req = urllib.request.Request(source)
+                    with urllib.request.urlopen(req, timeout=30) as response:
+                        csv_content = response.read().decode('utf-8')
+                    df = pd.read_csv(StringIO(csv_content))
+                else:
+                    # Read from local file
+                    df = pd.read_csv(source)
+                
+                # Clean up the data - remove duplicate header rows
+                if 'ticker' in df.columns:
+                    df = df[df['ticker'] != 'ticker']
+                
+                # Calculate missing calculated columns BEFORE normalizing column names
+                # (calculate_bid_ask_analysis expects original column names like 'opt_prem.' not 'option_premium')
+                try:
+                    from scripts.evaluate_covered_calls import calculate_bid_ask_analysis
+                    # Check if any calculated columns are missing
+                    calculated_cols = ['spread_slippage', 'net_premium_after_spread', 
+                                     'net_daily_premium_after_spread', 'spread_impact_pct',
+                                     'liquidity_score', 'assignment_risk', 'trade_quality']
+                    missing_calculated = [col for col in calculated_cols if col not in df.columns]
+                    
+                    # Only calculate if we have the required input columns
+                    has_bid_ask = any(col in df.columns for col in ['bid:ask', 'bid_ask'])
+                    has_l_bid_ask = any(col in df.columns for col in ['l_bid:ask', 'l_bid_ask', 'long_bid_ask'])
+                    
+                    if missing_calculated and (has_bid_ask or has_l_bid_ask):
+                        # Calculate all bid/ask analysis columns (uses original column names)
+                        df = calculate_bid_ask_analysis(df)
+                except (ImportError, AttributeError) as e:
+                    logger.warning(f"Could not import calculate_bid_ask_analysis: {e}")
+                except Exception as e:
+                    logger.warning(f"Error calculating bid/ask analysis columns: {e}")
+                    # Continue without calculated columns
+                
+                # Use the same data processing pipeline as HTML generation
+                # This normalizes column names and ensures all expected columns are present
+                try:
+                    from scripts.html_report_v2.data_processor import prepare_dataframe_for_display
+                    df_display, df_raw = prepare_dataframe_for_display(df)
+                    # Use df_raw for API (has normalized column names but raw values)
+                    df = df_raw.copy()
+                except Exception as e:
+                    logger.warning(f"Could not use prepare_dataframe_for_display, falling back to basic processing: {e}")
+                    # Fallback: Convert numeric columns (same as evaluate_covered_calls.py)
+                    numeric_cols = [
+                        'pe_ratio', 'market_cap_b', 'curr_price', 'current_price', 
+                        'strike_price', 'price_above_curr', 'opt_prem.', 'IV', 
+                        'delta', 'theta', 'days_to_expiry', 's_prem_tot', 
+                        's_day_prem', 'l_strike', 'l_prem', 'liv', 'l_delta', 
+                        'l_theta', 'l_days_to_expiry', 'l_prem_tot', 'l_cnt_avl', 
+                        'prem_diff', 'net_premium', 'net_daily_premi', 'volume', 
+                        'num_contracts', 'price_change_pct'
+                    ]
+                    
+                    for col in numeric_cols:
+                        if col in df.columns:
+                            df[col] = pd.to_numeric(df[col], errors='coerce')
+                
+                # Cache the dataframe
+                _covered_calls_cache[cache_key] = (df.copy(), current_time)
+            except FileNotFoundError:
+                return web.json_response({
+                    "error": "File not found",
+                    "message": f"CSV file not found: {source}"
+                }, status=404)
+            except urllib.error.URLError as e:
+                return web.json_response({
+                    "error": "URL error",
+                    "message": f"Failed to download CSV from URL: {str(e)}"
+                }, status=400)
+            except Exception as e:
+                logger.error(f"Error loading CSV from {source}: {e}")
+                return web.json_response({
+                    "error": "Error loading CSV",
+                    "message": str(e)
+                }, status=500)
+        
+        # Filter by option_type if specified
+        if option_type != 'all' and 'option_type' in df.columns:
+            df = df[df['option_type'].str.lower() == option_type].copy()
+        
+        # Apply filters
+        if filters:
+            df = _apply_filters(df, filters, filter_logic)
+        
+        # Get total count before pagination
+        total_count = len(df)
+        
+        # Sort
+        if sort_col in df.columns:
+            ascending = (sort_direction == 'asc')
+            df = df.sort_values(by=sort_col, ascending=ascending, na_position='last')
+        
+        # Apply pagination
+        if limit:
+            limit = int(limit)
+            df = df.iloc[offset:offset + limit]
+        elif offset > 0:
+            df = df.iloc[offset:]
+        
+        # Ensure all expected columns are present (fill remaining missing with None)
+        # Note: Calculated columns should already be added before prepare_dataframe_for_display
+        # This ensures the API response matches the table structure
+        expected_columns = set(df.columns)
+        
+        # Add any missing columns that might be expected by the table
+        # (These are columns that might be in the HTML table but not in CSV and can't be calculated)
+        potential_missing_cols = [
+            'current_price', 'price_with_change', 'price_change_pct',
+            'option_premium', 'long_option_premium'
+        ]
+        
+        for col in potential_missing_cols:
+            if col not in df.columns:
+                df[col] = None
+        
+        # Convert to records
+        records = df.to_dict('records')
+        
+        # Convert pandas types to native Python types for JSON serialization
+        def convert_pandas_types(obj):
+            if isinstance(obj, pd.Timestamp):
+                return obj.isoformat()
+            elif pd.isna(obj):
+                return None
+            # Handle numpy integer/float/boolean types if numpy is available
+            elif NUMPY_AVAILABLE and np is not None:
+                if isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8)):
+                    return int(obj)
+                elif isinstance(obj, (np.floating, np.float64, np.float32, np.float16)):
+                    return float(obj)
+                elif isinstance(obj, np.bool_):
+                    return bool(obj)
+                elif hasattr(obj, 'item'):  # numpy scalar (fallback)
+                    try:
+                        return obj.item()
+                    except (ValueError, AttributeError):
+                        pass
+            # Handle regular Python int/float/bool
+            elif isinstance(obj, (int, float, bool)):
+                if isinstance(obj, bool):
+                    return bool(obj)
+                elif isinstance(obj, float):
+                    return float(obj)
+                else:
+                    return int(obj)
+            return obj
+        
+        for record in records:
+            for key, value in record.items():
+                record[key] = convert_pandas_types(value)
+        
+        # Get column metadata
+        columns = []
+        numeric_cols_set = set([
+            'pe_ratio', 'market_cap_b', 'curr_price', 'current_price', 
+            'strike_price', 'price_above_curr', 'opt_prem.', 'IV', 
+            'delta', 'theta', 'days_to_expiry', 's_prem_tot', 
+            's_day_prem', 'l_strike', 'l_prem', 'liv', 'l_delta', 
+            'l_theta', 'l_days_to_expiry', 'l_prem_tot', 'l_cnt_avl', 
+            'prem_diff', 'net_premium', 'net_daily_premi', 'volume', 
+            'num_contracts', 'price_change_pct'
+        ])
+        for col in df.columns:
+            col_type = 'string'
+            if col in numeric_cols_set:
+                col_type = 'number'
+            elif 'date' in col.lower() or 'expiration' in col.lower():
+                col_type = 'date'
+            columns.append({
+                "name": col,
+                "type": col_type
+            })
+        
+        # Determine if calls/puts exist
+        has_calls = False
+        has_puts = False
+        if 'option_type' in df.columns:
+            has_calls = bool((df['option_type'].str.lower() == 'call').any())
+            has_puts = bool((df['option_type'].str.lower() == 'put').any())
+        else:
+            # If no option_type column, assume all are calls
+            has_calls = len(df) > 0
+        
+        # Build response
+        response = {
+            "data": records,
+            "metadata": {
+                "total_count": total_count,
+                "filtered_count": len(records),
+                "columns": columns,
+                "has_calls": has_calls,
+                "has_puts": has_puts
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        return web.json_response(response)
+        
+    except Exception as e:
+        logger.error(f"Error handling covered calls data request: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return web.json_response({
+            "error": "An internal server error occurred",
+            "details": str(e)
+        }, status=500)
+
+
+async def handle_covered_calls_analysis(request: web.Request) -> web.Response:
+    """Handle comprehensive analysis HTML generation API requests.
+    
+    GET /stock_info/api/covered_calls/analysis
+    
+    Query Parameters:
+        source: str (required)
+            - Local file path (e.g., "/tmp/results.csv")
+            - HTTP/HTTPS URL (e.g., "https://example.com/results.csv")
+        option_type: str (optional, default: "all")
+            - "call", "put", or "all"
+        filters: str (optional)
+            - JSON-encoded array of filter objects
+        calls_filters: str (optional)
+            - Pipe-separated filter expressions for calls
+        puts_filters: str (optional)
+            - Pipe-separated filter expressions for puts
+        filter_logic: str (optional, default: "AND")
+            - "AND" or "OR" logic for combining filters
+        calls_filterLogic: str (optional)
+            - Filter logic specifically for calls
+        puts_filterLogic: str (optional)
+            - Filter logic specifically for puts
+    
+    Returns:
+        HTML response with comprehensive analysis
+    """
+    try:
+        # Get query parameters (same as data endpoint)
+        source = request.query.get('source')
+        if not source:
+            return web.Response(
+                text="<div class='error'>Missing required parameter: source</div>",
+                status=400,
+                content_type='text/html'
+            )
+        
+        option_type = request.query.get('option_type', 'all').lower()
+        filters_json = request.query.get('filters', '[]')
+        calls_filters_str = request.query.get('calls_filters', '')
+        puts_filters_str = request.query.get('puts_filters', '')
+        # Explicitly handle URL decoding to ensure negative numbers are parsed correctly
+        # This handles cases where URL encoding might have introduced spaces before negative numbers
+        if puts_filters_str:
+            import urllib.parse
+            puts_filters_str = urllib.parse.unquote_plus(puts_filters_str)
+        if calls_filters_str:
+            import urllib.parse
+            calls_filters_str = urllib.parse.unquote_plus(calls_filters_str)
+        filter_logic = request.query.get('filter_logic', 'AND').upper()
+        calls_filter_logic = request.query.get('calls_filterLogic', filter_logic).upper()
+        puts_filter_logic = request.query.get('puts_filterLogic', filter_logic).upper()
+        
+        # Parse filters (same logic as data endpoint)
+        filters = []
+        if filters_json and filters_json != '[]':
+            try:
+                filters = json.loads(filters_json) if filters_json else []
+            except json.JSONDecodeError:
+                return web.Response(
+                    text="<div class='error'>Invalid filters parameter</div>",
+                    status=400,
+                    content_type='text/html'
+                )
+        elif calls_filters_str or puts_filters_str:
+            filter_str = ''
+            if option_type == 'call' and calls_filters_str:
+                filter_str = calls_filters_str
+                filter_logic = calls_filter_logic
+            elif option_type == 'put' and puts_filters_str:
+                filter_str = puts_filters_str
+                filter_logic = puts_filter_logic
+            elif calls_filters_str:
+                filter_str = calls_filters_str
+                filter_logic = calls_filter_logic
+            elif puts_filters_str:
+                filter_str = puts_filters_str
+                filter_logic = puts_filter_logic
+            
+            if filter_str:
+                filters = _parse_filter_strings(filter_str)
+        
+        # Load and cache CSV data (reuse same logic as data endpoint)
+        cache_key = source
+        cache_entry = _covered_calls_cache.get(cache_key)
+        
+        current_time = time.time()
+        if cache_entry and (current_time - cache_entry[1]) < 60:
+            df = cache_entry[0].copy()
+        else:
+            try:
+                if source.startswith(('http://', 'https://')):
+                    req = urllib.request.Request(source)
+                    with urllib.request.urlopen(req, timeout=30) as response:
+                        csv_content = response.read().decode('utf-8')
+                    df = pd.read_csv(StringIO(csv_content))
+                else:
+                    df = pd.read_csv(source)
+                
+                if 'ticker' in df.columns:
+                    df = df[df['ticker'] != 'ticker']
+                
+                # Calculate missing calculated columns BEFORE normalizing
+                try:
+                    from scripts.evaluate_covered_calls import calculate_bid_ask_analysis
+                    calculated_cols = ['spread_slippage', 'net_premium_after_spread', 
+                                     'net_daily_premium_after_spread', 'spread_impact_pct',
+                                     'liquidity_score', 'assignment_risk', 'trade_quality']
+                    missing_calculated = [col for col in calculated_cols if col not in df.columns]
+                    
+                    has_bid_ask = any(col in df.columns for col in ['bid:ask', 'bid_ask'])
+                    has_l_bid_ask = any(col in df.columns for col in ['l_bid:ask', 'l_bid_ask', 'long_bid_ask'])
+                    
+                    if missing_calculated and (has_bid_ask or has_l_bid_ask):
+                        df = calculate_bid_ask_analysis(df)
+                except (ImportError, AttributeError) as e:
+                    logger.warning(f"Could not import calculate_bid_ask_analysis: {e}")
+                except Exception as e:
+                    logger.warning(f"Error calculating bid/ask analysis columns: {e}")
+                
+                # Use prepare_dataframe_for_display to normalize column names
+                try:
+                    from scripts.html_report_v2.data_processor import prepare_dataframe_for_display
+                    df_display, df_raw = prepare_dataframe_for_display(df)
+                    # Cache df_raw (same as data endpoint) - we'll convert to df_display after filtering
+                    df = df_raw.copy()
+                except Exception as e:
+                    logger.warning(f"Could not use prepare_dataframe_for_display: {e}")
+                
+                _covered_calls_cache[cache_key] = (df.copy(), current_time)
+            except FileNotFoundError:
+                return web.Response(
+                    text="<div class='error'>CSV file not found</div>",
+                    status=404,
+                    content_type='text/html'
+                )
+            except urllib.error.URLError as e:
+                return web.Response(
+                    text=f"<div class='error'>Failed to download CSV: {str(e)}</div>",
+                    status=400,
+                    content_type='text/html'
+                )
+            except Exception as e:
+                logger.error(f"Error loading CSV from {source}: {e}")
+                return web.Response(
+                    text=f"<div class='error'>Error loading CSV: {str(e)}</div>",
+                    status=500,
+                    content_type='text/html'
+                )
+        
+        # Filter by option_type if specified
+        if option_type != 'all' and 'option_type' in df.columns:
+            df = df[df['option_type'].str.lower() == option_type].copy()
+        
+        # Apply filters
+        if filters:
+            df = _apply_filters(df, filters, filter_logic)
+        
+        # Convert to display format for analysis (normalized column names)
+        try:
+            from scripts.html_report_v2.data_processor import prepare_dataframe_for_display
+            df_display, _ = prepare_dataframe_for_display(df)
+            df = df_display.copy()
+        except Exception as e:
+            logger.warning(f"Could not convert to display format: {e}")
+            # Continue with raw format
+        
+        # Generate analysis HTML
+        # Check if Gemini analysis is requested
+        use_gemini = request.query.get('use_gemini', 'false').lower() == 'true'
+        
+        if use_gemini:
+            # Use Gemini AI analysis
+            try:
+                logger.info(f"[GEMINI] Starting Gemini AI analysis request")
+                logger.info(f"[GEMINI] Option type: {option_type}, DataFrame shape: {df.shape}")
+                
+                from common.gemini_analysis import run_gemini_analysis_on_dataframe, DEFAULT_GEMINI_INSTRUCTION
+                from pathlib import Path
+                
+                # Determine which option types to analyze
+                option_types = []
+                if option_type == 'all':
+                    # Check what option types are in the filtered data
+                    if 'option_type' in df.columns:
+                        unique_types = df['option_type'].str.lower().unique()
+                        if 'call' in unique_types:
+                            option_types.append('call')
+                        if 'put' in unique_types:
+                            option_types.append('put')
+                    else:
+                        option_types = ['call', 'put']  # Default to both
+                else:
+                    option_types = [option_type]
+                
+                logger.info(f"[GEMINI] Will analyze option types: {option_types}, filtered data rows: {len(df)}")
+                logger.debug(f"[GEMINI] Starting Gemini AI analysis for option types: {option_types}, filtered data rows: {len(df)}")
+                
+                # Run Gemini analysis
+                # Calculate base_dir: db_server.py is in stocks/, so we want stocks/ as base_dir
+                # Try multiple possible locations for the tests directory
+                possible_base_dirs = [
+                    Path(__file__).resolve().parent,  # stocks/ directory
+                    Path(__file__).resolve().parent.parent,  # parent of stocks/ (in case of symlinks)
+                ]
+                
+                base_dir = None
+                for possible_dir in possible_base_dirs:
+                    test_file = possible_dir / "tests" / "gemini_test.py"
+                    if test_file.exists():
+                        base_dir = possible_dir
+                        break
+                
+                if base_dir is None:
+                    # Fallback: use current working directory
+                    base_dir = Path.cwd()
+                    logger.warning(f"Could not find tests/gemini_test.py relative to db_server.py, using cwd: {base_dir}")
+                
+                logger.info(f"[GEMINI] Calling run_gemini_analysis_on_dataframe with base_dir: {base_dir}")
+                logger.debug(f"[GEMINI] Calling run_gemini_analysis_on_dataframe with base_dir: {base_dir}")
+                start_time = time.time()
+                
+                logger.info(f"[GEMINI] Starting subprocess calls (this may take up to 5 minutes per option type)...")
+                gemini_results = run_gemini_analysis_on_dataframe(
+                    df=df,
+                    instruction=DEFAULT_GEMINI_INSTRUCTION,
+                    base_dir=base_dir,
+                    option_types=option_types
+                )
+                
+                elapsed_time = time.time() - start_time
+                logger.info(f"[GEMINI] Analysis completed in {elapsed_time:.2f} seconds. Generated analysis for: {list(gemini_results.keys())}")
+                logger.debug(f"[GEMINI] Gemini AI analysis completed in {elapsed_time:.2f} seconds. Generated analysis for: {list(gemini_results.keys())}")
+                
+                # Combine results into HTML
+                html_parts = ['<div class="detailed-analysis">']
+                html_parts.append('<h2>📊 COMPREHENSIVE ANALYSIS: GEMINI AI ANALYSIS</h2>')
+                
+                for opt_type, html_content in gemini_results.items():
+                    html_parts.append(f'<div class="analysis-section">')
+                    html_parts.append(f'<h3>{opt_type.upper()} SPREADS</h3>')
+                    html_parts.append(html_content)
+                    html_parts.append('</div>')
+                
+                html_parts.append('</div>')
+                html_content = '\n'.join(html_parts)
+                
+            except Exception as e:
+                logger.error(f"[GEMINI] Error running Gemini analysis: {e}")
+                import traceback
+                logger.error(f"[GEMINI] Traceback:\n{traceback.format_exc()}")
+                # Fall back to rule-based analysis
+                use_gemini = False
+        
+        if not use_gemini:
+            # Use rule-based analysis (original implementation)
+            try:
+                from scripts.html_report_v2.analysis_builder import generate_detailed_analysis_html
+                html_content = generate_detailed_analysis_html(df)
+            except Exception as e:
+                logger.error(f"Error generating analysis HTML: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                return web.Response(
+                    text=f"<div class='error'>Error generating analysis: {str(e)}</div>",
+                    status=500,
+                    content_type='text/html'
+                )
+        
+        return web.Response(
+            text=html_content,
+            content_type='text/html'
+        )
+        
+    except Exception as e:
+        logger.error(f"Error handling covered calls analysis request: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return web.Response(
+            text=f"<div class='error'>An internal server error occurred: {str(e)}</div>",
+            status=500,
+            content_type='text/html'
+        )
+
+
+def _apply_filters(df: pd.DataFrame, filters: list, filter_logic: str = 'AND') -> pd.DataFrame:
+    """Apply filters to DataFrame.
+    
+    Args:
+        df: DataFrame to filter
+        filters: List of filter dictionaries with keys: field, operator, value
+        filter_logic: 'AND' or 'OR' logic for combining filters
+        
+    Returns:
+        Filtered DataFrame
+    """
+    if not filters:
+        return df
+    
+    # Evaluate each filter separately
+    filter_masks = []
+    for filter_obj in filters:
+        field = filter_obj.get('field', '')
+        operator = filter_obj.get('operator', '==')
+        value = filter_obj.get('value')
+        is_field_comparison = filter_obj.get('isFieldComparison', False)
+        has_math = filter_obj.get('hasMath', False)
+        
+        if not field:
+            continue
+        
+        filter_mask = pd.Series([True] * len(df), index=df.index)
+        
+        # Handle exists/not_exists
+        if operator.lower() in ('exists', 'not_exists'):
+            if operator.lower() == 'exists':
+                filter_mask = df[field].notna() if field in df.columns else pd.Series([False] * len(df), index=df.index)
+            else:
+                filter_mask = df[field].isna() if field in df.columns else pd.Series([False] * len(df), index=df.index)
+            filter_masks.append(filter_mask)
+            continue
+        
+        # Check if field exists
+        if field not in df.columns:
+            # Try to find similar column (case-insensitive)
+            field_lower = field.lower()
+            matching_cols = [col for col in df.columns if col.lower() == field_lower]
+            if not matching_cols:
+                # Field doesn't exist, skip this filter
+                continue
+            field = matching_cols[0]
+        
+        # Check if value is actually a field name (field-to-field comparison)
+        # This needs to be checked after we know the DataFrame columns
+        if not is_field_comparison and isinstance(value, str) and not has_math:
+            # Check if value string matches a column name (case-insensitive)
+            value_lower = value.lower()
+            matching_value_cols = [col for col in df.columns if col.lower() == value_lower]
+            if matching_value_cols:
+                is_field_comparison = True
+                value = matching_value_cols[0]
+        
+        # Handle field-to-field comparison
+        if is_field_comparison:
+            if value not in df.columns:
+                # Try to find similar column
+                value_lower = value.lower()
+                matching_cols = [col for col in df.columns if col.lower() == value_lower]
+                if not matching_cols:
+                    continue
+                value_col = matching_cols[0]
+            else:
+                value_col = value
+            
+            if operator == '>':
+                filter_mask = (df[field] > df[value_col])
+            elif operator == '<':
+                filter_mask = (df[field] < df[value_col])
+            elif operator == '>=':
+                filter_mask = (df[field] >= df[value_col])
+            elif operator == '<=':
+                filter_mask = (df[field] <= df[value_col])
+            elif operator == '==':
+                filter_mask = (df[field] == df[value_col])
+            elif operator == '!=':
+                filter_mask = (df[field] != df[value_col])
+            filter_masks.append(filter_mask)
+            continue
+        
+        # Handle math expressions (e.g., "curr_price*1.05")
+        if has_math:
+            try:
+                # Evaluate math expression for each row
+                field_values = []
+                for idx, row in df.iterrows():
+                    expr = field
+                    # Replace field names with values
+                    for col in df.columns:
+                        if col in expr:
+                            expr = expr.replace(col, str(row[col]) if pd.notna(row[col]) else '0')
+                    try:
+                        result = eval(expr)
+                        field_values.append(float(result) if pd.notna(result) else None)
+                    except:
+                        field_values.append(None)
+                
+                field_series = pd.Series(field_values, index=df.index)
+                
+                # Apply operator
+                if operator == '>':
+                    filter_mask = (field_series > value)
+                elif operator == '<':
+                    filter_mask = (field_series < value)
+                elif operator == '>=':
+                    filter_mask = (field_series >= value)
+                elif operator == '<=':
+                    filter_mask = (field_series <= value)
+                elif operator == '==':
+                    filter_mask = (field_series == value)
+                elif operator == '!=':
+                    filter_mask = (field_series != value)
+                filter_masks.append(filter_mask)
+            except Exception as e:
+                logger.warning(f"Error evaluating math expression '{field}': {e}")
+                continue
+        else:
+            # Regular field comparison
+            # Handle percentage-based filtering for spread fields
+            value_to_compare = value
+            value_str = filter_obj.get('valueStr', str(value) if value is not None else '')
+            
+            # Check if this is a percentage-based filter (e.g., "spread < 20%")
+            if isinstance(value_str, str) and value_str.endswith('%'):
+                field_lower = field.lower()
+                if field_lower in ('spread', 'l_spread', 'long_spread'):
+                    try:
+                        percent_value = float(value_str[:-1])
+                        # Find the option premium column
+                        prem_col = None
+                        if field_lower == 'spread':
+                            # Try to find short option premium column
+                            for col in ['opt_prem.', 'opt_prem', 'option_premium', 'premium']:
+                                if col in df.columns:
+                                    prem_col = col
+                                    break
+                        elif field_lower in ('l_spread', 'long_spread'):
+                            # Try to find long option premium column
+                            for col in ['l_prem', 'l_opt_prem', 'long_option_premium', 'long_premium']:
+                                if col in df.columns:
+                                    prem_col = col
+                                    break
+                        
+                        if prem_col and prem_col in df.columns:
+                            # Calculate percentage of premium for each row
+                            value_to_compare = (percent_value / 100.0) * df[prem_col]
+                        else:
+                            # Can't calculate percentage without premium column, skip filter
+                            logger.warning(f"Cannot apply percentage filter '{field} {operator} {value_str}': premium column not found")
+                            continue
+                    except (ValueError, TypeError):
+                        # Invalid percentage value, use original value
+                        pass
+            
+            if operator == '>':
+                filter_mask = (df[field] > value_to_compare)
+            elif operator == '<':
+                filter_mask = (df[field] < value_to_compare)
+                # Debug logging for negative number comparisons
+                if isinstance(value_to_compare, (int, float)) and value_to_compare < 0:
+                    logger.debug(f"Applying filter: {field} < {value_to_compare} (negative value)")
+                    logger.debug(f"Sample values: {df[field].head(10).tolist()}")
+                    logger.debug(f"Filter mask (first 10): {filter_mask.head(10).tolist()}")
+                    logger.debug(f"Rows matching filter: {filter_mask.sum()} out of {len(df)}")
+            elif operator == '>=':
+                filter_mask = (df[field] >= value_to_compare)
+            elif operator == '<=':
+                filter_mask = (df[field] <= value_to_compare)
+            elif operator == '==':
+                filter_mask = (df[field] == value_to_compare)
+            elif operator == '!=':
+                filter_mask = (df[field] != value_to_compare)
+            filter_masks.append(filter_mask)
+    
+    # Combine filter masks based on logic
+    if not filter_masks:
+        return df
+    
+    if filter_logic == 'OR':
+        # OR logic: any filter matches
+        combined_mask = filter_masks[0]
+        for fm in filter_masks[1:]:
+            combined_mask = combined_mask | fm
+    else:
+        # AND logic: all filters must match (default)
+        combined_mask = filter_masks[0]
+        for fm in filter_masks[1:]:
+            combined_mask = combined_mask & fm
+    
+    return df[combined_mask].copy()
+
 
 async def handle_stock_info(request: web.Request) -> web.Response:
     """Handle stock info API requests.
@@ -4900,9 +5822,13 @@ def main_server_runner():
         
         # Add stock info API endpoint
         app.router.add_get("/api/stock_info/{symbol}", handle_stock_info)
-        
+        app.router.add_get("/stock_info/api/{symbol}", handle_stock_info)
         # Add stock info HTML page endpoint
         app.router.add_get("/stock_info/{symbol}", handle_stock_info_html)
+        
+        # Add covered calls data API endpoint
+        app.router.add_get("/stock_info/api/covered_calls/data", handle_covered_calls_data)
+        app.router.add_get("/stock_info/api/covered_calls/analysis", handle_covered_calls_analysis)
         
         # Add catch-all handler for unknown routes (must be last)
         app.router.add_get("/{path:.*}", handle_catch_all)

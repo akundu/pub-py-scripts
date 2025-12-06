@@ -9,7 +9,565 @@ def get_javascript():
     Returns:
         String containing JavaScript code
     """
-    return """        // Namespaced state for calls and puts
+    return """        // API Configuration (injected by HTML)
+        const API_CONFIG = window.API_CONFIG || {
+            csv_source: '/tmp/results.csv'
+        };
+        
+        // API state
+        let apiDataCache = {};
+        let apiLoading = {};
+        
+        // Fetch data from API
+        async function fetchDataFromAPI(prefix, optionType = null) {
+            const cacheKey = prefix + (optionType || 'all');
+            if (apiLoading[cacheKey]) {
+                return; // Already loading
+            }
+            
+            // Determine option type
+            if (!optionType) {
+                optionType = prefix === 'calls' ? 'call' : (prefix === 'puts' ? 'put' : 'all');
+            }
+            
+            apiLoading[cacheKey] = true;
+            
+            // Show loading indicator
+            showLoadingIndicator(prefix);
+            
+            try {
+                // Build query parameters
+                const params = new URLSearchParams({
+                    source: API_CONFIG.csv_source,
+                    option_type: optionType
+                });
+                
+                // Add filters if any - use pipe-separated format
+                if (activeFilters[prefix] && activeFilters[prefix].length > 0) {
+                    const filterStrings = activeFilters[prefix].map(f => {
+                        let filterStr = f.field;
+                        if (f.operator) {
+                            filterStr += ' ' + f.operator;
+                            if (f.value !== null) {
+                                // Use valueStr if available (preserves % sign), otherwise use value
+                                const valueToUse = (f.valueStr !== undefined) ? f.valueStr : String(f.value);
+                                filterStr += ' ' + valueToUse;
+                            }
+                        }
+                        return filterStr;
+                    });
+                    // Use prefix-specific parameter name (calls_filters or puts_filters)
+                    params.set(prefix + '_filters', filterStrings.join('|'));
+                    // Add filter logic with prefix-specific parameter name
+                    const logic = filterLogic[prefix] || 'AND';
+                    if (logic !== 'AND') {
+                        params.set(prefix + '_filterLogic', logic);
+                    }
+                }
+                
+                // Add sorting
+                if (currentSortColumn[prefix] !== undefined && currentSortColumn[prefix] >= 0) {
+                    const tableId = prefix + 'resultsTable';
+                    const table = document.getElementById(tableId);
+                    if (table) {
+                        const headerRow = table.querySelector('tr.column-header-row');
+                        const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
+                        if (headers[currentSortColumn[prefix]]) {
+                            const colName = headers[currentSortColumn[prefix]].getAttribute('data-filterable-name') || 
+                                          headers[currentSortColumn[prefix]].textContent.trim();
+                            params.set('sort', colName);
+                            params.set('sort_direction', sortDirection[prefix][currentSortColumn[prefix]] || 'desc');
+                        }
+                    }
+                }
+                
+                // Use relative URL - same host as the HTML page
+                const url = `/stock_info/api/covered_calls/data?${params.toString()}`;
+                const response = await fetch(url);
+                
+                if (!response.ok) {
+                    throw new Error(`API error: ${response.status} ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                apiDataCache[cacheKey] = data;
+                
+                // Render table with API data
+                renderTableFromAPI(prefix, data);
+                
+            } catch (error) {
+                console.error('Error fetching data from API:', error);
+                const tableId = prefix + 'resultsTable';
+                const tbody = document.querySelector(`#${tableId} tbody`);
+                if (tbody) {
+                    tbody.innerHTML = `<tr><td colspan="100%" style="text-align: center; padding: 20px; color: red;">Error loading data: ${error.message}</td></tr>`;
+                }
+            } finally {
+                apiLoading[cacheKey] = false;
+                // Hide loading indicator
+                hideLoadingIndicator(prefix);
+            }
+        }
+        
+        // Fetch comprehensive analysis from API
+        async function fetchAnalysisFromAPI() {
+            const cacheKey = 'analysis';
+            if (apiLoading[cacheKey]) {
+                return; // Already loading
+            }
+            
+            apiLoading[cacheKey] = true;
+            
+            // Get analysis type preference from checkbox
+            const useGeminiCheckbox = document.getElementById('useGeminiAnalysis');
+            const useGemini = useGeminiCheckbox ? useGeminiCheckbox.checked : false;
+            
+            // Update status
+            const statusEl = document.getElementById('analysisStatus');
+            if (statusEl) {
+                if (useGemini) {
+                    statusEl.textContent = '⏳ Generating Gemini AI analysis (this may take 1-2 minutes)...';
+                    statusEl.style.color = '#ff9800';
+                } else {
+                    statusEl.textContent = 'Loading rule-based analysis...';
+                    statusEl.style.color = '#666';
+                }
+            }
+            
+            // Show loading indicator in content area with different messages for Gemini
+            const analysisContent = document.getElementById('analysisContent');
+            if (analysisContent) {
+                if (useGemini) {
+                    analysisContent.innerHTML = `
+                        <div class="loading-indicator" style="text-align: center; padding: 40px;">
+                            <div class="spinner" style="margin: 0 auto 20px;"></div>
+                            <div class="loading-text" style="font-size: 16px; font-weight: 500; color: #667eea; margin-bottom: 10px;">
+                                🤖 Generating Gemini AI Analysis
+                            </div>
+                            <div style="font-size: 14px; color: #666; margin-bottom: 5px;">
+                                This may take 1-2 minutes...
+                            </div>
+                            <div style="font-size: 12px; color: #999;">
+                                Analyzing ${useGemini ? 'filtered' : 'all'} data with AI
+                            </div>
+                            <div style="margin-top: 20px; font-size: 11px; color: #aaa;">
+                                <div class="pulse-dots">
+                                    <span>.</span><span>.</span><span>.</span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    analysisContent.innerHTML = '<div class="loading-indicator"><div class="spinner"></div><div class="loading-text">Loading rule-based analysis...</div></div>';
+                }
+            }
+            
+            try {
+                // Build query parameters - use filters from both calls and puts
+                const params = new URLSearchParams({
+                    source: API_CONFIG.csv_source,
+                    option_type: 'all',  // Get all data for comprehensive analysis
+                    use_gemini: useGemini ? 'true' : 'false'  // Use checkbox value
+                });
+                
+                // Combine filters from both calls and puts
+                const allFilters = [];
+                if (activeFilters['calls'] && activeFilters['calls'].length > 0) {
+                    const callsFilterStrings = activeFilters['calls'].map(f => {
+                        let filterStr = f.field;
+                        if (f.operator) {
+                            filterStr += ' ' + f.operator;
+                            if (f.value !== null) {
+                                const valueToUse = (f.valueStr !== undefined) ? f.valueStr : String(f.value);
+                                filterStr += ' ' + valueToUse;
+                            }
+                        }
+                        return filterStr;
+                    });
+                    if (callsFilterStrings.length > 0) {
+                        params.set('calls_filters', callsFilterStrings.join('|'));
+                        const logic = filterLogic['calls'] || 'AND';
+                        if (logic !== 'AND') {
+                            params.set('calls_filterLogic', logic);
+                        }
+                    }
+                }
+                
+                if (activeFilters['puts'] && activeFilters['puts'].length > 0) {
+                    const putsFilterStrings = activeFilters['puts'].map(f => {
+                        let filterStr = f.field;
+                        if (f.operator) {
+                            filterStr += ' ' + f.operator;
+                            if (f.value !== null) {
+                                const valueToUse = (f.valueStr !== undefined) ? f.valueStr : String(f.value);
+                                filterStr += ' ' + valueToUse;
+                            }
+                        }
+                        return filterStr;
+                    });
+                    if (putsFilterStrings.length > 0) {
+                        params.set('puts_filters', putsFilterStrings.join('|'));
+                        const logic = filterLogic['puts'] || 'AND';
+                        if (logic !== 'AND') {
+                            params.set('puts_filterLogic', logic);
+                        }
+                    }
+                }
+                
+                // Use relative URL - same host as the HTML page
+                const url = `/stock_info/api/covered_calls/analysis?${params.toString()}`;
+                
+                // For Gemini analysis, use a much longer timeout (6 minutes = 360 seconds)
+                // since Gemini can take up to 5 minutes per option type
+                const timeoutMs = useGemini ? 360000 : 60000; // 6 minutes for Gemini, 1 minute for rule-based
+                
+                // Create an AbortController for timeout
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+                
+                try {
+                    const response = await fetch(url, {
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeoutId);
+                    
+                    if (!response.ok) {
+                        throw new Error(`API error: ${response.status} ${response.statusText}`);
+                    }
+                
+                    const htmlContent = await response.text();
+                    
+                    // Update analysis content area (not the whole tab, preserve controls)
+                    if (analysisContent) {
+                        analysisContent.innerHTML = htmlContent;
+                    }
+                    
+                    // Update status
+                    if (statusEl) {
+                        statusEl.textContent = useGemini ? '✓ Gemini AI analysis loaded' : '✓ Rule-based analysis loaded';
+                        statusEl.style.color = '#28a745';
+                    }
+                } catch (fetchError) {
+                    clearTimeout(timeoutId);
+                    if (fetchError.name === 'AbortError') {
+                        throw new Error('Request timeout: Analysis took too long. Please try again or use rule-based analysis.');
+                    }
+                    throw fetchError;
+                }
+                
+            } catch (error) {
+                console.error('Error fetching analysis from API:', error);
+                if (analysisContent) {
+                    let errorMsg = error.message;
+                    if (errorMsg.includes('timeout') || errorMsg.includes('504')) {
+                        errorMsg = 'Request timed out. Gemini analysis can take up to 5 minutes. Please try again or check server logs.';
+                    }
+                    analysisContent.innerHTML = `<div class="error" style="padding: 20px; color: red;">Error loading comprehensive analysis: ${errorMsg}</div>`;
+                }
+                if (statusEl) {
+                    statusEl.textContent = '✗ Error loading analysis';
+                    statusEl.style.color = '#dc3545';
+                }
+            } finally {
+                apiLoading[cacheKey] = false;
+            }
+        }
+        
+        // Global function to load analysis (called by button)
+        function loadComprehensiveAnalysis() {
+            fetchAnalysisFromAPI();
+        }
+        
+        // Render table from API data
+        function renderTableFromAPI(prefix, apiData) {
+            const tableId = prefix + 'resultsTable';
+            const table = document.getElementById(tableId);
+            if (!table) return;
+            
+            const tbody = table.querySelector('tbody');
+            if (!tbody) return;
+            
+            const data = apiData.data || [];
+            const metadata = apiData.metadata || {};
+            
+            // Update stats
+            const totalCountEl = document.getElementById(prefix + 'totalCount');
+            const visibleCountEl = document.getElementById(prefix + 'visibleCount');
+            if (totalCountEl) totalCountEl.textContent = metadata.total_count || 0;
+            if (visibleCountEl) visibleCountEl.textContent = metadata.filtered_count || data.length;
+            
+            // Clear existing rows
+            tbody.innerHTML = '';
+            
+            if (data.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="100%" style="text-align: center; padding: 20px;">No data available.</td></tr>';
+                return;
+            }
+            
+            // Get column order from table headers
+            const headerRow = table.querySelector('tr.column-header-row');
+            const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
+            const columnOrder = [];
+            const columnMetadata = []; // Store metadata for each column
+            
+            headers.forEach(th => {
+                const colName = th.getAttribute('data-filterable-name') || th.textContent.trim();
+                columnOrder.push(colName);
+                
+                // Store metadata about hidden columns
+                const isHidden = th.classList.contains('is-hidden-col');
+                const isAlwaysHidden = th.classList.contains('always-hidden');
+                columnMetadata.push({
+                    name: colName,
+                    isHidden: isHidden,
+                    isAlwaysHidden: isAlwaysHidden
+                });
+            });
+            
+            // Build a map of normalized column names from API data for better matching
+            const apiColumnMap = {};
+            if (data.length > 0) {
+                Object.keys(data[0]).forEach(key => {
+                    const normalized = key.toLowerCase().replace(/\\s+/g, '_').replace(/-/g, '_');
+                    if (!apiColumnMap[normalized]) {
+                        apiColumnMap[normalized] = [];
+                    }
+                    apiColumnMap[normalized].push(key);
+                });
+                // Debug: log available columns from API
+                console.log('API columns:', Object.keys(data[0]));
+                console.log('Table columns:', columnOrder);
+            }
+            
+            // Helper to find matching column name in API data
+            function findApiColumnName(headerColName) {
+                // Try exact match first
+                if (data.length > 0 && data[0].hasOwnProperty(headerColName)) {
+                    return headerColName;
+                }
+                
+                // Try case-insensitive match
+                const normalized = headerColName.toLowerCase().replace(/\\s+/g, '_').replace(/-/g, '_');
+                if (apiColumnMap[normalized] && apiColumnMap[normalized].length > 0) {
+                    return apiColumnMap[normalized][0]; // Use first match
+                }
+                
+                // Try partial match
+                for (const apiKey in data[0] || {}) {
+                    if (apiKey.toLowerCase().replace(/\\s+/g, '_').replace(/-/g, '_') === normalized) {
+                        return apiKey;
+                    }
+                }
+                
+                return null;
+            }
+            
+            // Helper function to format age in seconds to human-readable format
+            function formatAgeSeconds(ageSeconds) {
+                if (ageSeconds === null || ageSeconds === undefined || ageSeconds === '') {
+                    return '';
+                }
+                const age = parseFloat(ageSeconds);
+                if (isNaN(age) || age < 0) return '';
+                if (age === 0) return '0 secs';
+                if (age < 60) return Math.floor(age) + ' secs';
+                if (age < 3600) return (age / 60).toFixed(1) + ' mins';
+                if (age < 86400) return (age / 3600).toFixed(1) + ' hrs';
+                return (age / 86400).toFixed(1) + ' days';
+            }
+            
+            // Helper function to format numeric value based on column type
+            function formatCellValue(value, colName) {
+                if (value === null || value === undefined || value === '') {
+                    return { display: '', raw: null };
+                }
+                
+                const normalizedCol = colName.toLowerCase().replace(/\\s+/g, '_').replace(/-/g, '_');
+                const numValue = typeof value === 'number' ? value : parseFloat(value);
+                const isNumeric = !isNaN(numValue) && value !== '';
+                
+                // Age columns (latest_option_writets, latest_opt_ts) - format as human-readable
+                if ((normalizedCol.includes('writets') || normalizedCol.includes('latest_opt') || 
+                     normalizedCol.includes('age')) && isNumeric) {
+                    const ageDisplay = formatAgeSeconds(numValue);
+                    return {
+                        display: ageDisplay,
+                        raw: String(numValue)
+                    };
+                }
+                
+                // Currency columns (price, premium, strike, cost, total)
+                if (isNumeric && (normalizedCol.includes('price') || normalizedCol.includes('premium') || 
+                    normalizedCol.includes('prem') || normalizedCol.includes('strike') || 
+                    normalizedCol.includes('cost') || normalizedCol.includes('total'))) {
+                    return {
+                        display: '$' + numValue.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}),
+                        raw: String(numValue)
+                    };
+                }
+                
+                // Percentage columns
+                if (isNumeric && (normalizedCol.includes('pct') || normalizedCol.includes('percent') || normalizedCol.endsWith('%'))) {
+                    return {
+                        display: numValue.toFixed(2) + '%',
+                        raw: String(numValue)
+                    };
+                }
+                
+                // Integer columns (volume, contracts, days, count)
+                if (isNumeric && (normalizedCol.includes('volume') || normalizedCol.includes('contracts') || 
+                    normalizedCol.includes('cnt') || (normalizedCol.includes('days') && !normalizedCol.includes('writets')) || 
+                    normalizedCol.includes('count'))) {
+                    return {
+                        display: Math.floor(numValue).toLocaleString('en-US'),
+                        raw: String(Math.floor(numValue))
+                    };
+                }
+                
+                // Trade quality - 2 decimal places
+                if (isNumeric && normalizedCol === 'trade_quality') {
+                    return {
+                        display: numValue.toFixed(2),
+                        raw: String(numValue)
+                    };
+                }
+                
+                // Date columns - check if it's a date string (YYYY-MM-DD or ISO format)
+                if (typeof value === 'string' && (normalizedCol.includes('expiration') || normalizedCol.includes('exp_date') || normalizedCol.includes('date'))) {
+                    // Extract just the date portion (YYYY-MM-DD) from timestamp strings
+                    const dateMatch = value.match(/^(\\d{4}-\\d{2}-\\d{2})/);
+                    if (dateMatch) {
+                        return {
+                            display: dateMatch[1], // Just the date part (YYYY-MM-DD)
+                            raw: value
+                        };
+                    }
+                    // If it's already a formatted date string, keep it
+                    if (/^\\d{4}-\\d{2}-\\d{2}$/.test(value)) {
+                        return {
+                            display: value,
+                            raw: value
+                        };
+                    }
+                }
+                
+                // Default: return as string
+                return {
+                    display: String(value),
+                    raw: isNumeric ? String(numValue) : String(value)
+                };
+            }
+            
+            // Render rows
+            data.forEach((row, rowIdx) => {
+                const tr = document.createElement('tr');
+                tr.setAttribute('data-row-index', rowIdx);
+                
+                columnOrder.forEach((colName, colIdx) => {
+                    const td = document.createElement('td');
+                    const colMeta = columnMetadata[colIdx] || {};
+                    
+                    // Find matching column name in API data
+                    const apiColName = findApiColumnName(colName);
+                    const value = apiColName ? row[apiColName] : null;
+                    
+                    // Debug missing columns (only log once per column)
+                    if (!apiColName && rowIdx === 0) {
+                        console.warn(`Column "${colName}" not found in API data. Available:`, Object.keys(row));
+                    }
+                    
+                    // Format the value (handle null/undefined gracefully)
+                    const formatted = formatCellValue(value !== undefined ? value : null, colName);
+                    
+                    // Set display value
+                    if (formatted.display) {
+                        td.textContent = formatted.display;
+                    }
+                    
+                    // Set raw value for filtering/sorting
+                    if (formatted.raw !== null) {
+                        td.setAttribute('data-raw', formatted.raw);
+                    }
+                    
+                    // Add CSS classes for hidden columns
+                    if (colMeta.isHidden) {
+                        td.classList.add('is-hidden-col');
+                    }
+                    if (colMeta.isAlwaysHidden) {
+                        td.classList.add('always-hidden');
+                    }
+                    
+                    // Add color classes for price change columns
+                    const normalizedCol = colName.toLowerCase().replace(/\\s+/g, '_');
+                    if ((normalizedCol === 'price_with_change' || normalizedCol === 'change_pct') && formatted.display) {
+                        const displayStr = String(formatted.display);
+                        // Check for positive change (+$ or (+ or positive percentage)
+                        if (displayStr.includes('+$') || displayStr.includes('(+') || (displayStr.startsWith('+') && !displayStr.startsWith('+-'))) {
+                            td.classList.add('price-positive');
+                        }
+                        // Check for negative change (-$ or (- or negative percentage)
+                        else if (displayStr.includes('-$') || displayStr.includes('(-') || (displayStr.startsWith('-') && !displayStr.startsWith('--'))) {
+                            td.classList.add('price-negative');
+                        }
+                    }
+                    
+                    // Make ticker column a link
+                    if (normalizedCol === 'ticker' && formatted.display) {
+                        const tickerLink = document.createElement('a');
+                        tickerLink.href = `/stock_info/${encodeURIComponent(formatted.display.trim())}`;
+                        tickerLink.target = '_blank';
+                        tickerLink.style.cssText = 'color: #667eea; text-decoration: none; font-weight: 500;';
+                        tickerLink.textContent = formatted.display;
+                        td.innerHTML = '';
+                        td.appendChild(tickerLink);
+                    }
+                    
+                    tr.appendChild(td);
+                });
+                
+                tbody.appendChild(tr);
+            });
+            
+            // Apply all post-render functions (matching original behavior)
+            applyRowStriping(prefix);
+            applyColumnStriping(prefix);
+            syncCardOrder(prefix);
+            syncCardVisibility(prefix);
+            updateVisibleCount(prefix);
+            
+            // Initialize column map after data is loaded (needed for filter parsing)
+            initColumnMap(prefix);
+        }
+        
+        // Show loading indicator
+        function showLoadingIndicator(prefix) {
+            const loadingEl = document.getElementById(prefix + 'loadingIndicator');
+            const tableWrapper = document.getElementById(prefix + 'tableWrapper');
+            if (loadingEl) {
+                loadingEl.classList.add('active');
+            }
+            // Hide table wrapper while loading
+            if (tableWrapper) {
+                tableWrapper.style.opacity = '0.5';
+                tableWrapper.style.pointerEvents = 'none';
+            }
+        }
+        
+        // Hide loading indicator
+        function hideLoadingIndicator(prefix) {
+            const loadingEl = document.getElementById(prefix + 'loadingIndicator');
+            const tableWrapper = document.getElementById(prefix + 'tableWrapper');
+            if (loadingEl) {
+                loadingEl.classList.remove('active');
+            }
+            // Show table wrapper after loading
+            if (tableWrapper) {
+                tableWrapper.style.opacity = '1';
+                tableWrapper.style.pointerEvents = 'auto';
+            }
+        }
+        
+        // Namespaced state for calls and puts
         let sortDirection = {};
         let currentSortColumn = {};
         let activeFilters = {};
@@ -838,44 +1396,8 @@ def get_javascript():
         
         // Apply all filters to table
         function applyFilters(prefix) {
-            const tableId = prefix + 'resultsTable';
-            const table = document.getElementById(tableId);
-            if (!table) return;
-            
-            const tbody = table.querySelector('tbody');
-            const rows = Array.from(tbody.querySelectorAll('tr'));
-            const errorDiv = document.getElementById(prefix + 'filterError');
-            
-            if (errorDiv) errorDiv.textContent = '';
-            
-            initStateForPrefix(prefix);
-            
-            if (activeFilters[prefix].length === 0) {
-                rows.forEach(row => {
-                    row.style.display = '';
-                });
-                updateVisibleCount(prefix);
-                applyRowStriping(prefix);
-                syncCardVisibility(prefix);
-                return;
-            }
-            
-            rows.forEach(row => {
-                let matches = activeFilters[prefix].map(filter => evaluateFilter(filter, row, tableId));
-                
-                let shouldShow;
-                if (filterLogic[prefix] === 'AND') {
-                    shouldShow = matches.every(m => m);
-                } else {
-                    shouldShow = matches.some(m => m);
-                }
-                
-                row.style.display = shouldShow ? '' : 'none';
-            });
-            
-            updateVisibleCount(prefix);
-            applyRowStriping(prefix);
-            syncCardVisibility(prefix);
+            // Use API-based filtering instead of client-side
+            fetchDataFromAPI(prefix);
         }
         
         // Validate filter fields exist
@@ -1172,166 +1694,15 @@ def get_javascript():
         }
         
         function sortTable(prefix, columnIndex) {
-            const tableId = prefix + 'resultsTable';
-            const table = document.getElementById(tableId);
-            if (!table) return;
-            const tbody = table.querySelector('tbody');
-            const rows = Array.from(tbody.querySelectorAll('tr:not([style*="display: none"])'));
-            // Only select headers from the column-header-row (second row), not group headers
-            const headerRow = table.querySelector('tr.column-header-row');
-            const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
-            
-            initStateForPrefix(prefix);
-            
-            // Remove sort classes from all column headers
-            headers.forEach(h => {
-                h.classList.remove('sort-asc', 'sort-desc');
-            });
-            
-            // Determine sort direction
-            if (currentSortColumn[prefix] === columnIndex) {
-                sortDirection[prefix][columnIndex] = sortDirection[prefix][columnIndex] === 'asc' ? 'desc' : 'asc';
+            // Use API-based sorting instead of client-side
+            currentSortColumn[prefix] = columnIndex;
+            if (!sortDirection[prefix]) sortDirection[prefix] = {};
+            if (sortDirection[prefix][columnIndex] === 'asc') {
+                sortDirection[prefix][columnIndex] = 'desc';
             } else {
-                if (!sortDirection[prefix]) sortDirection[prefix] = {};
                 sortDirection[prefix][columnIndex] = 'asc';
-                currentSortColumn[prefix] = columnIndex;
             }
-            
-            // Add sort class to current header
-            if (headers[columnIndex]) {
-                headers[columnIndex].classList.add(sortDirection[prefix][columnIndex] === 'asc' ? 'sort-asc' : 'sort-desc');
-            }
-            
-            // Check if sorting by change_pct (renamed from price_with_change)
-            // We can sort directly using the data-raw attribute which contains the percentage value
-            // No need to find a separate column - the change_pct column itself has the percentage in data-raw
-            const currentHeader = headers[columnIndex];
-            const filterableName = currentHeader.getAttribute('data-filterable-name');
-            let sortColumnIndex = columnIndex;
-            // For change_pct column, we'll use its own data-raw attribute which contains the percentage
-            // The JavaScript sorting code below will automatically use data-raw if available
-            
-            // Check if this is a date column
-            // Note: latest_option_writets is NOT a date column - it's age in seconds (numeric)
-            const filterableLower = filterableName ? filterableName.toLowerCase() : '';
-            const isDateColumn = filterableLower && (
-                filterableLower.includes('expiration_date') ||
-                filterableLower.includes('exp_date') ||
-                (filterableLower.endsWith('_expiration_date') && !filterableLower.includes('latest_option_writets') && !filterableLower.includes('latest_opt_ts')) ||
-                (filterableLower.endsWith('_exp_date') && !filterableLower.includes('latest_option_writets') && !filterableLower.includes('latest_opt_ts')) ||
-                filterableLower === 'l_expiration_date' ||
-                filterableLower === 'long_expiration_date' ||
-                filterableLower === 'expiration_date'
-            );
-            
-            // Check if this is an age column (latest_option_writets - age in seconds)
-            const isAgeColumn = filterableLower && (
-                filterableLower.includes('latest_option_writets') ||
-                filterableLower.includes('latest_opt_ts') ||
-                filterableLower.endsWith('_writets')
-            );
-            
-            // Sort rows
-            rows.sort((a, b) => {
-                const aCell = a.cells[sortColumnIndex];
-                const bCell = b.cells[sortColumnIndex];
-                if (!aCell || !bCell) return 0;
-                
-                const aRaw = aCell.getAttribute('data-raw');
-                const bRaw = bCell.getAttribute('data-raw');
-                
-                let comparison = 0;
-                
-                // Handle age columns (latest_option_writets) - sort as numeric (smaller = more recent)
-                if (isAgeColumn) {
-                    // Age in seconds - smaller value = more recent
-                    let aNum = aRaw !== null ? parseFloat(aRaw) : NaN;
-                    let bNum = bRaw !== null ? parseFloat(bRaw) : NaN;
-                    
-                    if (isNaN(aNum)) {
-                        aNum = parseFloat(aCell.textContent.trim().replace(/[^0-9.-]/g, ''));
-                    }
-                    if (isNaN(bNum)) {
-                        bNum = parseFloat(bCell.textContent.trim().replace(/[^0-9.-]/g, ''));
-                    }
-                    
-                    if (!isNaN(aNum) && !isNaN(bNum)) {
-                        comparison = aNum - bNum;  // Smaller age = more recent
-                    } else if (isNaN(aNum) && !isNaN(bNum)) {
-                        comparison = 1; // a comes after b
-                    } else if (!isNaN(aNum) && isNaN(bNum)) {
-                        comparison = -1; // a comes before b
-                    } else {
-                        // Both are NaN, use text comparison
-                        const aText = aCell.textContent.trim();
-                        const bText = bCell.textContent.trim();
-                        comparison = aText.localeCompare(bText);
-                    }
-                }
-                // Handle date columns specially
-                else if (isDateColumn) {
-                    // For date columns, data-raw contains timestamp in milliseconds
-                    let aTimestamp = aRaw !== null ? parseFloat(aRaw) : NaN;
-                    let bTimestamp = bRaw !== null ? parseFloat(bRaw) : NaN;
-                    
-                    // If timestamp parsing fails, try to parse from text (YYYY-MM-DD format)
-                    if (isNaN(aTimestamp)) {
-                        const aText = aCell.textContent.trim();
-                        const aDate = new Date(aText);
-                        aTimestamp = isNaN(aDate.getTime()) ? NaN : aDate.getTime();
-                    }
-                    if (isNaN(bTimestamp)) {
-                        const bText = bCell.textContent.trim();
-                        const bDate = new Date(bText);
-                        bTimestamp = isNaN(bDate.getTime()) ? NaN : bDate.getTime();
-                    }
-                    
-                    if (!isNaN(aTimestamp) && !isNaN(bTimestamp)) {
-                        comparison = aTimestamp - bTimestamp;
-                    } else if (isNaN(aTimestamp) && !isNaN(bTimestamp)) {
-                        comparison = 1; // a comes after b
-                    } else if (!isNaN(aTimestamp) && isNaN(bTimestamp)) {
-                        comparison = -1; // a comes before b
-                    } else {
-                        // Both are NaN, use text comparison
-                        const aText = aCell.textContent.trim();
-                        const bText = bCell.textContent.trim();
-                        comparison = aText.localeCompare(bText);
-                    }
-                } else {
-                    // Regular numeric/text sorting
-                    let aNum = aRaw !== null ? parseFloat(aRaw) : NaN;
-                    let bNum = bRaw !== null ? parseFloat(bRaw) : NaN;
-                    
-                    if (isNaN(aNum)) {
-                        aNum = parseFloat(aCell.textContent.trim().replace(/[^0-9.-]/g, ''));
-                    }
-                    if (isNaN(bNum)) {
-                        bNum = parseFloat(bCell.textContent.trim().replace(/[^0-9.-]/g, ''));
-                    }
-                    
-                    if (!isNaN(aNum) && !isNaN(bNum)) {
-                        comparison = aNum - bNum;
-                    } else {
-                        const aText = aCell.textContent.trim();
-                        const bText = bCell.textContent.trim();
-                        comparison = aText.localeCompare(bText);
-                    }
-                }
-                
-                return sortDirection[prefix][columnIndex] === 'asc' ? comparison : -comparison;
-            });
-            
-            // Re-append sorted rows (only visible ones)
-            const hiddenRows = Array.from(tbody.querySelectorAll('tr[style*="display: none"]'));
-            rows.forEach(row => tbody.appendChild(row));
-            hiddenRows.forEach(row => tbody.appendChild(row));
-            
-            // Sync card order with table order
-            syncCardOrder(prefix);
-            
-            updateVisibleCount(prefix);
-            applyRowStriping(prefix);
+            fetchDataFromAPI(prefix);
         }
         
         // Sync card order with table row order
@@ -1368,21 +1739,41 @@ def get_javascript():
         // Tab switching functionality
         // CRITICAL FIX: Tab switching - only use CSS classes, no inline styles
         function switchTab(tabIndex) {
+            // Determine which tab is being switched to and fetch data if needed
             const tabContents = document.querySelectorAll('.tab-content');
-            tabContents.forEach((content, index) => {
-                content.classList.remove('active');
-                if (index === tabIndex) {
-                    content.classList.add('active');
+            const tabButtons = document.querySelectorAll('.tab-button');
+            
+            // Hide all tabs
+            tabContents.forEach((tab, idx) => {
+                tab.classList.remove('active');
+                if (tabButtons[idx]) {
+                    tabButtons[idx].classList.remove('active');
                 }
             });
             
-            const tabButtons = document.querySelectorAll('.tab-button');
-            tabButtons.forEach((button, index) => {
-                button.classList.remove('active');
-                if (index === tabIndex) {
-                    button.classList.add('active');
+            // Show selected tab
+            if (tabContents[tabIndex]) {
+                tabContents[tabIndex].classList.add('active');
+                if (tabButtons[tabIndex]) {
+                    tabButtons[tabIndex].classList.add('active');
                 }
-            });
+                
+                // Fetch data for the active tab
+                const activeTab = tabContents[tabIndex];
+                if (activeTab.id === 'callsTab') {
+                    fetchDataFromAPI('calls');
+                } else if (activeTab.id === 'putsTab') {
+                    fetchDataFromAPI('puts');
+                } else if (activeTab.id === 'analysisTab') {
+                    // Auto-load rule-based analysis when tab is clicked
+                    // User can then click button again with Gemini checkbox checked for AI analysis
+                    const useGeminiCheckbox = document.getElementById('useGeminiAnalysis');
+                    if (useGeminiCheckbox && !useGeminiCheckbox.checked) {
+                        // Only auto-load if Gemini is not checked (rule-based analysis)
+                        fetchAnalysisFromAPI();
+                    }
+                }
+            }
         }
         
         // Handle Enter key in filter input
@@ -1541,45 +1932,54 @@ def get_javascript():
                 
                 for (const filterStr of filterStrings) {
                     if (filterStr.trim()) {
+                        // Try to parse filter - tableId might not exist yet, but parseFilterExpression can handle that
                         const filter = parseFilterExpression(filterStr.trim(), tableId);
                         if (filter) {
-                            // Validate filter before adding
-                            const errors = validateFilter(filter, tableId);
-                            if (errors.length > 0) {
-                                validationErrors.push(...errors);
-                            } else {
-                                activeFilters[prefix].push(filter);
-                            }
+                            // When loading from URL, skip client-side validation since server will validate
+                            // Just add the filter - it will be validated when API is called
+                            activeFilters[prefix].push(filter);
+                        } else {
+                            // If parsing failed, log it but continue
+                            validationErrors.push(`Could not parse filter: ${filterStr.trim()}`);
                         }
                     }
                 }
                 
-                // Show validation errors if any
+                // Show validation errors if any (but don't block loading)
                 if (validationErrors.length > 0 && errorDiv) {
-                    errorDiv.textContent = 'Warning: Some filters from URL could not be loaded: ' + validationErrors.join(' ');
+                    errorDiv.textContent = 'Warning: Some filters from URL could not be parsed: ' + validationErrors.join(' ');
                     errorDiv.style.display = 'block';
+                    errorDiv.style.color = '#856404';
+                    errorDiv.style.backgroundColor = '#fff3cd';
                 }
                 
                 // If filters were loaded from URL, expand the filter section
+                // But only if the table exists (might not exist yet on initial load)
                 if (activeFilters[prefix].length > 0) {
-                    const filterSection = document.getElementById(prefix + 'filterSection');
-                    const button = document.getElementById(prefix + 'toggleFilterBtn');
-                    // Only show filterable names on column headers, not group headers
-                    const headerRow = document.querySelector('#' + tableId + ' tr.column-header-row');
-                    const headers = headerRow ? headerRow.querySelectorAll('th') : document.querySelectorAll('#' + tableId + ' th');
+                    // Delay expanding filter section until after data loads
+                    setTimeout(() => {
+                        const filterSection = document.getElementById(prefix + 'filterSection');
+                        const button = document.getElementById(prefix + 'toggleFilterBtn');
+                        const table = document.getElementById(tableId);
+                        if (table) {
+                            // Only show filterable names on column headers, not group headers
+                            const headerRow = table.querySelector('tr.column-header-row');
+                            const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
+                            
+                            if (filterSection && button) {
+                                filterSection.classList.add('expanded');
+                                headers.forEach(th => {
+                                    th.classList.add('showing-filterable');
+                                });
+                                button.textContent = '✖️ Hide Filter';
+                                button.title = 'Hide filter options and show display column names';
+                            }
+                        }
+                    }, 500); // Increased delay to ensure table is rendered
                     
-                    if (filterSection && button) {
-                        filterSection.classList.add('expanded');
-                        headers.forEach(th => {
-                            th.classList.add('showing-filterable');
-                        });
-                        button.textContent = '✖️ Hide Filter';
-                        button.title = 'Hide filter options and show display column names';
-                    }
+                    // Update filter display immediately
+                    updateFilterDisplay(prefix);
                 }
-                
-                updateFilterDisplay(prefix);
-                applyFilters(prefix);
             }
         }
         
@@ -1715,24 +2115,21 @@ def get_javascript():
             }
         }
         
-        // Initialize
+            // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             // Initialize state for both prefixes
             initStateForPrefix('calls');
             initStateForPrefix('puts');
             
-            switchTab(0);
+            // Load filters from URL first (before fetching data)
+            loadFiltersFromURL();
             
-            // Initialize column maps for both tables
-            initColumnMap('calls');
-            initColumnMap('puts');
+            // Fetch data from API for active tab
+            switchTab(0);
             
             // Update filter displays
             updateFilterDisplay('calls');
             updateFilterDisplay('puts');
-            
-            // Load filters from URL
-            loadFiltersFromURL();
             
             updateTimeAgo(); // Update time ago on page load
             // Update time ago every minute
@@ -1756,19 +2153,23 @@ def get_javascript():
                     }
                 }
                 
-                // Apply initial row and column striping
-                applyRowStriping(prefix);
-                applyColumnStriping(prefix);
-                
-                // Sync card visibility on load
-                syncCardVisibility(prefix);
-                
-                // Default sort by net_premium descending
-                const netPremiumColIndex = findColumnIndex('net_premium', prefix + 'resultsTable');
-                if (netPremiumColIndex >= 0) {
-                    // Call sortTable twice: first sets to asc, second toggles to desc
-                    sortTable(prefix, netPremiumColIndex);
-                    sortTable(prefix, netPremiumColIndex);
+                // Default sort by net_daily_premi descending (will be applied via API)
+                // Set initial sort state
+                const tableId = prefix + 'resultsTable';
+                const table = document.getElementById(tableId);
+                if (table) {
+                    const headerRow = table.querySelector('tr.column-header-row');
+                    const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
+                    headers.forEach((th, idx) => {
+                        const colName = th.getAttribute('data-filterable-name') || th.textContent.trim();
+                        if (colName.toLowerCase().includes('net_daily_premi') || colName.toLowerCase().includes('net_daily_premium')) {
+                            currentSortColumn[prefix] = idx;
+                            if (!sortDirection[prefix]) sortDirection[prefix] = {};
+                            sortDirection[prefix][idx] = 'desc';
+                            // Add sort class to header
+                            th.classList.add('sort-desc');
+                        }
+                    });
                 }
             });
         });

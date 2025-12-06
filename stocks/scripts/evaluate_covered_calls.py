@@ -762,7 +762,17 @@ Examples:
                 print(f"[CACHE WARMUP] Database server: {args.db_server_host}:{args.db_server_port}", file=sys.stderr)
                 print(f"[CACHE WARMUP] HTTP endpoint pattern: {warmup_url}", file=sys.stderr)
                 
-                generate_html_output(df, args.output_dir, db_server_host=args.db_server_host, db_server_port=args.db_server_port)
+                # Determine CSV source (file path or URL)
+                # Use the file path if provided, otherwise default location
+                csv_source = file_path if file_path and file_path != '-' else str(Path.home() / "Downloads" / "results.csv")
+                
+                generate_html_output(
+                    df, 
+                    args.output_dir, 
+                    db_server_host=args.db_server_host, 
+                    db_server_port=args.db_server_port,
+                    csv_source=csv_source
+                )
                 logger.info(f"HTML output generated successfully in {args.output_dir}")
             except Exception as e:
                 logger.error(f"Error generating HTML output: {e}")

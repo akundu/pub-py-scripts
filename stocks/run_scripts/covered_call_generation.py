@@ -21,6 +21,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from common.market_hours import compute_market_transition_times, is_market_hours as common_is_market_hours  # noqa: E402
+from common.gemini_analysis import run_gemini_analysis_on_file, DEFAULT_GEMINI_INSTRUCTION  # noqa: E402
 TMP_DIR = Path("/tmp")
 
 STORE_DIR_DEFAULT = Path("/Users/akundu/programs/http-proxy/static/")
@@ -65,22 +66,8 @@ DEFAULT_SLEEP_SECONDS = 300
 MAX_OFF_HOURS_SLEEP = 3600
 MIN_OFF_HOURS_SLEEP = 3600
 
-GEMINI_INSTRUCTION = (
-    "given the provided file of spread option trades possible, choose the 5 best set "
-    "(based on realism of possibility of it happening) of dealing with risk and being "
-    "aggressive and being conservative. focus on the intrinsic characteristics of each "
-    "spread (strike prices, premiums, days to expiry and theta and delta), the underlying "
-    "stock's volatility and market cap, and the reported net_daily_premi as an indicator "
-    "of potential theta gain/loss. assume these represent **calendar spreads**, where you "
-    "sell the shorter-dated option and buy the longer-dated option of the same type. the "
-    "net cost (debit) per share is generally (long leg premium - short leg premium). a "
-    "positive net_daily_premi suggests a theoretical daily gain from time decay. also, "
-    "use the short_daily_premium in the analysis. make sure to only pick realistic "
-    "situations of being able to procure those things. also, give me 3 examples of risky "
-    "and 3 examples of conservative choices. Write the responses in a HTML form that I "
-    "can save to a .html file. make sure to cover the examples of 3 per put spread and "
-    "call spread."
-)
+# Use the default instruction from common module
+GEMINI_INSTRUCTION = DEFAULT_GEMINI_INSTRUCTION
 
 
 def parse_args() -> argparse.Namespace:
@@ -93,6 +80,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-cache", action="store_true", help="Forward --no-cache to options_analyzer.")
     parser.add_argument("--db-server-host", type=str, default="mm.kundu.dev", help="Database server hostname for cache warmup (default: mm.kundu.dev).")
     parser.add_argument("--db-server-port", type=int, default=9100, help="Database server port for cache warmup (default: 9100).")
+    parser.add_argument("--output-file", type=str, default="", help=f"Path to output CSV file (default: {DOWNLOAD_LOC_DEFAULT}).")
+    parser.add_argument("--html-output-dir", type=str, default="", help=f"Directory for HTML output (default: {TMP_DIR / OUTPUT_DIR_NAME}).")
     
     execution_group = parser.add_mutually_exclusive_group()
     execution_group.add_argument(
@@ -171,56 +160,40 @@ def run_gemini_analysis(
     cooldown_seconds: int,
     last_run_file: Path,
 ) -> None:
+    """Run Gemini analysis using the common module.
+    
+    This is a wrapper around the common.gemini_analysis.run_gemini_analysis_on_file function
+    that maintains backward compatibility with the existing interface.
+    """
     print("Running Gemini analysis...", file=sys.stderr, flush=True)
-    if not market_hours and not force_run:
-        print("Skipping Gemini analysis: outside market hours", file=sys.stderr, flush=True)
-        return
-
-    current_epoch = int(time.time())
-    last_epoch = 0
-    if last_run_file.exists():
-        try:
-            last_epoch = int(last_run_file.read_text().strip() or "0")
-        except ValueError:
-            last_epoch = 0
-
-    if not force_run and current_epoch - last_epoch < cooldown_seconds:
-        remaining = cooldown_seconds - (current_epoch - last_epoch)
-        print(f"Skipping Gemini analysis: ran recently ({remaining}s remaining on cooldown)", file=sys.stderr, flush=True)
-        return
-
-    analysis_outputs: list[Path] = []
-    for opt_type in ("call", "put"):
-        subset_file = input_file.with_suffix(input_file.suffix + f".{opt_type}")
-        try:
-            write_subset_file(input_file, subset_file, opt_type)
-        except FileNotFoundError:
-            print(f"Input file not found for Gemini analysis: {input_file}", file=sys.stderr, flush=True)
-            return
-
-        html_output = TMP_DIR / f"{ANALYSIS_FILE_BASENAME}.{opt_type}.html"
-        analysis_outputs.append(html_output)
-        command = [
-            sys.executable,
-            str(GEMINI_PROG),
-            "--instruction",
-            GEMINI_INSTRUCTION,
-            "--file",
-            str(subset_file),
-        ]
-        print(f"Executing: {' '.join(command)}", file=sys.stderr, flush=True)
-        with html_output.open("w", encoding="utf-8") as handle:
-            result = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT, cwd=str(BASE_DIR))
-        print(f"Gemini analysis ({opt_type}) completed with result = {result.returncode}", file=sys.stderr, flush=True)
-
-    last_run_file.write_text(str(current_epoch), encoding="utf-8")
-
+    
+    # Determine output directory
+    if store_dir and output_dir_name:
+        output_dir = store_dir / output_dir_name
+    else:
+        output_dir = TMP_DIR
+    
+    # Use the common function
+    analysis_outputs = run_gemini_analysis_on_file(
+        input_file=input_file,
+        output_dir=output_dir,
+        instruction=GEMINI_INSTRUCTION,
+        gemini_prog=GEMINI_PROG,
+        base_dir=BASE_DIR,
+        force_run=force_run,
+        market_hours=market_hours,
+        cooldown_seconds=cooldown_seconds,
+        last_run_file=last_run_file,
+    )
+    
+    # Copy outputs to final destination if needed
     if store_dir and output_dir_name:
         dest_dir = store_dir / output_dir_name
         ensure_dir(dest_dir)
-        for output in analysis_outputs:
-            if output.exists():
-                shutil.copy(output, dest_dir / output.name)
+        for opt_type, output_path in analysis_outputs.items():
+            if output_path.exists():
+                final_name = f"{ANALYSIS_FILE_BASENAME}.{opt_type}.html"
+                shutil.copy(output_path, dest_dir / final_name)
 
 
 def build_options_analyzer_command(
@@ -372,8 +345,11 @@ def run_loop(
     off_hours_lookback_seconds: int,
     db_server_host: str,
     db_server_port: int,
+    output_file: Path | None = None,
+    html_output_dir: Path | None = None,
 ) -> None:
-    download_loc = DOWNLOAD_LOC_DEFAULT
+    download_loc = output_file if output_file else DOWNLOAD_LOC_DEFAULT
+    html_output_path = html_output_dir if html_output_dir else (TMP_DIR / OUTPUT_DIR_NAME)
     store_dir = gemini_store_dir
 
     if gemini_only:
@@ -460,7 +436,7 @@ def run_loop(
                 str(download_loc),
                 "--html",
                 "--output-dir",
-                str(TMP_DIR / OUTPUT_DIR_NAME),
+                str(html_output_path),
                 "--db-server-host",
                 str(db_server_host),
                 "--db-server-port",
@@ -473,7 +449,7 @@ def run_loop(
                 dest_dir = store_dir / OUTPUT_DIR_NAME
                 shutil.rmtree(dest_dir, ignore_errors=True)
                 try:
-                    shutil.move(str(TMP_DIR / OUTPUT_DIR_NAME), dest_dir)
+                    shutil.move(str(html_output_path), dest_dir)
                     print(f"Moved results to {dest_dir}", file=sys.stderr, flush=True)
                 except FileNotFoundError:
                     print("Temporary output directory missing; skipping move.", file=sys.stderr, flush=True)
@@ -517,6 +493,8 @@ def main() -> None:
     gemini_input_file = Path(args.gemini_input_file or DOWNLOAD_LOC_DEFAULT)
     gemini_output_dir = args.gemini_output_dir or OUTPUT_DIR_NAME
     gemini_store_dir = Path(os.path.expanduser(args.gemini_store_dir or STORE_DIR_DEFAULT))
+    output_file = Path(args.output_file) if args.output_file else None
+    html_output_dir = Path(args.html_output_dir) if args.html_output_dir else None
 
     ensure_dir(gemini_store_dir)
 
@@ -552,6 +530,8 @@ def main() -> None:
         off_hours_lookback_seconds=args.off_hours_lookback_seconds,
         db_server_host=args.db_server_host,
         db_server_port=args.db_server_port,
+        output_file=output_file,
+        html_output_dir=html_output_dir,
     )
 
 
