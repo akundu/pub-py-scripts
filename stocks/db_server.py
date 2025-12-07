@@ -858,7 +858,7 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
 
 # Custom Formatter to handle different log record types
 class RequestFormatter(logging.Formatter):
-    access_log_format = "%(asctime)s [PID: %(process)d] [%(levelname)s] %(client_ip)s - \"%(request_line)s\" %(status_code)s %(response_size)s \"%(user_agent)s\" - %(message)s"
+    access_log_format = "%(asctime)s [PID: %(process)d] [%(levelname)s] %(client_ip)s - \"%(request_line)s\" %(status_code)s %(response_size)s \"%(user_agent)s\" %(duration_ms)s - %(message)s"
     basic_log_format = "%(asctime)s [PID: %(process)d] [%(levelname)s] - %(message)s"
 
     def __init__(self):
@@ -868,6 +868,12 @@ class RequestFormatter(logging.Formatter):
         # Check if request-specific fields are present
         if hasattr(record, 'client_ip'):
             self._style._fmt = self.access_log_format
+            # Ensure duration_ms is set (default to 0 if not present)
+            if not hasattr(record, 'duration_ms'):
+                record.duration_ms = 0
+            # Format duration_ms as string with "ms" suffix
+            if hasattr(record, 'duration_ms'):
+                record.duration_ms = f"{record.duration_ms:.0f}ms"
         else:
             self._style._fmt = self.basic_log_format
         
@@ -885,6 +891,12 @@ class RequestFormatter(logging.Formatter):
         # Choose format based on record attributes
         if hasattr(record, 'client_ip'):
             self._style._fmt = self.access_log_format
+            # Ensure duration_ms is set (default to 0 if not present)
+            if not hasattr(record, 'duration_ms'):
+                record.duration_ms = "0ms"
+            # Format duration_ms as string with "ms" suffix if it's a number
+            elif isinstance(record.duration_ms, (int, float)):
+                record.duration_ms = f"{record.duration_ms:.0f}ms"
         else:
             self._style._fmt = self.basic_log_format
         
@@ -1271,6 +1283,12 @@ def initialize_database(db_file_path: str, log_level: str = "INFO", questdb_conn
 def setup_logging(log_file: str | None = None, log_level_str: str = "INFO"):
     """Configures logging to stdout and optionally to a file."""
     log_level = getattr(logging, log_level_str.upper(), logging.INFO)
+    
+    # Set root logger level so all child loggers inherit it
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    
+    # Also set level on the module logger
     logger.setLevel(log_level)
     
     # Use the custom formatter
@@ -1278,8 +1296,12 @@ def setup_logging(log_file: str | None = None, log_level_str: str = "INFO"):
 
     # Console Handler
     console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
     console_handler.setFormatter(custom_formatter) 
-    logger.addHandler(console_handler)
+    root_logger.addHandler(console_handler)
+    # Also add to module logger if it doesn't have handlers
+    if not logger.handlers:
+        logger.addHandler(console_handler)
 
     if log_file:
         # File Handler - Rotate logs, 5MB per file, keep 5 backups
@@ -1346,6 +1368,9 @@ def setup_child_process_logging(worker_id: int, log_level_str: str = "INFO"):
 @web.middleware
 async def logging_middleware(request: web.Request, handler):
     """Middleware to log access requests."""
+    import time
+    start_time = time.time()
+    
     peername = request.transport.get_extra_info('peername')
     client_ip = peername[0] if peername else "Unknown"
     user_agent = request.headers.get("User-Agent", "Unknown")
@@ -1356,7 +1381,8 @@ async def logging_middleware(request: web.Request, handler):
         "request_line": request_line,
         "user_agent": user_agent,
         "status_code": 0, # Default
-        "response_size": 0 # Default
+        "response_size": 0, # Default
+        "duration_ms": 0 # Default
     }
 
     # Check if access logging is enabled
@@ -1364,41 +1390,47 @@ async def logging_middleware(request: web.Request, handler):
 
     try:
         response = await handler(request)
+        duration_ms = (time.time() - start_time) * 1000  # Convert to milliseconds
         extra_log_info["status_code"] = response.status
         extra_log_info["response_size"] = response.body_length if hasattr(response, 'body_length') else len(response.body) if response.body else 0
+        extra_log_info["duration_ms"] = duration_ms
         
         # Log based on access log setting
         if enable_access_log:
-            # Full access logging when enabled
-            access_log_msg = f"Access: {client_ip} - \"{request_line}\" {response.status} {extra_log_info['response_size']} \"{user_agent}\""
+            # Full access logging when enabled - include duration in milliseconds
+            access_log_msg = f"Access: {client_ip} - \"{request_line}\" {response.status} {extra_log_info['response_size']} \"{user_agent}\" {duration_ms:.0f}ms"
             logger.warning(f"ACCESS: {access_log_msg}")
         else:
             # Reduced logging for health checks and static resources
             if request.path in ["/", "/health", "/healthz", "/ready", "/live"] or request.path.endswith(('.js', '.css', '.ico', '.png', '.jpg', '.jpeg', '.gif')):
-                logger.warning(f"Request handled for {request.path}", extra=extra_log_info)
+                logger.warning(f"Request handled for {request.path} ({duration_ms:.0f}ms)", extra=extra_log_info)
             else:
-                logger.warning(f"Request handled for {request.path}", extra=extra_log_info)
+                logger.warning(f"Request handled for {request.path} ({duration_ms:.0f}ms)", extra=extra_log_info)
         return response
     except web.HTTPException as ex: # Catch HTTP exceptions to log them correctly
+        duration_ms = (time.time() - start_time) * 1000
         extra_log_info["status_code"] = ex.status_code
         extra_log_info["response_size"] = ex.body.tell() if ex.body and hasattr(ex.body, 'tell') else (len(ex.body) if ex.body else 0)
+        extra_log_info["duration_ms"] = duration_ms
         
         # Log based on access log setting
         if enable_access_log:
-            logger.error(f"Access: {client_ip} - \"{request_line}\" {ex.status_code} {extra_log_info['response_size']} \"{user_agent}\" - {ex.reason}", extra=extra_log_info, exc_info=False)
+            logger.error(f"Access: {client_ip} - \"{request_line}\" {ex.status_code} {extra_log_info['response_size']} \"{user_agent}\" {duration_ms:.0f}ms - {ex.reason}", extra=extra_log_info, exc_info=False)
         else:
             # Reduced logging for health checks and static resources
             if request.path in ["/", "/health", "/healthz", "/ready", "/live"] or request.path.endswith(('.js', '.css', '.ico', '.png', '.jpg', '.jpeg', '.gif')):
-                logger.warning(f"HTTP Exception: {ex.reason}", extra=extra_log_info, exc_info=False)
+                logger.warning(f"HTTP Exception: {ex.reason} ({duration_ms:.0f}ms)", extra=extra_log_info, exc_info=False)
             else:
-                logger.error(f"HTTP Exception: {ex.reason}", extra=extra_log_info, exc_info=False)
+                logger.error(f"HTTP Exception: {ex.reason} ({duration_ms:.0f}ms)", extra=extra_log_info, exc_info=False)
         raise
     except Exception as e: # Catch all other exceptions
+        duration_ms = (time.time() - start_time) * 1000
         extra_log_info["status_code"] = 500
+        extra_log_info["duration_ms"] = duration_ms
         if enable_access_log:
-            logger.error(f"Access: {client_ip} - \"{request_line}\" 500 0 \"{user_agent}\" - Unhandled exception: {str(e)}", extra=extra_log_info, exc_info=True)
+            logger.error(f"Access: {client_ip} - \"{request_line}\" 500 0 \"{user_agent}\" {duration_ms:.0f}ms - Unhandled exception: {str(e)}", extra=extra_log_info, exc_info=True)
         else:
-            logger.error(f"Unhandled exception during request: {str(e)}", extra=extra_log_info, exc_info=True)
+            logger.error(f"Unhandled exception during request: {str(e)} ({duration_ms:.0f}ms)", extra=extra_log_info, exc_info=True)
         raise
 
 async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
@@ -2235,22 +2267,42 @@ async def handle_covered_calls_analysis(request: web.Request) -> web.Response:
                     content_type='text/html'
                 )
         elif calls_filters_str or puts_filters_str:
-            filter_str = ''
-            if option_type == 'call' and calls_filters_str:
-                filter_str = calls_filters_str
-                filter_logic = calls_filter_logic
-            elif option_type == 'put' and puts_filters_str:
-                filter_str = puts_filters_str
-                filter_logic = puts_filter_logic
-            elif calls_filters_str:
-                filter_str = calls_filters_str
-                filter_logic = calls_filter_logic
-            elif puts_filters_str:
-                filter_str = puts_filters_str
-                filter_logic = puts_filter_logic
-            
-            if filter_str:
-                filters = _parse_filter_strings(filter_str)
+            # When option_type is 'all' and both filters are provided, we need to handle them separately
+            # Otherwise, use the appropriate filter based on option_type
+            if option_type == 'all' and calls_filters_str and puts_filters_str:
+                # Special case: apply filters separately to calls and puts, then combine
+                # We'll handle this after loading the DataFrame
+                filters = None  # Will be handled separately
+                calls_filters_parsed = _parse_filter_strings(calls_filters_str)
+                puts_filters_parsed = _parse_filter_strings(puts_filters_str)
+                logger.info(f"[GEMINI] option_type='all' with both calls_filters and puts_filters - will apply separately")
+            else:
+                # Single filter case
+                filter_str = ''
+                if option_type == 'call' and calls_filters_str:
+                    filter_str = calls_filters_str
+                    filter_logic = calls_filter_logic
+                elif option_type == 'put' and puts_filters_str:
+                    filter_str = puts_filters_str
+                    filter_logic = puts_filter_logic
+                elif calls_filters_str:
+                    filter_str = calls_filters_str
+                    filter_logic = calls_filter_logic
+                elif puts_filters_str:
+                    filter_str = puts_filters_str
+                    filter_logic = puts_filter_logic
+                
+                if filter_str:
+                    filters = _parse_filter_strings(filter_str)
+                    calls_filters_parsed = None
+                    puts_filters_parsed = None
+                else:
+                    calls_filters_parsed = None
+                    puts_filters_parsed = None
+        else:
+            filters = None
+            calls_filters_parsed = None
+            puts_filters_parsed = None
         
         # Load and cache CSV data (reuse same logic as data endpoint)
         cache_key = source
@@ -2324,8 +2376,34 @@ async def handle_covered_calls_analysis(request: web.Request) -> web.Response:
         if option_type != 'all' and 'option_type' in df.columns:
             df = df[df['option_type'].str.lower() == option_type].copy()
         
-        # Apply filters
-        if filters:
+        # Apply filters - handle separate calls/puts filters when option_type='all'
+        if option_type == 'all' and calls_filters_parsed is not None and puts_filters_parsed is not None:
+            # Apply filters separately to calls and puts, then combine
+            logger.info(f"[GEMINI] Applying filters separately: calls_filters ({len(calls_filters_parsed)} filters), puts_filters ({len(puts_filters_parsed)} filters)")
+            logger.debug(f"[GEMINI] DataFrame before filtering: {len(df)} rows")
+            if 'option_type' in df.columns:
+                # Split into calls and puts
+                df_calls = df[df['option_type'].str.lower() == 'call'].copy()
+                df_puts = df[df['option_type'].str.lower() == 'put'].copy()
+                logger.debug(f"[GEMINI] Split DataFrame: {len(df_calls)} calls, {len(df_puts)} puts")
+                
+                # Apply filters separately
+                if len(df_calls) > 0 and calls_filters_parsed:
+                    df_calls = _apply_filters(df_calls, calls_filters_parsed, calls_filter_logic)
+                    logger.debug(f"[GEMINI] After calls_filters: {len(df_calls)} calls remain")
+                
+                if len(df_puts) > 0 and puts_filters_parsed:
+                    df_puts = _apply_filters(df_puts, puts_filters_parsed, puts_filter_logic)
+                    logger.debug(f"[GEMINI] After puts_filters: {len(df_puts)} puts remain")
+                
+                # Combine back
+                df = pd.concat([df_calls, df_puts], ignore_index=True)
+                logger.info(f"[GEMINI] Combined filtered DataFrame: {len(df)} rows ({len(df_calls)} calls + {len(df_puts)} puts)")
+            else:
+                logger.warning(f"[GEMINI] No 'option_type' column found, applying calls_filters to entire DataFrame")
+                if calls_filters_parsed:
+                    df = _apply_filters(df, calls_filters_parsed, calls_filter_logic)
+        elif filters:
             df = _apply_filters(df, filters, filter_logic)
         
         # Convert to display format for analysis (normalized column names)
@@ -2353,19 +2431,34 @@ async def handle_covered_calls_analysis(request: web.Request) -> web.Response:
                 # Determine which option types to analyze
                 option_types = []
                 if option_type == 'all':
-                    # Check what option types are in the filtered data
+                    # When option_type is 'all', always try to analyze both call and put
+                    # Check what option types are actually in the filtered data
+                    has_call_data = False
+                    has_put_data = False
+                    
                     if 'option_type' in df.columns:
                         unique_types = df['option_type'].str.lower().unique()
-                        if 'call' in unique_types:
-                            option_types.append('call')
-                        if 'put' in unique_types:
-                            option_types.append('put')
+                        has_call_data = 'call' in unique_types
+                        has_put_data = 'put' in unique_types
+                        logger.info(f"[GEMINI] Found option types in data: {unique_types.tolist()}")
                     else:
-                        option_types = ['call', 'put']  # Default to both
+                        # If no option_type column, check if we have separate call/put filters
+                        # or default to analyzing both (will show error if no data)
+                        logger.warning(f"[GEMINI] No 'option_type' column found in DataFrame. Columns: {df.columns.tolist()}")
+                        # Default to both - the analysis function will handle empty data gracefully
+                        has_call_data = True  # Assume we should try
+                        has_put_data = True   # Assume we should try
+                    
+                    # Always add both types when option_type='all', even if one has no data
+                    # This ensures both sections appear in the output
+                    option_types = ['call', 'put']
+                    logger.info(f"[GEMINI] Will analyze both call and put (call data: {has_call_data}, put data: {has_put_data})")
                 else:
                     option_types = [option_type]
                 
                 logger.info(f"[GEMINI] Will analyze option types: {option_types}, filtered data rows: {len(df)}")
+                if 'option_type' in df.columns:
+                    logger.info(f"[GEMINI] Option type distribution: {df['option_type'].value_counts().to_dict()}")
                 logger.debug(f"[GEMINI] Starting Gemini AI analysis for option types: {option_types}, filtered data rows: {len(df)}")
                 
                 # Run Gemini analysis
@@ -2405,17 +2498,49 @@ async def handle_covered_calls_analysis(request: web.Request) -> web.Response:
                 logger.debug(f"[GEMINI] Gemini AI analysis completed in {elapsed_time:.2f} seconds. Generated analysis for: {list(gemini_results.keys())}")
                 
                 # Combine results into HTML
+                logger.info(f"[GEMINI] ===== Combining results into final HTML =====")
+                logger.debug(f"[GEMINI] Received results dictionary with keys: {list(gemini_results.keys())}")
+                for key, value in gemini_results.items():
+                    logger.debug(f"[GEMINI]   Result[{key}]: {len(value)} chars, starts with: {value[:50] if value else 'EMPTY'}...")
+                
                 html_parts = ['<div class="detailed-analysis">']
                 html_parts.append('<h2>📊 COMPREHENSIVE ANALYSIS: GEMINI AI ANALYSIS</h2>')
                 
-                for opt_type, html_content in gemini_results.items():
-                    html_parts.append(f'<div class="analysis-section">')
-                    html_parts.append(f'<h3>{opt_type.upper()} SPREADS</h3>')
-                    html_parts.append(html_content)
-                    html_parts.append('</div>')
+                # Ensure we show results in a consistent order: call first, then put
+                # This ensures both sections appear even if one failed or has no data
+                expected_order = ['call', 'put'] if option_type == 'all' else option_types
+                
+                logger.info(f"[GEMINI] Combining results. Expected order: {expected_order}, Available results: {list(gemini_results.keys())}")
+                logger.debug(f"[GEMINI] Will combine in order: {expected_order}")
+                
+                for opt_type in expected_order:
+                    logger.debug(f"[GEMINI] Processing {opt_type} section...")
+                    if opt_type in gemini_results:
+                        logger.debug(f"[GEMINI]   ✓ Found {opt_type} result, adding to HTML")
+                        html_parts.append(f'<div class="analysis-section">')
+                        html_parts.append(f'<h3>{opt_type.upper()} SPREADS</h3>')
+                        html_parts.append(gemini_results[opt_type])
+                        html_parts.append('</div>')
+                        logger.debug(f"[GEMINI]   Added {opt_type} section ({len(gemini_results[opt_type])} chars)")
+                    else:
+                        # If a result is missing, add a placeholder
+                        logger.warning(f"[GEMINI]   ✗ Missing result for {opt_type}, adding placeholder")
+                        html_parts.append(f'<div class="analysis-section">')
+                        html_parts.append(f'<h3>{opt_type.upper()} SPREADS</h3>')
+                        html_parts.append(f'<div class="error">No {opt_type} analysis available. This may be because there was no {opt_type} data in the filtered results, or the analysis failed.</div>')
+                        html_parts.append('</div>')
+                        logger.debug(f"[GEMINI]   Added placeholder for missing {opt_type} section")
                 
                 html_parts.append('</div>')
                 html_content = '\n'.join(html_parts)
+                
+                logger.info(f"[GEMINI] Combined HTML content length: {len(html_content)} characters")
+                logger.debug(f"[GEMINI] Final HTML contains {len(html_parts)} parts")
+                if logger.isEnabledFor(logging.DEBUG):
+                    # Count sections in final HTML
+                    call_sections = html_content.count('CALL SPREADS')
+                    put_sections = html_content.count('PUT SPREADS')
+                    logger.debug(f"[GEMINI] Final HTML contains {call_sections} CALL section(s) and {put_sections} PUT section(s)")
                 
             except Exception as e:
                 logger.error(f"[GEMINI] Error running Gemini analysis: {e}")

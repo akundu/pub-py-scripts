@@ -6,18 +6,23 @@ either from CSV files or pandas DataFrames.
 """
 
 import html as html_escape
-import html as html_escape
 import logging
+import os
 import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 
+# Get logger - ensure it inherits from root logger to get log level
 logger = logging.getLogger(__name__)
+# Ensure logger level propagates from root logger
+logger.setLevel(logging.NOTSET)  # NOTSET means inherit from parent
 
 # Default Gemini instruction for spread option analysis
 DEFAULT_GEMINI_INSTRUCTION = (
@@ -43,7 +48,7 @@ def run_gemini_analysis_on_dataframe(
     instruction: str = DEFAULT_GEMINI_INSTRUCTION,
     gemini_prog: Optional[Path] = None,
     base_dir: Optional[Path] = None,
-    model_alias: str = "flash",
+    model_alias: str = "gemini-3",
     option_types: Optional[list[str]] = None,
 ) -> dict[str, str]:
     """
@@ -54,7 +59,7 @@ def run_gemini_analysis_on_dataframe(
         instruction: Custom instruction for Gemini AI (default: DEFAULT_GEMINI_INSTRUCTION)
         gemini_prog: Path to gemini_test.py script (default: tests/gemini_test.py relative to base_dir)
         base_dir: Base directory for resolving gemini_prog path (default: current working directory)
-        model_alias: Gemini model alias to use ('flash', 'pro', 'flash-lite')
+        model_alias: Gemini model alias to use ('flash', 'pro', 'flash-lite', 'gemini-3')
         option_types: List of option types to analyze (default: ['call', 'put'])
     
     Returns:
@@ -75,23 +80,101 @@ def run_gemini_analysis_on_dataframe(
     
     results = {}
     
-    # Filter DataFrame by option type and run analysis for each
-    for opt_type in option_types:
+    logger.info(f"[GEMINI] Starting analysis for {len(option_types)} option types: {option_types}")
+    logger.info(f"[GEMINI] Input DataFrame shape: {df.shape}, columns: {list(df.columns)}")
+    if 'option_type' in df.columns:
+        value_counts = df['option_type'].value_counts()
+        logger.info(f"[GEMINI] Option type distribution in input DataFrame:")
+        for opt_type_val, count in value_counts.items():
+            logger.info(f"[GEMINI]   '{opt_type_val}': {count} rows")
+        logger.debug(f"[GEMINI] Option type distribution (dict): {value_counts.to_dict()}")
+        
+        # Check for case variations
+        unique_lower = df['option_type'].str.lower().unique()
+        logger.debug(f"[GEMINI] Unique option_type values (lowercase): {unique_lower.tolist()}")
+    else:
+        logger.warning(f"[GEMINI] WARNING: 'option_type' column NOT found in DataFrame!")
+        logger.warning(f"[GEMINI] Available columns: {list(df.columns)}")
+    
+    def run_single_analysis(opt_type: str) -> tuple[str, str]:
+        """Run Gemini analysis for a single option type. Returns (opt_type, html_content_or_error)."""
+        logger.info(f"[GEMINI] ===== Processing {opt_type.upper()} analysis (parallel) =====")
+        logger.debug(f"[GEMINI] Filtering DataFrame for {opt_type} option type...")
+        logger.debug(f"[GEMINI] Input DataFrame shape: {df.shape}, columns: {list(df.columns)}")
+        
         # Filter DataFrame for this option type
         if 'option_type' in df.columns:
+            # Show what unique values exist in option_type column
+            unique_option_types = df['option_type'].str.lower().unique()
+            logger.info(f"[GEMINI] Unique option_type values in DataFrame: {unique_option_types.tolist()}")
+            logger.debug(f"[GEMINI] Looking for option_type == '{opt_type.lower()}' (case-insensitive)")
+            
+            # Filter with case-insensitive comparison
             df_filtered = df[df['option_type'].str.lower() == opt_type.lower()].copy()
+            
+            logger.info(f"[GEMINI] Filtered DataFrame: {len(df_filtered)} rows for {opt_type} (out of {len(df)} total rows)")
+            logger.debug(f"[GEMINI] Filter mask applied: {df['option_type'].str.lower() == opt_type.lower()}")
+            
+            # Show sample of what was filtered
+            if len(df_filtered) > 0:
+                logger.debug(f"[GEMINI] Sample of filtered {opt_type} data (first 3 rows):")
+                for idx, row in df_filtered.head(3).iterrows():
+                    logger.debug(f"[GEMINI]   Row {idx}: option_type='{row.get('option_type', 'N/A')}', ticker='{row.get('ticker', 'N/A')}'")
+            else:
+                # Show what option_type values actually exist
+                logger.warning(f"[GEMINI] No rows match {opt_type}! Showing option_type value counts:")
+                value_counts = df['option_type'].value_counts()
+                for opt_val, count in value_counts.items():
+                    logger.warning(f"[GEMINI]   '{opt_val}': {count} rows")
         else:
             # If no option_type column, assume all rows are of this type
+            logger.warning(f"[GEMINI] No 'option_type' column found, using all {len(df)} rows for {opt_type} analysis")
+            logger.warning(f"[GEMINI] DataFrame columns: {list(df.columns)}")
             df_filtered = df.copy()
         
         if len(df_filtered) == 0:
-            logger.warning(f"No data found for option type: {opt_type}")
-            results[opt_type] = f"<div class='error'>No {opt_type} data available for analysis.</div>"
-            continue
+            logger.error(f"[GEMINI] No data found for option type: {opt_type}")
+            logger.error(f"[GEMINI] This means the filtered DataFrame is empty. Check option_type column values.")
+            error_html = f"<div class='error'>No {opt_type} data available for analysis.</div>"
+            logger.debug(f"[GEMINI] Added error placeholder for {opt_type} to results")
+            return (opt_type, error_html)
         
-        # Write DataFrame to temporary CSV file
+        # Create a temporary directory for saving input files for inspection
+        # Save to a location that persists for debugging
+        debug_temp_dir = Path(tempfile.gettempdir()) / "gemini_analysis_debug"
+        debug_temp_dir.mkdir(exist_ok=True)
+        
+        # Create a timestamped filename for inspection
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        debug_file = debug_temp_dir / f"input_{opt_type}_{timestamp}.csv"
+        
+        # Also save a copy for debugging BEFORE writing to temp file
+        try:
+            df_filtered.to_csv(debug_file, index=False)
+            logger.info(f"[GEMINI] ✓ Saved {opt_type} input CSV for inspection: {debug_file}")
+            logger.info(f"[GEMINI]   Debug file location: {debug_file}")
+            logger.info(f"[GEMINI]   File size: {debug_file.stat().st_size} bytes, {len(df_filtered)} rows, {len(df_filtered.columns)} columns")
+            logger.info(f"[GEMINI]   Columns in saved file: {list(df_filtered.columns)}")
+            
+            # Show first few rows as a sample
+            if len(df_filtered) > 0:
+                logger.debug(f"[GEMINI]   First row sample (first 5 columns):")
+                first_row = df_filtered.iloc[0]
+                sample_cols = list(df_filtered.columns)[:5]
+                for col in sample_cols:
+                    logger.debug(f"[GEMINI]     {col}: {first_row.get(col, 'N/A')}")
+        except Exception as e:
+            logger.error(f"[GEMINI] ✗ Could not save debug file: {e}")
+            import traceback
+            logger.debug(f"[GEMINI] Debug file save exception:\n{traceback.format_exc()}")
+        
+        # Write DataFrame to temporary CSV file (for subprocess)
         with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, encoding='utf-8') as tmp_file:
             tmp_path = Path(tmp_file.name)
+            
+            # Write the actual file for subprocess
+            df_filtered.to_csv(tmp_path, index=False)
+            logger.debug(f"[GEMINI] Wrote {len(df_filtered)} rows to temporary CSV for subprocess: {tmp_path}")
             try:
                 # Write DataFrame to CSV
                 df_filtered.to_csv(tmp_path, index=False)
@@ -121,17 +204,22 @@ def run_gemini_analysis_on_dataframe(
                     timeout=300  # 5 minute timeout
                 )
                 
-                logger.info(f"[GEMINI] Subprocess completed with return code: {result.returncode}")
+                logger.info(f"[GEMINI] Subprocess completed with return code: {result.returncode} for {opt_type}")
                 if result.stderr:
-                    logger.debug(f"[GEMINI] Subprocess stderr: {result.stderr[:500]}")  # First 500 chars
+                    logger.debug(f"[GEMINI] {opt_type.upper()} subprocess stderr: {result.stderr[:500]}")  # First 500 chars
                 if result.stdout and len(result.stdout) > 0:
-                    logger.debug(f"[GEMINI] Subprocess stdout length: {len(result.stdout)} chars")
+                    logger.debug(f"[GEMINI] {opt_type.upper()} subprocess stdout length: {len(result.stdout)} chars")
                 
                 if result.returncode == 0:
                     # Extract HTML from output (Gemini returns HTML)
                     html_content = result.stdout
-                    results[opt_type] = html_content
-                    logger.info(f"Gemini analysis completed for {opt_type} options")
+                    logger.info(f"[GEMINI] ✓ {opt_type.upper()} analysis completed successfully")
+                    logger.debug(f"[GEMINI] {opt_type.upper()} HTML content length: {len(html_content)} characters")
+                    # Show first 200 chars of output in debug mode
+                    if logger.isEnabledFor(logging.DEBUG):
+                        preview = html_content[:200].replace('\n', ' ').strip()
+                        logger.debug(f"[GEMINI] {opt_type.upper()} HTML preview: {preview}...")
+                    return (opt_type, html_content)
                 else:
                     error_msg = result.stderr or result.stdout or "Unknown error"
                     
@@ -149,29 +237,78 @@ def run_gemini_analysis_on_dataframe(
                             f"Original error: {error_msg}"
                         )
                     
-                    logger.error(f"Gemini analysis failed for {opt_type}: {error_msg}")
+                    logger.error(f"[GEMINI] ✗ {opt_type.upper()} analysis failed: {error_msg}")
+                    logger.debug(f"[GEMINI] {opt_type.upper()} error details - return code: {result.returncode}")
+                    if result.stderr:
+                        logger.debug(f"[GEMINI] {opt_type.upper()} stderr: {result.stderr}")
+                    if result.stdout:
+                        logger.debug(f"[GEMINI] {opt_type.upper()} stdout: {result.stdout[:500]}")
+                    
                     # Format error message for HTML display
                     error_html = html_escape.escape(error_msg).replace('\n', '<br>')
-                    results[opt_type] = (
+                    error_result = (
                         f"<div class='error' style='padding: 20px; background: #fee; "
                         f"border: 1px solid #fcc; border-radius: 4px; margin: 10px 0;'>"
                         f"<strong style='color: #c00;'>Gemini Analysis Error:</strong><br><br>"
                         f"<pre style='white-space: pre-wrap; font-family: monospace; font-size: 12px;'>{error_html}</pre>"
                         f"</div>"
                     )
+                    logger.debug(f"[GEMINI] Added error result for {opt_type} to results dictionary")
+                    return (opt_type, error_result)
                     
             except subprocess.TimeoutExpired:
-                logger.error(f"Gemini analysis timed out for {opt_type}")
-                results[opt_type] = "<div class='error'>Gemini analysis timed out (exceeded 5 minutes)</div>"
+                logger.error(f"[GEMINI] ✗ {opt_type.upper()} analysis timed out (exceeded 5 minutes)")
+                timeout_error = "<div class='error'>Gemini analysis timed out (exceeded 5 minutes)</div>"
+                logger.debug(f"[GEMINI] Added timeout error result for {opt_type} to results dictionary")
+                return (opt_type, timeout_error)
             except Exception as e:
-                logger.error(f"Error running Gemini analysis for {opt_type}: {e}")
-                results[opt_type] = f"<div class='error'>Error running Gemini analysis: {str(e)}</div>"
+                logger.error(f"[GEMINI] ✗ Error running {opt_type.upper()} analysis: {e}")
+                import traceback
+                logger.debug(f"[GEMINI] {opt_type.upper()} exception traceback:\n{traceback.format_exc()}")
+                exception_error = f"<div class='error'>Error running Gemini analysis: {str(e)}</div>"
+                logger.debug(f"[GEMINI] Added exception error result for {opt_type} to results dictionary")
+                return (opt_type, exception_error)
             finally:
                 # Clean up temporary file
                 try:
                     tmp_path.unlink()
+                    logger.debug(f"[GEMINI] Cleaned up temporary file: {tmp_path}")
                 except Exception:
                     pass
+        
+        logger.info(f"[GEMINI] ===== Completed {opt_type.upper()} analysis =====")
+        return (opt_type, f"<div class='error'>Unexpected error in {opt_type} analysis</div>")
+    
+    # Run analyses in parallel using ThreadPoolExecutor
+    logger.info(f"[GEMINI] Running {len(option_types)} analyses in parallel...")
+    start_time = time.time()
+    
+    with ThreadPoolExecutor(max_workers=len(option_types)) as executor:
+        # Submit all analyses
+        future_to_opt_type = {executor.submit(run_single_analysis, opt_type): opt_type for opt_type in option_types}
+        logger.debug(f"[GEMINI] Submitted {len(future_to_opt_type)} analysis tasks to thread pool")
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_opt_type):
+            opt_type = future_to_opt_type[future]
+            try:
+                result_opt_type, html_content = future.result()
+                results[result_opt_type] = html_content
+                logger.info(f"[GEMINI] ✓ Collected result for {result_opt_type.upper()} from parallel execution")
+            except Exception as e:
+                logger.error(f"[GEMINI] ✗ Exception in parallel execution for {opt_type}: {e}")
+                import traceback
+                logger.debug(f"[GEMINI] {opt_type.upper()} parallel execution exception:\n{traceback.format_exc()}")
+                results[opt_type] = f"<div class='error'>Error in parallel execution: {str(e)}</div>"
+    
+    elapsed_time = time.time() - start_time
+    logger.info(f"[GEMINI] All parallel analyses completed in {elapsed_time:.2f} seconds")
+    
+    logger.info(f"[GEMINI] All analyses complete. Results keys: {list(results.keys())}")
+    logger.debug(f"[GEMINI] Final results summary:")
+    for opt_type, content in results.items():
+        content_type = "HTML" if content.startswith('<') else "Error"
+        logger.debug(f"[GEMINI]   - {opt_type}: {content_type} ({len(content)} chars)")
     
     return results
 
@@ -182,7 +319,7 @@ def run_gemini_analysis_on_file(
     instruction: str = DEFAULT_GEMINI_INSTRUCTION,
     gemini_prog: Optional[Path] = None,
     base_dir: Optional[Path] = None,
-    model_alias: str = "flash",
+    model_alias: str = "gemini-3",
     option_types: Optional[list[str]] = None,
     force_run: bool = False,
     market_hours: bool = True,
@@ -200,7 +337,7 @@ def run_gemini_analysis_on_file(
         instruction: Custom instruction for Gemini AI
         gemini_prog: Path to gemini_test.py script
         base_dir: Base directory for resolving paths
-        model_alias: Gemini model alias to use
+        model_alias: Gemini model alias to use ('flash', 'pro', 'flash-lite', 'gemini-3')
         option_types: List of option types to analyze (default: ['call', 'put'])
         force_run: Force analysis even if cooldown hasn't expired
         market_hours: Whether market is currently open (affects whether analysis runs)

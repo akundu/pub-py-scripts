@@ -1,6 +1,7 @@
 import os
 import argparse
 import sys # Import sys for file operations
+import requests
 import google.genai as genai
 from google.genai.errors import APIError
 
@@ -10,6 +11,7 @@ MODEL_ALIASES = {
     "flash": "gemini-2.5-flash",
     "pro": "gemini-2.5-pro",
     "flash-lite": "gemini-2.5-flash-lite",
+    "gemini-3": "gemini-3-pro-preview"
     # Add other models here as needed, like:
     # "embedding": "text-embedding-004",
 }
@@ -63,6 +65,81 @@ def query_gemini(prompt: str, model_alias: str):
         return f"An unexpected error occurred: {e}"
 
 
+def list_available_models():
+    """
+    Lists all available Gemini models using the REST API.
+    
+    Returns:
+        int: Exit code (0 for success, 1 for error)
+    """
+    api_key = os.getenv('GEMINI_API_KEY')
+    
+    if not api_key:
+        print("Error: GEMINI_API_KEY environment variable is not set.", file=sys.stderr)
+        print("Please set your API key: export GEMINI_API_KEY='your-api-key'", file=sys.stderr)
+        return 1
+    
+    url = "https://generativelanguage.googleapis.com/v1beta/models"
+    params = {"key": api_key}
+    
+    try:
+        response = requests.get(url, params=params)
+        
+        if response.status_code == 200:
+            data = response.json()
+            models = data.get('models', [])
+            
+            if not models:
+                print("No models found in the response.", file=sys.stderr)
+                return 1
+            
+            print("\n" + "="*70)
+            print("AVAILABLE GEMINI MODELS")
+            print("="*70)
+            
+            for model in models:
+                name = model.get('name', 'Unknown')
+                # Remove 'models/' prefix if present for cleaner display
+                display_name = name.replace('models/', '') if name.startswith('models/') else name
+                
+                print(f"\nModel ID: {display_name}")
+                
+                if 'displayName' in model:
+                    print(f"  Display Name: {model['displayName']}")
+                
+                if 'description' in model:
+                    print(f"  Description: {model['description']}")
+                
+                if 'supportedGenerationMethods' in model:
+                    methods = model['supportedGenerationMethods']
+                    if methods:
+                        print(f"  Supported Methods: {', '.join(methods)}")
+                
+                if 'inputTokenLimit' in model:
+                    print(f"  Input Token Limit: {model['inputTokenLimit']:,}")
+                
+                if 'outputTokenLimit' in model:
+                    print(f"  Output Token Limit: {model['outputTokenLimit']:,}")
+                
+                print("-" * 70)
+            
+            print(f"\nTotal models found: {len(models)}")
+            print("\nTo use a model, add it to MODEL_ALIASES or use the full model ID.")
+            print("="*70 + "\n")
+            
+            return 0
+        else:
+            print(f"Error: Failed to retrieve models. Status code: {response.status_code}", file=sys.stderr)
+            print(f"Response: {response.text}", file=sys.stderr)
+            return 1
+            
+    except requests.exceptions.RequestException as e:
+        print(f"Error: Failed to connect to Gemini API: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}", file=sys.stderr)
+        return 1
+
 
 def main():
     # You must install the library first: pip install google-genai
@@ -72,9 +149,15 @@ def main():
     )
     
     parser.add_argument(
+        "--list-models",
+        action="store_true",
+        help="List all available Gemini models and exit."
+    )
+    
+    parser.add_argument(
         "--instruction", 
         type=str, 
-        required=True, # Instruction is now mandatory
+        required=False, # Made optional to allow --list-models to work
         help="The specific instruction or question to ask the model about the context (e.g., 'Summarize the Q4 sales data in the file')."
     )
     parser.add_argument(
@@ -86,12 +169,21 @@ def main():
     parser.add_argument(
         "--model", 
         type=str, 
-        default="flash", # Switched default to 'pro' since file analysis benefits from it
+        #default="flash", # Switched default to 'pro' since file analysis benefits from it
+        default="gemini-3", # Switched default to 'pro' since file analysis benefits from it
         choices=list(MODEL_ALIASES.keys()),
         help="Model alias to use ('flash', 'pro', or 'flash-lite')."
     )
     
     args = parser.parse_args()
+    
+    # Handle --list-models option
+    if args.list_models:
+        return list_available_models()
+    
+    # If --list-models is not used, --instruction is required
+    if not args.instruction:
+        parser.error("--instruction is required unless --list-models is specified.")
     
     # --- Context Loading and Combination Logic ---
     file_content = ""
