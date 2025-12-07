@@ -22,6 +22,8 @@ if str(BASE_DIR) not in sys.path:
 
 from common.market_hours import compute_market_transition_times, is_market_hours as common_is_market_hours  # noqa: E402
 from common.gemini_analysis import run_gemini_analysis_on_file, DEFAULT_GEMINI_INSTRUCTION  # noqa: E402
+from common.cache_warmup import warmup_stock_info_cache  # noqa: E402
+import pandas as pd  # noqa: E402
 TMP_DIR = Path("/tmp")
 
 STORE_DIR_DEFAULT = Path("/Users/akundu/programs/http-proxy/static/")
@@ -428,48 +430,82 @@ def run_loop(
         elapsed = int(time.time() - start_time)
         print(f"Elapsed: {elapsed} seconds with result = {result.returncode}", file=sys.stderr, flush=True)
 
-        if result.returncode == 0:
-            evaluate_cmd = [
-                sys.executable,
-                str(BASE_DIR / "scripts" / "evaluate_covered_calls.py"),
-                "--file",
-                str(download_loc),
-                "--html",
-                "--output-dir",
-                str(html_output_path),
-                "--db-server-host",
-                str(db_server_host),
-                "--db-server-port",
-                str(db_server_port),
-            ]
-            print(f"Executing: {' '.join(evaluate_cmd)}", file=sys.stderr, flush=True)
-            eval_result = subprocess.run(evaluate_cmd, cwd=str(BASE_DIR))
-            print(f"evaluate_covered_calls.py completed with result = {eval_result.returncode}", file=sys.stderr, flush=True)
-            if eval_result.returncode == 0:
-                dest_dir = store_dir / OUTPUT_DIR_NAME
-                shutil.rmtree(dest_dir, ignore_errors=True)
-                try:
-                    shutil.move(str(html_output_path), dest_dir)
-                    print(f"Moved results to {dest_dir}", file=sys.stderr, flush=True)
-                except FileNotFoundError:
-                    print("Temporary output directory missing; skipping move.", file=sys.stderr, flush=True)
-            else:
-                print("evaluate_covered_calls.py failed; skipping result move.", file=sys.stderr, flush=True)
+        # Cache warmup: Load results CSV and warm up cache for all tickers
+        if result.returncode == 0 and download_loc.exists():
+            try:
+                print("Loading results CSV for cache warmup...", file=sys.stderr, flush=True)
+                df = pd.read_csv(download_loc)
+                
+                # Clean up duplicate header rows if present
+                if not df.empty and 'ticker' in df.columns:
+                    df = df[df['ticker'] != 'ticker']
+                
+                if not df.empty:
+                    # Calculate TTL as 1/2 of the sleep time (in seconds)
+                    ttl_seconds = sleep_time / 2.0
+                    print(
+                        f"Starting cache warmup for tickers in results (TTL: {ttl_seconds:.0f}s = 1/2 of sleep interval)",
+                        file=sys.stderr,
+                        flush=True
+                    )
+                    # Fire-and-forget warmup (wait_timeout=None)
+                    warmup_stock_info_cache(
+                        df,
+                        host=db_server_host,
+                        port=db_server_port,
+                        ttl_seconds=ttl_seconds,
+                        wait_timeout=None  # Fire-and-forget
+                    )
+                    print("Cache warmup initiated", file=sys.stderr, flush=True)
+                else:
+                    print("Results CSV is empty, skipping cache warmup", file=sys.stderr, flush=True)
+            except Exception as e:
+                print(f"Error during cache warmup (non-fatal): {e}", file=sys.stderr, flush=True)
+                # Don't fail the whole process if warmup fails
 
-            run_gemini_analysis(
-                download_loc,
-                gemini_output_dir,
-                store_dir,
-                force_run=force_gemini,
-                market_hours=market_hours,
-                cooldown_seconds=GEMINI_COOLDOWN_SECONDS,
-                last_run_file=LAST_GEMINI_RUN_FILE,
-            )
+        # don't need to generate this any more as it should be generated once on a change if necessary
+        # if result.returncode == 0:
+        #     evaluate_cmd = [
+        #         sys.executable,
+        #         str(BASE_DIR / "scripts" / "evaluate_covered_calls.py"),
+        #         "--file",
+        #         str(download_loc),
+        #         "--html",
+        #         "--output-dir",
+        #         str(html_output_path),
+        #         "--db-server-host",
+        #         str(db_server_host),
+        #         "--db-server-port",
+        #         str(db_server_port),
+        #     ]
+        #     print(f"Executing: {' '.join(evaluate_cmd)}", file=sys.stderr, flush=True)
+        #     eval_result = subprocess.run(evaluate_cmd, cwd=str(BASE_DIR))
+        #     print(f"evaluate_covered_calls.py completed with result = {eval_result.returncode}", file=sys.stderr, flush=True)
+        #     if eval_result.returncode == 0:
+        #         dest_dir = store_dir / OUTPUT_DIR_NAME
+        #         shutil.rmtree(dest_dir, ignore_errors=True)
+        #         try:
+        #             shutil.move(str(html_output_path), dest_dir)
+        #             print(f"Moved results to {dest_dir}", file=sys.stderr, flush=True)
+        #         except FileNotFoundError:
+        #             print("Temporary output directory missing; skipping move.", file=sys.stderr, flush=True)
+        #     else:
+        #         print("evaluate_covered_calls.py failed; skipping result move.", file=sys.stderr, flush=True)
+        #
+        #     run_gemini_analysis(
+        #         download_loc,
+        #         gemini_output_dir,
+        #         store_dir,
+        #         force_run=force_gemini,
+        #         market_hours=market_hours,
+        #         cooldown_seconds=GEMINI_COOLDOWN_SECONDS,
+        #         last_run_file=LAST_GEMINI_RUN_FILE,
+        #     )
 
-        try:
-            copy_analysis_files(store_dir, gemini_output_dir)
-        except Exception as exc:  # noqa: BLE001
-            print(f"Failed to copy analysis files: {exc}", file=sys.stderr, flush=True)
+        # try:
+        #     copy_analysis_files(store_dir, gemini_output_dir)
+        # except Exception as exc:  # noqa: BLE001
+        #     print(f"Failed to copy analysis files: {exc}", file=sys.stderr, flush=True)
 
         # Exit if we've reached the iteration limit
         if max_iterations is not None and iteration_count >= max_iterations:
