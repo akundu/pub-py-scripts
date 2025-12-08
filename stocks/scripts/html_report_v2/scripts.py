@@ -290,6 +290,11 @@ def get_javascript():
             const data = apiData.data || [];
             const metadata = apiData.metadata || {};
             
+            // Update data source timestamp if available
+            if (metadata.data_source_timestamp) {
+                updateDataSourceTimestamp(metadata.data_source_timestamp);
+            }
+            
             // Update stats
             const totalCountEl = document.getElementById(prefix + 'totalCount');
             const visibleCountEl = document.getElementById(prefix + 'visibleCount');
@@ -1983,6 +1988,39 @@ def get_javascript():
             }
         }
         
+        // Update data source timestamp display
+        function updateDataSourceTimestamp(isoTimestamp) {
+            const generatedTimeEl = document.getElementById('generatedTime');
+            const dataTimestampEl = document.getElementById('dataTimestamp');
+            
+            if (!generatedTimeEl || !dataTimestampEl || !isoTimestamp) return;
+            
+            try {
+                // Update the data-generated attribute with the timestamp
+                generatedTimeEl.setAttribute('data-generated', isoTimestamp);
+                
+                // Parse and format the timestamp
+                const date = new Date(isoTimestamp);
+                const options = {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    timeZoneName: 'short'
+                };
+                const formattedDate = date.toLocaleString('en-US', options);
+                dataTimestampEl.textContent = formattedDate;
+                
+                // Immediately update the "time ago" display
+                updateTimeAgo();
+            } catch (e) {
+                console.error('Error updating data source timestamp:', e);
+                dataTimestampEl.textContent = 'Unknown';
+            }
+        }
+        
         // Calculate and display time ago
         function updateTimeAgo() {
             const timeAgoEl = document.getElementById('timeAgo');
@@ -1993,6 +2031,7 @@ def get_javascript():
             const generatedTimeStr = generatedTimeEl.getAttribute('data-generated');
             if (!generatedTimeStr || generatedTimeStr.trim() === '' || generatedTimeStr === '+') {
                 // Silently return if no valid timestamp
+                timeAgoEl.textContent = '';
                 return;
             }
             

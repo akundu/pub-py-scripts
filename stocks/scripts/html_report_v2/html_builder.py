@@ -76,8 +76,8 @@ def build_header(
     
     Args:
         title: Report title
-        timestamp: Formatted timestamp string
-        iso_timestamp: ISO format timestamp for JavaScript
+        timestamp: Formatted timestamp string (placeholder, will be updated by JS)
+        iso_timestamp: ISO format timestamp for JavaScript (placeholder, will be updated by JS)
         total_results: Total number of results
         tab_buttons: List of tab button HTML strings
         
@@ -92,7 +92,7 @@ def build_header(
             <div class="tabs">
 {tabs_html}
             </div>
-            <p id="generatedTime" data-generated="{iso_timestamp}">Generated: {timestamp} <span id="timeAgo"></span></p>
+            <p id="generatedTime" data-generated="">Data updated: <span id="dataTimestamp">Loading...</span> <span id="timeAgo"></span></p>
             <p class="desktop-only">Click column headers to sort • {total_results} total results</p>
             <p class="mobile-only">Tap cards to expand details • {total_results} total results</p>
         </div>

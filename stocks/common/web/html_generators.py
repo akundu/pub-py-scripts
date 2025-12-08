@@ -1418,6 +1418,7 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
         }}
         
         // WebSocket connection for real-time updates
+        // Use same host but fixed port 9102 for real-time ticker data
         const wsPort = 9102;
         let ws = null;
         let reconnectAttempts = 0;
@@ -1425,10 +1426,10 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
         
         function connectWebSocket() {{
             try {{
-                // Connect to WebSocket server on port 9102
+                // Connect to WebSocket server on port 9102 (same host as page)
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 const host = window.location.hostname || 'localhost';
-                const wsUrl = `${{protocol}}//${{host}}:${{wsPort}}/ws?symbol={symbol}`;
+                const wsUrl = `${{protocol}}//${{host}}:${{wsPort}}/stock_info/ws?symbol={symbol}`;
                 console.log('Connecting to WebSocket:', wsUrl);
                 ws = new WebSocket(wsUrl);
                 

@@ -3254,7 +3254,7 @@ def generate_html_output(df: pd.DataFrame, output_dir: str) -> None:
     # Always add comprehensive analysis tab
     html_parts.append(f'                <button class="tab-button" onclick="switchTab({tab_index})">📊 Comprehensive Analysis</button>\n')
     html_parts.append("""            </div>
-            <p id="generatedTime" data-generated="""" + iso_timestamp + """">Generated: """ + timestamp + """ <span id="timeAgo"></span></p>
+            <p id="generatedTime" data-generated="""" + iso_timestamp + """">Data updated: <span id="dataTimestamp">""" + timestamp + """</span> <span id="timeAgo"></span></p>
             <p class="desktop-only">Click column headers to sort • """ + str(len(df)) + """ total results</p>
             <p class="mobile-only">Tap cards to expand details • """ + str(len(df)) + """ total results</p>
         </div>

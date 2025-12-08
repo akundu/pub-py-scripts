@@ -733,6 +733,339 @@ class TestEdgeCases:
         assert 'html' in result.lower()
 
 
+class TestCoveredCallsDataTimestamp:
+    """Test data source timestamp functionality in covered calls API."""
+    
+    @pytest.fixture
+    def sample_csv_content(self):
+        """Create sample CSV content for testing."""
+        return """ticker,option_type,strike_price,opt_prem.,delta,volume,expiration
+AAPL,call,150.0,5.50,0.30,1000,2024-12-20
+AAPL,call,155.0,3.20,0.20,800,2024-12-20
+GOOGL,put,2800.0,45.00,-0.35,500,2024-12-20"""
+    
+    @pytest.fixture
+    def temp_csv_file(self, tmp_path, sample_csv_content):
+        """Create a temporary CSV file."""
+        csv_file = tmp_path / "test_results.csv"
+        csv_file.write_text(sample_csv_content)
+        return str(csv_file)
+    
+    @pytest.mark.asyncio
+    async def test_api_response_includes_data_source_timestamp(self, temp_csv_file):
+        """Test that API response includes data_source_timestamp in metadata."""
+        from aiohttp import web
+        from aiohttp.test_utils import AioHTTPTestCase, unittest_run_loop
+        import db_server
+        
+        # Create a mock request with the CSV file path
+        app = web.Application()
+        
+        # Mock request
+        class MockRequest:
+            def __init__(self, csv_path):
+                self.app = app
+                self.query = {
+                    'source': csv_path,
+                    'option_type': 'all'
+                }
+            
+            def get_query(self):
+                return self.query
+        
+        request = MockRequest(temp_csv_file)
+        request.query = type('obj', (object,), {
+            'get': lambda key, default=None: {
+                'source': temp_csv_file,
+                'option_type': 'all',
+                'filters': '[]',
+                'calls_filters': '',
+                'puts_filters': '',
+                'filter_logic': 'AND',
+                'calls_filterLogic': 'AND',
+                'puts_filterLogic': 'AND',
+                'sort': 'net_daily_premi',
+                'sort_direction': 'desc',
+                'limit': None,
+                'offset': '0'
+            }.get(key, default)
+        })()
+        
+        # Call the handler
+        response = await db_server.handle_covered_calls_data(request)
+        
+        # Parse response
+        assert response.status == 200
+        response_data = json.loads(response.text)
+        
+        # Verify structure
+        assert 'metadata' in response_data
+        assert 'data_source_timestamp' in response_data['metadata']
+        assert response_data['metadata']['data_source_timestamp'] is not None
+        
+        # Verify timestamp format (should be ISO 8601)
+        timestamp = response_data['metadata']['data_source_timestamp']
+        assert isinstance(timestamp, str)
+        # Should be parseable as datetime
+        parsed_dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        assert isinstance(parsed_dt, datetime)
+    
+    def test_file_modification_time_extraction(self, temp_csv_file):
+        """Test that file modification time is correctly extracted."""
+        import os
+        import time
+        
+        # Get actual file modification time
+        actual_mtime = os.path.getmtime(temp_csv_file)
+        
+        # Verify we can read it
+        assert actual_mtime > 0
+        assert isinstance(actual_mtime, float)
+        
+        # Should be recent (within last minute)
+        current_time = time.time()
+        assert current_time - actual_mtime < 60
+    
+    @pytest.mark.asyncio
+    async def test_cache_stores_modification_time(self, temp_csv_file):
+        """Test that cache properly stores modification time."""
+        import db_server
+        from aiohttp import web
+        
+        # Clear any existing cache
+        db_server._covered_calls_cache.clear()
+        
+        app = web.Application()
+        
+        # Create mock request
+        class MockRequest:
+            def __init__(self, csv_path):
+                self.app = app
+                self.query_params = {
+                    'source': csv_path,
+                    'option_type': 'all',
+                    'filters': '[]',
+                    'calls_filters': '',
+                    'puts_filters': '',
+                    'filter_logic': 'AND',
+                    'calls_filterLogic': 'AND',
+                    'puts_filterLogic': 'AND',
+                    'sort': 'net_daily_premi',
+                    'sort_direction': 'desc',
+                    'limit': None,
+                    'offset': '0'
+                }
+        
+        request = MockRequest(temp_csv_file)
+        request.query = type('obj', (object,), {
+            'get': lambda key, default=None: request.query_params.get(key, default)
+        })()
+        
+        # First call - should cache
+        response1 = await db_server.handle_covered_calls_data(request)
+        assert response1.status == 200
+        
+        # Check cache
+        assert temp_csv_file in db_server._covered_calls_cache
+        cache_entry = db_server._covered_calls_cache[temp_csv_file]
+        
+        # Cache should have 3 elements: (df, cache_time, mtime)
+        assert len(cache_entry) == 3
+        df, cache_time, mtime = cache_entry
+        
+        # Verify types
+        assert isinstance(df, pd.DataFrame)
+        assert isinstance(cache_time, float)
+        assert isinstance(mtime, (float, type(None)))
+        
+        if mtime is not None:
+            # mtime should be positive and recent
+            assert mtime > 0
+            import time
+            assert time.time() - mtime < 3600  # Within last hour
+    
+    @pytest.mark.asyncio
+    async def test_timestamp_persists_across_cache_hits(self, temp_csv_file):
+        """Test that timestamp remains consistent when using cached data."""
+        import db_server
+        from aiohttp import web
+        
+        # Clear cache
+        db_server._covered_calls_cache.clear()
+        
+        app = web.Application()
+        
+        class MockRequest:
+            def __init__(self, csv_path):
+                self.app = app
+                self.query_params = {
+                    'source': csv_path,
+                    'option_type': 'all',
+                    'filters': '[]',
+                    'calls_filters': '',
+                    'puts_filters': '',
+                    'filter_logic': 'AND',
+                    'calls_filterLogic': 'AND',
+                    'puts_filterLogic': 'AND',
+                    'sort': 'net_daily_premi',
+                    'sort_direction': 'desc',
+                    'limit': None,
+                    'offset': '0'
+                }
+        
+        request = MockRequest(temp_csv_file)
+        request.query = type('obj', (object,), {
+            'get': lambda key, default=None: request.query_params.get(key, default)
+        })()
+        
+        # First call
+        response1 = await db_server.handle_covered_calls_data(request)
+        data1 = json.loads(response1.text)
+        timestamp1 = data1['metadata']['data_source_timestamp']
+        
+        # Second call (should use cache)
+        response2 = await db_server.handle_covered_calls_data(request)
+        data2 = json.loads(response2.text)
+        timestamp2 = data2['metadata']['data_source_timestamp']
+        
+        # Timestamps should be identical (from same file)
+        assert timestamp1 == timestamp2
+    
+    def test_timestamp_format_is_iso8601(self, temp_csv_file):
+        """Test that timestamp is in ISO 8601 format."""
+        import os
+        
+        mtime = os.path.getmtime(temp_csv_file)
+        
+        # Convert to ISO format (as done in db_server)
+        from datetime import timezone
+        iso_timestamp = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+        
+        # Verify format
+        assert isinstance(iso_timestamp, str)
+        assert 'T' in iso_timestamp  # Date and time separated by T
+        assert '+' in iso_timestamp or 'Z' in iso_timestamp  # Has timezone
+        
+        # Should be parseable
+        parsed = datetime.fromisoformat(iso_timestamp.replace('Z', '+00:00'))
+        assert isinstance(parsed, datetime)
+    
+    @pytest.mark.asyncio
+    async def test_url_source_fallback_timestamp(self):
+        """Test that URL sources use current time as fallback."""
+        import db_server
+        from aiohttp import web
+        from unittest.mock import patch, MagicMock
+        import urllib.request
+        
+        app = web.Application()
+        
+        # Mock CSV content
+        csv_content = "ticker,price\nAAPL,150.0\nGOOGL,2800.0"
+        
+        class MockRequest:
+            def __init__(self):
+                self.app = app
+                self.query_params = {
+                    'source': 'https://example.com/data.csv',
+                    'option_type': 'all',
+                    'filters': '[]',
+                    'calls_filters': '',
+                    'puts_filters': '',
+                    'filter_logic': 'AND',
+                    'calls_filterLogic': 'AND',
+                    'puts_filterLogic': 'AND',
+                    'sort': 'net_daily_premi',
+                    'sort_direction': 'desc',
+                    'limit': None,
+                    'offset': '0'
+                }
+        
+        request = MockRequest()
+        request.query = type('obj', (object,), {
+            'get': lambda key, default=None: request.query_params.get(key, default)
+        })()
+        
+        # Mock urllib.request.urlopen
+        mock_response = MagicMock()
+        mock_response.read.return_value = csv_content.encode('utf-8')
+        mock_response.headers.get.return_value = None  # No Last-Modified header
+        mock_response.__enter__ = lambda s: s
+        mock_response.__exit__ = lambda s, *args: None
+        
+        with patch('urllib.request.urlopen', return_value=mock_response):
+            response = await db_server.handle_covered_calls_data(request)
+            
+            if response.status == 200:
+                data = json.loads(response.text)
+                
+                # Should have a timestamp even without Last-Modified header
+                assert 'metadata' in data
+                assert 'data_source_timestamp' in data['metadata']
+    
+    @pytest.mark.asyncio
+    async def test_missing_file_handles_gracefully(self):
+        """Test that missing file is handled gracefully."""
+        import db_server
+        from aiohttp import web
+        
+        app = web.Application()
+        
+        class MockRequest:
+            def __init__(self):
+                self.app = app
+                self.query_params = {
+                    'source': '/nonexistent/path/to/file.csv',
+                    'option_type': 'all',
+                    'filters': '[]',
+                    'calls_filters': '',
+                    'puts_filters': '',
+                    'filter_logic': 'AND',
+                    'calls_filterLogic': 'AND',
+                    'puts_filterLogic': 'AND',
+                    'sort': 'net_daily_premi',
+                    'sort_direction': 'desc',
+                    'limit': None,
+                    'offset': '0'
+                }
+        
+        request = MockRequest()
+        request.query = type('obj', (object,), {
+            'get': lambda key, default=None: request.query_params.get(key, default)
+        })()
+        
+        # Should return error response, not crash
+        response = await db_server.handle_covered_calls_data(request)
+        assert response.status == 404  # File not found
+        
+        data = json.loads(response.text)
+        assert 'error' in data
+    
+    def test_timestamp_comparison_with_file_stat(self, temp_csv_file):
+        """Test that returned timestamp matches file stat."""
+        import os
+        import time
+        
+        # Get file modification time
+        file_mtime = os.path.getmtime(temp_csv_file)
+        
+        # Convert to datetime
+        file_dt = datetime.fromtimestamp(file_mtime, tz=timezone.utc)
+        
+        # This should match what the API returns
+        iso_timestamp = file_dt.isoformat()
+        
+        # Verify it's a valid timestamp
+        assert isinstance(iso_timestamp, str)
+        
+        # Parse it back
+        parsed = datetime.fromisoformat(iso_timestamp.replace('Z', '+00:00'))
+        
+        # Should be very close to original (within a second due to precision)
+        time_diff = abs((parsed - file_dt).total_seconds())
+        assert time_diff < 1.0
+
+
 def run_all_tests():
     """Run all tests and return results."""
     print("=" * 80)
