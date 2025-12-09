@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>📊 Options Analysis Results (Calls & Puts)</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>📊 Options Analysis Results (Calls & Puts)</h1>
+      <div class="tabs">
+        <button class="tab-button active" onclick="switchTab(0)">📞 Calls</button>
+        <button class="tab-button" onclick="switchTab(1)">📉 Puts</button>
+        <button class="tab-button" onclick="switchTab(2)">📊 Comprehensive Analysis</button>
+      </div>
+      <p id="generatedTime" data-generated="">Data updated: <span id="dataTimestamp">Loading...</span> <span
+          id="timeAgo"></span></p>
+      <p class="desktop-only">Click column headers to sort • 0 total results</p>
+      <p class="mobile-only">Tap cards to expand details • 0 total results</p>
+    </div>
+    <div class="tab-content active" id="callsTab">
+      <div style="margin-bottom: 15px; display: flex; justify-content: space-between; gap: 10px; align-items: center;">
+        <div>
+          <button class="filter-button clear" onclick="toggleHiddenColumns('calls')" id="callstoggleHiddenBtn">
+            👁️ Show hidden columns
+          </button>
+        </div>
+        <div style="text-align: right;">
+          <button class="filter-button" onclick="toggleFilterSection('calls')" id="callstoggleFilterBtn">
+            🔍 Filter
+          </button>
+        </div>
+      </div>
+      <div class="filter-section" id="callsfilterSection">
+        <div class="filter-logic">
+          <label>Filter Logic:</label>
+          <label><input type="radio" name="callsfilterLogic" value="AND" checked> AND (all filters must match)</label>
+          <label><input type="radio" name="callsfilterLogic" value="OR"> OR (any filter can match)</label>
+        </div>
+        <div class="filter-controls">
+          <div class="filter-input-group">
+            <input type="text" class="filter-input" id="callsfilterInput" placeholder="e.g., net_daily_premi > 1000"
+              onkeypress="if(event.key==='Enter') addFilter('calls')">
+            <button class="filter-button" onclick="addFilter('calls')">Add Filter</button>
+            <button class="filter-button clear" onclick="clearFilters('calls')">Clear All</button>
+          </div>
+        </div>
+        <div id="callsactiveFilters" style="margin-top: 10px;"></div>
+        <div class="filter-help">
+          <strong>Filter Examples:</strong><br>
+          • <code>pe_ratio > 20</code> - P/E ratio greater than 20<br>
+          • <code>market_cap_b < 3.5</code> - Market cap less than 3.5B<br>
+          • <code>volume exists</code> - Volume data exists<br>
+          • <code>net_daily_premium > 100</code> - Net daily premium greater than 100<br>
+          • <code>delta < 0.5</code> - Delta less than 0.5<br>
+          • <code>days_to_expiry >= 7</code> - Days to expiry at least 7<br>
+          <strong>Spread Filters:</strong><br>
+          • <code>spread < 0.1</code> - Short leg bid/ask spread less than $0.10 (absolute value)<br>
+          • <code>spread < 10%</code> - Short leg spread less than 10% of option premium (percentage-based)<br>
+          • <code>l_spread < 0.1</code> - Long leg bid/ask spread less than $0.10 (absolute value)<br>
+          • <code>l_spread < 10%</code> - Long leg spread less than 10% of option premium (percentage-based)<br>
+          <strong>💡 Spread Filter Tip:</strong> Use percentage-based spread filters (e.g., <code>spread < 20%</code>)
+          to filter by spread relative to option premium. This helps find liquid options where the bid/ask spread is a
+          small percentage of the premium value.<br>
+          <strong>Advanced Filters:</strong><br>
+          • <code>num_contracts > volume</code> - Field-to-field comparison<br>
+          • <code>curr_price*1.05 < strike_price</code> - Mathematical expression (5% above current price less than
+          strike)<br>
+          • <code>strike_price*0.95 > curr_price</code> - Mathematical expression (strike 5% below current)<br>
+          <strong>Operators:</strong> <code>&gt;</code> <code>&gt;=</code> <code>&lt;</code> <code>&lt;=</code>
+          <code>==</code> <code>!=</code> <code>exists</code> <code>not_exists</code><br>
+          <strong>Math Operations:</strong> Use <code>+</code> <code>-</code> <code>*</code> <code>/</code> in
+          expressions (e.g., <code>field*1.05</code>, <code>field+100</code>)<br>
+          <strong>💡 Tip:</strong> When the filter section is expanded, column headers show their filterable field
+          names. Filters are automatically saved in the URL - share the URL to share your filtered view!
+        </div>
+      </div>
+      <div class="loading-indicator" id="callsloadingIndicator">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">Loading data...</div>
+      </div>
+      <div class="table-wrapper hide-hidden" id="callstableWrapper">
+        <table id="callsresultsTable">
+          <thead>
+            <tr class="column-header-row">
+              <th>Loading...</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td colspan="100%" style="text-align: center; padding: 20px;">Loading data...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div id="callscardsContainer" class="cards-container"></div>
+      <div class="stats">
+        <div class="stat-item">
+          <div class="stat-value" id="callstotalCount">0</div>
+          <div class="stat-label">Total Results</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value" id="callsvisibleCount">0</div>
+          <div class="stat-label">Visible Rows</div>
+        </div>
+      </div>
+    </div>
+    <div class="tab-content" id="putsTab">
+      <div style="margin-bottom: 15px; display: flex; justify-content: space-between; gap: 10px; align-items: center;">
+        <div>
+          <button class="filter-button clear" onclick="toggleHiddenColumns('puts')" id="putstoggleHiddenBtn">
+            👁️ Show hidden columns
+          </button>
+        </div>
+        <div style="text-align: right;">
+          <button class="filter-button" onclick="toggleFilterSection('puts')" id="putstoggleFilterBtn">
+            🔍 Filter
+          </button>
+        </div>
+      </div>
+      <div class="filter-section" id="putsfilterSection">
+        <div class="filter-logic">
+          <label>Filter Logic:</label>
+          <label><input type="radio" name="putsfilterLogic" value="AND" checked> AND (all filters must match)</label>
+          <label><input type="radio" name="putsfilterLogic" value="OR"> OR (any filter can match)</label>
+        </div>
+        <div class="filter-controls">
+          <div class="filter-input-group">
+            <input type="text" class="filter-input" id="putsfilterInput" placeholder="e.g., net_daily_premi > 1000"
+              onkeypress="if(event.key==='Enter') addFilter('puts')">
+            <button class="filter-button" onclick="addFilter('puts')">Add Filter</button>
+            <button class="filter-button clear" onclick="clearFilters('puts')">Clear All</button>
+          </div>
+        </div>
+        <div id="putsactiveFilters" style="margin-top: 10px;"></div>
+        <div class="filter-help">
+          <strong>Filter Examples:</strong><br>
+          • <code>pe_ratio > 20</code> - P/E ratio greater than 20<br>
+          • <code>market_cap_b < 3.5</code> - Market cap less than 3.5B<br>
+          • <code>volume exists</code> - Volume data exists<br>
+          • <code>net_daily_premium > 100</code> - Net daily premium greater than 100<br>
+          • <code>delta < 0.5</code> - Delta less than 0.5<br>
+          • <code>days_to_expiry >= 7</code> - Days to expiry at least 7<br>
+          <strong>Spread Filters:</strong><br>
+          • <code>spread < 0.1</code> - Short leg bid/ask spread less than $0.10 (absolute value)<br>
+          • <code>spread < 10%</code> - Short leg spread less than 10% of option premium (percentage-based)<br>
+          • <code>l_spread < 0.1</code> - Long leg bid/ask spread less than $0.10 (absolute value)<br>
+          • <code>l_spread < 10%</code> - Long leg spread less than 10% of option premium (percentage-based)<br>
+          <strong>💡 Spread Filter Tip:</strong> Use percentage-based spread filters (e.g., <code>spread < 20%</code>)
+          to filter by spread relative to option premium. This helps find liquid options where the bid/ask spread is a
+          small percentage of the premium value.<br>
+          <strong>Advanced Filters:</strong><br>
+          • <code>num_contracts > volume</code> - Field-to-field comparison<br>
+          • <code>curr_price*1.05 < strike_price</code> - Mathematical expression (5% above current price less than
+          strike)<br>
+          • <code>strike_price*0.95 > curr_price</code> - Mathematical expression (strike 5% below current)<br>
+          <strong>Operators:</strong> <code>&gt;</code> <code>&gt;=</code> <code>&lt;</code> <code>&lt;=</code>
+          <code>==</code> <code>!=</code> <code>exists</code> <code>not_exists</code><br>
+          <strong>Math Operations:</strong> Use <code>+</code> <code>-</code> <code>*</code> <code>/</code> in
+          expressions (e.g., <code>field*1.05</code>, <code>field+100</code>)<br>
+          <strong>💡 Tip:</strong> When the filter section is expanded, column headers show their filterable field
+          names. Filters are automatically saved in the URL - share the URL to share your filtered view!
+        </div>
+      </div>
+      <div class="loading-indicator" id="putsloadingIndicator">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">Loading data...</div>
+      </div>
+      <div class="table-wrapper hide-hidden" id="putstableWrapper">
+        <table id="putsresultsTable">
+          <thead>
+            <tr class="column-header-row">
+              <th>Loading...</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td colspan="100%" style="text-align: center; padding: 20px;">Loading data...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div id="putscardsContainer" class="cards-container"></div>
+      <div class="stats">
+        <div class="stat-item">
+          <div class="stat-value" id="putstotalCount">0</div>
+          <div class="stat-label">Total Results</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-value" id="putsvisibleCount">0</div>
+          <div class="stat-label">Visible Rows</div>
+        </div>
+      </div>
+    </div>
+    <div class="tab-content" id="analysisTab">
+      <div class="analysis-controls"
+        style="margin-bottom: 20px; padding: 15px; background: #f5f5f5; border-radius: 8px;">
+        <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+          <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+            <input type="checkbox" id="useGeminiAnalysis" style="width: 18px; height: 18px; cursor: pointer;">
+            <span style="font-weight: 500;">Use Gemini AI Analysis</span>
+          </label>
+          <button id="loadAnalysisBtn" onclick="loadComprehensiveAnalysis()"
+            style="padding: 8px 16px; background: #667eea; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 500;">
+            🔄 Load Analysis
+          </button>
+          <span id="analysisStatus" style="color: #666; font-size: 14px;"></span>
+        </div>
+        <div style="margin-top: 10px; font-size: 12px; color: #888;">
+          <strong>Rule-based:</strong> Fast, deterministic analysis based on scoring algorithm (loads automatically)<br>
+          <strong>Gemini AI:</strong> AI-powered analysis with risk/aggressive/conservative recommendations (check box
+          and click button, slower, requires API key)
+        </div>
+      </div>
+      <div id="analysisContent">
+        <div class="loading-indicator">
+          <div class="spinner"></div>
+          <div class="loading-text">Loading rule-based analysis...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    window.API_CONFIG = {};
+  </script>
+  <script src="app.js?v=8"></script>
+</body>
+
+</html>

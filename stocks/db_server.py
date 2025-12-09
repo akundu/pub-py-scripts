@@ -810,6 +810,8 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     app.router.add_get("/stock_info/ws", handle_websocket)
     app.router.add_get("/stock_info/api/covered_calls/data", handle_covered_calls_data)
     app.router.add_get("/stock_info/api/covered_calls/analysis", handle_covered_calls_analysis)
+    app.router.add_get("/stock_info/api/covered_calls/view", handle_covered_calls_view)
+    app.router.add_get("/stock_info/api/covered_calls/{filename}", handle_covered_calls_static)
     
     # Add stock info HTML page endpoint (parameterized route must be after specific routes)
     app.router.add_get("/stock_info/{symbol}", handle_stock_info_html)
@@ -1918,11 +1920,8 @@ async def handle_covered_calls_data(request: web.Request) -> web.Response:
     try:
         # Get query parameters
         source = request.query.get('source')
-        if not source:
-            return web.json_response({
-                "error": "Missing required parameter: source",
-                "message": "Please provide 'source' parameter (file path or URL)"
-            }, status=400)
+        # If no source provided, we'll set it to the default CSV file later
+        # (after parsing other parameters)
         
         option_type = request.query.get('option_type', 'all').lower()
         filters_json = request.query.get('filters', '[]')
@@ -1988,7 +1987,13 @@ async def handle_covered_calls_data(request: web.Request) -> web.Response:
                 logger.debug(f"Parsed {len(filters)} filters: {filters}")
         
         # Load and cache CSV data
+        # If source is not provided, use ~/Downloads/results.csv
+        if not source:
+            source = os.path.expanduser("~/Downloads/results.csv")
+            logger.info(f"No source provided, using default: {source}")
+        
         cache_key = source
+        logger.debug(f"Loading covered calls data from source: {source}")
         cache_entry = _covered_calls_cache.get(cache_key)
         
         # Track data source modification time
@@ -2001,186 +2006,219 @@ async def handle_covered_calls_data(request: web.Request) -> web.Response:
             # Get cached modification time (stored as third element in tuple)
             data_source_mtime = cache_entry[2] if len(cache_entry) > 2 else None
         else:
-            # Load CSV from file or URL
-            try:
-                if source.startswith(('http://', 'https://')):
-                    # Download from URL
-                    req = urllib.request.Request(source)
-                    with urllib.request.urlopen(req, timeout=30) as response:
-                        csv_content = response.read().decode('utf-8')
-                        # Try to get Last-Modified header
-                        last_modified = response.headers.get('Last-Modified')
-                        if last_modified:
-                            from email.utils import parsedate_to_datetime
-                            try:
-                                data_source_mtime = parsedate_to_datetime(last_modified).timestamp()
-                            except Exception:
-                                data_source_mtime = current_time
-                        else:
-                            data_source_mtime = current_time
-                    df = pd.read_csv(StringIO(csv_content))
-                else:
-                    # Read from local file
-                    df = pd.read_csv(source)
-                    # Get file modification time
-                    try:
-                        import os
-                        data_source_mtime = os.path.getmtime(source)
-                    except Exception:
-                        data_source_mtime = current_time
-                
-                # Clean up the data - remove duplicate header rows
-                if 'ticker' in df.columns:
-                    df = df[df['ticker'] != 'ticker']
-                
-                # Calculate missing calculated columns BEFORE normalizing column names
-                # (calculate_bid_ask_analysis expects original column names like 'opt_prem.' not 'option_premium')
-                try:
-                    from scripts.evaluate_covered_calls import calculate_bid_ask_analysis
-                    # Check if any calculated columns are missing
-                    calculated_cols = ['spread_slippage', 'net_premium_after_spread', 
-                                     'net_daily_premium_after_spread', 'spread_impact_pct',
-                                     'liquidity_score', 'assignment_risk', 'trade_quality']
-                    missing_calculated = [col for col in calculated_cols if col not in df.columns]
-                    
-                    # Only calculate if we have the required input columns
-                    has_bid_ask = any(col in df.columns for col in ['bid:ask', 'bid_ask'])
-                    has_l_bid_ask = any(col in df.columns for col in ['l_bid:ask', 'l_bid_ask', 'long_bid_ask'])
-                    
-                    if missing_calculated and (has_bid_ask or has_l_bid_ask):
-                        # Calculate all bid/ask analysis columns (uses original column names)
-                        df = calculate_bid_ask_analysis(df)
-                except (ImportError, AttributeError) as e:
-                    logger.warning(f"Could not import calculate_bid_ask_analysis: {e}")
-                except Exception as e:
-                    logger.warning(f"Error calculating bid/ask analysis columns: {e}")
-                    # Continue without calculated columns
-                
-                # Calculate spread percentage columns from bid:ask data (needed for filtering)
-                # These are used by filters like "spread < 15%" or "l_spread < 10%"
-                if 'spread' not in df.columns and 'bid:ask' in df.columns:
-                    # Parse short bid:ask and calculate spread percentage
-                    bid_ask_split = df['bid:ask'].str.split(':', expand=True)
-                    if len(bid_ask_split.columns) >= 2:
-                        short_bid = pd.to_numeric(bid_ask_split[0], errors='coerce')
-                        short_ask = pd.to_numeric(bid_ask_split[1], errors='coerce')
-                        short_spread_dollars = short_ask - short_bid
-                        # Find premium column (try multiple names)
-                        prem_col = None
-                        for col_name in ['opt_prem.', 'opt_prem', 'option_premium']:
-                            if col_name in df.columns:
-                                prem_col = col_name
-                                break
-                        if prem_col:
-                            premium = pd.to_numeric(df[prem_col], errors='coerce')
-                            df['spread'] = ((short_spread_dollars / premium) * 100).round(2)
-                            # Replace inf values with NaN
-                            if NUMPY_AVAILABLE and np is not None:
-                                df['spread'] = df['spread'].replace([np.inf, -np.inf], pd.NA)
-                            else:
-                                df['spread'] = df['spread'].replace([float('inf'), float('-inf')], pd.NA)
-                            logger.info(f"Calculated 'spread' column from bid:ask (sample values: {df['spread'].head(3).tolist()})")
-                
-                if 'l_spread' not in df.columns and 'l_bid:ask' in df.columns:
-                    # Parse long bid:ask and calculate spread percentage
-                    l_bid_ask_split = df['l_bid:ask'].str.split(':', expand=True)
-                    if len(l_bid_ask_split.columns) >= 2:
-                        long_bid = pd.to_numeric(l_bid_ask_split[0], errors='coerce')
-                        long_ask = pd.to_numeric(l_bid_ask_split[1], errors='coerce')
-                        long_spread_dollars = long_ask - long_bid
-                        # Find long premium column
-                        l_prem_col = None
-                        for col_name in ['l_prem', 'l_opt_prem', 'long_option_premium']:
-                            if col_name in df.columns:
-                                l_prem_col = col_name
-                                break
-                        if l_prem_col:
-                            l_premium = pd.to_numeric(df[l_prem_col], errors='coerce')
-                            df['l_spread'] = ((long_spread_dollars / l_premium) * 100).round(2)
-                            # Replace inf values with NaN
-                            if NUMPY_AVAILABLE and np is not None:
-                                df['l_spread'] = df['l_spread'].replace([np.inf, -np.inf], pd.NA)
-                            else:
-                                df['l_spread'] = df['l_spread'].replace([float('inf'), float('-inf')], pd.NA)
-                            logger.info(f"Calculated 'l_spread' column from l_bid:ask (sample values: {df['l_spread'].head(3).tolist()})")
-                
-                # Save spread columns before processing (they might get lost)
-                spread_col = df['spread'].copy() if 'spread' in df.columns else None
-                l_spread_col = df['l_spread'].copy() if 'l_spread' in df.columns else None
-                
-                # Use the same data processing pipeline as HTML generation
-                # This normalizes column names and ensures all expected columns are present
-                try:
-                    from scripts.html_report_v2.data_processor import prepare_dataframe_for_display
-                    df_display, df_raw = prepare_dataframe_for_display(df)
-                    # Use df_raw for API (has normalized column names but raw values)
-                    df = df_raw.copy()
-                    
-                    # Restore spread columns if they were lost during processing
-                    if spread_col is not None and 'spread' not in df.columns:
-                        df['spread'] = spread_col
-                        logger.info("Restored 'spread' column after data processing")
-                    if l_spread_col is not None and 'l_spread' not in df.columns:
-                        df['l_spread'] = l_spread_col
-                        logger.info("Restored 'l_spread' column after data processing")
-                except Exception as e:
-                    logger.warning(f"Could not use prepare_dataframe_for_display, falling back to basic processing: {e}")
-                    # Fallback: Convert numeric columns (same as evaluate_covered_calls.py)
-                    numeric_cols = [
-                        'pe_ratio', 'market_cap_b', 'curr_price', 'current_price', 
-                        'strike_price', 'price_above_curr', 'opt_prem.', 'IV', 
-                        'delta', 'theta', 'days_to_expiry', 's_prem_tot', 
-                        's_day_prem', 'l_strike', 'l_prem', 'liv', 'l_delta', 
-                        'l_theta', 'l_days_to_expiry', 'l_prem_tot', 'l_cnt_avl', 
-                        'prem_diff', 'net_premium', 'net_daily_premi', 'volume', 
-                        'num_contracts', 'price_change_pct', 'spread', 'l_spread'
-                    ]
-                    
-                    for col in numeric_cols:
-                        if col in df.columns:
-                            df[col] = pd.to_numeric(df[col], errors='coerce')
-                
-                # Cache the dataframe with modification time
+            # If source is "database", return empty dataframe for now
+            # TODO: Implement actual database query here
+            if source == "database":
+                df = pd.DataFrame({
+                    'ticker': [],
+                    'option_type': [],
+                    'current_price': [],
+                    'strike_price': [],
+                    'l_strike': [],
+                    'opt_prem.': [],
+                    'l_prem': [],
+                    'expiration_date': [],
+                    'l_expiration_date': [],
+                    'delta': [],
+                    'l_delta': [],
+                    'theta': [],
+                    'l_theta': [],
+                    'net_daily_premi': [],
+                    'volume': [],
+                    'num_contracts': [],
+                    'pe_ratio': [],
+                    'market_cap_b': [],
+                })
+                data_source_mtime = current_time
+                # Cache the empty dataframe
                 _covered_calls_cache[cache_key] = (df.copy(), current_time, data_source_mtime)
-            except FileNotFoundError:
-                return web.json_response({
-                    "error": "File not found",
-                    "message": f"CSV file not found: {source}"
-                }, status=404)
-            except urllib.error.URLError as e:
-                return web.json_response({
-                    "error": "URL error",
-                    "message": f"Failed to download CSV from URL: {str(e)}"
-                }, status=400)
-            except Exception as e:
-                logger.error(f"Error loading CSV from {source}: {e}")
-                return web.json_response({
-                    "error": "Error loading CSV",
-                    "message": str(e)
-                }, status=500)
+            else:
+                # Load CSV from file or URL
+                try:
+                    if source.startswith(('http://', 'https://')):
+                        # Download from URL
+                        req = urllib.request.Request(source)
+                        with urllib.request.urlopen(req, timeout=30) as response:
+                            csv_content = response.read().decode('utf-8')
+                            # Try to get Last-Modified header
+                            last_modified = response.headers.get('Last-Modified')
+                            if last_modified:
+                                from email.utils import parsedate_to_datetime
+                                try:
+                                    data_source_mtime = parsedate_to_datetime(last_modified).timestamp()
+                                except Exception:
+                                    data_source_mtime = current_time
+                            else:
+                                data_source_mtime = current_time
+                        df = pd.read_csv(StringIO(csv_content))
+                    else:
+                        # Read from local file
+                        logger.debug(f"Reading CSV file: {source}")
+                        if not os.path.exists(source):
+                            raise FileNotFoundError(f"CSV file not found: {source}")
+                        df = pd.read_csv(source)
+                        logger.info(f"Loaded {len(df)} rows from {source}")
+                        # Get file modification time
+                        try:
+                            data_source_mtime = os.path.getmtime(source)
+                        except Exception:
+                            data_source_mtime = current_time
+                    
+                    # Clean up the data - remove duplicate header rows
+                    if 'ticker' in df.columns:
+                        df = df[df['ticker'] != 'ticker']
+                    
+                    # Calculate missing calculated columns BEFORE normalizing column names
+                    # (calculate_bid_ask_analysis expects original column names like 'opt_prem.' not 'option_premium')
+                    try:
+                        from scripts.evaluate_covered_calls import calculate_bid_ask_analysis
+                        # Check if any calculated columns are missing
+                        calculated_cols = ['spread_slippage', 'net_premium_after_spread', 
+                                         'net_daily_premium_after_spread', 'spread_impact_pct',
+                                         'liquidity_score', 'assignment_risk', 'trade_quality']
+                        missing_calculated = [col for col in calculated_cols if col not in df.columns]
+                        
+                        # Only calculate if we have the required input columns
+                        has_bid_ask = any(col in df.columns for col in ['bid:ask', 'bid_ask'])
+                        has_l_bid_ask = any(col in df.columns for col in ['l_bid:ask', 'l_bid_ask', 'long_bid_ask'])
+                        
+                        if missing_calculated and (has_bid_ask or has_l_bid_ask):
+                            # Calculate all bid/ask analysis columns (uses original column names)
+                            df = calculate_bid_ask_analysis(df)
+                    except (ImportError, AttributeError) as e:
+                        logger.warning(f"Could not import calculate_bid_ask_analysis: {e}")
+                    except Exception as e:
+                        logger.warning(f"Error calculating bid/ask analysis columns: {e}")
+                        # Continue without calculated columns
+                    
+                    # Calculate spread percentage columns from bid:ask data (needed for filtering)
+                    # These are used by filters like "spread < 15%" or "l_spread < 10%"
+                    if 'spread' not in df.columns and 'bid:ask' in df.columns:
+                        # Parse short bid:ask and calculate spread percentage
+                        bid_ask_split = df['bid:ask'].str.split(':', expand=True)
+                        if len(bid_ask_split.columns) >= 2:
+                            short_bid = pd.to_numeric(bid_ask_split[0], errors='coerce')
+                            short_ask = pd.to_numeric(bid_ask_split[1], errors='coerce')
+                            short_spread_dollars = short_ask - short_bid
+                            # Find premium column (try multiple names)
+                            prem_col = None
+                            for col_name in ['opt_prem.', 'opt_prem', 'option_premium']:
+                                if col_name in df.columns:
+                                    prem_col = col_name
+                                    break
+                            if prem_col:
+                                premium = pd.to_numeric(df[prem_col], errors='coerce')
+                                df['spread'] = ((short_spread_dollars / premium) * 100).round(2)
+                                # Replace inf values with NaN
+                                if NUMPY_AVAILABLE and np is not None:
+                                    df['spread'] = df['spread'].replace([np.inf, -np.inf], pd.NA)
+                                else:
+                                    df['spread'] = df['spread'].replace([float('inf'), float('-inf')], pd.NA)
+                                logger.info(f"Calculated 'spread' column from bid:ask (sample values: {df['spread'].head(3).tolist()})")
+                    
+                    if 'l_spread' not in df.columns and 'l_bid:ask' in df.columns:
+                        # Parse long bid:ask and calculate spread percentage
+                        l_bid_ask_split = df['l_bid:ask'].str.split(':', expand=True)
+                        if len(l_bid_ask_split.columns) >= 2:
+                            long_bid = pd.to_numeric(l_bid_ask_split[0], errors='coerce')
+                            long_ask = pd.to_numeric(l_bid_ask_split[1], errors='coerce')
+                            long_spread_dollars = long_ask - long_bid
+                            # Find long premium column
+                            l_prem_col = None
+                            for col_name in ['l_prem', 'l_opt_prem', 'long_option_premium']:
+                                if col_name in df.columns:
+                                    l_prem_col = col_name
+                                    break
+                            if l_prem_col:
+                                l_premium = pd.to_numeric(df[l_prem_col], errors='coerce')
+                                df['l_spread'] = ((long_spread_dollars / l_premium) * 100).round(2)
+                                # Replace inf values with NaN
+                                if NUMPY_AVAILABLE and np is not None:
+                                    df['l_spread'] = df['l_spread'].replace([np.inf, -np.inf], pd.NA)
+                                else:
+                                    df['l_spread'] = df['l_spread'].replace([float('inf'), float('-inf')], pd.NA)
+                                logger.info(f"Calculated 'l_spread' column from l_bid:ask (sample values: {df['l_spread'].head(3).tolist()})")
+                    
+                    # Save spread columns before processing (they might get lost)
+                    spread_col = df['spread'].copy() if 'spread' in df.columns else None
+                    l_spread_col = df['l_spread'].copy() if 'l_spread' in df.columns else None
+                    
+                    # Use the same data processing pipeline as HTML generation
+                    # This normalizes column names and ensures all expected columns are present
+                    try:
+                        from scripts.html_report_v2.data_processor import prepare_dataframe_for_display
+                        df_display, df_raw = prepare_dataframe_for_display(df)
+                        # Use df_raw for API (has normalized column names but raw values)
+                        df = df_raw.copy()
+                        
+                        # Restore spread columns if they were lost during processing
+                        if spread_col is not None and 'spread' not in df.columns:
+                            df['spread'] = spread_col
+                            logger.info("Restored 'spread' column after data processing")
+                        if l_spread_col is not None and 'l_spread' not in df.columns:
+                            df['l_spread'] = l_spread_col
+                            logger.info("Restored 'l_spread' column after data processing")
+                    except Exception as e:
+                        logger.warning(f"Could not use prepare_dataframe_for_display, falling back to basic processing: {e}")
+                        # Fallback: Convert numeric columns (same as evaluate_covered_calls.py)
+                        numeric_cols = [
+                            'pe_ratio', 'market_cap_b', 'curr_price', 'current_price', 
+                            'strike_price', 'price_above_curr', 'opt_prem.', 'IV', 
+                            'delta', 'theta', 'days_to_expiry', 's_prem_tot', 
+                            's_day_prem', 'l_strike', 'l_prem', 'liv', 'l_delta', 
+                            'l_theta', 'l_days_to_expiry', 'l_prem_tot', 'l_cnt_avl', 
+                            'prem_diff', 'net_premium', 'net_daily_premi', 'volume', 
+                            'num_contracts', 'price_change_pct', 'spread', 'l_spread'
+                        ]
+                        
+                        for col in numeric_cols:
+                            if col in df.columns:
+                                df[col] = pd.to_numeric(df[col], errors='coerce')
+                    
+                    # Cache the dataframe with modification time
+                    _covered_calls_cache[cache_key] = (df.copy(), current_time, data_source_mtime)
+                except FileNotFoundError:
+                    return web.json_response({
+                        "error": "File not found",
+                        "message": f"CSV file not found: {source}"
+                    }, status=404)
+                except urllib.error.URLError as e:
+                    return web.json_response({
+                        "error": "URL error",
+                        "message": f"Failed to download CSV from URL: {str(e)}"
+                    }, status=400)
+                except Exception as e:
+                    logger.error(f"Error loading CSV from {source}: {e}")
+                    return web.json_response({
+                        "error": "Error loading CSV",
+                        "message": str(e)
+                    }, status=500)
         
-        # Filter by option_type if specified
-        if option_type != 'all' and 'option_type' in df.columns:
+        # Filter by option_type if specified (only if DataFrame has data)
+        logger.debug(f"Before option_type filter: {len(df)} rows, option_type={option_type}")
+        if option_type != 'all' and 'option_type' in df.columns and len(df) > 0:
             df = df[df['option_type'].str.lower() == option_type].copy()
+            logger.debug(f"After option_type filter: {len(df)} rows")
         
-        # Apply filters
-        if filters:
+        # Apply filters (only if DataFrame has data)
+        if filters and len(df) > 0:
             df = _apply_filters(df, filters, filter_logic)
         
         # Get total count before pagination
         total_count = len(df)
         
-        # Sort
-        if sort_col in df.columns:
+        # Sort (only if DataFrame has data and sort column exists)
+        if sort_col in df.columns and len(df) > 0:
             ascending = (sort_direction == 'asc')
             df = df.sort_values(by=sort_col, ascending=ascending, na_position='last')
         
-        # Apply pagination
-        if limit:
-            limit = int(limit)
-            df = df.iloc[offset:offset + limit]
-        elif offset > 0:
-            df = df.iloc[offset:]
+        # Apply pagination (only if DataFrame has data)
+        if len(df) > 0:
+            if limit:
+                limit = int(limit)
+                df = df.iloc[offset:offset + limit]
+            elif offset > 0:
+                df = df.iloc[offset:]
         
         # Ensure all expected columns are present (fill remaining missing with None)
         # Note: Calculated columns should already be added before prepare_dataframe_for_display
@@ -2259,14 +2297,15 @@ async def handle_covered_calls_data(request: web.Request) -> web.Response:
         # Determine if calls/puts exist
         has_calls = False
         has_puts = False
-        if 'option_type' in df.columns:
+        if 'option_type' in df.columns and len(df) > 0:
             has_calls = bool((df['option_type'].str.lower() == 'call').any())
             has_puts = bool((df['option_type'].str.lower() == 'put').any())
         else:
-            # If no option_type column, assume all are calls
+            # If no option_type column, assume all are calls (if data exists)
             has_calls = len(df) > 0
         
         # Build response
+        logger.info(f"Returning {len(records)} records (total_count={total_count}, filtered_count={len(records)})")
         response = {
             "data": records,
             "metadata": {
@@ -2289,6 +2328,115 @@ async def handle_covered_calls_data(request: web.Request) -> web.Response:
         return web.json_response({
             "error": "An internal server error occurred",
             "details": str(e)
+        }, status=500)
+
+
+async def handle_covered_calls_view(request: web.Request) -> web.Response:
+    """Serve the static covered calls HTML view.
+    
+    GET /stock_info/api/covered_calls/view
+    
+    Returns the static HTML page for covered calls analysis.
+    """
+    try:
+        from pathlib import Path
+        
+        # Get the path to the static HTML file
+        current_dir = Path(__file__).parent
+        html_file = current_dir / "common" / "web" / "covered_call" / "index.html"
+        
+        if not html_file.exists():
+            return web.json_response({
+                "error": "Not Found",
+                "message": "Covered calls HTML file not found"
+            }, status=404)
+        
+        with open(html_file, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        
+        return web.Response(
+            text=html_content,
+            content_type='text/html',
+            charset='utf-8'
+        )
+    except Exception as e:
+        logger.error(f"Error serving covered calls view: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return web.json_response({
+            "error": "Internal server error",
+            "message": str(e)
+        }, status=500)
+
+
+async def handle_covered_calls_static(request: web.Request) -> web.Response:
+    """Serve static files (CSS, JS) for covered calls view.
+    
+    GET /stock_info/api/covered_calls/{filename}
+    
+    Serves static files like app.js and styles.css from common/web/covered_call/
+    """
+    try:
+        from pathlib import Path
+        
+        filename = request.match_info.get('filename', '')
+        if not filename:
+            return web.json_response({
+                "error": "Not Found",
+                "message": "Filename required"
+            }, status=404)
+        
+        # Security: only allow specific file extensions
+        allowed_extensions = {'.js', '.css', '.html'}
+        file_ext = Path(filename).suffix.lower()
+        if file_ext not in allowed_extensions:
+            return web.json_response({
+                "error": "Forbidden",
+                "message": f"File type '{file_ext}' not allowed"
+            }, status=403)
+        
+        # Get the path to the static file
+        current_dir = Path(__file__).parent
+        static_file = current_dir / "common" / "web" / "covered_call" / filename
+        
+        if not static_file.exists():
+            return web.json_response({
+                "error": "Not Found",
+                "message": f"File '{filename}' not found"
+            }, status=404)
+        
+        # Security: ensure the file is within the covered_call directory
+        try:
+            static_file.resolve().relative_to((current_dir / "common" / "web" / "covered_call").resolve())
+        except ValueError:
+            return web.json_response({
+                "error": "Forbidden",
+                "message": "Invalid file path"
+            }, status=403)
+        
+        # Determine content type
+        content_type_map = {
+            '.js': 'application/javascript',
+            '.css': 'text/css',
+            '.html': 'text/html'
+        }
+        content_type = content_type_map.get(file_ext, 'application/octet-stream')
+        
+        with open(static_file, 'r', encoding='utf-8') as f:
+            file_content = f.read()
+        
+        return web.Response(
+            text=file_content,
+            content_type=content_type,
+            charset='utf-8'
+        )
+    except Exception as e:
+        logger.error(f"Error serving static file: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return web.json_response({
+            "error": "Internal server error",
+            "message": str(e)
         }, status=500)
 
 
@@ -2427,7 +2575,6 @@ async def handle_covered_calls_analysis(request: web.Request) -> web.Response:
                     df = pd.read_csv(source)
                     # Get file modification time
                     try:
-                        import os
                         data_source_mtime = os.path.getmtime(source)
                     except Exception:
                         data_source_mtime = current_time
@@ -7530,6 +7677,8 @@ def main_server_runner():
         app.router.add_get("/stock_info/ws", handle_websocket)
         app.router.add_get("/stock_info/api/covered_calls/data", handle_covered_calls_data)
         app.router.add_get("/stock_info/api/covered_calls/analysis", handle_covered_calls_analysis)
+        app.router.add_get("/stock_info/api/covered_calls/view", handle_covered_calls_view)
+        app.router.add_get("/stock_info/api/covered_calls/{filename}", handle_covered_calls_static)
         
         # Add stock info HTML page endpoint (parameterized route must be after specific routes)
         app.router.add_get("/stock_info/{symbol}", handle_stock_info_html)
