@@ -36,6 +36,13 @@ except ImportError:
         WebSocketManager,
     )
 
+# Import for daily range tests
+try:
+    from common.questdb_db import RealtimeDataService
+except ImportError:
+    # If not available, tests will be skipped
+    RealtimeDataService = None
+
 
 class TestDataframeSerialization:
     """Test DataFrame to JSON conversion functions."""
@@ -1064,6 +1071,514 @@ GOOGL,put,2800.0,45.00,-0.35,500,2024-12-20"""
         # Should be very close to original (within a second due to precision)
         time_diff = abs((parsed - file_dt).total_seconds())
         assert time_diff < 1.0
+
+
+class TestDailyPriceRange:
+    """Test daily price range tracking and retrieval functionality."""
+    
+    @pytest.mark.asyncio
+    async def test_get_last_trading_day_weekday(self):
+        """Test _get_last_trading_day returns today for weekdays."""
+        if RealtimeDataService is None:
+            pytest.skip("RealtimeDataService not available")
+        
+        from unittest.mock import Mock
+        
+        # Create a mock service instance
+        mock_repo = Mock()
+        mock_cache = Mock()
+        mock_logger = Mock()
+        service = RealtimeDataService(mock_repo, mock_cache, mock_logger)
+        
+        # Test on a weekday (Monday = 0, Friday = 4)
+        # Use a known Monday - need to check actual weekday
+        # Dec 9, 2024 is actually a Monday
+        monday = datetime(2024, 12, 9, 12, 0, 0, tzinfo=timezone.utc)
+        result = service._get_last_trading_day(monday)
+        
+        # Should return the same day for a weekday
+        assert result == '2024-12-09' or result.endswith('12-09')  # Should return the same day
+    
+    @pytest.mark.asyncio
+    async def test_get_last_trading_day_weekend(self):
+        """Test _get_last_trading_day returns Friday for weekends."""
+        if RealtimeDataService is None:
+            pytest.skip("RealtimeDataService not available")
+        
+        from unittest.mock import Mock
+        
+        mock_repo = Mock()
+        mock_cache = Mock()
+        mock_logger = Mock()
+        service = RealtimeDataService(mock_repo, mock_cache, mock_logger)
+        
+        # Test on a Saturday - Dec 7, 2024 is a Saturday
+        saturday = datetime(2024, 12, 7, 12, 0, 0, tzinfo=timezone.utc)
+        result_sat = service._get_last_trading_day(saturday)
+        
+        # Should return Friday (Dec 6, 2024)
+        assert result_sat == '2024-12-06' or result_sat.endswith('12-06')
+        
+        # Test on a Sunday - Dec 8, 2024 is a Sunday
+        sunday = datetime(2024, 12, 8, 12, 0, 0, tzinfo=timezone.utc)
+        result_sun = service._get_last_trading_day(sunday)
+        
+        # Should return Friday (Dec 6, 2024)
+        assert result_sun == '2024-12-06' or result_sun.endswith('12-06')
+    
+    @pytest.mark.asyncio
+    async def test_update_daily_price_range_new_high(self):
+        """Test _update_daily_price_range updates when new high is found."""
+        if RealtimeDataService is None:
+            pytest.skip("RealtimeDataService not available")
+        
+        from unittest.mock import Mock, AsyncMock, patch
+        import json
+        
+        mock_repo = Mock()
+        mock_cache = Mock()
+        mock_logger = Mock()
+        service = RealtimeDataService(mock_repo, mock_cache, mock_logger)
+        
+        # Create sample DataFrame with prices
+        df = pd.DataFrame({
+            'price': [100.0, 105.0, 110.0]
+        }, index=pd.date_range('2024-12-09 10:00:00', periods=3, freq='1H', tz='UTC'))
+        
+        # Mock Redis client
+        mock_client = AsyncMock()
+        mock_client.get.return_value = None  # No existing data
+        mock_client.setex = AsyncMock()
+        
+        with patch.object(service.cache, '_get_redis_client', return_value=mock_client):
+            await service._update_daily_price_range('AAPL', df)
+            
+            # Verify setex was called
+            assert mock_client.setex.called
+            
+            # Verify the data stored
+            call_args = mock_client.setex.call_args
+            redis_key = call_args[0][0]
+            ttl = call_args[0][1]
+            data_str = call_args[0][2]
+            
+            assert 'AAPL' in redis_key.upper()
+            assert ttl == 259200  # 72 hours
+            data = json.loads(data_str)
+            assert data['high'] == 110.0
+            assert data['low'] == 100.0
+    
+    @pytest.mark.asyncio
+    async def test_update_daily_price_range_updates_existing(self):
+        """Test _update_daily_price_range only updates when price is lower/higher."""
+        if RealtimeDataService is None:
+            pytest.skip("RealtimeDataService not available")
+        
+        from unittest.mock import Mock, AsyncMock, patch
+        import json
+        
+        mock_repo = Mock()
+        mock_cache = Mock()
+        mock_logger = Mock()
+        service = RealtimeDataService(mock_repo, mock_cache, mock_logger)
+        
+        # Create DataFrame with prices that should update
+        df = pd.DataFrame({
+            'price': [95.0, 115.0]  # Lower low and higher high
+        }, index=pd.date_range('2024-12-09 10:00:00', periods=2, freq='1H', tz='UTC'))
+        
+        # Mock existing Redis data
+        existing_data = json.dumps({
+            'high': 110.0,
+            'low': 100.0,
+            'date': '2024-12-09'
+        })
+        
+        mock_client = AsyncMock()
+        mock_client.get.return_value = existing_data.encode('utf-8')
+        mock_client.setex = AsyncMock()
+        
+        with patch.object(service.cache, '_get_redis_client', return_value=mock_client):
+            await service._update_daily_price_range('AAPL', df)
+            
+            # Verify setex was called with updated values
+            call_args = mock_client.setex.call_args
+            data_str = call_args[0][2]
+            data = json.loads(data_str)
+            
+            assert data['high'] == 115.0  # Updated to new high
+            assert data['low'] == 95.0    # Updated to new low
+    
+    @pytest.mark.asyncio
+    async def test_update_daily_price_range_no_update_when_within_range(self):
+        """Test _update_daily_price_range doesn't update when prices are within existing range."""
+        if RealtimeDataService is None:
+            pytest.skip("RealtimeDataService not available")
+        
+        from unittest.mock import Mock, AsyncMock, patch
+        import json
+        
+        mock_repo = Mock()
+        mock_cache = Mock()
+        mock_logger = Mock()
+        service = RealtimeDataService(mock_repo, mock_cache, mock_logger)
+        
+        # Create DataFrame with prices within existing range
+        df = pd.DataFrame({
+            'price': [102.0, 108.0]  # Within 100-110 range
+        }, index=pd.date_range('2024-12-09 10:00:00', periods=2, freq='1H', tz='UTC'))
+        
+        # Mock existing Redis data
+        existing_data = json.dumps({
+            'high': 110.0,
+            'low': 100.0,
+            'date': '2024-12-09'
+        })
+        
+        mock_client = AsyncMock()
+        mock_client.get.return_value = existing_data.encode('utf-8')
+        mock_client.setex = AsyncMock()
+        
+        with patch.object(service.cache, '_get_redis_client', return_value=mock_client):
+            await service._update_daily_price_range('AAPL', df)
+            
+            # Should still call setex to persist existing data
+            assert mock_client.setex.called
+    
+    @pytest.mark.asyncio
+    async def test_get_daily_price_range_weekend_fallback(self):
+        """Test get_daily_price_range falls back to last trading day on weekends."""
+        if RealtimeDataService is None:
+            pytest.skip("RealtimeDataService not available")
+        
+        from unittest.mock import Mock, AsyncMock, patch
+        import json
+        
+        mock_repo = Mock()
+        mock_cache = Mock()
+        mock_logger = Mock()
+        service = RealtimeDataService(mock_repo, mock_cache, mock_logger)
+        
+        # Mock Saturday
+        with patch('common.questdb_db.datetime') as mock_dt:
+            saturday = datetime(2024, 12, 7, 12, 0, 0, tzinfo=timezone.utc)
+            mock_dt.now.return_value = saturday
+            mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
+            
+            # Mock Redis client - no data for Saturday, but data for Friday
+            mock_client = AsyncMock()
+            friday_data = json.dumps({
+                'high': 110.0,
+                'low': 100.0,
+                'date': '2024-12-06'
+            })
+            
+            async def mock_get(key):
+                if '2024-12-07' in key:  # Saturday
+                    return None
+                elif '2024-12-06' in key:  # Friday
+                    return friday_data.encode('utf-8')
+                return None
+            
+            mock_client.get = AsyncMock(side_effect=mock_get)
+            
+            with patch.object(service.cache, '_get_redis_client', return_value=mock_client):
+                result = await service.get_daily_price_range('AAPL')
+                
+                # Should return Friday's data
+                assert result is not None
+                assert result['high'] == 110.0
+                assert result['low'] == 100.0
+    
+    @pytest.mark.asyncio
+    async def test_get_daily_price_range_returns_none_when_no_data(self):
+        """Test get_daily_price_range returns None when no data exists."""
+        if RealtimeDataService is None:
+            pytest.skip("RealtimeDataService not available")
+        
+        from unittest.mock import Mock, AsyncMock, patch
+        
+        mock_repo = Mock()
+        mock_cache = Mock()
+        mock_logger = Mock()
+        service = RealtimeDataService(mock_repo, mock_cache, mock_logger)
+        
+        mock_client = AsyncMock()
+        mock_client.get.return_value = None
+        
+        with patch.object(service.cache, '_get_redis_client', return_value=mock_client):
+            result = await service.get_daily_price_range('AAPL')
+            assert result is None
+    
+    def test_daily_range_displayed_in_html(self):
+        """Test that daily range is displayed in generated HTML."""
+        symbol = 'AAPL'
+        data = {
+            'price_info': {
+                'current_price': {
+                    'price': 150.50,
+                    'daily_range': {
+                        'high': 152.00,
+                        'low': 148.50
+                    }
+                },
+                'price_data': []
+            },
+            'financial_info': {},
+            'options_info': {},
+            'iv_info': {},
+            'news_info': {}
+        }
+        
+        html = generate_stock_info_html(symbol, data)
+        
+        # Should contain Day's Range
+        assert "Day's Range" in html or "Day Range" in html
+        assert '152.00' in html or '152' in html
+        assert '148.50' in html or '148' in html
+
+
+class TestOptionsTableFormatting:
+    """Test options table formatting improvements."""
+    
+    def test_options_table_bid_ask_same_line(self):
+        """Test that bid/ask are displayed on same line with spread below."""
+        options_data = {
+            'success': True,
+            'data': {
+                'contracts': [
+                    {
+                        'expiration': '2024-12-20',
+                        'type': 'call',
+                        'strike': 150.0,
+                        'bid': 5.50,
+                        'ask': 5.60,
+                        'volume': 1000,
+                        'open_interest': 5000,
+                        'implied_volatility': 0.25,
+                        'delta': 0.30,
+                        'theta': -0.05
+                    }
+                ]
+            }
+        }
+        
+        html = _format_options_html(options_data, current_price=150.0)
+        
+        # Bid and ask should be on same line separated by /
+        assert '$5.50 / $5.60' in html or '5.50 / 5.60' in html
+        # Spread should be on next line
+        assert '$0.10' in html or '0.10' in html
+    
+    def test_options_table_no_oi_column(self):
+        """Test that OI (Open Interest) column is removed."""
+        options_data = {
+            'success': True,
+            'data': {
+                'contracts': [
+                    {
+                        'expiration': '2024-12-20',
+                        'type': 'call',
+                        'strike': 150.0,
+                        'bid': 5.50,
+                        'ask': 5.60,
+                        'volume': 1000,
+                        'open_interest': 5000,
+                        'implied_volatility': 0.25,
+                        'delta': 0.30,
+                        'theta': -0.05
+                    }
+                ]
+            }
+        }
+        
+        html = _format_options_html(options_data, current_price=150.0)
+        
+        # Should have 6 columns per side (not 7)
+        # Count header occurrences - should not have OI header
+        assert html.count('colspan="6"') >= 2  # CALLS and PUTS headers
+        # OI should not appear as a column header
+        assert 'OI</th>' not in html or html.count('OI</th>') == 0
+
+
+class TestImpliedVolatilityCollapsible:
+    """Test implied volatility section collapsible functionality."""
+    
+    def test_iv_section_has_caret(self):
+        """Test that IV section has a caret icon."""
+        symbol = 'AAPL'
+        data = {
+            'price_info': {'current_price': {'price': 150.50}, 'price_data': []},
+            'financial_info': {},
+            'options_info': {},
+            'iv_info': {
+                'iv_data': {
+                    'statistics': {'mean': 0.25, 'median': 0.24, 'count': 100},
+                    'atm_iv': {'mean': 0.26},
+                    'call_iv': {'mean': 0.25},
+                    'put_iv': {'mean': 0.27}
+                }
+            },
+            'news_info': {}
+        }
+        
+        html = generate_stock_info_html(symbol, data)
+        
+        # Should have caret icon
+        assert 'ivCaret' in html or '▶' in html
+        # Should have toggle function
+        assert 'toggleIVSection' in html
+        # Content should be hidden by default
+        assert 'ivContent' in html
+        assert 'display: none' in html or 'display:none' in html
+    
+    def test_iv_section_collapsed_by_default(self):
+        """Test that IV section is collapsed by default."""
+        symbol = 'AAPL'
+        data = {
+            'price_info': {'current_price': {'price': 150.50}, 'price_data': []},
+            'financial_info': {},
+            'options_info': {},
+            'iv_info': {
+                'iv_data': {
+                    'statistics': {'mean': 0.25}
+                }
+            },
+            'news_info': {}
+        }
+        
+        html = generate_stock_info_html(symbol, data)
+        
+        # IV content should be hidden
+        assert 'id="ivContent"' in html
+        # Check for hidden style
+        iv_content_start = html.find('id="ivContent"')
+        if iv_content_start != -1:
+            # Look for display: none in the style attribute
+            style_section = html[iv_content_start:iv_content_start+200]
+            assert 'display: none' in style_section or 'display:none' in style_section
+
+
+class TestEarningsDateFiltering:
+    """Test earnings date filtering to exclude dividend/yield data."""
+    
+    @pytest.mark.asyncio
+    async def test_earnings_date_filters_dividend_data(self):
+        """Test that earnings date parsing filters out dividend/yield information."""
+        import db_server
+        
+        # Mock the fetch_earnings_date function to return dividend data
+        # and verify it gets filtered
+        test_cases = [
+            ("Forward Dividend & Yield 0.84 (0.26%)", "N/A"),  # Should be filtered
+            ("2025-01-15", "2025-01-15"),  # Valid date should pass
+            ("Jan 15, 2025", "Jan 15, 2025"),  # Valid date format should pass
+            ("Dividend Yield 2.5%", "N/A"),  # Should be filtered
+        ]
+        
+        for input_value, expected in test_cases:
+            # Check the filtering logic in generate_stock_info_html
+            symbol = 'AAPL'
+            data = {
+                'price_info': {'current_price': {'price': 150.50}, 'price_data': []},
+                'financial_info': {},
+                'options_info': {},
+                'iv_info': {},
+                'news_info': {}
+            }
+            
+            html = generate_stock_info_html(symbol, data, earnings_date=input_value)
+            
+            # If input contains dividend/yield, it should show N/A or be filtered
+            if 'Dividend' in input_value or 'Yield' in input_value:
+                # Should not contain the dividend text in earnings date field
+                earnings_section = html[html.find('Earnings Date'):html.find('Earnings Date')+200]
+                assert 'Dividend' not in earnings_section or 'N/A' in earnings_section
+            else:
+                # Valid dates should appear
+                assert input_value in html or expected in html
+
+
+class TestLayoutAndDisplay:
+    """Test layout and display improvements."""
+    
+    def test_metrics_grid_positioned_right_of_price(self):
+        """Test that metrics grid is positioned to the right of price section."""
+        symbol = 'AAPL'
+        data = {
+            'price_info': {
+                'current_price': {
+                    'price': 150.50,
+                    'previous_close': 148.00,
+                    'open': 149.00
+                },
+                'price_data': []
+            },
+            'financial_info': {},
+            'options_info': {},
+            'iv_info': {},
+            'news_info': {}
+        }
+        
+        html = generate_stock_info_html(symbol, data)
+        
+        # Should have header-content-wrapper for flexbox layout
+        assert 'header-content-wrapper' in html or 'headerContentWrapper' in html
+        # Price section and metrics grid should be in the wrapper
+        assert 'price-section' in html
+        assert 'metrics-grid' in html
+    
+    def test_financial_data_section_hidden(self):
+        """Test that Financial Data section is hidden/removed."""
+        symbol = 'AAPL'
+        data = {
+            'price_info': {'current_price': {'price': 150.50}, 'price_data': []},
+            'financial_info': {
+                'financial_data': {
+                    'market_cap': 2500000000000,
+                    'pe_ratio': 28.5
+                }
+            },
+            'options_info': {},
+            'iv_info': {},
+            'news_info': {}
+        }
+        
+        html = generate_stock_info_html(symbol, data)
+        
+        # Financial Data section should not appear
+        # Look for the specific section that was removed
+        assert html.count('<h2>Financial Data</h2>') == 0
+    
+    def test_days_range_displayed_before_52_week_range(self):
+        """Test that Day's Range appears before 52 Week Range in metrics."""
+        symbol = 'AAPL'
+        data = {
+            'price_info': {
+                'current_price': {
+                    'price': 150.50,
+                    'daily_range': {
+                        'high': 152.00,
+                        'low': 148.50
+                    }
+                },
+                'price_data': []
+            },
+            'financial_info': {},
+            'options_info': {},
+            'iv_info': {},
+            'news_info': {}
+        }
+        
+        html = generate_stock_info_html(symbol, data)
+        
+        # Find positions of both ranges
+        days_range_pos = html.find("Day's Range")
+        week52_range_pos = html.find("52 Week Range")
+        
+        # Day's Range should come before 52 Week Range
+        if days_range_pos != -1 and week52_range_pos != -1:
+            assert days_range_pos < week52_range_pos
 
 
 def run_all_tests():

@@ -17,7 +17,7 @@ import logging
 from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
 import sys
 from pathlib import Path
-from typing import Dict, Set, Any, Optional
+from typing import Dict, Set, Any, Optional, Tuple
 import json
 from datetime import datetime, timezone
 import time
@@ -798,6 +798,12 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     
     # Add stock info API endpoint
     app.router.add_get("/api/stock_info/{symbol}", handle_stock_info)
+    
+    # Add Yahoo Finance news API endpoint
+    app.router.add_get("/api/yahoo_news/{symbol}", handle_yahoo_finance_news)
+    
+    # Add Twitter/X tweets API endpoint
+    app.router.add_get("/api/tweets/{symbol}", handle_twitter_tweets)
     
     # Add stock info API subroutes BEFORE the parameterized route
     # (must be registered before /stock_info/{symbol} to avoid {symbol} capturing "ws" or "api")
@@ -3163,8 +3169,8 @@ async def handle_stock_info(request: web.Request) -> web.Response:
         }, status=500)
 
 
-def _format_options_html(options_data: Dict[str, Any]) -> str:
-    """Format options data as HTML table."""
+def _format_options_html(options_data: Dict[str, Any], current_price: float = None) -> str:
+    """Format options data as HTML with dropdown for expiration date selection, calls and puts side-by-side."""
     if not options_data or not options_data.get('success', False):
         return '<p>No options data available</p>'
     
@@ -3180,41 +3186,478 @@ def _format_options_html(options_data: Dict[str, Any]) -> str:
             by_expiry[exp] = []
         by_expiry[exp].append(contract)
     
-    html_parts = []
-    for exp_date in sorted(by_expiry.keys())[:10]:  # Show first 10 expirations
-        contracts_list = by_expiry[exp_date]
-        html_parts.append(f'<h3 style="margin-top: 20px; color: #667eea;">Expiration: {exp_date}</h3>')
-        html_parts.append('<table class="data-table" style="width: 100%; margin-bottom: 20px;">')
-        html_parts.append('<tr><th>Type</th><th>Strike</th><th>Bid</th><th>Ask</th><th>Last</th><th>Volume</th><th>Open Interest</th><th>IV</th></tr>')
-        
-        for contract in contracts_list[:20]:  # Show first 20 contracts per expiry
-            option_type = contract.get('option_type', 'N/A')
-            strike = contract.get('strike', 'N/A')
-            bid = contract.get('bid', 'N/A')
-            ask = contract.get('ask', 'N/A')
-            last = contract.get('last', 'N/A')
-            volume = contract.get('volume', 'N/A')
-            open_interest = contract.get('open_interest', 'N/A')
-            iv = contract.get('implied_volatility', 'N/A')
-            
-            html_parts.append('<tr>')
-            html_parts.append(f'<td>{option_type}</td>')
-            html_parts.append(f'<td>${strike:.2f}</td>' if isinstance(strike, (int, float)) else f'<td>{strike}</td>')
-            html_parts.append(f'<td>${bid:.2f}</td>' if isinstance(bid, (int, float)) else f'<td>{bid}</td>')
-            html_parts.append(f'<td>${ask:.2f}</td>' if isinstance(ask, (int, float)) else f'<td>{ask}</td>')
-            html_parts.append(f'<td>${last:.2f}</td>' if isinstance(last, (int, float)) else f'<td>{last}</td>')
-            html_parts.append(f'<td>{volume}</td>')
-            html_parts.append(f'<td>{open_interest}</td>')
-            html_parts.append(f'<td>{iv:.2%}</td>' if isinstance(iv, (int, float)) else f'<td>{iv}</td>')
-            html_parts.append('</tr>')
-        
-        html_parts.append('</table>')
+    # Sort expirations
+    sorted_expirations = sorted(by_expiry.keys())[:10]  # Show first 10 expirations
     
-    return ''.join(html_parts)
+    if not sorted_expirations:
+        return '<p>No options contracts found</p>'
+    
+    # Helper function to calculate background color based on moneyness
+    def get_row_bg_color(strike, current_price, option_type, row_idx):
+        """Calculate background color based on how far strike is from current price."""
+        # Base alternating row color - lighter for better contrast
+        base_color = '#ffffff' if row_idx % 2 == 0 else '#f5f5f5'
+        
+        if not current_price:
+            return base_color
+        
+        pct_diff = abs(strike - current_price) / current_price * 100
+        
+        # Determine if in-the-money (ITM)
+        if option_type == 'call':
+            itm = strike < current_price
+        else:  # put
+            itm = strike > current_price
+        
+        # Color intensity based on distance from ATM (more subtle)
+        if pct_diff < 2:  # Very close to ATM
+            alpha = 0.12
+        elif pct_diff < 5:
+            alpha = 0.08
+        elif pct_diff < 10:
+            alpha = 0.04
+        else:
+            return base_color
+        
+        # ITM: light yellow tint, OTM: very light gray (subtle)
+        if itm:
+            return f'#fffbf0'  # Very light yellow for ITM
+        else:
+            return base_color  # Keep base color for OTM
+    
+    # Helper function to generate cell style
+    def cell_style(bg_color, align='center', is_numeric=False, border_right=False):
+        """Generate consistent cell styling."""
+        style = f'padding: 12px 10px; background-color: {bg_color}; text-align: {align}; font-size: 14px; vertical-align: middle; color: #1a1a1a;'
+        if border_right:
+            style += ' border-right: 1px solid #d0d0d0;'
+        if is_numeric:
+            style += ' font-family: "SF Mono", "Monaco", "Courier New", monospace; font-weight: 600;'
+        return style
+    
+    # Build dropdown for expiration selection
+    dropdown_html = '<div style="display: flex; gap: 15px; margin-bottom: 15px; align-items: center;">'
+    dropdown_html += '<div><label for="optionsExpirationSelect" style="margin-right: 8px; font-weight: 600;">Expiration:</label>'
+    dropdown_html += '<select id="optionsExpirationSelect" onchange="showOptionsForExpiration(this.value)" style="padding: 8px; font-size: 14px; border: 1px solid #ddd; border-radius: 4px;">'
+    for i, exp_date in enumerate(sorted_expirations):
+        selected = 'selected' if i == 0 else ''
+        dropdown_html += f'<option value="{exp_date}" {selected}>{exp_date} ({len(by_expiry[exp_date])} contracts)</option>'
+    dropdown_html += '</select></div>'
+    
+    # Add dropdown for strike range around ATM
+    dropdown_html += '<div><label for="strikeRangeSelect" style="margin-right: 8px; font-weight: 600;">Show strikes:</label>'
+    dropdown_html += '<select id="strikeRangeSelect" onchange="filterStrikesByRange(this.value)" style="padding: 8px; font-size: 14px; border: 1px solid #ddd; border-radius: 4px;">'
+    dropdown_html += '<option value="10" selected>±10 around ATM</option>'
+    dropdown_html += '<option value="15">±15 around ATM</option>'
+    dropdown_html += '<option value="20">±20 around ATM</option>'
+    dropdown_html += '<option value="all">All strikes</option>'
+    dropdown_html += '</select></div>'
+    dropdown_html += '</div>'
+    
+    # Build table containers for each expiration (initially hide all except first)
+    tables_html = []
+    for i, exp_date in enumerate(sorted_expirations):
+        contracts_list = by_expiry[exp_date]
+        
+        # Group by strike price and option type
+        by_strike = {}
+        for contract in contracts_list:
+            strike = contract.get('strike', 0)
+            if not isinstance(strike, (int, float)):
+                continue
+            option_type = str(contract.get('type', '')).lower()
+            if strike not in by_strike:
+                by_strike[strike] = {'call': None, 'put': None}
+            by_strike[strike][option_type] = contract
+        
+        # Sort strikes high to low
+        sorted_strikes = sorted(by_strike.keys(), reverse=True)
+        
+        display_style = 'display: block;' if i == 0 else 'display: none;'
+        table_html = f'<div id="optionsTable_{exp_date}" class="options-table-container" style="{display_style}">'
+        table_html += '''<table class="data-table options-chain-table" style="
+            width: 100%; 
+            margin-bottom: 20px; 
+            font-size: 14px; 
+            border-collapse: separate;
+            border-spacing: 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            border-radius: 8px;
+            overflow: hidden;
+            background: #ffffff;
+        ">'''
+        
+        # Header with calls on left, puts on right
+        table_html += '''
+        <thead>
+        <tr>
+            <th colspan="6" style="background: linear-gradient(135deg, #43a047 0%, #66bb6a 100%); color: white; padding: 12px; font-weight: 700; font-size: 15px; text-align: center; letter-spacing: 1px; border-right: 2px solid white;">CALLS</th>
+            <th rowspan="2" style="background: linear-gradient(135deg, #5e72e4 0%, #825ee4 100%); color: white; padding: 12px; font-weight: 700; font-size: 15px; text-align: center; vertical-align: middle; border-left: 2px solid white; border-right: 2px solid white;">Strike</th>
+            <th colspan="6" style="background: linear-gradient(135deg, #ef5350 0%, #f44336 100%); color: white; padding: 12px; font-weight: 700; font-size: 15px; text-align: center; letter-spacing: 1px; border-left: 2px solid white;">PUTS</th>
+        </tr>
+        <tr>
+            <th style="padding: 12px 10px; background-color: #2e7d32; color: white; font-weight: 700; font-size: 13px; text-align: center; border-right: 1px solid #1b5e20;">Bid/Ask<br><small style="font-weight: 500; font-size: 11px;">Spread</small></th>
+            <th style="padding: 12px 10px; background-color: #2e7d32; color: white; font-weight: 700; font-size: 13px; text-align: center; border-right: 1px solid #1b5e20;">Mid</th>
+            <th style="padding: 12px 10px; background-color: #2e7d32; color: white; font-weight: 700; font-size: 13px; text-align: center; border-right: 1px solid #1b5e20;">Vol</th>
+            <th style="padding: 12px 10px; background-color: #2e7d32; color: white; font-weight: 700; font-size: 13px; text-align: center; border-right: 1px solid #1b5e20;">IV</th>
+            <th style="padding: 12px 10px; background-color: #2e7d32; color: white; font-weight: 700; font-size: 13px; text-align: center; border-right: 1px solid #1b5e20;">Delta<br><small style="font-weight: 500; font-size: 11px;">(Δ)</small></th>
+            <th style="padding: 12px 10px; background-color: #2e7d32; color: white; font-weight: 700; font-size: 13px; text-align: center;">Theta<br><small style="font-weight: 500; font-size: 11px;">(Θ)</small></th>
+            <th style="padding: 12px 10px; background-color: #c62828; color: white; font-weight: 700; font-size: 13px; text-align: center; border-right: 1px solid #b71c1c;">Bid/Ask<br><small style="font-weight: 500; font-size: 11px;">Spread</small></th>
+            <th style="padding: 12px 10px; background-color: #c62828; color: white; font-weight: 700; font-size: 13px; text-align: center; border-right: 1px solid #b71c1c;">Mid</th>
+            <th style="padding: 12px 10px; background-color: #c62828; color: white; font-weight: 700; font-size: 13px; text-align: center; border-right: 1px solid #b71c1c;">Vol</th>
+            <th style="padding: 12px 10px; background-color: #c62828; color: white; font-weight: 700; font-size: 13px; text-align: center; border-right: 1px solid #b71c1c;">IV</th>
+            <th style="padding: 12px 10px; background-color: #c62828; color: white; font-weight: 700; font-size: 13px; text-align: center; border-right: 1px solid #b71c1c;">Delta<br><small style="font-weight: 500; font-size: 11px;">(Δ)</small></th>
+            <th style="padding: 12px 10px; background-color: #c62828; color: white; font-weight: 700; font-size: 13px; text-align: center;">Theta<br><small style="font-weight: 500; font-size: 11px;">(Θ)</small></th>
+        </tr>
+        </thead>
+        <tbody>
+        '''
+        
+        # Find ATM strike (closest to current price)
+        atm_strike_idx = None
+        if current_price and sorted_strikes:
+            # Find the strike closest to current price
+            atm_strike_idx = min(range(len(sorted_strikes)), 
+                                key=lambda i: abs(sorted_strikes[i] - current_price))
+        
+        # Show up to 50 strikes, but mark each with distance from ATM
+        for idx, strike in enumerate(sorted_strikes[:50]):
+            call = by_strike[strike]['call']
+            put = by_strike[strike]['put']
+            
+            # Calculate row background color
+            call_bg = get_row_bg_color(strike, current_price, 'call', idx)
+            put_bg = get_row_bg_color(strike, current_price, 'put', idx)
+            
+            # Calculate distance from ATM for filtering
+            distance_from_atm = abs(idx - atm_strike_idx) if atm_strike_idx is not None else 999
+            
+            table_html += f'<tr class="strike-row" data-distance-from-atm="{distance_from_atm}" style="transition: background-color 0.2s;" onmouseover="this.style.backgroundColor=\'#e3f2fd\'" onmouseout="this.style.backgroundColor=\'\'">'
+            
+            # CALL data
+            if call:
+                bid = call.get('bid')
+                ask = call.get('ask')
+                last = call.get('last')
+                volume = call.get('volume', 'N/A')
+                oi = call.get('open_interest', 'N/A')
+                iv = call.get('implied_volatility')
+                delta = call.get('delta')
+                theta = call.get('theta')
+                
+                # Bid/Ask/Spread column - bid and ask on same line, spread on next line
+                if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and bid > 0 and ask > 0:
+                    spread = ask - bid
+                    table_html += f'<td style="{cell_style(call_bg, "right", True, True)}"><span style="color: #333; font-size: 13px; font-weight: 600;">${bid:.2f} / ${ask:.2f}</span><br><strong style="color: #1b5e20; font-size: 13px;">${spread:.2f}</strong></td>'
+                elif isinstance(bid, (int, float)):
+                    table_html += f'<td style="{cell_style(call_bg, "right", True, True)}"><span style="color: #333; font-size: 13px; font-weight: 600;">${bid:.2f} / -</span><br><span style="color: #666;">-</span></td>'
+                elif isinstance(ask, (int, float)):
+                    table_html += f'<td style="{cell_style(call_bg, "right", True, True)}"><span style="color: #333; font-size: 13px; font-weight: 600;">- / ${ask:.2f}</span><br><span style="color: #666;">-</span></td>'
+                else:
+                    table_html += f'<td style="{cell_style(call_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
+                
+                # Mid column
+                if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and bid > 0 and ask > 0:
+                    mid = (bid + ask) / 2
+                    table_html += f'<td style="{cell_style(call_bg, "right", True, True)}"><strong style="color: #0d47a1; font-size: 15px;">${mid:.2f}</strong></td>'
+                else:
+                    table_html += f'<td style="{cell_style(call_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
+                
+                table_html += f'<td style="{cell_style(call_bg, "right", True, True)}">{volume:,}</td>' if isinstance(volume, int) else f'<td style="{cell_style(call_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
+                table_html += f'<td style="{cell_style(call_bg, "right", True, True)}"><strong style="color: #1a1a1a;">{iv:.1%}</strong></td>' if isinstance(iv, (int, float)) else f'<td style="{cell_style(call_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
+                
+                # Delta (separate column)
+                table_html += f'<td style="{cell_style(call_bg, "center", True, True)}"><strong style="color: #004d40; font-size: 15px;">{delta:.3f}</strong></td>' if isinstance(delta, (int, float)) else f'<td style="{cell_style(call_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
+                
+                # Theta (separate column)
+                table_html += f'<td style="{cell_style(call_bg, "center", True, False)}"><strong style="color: #bf360c; font-size: 15px;">{theta:.3f}</strong></td>' if isinstance(theta, (int, float)) else f'<td style="{cell_style(call_bg, "center", False, False)}"><span style="color: #666;">-</span></td>'
+            else:
+                base_bg = get_row_bg_color(strike, current_price, 'call', idx)
+                table_html += f'<td style="{cell_style(base_bg, "center", False, True)}"><span style="color: #666;">-</span></td>' * 6
+            
+            # Strike price (center) - highlight if near current price
+            is_atm = current_price and abs(strike - current_price) / current_price < 0.02
+            if is_atm:
+                strike_style = 'background: linear-gradient(135deg, #ff9800 0%, #fb8c00 100%); color: white; font-weight: 700; padding: 12px; text-align: center; font-size: 15px; border-left: 3px solid #f57c00; border-right: 3px solid #f57c00; box-shadow: 0 2px 4px rgba(255, 152, 0, 0.3);'
+            else:
+                strike_style = 'background: linear-gradient(135deg, #5e72e4 0%, #825ee4 100%); color: white; font-weight: 600; padding: 12px; text-align: center; font-size: 14px; border-left: 2px solid #4a5dc7; border-right: 2px solid #4a5dc7;'
+            table_html += f'<td style="{strike_style}">${strike:.2f}</td>'
+            
+            # PUT data
+            if put:
+                bid = put.get('bid')
+                ask = put.get('ask')
+                last = put.get('last')
+                volume = put.get('volume', 'N/A')
+                oi = put.get('open_interest', 'N/A')
+                iv = put.get('implied_volatility')
+                delta = put.get('delta')
+                theta = put.get('theta')
+                
+                # Bid/Ask/Spread column - bid and ask on same line, spread on next line
+                if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and bid > 0 and ask > 0:
+                    spread = ask - bid
+                    table_html += f'<td style="{cell_style(put_bg, "right", True, True)}"><span style="color: #333; font-size: 13px; font-weight: 600;">${bid:.2f} / ${ask:.2f}</span><br><strong style="color: #b71c1c; font-size: 13px;">${spread:.2f}</strong></td>'
+                elif isinstance(bid, (int, float)):
+                    table_html += f'<td style="{cell_style(put_bg, "right", True, True)}"><span style="color: #333; font-size: 13px; font-weight: 600;">${bid:.2f} / -</span><br><span style="color: #666;">-</span></td>'
+                elif isinstance(ask, (int, float)):
+                    table_html += f'<td style="{cell_style(put_bg, "right", True, True)}"><span style="color: #333; font-size: 13px; font-weight: 600;">- / ${ask:.2f}</span><br><span style="color: #666;">-</span></td>'
+                else:
+                    table_html += f'<td style="{cell_style(put_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
+                
+                # Mid column
+                if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and bid > 0 and ask > 0:
+                    mid = (bid + ask) / 2
+                    table_html += f'<td style="{cell_style(put_bg, "right", True, True)}"><strong style="color: #0d47a1; font-size: 15px;">${mid:.2f}</strong></td>'
+                else:
+                    table_html += f'<td style="{cell_style(put_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
+                
+                table_html += f'<td style="{cell_style(put_bg, "right", True, True)}">{volume:,}</td>' if isinstance(volume, int) else f'<td style="{cell_style(put_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
+                table_html += f'<td style="{cell_style(put_bg, "right", True, True)}"><strong style="color: #1a1a1a;">{iv:.1%}</strong></td>' if isinstance(iv, (int, float)) else f'<td style="{cell_style(put_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
+                
+                # Delta (separate column)
+                table_html += f'<td style="{cell_style(put_bg, "center", True, True)}"><strong style="color: #004d40; font-size: 15px;">{delta:.3f}</strong></td>' if isinstance(delta, (int, float)) else f'<td style="{cell_style(put_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
+                
+                # Theta (separate column)
+                table_html += f'<td style="{cell_style(put_bg, "center", True, False)}"><strong style="color: #bf360c; font-size: 15px;">{theta:.3f}</strong></td>' if isinstance(theta, (int, float)) else f'<td style="{cell_style(put_bg, "center", False, False)}"><span style="color: #666;">-</span></td>'
+            else:
+                base_bg = get_row_bg_color(strike, current_price, 'put', idx)
+                table_html += f'<td style="{cell_style(base_bg, "center", False, True)}"><span style="color: #666;">-</span></td>' * 6
+            
+            table_html += '</tr>'
+        
+        table_html += '</tbody></table>'
+        table_html += '</div>'
+        tables_html.append(table_html)
+    
+    # Combine dropdown and tables
+    return dropdown_html + ''.join(tables_html)
 
 
-def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
-    """Generate Yahoo Finance-like HTML page for stock information."""
+# Earnings date cache in Redis
+EARNINGS_CACHE_TTL = 30 * 24 * 60 * 60  # 30 days in seconds
+EARNINGS_CACHE_KEY_PREFIX = "stocks:earnings_date:"
+
+# Global Redis client for earnings cache (lazy initialization)
+_earnings_redis_client: Optional[redis.Redis] = None
+_earnings_redis_lock = asyncio.Lock()
+
+
+async def _get_earnings_redis_client() -> Optional[redis.Redis]:
+    """Get or create Redis client for earnings date cache."""
+    global _earnings_redis_client
+    
+    if _earnings_redis_client is not None:
+        try:
+            # Test connection
+            await _earnings_redis_client.ping()
+            return _earnings_redis_client
+        except Exception:
+            # Connection lost, reset client
+            _earnings_redis_client = None
+    
+    if not REDIS_PUBSUB_AVAILABLE:
+        return None
+    
+    async with _earnings_redis_lock:
+        # Double-check after acquiring lock
+        if _earnings_redis_client is not None:
+            try:
+                await _earnings_redis_client.ping()
+                return _earnings_redis_client
+            except Exception:
+                _earnings_redis_client = None
+        
+        try:
+            redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+            _earnings_redis_client = redis.from_url(
+                redis_url,
+                decode_responses=True,  # Use text mode for simple string values
+                socket_connect_timeout=5,
+                socket_timeout=5,
+                socket_keepalive=True,
+                retry_on_timeout=True,
+                health_check_interval=30
+            )
+            # Test connection
+            await _earnings_redis_client.ping()
+            logger.debug(f"Initialized Redis client for earnings date cache: {redis_url}")
+            return _earnings_redis_client
+        except Exception as e:
+            logger.warning(f"Failed to initialize Redis client for earnings cache: {e}")
+            _earnings_redis_client = None
+            return None
+
+
+async def fetch_earnings_date(symbol: str) -> str:
+    """Fetch next earnings date for a symbol from Yahoo Finance.
+    
+    Caches results in Redis for 30 days to avoid excessive API calls.
+    Falls back to fetching if Redis is unavailable.
+    
+    Args:
+        symbol: Stock ticker symbol
+        
+    Returns:
+        Earnings date string (e.g., "2025-01-15") or "N/A" if not found
+    """
+    import subprocess
+    from bs4 import BeautifulSoup
+    
+    cache_key = f"{EARNINGS_CACHE_KEY_PREFIX}{symbol.upper()}"
+    
+    # Check Redis cache first
+    redis_client = await _get_earnings_redis_client()
+    if redis_client:
+        try:
+            cached_date = await redis_client.get(cache_key)
+            if cached_date:
+                logger.debug(f"Using cached earnings date for {symbol} from Redis: {cached_date}")
+                return cached_date
+        except Exception as e:
+            logger.warning(f"Error reading from Redis cache for {symbol}: {e}")
+            # Continue to fetch if Redis read fails
+    
+    try:
+        # Fetch from Yahoo Finance
+        url = f"https://finance.yahoo.com/quote/{symbol}"
+        
+        curl_cmd = [
+            'curl',
+            '-s',
+            '-L',
+            '--max-time', '10',
+            '-H', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            url
+        ]
+        
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                curl_cmd,
+                capture_output=True,
+                text=True,
+                timeout=15
+            )
+        )
+        
+        if result.returncode != 0:
+            logger.warning(f"Failed to fetch earnings date for {symbol}: curl returned {result.returncode}")
+            return "N/A"
+        
+        html = result.stdout
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # Look for earnings date in various possible locations
+        earnings_date = None
+        
+        # Method 1: Look for "Earnings Date" label in the stats table
+        stats_section = soup.find('section', {'data-testid': 'qsp-statistics'})
+        if stats_section:
+            rows = stats_section.find_all('tr')
+            for row in rows:
+                cells = row.find_all('td')
+                if len(cells) >= 2:
+                    label = cells[0].get_text(strip=True)
+                    value = cells[1].get_text(strip=True)
+                    # Only match if it's specifically "Earnings Date" and not dividend/yield data
+                    if 'earnings' in label.lower() and 'date' in label.lower():
+                        # Filter out dividend/yield data
+                        if 'dividend' not in value.lower() and 'yield' not in value.lower():
+                            # Check if it looks like a date (contains numbers and separators)
+                            import re
+                            if re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', value) or re.search(r'\d{4}-\d{2}-\d{2}', value):
+                                earnings_date = value
+                                break
+        
+        # Method 2: Look in the key statistics section
+        if not earnings_date:
+            key_stats = soup.find('div', {'data-testid': 'qsp-statistics'})
+            if key_stats:
+                # Look for text containing "Earnings Date" or similar
+                text_content = key_stats.get_text()
+                # Try to find date patterns near "earnings"
+                import re
+                date_pattern = r'(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})'
+                matches = re.findall(date_pattern, text_content)
+                if matches:
+                    # Take the first date found (likely the earnings date)
+                    earnings_date = matches[0]
+        
+        # Method 3: Look for specific data attributes
+        if not earnings_date:
+            import re
+            earnings_elem = soup.find('span', string=re.compile(r'Earnings\s+Date', re.I))
+            if earnings_elem:
+                parent = earnings_elem.find_parent()
+                if parent:
+                    # Look for date in nearby elements
+                    date_elem = parent.find_next_sibling()
+                    if date_elem:
+                        earnings_date = date_elem.get_text(strip=True)
+        
+        # Format and validate the date
+        if earnings_date:
+            # Clean up the date string
+            earnings_date = earnings_date.strip()
+            
+            # Filter out dividend/yield data - if it contains dividend or yield, it's not an earnings date
+            if 'dividend' in earnings_date.lower() or 'yield' in earnings_date.lower():
+                earnings_date = None
+            else:
+                # Remove extra text like "After Market Close" or "Before Market Open"
+                if 'After' in earnings_date or 'Before' in earnings_date:
+                    parts = earnings_date.split()
+                    earnings_date = ' '.join(parts[:3])  # Take first 3 parts (date)
+                
+                # Validate it looks like a date (contains date pattern)
+                import re
+                if not (re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', earnings_date) or re.search(r'\d{4}-\d{2}-\d{2}', earnings_date)):
+                    earnings_date = None
+        
+        if earnings_date:
+            # Cache the result in Redis
+            if redis_client:
+                try:
+                    await redis_client.setex(cache_key, EARNINGS_CACHE_TTL, earnings_date)
+                    logger.info(f"Fetched and cached earnings date for {symbol} in Redis: {earnings_date}")
+                except Exception as e:
+                    logger.warning(f"Error writing to Redis cache for {symbol}: {e}")
+            else:
+                logger.info(f"Fetched earnings date for {symbol} (Redis unavailable): {earnings_date}")
+            return earnings_date
+        else:
+            # Cache "N/A" to avoid repeated failed lookups (shorter TTL: 1 day)
+            if redis_client:
+                try:
+                    await redis_client.setex(cache_key, 86400, "N/A")  # 1 day TTL for "N/A"
+                    logger.debug(f"Cached 'N/A' for {symbol} in Redis (1 day TTL)")
+                except Exception as e:
+                    logger.warning(f"Error writing 'N/A' to Redis cache for {symbol}: {e}")
+            logger.debug(f"Could not find earnings date for {symbol}")
+            return "N/A"
+            
+    except Exception as e:
+        logger.error(f"Error fetching earnings date for {symbol}: {e}", exc_info=True)
+        # Cache "N/A" for a shorter time (1 day) on error
+        if redis_client:
+            try:
+                await redis_client.setex(cache_key, 86400, "N/A")  # 1 day TTL for errors
+            except Exception:
+                pass  # Ignore Redis errors on error path
+        return "N/A"
+
+
+def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: str = None) -> str:
+    """Generate Yahoo Finance-like HTML page for stock information.
+    
+    Args:
+        symbol: Stock ticker symbol
+        data: Dictionary containing price_info, financial_info, etc.
+        earnings_date: Optional earnings date string (if None, will show "N/A")
+    """
     import json
     from datetime import datetime, timedelta
     import pandas as pd
@@ -3241,25 +3684,108 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
     iv_info = data.get('iv_info', {})
     news_info = data.get('news_info', {})
     
-    # Get current price
+    # Get financial data first - handle both dict and DataFrame
+    financial_data = {}
+    if financial_info:
+        fin_data = financial_info.get('financial_data')
+        if isinstance(fin_data, dict):
+            financial_data = fin_data
+        elif hasattr(fin_data, 'to_dict'):
+            # It's a DataFrame - get the latest row
+            if not fin_data.empty:
+                financial_data = fin_data.iloc[-1].to_dict()
+    
+    # Get current price and related data
     current_price_data = price_info.get('current_price', {})
     if isinstance(current_price_data, dict):
+        # Get current/realtime price
         current_price = current_price_data.get('price') or current_price_data.get('close') or current_price_data.get('last_price') or 'N/A'
-        price_change = current_price_data.get('change', 0) or current_price_data.get('change_amount', 0)
-        price_change_pct = current_price_data.get('change_percent', 0) or current_price_data.get('change_pct', 0)
+        
+        # Get closing price (last trading day's close)
+        closing_price = current_price_data.get('close') or current_price_data.get('last_close') or current_price_data.get('price') or 'N/A'
+        
+        # Get previous close
+        previous_close = current_price_data.get('previous_close') or financial_data.get('previous_close')
+        
+        # Get open price
+        open_price = current_price_data.get('open') or financial_data.get('open')
+        
+        # Get bid/ask
+        bid_price = current_price_data.get('bid') or current_price_data.get('bid_price') or financial_data.get('bid')
+        ask_price = current_price_data.get('ask') or current_price_data.get('ask_price') or financial_data.get('ask')
+        bid_size = current_price_data.get('bid_size') or financial_data.get('bid_size')
+        ask_size = current_price_data.get('ask_size') or financial_data.get('ask_size')
+        
+        # Get after-hours price
+        after_hours_price = current_price_data.get('after_hours_price') or current_price_data.get('extended_hours_price')
+        
+        # Get daily range (high/low for today)
+        daily_range = current_price_data.get('daily_range')
+        if daily_range and isinstance(daily_range, dict):
+            daily_high = daily_range.get('high')
+            daily_low = daily_range.get('low')
+        else:
+            daily_high = None
+            daily_low = None
+        
+        # Calculate change from previous close
+        if previous_close and isinstance(previous_close, (int, float)) and previous_close > 0:
+            if isinstance(closing_price, (int, float)):
+                price_change = closing_price - previous_close
+                price_change_pct = (price_change / previous_close) * 100
+            elif isinstance(current_price, (int, float)):
+                price_change = current_price - previous_close
+                price_change_pct = (price_change / previous_close) * 100
+            else:
+                price_change = current_price_data.get('change', 0) or current_price_data.get('change_amount', 0)
+                price_change_pct = current_price_data.get('change_percent', 0) or current_price_data.get('change_pct', 0)
+        else:
+            price_change = current_price_data.get('change', 0) or current_price_data.get('change_amount', 0)
+            price_change_pct = current_price_data.get('change_percent', 0) or current_price_data.get('change_pct', 0)
+        
         volume = current_price_data.get('volume') or current_price_data.get('size')
     else:
         # If current_price is a number directly
         current_price = current_price_data if isinstance(current_price_data, (int, float)) else 'N/A'
+        closing_price = current_price
+        previous_close = None
+        open_price = None
+        bid_price = None
+        ask_price = None
+        bid_size = None
+        ask_size = None
+        after_hours_price = None
+        daily_high = None
+        daily_low = None
         price_change = 0
         price_change_pct = 0
         volume = None
     
-    # Format price
+    # Format prices
     if isinstance(current_price, (int, float)):
         current_price_str = f"{current_price:.2f}"
     else:
         current_price_str = str(current_price)
+    
+    if isinstance(closing_price, (int, float)):
+        closing_price_str = f"{closing_price:.2f}"
+    else:
+        closing_price_str = str(closing_price)
+    
+    # Format after-hours price
+    if isinstance(after_hours_price, (int, float)):
+        after_hours_price_str = f"{after_hours_price:.2f}"
+        # Calculate after-hours change from close
+        if isinstance(closing_price, (int, float)) and closing_price > 0:
+            after_hours_change = after_hours_price - closing_price
+            after_hours_change_pct = (after_hours_change / closing_price) * 100
+        else:
+            after_hours_change = 0
+            after_hours_change_pct = 0
+    else:
+        after_hours_price_str = None
+        after_hours_change = 0
+        after_hours_change_pct = 0
     
     # Get price history for chart (daily) and merged series (realtime+hourly+daily)
     price_history = price_info.get('price_data', [])
@@ -3278,16 +3804,8 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
     else:
         logger.warning(f"price_history type: {type(price_history)} for {symbol}")
     
-    # Get financial data - handle both dict and DataFrame
-    financial_data = {}
-    if financial_info:
-        fin_data = financial_info.get('financial_data')
-        if isinstance(fin_data, dict):
-            financial_data = fin_data
-        elif hasattr(fin_data, 'to_dict'):
-            # It's a DataFrame - get the latest row
-            if not fin_data.empty:
-                financial_data = fin_data.iloc[-1].to_dict()
+    # Get earnings date (use provided or default to "N/A")
+    earnings_date_display = earnings_date if earnings_date else "N/A"
     
     # Calculate 52 week high/low from price history
     week_52_high = None
@@ -3504,8 +4022,8 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
         published = item.get("published_utc", "")[:10] if item.get("published_utc") else ""
         description = item.get("description", "")
         article_url = item.get("article_url", "#")
-        desc_html = f'<p>{description[:200]}...</p>' if description else ""
-        return f'<li style="margin-bottom: 15px; padding: 10px; background: #f9fafb; border-radius: 4px;"><strong>{title}</strong><br><small>{published}</small><br>{desc_html}<a href="{article_url}" target="_blank" style="color: #667eea;">Read more</a></li>'
+        desc_html = f'<p style="color: #333; line-height: 1.6; font-size: 15px; margin: 8px 0;">{description[:200]}...</p>' if description else ""
+        return f'<li style="margin-bottom: 20px; padding: 20px; background: #ffffff; border-radius: 8px; border-left: 5px solid #1a73e8; box-shadow: 0 2px 4px rgba(0,0,0,0.05);"><h4 style="margin: 0 0 10px 0; font-size: 18px; font-weight: 700; color: #1a1a1a; line-height: 1.4;">{title}</h4><div style="font-size: 13px; color: #666; margin-bottom: 8px; font-weight: 500;">{published}</div>{desc_html}<a href="{article_url}" target="_blank" style="color: #1a73e8; text-decoration: none; font-weight: 600; font-size: 14px;">Read more →</a></li>'
     
     news_html = ""
     if news_items:
@@ -3533,8 +4051,8 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
         }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: #f5f5f5;
-            color: #333;
+            background: #0d1117;
+            color: #c9d1d9;
             line-height: 1.6;
         }}
         .container {{
@@ -3543,64 +4061,107 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
             padding: 20px;
         }}
         .header {{
-            background: white;
-            padding: 20px;
+            background: #161b22;
+            padding: 20px 30px;
             border-radius: 8px;
             margin-bottom: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            border: 1px solid #30363d;
         }}
         .header h1 {{
             font-size: 32px;
-            margin-bottom: 10px;
+            margin-bottom: 5px;
+            color: #f0f6fc;
+        }}
+        .header .symbol-info {{
+            font-size: 14px;
+            color: #8b949e;
+            margin-bottom: 20px;
+        }}
+        .header-content-wrapper {{
+            display: flex;
+            gap: 40px;
+            align-items: flex-start;
+            margin: 20px 0;
         }}
         .price-section {{
             display: flex;
-            align-items: center;
-            gap: 20px;
-            margin: 20px 0;
+            flex-direction: column;
+            gap: 10px;
+            flex: 1;
+            min-width: 0;
+        }}
+        .price-row {{
+            display: flex;
+            align-items: baseline;
+            gap: 15px;
         }}
         .price {{
             font-size: 48px;
-            font-weight: bold;
+            font-weight: 600;
+            color: #f0f6fc;
         }}
         .change {{
             font-size: 24px;
             font-weight: 500;
         }}
         .change.positive {{
-            color: #16a34a;
+            color: #26a641;
         }}
         .change.negative {{
-            color: #dc2626;
+            color: #f85149;
+        }}
+        .price-timestamp {{
+            font-size: 13px;
+            color: #8b949e;
+            margin-top: 5px;
+        }}
+        .after-hours {{
+            display: flex;
+            align-items: baseline;
+            gap: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #30363d;
+            margin-top: 15px;
+        }}
+        .after-hours .label {{
+            font-size: 13px;
+            color: #8b949e;
+            margin-right: 10px;
         }}
         .metrics-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin: 20px 0;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0;
+            flex: 1;
+            min-width: 0;
+            border-left: 1px solid #30363d;
+            padding-left: 30px;
         }}
         .metric-card {{
-            background: white;
-            padding: 15px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            background: transparent;
+            padding: 12px 0;
+            border-right: 1px solid #30363d;
+            padding-right: 20px;
+        }}
+        .metric-card:last-child {{
+            border-right: none;
         }}
         .metric-label {{
             font-size: 12px;
-            color: #666;
-            text-transform: uppercase;
-            margin-bottom: 5px;
+            color: #8b949e;
+            margin-bottom: 4px;
         }}
         .metric-value {{
-            font-size: 20px;
+            font-size: 16px;
             font-weight: 600;
+            color: #f0f6fc;
         }}
         .chart-section {{
-            background: white;
+            background: #161b22;
             padding: 20px;
             border-radius: 8px;
             margin-bottom: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            border: 1px solid #30363d;
         }}
         .chart-controls {{
             display: flex;
@@ -3608,31 +4169,38 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
             margin-bottom: 20px;
         }}
         .chart-btn {{
-            padding: 8px 16px;
-            border: 1px solid #ddd;
-            background: white;
-            border-radius: 4px;
+            padding: 6px 12px;
+            border: 1px solid #30363d;
+            background: #0d1117;
+            border-radius: 6px;
             cursor: pointer;
-            font-size: 14px;
+            font-size: 13px;
+            color: #c9d1d9;
+            transition: all 0.2s;
+        }}
+        .chart-btn:hover {{
+            background: #161b22;
+            border-color: #58a6ff;
         }}
         .chart-btn.active {{
-            background: #667eea;
+            background: #1f6feb;
             color: white;
-            border-color: #667eea;
+            border-color: #1f6feb;
         }}
         .chart-container {{
             position: relative;
             height: 400px;
         }}
         .data-section {{
-            background: white;
+            background: #161b22;
             padding: 20px;
             border-radius: 8px;
             margin-bottom: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            border: 1px solid #30363d;
         }}
         .data-section h2 {{
             margin-bottom: 15px;
+            color: #f0f6fc;
             color: #667eea;
         }}
         .data-table {{
@@ -3641,14 +4209,21 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
         }}
         .data-table th,
         .data-table td {{
-            padding: 10px;
+            padding: 12px;
             text-align: left;
-            border-bottom: 1px solid #eee;
+            border-bottom: 1px solid #21262d;
         }}
         .data-table th {{
-            background: #f9fafb;
+            background: #0d1117;
             font-weight: 600;
-            color: #666;
+            color: #8b949e;
+            font-size: 13px;
+        }}
+        .data-table td {{
+            color: #c9d1d9;
+        }}
+        .data-table tr:hover {{
+            background: #161b22;
         }}
         .status-indicator {{
             display: inline-block;
@@ -3669,49 +4244,125 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
             border-radius: 4px;
             margin-top: 10px;
         }}
+        @keyframes spin {{
+            0% {{ transform: rotate(0deg); }}
+            100% {{ transform: rotate(360deg); }}
+        }}
+        .yahoo-news-item {{
+            margin-bottom: 15px;
+            padding: 12px;
+            background: #f9fafb;
+            border-radius: 6px;
+            border-left: 3px solid #667eea;
+        }}
+        .yahoo-news-item h3 {{
+            margin: 0 0 8px 0;
+            font-size: 16px;
+            color: #333;
+        }}
+        .yahoo-news-item a {{
+            color: #667eea;
+            text-decoration: none;
+        }}
+        .yahoo-news-item a:hover {{
+            text-decoration: underline;
+        }}
+        .yahoo-news-item .news-meta {{
+            font-size: 12px;
+            color: #999;
+            margin-top: 5px;
+        }}
+        .yahoo-analysis-box {{
+            background: #fffbeb;
+            border: 1px solid #fbbf24;
+            border-radius: 6px;
+            padding: 15px;
+            margin-top: 15px;
+        }}
+        .yahoo-analysis-box h3 {{
+            margin: 0 0 10px 0;
+            color: #d97706;
+            font-size: 16px;
+        }}
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
+            <div class="symbol-info">NYSE - Nasdaq Real Time Price • USD</div>
             <h1>{symbol}</h1>
-            <div class="price-section">
-                <div class="price">${current_price_str}</div>
-                <div class="change {change_color}">
-                    {change_sign}${abs(price_change):.2f} ({change_sign}{price_change_pct:.2f}%)
+            <div class="header-content-wrapper">
+                <div class="price-section">
+                    <div class="price-row">
+                    <div class="price" id="mainPrice">${closing_price_str}</div>
+                    <div class="change {change_color}" id="mainChange">
+                        {change_sign}${abs(price_change):.2f} ({change_sign}{price_change_pct:.2f}%)
+                    </div>
                 </div>
-            </div>
-            <div class="realtime-section">
-                <span class="status-indicator disconnected" id="wsStatus"></span>
-                <span id="wsStatusText">Connecting to real-time data...</span>
-                <span id="realtimePrice" style="margin-left: 20px; font-weight: 600;"></span>
-            </div>
-        </div>
-        
-        <div class="metrics-grid">
+                    <div class="price-timestamp">At close: <span id="closeTime">Loading...</span></div>
+                    
+                    <div class="after-hours" id="afterHoursSection" style="display: {'block' if after_hours_price_str else 'none'};">
+                        <div>
+                            <span class="label">🌙 After hours:</span>
+                            <span class="price" style="font-size: 24px;" id="afterHoursPrice">{after_hours_price_str if after_hours_price_str else '--'}</span>
+                            <span class="change" id="afterHoursChange">{f"{'+' if after_hours_change >= 0 else ''}${abs(after_hours_change):.2f} ({'+' if after_hours_change >= 0 else ''}{after_hours_change_pct:.2f}%)" if after_hours_price_str else '--'}</span>
+                        </div>
+                        <div class="price-timestamp" id="afterHoursTime">--</div>
+                    </div>
+                    
+                    <div class="realtime-section" style="margin-top: 15px;">
+                    <span class="status-indicator disconnected" id="wsStatus"></span>
+                        <span id="wsStatusText" style="color: #8b949e;">Connecting to real-time data...</span>
+                        <span id="realtimePrice" style="margin-left: 20px; font-weight: 600; color: #f0f6fc;"></span>
+                    </div>
+                </div>
+                
+                <div class="metrics-grid">
             <div class="metric-card">
-                <div class="metric-label">Market Cap</div>
+                <div class="metric-label">Previous Close</div>
+                <div class="metric-value">{format_value(previous_close)}</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Market Cap (intraday)</div>
                 <div class="metric-value">{format_value(financial_data.get('market_cap'))}</div>
             </div>
             <div class="metric-card">
-                <div class="metric-label">P/E Ratio</div>
+                <div class="metric-label">Open</div>
+                <div class="metric-value">{format_value(open_price)}</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Day's Range</div>
+                <div class="metric-value">{f"{format_value(daily_low)} - {format_value(daily_high)}" if daily_low is not None and daily_high is not None else 'N/A'}</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">52 Week Range</div>
+                <div class="metric-value">{format_value(week_52_low)} - {format_value(week_52_high)}</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Bid/Ask</div>
+                <div class="metric-value">{f"{format_value(bid_price)} / {format_value(ask_price)}" if bid_price and ask_price else (format_value(bid_price) if bid_price else (format_value(ask_price) if ask_price else 'N/A'))}</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Avg. Volume</div>
+                <div class="metric-value">{format_value(financial_data.get('average_volume'))}</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">PE Ratio (TTM)</div>
                 <div class="metric-value">{format_value(financial_data.get('price_to_earnings') or financial_data.get('pe_ratio'))}</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">52 Week High</div>
-                <div class="metric-value">{format_value(week_52_high)}</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">52 Week Low</div>
-                <div class="metric-value">{format_value(week_52_low)}</div>
             </div>
             <div class="metric-card">
                 <div class="metric-label">Volume</div>
                 <div class="metric-value">{format_value(volume)}</div>
             </div>
             <div class="metric-card">
-                <div class="metric-label">Implied Volatility</div>
-                <div class="metric-value">{format_value((iv_data.get('statistics', {}).get('mean') or iv_data.get('atm_iv', {}).get('mean')) if iv_data else None)}</div>
+                <div class="metric-label">EPS (TTM)</div>
+                <div class="metric-value">{format_value(financial_data.get('earnings_per_share') or financial_data.get('eps'))}</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Earnings Date</div>
+                <div class="metric-value" id="earningsDate">{earnings_date_display if earnings_date_display and earnings_date_display != 'N/A' and 'Dividend' not in earnings_date_display and 'Yield' not in earnings_date_display else 'N/A'}</div>
+            </div>
+        </div>
             </div>
         </div>
         
@@ -3736,53 +4387,62 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
             </div>
         </div>
         
-        <div class="data-section">
-            <h2>Financial Data</h2>
-            <table class="data-table">
-                <tr>
-                    <th>Metric</th>
-                    <th>Value</th>
-                </tr>
-                <tr><td>Market Cap</td><td>{format_value(financial_data.get('market_cap'))}</td></tr>
-                <tr><td>P/E Ratio</td><td>{format_value(financial_data.get('price_to_earnings') or financial_data.get('pe_ratio'))}</td></tr>
-                <tr><td>EPS</td><td>{format_value(financial_data.get('earnings_per_share') or financial_data.get('eps'))}</td></tr>
-                <tr><td>Dividend Yield</td><td>{format_value(financial_data.get('dividend_yield'))}</td></tr>
-                <tr><td>52 Week High</td><td>{format_value(week_52_high)}</td></tr>
-                <tr><td>52 Week Low</td><td>{format_value(week_52_low)}</td></tr>
-                <tr><td>Volume</td><td>{format_value(volume)}</td></tr>
-            </table>
-        </div>
         
         {f'''
         <div class="data-section">
-            <h2>Implied Volatility</h2>
-            <table class="data-table">
-                <tr>
-                    <th>Metric</th>
-                    <th>Value</th>
-                </tr>
-                <tr><td>Mean IV</td><td>{format_value(iv_data.get('statistics', {}).get('mean'))}</td></tr>
-                <tr><td>Median IV</td><td>{format_value(iv_data.get('statistics', {}).get('median'))}</td></tr>
-                <tr><td>ATM IV</td><td>{format_value(iv_data.get('atm_iv', {}).get('mean'))}</td></tr>
-                <tr><td>Call IV</td><td>{format_value(iv_data.get('call_iv', {}).get('mean'))}</td></tr>
-                <tr><td>Put IV</td><td>{format_value(iv_data.get('put_iv', {}).get('mean'))}</td></tr>
-                <tr><td>IV Count</td><td>{format_value(iv_data.get('statistics', {}).get('count'))}</td></tr>
-            </table>
+            <h2 style="cursor: pointer; user-select: none; display: flex; align-items: center; gap: 10px;" onclick="toggleIVSection()">
+                <span id="ivCaret" style="display: inline-block; transition: transform 0.3s; transform: rotate(-90deg); font-size: 14px;">▶</span>
+                Implied Volatility
+            </h2>
+            <div id="ivContent" style="display: none; margin-top: 15px;">
+                <table class="data-table">
+                    <tr>
+                        <th>Metric</th>
+                        <th>Value</th>
+                    </tr>
+                    <tr><td>Mean IV</td><td>{format_value(iv_data.get('statistics', {}).get('mean'))}</td></tr>
+                    <tr><td>Median IV</td><td>{format_value(iv_data.get('statistics', {}).get('median'))}</td></tr>
+                    <tr><td>ATM IV</td><td>{format_value(iv_data.get('atm_iv', {}).get('mean'))}</td></tr>
+                    <tr><td>Call IV</td><td>{format_value(iv_data.get('call_iv', {}).get('mean'))}</td></tr>
+                    <tr><td>Put IV</td><td>{format_value(iv_data.get('put_iv', {}).get('mean'))}</td></tr>
+                    <tr><td>IV Count</td><td>{format_value(iv_data.get('statistics', {}).get('count'))}</td></tr>
+                </table>
+            </div>
         </div>
         ''' if iv_data else ''}
         
         {f'''
         <div class="data-section">
-            <h2>Options (90 Days)</h2>
+            <h2>Options</h2>
             <div id="optionsDisplay">
-                {_format_options_html(options_data) if options_data else '<p>No options data available</p>'}
+                {_format_options_html(options_data, current_price if isinstance(current_price, (int, float)) else None) if options_data else '<p>No options data available</p>'}
             </div>
         </div>
         ''' if options_data else ''}
         
+        <div class="data-section">
+            <h2>Yahoo Finance News & Analysis</h2>
+            <div id="yahooNewsDisplay">
+                <div style="padding: 20px; text-align: center; color: #666;">
+                    <div class="loading-spinner" style="display: inline-block; width: 24px; height: 24px; border: 3px solid #f3f3f3; border-top: 3px solid #667eea; border-radius: 50%; animation: spin 1s linear infinite;"></div>
+                    <p style="margin-top: 10px;">Loading Yahoo Finance news...</p>
+                </div>
+            </div>
+        </div>
+        
+        <div class="data-section">
+            <h2>Recent Tweets</h2>
+            <div id="tweetsDisplay">
+                <div style="padding: 20px; text-align: center; color: #666;">
+                    <div class="loading-spinner" style="display: inline-block; width: 24px; height: 24px; border: 3px solid #f3f3f3; border-top: 3px solid #1DA1F2; border-radius: 50%; animation: spin 1s linear infinite;"></div>
+                    <p style="margin-top: 10px;">Loading tweets...</p>
+                </div>
+            </div>
+        </div>
+        
         {f'''
         <div class="data-section">
-            <h2>Latest News</h2>
+            <h2>Latest News (Database)</h2>
             <div id="newsDisplay">
                 {news_html}
             </div>
@@ -4565,15 +5225,15 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
         }}
         
         // WebSocket connection for real-time updates
-        // Use same host but fixed port 9102 for real-time ticker data
-        const wsPort = 9102;
+        // Use the same port as the current page URL (proxy will route to backend)
+        const wsPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
         let ws = null;
         let reconnectAttempts = 0;
         const maxReconnectAttempts = 5;
         
         function connectWebSocket() {{
             try {{
-                // Connect to WebSocket server on port 9102 (same host as page)
+                // Connect to WebSocket on same host:port as page (proxy routes to backend:9102)
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 const host = window.location.hostname || 'localhost';
                 const wsUrl = `${{protocol}}//${{host}}:${{wsPort}}/stock_info/ws?symbol={symbol}`;
@@ -4632,14 +5292,15 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
                     const priceFloat = parseFloat(price);
                     if (isNaN(priceFloat)) return;
                     
-                    // Update the small realtime price display
-                    document.getElementById('realtimePrice').textContent = `Real-time: ${{priceFloat.toFixed(2)}}`;
-                    
-                    // Update the main price display
-                    const priceElement = document.querySelector('.price');
-                    if (priceElement) {{
-                        priceElement.textContent = `$${{priceFloat.toFixed(2)}}`;
-                    }}
+                    // Check if market is open
+                    const now = new Date();
+                    const et = new Date(now.toLocaleString('en-US', {{ timeZone: 'America/New_York' }}));
+                    const hours = et.getHours();
+                    const minutes = et.getMinutes();
+                    const day = et.getDay();
+                    const isWeekday = day >= 1 && day <= 5;
+                    const isMarketHours = isWeekday && ((hours === 9 && minutes >= 30) || (hours > 9 && hours < 16));
+                    const isAfterHours = isWeekday && (hours >= 16 || hours < 9 || (hours === 9 && minutes < 30));
                     
                     // Calculate change and change percentage from reference price
                     let change = 0;
@@ -4649,14 +5310,82 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
                         changePct = (change / referencePrice) * 100;
                     }}
                     
-                    // Update the change display
+                    const changeSign = change >= 0 ? '+' : '';
+                    const changeColor = change >= 0 ? 'positive' : 'negative';
+                    
+                    if (isMarketHours) {{
+                        // Update main price during market hours
+                        const priceElement = document.querySelector('.price');
+                        if (priceElement) {{
+                            priceElement.textContent = '$' + priceFloat.toFixed(2);
+                        }}
+                        
                     const changeElement = document.querySelector('.change');
                     if (changeElement) {{
-                        const changeSign = change >= 0 ? '+' : '';
-                        changeElement.textContent = `${{changeSign}}$${{Math.abs(change).toFixed(2)}} (${{changeSign}}${{changePct.toFixed(2)}}%)`;
-                        // Update color class
-                        changeElement.classList.remove('positive', 'negative');
-                        changeElement.classList.add(change >= 0 ? 'positive' : 'negative');
+                            changeElement.textContent = changeSign + '$' + Math.abs(change).toFixed(2) + ' (' + changeSign + changePct.toFixed(2) + '%)';
+                            changeElement.className = 'change ' + changeColor;
+                        }}
+                        
+                        // Update realtime indicator
+                        document.getElementById('realtimePrice').textContent = 'Live: $' + priceFloat.toFixed(2);
+                    }} else if (isAfterHours) {{
+                        // Update after-hours section
+                        const afterHoursSection = document.getElementById('afterHoursSection');
+                        const afterHoursPrice = document.getElementById('afterHoursPrice');
+                        const afterHoursChangeElement = document.getElementById('afterHoursChange');
+                        const afterHoursTime = document.getElementById('afterHoursTime');
+                        
+                        // Show after-hours section
+                        if (afterHoursSection) {{
+                            afterHoursSection.style.display = 'block';
+                        }}
+                        
+                        // Get closing price from main price display
+                        const mainPriceElement = document.getElementById('mainPrice');
+                        let closingPrice = null;
+                        if (mainPriceElement) {{
+                            const closingPriceText = mainPriceElement.textContent.replace('$', '').trim();
+                            closingPrice = parseFloat(closingPriceText);
+                        }}
+                        
+                        // Calculate change from closing price (not reference price)
+                        let afterHoursChangeValue = 0;
+                        let afterHoursChangePct = 0;
+                        if (closingPrice && !isNaN(closingPrice) && closingPrice > 0) {{
+                            afterHoursChangeValue = priceFloat - closingPrice;
+                            afterHoursChangePct = (afterHoursChangeValue / closingPrice) * 100;
+                        }}
+                        
+                        const afterHoursChangeSign = afterHoursChangeValue >= 0 ? '+' : '';
+                        const afterHoursChangeColor = afterHoursChangeValue >= 0 ? 'positive' : 'negative';
+                        
+                        if (afterHoursPrice) {{
+                            afterHoursPrice.textContent = '$' + priceFloat.toFixed(2);
+                            afterHoursPrice.style.color = '#f0f6fc';
+                        }}
+                        
+                        if (afterHoursChangeElement) {{
+                            afterHoursChangeElement.textContent = afterHoursChangeSign + '$' + Math.abs(afterHoursChangeValue).toFixed(2) + ' (' + afterHoursChangeSign + afterHoursChangePct.toFixed(2) + '%)';
+                            afterHoursChangeElement.className = 'change ' + afterHoursChangeColor;
+                        }}
+                        
+                        // Update timestamp
+                        if (afterHoursTime && quote.timestamp) {{
+                            const timestamp = new Date(quote.timestamp);
+                            afterHoursTime.textContent = timestamp.toLocaleTimeString('en-US', {{
+                                hour: 'numeric',
+                                minute: '2-digit',
+                                second: '2-digit',
+                                timeZone: 'America/New_York',
+                                timeZoneName: 'short'
+                            }});
+                        }}
+                        
+                        // Update realtime indicator
+                        document.getElementById('realtimePrice').textContent = 'After hours: $' + priceFloat.toFixed(2);
+                    }} else {{
+                        // Pre-market or weekend
+                        document.getElementById('realtimePrice').textContent = 'Pre-market: $' + priceFloat.toFixed(2);
                     }}
                     
                     // Add new realtime point to mergedSeries array
@@ -4719,6 +5448,303 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
             }}
         }}
         
+        // Function to show selected options expiration date
+        function showOptionsForExpiration(expiration) {{
+            // Hide all options tables
+            const allTables = document.querySelectorAll('.options-table-container');
+            allTables.forEach(table => {{
+                table.style.display = 'none';
+            }});
+            
+            // Show the selected table
+            const selectedTable = document.getElementById('optionsTable_' + expiration);
+            if (selectedTable) {{
+                selectedTable.style.display = 'block';
+                // Re-apply strike range filter
+                const rangeSelect = document.getElementById('strikeRangeSelect');
+                if (rangeSelect) {{
+                    filterStrikesByRange(rangeSelect.value);
+                }}
+            }}
+        }}
+        
+        // Function to filter strikes by range around ATM
+        function filterStrikesByRange(range) {{
+            // Get all visible options tables
+            const visibleTable = document.querySelector('.options-table-container[style*="display: block"]');
+            if (!visibleTable) return;
+            
+            const rows = visibleTable.querySelectorAll('.strike-row');
+            
+            if (range === 'all') {{
+                // Show all rows
+                rows.forEach(row => {{
+                    row.style.display = '';
+                }});
+            }} else {{
+                const maxDistance = parseInt(range);
+                rows.forEach(row => {{
+                    const distance = parseInt(row.getAttribute('data-distance-from-atm') || '999');
+                    if (distance <= maxDistance) {{
+                        row.style.display = '';
+                    }} else {{
+                        row.style.display = 'none';
+                    }}
+                }});
+            }}
+        }}
+        
+        // Function to fetch and display Yahoo Finance news
+        async function fetchYahooFinanceNews() {{
+            try {{
+                const response = await fetch(`/api/yahoo_news/{symbol}`);
+                const data = await response.json();
+                
+                const yahooNewsDisplay = document.getElementById('yahooNewsDisplay');
+                
+                if (!data.success) {{
+                    yahooNewsDisplay.innerHTML = `<p style="color: #dc2626;">Error loading Yahoo Finance news: ${{data.error || 'Unknown error'}}</p>`;
+                    return;
+                }}
+                
+                let html = '';
+                
+                // Display AI analysis if available
+                if (data.ai_analysis && (data.ai_analysis.summary || (data.ai_analysis.bullet_points && data.ai_analysis.bullet_points.length > 0))) {{
+                    html += `
+                        <div style="
+                            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                            color: white;
+                            border-radius: 12px;
+                            padding: 20px;
+                            margin-bottom: 20px;
+                            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                        ">
+                            <h3 style="margin: 0 0 15px 0; font-size: 20px; display: flex; align-items: center; gap: 10px;">
+                                <span style="font-size: 24px;">🤖</span>
+                                <span>AI Analysis</span>
+                            </h3>
+                    `;
+                    
+                    // Display summary
+                    if (data.ai_analysis.summary) {{
+                        html += '<div style="background: rgba(255, 255, 255, 0.1); padding: 15px; border-radius: 8px; margin-bottom: 15px;">';
+                        html += '<h4 style="margin: 0 0 10px 0; font-size: 16px; font-weight: 600;">Summary</h4>';
+                        html += '<p style="margin: 0; line-height: 1.6;">' + data.ai_analysis.summary + '</p>';
+                        html += '</div>';
+                    }}
+                    
+                    // Display bullet points/key insights
+                    if (data.ai_analysis.bullet_points && data.ai_analysis.bullet_points.length > 0) {{
+                        html += `
+                            <div style="background: rgba(255, 255, 255, 0.1); padding: 15px; border-radius: 8px;">
+                                <h4 style="margin: 0 0 10px 0; font-size: 16px; font-weight: 600;">Key Insights</h4>
+                                <ul style="margin: 0; padding-left: 20px; line-height: 1.8;">
+                        `;
+                        data.ai_analysis.bullet_points.forEach(bullet => {{
+                            html += '<li style="margin-bottom: 8px;">' + bullet + '</li>';
+                        }});
+                        html += `
+                                </ul>
+                            </div>
+                        `;
+                    }}
+                    
+                    html += '</div>';
+                }}
+                
+                // Display news items
+                if (data.news && data.news.length > 0) {{
+                    html += `
+                        <div style="margin-top: 30px;">
+                            <h3 style="color: #1a1a1a; font-size: 22px; font-weight: 700; margin-bottom: 20px; padding-bottom: 12px; border-bottom: 3px solid #1a73e8;">
+                                📰 Recent News
+                            </h3>
+                        </div>
+                    `;
+                    data.news.forEach(item => {{
+                        html += '<div style="margin-bottom: 20px; padding: 20px; background: #ffffff; border-radius: 10px; border-left: 5px solid #1a73e8; border: 1px solid #e0e0e0; box-shadow: 0 2px 4px rgba(0,0,0,0.05); transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;" ';
+                        html += 'onmouseover="this.style.transform=\\'translateX(5px)\\'; this.style.borderColor=\\'#1a73e8\\'; this.style.boxShadow=\\'0 4px 8px rgba(0,0,0,0.1)\\';" ';
+                        html += 'onmouseout="this.style.transform=\\'\\'; this.style.borderColor=\\'#e0e0e0\\'; this.style.boxShadow=\\'0 2px 4px rgba(0,0,0,0.05)\\';">';
+                        html += '<h4 style="margin: 0 0 12px 0; font-size: 18px; font-weight: 700; line-height: 1.4;">';
+                        html += '<a href="' + item.link + '" target="_blank" style="color: #1a1a1a; text-decoration: none;">' + item.title + '</a>';
+                        html += '</h4>';
+                        if (item.description) {{
+                            html += '<p style="margin: 0 0 12px 0; color: #333; line-height: 1.6; font-size: 15px;">' + item.description + '</p>';
+                        }}
+                        html += '<div style="font-size: 13px; color: #666; font-weight: 500;">';
+                        if (item.timestamp) {{
+                            html += 'Published: ' + new Date(item.timestamp).toLocaleString();
+                        }} else {{
+                            html += 'Recently';
+                        }}
+                        html += '</div></div>';
+                    }});
+                }} else if (!data.ai_analysis || (!data.ai_analysis.summary && (!data.ai_analysis.bullet_points || data.ai_analysis.bullet_points.length === 0))) {{
+                    html = '<p style="color: #8b949e; padding: 20px; text-align: center;">No news available from Yahoo Finance at this time.</p>';
+                }}
+                
+                // Add source attribution
+                html += `<p style="margin-top: 20px; font-size: 12px; color: #6e7681; text-align: center;">Data sourced from <a href="${{data.url}}" target="_blank" style="color: #58a6ff;">Yahoo Finance</a></p>`;
+                
+                yahooNewsDisplay.innerHTML = html;
+            }} catch (error) {{
+                console.error('Error fetching Yahoo Finance news:', error);
+                document.getElementById('yahooNewsDisplay').innerHTML = 
+                    '<p style="color: #dc2626;">Error loading Yahoo Finance news. Please try again later.</p>';
+            }}
+        }}
+        
+        // Function to fetch and display tweets
+        async function fetchTweets() {{
+            try {{
+                const response = await fetch('/api/tweets/{symbol}');
+                
+                if (!response.ok) {{
+                    throw new Error('HTTP ' + response.status + ': ' + response.statusText);
+                }}
+                
+                let data;
+                try {{
+                    data = await response.json();
+                }} catch (jsonError) {{
+                    console.error('Invalid JSON response from tweets endpoint:', jsonError);
+                    const tweetsDisplay = document.getElementById('tweetsDisplay');
+                    tweetsDisplay.innerHTML = '<p style="color: #8b949e; padding: 20px; text-align: center;">Unable to fetch tweets. Service may be temporarily unavailable.</p>';
+                    return;
+                }}
+                
+                const tweetsDisplay = document.getElementById('tweetsDisplay');
+                
+                if (!data.success || !data.tweets || data.tweets.length === 0) {{
+                    const note = data.note || 'No recent tweets available at this time.';
+                    tweetsDisplay.innerHTML = '<p style="color: #8b949e; padding: 20px; text-align: center;">' + note + '</p>';
+                    return;
+                }}
+                
+                let html = '<div style="display: grid; gap: 15px;">';
+                
+                data.tweets.forEach(tweet => {{
+                    const initial = tweet.fullname ? tweet.fullname.charAt(0).toUpperCase() : 'T';
+                    const fullname = tweet.fullname || 'User';
+                    const username = tweet.username || '';
+                    const timestamp = tweet.timestamp || '';
+                    const content = tweet.content || '';
+                    const likes = tweet.likes || 0;
+                    const retweets = tweet.retweets || 0;
+                    
+                    html += '<div style="background: #0d1117; border-radius: 12px; padding: 16px; border: 1px solid #30363d; transition: all 0.2s;" ';
+                    html += 'onmouseover="this.style.borderColor=\\'#58a6ff\\'; this.style.transform=\\'translateY(-2px)\\';" ';
+                    html += 'onmouseout="this.style.borderColor=\\'#30363d\\'; this.style.transform=\\'\\';">';
+                    html += '<div style="display: flex; align-items: start; gap: 12px; margin-bottom: 12px;">';
+                    html += '<div style="width: 48px; height: 48px; background: linear-gradient(135deg, #1DA1F2 0%, #0d8bd9 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-weight: 600; font-size: 18px; flex-shrink: 0;">' + initial + '</div>';
+                    html += '<div style="flex: 1; min-width: 0;">';
+                    html += '<div style="display: flex; align-items: center; gap: 4px; flex-wrap: wrap;">';
+                    html += '<span style="font-weight: 600; color: #f0f6fc;">' + fullname + '</span>';
+                    html += '<span style="color: #8b949e; font-size: 14px;">' + username + '</span>';
+                    html += '</div>';
+                    html += '<div style="color: #8b949e; font-size: 13px;">' + timestamp + '</div>';
+                    html += '</div></div>';
+                    html += '<div style="color: #c9d1d9; line-height: 1.5; margin-bottom: 12px; word-wrap: break-word;">' + content + '</div>';
+                    html += '<div style="display: flex; gap: 20px; color: #8b949e; font-size: 13px;">';
+                    html += '<span style="display: flex; align-items: center; gap: 4px;">';
+                    html += '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 21.638h-.014C9.403 21.59 1.95 14.856 1.95 8.478c0-3.064 2.525-5.754 5.403-5.754 2.29 0 3.83 1.58 4.646 2.73.814-1.148 2.354-2.73 4.645-2.73 2.88 0 5.404 2.69 5.404 5.755 0 6.376-7.454 13.11-10.037 13.157H12z"/></svg>';
+                    html += likes;
+                    html += '</span>';
+                    html += '<span style="display: flex; align-items: center; gap: 4px;">';
+                    html += '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M23.77 15.67c-.292-.293-.767-.293-1.06 0l-2.22 2.22V7.65c0-2.068-1.683-3.75-3.75-3.75h-5.85c-.414 0-.75.336-.75.75s.336.75.75.75h5.85c1.24 0 2.25 1.01 2.25 2.25v10.24l-2.22-2.22c-.293-.293-.768-.293-1.06 0s-.294.768 0 1.06l3.5 3.5c.145.147.337.22.53.22s.383-.072.53-.22l3.5-3.5c.294-.292.294-.767 0-1.06zm-10.66 3.28H7.26c-1.24 0-2.25-1.01-2.25-2.25V6.46l2.22 2.22c.148.147.34.22.532.22s.384-.073.53-.22c.293-.293.293-.768 0-1.06l-3.5-3.5c-.293-.294-.768-.294-1.06 0l-3.5 3.5c-.294.292-.294.767 0 1.06s.767.293 1.06 0l2.22-2.22V16.7c0 2.068 1.683 3.75 3.75 3.75h5.85c.414 0 .75-.336.75-.75s-.337-.75-.75-.75z"/></svg>';
+                    html += retweets;
+                    html += '</span></div></div>';
+                }});
+                
+                html += '</div>';
+                if (data.source) {{
+                    html += '<p style="margin-top: 20px; font-size: 12px; color: #6e7681; text-align: center;">Source: ' + data.source + '</p>';
+                }}
+                
+                tweetsDisplay.innerHTML = html;
+            }} catch (error) {{
+                console.error('Error fetching tweets:', error);
+                const tweetsDisplay = document.getElementById('tweetsDisplay');
+                if (tweetsDisplay) {{
+                    tweetsDisplay.innerHTML = '<p style="color: #8b949e; padding: 20px; text-align: center;">Unable to fetch tweets at this time. The service may be temporarily unavailable.</p>';
+                }}
+            }}
+        }}
+        
+        // Function to toggle Implied Volatility section
+        function toggleIVSection() {{
+            const ivContent = document.getElementById('ivContent');
+            const ivCaret = document.getElementById('ivCaret');
+            if (ivContent && ivCaret) {{
+                if (ivContent.style.display === 'none') {{
+                    ivContent.style.display = 'block';
+                    ivCaret.style.transform = 'rotate(0deg)';
+                }} else {{
+                    ivContent.style.display = 'none';
+                    ivCaret.style.transform = 'rotate(-90deg)';
+                }}
+            }}
+        }}
+        
+        // Fetch Yahoo Finance news and tweets after page loads
+        document.addEventListener('DOMContentLoaded', function() {{
+            fetchYahooFinanceNews();
+            fetchTweets();
+            // Apply default strike range filter
+            filterStrikesByRange('10');
+        }});
+        
+        // If DOMContentLoaded already fired, fetch immediately
+        if (document.readyState === 'complete' || document.readyState === 'interactive') {{
+            fetchYahooFinanceNews();
+            fetchTweets();
+            // Apply default strike range filter
+            filterStrikesByRange('10');
+        }}
+        
+        // Function to check if market is open and update timestamps
+        function updateMarketStatus() {{
+            const now = new Date();
+            const et = new Date(now.toLocaleString('en-US', {{ timeZone: 'America/New_York' }}));
+            const hours = et.getHours();
+            const minutes = et.getMinutes();
+            const day = et.getDay(); // 0 = Sunday, 6 = Saturday
+            
+            // Market hours: 9:30 AM - 4:00 PM ET, Monday-Friday
+            const isWeekday = day >= 1 && day <= 5;
+            const isMarketHours = isWeekday && ((hours === 9 && minutes >= 30) || (hours > 9 && hours < 16));
+            const isAfterHours = isWeekday && (hours >= 16 || hours < 9 || (hours === 9 && minutes < 30));
+            
+            // Update close time display
+            const closeTimeElem = document.getElementById('closeTime');
+            if (closeTimeElem) {{
+                closeTimeElem.textContent = '3:59:58 PM EST';
+            }}
+            
+            // Show/hide after hours section
+            const afterHoursSection = document.getElementById('afterHoursSection');
+            if (isAfterHours && afterHoursSection) {{
+                afterHoursSection.style.display = 'block';
+                // Update after hours time
+                const afterHoursTime = document.getElementById('afterHoursTime');
+                if (afterHoursTime) {{
+                    const timeOptions = {{
+                        hour: 'numeric', 
+                        minute: '2-digit', 
+                        second: '2-digit',
+                        timeZone: 'America/New_York',
+                        timeZoneName: 'short'
+                    }};
+                    afterHoursTime.textContent = et.toLocaleTimeString('en-US', timeOptions);
+                }}
+            }}
+        }}
+        
+        // Update market status on load and every minute
+        updateMarketStatus();
+        setInterval(updateMarketStatus, 60000);
+        
         // Connect on page load
         connectWebSocket();
         
@@ -4755,8 +5781,8 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 End date for historical price data (default: today)
         
         Options Data:
-            - options_days: int (default: 90)
-                Number of days ahead to fetch options data
+            - options_days: int (default: 450)
+                Number of days ahead to fetch options data (15 months)
             - options_type: str (default: "all")
                 Filter options by type: "all", "call", or "put"
             - strike_range_percent: int (optional)
@@ -4822,7 +5848,7 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         latest = request.query.get('latest', 'false').lower() == 'true'
         start_date = request.query.get('start_date')
         end_date = request.query.get('end_date')
-        options_days = int(request.query.get('options_days', '90'))  # Default 90 for HTML view
+        options_days = int(request.query.get('options_days', '450'))  # Default 450 days (15 months) for HTML view
         force_fetch = request.query.get('force_fetch', 'false').lower() == 'true'
         data_source = request.query.get('data_source', 'polygon')
         timezone_str = request.query.get('timezone', 'America/New_York')
@@ -4903,8 +5929,113 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
             # The fallback in get_price_info should have already tried, but if it still failed,
             # we could trigger a background fetch here if needed
         
+        # Fetch earnings date (async, cached)
+        earnings_date_str = await fetch_earnings_date(symbol)
+        
+        # Fetch additional data from database
+        # 1. Previous close price
+        prev_close_map = await db_instance.get_previous_close_prices([symbol])
+        previous_close = prev_close_map.get(symbol)
+        
+        # 2. Today's opening price
+        open_price_map = await db_instance.get_today_opening_prices([symbol])
+        open_price = open_price_map.get(symbol)
+        
+        # 3. After-hours price from realtime DB (latest quote - always fetch, let JS decide when to show)
+        after_hours_price = None
+        try:
+            # Get latest realtime quote (regardless of market hours - JS will determine when to display)
+            realtime_df = await db_instance.get_realtime_data(symbol, data_type='quote')
+            if not realtime_df.empty:
+                # Get the latest quote
+                latest_quote = realtime_df.iloc[-1]
+                # Use ask_price if available (more accurate for after-hours), otherwise use price (bid)
+                after_hours_price = latest_quote.get('ask_price') or latest_quote.get('price')
+        except Exception as e:
+            logger.debug(f"Error fetching after-hours price for {symbol}: {e}")
+        
+        # 4. Bid/Ask from realtime, hourly, or daily (in that order)
+        bid_price = None
+        ask_price = None
+        bid_size = None
+        ask_size = None
+        
+        # Try realtime first
+        try:
+            realtime_df = await db_instance.get_realtime_data(symbol, data_type='quote')
+            if not realtime_df.empty:
+                latest_quote = realtime_df.iloc[-1]
+                # For quotes: price is bid_price, size is bid_size
+                bid_price = latest_quote.get('bid_price') or latest_quote.get('price')
+                ask_price = latest_quote.get('ask_price')
+                bid_size = latest_quote.get('bid_size') or latest_quote.get('size')
+                ask_size = latest_quote.get('ask_size')
+        except Exception as e:
+            logger.debug(f"Error fetching bid/ask from realtime for {symbol}: {e}")
+        
+        # Try hourly if not found in realtime
+        if bid_price is None or ask_price is None:
+            try:
+                hourly_df = await db_instance.get_stock_data(symbol, interval='hourly')
+                if not hourly_df.empty:
+                    latest_hourly = hourly_df.iloc[-1]
+                    # Hourly data typically doesn't have bid/ask, but check anyway
+                    if bid_price is None:
+                        bid_price = latest_hourly.get('bid') or latest_hourly.get('bid_price')
+                    if ask_price is None:
+                        ask_price = latest_hourly.get('ask') or latest_hourly.get('ask_price')
+            except Exception as e:
+                logger.debug(f"Error fetching bid/ask from hourly for {symbol}: {e}")
+        
+        # Try daily if still not found
+        if bid_price is None or ask_price is None:
+            try:
+                daily_df = await db_instance.get_stock_data(symbol, interval='daily')
+                if not daily_df.empty:
+                    latest_daily = daily_df.iloc[-1]
+                    if bid_price is None:
+                        bid_price = latest_daily.get('bid') or latest_daily.get('bid_price')
+                    if ask_price is None:
+                        ask_price = latest_daily.get('ask') or latest_daily.get('ask_price')
+            except Exception as e:
+                logger.debug(f"Error fetching bid/ask from daily for {symbol}: {e}")
+        
+        # 5. Fetch daily price range (high/low) from Redis
+        daily_range = None
+        try:
+            if hasattr(db_instance, 'get_daily_price_range'):
+                daily_range = await db_instance.get_daily_price_range(symbol)
+        except Exception as e:
+            logger.debug(f"Error fetching daily price range for {symbol}: {e}")
+        
+        # Add fetched data to result
+        price_info = result.setdefault('price_info', {})
+        current_price_data = price_info.setdefault('current_price', {})
+        if isinstance(current_price_data, dict):
+            if previous_close is not None:
+                current_price_data['previous_close'] = previous_close
+            if open_price is not None:
+                current_price_data['open'] = open_price
+            if after_hours_price is not None:
+                current_price_data['after_hours_price'] = after_hours_price
+            if bid_price is not None:
+                current_price_data['bid'] = bid_price
+                current_price_data['bid_price'] = bid_price
+            if ask_price is not None:
+                current_price_data['ask'] = ask_price
+                current_price_data['ask_price'] = ask_price
+            if bid_size is not None:
+                current_price_data['bid_size'] = bid_size
+            if ask_size is not None:
+                current_price_data['ask_size'] = ask_size
+            if daily_range is not None:
+                current_price_data['daily_range'] = daily_range
+                logger.info(f"Daily range for {symbol}: {daily_range}")
+            else:
+                logger.warning(f"No daily range found for {symbol}")
+        
         # Generate HTML page
-        html_content = generate_stock_info_html(symbol, result)
+        html_content = generate_stock_info_html(symbol, result, earnings_date=earnings_date_str)
         
         return web.Response(
             text=html_content,
@@ -5188,6 +6319,355 @@ async def handle_analyze_ticker(request: web.Request) -> web.Response:
             "error": str(e),
             "timestamp": datetime.now(timezone.utc).isoformat()
         }, status=500)
+
+async def handle_yahoo_finance_news(request: web.Request) -> web.Response:
+    """Fetch Yahoo Finance news for a symbol.
+    
+    GET /api/yahoo_news/{symbol}
+    
+    Returns news from Yahoo Finance including Recent News and AI analysis.
+    """
+    symbol = request.match_info.get('symbol', '').upper().strip()
+    if not symbol:
+        return web.json_response({
+            "error": "Missing symbol",
+            "success": False
+        }, status=400)
+    
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return web.json_response({
+            "error": "BeautifulSoup library not available. Install with: pip install beautifulsoup4",
+            "success": False
+        }, status=500)
+    
+    try:
+        import subprocess
+        import tempfile
+        
+        # Use curl in a subprocess to avoid macOS fork() + SSL issues
+        # This isolates SSL from the forked worker process
+        url = f"https://finance.yahoo.com/quote/{symbol}/"
+        
+        # Prepare curl command with headers
+        curl_cmd = [
+            'curl',
+            '-s',  # Silent mode
+            '-L',  # Follow redirects
+            '--max-time', '10',  # 10 second timeout
+            '-H', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            '-H', 'Accept-Language: en-US,en;q=0.9',
+            '-H', 'Referer: https://finance.yahoo.com/',
+            url
+        ]
+        
+        # Run curl in subprocess (run in executor to avoid blocking)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                curl_cmd,
+                capture_output=True,
+                text=True,
+                timeout=15
+            )
+        )
+        
+        if result.returncode != 0:
+            logger.warning(f"curl failed for {symbol}: {result.stderr}")
+            return web.json_response({
+                "error": f"Failed to fetch Yahoo Finance page: {result.stderr[:200]}",
+                "success": False
+            }, status=503)
+        
+        html = result.stdout
+        
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # Extract recent news - look for actual news stream items
+        news_items = []
+        
+        # Try multiple selectors for Yahoo Finance news items
+        # Look for h3 elements which typically contain news headlines
+        news_headlines = soup.find_all('h3', limit=20)
+        
+        for headline in news_headlines:
+            try:
+                # Get the text
+                title = headline.get_text(strip=True)
+                
+                # Skip if it's too short or looks like a category/menu item
+                if len(title) < 20 or any(skip in title.lower() for skip in ['menu', 'search', 'sign in', 'my portfolio']):
+                    continue
+                
+                # Find parent container for more context
+                parent = headline.find_parent(['li', 'div', 'article'])
+                
+                # Try to find link
+                link = ''
+                link_elem = headline.find('a') or (parent.find('a') if parent else None)
+                if link_elem:
+                    link = link_elem.get('href', '')
+                    if link and not link.startswith('http'):
+                        link = f"https://finance.yahoo.com{link}" if link.startswith('/') else f"https://finance.yahoo.com/{link}"
+                
+                # Try to find description/summary in parent
+                description = ""
+                if parent:
+                    # Look for <p> tags that might contain summary
+                    p_tags = parent.find_all('p', limit=3)
+                    for p in p_tags:
+                        text = p.get_text(strip=True)
+                        if len(text) > 30 and text != title:
+                            description = text
+                            break
+                
+                # Find timestamp
+                timestamp = ""
+                if parent:
+                    time_elem = parent.find('time')
+                    if time_elem:
+                        timestamp = time_elem.get('datetime', '') or time_elem.get_text(strip=True)
+                
+                if title and len(news_items) < 10:
+                    news_items.append({
+                        'title': title,
+                        'link': link,
+                        'description': description,
+                        'timestamp': timestamp
+                    })
+            except Exception as e:
+                logger.debug(f"Error parsing news headline: {e}")
+                continue
+        
+        # Try to extract AI analysis section with better targeting
+        ai_analysis = {
+            'summary': '',
+            'headlines': [],
+            'bullet_points': []
+        }
+        
+        # Look for sections with "AI Analysis" or similar headings
+        for heading in soup.find_all(['h2', 'h3', 'h4']):
+            heading_text = heading.get_text(strip=True).lower()
+            if any(term in heading_text for term in ['ai analysis', 'news headlines', 'analyst', 'summary']):
+                # Found an AI analysis section
+                container = heading.find_parent(['div', 'section'])
+                if container:
+                    # Get the summary paragraph
+                    paragraphs = container.find_all('p', limit=5)
+                    for p in paragraphs:
+                        text = p.get_text(strip=True)
+                        if len(text) > 50 and not ai_analysis['summary']:
+                            ai_analysis['summary'] = text
+                    
+                    # Get bullet points/key insights
+                    bullets = container.find_all('li', limit=10)
+                    for bullet in bullets:
+                        text = bullet.get_text(strip=True)
+                        if len(text) > 20:
+                            ai_analysis['bullet_points'].append(text)
+                    
+                    # If we found content, stop looking
+                    if ai_analysis['summary'] or ai_analysis['bullet_points']:
+                        break
+        
+        return web.json_response({
+            "success": True,
+            "symbol": symbol,
+            "news": news_items,
+            "ai_analysis": ai_analysis,
+            "source": "Yahoo Finance",
+            "url": url
+        })
+        
+    except asyncio.TimeoutError:
+        return web.json_response({
+            "error": "Request timeout",
+            "success": False
+        }, status=504)
+    except subprocess.TimeoutExpired:
+        logger.warning(f"Timeout fetching Yahoo Finance for {symbol}")
+        return web.json_response({
+            "error": "Request timeout while fetching Yahoo Finance",
+            "success": False
+        }, status=504)
+    except FileNotFoundError:
+        logger.error(f"curl command not found - please install curl")
+        return web.json_response({
+            "error": "curl command not available on server",
+            "success": False
+        }, status=500)
+    except Exception as e:
+        logger.error(f"Error fetching Yahoo Finance news for {symbol}: {e}", exc_info=True)
+        return web.json_response({
+            "error": str(e),
+            "success": False
+        }, status=500)
+
+async def handle_twitter_tweets(request: web.Request) -> web.Response:
+    """Fetch recent tweets about a stock symbol.
+    
+    GET /api/tweets/{symbol}
+    
+    Returns recent meaningful tweets about the stock.
+    """
+    symbol = request.match_info.get('symbol', '').upper().strip()
+    if not symbol:
+        return web.json_response({
+            "error": "Missing symbol",
+            "success": False
+        }, status=400)
+    
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return web.json_response({
+            "error": "BeautifulSoup library not available",
+            "success": False
+        }, status=500)
+    
+    try:
+        import subprocess
+        
+        # Search for tweets about the stock ticker using nitter.net (privacy-friendly Twitter frontend)
+        # Nitter is more scraping-friendly than Twitter directly
+        search_query = f"${symbol} OR #{symbol} OR {symbol}"
+        # Use nitter.net mirror
+        url = f"https://nitter.poast.org/search?f=tweets&q={search_query.replace(' ', '+')}"
+        
+        curl_cmd = [
+            'curl',
+            '-s',
+            '-L',
+            '--max-time', '10',
+            '-H', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            url
+        ]
+        
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                curl_cmd,
+                capture_output=True,
+                text=True,
+                timeout=15
+            )
+        )
+        
+        if result.returncode != 0:
+            logger.warning(f"curl failed for tweets {symbol}: {result.stderr}")
+            # Return empty but successful response
+            return web.json_response({
+                "success": True,
+                "symbol": symbol,
+                "tweets": [],
+                "note": "Unable to fetch tweets at this time"
+            })
+        
+        html = result.stdout
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        tweets = []
+        
+        # Find tweet containers - nitter uses specific classes
+        tweet_items = soup.find_all('div', class_='timeline-item', limit=15)
+        
+        for item in tweet_items:
+            try:
+                # Find tweet content
+                tweet_content_elem = item.find('div', class_='tweet-content')
+                if not tweet_content_elem:
+                    continue
+                
+                content = tweet_content_elem.get_text(strip=True)
+                
+                # Filter out retweets and very short tweets
+                if not content or len(content) < 30 or content.startswith('RT @'):
+                    continue
+                
+                # Find username
+                username = ""
+                username_elem = item.find('a', class_='username')
+                if username_elem:
+                    username = username_elem.get_text(strip=True)
+                
+                # Find full name
+                fullname = ""
+                fullname_elem = item.find('a', class_='fullname')
+                if fullname_elem:
+                    fullname = fullname_elem.get_text(strip=True)
+                
+                # Find timestamp
+                timestamp = ""
+                time_elem = item.find('span', class_='tweet-date')
+                if time_elem:
+                    timestamp = time_elem.find('a')
+                    if timestamp:
+                        timestamp = timestamp.get('title', '') or timestamp.get_text(strip=True)
+                
+                # Find stats (likes, retweets)
+                likes = 0
+                retweets = 0
+                stats_elem = item.find('div', class_='tweet-stats')
+                if stats_elem:
+                    like_elem = stats_elem.find('span', class_='icon-heart')
+                    if like_elem and like_elem.parent:
+                        like_text = like_elem.parent.get_text(strip=True)
+                        try:
+                            likes = int(like_text.replace(',', ''))
+                        except:
+                            pass
+                    
+                    rt_elem = stats_elem.find('span', class_='icon-retweet')
+                    if rt_elem and rt_elem.parent:
+                        rt_text = rt_elem.parent.get_text(strip=True)
+                        try:
+                            retweets = int(rt_text.replace(',', ''))
+                        except:
+                            pass
+                
+                # Only include tweets with some engagement or from verified/popular accounts
+                if content and len(tweets) < 10:
+                    tweets.append({
+                        'username': username,
+                        'fullname': fullname,
+                        'content': content,
+                        'timestamp': timestamp,
+                        'likes': likes,
+                        'retweets': retweets
+                    })
+                    
+            except Exception as e:
+                logger.debug(f"Error parsing tweet: {e}")
+                continue
+        
+        return web.json_response({
+            "success": True,
+            "symbol": symbol,
+            "tweets": tweets,
+            "source": "Twitter/X via Nitter"
+        })
+        
+    except subprocess.TimeoutExpired:
+        return web.json_response({
+            "success": True,
+            "symbol": symbol,
+            "tweets": [],
+            "note": "Timeout fetching tweets"
+        })
+    except Exception as e:
+        logger.error(f"Error fetching tweets for {symbol}: {e}", exc_info=True)
+        return web.json_response({
+            "success": True,
+            "symbol": symbol,
+            "tweets": [],
+            "note": str(e)
+        })
 
 async def handle_catch_all(request: web.Request) -> web.Response:
     """Catch-all handler for unknown routes."""
@@ -6038,6 +7518,12 @@ def main_server_runner():
         # Add stock info API endpoint
         app.router.add_get("/api/stock_info/{symbol}", handle_stock_info)
         app.router.add_get("/stock_info/api/{symbol}", handle_stock_info)
+        
+        # Add Yahoo Finance news API endpoint
+        app.router.add_get("/api/yahoo_news/{symbol}", handle_yahoo_finance_news)
+        
+        # Add Twitter/X tweets API endpoint
+        app.router.add_get("/api/tweets/{symbol}", handle_twitter_tweets)
         
         # Add stock info API subroutes BEFORE the parameterized route
         # (must be registered before /stock_info/{symbol} to avoid {symbol} capturing "ws" or "api")

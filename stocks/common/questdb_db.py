@@ -2162,6 +2162,9 @@ class RealtimeDataService:
             row_df = pd.DataFrame([latest_row]).set_index(pd.Index([latest_idx]))
             self.cache.set_fire_and_forget(cache_key, row_df)
             self.logger.debug(f"[CACHE SET] Cached realtime data on write (fire-and-forget): {cache_key} (rows: 1)")
+            
+            # Track daily high/low prices in Redis
+            await self._update_daily_price_range(ticker, df)
     
     async def get(self, ticker: str, start_datetime: Optional[str] = None,
                  end_datetime: Optional[str] = None, data_type: str = "quote") -> pd.DataFrame:
@@ -2195,6 +2198,197 @@ class RealtimeDataService:
         if not isinstance(df, pd.DataFrame):
             df = pd.DataFrame()
         return df
+    
+    async def _update_daily_price_range(self, ticker: str, df: pd.DataFrame) -> None:
+        """Update daily high/low price range in Redis.
+        
+        Args:
+            ticker: Stock ticker symbol
+            df: DataFrame with realtime price data (must have 'price' column and datetime index)
+        """
+        if df.empty or 'price' not in df.columns:
+            return
+        
+        try:
+            # Get UTC date for today
+            now_utc = datetime.now(timezone.utc)
+            utc_date_str = now_utc.strftime('%Y-%m-%d')
+            
+            # Redis key format: ticker-<utc_date> (e.g., AAPL-2025-12-08)
+            redis_key = f"{ticker.upper()}-{utc_date_str}"
+            
+            # Get current high/low from Redis
+            client = await self.cache._get_redis_client()
+            if client is None:
+                return
+            
+            # Get existing values
+            existing_data = await client.get(redis_key)
+            current_high = None
+            current_low = None
+            
+            if existing_data:
+                try:
+                    data = json.loads(existing_data)
+                    current_high = data.get('high')
+                    current_low = data.get('low')
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            
+            # Find min and max prices in the DataFrame
+            valid_prices = df['price'].dropna()
+            if valid_prices.empty:
+                return
+            
+            new_min = float(valid_prices.min())
+            new_max = float(valid_prices.max())
+            
+            # Update only if new price is lower than current low or higher than current high
+            updated = False
+            if current_low is None or new_min < current_low:
+                current_low = new_min
+                updated = True
+            if current_high is None or new_max > current_high:
+                current_high = new_max
+                updated = True
+            
+            # Save to Redis with 72 hour TTL (259200 seconds)
+            if updated or (current_high is not None and current_low is not None):
+                data = {
+                    'high': current_high,
+                    'low': current_low,
+                    'date': utc_date_str
+                }
+                await client.setex(redis_key, 259200, json.dumps(data))  # 72 hours TTL
+                self.logger.debug(f"[DAILY RANGE] Updated daily range for {ticker}: low={current_low}, high={current_high}")
+        except Exception as e:
+            self.logger.warning(f"Error updating daily price range for {ticker}: {e}")
+    
+    def _get_last_trading_day(self, reference_date: Optional[datetime] = None) -> str:
+        """Get the last trading day (weekday) date string.
+        
+        Args:
+            reference_date: Reference date (defaults to today UTC)
+        
+        Returns:
+            Date string in YYYY-MM-DD format for the last trading day
+        """
+        if reference_date is None:
+            reference_date = datetime.now(timezone.utc)
+        
+        # Convert to ET timezone to check weekday
+        try:
+            from zoneinfo import ZoneInfo
+            et_tz = ZoneInfo("America/New_York")
+        except Exception:
+            import pytz
+            et_tz = pytz.timezone("America/New_York")
+        
+        if reference_date.tzinfo is None:
+            reference_date = reference_date.replace(tzinfo=timezone.utc)
+        
+        et_date = reference_date.astimezone(et_tz)
+        current_date = et_date.date()
+        
+        # If today is a weekday (Mon-Fri), return today
+        if current_date.weekday() < 5:
+            return current_date.strftime('%Y-%m-%d')
+        
+        # If it's Saturday (5) or Sunday (6), go back to Friday
+        days_back = current_date.weekday() - 4  # Sat=1 day back, Sun=2 days back
+        last_trading_day = current_date - timedelta(days=days_back)
+        return last_trading_day.strftime('%Y-%m-%d')
+    
+    async def get_daily_price_range(self, ticker: str, date_str: Optional[str] = None) -> Optional[Dict[str, float]]:
+        """Get daily high/low price range from Redis.
+        
+        If the market is closed today (weekend/holiday), automatically fetches
+        the range from the last trading day.
+        
+        Args:
+            ticker: Stock ticker symbol
+            date_str: Date in YYYY-MM-DD format (defaults to today UTC, or last trading day if market closed)
+        
+        Returns:
+            Dictionary with 'high' and 'low' keys, or None if not found
+        """
+        try:
+            client = await self.cache._get_redis_client()
+            if client is None:
+                return None
+            
+            # If no date specified, determine the appropriate date
+            if date_str is None:
+                # Check if market is open today
+                now_utc = datetime.now(timezone.utc)
+                try:
+                    from zoneinfo import ZoneInfo
+                    et_tz = ZoneInfo("America/New_York")
+                except Exception:
+                    import pytz
+                    et_tz = pytz.timezone("America/New_York")
+                
+                if now_utc.tzinfo is None:
+                    now_utc = now_utc.replace(tzinfo=timezone.utc)
+                
+                et_now = now_utc.astimezone(et_tz)
+                is_weekday = et_now.weekday() < 5
+                
+                if is_weekday:
+                    # Market might be open today, try today first
+                    date_str = et_now.date().strftime('%Y-%m-%d')
+                else:
+                    # Weekend, get last trading day
+                    date_str = self._get_last_trading_day(now_utc)
+            
+            # Try to get data for the specified date
+            redis_key = f"{ticker.upper()}-{date_str}"
+            data = await client.get(redis_key)
+            
+            if data:
+                try:
+                    result = json.loads(data)
+                    return {
+                        'high': float(result.get('high')),
+                        'low': float(result.get('low'))
+                    }
+                except (json.JSONDecodeError, TypeError, ValueError) as e:
+                    self.logger.warning(f"Error parsing daily range data for {ticker}: {e}")
+                    return None
+            
+            # If not found and we tried today, try last trading day
+            now_utc_check = datetime.now(timezone.utc)
+            try:
+                from zoneinfo import ZoneInfo
+                et_tz_check = ZoneInfo("America/New_York")
+            except Exception:
+                import pytz
+                et_tz_check = pytz.timezone("America/New_York")
+            
+            if now_utc_check.tzinfo is None:
+                now_utc_check = now_utc_check.replace(tzinfo=timezone.utc)
+            
+            today_str = now_utc_check.astimezone(et_tz_check).date().strftime('%Y-%m-%d')
+            if date_str == today_str:
+                last_trading_day = self._get_last_trading_day()
+                if last_trading_day != date_str:
+                    redis_key = f"{ticker.upper()}-{last_trading_day}"
+                    data = await client.get(redis_key)
+                    if data:
+                        try:
+                            result = json.loads(data)
+                            return {
+                                'high': float(result.get('high')),
+                                'low': float(result.get('low'))
+                            }
+                        except (json.JSONDecodeError, TypeError, ValueError) as e:
+                            self.logger.warning(f"Error parsing daily range data for {ticker}: {e}")
+                            return None
+            
+            return None
+        except Exception as e:
+            self.logger.warning(f"Error getting daily price range for {ticker}: {e}")
+            return None
 
 
 class OptionsDataService:
@@ -4434,6 +4628,18 @@ class StockQuestDB(StockDBBase):
                                end_datetime: Optional[str] = None, data_type: str = "quote") -> pd.DataFrame:
         """Get realtime data."""
         return await self.realtime_service.get(ticker, start_datetime, end_datetime, data_type)
+    
+    async def get_daily_price_range(self, ticker: str, date_str: Optional[str] = None) -> Optional[Dict[str, float]]:
+        """Get daily high/low price range from Redis.
+        
+        Args:
+            ticker: Stock ticker symbol
+            date_str: Date in YYYY-MM-DD format (defaults to today UTC)
+        
+        Returns:
+            Dictionary with 'high' and 'low' keys, or None if not found
+        """
+        return await self.realtime_service.get_daily_price_range(ticker, date_str)
     
     async def get_latest_price(self, ticker: str, use_market_time: bool = True) -> Optional[float]:
         """Get latest price."""

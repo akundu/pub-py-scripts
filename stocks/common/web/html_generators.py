@@ -16,14 +16,44 @@ from .serializers import dataframe_to_json_records
 
 logger = logging.getLogger("db_server_logger")
 
-def format_options_html(options_data: Dict[str, Any]) -> str:
-    """Format options data as HTML table."""
+def format_options_html(options_data: Dict[str, Any], current_price: float = None) -> str:
+    """Format options data as HTML table with calls and puts side-by-side, bid/ask combined with midpoint."""
     if not options_data or not options_data.get('success', False):
         return '<p>No options data available</p>'
     
     contracts = options_data.get('data', {}).get('contracts', [])
     if not contracts:
         return '<p>No options contracts found</p>'
+    
+    # Helper function to calculate background color based on moneyness
+    def get_row_bg_color(strike, current_price, option_type):
+        """Calculate background color based on how far strike is from current price."""
+        if not current_price:
+            return ''
+        
+        pct_diff = abs(strike - current_price) / current_price * 100
+        
+        # Determine if in-the-money (ITM)
+        if option_type == 'call':
+            itm = strike < current_price
+        else:  # put
+            itm = strike > current_price
+        
+        # Color intensity based on distance from ATM
+        if pct_diff < 2:  # Very close to ATM
+            alpha = 0.3
+        elif pct_diff < 5:
+            alpha = 0.2
+        elif pct_diff < 10:
+            alpha = 0.1
+        else:
+            alpha = 0.05
+        
+        # ITM: yellow tint, OTM: light gray
+        if itm:
+            return f'background-color: rgba(255, 235, 59, {alpha});'  # Yellow for ITM
+        else:
+            return f'background-color: rgba(200, 200, 200, {alpha});'  # Gray for OTM
     
     # Group by expiration date
     by_expiry = {}
@@ -36,29 +66,148 @@ def format_options_html(options_data: Dict[str, Any]) -> str:
     html_parts = []
     for exp_date in sorted(by_expiry.keys())[:10]:  # Show first 10 expirations
         contracts_list = by_expiry[exp_date]
-        html_parts.append(f'<h3 style="margin-top: 20px; color: #667eea;">Expiration: {exp_date}</h3>')
-        html_parts.append('<table class="data-table" style="width: 100%; margin-bottom: 20px;">')
-        html_parts.append('<tr><th>Type</th><th>Strike</th><th>Bid</th><th>Ask</th><th>Last</th><th>Volume</th><th>Open Interest</th><th>IV</th></tr>')
         
-        for contract in contracts_list[:20]:  # Show first 20 contracts per expiry
-            option_type = contract.get('option_type', 'N/A')
-            strike = contract.get('strike', 'N/A')
-            bid = contract.get('bid', 'N/A')
-            ask = contract.get('ask', 'N/A')
-            last = contract.get('last', 'N/A')
-            volume = contract.get('volume', 'N/A')
-            open_interest = contract.get('open_interest', 'N/A')
-            iv = contract.get('implied_volatility', 'N/A')
+        # Group by strike price and option type
+        by_strike = {}
+        for contract in contracts_list:
+            strike = contract.get('strike', 0)
+            if not isinstance(strike, (int, float)):
+                continue
+            option_type = str(contract.get('type', '')).lower()
+            if strike not in by_strike:
+                by_strike[strike] = {'call': None, 'put': None}
+            by_strike[strike][option_type] = contract
+        
+        # Sort strikes high to low
+        sorted_strikes = sorted(by_strike.keys(), reverse=True)
+        
+        html_parts.append(f'<h3 style="margin-top: 20px; color: #667eea;">Expiration: {exp_date}</h3>')
+        html_parts.append('<table class="data-table" style="width: 100%; margin-bottom: 20px; font-size: 12px; border-collapse: collapse;">')
+        
+        # Header with calls on left, puts on right
+        html_parts.append('''
+        <tr>
+            <th colspan="7" style="background-color: #4CAF50; color: white; padding: 8px; font-weight: bold; font-size: 14px;">CALLS</th>
+            <th rowspan="2" style="background-color: #667eea; color: white; padding: 8px; font-weight: bold; font-size: 14px;">Strike</th>
+            <th colspan="7" style="background-color: #f44336; color: white; padding: 8px; font-weight: bold; font-size: 14px;">PUTS</th>
+        </tr>
+        <tr>
+            <th style="padding: 6px; background-color: #2e7d32; color: white; font-weight: bold; font-size: 12px;">Bid/Ask<br>Spread</th>
+            <th style="padding: 6px; background-color: #2e7d32; color: white; font-weight: bold; font-size: 12px;">Mid</th>
+            <th style="padding: 6px; background-color: #2e7d32; color: white; font-weight: bold; font-size: 12px;">Vol</th>
+            <th style="padding: 6px; background-color: #2e7d32; color: white; font-weight: bold; font-size: 12px;">OI</th>
+            <th style="padding: 6px; background-color: #2e7d32; color: white; font-weight: bold; font-size: 12px;">IV</th>
+            <th style="padding: 6px; background-color: #2e7d32; color: white; font-weight: bold; font-size: 12px;">Delta<br>(Δ)</th>
+            <th style="padding: 6px; background-color: #2e7d32; color: white; font-weight: bold; font-size: 12px;">Theta<br>(Θ)</th>
+            <th style="padding: 6px; background-color: #c62828; color: white; font-weight: bold; font-size: 12px;">Bid/Ask<br>Spread</th>
+            <th style="padding: 6px; background-color: #c62828; color: white; font-weight: bold; font-size: 12px;">Mid</th>
+            <th style="padding: 6px; background-color: #c62828; color: white; font-weight: bold; font-size: 12px;">Vol</th>
+            <th style="padding: 6px; background-color: #c62828; color: white; font-weight: bold; font-size: 12px;">OI</th>
+            <th style="padding: 6px; background-color: #c62828; color: white; font-weight: bold; font-size: 12px;">IV</th>
+            <th style="padding: 6px; background-color: #c62828; color: white; font-weight: bold; font-size: 12px;">Delta<br>(Δ)</th>
+            <th style="padding: 6px; background-color: #c62828; color: white; font-weight: bold; font-size: 12px;">Theta<br>(Θ)</th>
+        </tr>
+        ''')
+        
+        # Show up to 30 strikes per expiration
+        for strike in sorted_strikes[:30]:
+            call = by_strike[strike]['call']
+            put = by_strike[strike]['put']
+            
+            # Calculate row background color
+            call_bg = get_row_bg_color(strike, current_price, 'call') if current_price else ''
+            put_bg = get_row_bg_color(strike, current_price, 'put') if current_price else ''
             
             html_parts.append('<tr>')
-            html_parts.append(f'<td>{option_type}</td>')
-            html_parts.append(f'<td>${strike:.2f}</td>' if isinstance(strike, (int, float)) else f'<td>{strike}</td>')
-            html_parts.append(f'<td>${bid:.2f}</td>' if isinstance(bid, (int, float)) else f'<td>{bid}</td>')
-            html_parts.append(f'<td>${ask:.2f}</td>' if isinstance(ask, (int, float)) else f'<td>{ask}</td>')
-            html_parts.append(f'<td>${last:.2f}</td>' if isinstance(last, (int, float)) else f'<td>{last}</td>')
-            html_parts.append(f'<td>{volume}</td>')
-            html_parts.append(f'<td>{open_interest}</td>')
-            html_parts.append(f'<td>{iv:.2%}</td>' if isinstance(iv, (int, float)) else f'<td>{iv}</td>')
+            
+            # CALL data
+            if call:
+                bid = call.get('bid')
+                ask = call.get('ask')
+                last = call.get('last')
+                volume = call.get('volume', 'N/A')
+                oi = call.get('open_interest', 'N/A')
+                iv = call.get('implied_volatility')
+                delta = call.get('delta')
+                theta = call.get('theta')
+                
+                # Bid/Ask/Spread column
+                if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and bid > 0 and ask > 0:
+                    spread = ask - bid
+                    html_parts.append(f'<td style="padding: 4px; {call_bg}">${bid:.2f}<br>${ask:.2f}<br><strong>${spread:.2f}</strong></td>')
+                elif isinstance(bid, (int, float)):
+                    html_parts.append(f'<td style="padding: 4px; {call_bg}">${bid:.2f}<br>-<br>-</td>')
+                elif isinstance(ask, (int, float)):
+                    html_parts.append(f'<td style="padding: 4px; {call_bg}">-<br>${ask:.2f}<br>-</td>')
+                else:
+                    html_parts.append(f'<td style="padding: 4px; {call_bg}">-</td>')
+                
+                # Mid column
+                if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and bid > 0 and ask > 0:
+                    mid = (bid + ask) / 2
+                    html_parts.append(f'<td style="padding: 4px; {call_bg}"><strong>${mid:.2f}</strong></td>')
+                else:
+                    html_parts.append(f'<td style="padding: 4px; {call_bg}">-</td>')
+                
+                html_parts.append(f'<td style="padding: 4px; {call_bg}">{volume}</td>')
+                html_parts.append(f'<td style="padding: 4px; {call_bg}">{oi}</td>')
+                html_parts.append(f'<td style="padding: 4px; {call_bg}">{iv:.1%}</td>' if isinstance(iv, (int, float)) else f'<td style="padding: 4px; {call_bg}">-</td>')
+                
+                # Delta (separate column)
+                html_parts.append(f'<td style="padding: 4px; {call_bg}"><strong>{delta:.3f}</strong></td>' if isinstance(delta, (int, float)) else f'<td style="padding: 4px; {call_bg}">-</td>')
+                
+                # Theta (separate column)
+                html_parts.append(f'<td style="padding: 4px; {call_bg}">{theta:.3f}</td>' if isinstance(theta, (int, float)) else f'<td style="padding: 4px; {call_bg}">-</td>')
+            else:
+                html_parts.append('<td style="padding: 4px;">-</td>' * 7)
+            
+            # Strike price (center) - highlight if near current price
+            strike_style = 'background-color: #667eea; color: white; font-weight: bold; padding: 6px;'
+            if current_price and abs(strike - current_price) / current_price < 0.02:  # Within 2% of current
+                strike_style = 'background-color: #ff9800; color: white; font-weight: bold; padding: 6px; border: 2px solid #f57c00;'
+            html_parts.append(f'<td style="{strike_style}">${strike:.2f}</td>')
+            
+            # PUT data
+            if put:
+                bid = put.get('bid')
+                ask = put.get('ask')
+                last = put.get('last')
+                volume = put.get('volume', 'N/A')
+                oi = put.get('open_interest', 'N/A')
+                iv = put.get('implied_volatility')
+                delta = put.get('delta')
+                theta = put.get('theta')
+                
+                # Bid/Ask/Spread column
+                if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and bid > 0 and ask > 0:
+                    spread = ask - bid
+                    html_parts.append(f'<td style="padding: 4px; {put_bg}">${bid:.2f}<br>${ask:.2f}<br><strong>${spread:.2f}</strong></td>')
+                elif isinstance(bid, (int, float)):
+                    html_parts.append(f'<td style="padding: 4px; {put_bg}">${bid:.2f}<br>-<br>-</td>')
+                elif isinstance(ask, (int, float)):
+                    html_parts.append(f'<td style="padding: 4px; {put_bg}">-<br>${ask:.2f}<br>-</td>')
+                else:
+                    html_parts.append(f'<td style="padding: 4px; {put_bg}">-</td>')
+                
+                # Mid column
+                if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and bid > 0 and ask > 0:
+                    mid = (bid + ask) / 2
+                    html_parts.append(f'<td style="padding: 4px; {put_bg}"><strong>${mid:.2f}</strong></td>')
+                else:
+                    html_parts.append(f'<td style="padding: 4px; {put_bg}">-</td>')
+                
+                html_parts.append(f'<td style="padding: 4px; {put_bg}">{volume}</td>')
+                html_parts.append(f'<td style="padding: 4px; {put_bg}">{oi}</td>')
+                html_parts.append(f'<td style="padding: 4px; {put_bg}">{iv:.1%}</td>' if isinstance(iv, (int, float)) else f'<td style="padding: 4px; {put_bg}">-</td>')
+                
+                # Delta (separate column)
+                html_parts.append(f'<td style="padding: 4px; {put_bg}"><strong>{delta:.3f}</strong></td>' if isinstance(delta, (int, float)) else f'<td style="padding: 4px; {put_bg}">-</td>')
+                
+                # Theta (separate column)
+                html_parts.append(f'<td style="padding: 4px; {put_bg}">{theta:.3f}</td>' if isinstance(theta, (int, float)) else f'<td style="padding: 4px; {put_bg}">-</td>')
+            else:
+                html_parts.append('<td style="padding: 4px;">-</td>' * 7)
+            
             html_parts.append('</tr>')
         
         html_parts.append('</table>')
@@ -626,9 +775,9 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
         
         {f'''
         <div class="data-section">
-            <h2>Options (90 Days)</h2>
+            <h2>Options</h2>
             <div id="optionsDisplay">
-                {format_options_html(options_data) if options_data else '<p>No options data available</p>'}
+                {format_options_html(options_data, current_price if isinstance(current_price, (int, float)) else None) if options_data else '<p>No options data available</p>'}
             </div>
         </div>
         ''' if options_data else ''}
@@ -1418,15 +1567,15 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
         }}
         
         // WebSocket connection for real-time updates
-        // Use same host but fixed port 9102 for real-time ticker data
-        const wsPort = 9102;
+        // Use the same port as the current page URL (proxy will route to backend)
+        const wsPort = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
         let ws = null;
         let reconnectAttempts = 0;
         const maxReconnectAttempts = 5;
         
         function connectWebSocket() {{
             try {{
-                // Connect to WebSocket server on port 9102 (same host as page)
+                // Connect to WebSocket on same host:port as page (proxy routes to backend:9102)
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 const host = window.location.hostname || 'localhost';
                 const wsUrl = `${{protocol}}//${{host}}:${{wsPort}}/stock_info/ws?symbol={symbol}`;
