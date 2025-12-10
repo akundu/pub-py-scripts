@@ -2202,6 +2202,9 @@ class RealtimeDataService:
     async def _update_daily_price_range(self, ticker: str, df: pd.DataFrame) -> None:
         """Update daily high/low price range in Redis.
         
+        Includes today's open price from daily_prices table to ensure the range
+        always includes the opening price.
+        
         Args:
             ticker: Stock ticker symbol
             df: DataFrame with realtime price data (must have 'price' column and datetime index)
@@ -2210,12 +2213,27 @@ class RealtimeDataService:
             return
         
         try:
-            # Get UTC date for today
+            # Use UTC date for storage (all storage should be in UTC)
             now_utc = datetime.now(timezone.utc)
-            utc_date_str = now_utc.strftime('%Y-%m-%d')
+            if now_utc.tzinfo is None:
+                now_utc = now_utc.replace(tzinfo=timezone.utc)
             
-            # Redis key format: ticker-<utc_date> (e.g., AAPL-2025-12-08)
+            utc_date_str = now_utc.date().strftime('%Y-%m-%d')
+            
+            # Redis key format: ticker-<utc_date> (e.g., AAPL-2025-12-08) - use UTC date for storage
             redis_key = f"{ticker.upper()}-{utc_date_str}"
+            
+            # For querying daily_prices, we need to convert to ET to match market dates
+            try:
+                from zoneinfo import ZoneInfo
+                et_tz = ZoneInfo("America/New_York")
+                use_zoneinfo = True
+            except Exception:
+                import pytz
+                et_tz = pytz.timezone("America/New_York")
+                use_zoneinfo = False
+            
+            now_et = now_utc.astimezone(et_tz)
             
             # Get current high/low from Redis
             client = await self.cache._get_redis_client()
@@ -2243,6 +2261,40 @@ class RealtimeDataService:
             new_min = float(valid_prices.min())
             new_max = float(valid_prices.max())
             
+            # Also fetch today's open price from daily_prices to include in range
+            open_price = None
+            try:
+                # Get today's date range in UTC for querying daily_prices
+                if use_zoneinfo:
+                    # zoneinfo: use replace() instead of localize()
+                    today_start_et = datetime(now_et.year, now_et.month, now_et.day, tzinfo=et_tz)
+                else:
+                    # pytz: use localize()
+                    today_start_et = et_tz.localize(datetime(now_et.year, now_et.month, now_et.day))
+                tomorrow_start_et = today_start_et + timedelta(days=1)
+                today_start_utc = today_start_et.astimezone(timezone.utc).replace(tzinfo=None)
+                tomorrow_start_utc = tomorrow_start_et.astimezone(timezone.utc).replace(tzinfo=None)
+                
+                # Query daily_prices for today's open
+                async with self.realtime_repo.connection.get_connection() as conn:
+                    rows = await conn.fetch(
+                        "SELECT open FROM daily_prices WHERE ticker = $1 AND date >= $2 AND date < $3 ORDER BY date DESC LIMIT 1",
+                        ticker, today_start_utc, tomorrow_start_utc
+                    )
+                    if rows:
+                        open_price = float(rows[0]['open'])
+                        self.logger.debug(f"[DAILY RANGE] Found today's open price for {ticker}: {open_price}")
+            except Exception as e:
+                self.logger.debug(f"[DAILY RANGE] Could not fetch open price for {ticker}: {e}")
+            
+            # Include open price in min/max calculation
+            prices_to_consider = [new_min, new_max]
+            if open_price is not None:
+                prices_to_consider.append(open_price)
+            
+            new_min = min(prices_to_consider)
+            new_max = max(prices_to_consider)
+            
             # Update only if new price is lower than current low or higher than current high
             updated = False
             if current_low is None or new_min < current_low:
@@ -2257,10 +2309,10 @@ class RealtimeDataService:
                 data = {
                     'high': current_high,
                     'low': current_low,
-                    'date': utc_date_str
+                    'date': utc_date_str  # Use UTC date for storage
                 }
                 await client.setex(redis_key, 259200, json.dumps(data))  # 72 hours TTL
-                self.logger.debug(f"[DAILY RANGE] Updated daily range for {ticker}: low={current_low}, high={current_high}")
+                self.logger.debug(f"[DAILY RANGE] Updated daily range for {ticker}: low={current_low}, high={current_high} (date: {utc_date_str}, open included: {open_price is not None})")
         except Exception as e:
             self.logger.warning(f"Error updating daily price range for {ticker}: {e}")
     
@@ -2302,12 +2354,12 @@ class RealtimeDataService:
     async def get_daily_price_range(self, ticker: str, date_str: Optional[str] = None) -> Optional[Dict[str, float]]:
         """Get daily high/low price range from Redis.
         
-        If the market is closed today (weekend/holiday), automatically fetches
-        the range from the last trading day.
+        Ensures the open price is always included in the range by fetching it from daily_prices
+        and adjusting the range if needed.
         
         Args:
             ticker: Stock ticker symbol
-            date_str: Date in YYYY-MM-DD format (defaults to today UTC, or last trading day if market closed)
+            date_str: Date in YYYY-MM-DD format in UTC (defaults to today UTC)
         
         Returns:
             Dictionary with 'high' and 'low' keys, or None if not found
@@ -2317,73 +2369,93 @@ class RealtimeDataService:
             if client is None:
                 return None
             
-            # If no date specified, determine the appropriate date
+            # If no date specified, use today's UTC date
             if date_str is None:
-                # Check if market is open today
                 now_utc = datetime.now(timezone.utc)
-                try:
-                    from zoneinfo import ZoneInfo
-                    et_tz = ZoneInfo("America/New_York")
-                except Exception:
-                    import pytz
-                    et_tz = pytz.timezone("America/New_York")
-                
                 if now_utc.tzinfo is None:
                     now_utc = now_utc.replace(tzinfo=timezone.utc)
-                
-                et_now = now_utc.astimezone(et_tz)
-                is_weekday = et_now.weekday() < 5
-                
-                if is_weekday:
-                    # Market might be open today, try today first
-                    date_str = et_now.date().strftime('%Y-%m-%d')
-                else:
-                    # Weekend, get last trading day
-                    date_str = self._get_last_trading_day(now_utc)
+                date_str = now_utc.date().strftime('%Y-%m-%d')
             
-            # Try to get data for the specified date
+            # Try to get data for the specified UTC date
             redis_key = f"{ticker.upper()}-{date_str}"
             data = await client.get(redis_key)
+            
+            range_high = None
+            range_low = None
             
             if data:
                 try:
                     result = json.loads(data)
-                    return {
-                        'high': float(result.get('high')),
-                        'low': float(result.get('low'))
-                    }
+                    range_high = result.get('high')
+                    range_low = result.get('low')
+                    if range_high is not None:
+                        range_high = float(range_high)
+                    if range_low is not None:
+                        range_low = float(range_low)
                 except (json.JSONDecodeError, TypeError, ValueError) as e:
                     self.logger.warning(f"Error parsing daily range data for {ticker}: {e}")
-                    return None
             
-            # If not found and we tried today, try last trading day
-            now_utc_check = datetime.now(timezone.utc)
+            # Always fetch today's open price to ensure it's included in the range
+            open_price = None
             try:
-                from zoneinfo import ZoneInfo
-                et_tz_check = ZoneInfo("America/New_York")
-            except Exception:
-                import pytz
-                et_tz_check = pytz.timezone("America/New_York")
+                # For querying daily_prices, we need to convert to ET to match market dates
+                try:
+                    from zoneinfo import ZoneInfo
+                    et_tz = ZoneInfo("America/New_York")
+                    use_zoneinfo = True
+                except Exception:
+                    import pytz
+                    et_tz = pytz.timezone("America/New_York")
+                    use_zoneinfo = False
+                
+                # Convert UTC date to ET date for querying daily_prices
+                now_utc = datetime.now(timezone.utc)
+                if now_utc.tzinfo is None:
+                    now_utc = now_utc.replace(tzinfo=timezone.utc)
+                now_et = now_utc.astimezone(et_tz)
+                
+                # Get today's date range in ET for querying daily_prices
+                if use_zoneinfo:
+                    # zoneinfo: use replace() instead of localize()
+                    today_start_et = datetime(now_et.year, now_et.month, now_et.day, tzinfo=et_tz)
+                else:
+                    # pytz: use localize()
+                    today_start_et = et_tz.localize(datetime(now_et.year, now_et.month, now_et.day))
+                tomorrow_start_et = today_start_et + timedelta(days=1)
+                today_start_utc = today_start_et.astimezone(timezone.utc).replace(tzinfo=None)
+                tomorrow_start_utc = tomorrow_start_et.astimezone(timezone.utc).replace(tzinfo=None)
+                
+                # Query daily_prices for today's open
+                async with self.realtime_repo.connection.get_connection() as conn:
+                    rows = await conn.fetch(
+                        "SELECT open FROM daily_prices WHERE ticker = $1 AND date >= $2 AND date < $3 ORDER BY date DESC LIMIT 1",
+                        ticker, today_start_utc, tomorrow_start_utc
+                    )
+                    if rows:
+                        open_price = float(rows[0]['open'])
+                        self.logger.debug(f"[DAILY RANGE] Found today's open price for {ticker}: {open_price}")
+            except Exception as e:
+                self.logger.debug(f"[DAILY RANGE] Could not fetch open price for {ticker}: {e}")
             
-            if now_utc_check.tzinfo is None:
-                now_utc_check = now_utc_check.replace(tzinfo=timezone.utc)
+            # Include open price in the range if available
+            if open_price is not None:
+                if range_high is None or open_price > range_high:
+                    range_high = open_price
+                if range_low is None or open_price < range_low:
+                    range_low = open_price
             
-            today_str = now_utc_check.astimezone(et_tz_check).date().strftime('%Y-%m-%d')
-            if date_str == today_str:
-                last_trading_day = self._get_last_trading_day()
-                if last_trading_day != date_str:
-                    redis_key = f"{ticker.upper()}-{last_trading_day}"
-                    data = await client.get(redis_key)
-                    if data:
-                        try:
-                            result = json.loads(data)
-                            return {
-                                'high': float(result.get('high')),
-                                'low': float(result.get('low'))
-                            }
-                        except (json.JSONDecodeError, TypeError, ValueError) as e:
-                            self.logger.warning(f"Error parsing daily range data for {ticker}: {e}")
-                            return None
+            # Return the range if we have at least one value
+            if range_high is not None and range_low is not None:
+                return {
+                    'high': range_high,
+                    'low': range_low
+                }
+            elif range_high is not None or range_low is not None:
+                # If we only have one value, return what we have
+                return {
+                    'high': range_high if range_high is not None else range_low,
+                    'low': range_low if range_low is not None else range_high
+                }
             
             return None
         except Exception as e:
@@ -4542,10 +4614,17 @@ class StockQuestDB(StockDBBase):
             dd.index = ts
             rows: list[dict[str, Any]] = []
             try:
-                import pytz  # type: ignore
-                et = pytz.timezone("America/New_York")
+                try:
+                    from zoneinfo import ZoneInfo
+                    et = ZoneInfo("America/New_York")
+                    use_zoneinfo = True
+                except Exception:
+                    import pytz  # type: ignore
+                    et = pytz.timezone("America/New_York")
+                    use_zoneinfo = False
             except Exception:
                 et = None
+                use_zoneinfo = False
 
             for idx, row in dd.iterrows():
                 try:
@@ -4562,8 +4641,14 @@ class StockQuestDB(StockDBBase):
 
                     # Build ET datetimes then convert to UTC-naive
                     if et is not None:
-                        open_et = et.localize(datetime(day.year, day.month, day.day, 9, 30))
-                        close_et = et.localize(datetime(day.year, day.month, day.day, 16, 0))
+                        if use_zoneinfo:
+                            # zoneinfo: use replace() instead of localize()
+                            open_et = datetime(day.year, day.month, day.day, 9, 30, tzinfo=et)
+                            close_et = datetime(day.year, day.month, day.day, 16, 0, tzinfo=et)
+                        else:
+                            # pytz: use localize()
+                            open_et = et.localize(datetime(day.year, day.month, day.day, 9, 30))
+                            close_et = et.localize(datetime(day.year, day.month, day.day, 16, 0))
                         open_utc = open_et.astimezone(timezone.utc).replace(tzinfo=None)
                         close_utc = close_et.astimezone(timezone.utc).replace(tzinfo=None)
                     else:
@@ -4671,40 +4756,120 @@ class StockQuestDB(StockDBBase):
         return result
     
     async def get_previous_close_prices(self, tickers: List[str]) -> Dict[str, Optional[float]]:
-        """Get previous close prices."""
+        """Get previous close prices.
+        
+        Returns the close price from the last trading day (not today).
+        Uses ET timezone to query daily_prices table because the table's 'date' column
+        stores market dates (ET trading days). All actual timestamp storage in the database
+        is in UTC via TimezoneHandler.to_naive_utc().
+        """
         result = {}
         async with self.connection.get_connection() as conn:
-            today = datetime.now(pytz.timezone('US/Eastern')).date()
-            et = pytz.timezone('US/Eastern')
-            today_start_et = et.localize(datetime(today.year, today.month, today.day))
-            today_start = today_start_et.astimezone(timezone.utc).replace(tzinfo=None)
+            # Use ET to determine "today" for market date, then convert to UTC for query
+            try:
+                from zoneinfo import ZoneInfo
+                et_tz = ZoneInfo("America/New_York")
+                use_zoneinfo = True
+            except Exception:
+                import pytz
+                et_tz = pytz.timezone("America/New_York")
+                use_zoneinfo = False
+            
+            now_utc = datetime.now(timezone.utc)
+            if now_utc.tzinfo is None:
+                now_utc = now_utc.replace(tzinfo=timezone.utc)
+            now_et = now_utc.astimezone(et_tz)
+            today_et = now_et.date()
+            
+            # Get the start of today in ET, then convert to UTC for query
+            if use_zoneinfo:
+                # zoneinfo: use replace() instead of localize()
+                today_start_et = datetime(today_et.year, today_et.month, today_et.day, tzinfo=et_tz)
+            else:
+                # pytz: use localize()
+                today_start_et = et_tz.localize(datetime(today_et.year, today_et.month, today_et.day))
+            today_start_utc = today_start_et.astimezone(timezone.utc).replace(tzinfo=None)
+            
+            # Log for debugging
+            self.logger.debug(f"[PREV CLOSE] Query params - today ET: {today_et}, today_start_utc: {today_start_utc}")
             
             for ticker in tickers:
                 try:
+                    # Get the most recent close from before today (last trading day)
+                    # The date column stores timestamps (UTC) representing market dates (ET trading days)
+                    # We need to compare dates, not timestamps, so we'll use the start of today in UTC
+                    # which corresponds to the start of today in ET converted to UTC
+                    
+                    # Query: get close where date < start of today (in UTC, representing ET market date)
                     rows = await conn.fetch(
                         "SELECT date, close FROM daily_prices WHERE ticker = $1 AND date < $2 ORDER BY date DESC LIMIT 1",
-                        ticker, today_start
+                        ticker, today_start_utc
                     )
                     if rows:
-                        result[ticker] = rows[0]['close']
+                        prev_close = rows[0]['close']
+                        prev_date = rows[0]['date']
+                        # Extract date portion from timestamp for logging
+                        if isinstance(prev_date, datetime):
+                            prev_date_str = prev_date.strftime('%Y-%m-%d')
+                        else:
+                            prev_date_str = str(prev_date)
+                        result[ticker] = prev_close
+                        self.logger.debug(f"[PREV CLOSE] {ticker}: {prev_close} from date {prev_date_str} (today ET: {today_et})")
                     else:
+                        # Fallback: if no data before today, try to get most recent (but this shouldn't be today)
+                        # This fallback should rarely be needed if data exists
                         rows = await conn.fetch(
-                            "SELECT date, close FROM daily_prices WHERE ticker = $1 ORDER BY date DESC LIMIT 1",
-                            ticker
+                            "SELECT date, close FROM daily_prices WHERE ticker = $1 AND date < $2 ORDER BY date DESC LIMIT 1",
+                            ticker, today_start_utc
                         )
-                        result[ticker] = rows[0]['close'] if rows else None
+                        if rows:
+                            prev_close = rows[0]['close']
+                            prev_date = rows[0]['date']
+                            if isinstance(prev_date, datetime):
+                                prev_date_str = prev_date.strftime('%Y-%m-%d')
+                            else:
+                                prev_date_str = str(prev_date)
+                            result[ticker] = prev_close
+                            self.logger.debug(f"[PREV CLOSE] {ticker}: {prev_close} from date {prev_date_str} (fallback, today ET: {today_et})")
+                        else:
+                            result[ticker] = None
+                            self.logger.warning(f"[PREV CLOSE] {ticker}: No close price found (today ET: {today_et})")
                 except Exception as e:
                     self.logger.error(f"Error getting previous close for {ticker}: {e}")
                     result[ticker] = None
         return result
     
     async def get_today_opening_prices(self, tickers: List[str]) -> Dict[str, Optional[float]]:
-        """Get today's opening prices."""
+        """Get today's opening prices.
+        
+        Note: Uses ET timezone to query daily_prices table because the table's 'date' column
+        stores market dates (ET trading days). All actual timestamp storage in the database
+        is in UTC via TimezoneHandler.to_naive_utc().
+        """
         result = {}
         async with self.connection.get_connection() as conn:
-            today = datetime.now(pytz.timezone('US/Eastern')).date()
-            et = pytz.timezone('US/Eastern')
-            today_start_et = et.localize(datetime(today.year, today.month, today.day))
+            # Use ET to determine "today" for market date, then convert to UTC for query
+            try:
+                from zoneinfo import ZoneInfo
+                et_tz = ZoneInfo("America/New_York")
+                use_zoneinfo = True
+            except Exception:
+                import pytz
+                et_tz = pytz.timezone("America/New_York")
+                use_zoneinfo = False
+            
+            now_utc = datetime.now(timezone.utc)
+            if now_utc.tzinfo is None:
+                now_utc = now_utc.replace(tzinfo=timezone.utc)
+            now_et = now_utc.astimezone(et_tz)
+            today_et = now_et.date()
+            
+            if use_zoneinfo:
+                # zoneinfo: use replace() instead of localize()
+                today_start_et = datetime(today_et.year, today_et.month, today_et.day, tzinfo=et_tz)
+            else:
+                # pytz: use localize()
+                today_start_et = et_tz.localize(datetime(today_et.year, today_et.month, today_et.day))
             tomorrow_start_et = today_start_et + timedelta(days=1)
             today_start = today_start_et.astimezone(timezone.utc).replace(tzinfo=None)
             tomorrow_start = tomorrow_start_et.astimezone(timezone.utc).replace(tzinfo=None)

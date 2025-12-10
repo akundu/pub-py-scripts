@@ -55,7 +55,7 @@ from collections import deque
 
 # Import market hours checking and data fetching
 try:
-    from common.market_hours import is_market_hours
+    from common.market_hours import is_market_hours, is_market_preopen, is_market_postclose
 except ImportError:
     # Fallback if market_hours module doesn't exist
     def is_market_hours(dt: Optional[datetime] = None, tz_name: str = "America/New_York") -> bool:
@@ -804,6 +804,12 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     
     # Add Twitter/X tweets API endpoint
     app.router.add_get("/api/tweets/{symbol}", handle_twitter_tweets)
+    
+    # Add Reddit news API endpoint
+    app.router.add_get("/api/reddit_news/{symbol}", handle_reddit_news)
+    
+    # Add WSB daily thread API endpoint
+    app.router.add_get("/api/wsb_daily_thread", handle_wsb_daily_thread)
     
     # Add stock info API subroutes BEFORE the parameterized route
     # (must be registered before /stock_info/{symbol} to avoid {symbol} capturing "ws" or "api")
@@ -1947,7 +1953,7 @@ async def handle_covered_calls_data(request: web.Request) -> web.Response:
         # Also support prefix-specific filter logic
         calls_filter_logic = request.query.get('calls_filterLogic', filter_logic).upper()
         puts_filter_logic = request.query.get('puts_filterLogic', filter_logic).upper()
-        sort_col = request.query.get('sort', 'net_daily_premi')
+        sort_col = request.query.get('sort', 'premium_total')
         sort_direction = request.query.get('sort_direction', 'desc').lower()
         limit = request.query.get('limit')
         offset = int(request.query.get('offset', 0))
@@ -2210,7 +2216,30 @@ async def handle_covered_calls_data(request: web.Request) -> web.Response:
         # Sort (only if DataFrame has data and sort column exists)
         if sort_col in df.columns and len(df) > 0:
             ascending = (sort_direction == 'asc')
-            df = df.sort_values(by=sort_col, ascending=ascending, na_position='last')
+            logger.debug(f"Sorting by column '{sort_col}' in {sort_direction} order. Column dtype: {df[sort_col].dtype}, sample values: {df[sort_col].head(3).tolist()}")
+            
+            # Create a temporary numeric column for sorting
+            # This handles currency-formatted strings, commas, and other formatting
+            sort_values = df[sort_col].copy()
+            
+            # If the column is object type (strings), try to extract numeric values
+            if sort_values.dtype == 'object':
+                # Remove currency symbols, commas, and whitespace, then convert to numeric
+                sort_values = sort_values.astype(str).str.replace('$', '', regex=False)
+                sort_values = sort_values.str.replace(',', '', regex=False)
+                sort_values = sort_values.str.strip()
+                # Convert to numeric, coercing errors to NaN
+                sort_values = pd.to_numeric(sort_values, errors='coerce')
+                logger.debug(f"Converted string values to numeric. Sample: {sort_values.head(3).tolist()}")
+            else:
+                # Already numeric, but ensure it's float64 for consistent sorting
+                sort_values = pd.to_numeric(sort_values, errors='coerce')
+            
+            # Sort by the numeric values, keeping original column intact
+            df = df.assign(_sort_temp=sort_values)
+            df = df.sort_values(by='_sort_temp', ascending=ascending, na_position='last', kind='mergesort')
+            df = df.drop(columns=['_sort_temp'])
+            logger.debug(f"Sorted {len(df)} rows. First 3 values after sort: {df[sort_col].head(3).tolist()}")
         
         # Apply pagination (only if DataFrame has data)
         if len(df) > 0:
@@ -2280,8 +2309,10 @@ async def handle_covered_calls_data(request: web.Request) -> web.Response:
             'delta', 'theta', 'days_to_expiry', 's_prem_tot', 
             's_day_prem', 'l_strike', 'l_prem', 'liv', 'l_delta', 
             'l_theta', 'l_days_to_expiry', 'l_prem_tot', 'l_cnt_avl', 
-            'prem_diff', 'net_premium', 'net_daily_premi', 'volume', 
-            'num_contracts', 'price_change_pct'
+            'prem_diff', 'net_premium', 'net_daily_premi', 'premium_total', 
+            'daily_premium', 'volume', 'num_contracts', 'price_change_pct',
+            'premium', 'bid', 'ask', 'iv', 'implied_volatility', 'long_iv',
+            'long_implied_volatility', 'l_iv', 'trade_quality'
         ])
         for col in df.columns:
             col_type = 'string'
@@ -2313,6 +2344,8 @@ async def handle_covered_calls_data(request: web.Request) -> web.Response:
                 "filtered_count": len(records),
                 "columns": columns,
                 "has_calls": has_calls,
+                "sort_column": sort_col if sort_col in df.columns else None,
+                "sort_direction": sort_direction,
                 "has_puts": has_puts,
                 "data_source_timestamp": datetime.fromtimestamp(data_source_mtime, tz=timezone.utc).isoformat() if data_source_mtime else None
             },
@@ -3809,20 +3842,76 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
     from datetime import datetime, timedelta
     import pandas as pd
     
-    def format_value(val):
-        """Format a value for display."""
+    def format_value(val, is_currency=False, is_percentage=False):
+        """Format a value for display.
+        
+        Args:
+            val: The value to format
+            is_currency: If True, format as currency (add $ and use B/M/K suffixes)
+            is_percentage: If True, format as percentage (multiply by 100 and add %)
+        """
         if val is None or (isinstance(val, float) and pd.isna(val)):
             return 'N/A'
         if isinstance(val, (int, float)):
-            if val >= 1e9:
-                return f"${val/1e9:.2f}B"
-            elif val >= 1e6:
-                return f"${val/1e6:.2f}M"
-            elif val >= 1e3:
-                return f"${val/1e3:.2f}K"
+            if is_percentage:
+                # Format as percentage (assume value is already a decimal, e.g., 0.05 = 5%)
+                return f"{val * 100:.2f}%"
+            elif is_currency:
+                if val >= 1e9:
+                    return f"${val/1e9:.2f}B"
+                elif val >= 1e6:
+                    return f"${val/1e6:.2f}M"
+                elif val >= 1e3:
+                    return f"${val/1e3:.2f}K"
+                else:
+                    return f"${val:.2f}"
             else:
-                return f"{val:.2f}"
+                # For ratios and percentages, just format as number
+                if abs(val) >= 1e9:
+                    return f"{val/1e9:.2f}B"
+                elif abs(val) >= 1e6:
+                    return f"{val/1e6:.2f}M"
+                elif abs(val) >= 1e3:
+                    return f"{val/1e3:.2f}K"
+                else:
+                    return f"{val:.2f}"
         return str(val)
+    
+    def format_options_timestamp(timestamp):
+        """Format options timestamp for display."""
+        if not timestamp:
+            return 'N/A'
+        try:
+            # Handle different timestamp formats
+            if isinstance(timestamp, str):
+                # Try parsing ISO format
+                if 'T' in timestamp or ' ' in timestamp:
+                    dt = pd.to_datetime(timestamp)
+                else:
+                    return timestamp  # Return as-is if can't parse
+            elif isinstance(timestamp, (pd.Timestamp, datetime)):
+                dt = timestamp
+            elif isinstance(timestamp, (int, float)):
+                # Unix timestamp
+                dt = pd.to_datetime(timestamp, unit='s')
+            else:
+                dt = pd.to_datetime(timestamp)
+            
+            # Convert to ET timezone for display
+            if dt.tzinfo is None:
+                dt = dt.tz_localize('UTC')
+            else:
+                dt = dt.tz_convert('UTC')
+            
+            # Convert to ET
+            et_tz = pd.Timestamp.now(tz='America/New_York').tz
+            dt_et = dt.tz_convert(et_tz)
+            
+            # Format as "MM/DD/YYYY HH:MM:SS AM/PM ET"
+            return dt_et.strftime('%m/%d/%Y %I:%M:%S %p ET')
+        except Exception:
+            # Fallback: return as string
+            return str(timestamp)
     
     # Extract data
     price_info = data.get('price_info', {})
@@ -3866,29 +3955,69 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
         # Get after-hours price
         after_hours_price = current_price_data.get('after_hours_price') or current_price_data.get('extended_hours_price')
         
+        # Get pre-market price
+        pre_market_price = current_price_data.get('pre_market_price') or current_price_data.get('premarket_price') or current_price_data.get('pre_market')
+        
         # Get daily range (high/low for today)
+        # Ensure open price is always included in the range
         daily_range = current_price_data.get('daily_range')
         if daily_range and isinstance(daily_range, dict):
             daily_high = daily_range.get('high')
             daily_low = daily_range.get('low')
+            # Always include open price in the range if available
+            if open_price is not None and isinstance(open_price, (int, float)):
+                if daily_high is None or open_price > daily_high:
+                    daily_high = open_price
+                if daily_low is None or open_price < daily_low:
+                    daily_low = open_price
         else:
-            daily_high = None
-            daily_low = None
+            # If no range from Redis, use open price as both high and low if available
+            if open_price is not None and isinstance(open_price, (int, float)):
+                daily_high = open_price
+                daily_low = open_price
+            else:
+                daily_high = None
+                daily_low = None
+        
+        # Check if we're in pre-market or after-hours
+        # During these times, main price should show previous close with 0 change
+        # Pre-market/after-hours prices should only appear in their separate sections
+        is_premarket = False
+        is_afterhours = False
+        try:
+            is_premarket = is_market_preopen()
+            is_afterhours = is_market_postclose()
+        except Exception:
+            pass  # If market hours check fails, continue with normal logic
         
         # Calculate change from previous close
-        if previous_close and isinstance(previous_close, (int, float)) and previous_close > 0:
-            if isinstance(closing_price, (int, float)):
-                price_change = closing_price - previous_close
-                price_change_pct = (price_change / previous_close) * 100
-            elif isinstance(current_price, (int, float)):
-                price_change = current_price - previous_close
-                price_change_pct = (price_change / previous_close) * 100
+        # During pre-market/after-hours: main price = previous close with 0 change
+        # During market hours: main price = current price with change from previous close
+        if (is_premarket or is_afterhours) and previous_close and isinstance(previous_close, (int, float)) and previous_close > 0:
+            # During pre-market/after-hours, main price should be previous close with 0 change
+            # The actual pre-market/after-hours price will be shown in the separate section
+            closing_price = previous_close  # Use previous close as the main displayed price
+            price_change = 0
+            price_change_pct = 0
+        else:
+            # During market hours: use current price and calculate change from previous close
+            price_for_change = None
+            if isinstance(current_price, (int, float)) and current_price != 'N/A':
+                price_for_change = current_price
+            elif isinstance(closing_price, (int, float)) and closing_price != 'N/A':
+                price_for_change = closing_price
+            
+            if previous_close and isinstance(previous_close, (int, float)) and previous_close > 0:
+                if price_for_change is not None:
+                    price_change = price_for_change - previous_close
+                    price_change_pct = (price_change / previous_close) * 100
+                else:
+                    # Fallback to values from current_price_data if available
+                    price_change = current_price_data.get('change', 0) or current_price_data.get('change_amount', 0)
+                    price_change_pct = current_price_data.get('change_percent', 0) or current_price_data.get('change_pct', 0)
             else:
                 price_change = current_price_data.get('change', 0) or current_price_data.get('change_amount', 0)
                 price_change_pct = current_price_data.get('change_percent', 0) or current_price_data.get('change_pct', 0)
-        else:
-            price_change = current_price_data.get('change', 0) or current_price_data.get('change_amount', 0)
-            price_change_pct = current_price_data.get('change_percent', 0) or current_price_data.get('change_pct', 0)
         
         volume = current_price_data.get('volume') or current_price_data.get('size')
     else:
@@ -3919,11 +4048,13 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
     else:
         closing_price_str = str(closing_price)
     
-    # Format after-hours price
     if isinstance(after_hours_price, (int, float)):
         after_hours_price_str = f"{after_hours_price:.2f}"
-        # Calculate after-hours change from close
-        if isinstance(closing_price, (int, float)) and closing_price > 0:
+        # Calculate after-hours change from previous close (not from closing_price)
+        if previous_close and isinstance(previous_close, (int, float)) and previous_close > 0:
+            after_hours_change = after_hours_price - previous_close
+            after_hours_change_pct = (after_hours_change / previous_close) * 100
+        elif isinstance(closing_price, (int, float)) and closing_price > 0:
             after_hours_change = after_hours_price - closing_price
             after_hours_change_pct = (after_hours_change / closing_price) * 100
         else:
@@ -3933,6 +4064,35 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
         after_hours_price_str = None
         after_hours_change = 0
         after_hours_change_pct = 0
+    
+    # Format pre-market price
+    # If we're in pre-market and current_price is available but not explicitly set as pre_market_price,
+    # use current_price as the pre-market price
+    if is_premarket and isinstance(current_price, (int, float)) and current_price != 'N/A' and pre_market_price is None:
+        pre_market_price = current_price
+    
+    if isinstance(pre_market_price, (int, float)):
+        pre_market_price_str = f"{pre_market_price:.2f}"
+        # Calculate pre-market change from previous close (not from closing_price)
+        if previous_close and isinstance(previous_close, (int, float)) and previous_close > 0:
+            pre_market_change = pre_market_price - previous_close
+            pre_market_change_pct = (pre_market_change / previous_close) * 100
+        elif isinstance(closing_price, (int, float)) and closing_price > 0:
+            pre_market_change = pre_market_price - closing_price
+            pre_market_change_pct = (pre_market_change / closing_price) * 100
+        else:
+            pre_market_change = 0
+            pre_market_change_pct = 0
+    else:
+        pre_market_price_str = None
+        pre_market_change = 0
+        pre_market_change_pct = 0
+    
+    # Format after-hours price
+    # If we're in after-hours and current_price is available but not explicitly set as after_hours_price,
+    # use current_price as the after-hours price
+    if is_afterhours and isinstance(current_price, (int, float)) and current_price != 'N/A' and after_hours_price is None:
+        after_hours_price = current_price
     
     # Get price history for chart (daily) and merged series (realtime+hourly+daily)
     price_history = price_info.get('price_data', [])
@@ -4151,12 +4311,32 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
     all_chart_data_json = json.dumps(all_chart_data)
     all_chart_labels_json = json.dumps(all_chart_labels)
     merged_series_json = json.dumps(all_price_records)
+    previous_close_json = json.dumps(previous_close) if previous_close is not None else 'null'
     
     # Get IV data
     iv_data = iv_info.get('iv_data', {}) if iv_info else {}
     
     # Get options data
     options_data = options_info.get('options_data', {}) if options_info else {}
+    
+    # Get options last update timestamp
+    options_last_update = None
+    if options_info:
+        # Try to get timestamp from options_info metadata
+        options_last_update = options_info.get('last_update_timestamp') or options_info.get('write_timestamp') or options_info.get('fetched_at')
+        
+        # If not in options_info, try to extract from options_data
+        if not options_last_update and options_data:
+            # Check if options_data has a timestamp field
+            if isinstance(options_data, dict):
+                options_last_update = options_data.get('last_update_timestamp') or options_data.get('write_timestamp') or options_data.get('fetched_at')
+            # If options_data contains contracts, check the first contract's timestamp
+            elif isinstance(options_data, dict) and options_data.get('data'):
+                contracts = options_data.get('data', {}).get('contracts', [])
+                if contracts and len(contracts) > 0:
+                    first_contract = contracts[0]
+                    if isinstance(first_contract, dict):
+                        options_last_update = first_contract.get('write_timestamp') or first_contract.get('last_quote_timestamp') or first_contract.get('timestamp')
     
     # Get news data
     news_data = news_info.get('news_data', {}) if news_info else {}
@@ -4446,7 +4626,16 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                         {change_sign}${abs(price_change):.2f} ({change_sign}{price_change_pct:.2f}%)
                     </div>
                 </div>
-                    <div class="price-timestamp">At close: <span id="closeTime">Loading...</span></div>
+                    <div class="price-timestamp" id="closeTimeContainer" style="display: none;">At close: <span id="closeTime">Loading...</span></div>
+                    
+                    <div class="pre-market" id="preMarketSection" style="display: {'block' if pre_market_price_str else 'none'};">
+                        <div>
+                            <span class="label">🌅 Pre-market:</span>
+                            <span class="price" style="font-size: 24px;" id="preMarketPrice">{pre_market_price_str if pre_market_price_str else '--'}</span>
+                            <span class="change" id="preMarketChange">{f"{'+' if pre_market_change >= 0 else ''}${abs(pre_market_change):.2f} ({'+' if pre_market_change >= 0 else ''}{pre_market_change_pct:.2f}%)" if pre_market_price_str else '--'}</span>
+                        </div>
+                        <div class="price-timestamp" id="preMarketTime">--</div>
+                    </div>
                     
                     <div class="after-hours" id="afterHoursSection" style="display: {'block' if after_hours_price_str else 'none'};">
                         <div>
@@ -4467,49 +4656,134 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                 <div class="metrics-grid">
             <div class="metric-card">
                 <div class="metric-label">Previous Close</div>
-                <div class="metric-value">{format_value(previous_close)}</div>
+                <div class="metric-value">{format_value(previous_close, is_currency=True)}</div>
             </div>
             <div class="metric-card">
                 <div class="metric-label">Market Cap (intraday)</div>
-                <div class="metric-value">{format_value(financial_data.get('market_cap'))}</div>
+                <div class="metric-value">{format_value(financial_data.get('market_cap'), is_currency=True)}</div>
             </div>
             <div class="metric-card">
                 <div class="metric-label">Open</div>
-                <div class="metric-value">{format_value(open_price)}</div>
+                <div class="metric-value">{format_value(open_price, is_currency=True)}</div>
             </div>
             <div class="metric-card">
                 <div class="metric-label">Day's Range</div>
-                <div class="metric-value">{f"{format_value(daily_low)} - {format_value(daily_high)}" if daily_low is not None and daily_high is not None else 'N/A'}</div>
+                <div class="metric-value">{f"{format_value(daily_low, is_currency=True)} - {format_value(daily_high, is_currency=True)}" if daily_low is not None and daily_high is not None else 'N/A'}</div>
             </div>
             <div class="metric-card">
                 <div class="metric-label">52 Week Range</div>
-                <div class="metric-value">{format_value(week_52_low)} - {format_value(week_52_high)}</div>
+                <div class="metric-value">{format_value(week_52_low, is_currency=True)} - {format_value(week_52_high, is_currency=True)}</div>
             </div>
             <div class="metric-card">
                 <div class="metric-label">Bid/Ask</div>
-                <div class="metric-value">{f"{format_value(bid_price)} / {format_value(ask_price)}" if bid_price and ask_price else (format_value(bid_price) if bid_price else (format_value(ask_price) if ask_price else 'N/A'))}</div>
+                <div class="metric-value">{f"{format_value(bid_price, is_currency=True)} / {format_value(ask_price, is_currency=True)}" if bid_price and ask_price else (format_value(bid_price, is_currency=True) if bid_price else (format_value(ask_price, is_currency=True) if ask_price else 'N/A'))}</div>
             </div>
             <div class="metric-card">
                 <div class="metric-label">Avg. Volume</div>
                 <div class="metric-value">{format_value(financial_data.get('average_volume'))}</div>
             </div>
             <div class="metric-card">
-                <div class="metric-label">PE Ratio (TTM)</div>
-                <div class="metric-value">{format_value(financial_data.get('price_to_earnings') or financial_data.get('pe_ratio'))}</div>
-            </div>
-            <div class="metric-card">
                 <div class="metric-label">Volume</div>
                 <div class="metric-value">{format_value(volume)}</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">EPS (TTM)</div>
-                <div class="metric-value">{format_value(financial_data.get('earnings_per_share') or financial_data.get('eps'))}</div>
             </div>
             <div class="metric-card">
                 <div class="metric-label">Earnings Date</div>
                 <div class="metric-value" id="earningsDate">{earnings_date_display if earnings_date_display and earnings_date_display != 'N/A' and 'Dividend' not in earnings_date_display and 'Yield' not in earnings_date_display else 'N/A'}</div>
             </div>
         </div>
+        
+        <!-- Financial Ratios Section -->
+        {f'''
+        <div class="data-section" style="margin-top: 30px;">
+            <h2>Financial Ratios & Metrics</h2>
+            <div class="metrics-grid">
+                <!-- Earnings & Profitability -->
+                <div class="metric-card">
+                    <div class="metric-label">EPS (TTM)</div>
+                    <div class="metric-value">{format_value(financial_data.get('earnings_per_share') or financial_data.get('eps'))}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">PE Ratio (TTM)</div>
+                    <div class="metric-value">{format_value(financial_data.get('price_to_earnings') or financial_data.get('pe_ratio'))}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">PEG Ratio</div>
+                    <div class="metric-value">{format_value(financial_data.get('peg_ratio'))}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Return on Equity (ROE)</div>
+                    <div class="metric-value">{format_value(financial_data.get('return_on_equity'), is_percentage=True)}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Return on Assets (ROA)</div>
+                    <div class="metric-value">{format_value(financial_data.get('return_on_assets'), is_percentage=True)}</div>
+                </div>
+                
+                <!-- Price Ratios -->
+                <div class="metric-card">
+                    <div class="metric-label">Price to Book (P/B)</div>
+                    <div class="metric-value">{format_value(financial_data.get('price_to_book'))}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Price to Sales (P/S)</div>
+                    <div class="metric-value">{format_value(financial_data.get('price_to_sales'))}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Price to Cash Flow (P/CF)</div>
+                    <div class="metric-value">{format_value(financial_data.get('price_to_cash_flow'))}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Price to Free Cash Flow (P/FCF)</div>
+                    <div class="metric-value">{format_value(financial_data.get('price_to_free_cash_flow'))}</div>
+                </div>
+                
+                <!-- Enterprise Value Ratios -->
+                <div class="metric-card">
+                    <div class="metric-label">EV to Sales</div>
+                    <div class="metric-value">{format_value(financial_data.get('ev_to_sales'))}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">EV to EBITDA</div>
+                    <div class="metric-value">{format_value(financial_data.get('ev_to_ebitda'))}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Enterprise Value</div>
+                    <div class="metric-value">{format_value(financial_data.get('enterprise_value'), is_currency=True)}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Free Cash Flow</div>
+                    <div class="metric-value">{format_value(financial_data.get('free_cash_flow'), is_currency=True)}</div>
+                </div>
+                
+                <!-- Liquidity Ratios -->
+                <div class="metric-card">
+                    <div class="metric-label">Current Ratio</div>
+                    <div class="metric-value">{format_value(financial_data.get('current') or financial_data.get('current_ratio'))}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Quick Ratio</div>
+                    <div class="metric-value">{format_value(financial_data.get('quick') or financial_data.get('quick_ratio'))}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Cash Ratio</div>
+                    <div class="metric-value">{format_value(financial_data.get('cash') or financial_data.get('cash_ratio'))}</div>
+                </div>
+                
+                <!-- Debt & Leverage -->
+                <div class="metric-card">
+                    <div class="metric-label">Debt to Equity</div>
+                    <div class="metric-value">{format_value(financial_data.get('debt_to_equity'))}</div>
+                </div>
+                
+                <!-- Dividends -->
+                <div class="metric-card">
+                    <div class="metric-label">Dividend Yield</div>
+                    <div class="metric-value">{format_value(financial_data.get('dividend_yield'), is_percentage=True)}</div>
+                </div>
+                
+            </div>
+        </div>
+        ''' if financial_data else ''}
             </div>
         </div>
         
@@ -4560,32 +4834,12 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
         
         {f'''
         <div class="data-section">
-            <h2>Options</h2>
+            <h2>Options{f' <span style="font-size: 14px; font-weight: normal; color: #8b949e; margin-left: 10px;">(Last updated: {format_options_timestamp(options_last_update)})</span>' if options_last_update else ''}</h2>
             <div id="optionsDisplay">
                 {_format_options_html(options_data, current_price if isinstance(current_price, (int, float)) else None) if options_data else '<p>No options data available</p>'}
             </div>
         </div>
         ''' if options_data else ''}
-        
-        <div class="data-section">
-            <h2>Yahoo Finance News & Analysis</h2>
-            <div id="yahooNewsDisplay">
-                <div style="padding: 20px; text-align: center; color: #666;">
-                    <div class="loading-spinner" style="display: inline-block; width: 24px; height: 24px; border: 3px solid #f3f3f3; border-top: 3px solid #667eea; border-radius: 50%; animation: spin 1s linear infinite;"></div>
-                    <p style="margin-top: 10px;">Loading Yahoo Finance news...</p>
-                </div>
-            </div>
-        </div>
-        
-        <div class="data-section">
-            <h2>Recent Tweets</h2>
-            <div id="tweetsDisplay">
-                <div style="padding: 20px; text-align: center; color: #666;">
-                    <div class="loading-spinner" style="display: inline-block; width: 24px; height: 24px; border: 3px solid #f3f3f3; border-top: 3px solid #1DA1F2; border-radius: 50%; animation: spin 1s linear infinite;"></div>
-                    <p style="margin-top: 10px;">Loading tweets...</p>
-                </div>
-            </div>
-        </div>
         
         {f'''
         <div class="data-section">
@@ -4606,11 +4860,22 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
         const allChartLabels = {all_chart_labels_json};
         const mergedSeries = {merged_series_json};
         
+        // Get previous close from backend (already calculated correctly)
+        const backendPreviousClose = {previous_close_json};
+        
         let currentTimePeriod = '1d';
         
+        // Get current time for market state detection (used in multiple places)
+        const now = new Date();
+        const et = new Date(now.toLocaleString('en-US', {{ timeZone: 'America/New_York' }}));
+        
         // Find reference price (previous day's close) for calculating change
+        // Use backend value first, then fall back to chart data calculation
         let referencePrice = null;
-        if (Array.isArray(mergedSeries) && mergedSeries.length > 0) {{
+        if (backendPreviousClose !== null && !isNaN(backendPreviousClose) && backendPreviousClose > 0) {{
+            referencePrice = parseFloat(backendPreviousClose);
+            console.log('Reference price (from backend):', referencePrice);
+        }} else if (Array.isArray(mergedSeries) && mergedSeries.length > 0) {{
             // Sort by timestamp to ensure chronological order
             const sortedSeries = [...mergedSeries].sort((a, b) => {{
                 const dateA = parseDate(a.timestamp);
@@ -4619,14 +4884,42 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                 return dateA.getTime() - dateB.getTime();
             }});
             
-            // Get today's date (in local timezone, but we'll compare dates)
-            const now = new Date();
-            const todayDate = now.toISOString().slice(0, 10); // YYYY-MM-DD
+            // Get today's date in ET timezone for proper comparison (reuse et from above)
+            const todayDate = et.toISOString().slice(0, 10); // YYYY-MM-DD
             
-            // Find the most recent daily close from a previous day
+            // Calculate previous trading day (accounting for weekends)
+            // If today is Monday, previous trading day is Friday (3 days back)
+            // If today is Tuesday-Friday, previous trading day is yesterday (1 day back)
+            // If today is weekend, previous trading day is Friday
+            let prevTradingDayDate = null;
+            const dayOfWeek = et.getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+            if (dayOfWeek === 0) {{
+                // Sunday - previous trading day is Friday (2 days back)
+                const friday = new Date(et);
+                friday.setDate(friday.getDate() - 2);
+                prevTradingDayDate = friday.toISOString().slice(0, 10);
+            }} else if (dayOfWeek === 1) {{
+                // Monday - previous trading day is Friday (3 days back)
+                const friday = new Date(et);
+                friday.setDate(friday.getDate() - 3);
+                prevTradingDayDate = friday.toISOString().slice(0, 10);
+            }} else if (dayOfWeek >= 2 && dayOfWeek <= 5) {{
+                // Tuesday-Friday - previous trading day is yesterday
+                const yesterday = new Date(et);
+                yesterday.setDate(yesterday.getDate() - 1);
+                prevTradingDayDate = yesterday.toISOString().slice(0, 10);
+            }} else {{
+                // Saturday - previous trading day is Friday (1 day back)
+                const friday = new Date(et);
+                friday.setDate(friday.getDate() - 1);
+                prevTradingDayDate = friday.toISOString().slice(0, 10);
+            }}
+            
+            // Find the most recent daily close from the previous trading day
             let previousDayClose = null;
             let previousDayDate = null;
             
+            // First, try to find exact match for previous trading day
             for (let i = sortedSeries.length - 1; i >= 0; i--) {{
                 const r = sortedSeries[i];
                 if (!r || !r.timestamp) continue;
@@ -4636,18 +4929,35 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                 
                 const recordDate = dt.toISOString().slice(0, 10); // YYYY-MM-DD
                 
-                // If this is from a previous day (before today)
-                if (recordDate < todayDate) {{
-                    // If it's a daily close or from daily source, use it
-                    if (r.is_daily_close || r.source === 'daily') {{
+                // If this matches the previous trading day
+                if (recordDate === prevTradingDayDate) {{
+                    // Prefer daily close, but accept any close from that day
+                    if (r.is_daily_close || r.source === 'daily' || r.close) {{
+                        previousDayClose = parseFloat(r.close);
+                        previousDayDate = recordDate;
+                        if (r.is_daily_close || r.source === 'daily') {{
+                            break; // Found official daily close, stop searching
+                        }}
+                    }}
+                }}
+            }}
+            
+            // If we didn't find exact match, find the most recent daily close before today
+            if (!previousDayClose) {{
+                for (let i = sortedSeries.length - 1; i >= 0; i--) {{
+                    const r = sortedSeries[i];
+                    if (!r || !r.timestamp) continue;
+                    
+                    const dt = parseDate(r.timestamp);
+                    if (!dt) continue;
+                    
+                    const recordDate = dt.toISOString().slice(0, 10);
+                    
+                    // If this is from a previous day (before today) and is a daily close
+                    if (recordDate < todayDate && (r.is_daily_close || r.source === 'daily')) {{
                         previousDayClose = parseFloat(r.close);
                         previousDayDate = recordDate;
                         break;
-                    }}
-                    // Otherwise, keep track of the latest price from previous day
-                    if (!previousDayClose) {{
-                        previousDayClose = parseFloat(r.close);
-                        previousDayDate = recordDate;
                     }}
                 }}
             }}
@@ -4675,10 +4985,40 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
             }}
         }}
         
+        // If we still don't have a reference price, log a warning
+        if (!referencePrice) {{
+            console.warn('No reference price found - price change calculation may be incorrect');
+        }}
+        
         console.log('Final reference price:', referencePrice);
         
-        // Update initial price display with change from reference price if available
-        if (referencePrice && referencePrice > 0) {{
+        // Check if we're in pre-market or after-hours (reuse et from above)
+        // During these times, main price should remain as previous close with 0 change
+        const hours = et.getHours();
+        const minutes = et.getMinutes();
+        const day = et.getDay();
+        const isWeekday = day >= 1 && day <= 5;
+        const isMarketHours = isWeekday && ((hours === 9 && minutes >= 30) || (hours > 9 && hours < 16));
+        const isPreMarket = isWeekday && hours >= 4 && ((hours === 9 && minutes < 30) || hours < 9);
+        const isAfterHours = isWeekday && hours >= 16 && hours < 20;
+        
+        // Update initial price display
+        // During pre-market/after-hours: main price = previous close with 0 change
+        // During market hours: main price = current price with change from previous close
+        if (isPreMarket || isAfterHours) {{
+            // During pre-market/after-hours, ensure main price shows previous close with 0 change
+            const currentPriceElement = document.querySelector('.price');
+            const changeElement = document.querySelector('.change');
+            
+            if (currentPriceElement && changeElement && referencePrice && referencePrice > 0) {{
+                // Set main price to previous close
+                currentPriceElement.textContent = '$' + referencePrice.toFixed(2);
+                // Set change to 0
+                changeElement.textContent = '$0.00 (0.00%)';
+                changeElement.classList.remove('positive', 'negative');
+            }}
+        }} else if (isMarketHours && referencePrice && referencePrice > 0) {{
+            // During market hours: update change display based on current price
             const currentPriceElement = document.querySelector('.price');
             const changeElement = document.querySelector('.change');
             
@@ -4714,8 +5054,7 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
             sampleLabels: allChartLabels.slice(0, 5)
         }});
         
-        // Calculate date ranges
-        const now = new Date();
+        // Calculate date ranges (reuse now and et from top level)
         const getDateRange = (period) => {{
             const ranges = {{
                 '1d': 1,
@@ -5098,13 +5437,13 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                     pluginsConfig.annotation = {{
                         annotations: dateMarkerAnnotations.annotations
                     }};
-                    console.log('Added', Object.keys(dateMarkerAnnotations.annotations).length, 'date marker annotations to chart');
+                    // console.log('Added', Object.keys(dateMarkerAnnotations.annotations).length, 'date marker annotations to chart');
                 }} else {{
                     console.warn('Annotation plugin not available - date markers will not be displayed');
                     console.warn('Available Chart.js plugins:', Object.keys(window).filter(k => k.toLowerCase().includes('chart')));
                 }}
             }} else {{
-                console.log('No date marker annotations to add (dateMarkers:', initialSeries.dateMarkers, ')');
+                // console.log('No date marker annotations to add (dateMarkers:', initialSeries.dateMarkers, ')');
             }}
             
             priceChart = new Chart(ctx, {{
@@ -5149,14 +5488,114 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
             }}
         }}
         
+        // Helper function to build market open annotations (9:30 AM ET)
+        function buildMarketOpenAnnotations(labels, mergedSeries) {{
+            const annotations = {{}};
+            
+            if (!labels || labels.length === 0 || !mergedSeries || mergedSeries.length === 0) {{
+                return {{ annotations }};
+            }}
+            
+            // Find all market open times (9:30 AM ET) in the data
+            const marketOpenIndices = [];
+            const seenDates = new Set();
+            
+            for (let i = 0; i < labels.length; i++) {{
+                const label = labels[i];
+                
+                // Check if label is a time (HH:MM format)
+                const timeMatch = label.match(/^(\\d{{1,2}}):(\\d{{2}})$/);
+                if (timeMatch) {{
+                    const hours = parseInt(timeMatch[1]);
+                    const minutes = parseInt(timeMatch[2]);
+                    
+                    // Check if it's 9:30 AM (market open)
+                    if (hours === 9 && minutes === 30) {{
+                        // Get the date for this point from mergedSeries
+                        if (i < mergedSeries.length) {{
+                            const record = mergedSeries[i];
+                            if (record && record.timestamp) {{
+                                const dt = parseDate(record.timestamp);
+                                if (dt) {{
+                                    const dateKey = dt.toISOString().slice(0, 10); // YYYY-MM-DD
+                                    // Only add one marker per day
+                                    if (!seenDates.has(dateKey)) {{
+                                        seenDates.add(dateKey);
+                                        marketOpenIndices.push({{ index: i, date: dateKey }});
+                                    }}
+                                }}
+                            }}
+                        }}
+                    }}
+                }} else {{
+                    // For date labels, check if we can find 9:30 AM in the data for that day
+                    // This handles cases where labels are dates but we need to find the 9:30 AM point
+                    if (i < mergedSeries.length) {{
+                        const record = mergedSeries[i];
+                        if (record && record.timestamp) {{
+                            const dt = parseDate(record.timestamp);
+                            if (dt) {{
+                                const et = new Date(dt.toLocaleString('en-US', {{ timeZone: 'America/New_York' }}));
+                                const hours = et.getHours();
+                                const minutes = et.getMinutes();
+                                
+                                // Check if it's close to 9:30 AM ET (within 5 minutes)
+                                if (hours === 9 && minutes >= 25 && minutes <= 35) {{
+                                    const dateKey = dt.toISOString().slice(0, 10);
+                                    if (!seenDates.has(dateKey)) {{
+                                        seenDates.add(dateKey);
+                                        marketOpenIndices.push({{ index: i, date: dateKey }});
+                                    }}
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+            }}
+            
+            // Create annotations for each market open
+            marketOpenIndices.forEach(({{ index, date }}, idx) => {{
+                const key = `marketOpen_${{idx}}`;
+                annotations[key] = {{
+                    type: 'line',
+                    xMin: index,
+                    xMax: index,
+                    borderColor: 'rgba(0, 200, 100, 0.8)',
+                    borderWidth: 2,
+                    borderDash: [5, 5],
+                    label: {{
+                        display: true,
+                        content: 'Market Open',
+                        position: 'start',
+                        yAdjust: -15,
+                        backgroundColor: 'rgba(0, 200, 100, 0.9)',
+                        color: '#fff',
+                        font: {{
+                            size: 11,
+                            weight: 'bold'
+                        }},
+                        padding: {{
+                            top: 4,
+                            bottom: 4,
+                            left: 8,
+                            right: 8
+                        }},
+                        textAlign: 'center'
+                    }}
+                }};
+            }});
+            
+            return {{ annotations }};
+        }}
+        
         // Helper function to build annotation configuration from date markers
         function buildDateMarkerAnnotations(dateMarkers, labels) {{
             if (!dateMarkers || dateMarkers.length === 0) {{
-                console.log('No date markers to display');
+                // console.log('No date markers to display');
                 return {{}};
             }}
             
-            console.log('Building annotations for', dateMarkers.length, 'date markers');
+            // console.log('Building annotations for', dateMarkers.length, 'date markers');
             
             const annotations = {{}};
             dateMarkers.forEach((index, idx) => {{
@@ -5291,7 +5730,7 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                 }};
             }});
             
-            console.log('Created', Object.keys(annotations).length, 'annotations');
+            // console.log('Created', Object.keys(annotations).length, 'annotations');
             return {{
                 annotations: annotations
             }};
@@ -5447,7 +5886,8 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                     const day = et.getDay();
                     const isWeekday = day >= 1 && day <= 5;
                     const isMarketHours = isWeekday && ((hours === 9 && minutes >= 30) || (hours > 9 && hours < 16));
-                    const isAfterHours = isWeekday && (hours >= 16 || hours < 9 || (hours === 9 && minutes < 30));
+                    const isPreMarket = isWeekday && hours >= 4 && ((hours === 9 && minutes < 30) || hours < 9);
+                    const isAfterHours = isWeekday && hours >= 16 && hours < 20;
                     
                     // Calculate change and change percentage from reference price
                     let change = 0;
@@ -5475,8 +5915,52 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                         
                         // Update realtime indicator
                         document.getElementById('realtimePrice').textContent = 'Live: $' + priceFloat.toFixed(2);
+                    }} else if (isPreMarket) {{
+                        // Update pre-market section (don't update main price)
+                        const preMarketSection = document.getElementById('preMarketSection');
+                        const preMarketPrice = document.getElementById('preMarketPrice');
+                        const preMarketChangeElement = document.getElementById('preMarketChange');
+                        const preMarketTime = document.getElementById('preMarketTime');
+                        
+                        // Show pre-market section
+                        if (preMarketSection) {{
+                            preMarketSection.style.display = 'block';
+                        }}
+                        
+                        // Calculate change from reference price (previous close)
+                        let preMarketChangeValue = 0;
+                        let preMarketChangePct = 0;
+                        if (referencePrice && !isNaN(referencePrice) && referencePrice > 0) {{
+                            preMarketChangeValue = priceFloat - referencePrice;
+                            preMarketChangePct = (preMarketChangeValue / referencePrice) * 100;
+                        }}
+                        
+                        const preMarketChangeSign = preMarketChangeValue >= 0 ? '+' : '';
+                        const preMarketChangeColor = preMarketChangeValue >= 0 ? 'positive' : 'negative';
+                        
+                        if (preMarketPrice) {{
+                            preMarketPrice.textContent = '$' + priceFloat.toFixed(2);
+                            preMarketPrice.style.color = '#f0f6fc';
+                        }}
+                        
+                        if (preMarketChangeElement) {{
+                            preMarketChangeElement.textContent = preMarketChangeSign + '$' + Math.abs(preMarketChangeValue).toFixed(2) + ' (' + preMarketChangeSign + preMarketChangePct.toFixed(2) + '%)';
+                            preMarketChangeElement.className = 'change ' + preMarketChangeColor;
+                        }}
+                        
+                        // Update timestamp
+                        if (preMarketTime && quote.timestamp) {{
+                            const timestamp = new Date(quote.timestamp);
+                            preMarketTime.textContent = timestamp.toLocaleTimeString('en-US', {{
+                                hour: 'numeric',
+                                minute: '2-digit',
+                                second: '2-digit',
+                                timeZone: 'America/New_York',
+                                hour12: true
+                            }}) + ' EST';
+                        }}
                     }} else if (isAfterHours) {{
-                        // Update after-hours section
+                        // Update after-hours section (don't update main price)
                         const afterHoursSection = document.getElementById('afterHoursSection');
                         const afterHoursPrice = document.getElementById('afterHoursPrice');
                         const afterHoursChangeElement = document.getElementById('afterHoursChange');
@@ -5487,20 +5971,12 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                             afterHoursSection.style.display = 'block';
                         }}
                         
-                        // Get closing price from main price display
-                        const mainPriceElement = document.getElementById('mainPrice');
-                        let closingPrice = null;
-                        if (mainPriceElement) {{
-                            const closingPriceText = mainPriceElement.textContent.replace('$', '').trim();
-                            closingPrice = parseFloat(closingPriceText);
-                        }}
-                        
-                        // Calculate change from closing price (not reference price)
+                        // Calculate change from reference price (previous close)
                         let afterHoursChangeValue = 0;
                         let afterHoursChangePct = 0;
-                        if (closingPrice && !isNaN(closingPrice) && closingPrice > 0) {{
-                            afterHoursChangeValue = priceFloat - closingPrice;
-                            afterHoursChangePct = (afterHoursChangeValue / closingPrice) * 100;
+                        if (referencePrice && !isNaN(referencePrice) && referencePrice > 0) {{
+                            afterHoursChangeValue = priceFloat - referencePrice;
+                            afterHoursChangePct = (afterHoursChangeValue / referencePrice) * 100;
                         }}
                         
                         const afterHoursChangeSign = afterHoursChangeValue >= 0 ? '+' : '';
@@ -5641,184 +6117,6 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
             }}
         }}
         
-        // Function to fetch and display Yahoo Finance news
-        async function fetchYahooFinanceNews() {{
-            try {{
-                const response = await fetch(`/api/yahoo_news/{symbol}`);
-                const data = await response.json();
-                
-                const yahooNewsDisplay = document.getElementById('yahooNewsDisplay');
-                
-                if (!data.success) {{
-                    yahooNewsDisplay.innerHTML = `<p style="color: #dc2626;">Error loading Yahoo Finance news: ${{data.error || 'Unknown error'}}</p>`;
-                    return;
-                }}
-                
-                let html = '';
-                
-                // Display AI analysis if available
-                if (data.ai_analysis && (data.ai_analysis.summary || (data.ai_analysis.bullet_points && data.ai_analysis.bullet_points.length > 0))) {{
-                    html += `
-                        <div style="
-                            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                            color: white;
-                            border-radius: 12px;
-                            padding: 20px;
-                            margin-bottom: 20px;
-                            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-                        ">
-                            <h3 style="margin: 0 0 15px 0; font-size: 20px; display: flex; align-items: center; gap: 10px;">
-                                <span style="font-size: 24px;">🤖</span>
-                                <span>AI Analysis</span>
-                            </h3>
-                    `;
-                    
-                    // Display summary
-                    if (data.ai_analysis.summary) {{
-                        html += '<div style="background: rgba(255, 255, 255, 0.1); padding: 15px; border-radius: 8px; margin-bottom: 15px;">';
-                        html += '<h4 style="margin: 0 0 10px 0; font-size: 16px; font-weight: 600;">Summary</h4>';
-                        html += '<p style="margin: 0; line-height: 1.6;">' + data.ai_analysis.summary + '</p>';
-                        html += '</div>';
-                    }}
-                    
-                    // Display bullet points/key insights
-                    if (data.ai_analysis.bullet_points && data.ai_analysis.bullet_points.length > 0) {{
-                        html += `
-                            <div style="background: rgba(255, 255, 255, 0.1); padding: 15px; border-radius: 8px;">
-                                <h4 style="margin: 0 0 10px 0; font-size: 16px; font-weight: 600;">Key Insights</h4>
-                                <ul style="margin: 0; padding-left: 20px; line-height: 1.8;">
-                        `;
-                        data.ai_analysis.bullet_points.forEach(bullet => {{
-                            html += '<li style="margin-bottom: 8px;">' + bullet + '</li>';
-                        }});
-                        html += `
-                                </ul>
-                            </div>
-                        `;
-                    }}
-                    
-                    html += '</div>';
-                }}
-                
-                // Display news items
-                if (data.news && data.news.length > 0) {{
-                    html += `
-                        <div style="margin-top: 30px;">
-                            <h3 style="color: #1a1a1a; font-size: 22px; font-weight: 700; margin-bottom: 20px; padding-bottom: 12px; border-bottom: 3px solid #1a73e8;">
-                                📰 Recent News
-                            </h3>
-                        </div>
-                    `;
-                    data.news.forEach(item => {{
-                        html += '<div style="margin-bottom: 20px; padding: 20px; background: #ffffff; border-radius: 10px; border-left: 5px solid #1a73e8; border: 1px solid #e0e0e0; box-shadow: 0 2px 4px rgba(0,0,0,0.05); transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;" ';
-                        html += 'onmouseover="this.style.transform=\\'translateX(5px)\\'; this.style.borderColor=\\'#1a73e8\\'; this.style.boxShadow=\\'0 4px 8px rgba(0,0,0,0.1)\\';" ';
-                        html += 'onmouseout="this.style.transform=\\'\\'; this.style.borderColor=\\'#e0e0e0\\'; this.style.boxShadow=\\'0 2px 4px rgba(0,0,0,0.05)\\';">';
-                        html += '<h4 style="margin: 0 0 12px 0; font-size: 18px; font-weight: 700; line-height: 1.4;">';
-                        html += '<a href="' + item.link + '" target="_blank" style="color: #1a1a1a; text-decoration: none;">' + item.title + '</a>';
-                        html += '</h4>';
-                        if (item.description) {{
-                            html += '<p style="margin: 0 0 12px 0; color: #333; line-height: 1.6; font-size: 15px;">' + item.description + '</p>';
-                        }}
-                        html += '<div style="font-size: 13px; color: #666; font-weight: 500;">';
-                        if (item.timestamp) {{
-                            html += 'Published: ' + new Date(item.timestamp).toLocaleString();
-                        }} else {{
-                            html += 'Recently';
-                        }}
-                        html += '</div></div>';
-                    }});
-                }} else if (!data.ai_analysis || (!data.ai_analysis.summary && (!data.ai_analysis.bullet_points || data.ai_analysis.bullet_points.length === 0))) {{
-                    html = '<p style="color: #8b949e; padding: 20px; text-align: center;">No news available from Yahoo Finance at this time.</p>';
-                }}
-                
-                // Add source attribution
-                html += `<p style="margin-top: 20px; font-size: 12px; color: #6e7681; text-align: center;">Data sourced from <a href="${{data.url}}" target="_blank" style="color: #58a6ff;">Yahoo Finance</a></p>`;
-                
-                yahooNewsDisplay.innerHTML = html;
-            }} catch (error) {{
-                console.error('Error fetching Yahoo Finance news:', error);
-                document.getElementById('yahooNewsDisplay').innerHTML = 
-                    '<p style="color: #dc2626;">Error loading Yahoo Finance news. Please try again later.</p>';
-            }}
-        }}
-        
-        // Function to fetch and display tweets
-        async function fetchTweets() {{
-            try {{
-                const response = await fetch('/api/tweets/{symbol}');
-                
-                if (!response.ok) {{
-                    throw new Error('HTTP ' + response.status + ': ' + response.statusText);
-                }}
-                
-                let data;
-                try {{
-                    data = await response.json();
-                }} catch (jsonError) {{
-                    console.error('Invalid JSON response from tweets endpoint:', jsonError);
-                    const tweetsDisplay = document.getElementById('tweetsDisplay');
-                    tweetsDisplay.innerHTML = '<p style="color: #8b949e; padding: 20px; text-align: center;">Unable to fetch tweets. Service may be temporarily unavailable.</p>';
-                    return;
-                }}
-                
-                const tweetsDisplay = document.getElementById('tweetsDisplay');
-                
-                if (!data.success || !data.tweets || data.tweets.length === 0) {{
-                    const note = data.note || 'No recent tweets available at this time.';
-                    tweetsDisplay.innerHTML = '<p style="color: #8b949e; padding: 20px; text-align: center;">' + note + '</p>';
-                    return;
-                }}
-                
-                let html = '<div style="display: grid; gap: 15px;">';
-                
-                data.tweets.forEach(tweet => {{
-                    const initial = tweet.fullname ? tweet.fullname.charAt(0).toUpperCase() : 'T';
-                    const fullname = tweet.fullname || 'User';
-                    const username = tweet.username || '';
-                    const timestamp = tweet.timestamp || '';
-                    const content = tweet.content || '';
-                    const likes = tweet.likes || 0;
-                    const retweets = tweet.retweets || 0;
-                    
-                    html += '<div style="background: #0d1117; border-radius: 12px; padding: 16px; border: 1px solid #30363d; transition: all 0.2s;" ';
-                    html += 'onmouseover="this.style.borderColor=\\'#58a6ff\\'; this.style.transform=\\'translateY(-2px)\\';" ';
-                    html += 'onmouseout="this.style.borderColor=\\'#30363d\\'; this.style.transform=\\'\\';">';
-                    html += '<div style="display: flex; align-items: start; gap: 12px; margin-bottom: 12px;">';
-                    html += '<div style="width: 48px; height: 48px; background: linear-gradient(135deg, #1DA1F2 0%, #0d8bd9 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-weight: 600; font-size: 18px; flex-shrink: 0;">' + initial + '</div>';
-                    html += '<div style="flex: 1; min-width: 0;">';
-                    html += '<div style="display: flex; align-items: center; gap: 4px; flex-wrap: wrap;">';
-                    html += '<span style="font-weight: 600; color: #f0f6fc;">' + fullname + '</span>';
-                    html += '<span style="color: #8b949e; font-size: 14px;">' + username + '</span>';
-                    html += '</div>';
-                    html += '<div style="color: #8b949e; font-size: 13px;">' + timestamp + '</div>';
-                    html += '</div></div>';
-                    html += '<div style="color: #c9d1d9; line-height: 1.5; margin-bottom: 12px; word-wrap: break-word;">' + content + '</div>';
-                    html += '<div style="display: flex; gap: 20px; color: #8b949e; font-size: 13px;">';
-                    html += '<span style="display: flex; align-items: center; gap: 4px;">';
-                    html += '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 21.638h-.014C9.403 21.59 1.95 14.856 1.95 8.478c0-3.064 2.525-5.754 5.403-5.754 2.29 0 3.83 1.58 4.646 2.73.814-1.148 2.354-2.73 4.645-2.73 2.88 0 5.404 2.69 5.404 5.755 0 6.376-7.454 13.11-10.037 13.157H12z"/></svg>';
-                    html += likes;
-                    html += '</span>';
-                    html += '<span style="display: flex; align-items: center; gap: 4px;">';
-                    html += '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M23.77 15.67c-.292-.293-.767-.293-1.06 0l-2.22 2.22V7.65c0-2.068-1.683-3.75-3.75-3.75h-5.85c-.414 0-.75.336-.75.75s.336.75.75.75h5.85c1.24 0 2.25 1.01 2.25 2.25v10.24l-2.22-2.22c-.293-.293-.768-.293-1.06 0s-.294.768 0 1.06l3.5 3.5c.145.147.337.22.53.22s.383-.072.53-.22l3.5-3.5c.294-.292.294-.767 0-1.06zm-10.66 3.28H7.26c-1.24 0-2.25-1.01-2.25-2.25V6.46l2.22 2.22c.148.147.34.22.532.22s.384-.073.53-.22c.293-.293.293-.768 0-1.06l-3.5-3.5c-.293-.294-.768-.294-1.06 0l-3.5 3.5c-.294.292-.294.767 0 1.06s.767.293 1.06 0l2.22-2.22V16.7c0 2.068 1.683 3.75 3.75 3.75h5.85c.414 0 .75-.336.75-.75s-.337-.75-.75-.75z"/></svg>';
-                    html += retweets;
-                    html += '</span></div></div>';
-                }});
-                
-                html += '</div>';
-                if (data.source) {{
-                    html += '<p style="margin-top: 20px; font-size: 12px; color: #6e7681; text-align: center;">Source: ' + data.source + '</p>';
-                }}
-                
-                tweetsDisplay.innerHTML = html;
-            }} catch (error) {{
-                console.error('Error fetching tweets:', error);
-                const tweetsDisplay = document.getElementById('tweetsDisplay');
-                if (tweetsDisplay) {{
-                    tweetsDisplay.innerHTML = '<p style="color: #8b949e; padding: 20px; text-align: center;">Unable to fetch tweets at this time. The service may be temporarily unavailable.</p>';
-                }}
-            }}
-        }}
-        
         // Function to toggle Implied Volatility section
         function toggleIVSection() {{
             const ivContent = document.getElementById('ivContent');
@@ -5834,18 +6132,13 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
             }}
         }}
         
-        // Fetch Yahoo Finance news and tweets after page loads
         document.addEventListener('DOMContentLoaded', function() {{
-            fetchYahooFinanceNews();
-            fetchTweets();
             // Apply default strike range filter
             filterStrikesByRange('10');
         }});
         
-        // If DOMContentLoaded already fired, fetch immediately
+        // If DOMContentLoaded already fired, apply filter immediately
         if (document.readyState === 'complete' || document.readyState === 'interactive') {{
-            fetchYahooFinanceNews();
-            fetchTweets();
             // Apply default strike range filter
             filterStrikesByRange('10');
         }}
@@ -5860,30 +6153,81 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
             
             // Market hours: 9:30 AM - 4:00 PM ET, Monday-Friday
             const isWeekday = day >= 1 && day <= 5;
-            const isMarketHours = isWeekday && ((hours === 9 && minutes >= 30) || (hours > 9 && hours < 16));
-            const isAfterHours = isWeekday && (hours >= 16 || hours < 9 || (hours === 9 && minutes < 30));
+            const isMarketHours = isWeekday && ((hours === 9 && minutes >= 30) || (hours > 9 && hours < 16)) || (hours === 16 && minutes === 0);
+            // Pre-market hours: 4:00 AM - 9:30 AM ET on weekdays
+            const isPreMarket = isWeekday && hours >= 4 && ((hours === 9 && minutes < 30) || hours < 9);
+            // After hours is only 4:00 PM - 8:00 PM ET on weekdays (not during market hours)
+            const isAfterHours = isWeekday && hours >= 16 && hours < 20;
             
-            // Update close time display
+            // Update close time display - only show when market is closed
             const closeTimeElem = document.getElementById('closeTime');
-            if (closeTimeElem) {{
-                closeTimeElem.textContent = '3:59:58 PM EST';
+            const closeTimeContainer = closeTimeElem ? closeTimeElem.closest('.price-timestamp') : null;
+            if (closeTimeElem && closeTimeContainer) {{
+                if (isMarketHours || isPreMarket) {{
+                    // Hide "At close" text during market hours and pre-market
+                    closeTimeContainer.style.display = 'none';
+                }} else {{
+                    // Show "At close" text when market is closed (after hours or weekend)
+                    closeTimeContainer.style.display = 'block';
+                    closeTimeElem.textContent = '3:59:58 PM EST';
+                }}
             }}
             
-            // Show/hide after hours section
+            // Show/hide pre-market section
+            const preMarketSection = document.getElementById('preMarketSection');
+            if (preMarketSection) {{
+                const hasPreMarketData = preMarketSection.querySelector('#preMarketPrice') && 
+                                       preMarketSection.querySelector('#preMarketPrice').textContent.trim() !== '--';
+                
+                // Show pre-market section if:
+                // 1. It's actually pre-market hours (4am-9:30am ET on weekdays) OR
+                // 2. Market is closed (weekend or before pre-market) AND we have pre-market price data
+                if ((isPreMarket || (!isMarketHours && !isAfterHours && !isPreMarket && hours < 4 && hasPreMarketData)) && hasPreMarketData) {{
+                    preMarketSection.style.display = 'block';
+                    // Update pre-market time
+                    const preMarketTime = document.getElementById('preMarketTime');
+                    if (preMarketTime) {{
+                        const timeOptions = {{
+                            hour: 'numeric', 
+                            minute: '2-digit', 
+                            second: '2-digit',
+                            timeZone: 'America/New_York',
+                            timeZoneName: 'short'
+                        }};
+                        preMarketTime.textContent = et.toLocaleTimeString('en-US', timeOptions);
+                    }}
+                }} else {{
+                    // Hide pre-market section during market hours and after hours
+                    preMarketSection.style.display = 'none';
+                }}
+            }}
+            
+            // Show/hide after hours section - only show if market is closed AND we have after hours data
             const afterHoursSection = document.getElementById('afterHoursSection');
-            if (isAfterHours && afterHoursSection) {{
-                afterHoursSection.style.display = 'block';
-                // Update after hours time
-                const afterHoursTime = document.getElementById('afterHoursTime');
-                if (afterHoursTime) {{
-                    const timeOptions = {{
-                        hour: 'numeric', 
-                        minute: '2-digit', 
-                        second: '2-digit',
-                        timeZone: 'America/New_York',
-                        timeZoneName: 'short'
-                    }};
-                    afterHoursTime.textContent = et.toLocaleTimeString('en-US', timeOptions);
+            if (afterHoursSection) {{
+                // Only show after hours section if:
+                // 1. It's actually after hours (4pm-8pm ET on weekdays) OR
+                // 2. Market is closed (weekend or outside trading hours) AND we have after hours price data
+                const hasAfterHoursData = afterHoursSection.querySelector('#afterHoursPrice') && 
+                                         afterHoursSection.querySelector('#afterHoursPrice').textContent.trim() !== '--';
+                
+                if ((isAfterHours || (!isMarketHours && !isPreMarket && !isAfterHours && hasAfterHoursData)) && hasAfterHoursData) {{
+                    afterHoursSection.style.display = 'block';
+                    // Update after hours time
+                    const afterHoursTime = document.getElementById('afterHoursTime');
+                    if (afterHoursTime) {{
+                        const timeOptions = {{
+                            hour: 'numeric', 
+                            minute: '2-digit', 
+                            second: '2-digit',
+                            timeZone: 'America/New_York',
+                            timeZoneName: 'short'
+                        }};
+                        afterHoursTime.textContent = et.toLocaleTimeString('en-US', timeOptions);
+                    }}
+                }} else {{
+                    // Hide after hours section during market hours and pre-market
+                    afterHoursSection.style.display = 'none';
                 }}
             }}
         }}
@@ -6081,8 +6425,15 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         
         # Fetch additional data from database
         # 1. Previous close price
+        # Get the close from the last trading day (not today)
         prev_close_map = await db_instance.get_previous_close_prices([symbol])
         previous_close = prev_close_map.get(symbol)
+        
+        # Log for debugging
+        if previous_close is not None:
+            logger.debug(f"Previous close for {symbol}: {previous_close}")
+        else:
+            logger.warning(f"No previous close found for {symbol}")
         
         # 2. Today's opening price
         open_price_map = await db_instance.get_today_opening_prices([symbol])
@@ -6148,6 +6499,8 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 logger.debug(f"Error fetching bid/ask from daily for {symbol}: {e}")
         
         # 5. Fetch daily price range (high/low) from Redis
+        # Note: The range automatically includes today's open price from daily_prices
+        # when updated via _update_daily_price_range
         daily_range = None
         try:
             if hasattr(db_instance, 'get_daily_price_range'):
@@ -6180,6 +6533,20 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 logger.info(f"Daily range for {symbol}: {daily_range}")
             else:
                 logger.warning(f"No daily range found for {symbol}")
+        
+        # Fetch options last update timestamp
+        options_last_update = None
+        try:
+            from common.common import fetch_latest_write_timestamp_from_db
+            options_last_update = await fetch_latest_write_timestamp_from_db(db_instance, symbol, debug=False)
+            # Add to options_info if available
+            if options_last_update is not None:
+                options_info = result.get('options_info', {})
+                if not options_info:
+                    result['options_info'] = {}
+                result['options_info']['last_update_timestamp'] = options_last_update
+        except Exception as e:
+            logger.debug(f"Error fetching options timestamp for {symbol}: {e}")
         
         # Generate HTML page
         html_content = generate_stock_info_html(symbol, result, earnings_date=earnings_date_str)
@@ -6536,89 +6903,255 @@ async def handle_yahoo_finance_news(request: web.Request) -> web.Response:
         # Extract recent news - look for actual news stream items
         news_items = []
         
-        # Try multiple selectors for Yahoo Finance news items
-        # Look for h3 elements which typically contain news headlines
-        news_headlines = soup.find_all('h3', limit=20)
+        # Strategy 1: Find the "News headlines" section specifically
+        # Look for headings that contain "News headlines" or similar
+        news_section = None
+        for heading in soup.find_all(['h2', 'h3', 'h4', 'h5']):
+            heading_text = heading.get_text(strip=True).lower()
+            if 'news headline' in heading_text or ('news' in heading_text and 'headline' in heading_text):
+                # Found the news headlines section
+                news_section = heading.find_parent(['div', 'section', 'article'])
+                if news_section:
+                    logger.debug(f"Found news headlines section via heading: {heading_text}")
+                    break
         
-        for headline in news_headlines:
-            try:
-                # Get the text
-                title = headline.get_text(strip=True)
-                
-                # Skip if it's too short or looks like a category/menu item
-                if len(title) < 20 or any(skip in title.lower() for skip in ['menu', 'search', 'sign in', 'my portfolio']):
-                    continue
-                
-                # Find parent container for more context
-                parent = headline.find_parent(['li', 'div', 'article'])
-                
-                # Try to find link
-                link = ''
-                link_elem = headline.find('a') or (parent.find('a') if parent else None)
+        # Strategy 2: Look for data-module="NewsStream" or similar data attributes
+        if not news_section:
+            news_section = soup.find(attrs={'data-module': lambda x: x and 'news' in x.lower()})
+            if news_section:
+                logger.debug("Found news section via data-module attribute")
+        
+        # Strategy 3: Look for sections with class/id containing "news"
+        if not news_section:
+            for elem in soup.find_all(['div', 'section'], class_=lambda x: x and 'news' in str(x).lower()):
+                # Check if it contains actual news items (links, headlines)
+                if elem.find_all('a', href=lambda x: x and ('news' in x.lower() or '/news/' in x)):
+                    news_section = elem
+                    logger.debug("Found news section via class/id containing 'news'")
+                    break
+        
+        # Strategy 4: Look for list items or articles within news containers
+        if not news_section:
+            # Try to find <li> or <article> elements that look like news items
+            potential_news = soup.find_all(['li', 'article'], limit=30)
+            for item in potential_news:
+                # Check if it has a link and looks like a news item
+                link_elem = item.find('a', href=lambda x: x and ('news' in x.lower() or '/news/' in x))
                 if link_elem:
-                    link = link_elem.get('href', '')
+                    title_elem = item.find(['h3', 'h4', 'h5', 'h6', 'a'])
+                    if title_elem and len(title_elem.get_text(strip=True)) > 20:
+                        # This might be a news item, use its parent container
+                        news_section = item.find_parent(['div', 'section', 'ul'])
+                        if news_section:
+                            logger.debug("Found news section via news-like list items")
+                            break
+        
+        # Extract news items from the found section
+        if news_section:
+            # Look for headlines (h3, h4, h5) or links within the news section
+            headlines = news_section.find_all(['h3', 'h4', 'h5', 'h6'], limit=15)
+            if not headlines:
+                # Try finding links that look like news headlines
+                links = news_section.find_all('a', href=lambda x: x and ('news' in x.lower() or '/news/' in x), limit=15)
+                for link in links:
+                    title = link.get_text(strip=True)
+                    if len(title) > 20:
+                        headlines.append(link)
+            
+            for headline in headlines:
+                try:
+                    # Get the text
+                    title = headline.get_text(strip=True)
+                    
+                    # Skip if it's too short or looks like a category/menu item
+                    if len(title) < 20 or any(skip in title.lower() for skip in [
+                        'menu', 'search', 'sign in', 'my portfolio', 'performance overview',
+                        'company insights', 'fair value', 'dividend score', 'hiring score',
+                        'insider sentiment', 'research reports', 'people also watch'
+                    ]):
+                        continue
+                    
+                    # Find parent container for more context
+                    parent = headline.find_parent(['li', 'div', 'article', 'a'])
+                    if not parent or parent == headline:
+                        parent = headline
+                    
+                    # Try to find link
+                    link = ''
+                    if headline.name == 'a':
+                        link = headline.get('href', '')
+                    else:
+                        link_elem = headline.find('a') or (parent.find('a') if parent else None)
+                        if link_elem:
+                            link = link_elem.get('href', '')
+                    
                     if link and not link.startswith('http'):
                         link = f"https://finance.yahoo.com{link}" if link.startswith('/') else f"https://finance.yahoo.com/{link}"
-                
-                # Try to find description/summary in parent
-                description = ""
-                if parent:
-                    # Look for <p> tags that might contain summary
-                    p_tags = parent.find_all('p', limit=3)
-                    for p in p_tags:
-                        text = p.get_text(strip=True)
-                        if len(text) > 30 and text != title:
-                            description = text
-                            break
-                
-                # Find timestamp
-                timestamp = ""
-                if parent:
-                    time_elem = parent.find('time')
-                    if time_elem:
-                        timestamp = time_elem.get('datetime', '') or time_elem.get_text(strip=True)
-                
-                if title and len(news_items) < 10:
-                    news_items.append({
-                        'title': title,
-                        'link': link,
-                        'description': description,
-                        'timestamp': timestamp
-                    })
-            except Exception as e:
-                logger.debug(f"Error parsing news headline: {e}")
-                continue
+                    
+                    # Try to find description/summary in parent
+                    description = ""
+                    if parent:
+                        # Look for <p> tags that might contain summary
+                        p_tags = parent.find_all('p', limit=3)
+                        for p in p_tags:
+                            text = p.get_text(strip=True)
+                            if len(text) > 30 and text != title:
+                                description = text
+                                break
+                    
+                    # Find timestamp
+                    timestamp = ""
+                    if parent:
+                        time_elem = parent.find('time')
+                        if time_elem:
+                            timestamp = time_elem.get('datetime', '') or time_elem.get_text(strip=True)
+                    
+                    if title and link and len(news_items) < 10:
+                        news_items.append({
+                            'title': title,
+                            'link': link,
+                            'description': description,
+                            'timestamp': timestamp
+                        })
+                except Exception as e:
+                    logger.debug(f"Error parsing news headline: {e}")
+                    continue
+        else:
+            # Fallback: Try to find news items by looking for links with /news/ in URL
+            logger.debug("News section not found, trying fallback method")
+            news_links = soup.find_all('a', href=lambda x: x and '/news/' in x, limit=20)
+            for link_elem in news_links:
+                try:
+                    title = link_elem.get_text(strip=True)
+                    if len(title) > 20:
+                        link = link_elem.get('href', '')
+                        if link and not link.startswith('http'):
+                            link = f"https://finance.yahoo.com{link}" if link.startswith('/') else f"https://finance.yahoo.com/{link}"
+                        
+                        parent = link_elem.find_parent(['li', 'div', 'article'])
+                        description = ""
+                        if parent:
+                            p_tags = parent.find_all('p', limit=2)
+                            for p in p_tags:
+                                text = p.get_text(strip=True)
+                                if len(text) > 30 and text != title:
+                                    description = text
+                                    break
+                        
+                        if title and link and len(news_items) < 10:
+                            news_items.append({
+                                'title': title,
+                                'link': link,
+                                'description': description,
+                                'timestamp': ""
+                            })
+                except Exception as e:
+                    logger.debug(f"Error parsing fallback news link: {e}")
+                    continue
         
-        # Try to extract AI analysis section with better targeting
+        # Try to extract AI-generated "News headlines" section
+        # This is the specific widget that shows AI-generated news summaries
         ai_analysis = {
             'summary': '',
             'headlines': [],
-            'bullet_points': []
+            'bullet_points': [],
+            'timestamp': ''
         }
         
-        # Look for sections with "AI Analysis" or similar headings
-        for heading in soup.find_all(['h2', 'h3', 'h4']):
-            heading_text = heading.get_text(strip=True).lower()
-            if any(term in heading_text for term in ['ai analysis', 'news headlines', 'analyst', 'summary']):
-                # Found an AI analysis section
-                container = heading.find_parent(['div', 'section'])
-                if container:
-                    # Get the summary paragraph
-                    paragraphs = container.find_all('p', limit=5)
+        # Strategy 1: Look for "News headlines" heading specifically
+        news_headlines_heading = None
+        for heading in soup.find_all(['h2', 'h3', 'h4', 'h5', 'div', 'span']):
+            heading_text = heading.get_text(strip=True)
+            if 'news headline' in heading_text.lower() and len(heading_text) < 50:
+                news_headlines_heading = heading
+                logger.debug(f"Found 'News headlines' heading: {heading_text}")
+                break
+        
+        # Strategy 2: Look for "Powered by Yahoo Finance AI" text
+        if not news_headlines_heading:
+            for elem in soup.find_all(string=lambda text: text and 'powered by yahoo finance ai' in text.lower()):
+                parent = elem.find_parent(['div', 'section', 'article'])
+                if parent:
+                    # Walk up to find the main container
+                    news_headlines_heading = parent
+                    # Try to find a parent with "News headlines" text
+                    for ancestor in parent.parents:
+                        if ancestor and 'news headline' in ancestor.get_text().lower():
+                            news_headlines_heading = ancestor
+                            break
+                    logger.debug("Found 'News headlines' section via 'Powered by Yahoo Finance AI'")
+                    break
+        
+        # Strategy 3: Look for data attributes that might indicate the news headlines widget
+        if not news_headlines_heading:
+            for elem in soup.find_all(attrs={'data-module': lambda x: x and ('news' in str(x).lower() or 'headline' in str(x).lower())}):
+                # Check if it contains "News headlines" text
+                if 'news headline' in elem.get_text().lower():
+                    news_headlines_heading = elem
+                    logger.debug("Found 'News headlines' section via data-module attribute")
+                    break
+        
+        # Extract content from the found section
+        if news_headlines_heading:
+            # Get the container (parent div/section)
+            container = news_headlines_heading.find_parent(['div', 'section', 'article'])
+            if not container:
+                container = news_headlines_heading
+            
+            # Look for the main summary text
+            # The summary is typically in a <p> tag or <div> with the news content
+            # It's usually the longest text block in the container
+            all_text_elements = container.find_all(['p', 'div', 'span'], string=True)
+            candidate_summaries = []
+            
+            for elem in all_text_elements:
+                text = elem.get_text(strip=True)
+                # Skip if it's the heading, timestamp, or button text
+                if (len(text) > 100 and 
+                    'news headline' not in text.lower() and
+                    'powered by' not in text.lower() and
+                    'get full analysis' not in text.lower() and
+                    not ('updated' in text.lower() and 'minutes ago' in text.lower())):
+                    candidate_summaries.append((len(text), text))
+            
+            # Sort by length and take the longest (most likely to be the summary)
+            if candidate_summaries:
+                candidate_summaries.sort(reverse=True, key=lambda x: x[0])
+                ai_analysis['summary'] = candidate_summaries[0][1]
+                logger.debug(f"Extracted summary: {ai_analysis['summary'][:100]}...")
+            
+            # Extract timestamp ("Updated X minutes ago")
+            timestamp_text = container.find(string=lambda text: text and 'updated' in text.lower() and 'minutes ago' in text.lower())
+            if timestamp_text:
+                ai_analysis['timestamp'] = timestamp_text.strip()
+                logger.debug(f"Extracted timestamp: {ai_analysis['timestamp']}")
+            
+            # If we didn't find a summary, try getting all paragraphs
+            if not ai_analysis['summary']:
+                paragraphs = container.find_all('p')
+                for p in paragraphs:
+                    text = p.get_text(strip=True)
+                    # Skip short text, headings, timestamps
+                    if (len(text) > 100 and 
+                        'news headline' not in text.lower() and
+                        'powered by' not in text.lower() and
+                        'updated' not in text.lower()):
+                        ai_analysis['summary'] = text
+                        break
+        else:
+            # Fallback: Look for any section with "News headlines" text
+            logger.debug("News headlines heading not found, trying fallback")
+            for elem in soup.find_all(string=lambda text: text and 'news headline' in text.lower()):
+                parent = elem.find_parent(['div', 'section', 'article'])
+                if parent:
+                    # Look for summary text in nearby elements
+                    paragraphs = parent.find_all(['p', 'div'], limit=10)
                     for p in paragraphs:
                         text = p.get_text(strip=True)
-                        if len(text) > 50 and not ai_analysis['summary']:
+                        if len(text) > 100 and 'news headline' not in text.lower():
                             ai_analysis['summary'] = text
-                    
-                    # Get bullet points/key insights
-                    bullets = container.find_all('li', limit=10)
-                    for bullet in bullets:
-                        text = bullet.get_text(strip=True)
-                        if len(text) > 20:
-                            ai_analysis['bullet_points'].append(text)
-                    
-                    # If we found content, stop looking
-                    if ai_analysis['summary'] or ai_analysis['bullet_points']:
+                            break
+                    if ai_analysis['summary']:
                         break
         
         return web.json_response({
@@ -6679,19 +7212,21 @@ async def handle_twitter_tweets(request: web.Request) -> web.Response:
     try:
         import subprocess
         
-        # Search for tweets about the stock ticker using nitter.net (privacy-friendly Twitter frontend)
-        # Nitter is more scraping-friendly than Twitter directly
-        search_query = f"${symbol} OR #{symbol} OR {symbol}"
-        # Use nitter.net mirror
-        url = f"https://nitter.poast.org/search?f=tweets&q={search_query.replace(' ', '+')}"
+        # Search for tweets about the stock ticker using x.com search
+        import urllib.parse
+        search_query = f"${symbol}"
+        encoded_query = urllib.parse.quote(search_query)
+        url = f"https://x.com/search?q={encoded_query}&src=typed_query"
         
         curl_cmd = [
             'curl',
             '-s',
             '-L',
-            '--max-time', '10',
-            '-H', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            '--max-time', '15',
+            '-H', 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            '-H', 'Accept-Language: en-US,en;q=0.9',
+            '-H', 'Referer: https://x.com/',
             url
         ]
         
@@ -6721,70 +7256,87 @@ async def handle_twitter_tweets(request: web.Request) -> web.Response:
         
         tweets = []
         
-        # Find tweet containers - nitter uses specific classes
-        tweet_items = soup.find_all('div', class_='timeline-item', limit=15)
+        # X/Twitter uses article tags for tweets
+        # Look for article elements with data-testid="tweet"
+        tweet_articles = soup.find_all('article', attrs={'data-testid': 'tweet'}, limit=15)
         
-        for item in tweet_items:
+        if not tweet_articles:
+            # Fallback: look for any article tags that might contain tweets
+            tweet_articles = soup.find_all('article', limit=15)
+        
+        for article in tweet_articles:
             try:
-                # Find tweet content
-                tweet_content_elem = item.find('div', class_='tweet-content')
-                if not tweet_content_elem:
+                # Find tweet text - look for div with data-testid="tweetText"
+                content_elem = article.find('div', attrs={'data-testid': 'tweetText'})
+                if not content_elem:
+                    # Try alternative selectors
+                    content_elem = article.find('div', class_=lambda x: x and 'tweet' in str(x).lower())
+                
+                if not content_elem:
                     continue
                 
-                content = tweet_content_elem.get_text(strip=True)
+                content = content_elem.get_text(strip=True)
                 
-                # Filter out retweets and very short tweets
-                if not content or len(content) < 30 or content.startswith('RT @'):
+                # Filter out very short tweets
+                if not content or len(content) < 20:
                     continue
                 
-                # Find username
+                # Find user info
                 username = ""
-                username_elem = item.find('a', class_='username')
-                if username_elem:
-                    username = username_elem.get_text(strip=True)
-                
-                # Find full name
                 fullname = ""
-                fullname_elem = item.find('a', class_='fullname')
-                if fullname_elem:
-                    fullname = fullname_elem.get_text(strip=True)
+                user_elem = article.find('div', attrs={'data-testid': 'User-Name'})
+                if user_elem:
+                    # Try to find username and fullname
+                    name_links = user_elem.find_all('a')
+                    for link in name_links:
+                        href = link.get('href', '')
+                        text = link.get_text(strip=True)
+                        if href.startswith('/') and not href.startswith('//'):
+                            username = href.lstrip('/')
+                        elif text and len(text) > 0:
+                            fullname = text
                 
                 # Find timestamp
                 timestamp = ""
-                time_elem = item.find('span', class_='tweet-date')
+                time_elem = article.find('time')
                 if time_elem:
-                    timestamp = time_elem.find('a')
-                    if timestamp:
-                        timestamp = timestamp.get('title', '') or timestamp.get_text(strip=True)
+                    timestamp = time_elem.get('datetime', '') or time_elem.get_text(strip=True)
                 
-                # Find stats (likes, retweets)
+                # Find tweet link
+                tweet_link = ""
+                link_elem = article.find('a', href=lambda x: x and '/status/' in str(x))
+                if link_elem:
+                    tweet_link = link_elem.get('href', '')
+                    if tweet_link and not tweet_link.startswith('http'):
+                        tweet_link = f"https://x.com{tweet_link}"
+                
+                # Find engagement stats
                 likes = 0
                 retweets = 0
-                stats_elem = item.find('div', class_='tweet-stats')
-                if stats_elem:
-                    like_elem = stats_elem.find('span', class_='icon-heart')
-                    if like_elem and like_elem.parent:
-                        like_text = like_elem.parent.get_text(strip=True)
-                        try:
-                            likes = int(like_text.replace(',', ''))
-                        except:
-                            pass
-                    
-                    rt_elem = stats_elem.find('span', class_='icon-retweet')
-                    if rt_elem and rt_elem.parent:
-                        rt_text = rt_elem.parent.get_text(strip=True)
-                        try:
-                            retweets = int(rt_text.replace(',', ''))
-                        except:
-                            pass
+                # Look for buttons with data-testid containing "like" or "retweet"
+                like_button = article.find('button', attrs={'data-testid': lambda x: x and 'like' in str(x).lower()})
+                if like_button:
+                    like_text = like_button.get_text(strip=True)
+                    try:
+                        likes = int(''.join(filter(str.isdigit, like_text)) or '0')
+                    except:
+                        pass
                 
-                # Only include tweets with some engagement or from verified/popular accounts
+                retweet_button = article.find('button', attrs={'data-testid': lambda x: x and 'retweet' in str(x).lower()})
+                if retweet_button:
+                    rt_text = retweet_button.get_text(strip=True)
+                    try:
+                        retweets = int(''.join(filter(str.isdigit, rt_text)) or '0')
+                    except:
+                        pass
+                
                 if content and len(tweets) < 10:
                     tweets.append({
                         'username': username,
-                        'fullname': fullname,
+                        'fullname': fullname or username,
                         'content': content,
                         'timestamp': timestamp,
+                        'link': tweet_link or f"https://x.com/search?q={encoded_query}",
                         'likes': likes,
                         'retweets': retweets
                     })
@@ -6797,7 +7349,7 @@ async def handle_twitter_tweets(request: web.Request) -> web.Response:
             "success": True,
             "symbol": symbol,
             "tweets": tweets,
-            "source": "Twitter/X via Nitter"
+            "source": "Twitter/X"
         })
         
     except subprocess.TimeoutExpired:
@@ -6814,6 +7366,394 @@ async def handle_twitter_tweets(request: web.Request) -> web.Response:
             "symbol": symbol,
             "tweets": [],
             "note": str(e)
+        })
+
+async def handle_reddit_news(request: web.Request) -> web.Response:
+    """Fetch Reddit news/posts about a stock symbol.
+    
+    GET /api/reddit_news/{symbol}
+    
+    Returns recent Reddit posts about the stock.
+    """
+    symbol = request.match_info.get('symbol', '').upper().strip()
+    if not symbol:
+        return web.json_response({
+            "error": "Missing symbol",
+            "success": False
+        }, status=400)
+    
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return web.json_response({
+            "error": "BeautifulSoup library not available",
+            "success": False
+        }, status=500)
+    
+    try:
+        import subprocess
+        import urllib.parse
+        
+        # Fetch posts from r/wallstreetbets and filter by symbol
+        # Use the subreddit's hot/new page and search within it
+        url = f"https://www.reddit.com/r/wallstreetbets/new/"
+        
+        curl_cmd = [
+            'curl',
+            '-s',
+            '-L',
+            '--max-time', '15',
+            '-H', 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            '-H', 'Accept-Language: en-US,en;q=0.9',
+            url
+        ]
+        
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                curl_cmd,
+                capture_output=True,
+                text=True,
+                timeout=20
+            )
+        )
+        
+        if result.returncode != 0:
+            logger.warning(f"curl failed for Reddit news {symbol}: {result.stderr[:200]}")
+            return web.json_response({
+                "success": True,
+                "symbol": symbol,
+                "posts": [],
+                "note": "Unable to fetch Reddit posts at this time"
+            })
+        
+        html = result.stdout
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        posts = []
+        symbol_lower = symbol.lower()
+        
+        # Reddit uses specific data attributes for posts
+        # Look for posts with data-testid="post-container"
+        post_containers = soup.find_all('div', attrs={'data-testid': 'post-container'}, limit=50)
+        
+        if not post_containers:
+            # Fallback: look for article tags or divs with class containing "Post"
+            post_containers = soup.find_all(['article', 'div'], class_=lambda x: x and 'post' in str(x).lower(), limit=50)
+        
+        # Filter posts that mention the symbol
+        for container in post_containers:
+            try:
+                # Find post title - look specifically for WSB posts
+                title_elem = container.find('h3') or container.find('a', href=lambda x: x and '/r/wallstreetbets/comments/' in str(x))
+                if not title_elem:
+                    continue
+                
+                title = title_elem.get_text(strip=True)
+                if not title or len(title) < 10:
+                    continue
+                
+                # Filter by symbol - check if title or body contains the symbol
+                title_lower = title.lower()
+                if symbol_lower not in title_lower and f"${symbol}" not in title:
+                    # Check body too
+                    body_elem = container.find('div', class_=lambda x: x and ('post' in str(x).lower() or 'content' in str(x).lower()))
+                    body_text = body_elem.get_text(strip=True).lower() if body_elem else ""
+                    if symbol_lower not in body_text and f"${symbol}" not in body_text:
+                        continue  # Skip posts that don't mention the symbol
+                
+                # Find post link - specifically for WSB (must be a comments link, not subreddit link)
+                post_link = ""
+                # Look for links to actual posts (comments pages), not subreddit pages
+                link_elems = container.find_all('a', href=lambda x: x and '/r/wallstreetbets/comments/' in str(x) and '/comments/' in str(x))
+                for link_elem in link_elems:
+                    href = link_elem.get('href', '')
+                    # Make sure it's a post link, not just a subreddit link
+                    if '/comments/' in href and href.count('/') >= 5:  # Post links have more path segments
+                        post_link = href
+                        if post_link and not post_link.startswith('http'):
+                            post_link = f"https://www.reddit.com{post_link}"
+                        break
+                
+                # If no post link found, skip this item (it's probably not a real post)
+                if not post_link:
+                    continue
+                
+                # Find post text/body
+                body = ""
+                body_elem = container.find('div', class_=lambda x: x and ('post' in str(x).lower() or 'content' in str(x).lower()))
+                if body_elem:
+                    body = body_elem.get_text(strip=True)
+                    if len(body) > 500:
+                        body = body[:500] + "..."
+                
+                # Find upvotes
+                upvotes = 0
+                upvote_elem = container.find('button', attrs={'aria-label': lambda x: x and 'upvote' in str(x).lower()})
+                if upvote_elem:
+                    upvote_text = upvote_elem.get_text(strip=True)
+                    try:
+                        upvotes = int(''.join(filter(str.isdigit, upvote_text)) or '0')
+                    except:
+                        pass
+                
+                # Find timestamp
+                timestamp = ""
+                time_elem = container.find('time')
+                if time_elem:
+                    timestamp = time_elem.get('datetime', '') or time_elem.get_text(strip=True)
+                
+                if title and len(posts) < 10:
+                    posts.append({
+                        'title': title,
+                        'body': body,
+                        'subreddit': 'wallstreetbets',
+                        'link': post_link or f"https://www.reddit.com/r/wallstreetbets/new/",
+                        'upvotes': upvotes,
+                        'timestamp': timestamp
+                    })
+            except Exception as e:
+                logger.debug(f"Error parsing Reddit post: {e}")
+                continue
+        
+        return web.json_response({
+            "success": True,
+            "symbol": symbol,
+            "posts": posts,
+            "source": "Reddit"
+        })
+        
+    except subprocess.TimeoutExpired:
+        return web.json_response({
+            "success": True,
+            "symbol": symbol,
+            "posts": [],
+            "note": "Timeout fetching Reddit posts"
+        })
+    except Exception as e:
+        logger.error(f"Error fetching Reddit news for {symbol}: {e}", exc_info=True)
+        return web.json_response({
+            "success": True,
+            "symbol": symbol,
+            "posts": [],
+            "note": str(e)[:100]
+        })
+
+async def handle_wsb_daily_thread(request: web.Request) -> web.Response:
+    """Fetch the most recent WSB daily discussion thread.
+    
+    GET /api/wsb_daily_thread
+    
+    Returns the most recent 10 comments/posts from the daily discussion thread.
+    """
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return web.json_response({
+            "error": "BeautifulSoup library not available",
+            "success": False
+        }, status=500)
+    
+    try:
+        import subprocess
+        from datetime import datetime, timedelta
+        try:
+            import pytz
+            # Calculate today's date in PDT (threads start around 4am PDT)
+            pdt = pytz.timezone('America/Los_Angeles')
+            now_pdt = datetime.now(pdt)
+        except ImportError:
+            # Fallback to local time if pytz not available
+            now_pdt = datetime.now()
+        
+        # If it's before 4am PDT, use yesterday's date
+        if now_pdt.hour < 4:
+            target_date = (now_pdt - timedelta(days=1)).date()
+        else:
+            target_date = now_pdt.date()
+        
+        # Format: "Daily Discussion Thread for December 09, 2025"
+        date_str = target_date.strftime("%B %d, %Y")
+        # Format date for URL slug: "december_09_2025" or "december_9_2025"
+        month_name = target_date.strftime("%B").lower()
+        day = target_date.day
+        year = target_date.year
+        date_url_slug = f"{month_name}_{day}_{year}"
+        
+        # First, try the subreddit's hot/new posts to find the daily thread
+        url = f"https://www.reddit.com/r/wallstreetbets/hot/"
+        
+        curl_cmd = [
+            'curl',
+            '-s',
+            '-L',
+            '--max-time', '15',
+            '-H', 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            '-H', 'Accept-Language: en-US,en;q=0.9',
+            url
+        ]
+        
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                curl_cmd,
+                capture_output=True,
+                text=True,
+                timeout=20
+            )
+        )
+        
+        if result.returncode != 0:
+            logger.warning(f"curl failed for WSB daily thread: {result.stderr[:200]}")
+            return web.json_response({
+                "success": True,
+                "comments": [],
+                "thread_url": "",
+                "note": "Unable to fetch WSB daily thread at this time"
+            })
+        
+        html = result.stdout
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # Look for the daily discussion thread
+        thread_url = ""
+        thread_title = ""
+        
+        # Search for posts with "Daily Discussion" in the title
+        all_links = soup.find_all('a', href=lambda x: x and '/r/wallstreetbets/comments/' in str(x))
+        for link in all_links:
+            title = link.get_text(strip=True).lower()
+            href = link.get('href', '').lower()
+            # Check if it's a daily discussion thread with date in URL
+            if 'daily discussion' in title and date_url_slug in href:
+                thread_url = link.get('href', '')
+                thread_title = link.get_text(strip=True)
+                if thread_url and not thread_url.startswith('http'):
+                    thread_url = f"https://www.reddit.com{thread_url}"
+                break
+        
+        # If not found, try broader search
+        if not thread_url:
+            for link in all_links:
+                title = link.get_text(strip=True).lower()
+                href = link.get('href', '').lower()
+                # Look for daily discussion with date in URL or title
+                if 'daily discussion' in title:
+                    # Check if URL contains date pattern or title contains day number
+                    if date_url_slug in href or str(day) in title:
+                        thread_url = link.get('href', '')
+                        thread_title = link.get_text(strip=True)
+                        if thread_url and not thread_url.startswith('http'):
+                            thread_url = f"https://www.reddit.com{thread_url}"
+                        break
+        
+        comments = []
+        
+        if thread_url:
+            # Fetch the actual thread page
+            thread_curl = [
+                'curl',
+                '-s',
+                '-L',
+                '--max-time', '15',
+                '-H', 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                thread_url
+            ]
+            
+            thread_result = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    thread_curl,
+                    capture_output=True,
+                    text=True,
+                    timeout=20
+                )
+            )
+            
+            if thread_result.returncode == 0:
+                thread_html = thread_result.stdout
+                thread_soup = BeautifulSoup(thread_html, 'html.parser')
+                
+                # Find comments in the thread
+                # Reddit comments are typically in divs with data-testid="comment"
+                comment_divs = thread_soup.find_all('div', attrs={'data-testid': 'comment'}, limit=10)
+                
+                if not comment_divs:
+                    # Fallback: look for divs with class containing "Comment"
+                    comment_divs = thread_soup.find_all('div', class_=lambda x: x and 'comment' in str(x).lower(), limit=10)
+                
+                for comment_div in comment_divs:
+                    try:
+                        # Find comment text
+                        comment_text = ""
+                        text_elem = comment_div.find('div', class_=lambda x: x and ('text' in str(x).lower() or 'content' in str(x).lower()))
+                        if text_elem:
+                            comment_text = text_elem.get_text(strip=True)
+                        
+                        if not comment_text or len(comment_text) < 10:
+                            continue
+                        
+                        # Find author
+                        author = ""
+                        author_elem = comment_div.find('a', href=lambda x: x and '/user/' in str(x))
+                        if author_elem:
+                            author = author_elem.get_text(strip=True)
+                        
+                        # Find upvotes
+                        upvotes = 0
+                        upvote_elem = comment_div.find('button', attrs={'aria-label': lambda x: x and 'upvote' in str(x).lower()})
+                        if upvote_elem:
+                            upvote_text = upvote_elem.get_text(strip=True)
+                            try:
+                                upvotes = int(''.join(filter(str.isdigit, upvote_text)) or '0')
+                            except:
+                                pass
+                        
+                        # Find timestamp
+                        timestamp = ""
+                        time_elem = comment_div.find('time')
+                        if time_elem:
+                            timestamp = time_elem.get('datetime', '') or time_elem.get_text(strip=True)
+                        
+                        if comment_text and len(comments) < 10:
+                            comments.append({
+                                'text': comment_text[:500],  # Limit length
+                                'author': author,
+                                'upvotes': upvotes,
+                                'timestamp': timestamp
+                            })
+                    except Exception as e:
+                        logger.debug(f"Error parsing comment: {e}")
+                        continue
+        
+        return web.json_response({
+            "success": True,
+            "thread_title": thread_title,
+            "thread_url": thread_url,
+            "comments": comments,
+            "date": date_str,
+            "source": "Reddit r/wallstreetbets"
+        })
+        
+    except subprocess.TimeoutExpired:
+        return web.json_response({
+            "success": True,
+            "comments": [],
+            "thread_url": "",
+            "note": "Timeout fetching WSB daily thread"
+        })
+    except Exception as e:
+        logger.error(f"Error fetching WSB daily thread: {e}", exc_info=True)
+        return web.json_response({
+            "success": True,
+            "comments": [],
+            "thread_url": "",
+            "note": str(e)[:100]
         })
 
 async def handle_catch_all(request: web.Request) -> web.Response:
@@ -7671,6 +8611,12 @@ def main_server_runner():
         
         # Add Twitter/X tweets API endpoint
         app.router.add_get("/api/tweets/{symbol}", handle_twitter_tweets)
+        
+        # Add Reddit news API endpoint
+        app.router.add_get("/api/reddit_news/{symbol}", handle_reddit_news)
+        
+        # Add WSB daily thread API endpoint
+        app.router.add_get("/api/wsb_daily_thread", handle_wsb_daily_thread)
         
         # Add stock info API subroutes BEFORE the parameterized route
         # (must be registered before /stock_info/{symbol} to avoid {symbol} capturing "ws" or "api")

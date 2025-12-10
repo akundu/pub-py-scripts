@@ -3,6 +3,9 @@ const API_CONFIG = window.API_CONFIG || {
 
 };
 
+// Debug mode - can be enabled via window.DEBUG_SORT = true or URL parameter ?debug=true
+const DEBUG_SORT = window.DEBUG_SORT || (new URLSearchParams(window.location.search).get('debug') === 'true') || false;
+
 // API state
 let apiDataCache = {};
 let apiLoading = {};
@@ -54,7 +57,7 @@ async function fetchDataFromAPI(prefix, optionType = null) {
             }
         }
 
-        // Add sorting
+        // Add sorting - use default if not set
         if (currentSortColumn[prefix] !== undefined && currentSortColumn[prefix] >= 0) {
             const tableId = prefix + 'resultsTable';
             const table = document.getElementById(tableId);
@@ -68,6 +71,10 @@ async function fetchDataFromAPI(prefix, optionType = null) {
                     params.set('sort_direction', sortDirection[prefix][currentSortColumn[prefix]] || 'desc');
                 }
             }
+        } else {
+            // Default sort: premium_total descending
+            params.set('sort', 'premium_total');
+            params.set('sort_direction', 'desc');
         }
 
         // Use relative URL - same host as the HTML page
@@ -290,6 +297,24 @@ function renderTableFromAPI(prefix, apiData) {
     if (totalCountEl) totalCountEl.textContent = metadata.total_count || 0;
     if (visibleCountEl) visibleCountEl.textContent = metadata.filtered_count || data.length;
 
+    // Update sort indicators based on API response
+    const sortCol = metadata.sort_column;
+    const sortDir = metadata.sort_direction;
+    if (sortCol) {
+        const headerRow = table.querySelector('tr.column-header-row');
+        const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
+        headers.forEach((th, idx) => {
+            th.classList.remove('sort-asc', 'sort-desc');
+            const colName = th.getAttribute('data-filterable-name') || th.textContent.trim();
+            if (colName === sortCol || colName.toLowerCase() === sortCol.toLowerCase()) {
+                th.classList.add('sort-' + (sortDir || 'desc'));
+                currentSortColumn[prefix] = idx;
+                if (!sortDirection[prefix]) sortDirection[prefix] = {};
+                sortDirection[prefix][idx] = sortDir || 'desc';
+            }
+        });
+    }
+
     // Clear existing rows
     tbody.innerHTML = '';
 
@@ -372,7 +397,9 @@ function renderTableFromAPI(prefix, apiData) {
     function createColumnHeader(colName, idx, prefix, isHidden, isAlwaysHidden, shortLongLabel, groupName) {
         const th = document.createElement('th');
         th.setAttribute('data-filterable-name', colName);
-        th.setAttribute('onclick', `sortTable('${prefix}', ${idx})`);
+        th.setAttribute('data-column-name', colName);
+        // Store the column name, we'll find the actual index when clicked
+        th.setAttribute('onclick', `sortTableByColumn('${prefix}', '${colName}')`);
         th.style.cursor = 'pointer';
 
         if (isAlwaysHidden) {
@@ -513,10 +540,12 @@ function renderTableFromAPI(prefix, apiData) {
             apiColumnMap[normalized].push(key);
         });
         // Debug: log available columns from API
-        console.log('API columns:', Object.keys(data[0]));
-        console.log('Table columns (columnOrder):', columnOrder);
-        console.log('API metadata.columns:', apiColumns);
-        console.log('API metadata:', metadata);
+        if (DEBUG_SORT) {
+            console.log('API columns:', Object.keys(data[0]));
+            console.log('Table columns (columnOrder):', columnOrder);
+            console.log('API metadata.columns:', apiColumns);
+            console.log('API metadata:', metadata);
+        }
     }
 
     // Helper to find matching column name in API data
@@ -1890,16 +1919,296 @@ function applyColumnStriping(prefix) {
     });
 }
 
-function sortTable(prefix, columnIndex) {
-    // Use API-based sorting instead of client-side
+// New function to sort by column name (finds the correct index)
+function sortTableByColumn(prefix, columnName) {
+    if (DEBUG_SORT) console.log(`[SORT] Starting sort for prefix="${prefix}", columnName="${columnName}"`);
+
+    const tableId = prefix + 'resultsTable';
+    const table = document.getElementById(tableId);
+    if (!table) {
+        console.error(`[SORT] Table not found: ${tableId}`);
+        return;
+    }
+
+    const headerRow = table.querySelector('tr.column-header-row');
+    const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
+
+    // Find the header with matching column name
+    let columnIndex = -1;
+    let clickedHeader = null;
+    for (let i = 0; i < headers.length; i++) {
+        const headerColName = headers[i].getAttribute('data-column-name') ||
+            headers[i].getAttribute('data-filterable-name') ||
+            headers[i].textContent.trim();
+        if (headerColName === columnName ||
+            headerColName.toLowerCase() === columnName.toLowerCase() ||
+            headerColName.toLowerCase().replace(/[_\s-]/g, '_') === columnName.toLowerCase().replace(/[_\s-]/g, '_')) {
+            columnIndex = i;
+            clickedHeader = headers[i];
+            break;
+        }
+    }
+
+    if (columnIndex === -1 || !clickedHeader) {
+        console.error(`[SORT] Column "${columnName}" not found in headers. Available columns:`,
+            Array.from(headers).map(h => h.getAttribute('data-column-name') || h.getAttribute('data-filterable-name') || h.textContent.trim()));
+        return;
+    }
+
+    if (DEBUG_SORT) {
+        console.log(`[SORT] Found column "${columnName}" at index ${columnIndex}`);
+        console.log(`[SORT] Found ${headers.length} headers total`);
+    }
+
+    // Use the existing sortTable function with the correct index
+    sortTable(prefix, columnIndex, columnName);
+}
+
+function sortTable(prefix, columnIndex, columnName = null) {
+    if (DEBUG_SORT) console.log(`[SORT] Starting sort for prefix="${prefix}", columnIndex=${columnIndex}, columnName="${columnName || 'unknown'}"`);
+
+// Client-side sorting
     currentSortColumn[prefix] = columnIndex;
     if (!sortDirection[prefix]) sortDirection[prefix] = {};
+
+    // Toggle sort direction
     if (sortDirection[prefix][columnIndex] === 'asc') {
         sortDirection[prefix][columnIndex] = 'desc';
     } else {
         sortDirection[prefix][columnIndex] = 'asc';
     }
-    fetchDataFromAPI(prefix);
+
+    // Update visual indicators
+    const tableId = prefix + 'resultsTable';
+    const table = document.getElementById(tableId);
+    if (!table) {
+        console.error(`[SORT] Table not found: ${tableId}`);
+        return;
+    }
+
+    const headerRow = table.querySelector('tr.column-header-row');
+    const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
+
+    if (DEBUG_SORT) console.log(`[SORT] Found ${headers.length} headers`);
+
+    // Remove sort indicators from all headers
+    headers.forEach(th => {
+        th.classList.remove('sort-asc', 'sort-desc');
+    });
+
+    // Add sort indicator to current header
+    if (headers[columnIndex]) {
+        const direction = sortDirection[prefix][columnIndex];
+        headers[columnIndex].classList.add('sort-' + direction);
+    }
+
+    // Get the tbody and all rows
+    const tbody = table.querySelector('tbody');
+    if (!tbody) {
+        console.error(`[SORT] tbody not found`);
+        return;
+    }
+
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    if (rows.length === 0) {
+        if (DEBUG_SORT) console.warn(`[SORT] No rows found to sort`);
+        return;
+    }
+
+    if (DEBUG_SORT) console.log(`[SORT] Found ${rows.length} rows to sort`);
+
+    // Get the column name for this index to determine data type
+    const header = headers[columnIndex];
+    if (!header) {
+        console.error(`[SORT] Header not found at index ${columnIndex}`);
+        return;
+    }
+
+    // Get column name from data-filterable-name attribute (set in createColumnHeader)
+    const actualColumnName = columnName || header.getAttribute('data-filterable-name') || header.getAttribute('data-column-name') || header.textContent.trim();
+    if (DEBUG_SORT) {
+        console.log(`[SORT] Column name: "${actualColumnName}"`);
+        console.log(`[SORT] Header text: "${header.textContent.trim()}"`);
+        console.log(`[SORT] Header data-filterable-name: "${header.getAttribute('data-filterable-name')}"`);
+        console.log(`[SORT] Header data-column-name: "${header.getAttribute('data-column-name')}"`);
+    }
+
+    // Determine if this is a numeric column
+    const lowerColName = actualColumnName ? actualColumnName.toLowerCase() : '';
+    const isNumeric = actualColumnName && (
+        lowerColName.includes('premium') ||
+        lowerColName.includes('prem') ||  // Handle "prem" abbreviation
+        lowerColName.includes('price') ||
+        lowerColName.includes('delta') ||
+        lowerColName.includes('theta') ||
+        lowerColName.includes('gamma') ||
+        lowerColName.includes('vega') ||
+        lowerColName.includes('iv') ||
+        lowerColName.includes('volume') ||
+        lowerColName.includes('contracts') ||
+        lowerColName.includes('spread') ||
+        lowerColName.includes('trade_quality') ||
+        lowerColName.includes('num_contracts') ||
+        lowerColName.includes('day_prem') ||  // Handle "s_day_prem", "l_day_prem", etc.
+        lowerColName.includes('prem_tot') ||   // Handle "s_prem_tot", "l_prem_tot", etc.
+        lowerColName.includes('opt_prem')      // Handle "opt_prem", "l_opt_prem", etc.
+    );
+
+    // Also check if the first few values look numeric (contain $ or are numbers)
+    let looksNumeric = isNumeric;
+    if (!isNumeric && rows.length > 0) {
+        let numericCount = 0;
+        let sampleCount = Math.min(5, rows.length);
+        for (let i = 0; i < sampleCount; i++) {
+            const cell = rows[i].cells[columnIndex];
+            if (cell) {
+                const text = cell.textContent.trim();
+                // Check if it looks like a currency or number
+                if (text.startsWith('$') || /^-?\d+\.?\d*/.test(text) || /^-?\$[\d,]+\.?\d*/.test(text)) {
+                    numericCount++;
+                }
+            }
+        }
+        // If most samples look numeric, treat as numeric
+        if (numericCount >= sampleCount * 0.6) {
+            looksNumeric = true;
+            if (DEBUG_SORT) console.log(`[SORT] Column detected as numeric based on sample values (${numericCount}/${sampleCount} samples look numeric)`);
+        }
+    }
+
+    if (DEBUG_SORT) console.log(`[SORT] Is numeric column: ${isNumeric} (looksNumeric: ${looksNumeric})`);
+
+    // Sort rows
+    const direction = sortDirection[prefix][columnIndex];
+    const ascending = direction === 'asc';
+    if (DEBUG_SORT) console.log(`[SORT] Sort direction: ${direction} (ascending: ${ascending})`);
+
+    // Log first few values before sorting
+    if (DEBUG_SORT) {
+        console.log(`[SORT] Sample values before sorting (first 5 rows):`);
+        for (let i = 0; i < Math.min(5, rows.length); i++) {
+            const cell = rows[i].cells[columnIndex];
+            if (cell) {
+                const rawValue = getRawValue(cell);
+                const textValue = cell.textContent.trim();
+                const dataRaw = cell.getAttribute('data-raw');
+                console.log(`  Row ${i}: text="${textValue}", data-raw="${dataRaw}", getRawValue()=${rawValue}`);
+            }
+        }
+    }
+
+    rows.sort((a, b) => {
+        const cellA = a.cells[columnIndex];
+        const cellB = b.cells[columnIndex];
+
+        if (!cellA || !cellB) {
+            if (DEBUG_SORT) console.warn(`[SORT] Missing cell at index ${columnIndex}`);
+            return 0;
+        }
+
+        // Get raw values - try data-raw attribute first, then parse from text
+        let valueA = getRawValue(cellA);
+        let valueB = getRawValue(cellB);
+
+        // If getRawValue returns null, try parsing from text content
+        if (valueA === null) {
+            const textA = cellA.textContent.trim();
+            valueA = textA;
+        }
+        if (valueB === null) {
+            const textB = cellB.textContent.trim();
+            valueB = textB;
+        }
+
+        // Handle numeric values (currency, percentages, etc.)
+        if (looksNumeric) {
+            // Extract numeric value from strings like "$25,085.00" or "49.4%"
+            const numA = parseNumericValue(valueA);
+            const numB = parseNumericValue(valueB);
+
+            if (isNaN(numA) && isNaN(numB)) return 0;
+            if (isNaN(numA)) return 1; // NaN goes to end
+            if (isNaN(numB)) return -1; // NaN goes to end
+
+            const diff = numA - numB;
+            return ascending ? diff : -diff;
+        }
+
+        // String comparison
+        const strA = String(valueA || '').toLowerCase().trim();
+        const strB = String(valueB || '').toLowerCase().trim();
+
+        if (strA < strB) return ascending ? -1 : 1;
+        if (strA > strB) return ascending ? 1 : -1;
+        return 0;
+    });
+
+    // Log first few values after sorting
+    if (DEBUG_SORT) {
+        console.log(`[SORT] Sample values after sorting (first 5 rows):`);
+        for (let i = 0; i < Math.min(5, rows.length); i++) {
+            const cell = rows[i].cells[columnIndex];
+            if (cell) {
+                const textValue = cell.textContent.trim();
+                const parsed = parseNumericValue(getRawValue(cell) || cell.textContent.trim());
+                console.log(`  Row ${i}: text="${textValue}", parsed=${parsed}`);
+            }
+        }
+    }
+
+    // Re-append sorted rows to tbody
+    rows.forEach(row => tbody.appendChild(row));
+
+    // Sync card order with table
+    syncCardOrder(prefix);
+
+    // Update visible count and row striping
+    updateVisibleCount(prefix);
+    applyRowStriping(prefix);
+}
+
+// Helper function to parse numeric values from formatted strings
+function parseNumericValue(value) {
+    if (value === null || value === undefined || value === '') {
+        if (DEBUG_SORT) console.log(`[PARSE] parseNumericValue: null/undefined/empty -> NaN`);
+        return NaN;
+    }
+
+    // If already a number, return it
+    if (typeof value === 'number') {
+        const result = isNaN(value) ? NaN : value;
+        if (DEBUG_SORT) console.log(`[PARSE] parseNumericValue: number ${value} -> ${result}`);
+        return result;
+    }
+
+    // Convert to string and clean
+    const str = String(value).trim();
+    if (str === '' || str === '-' || str === 'N/A' || str === 'nan' || str.toLowerCase() === 'nan') {
+        if (DEBUG_SORT) console.log(`[PARSE] parseNumericValue: empty/invalid string "${str}" -> NaN`);
+        return NaN;
+    }
+
+    // Remove currency symbols ($), commas, percentage signs, and whitespace
+    // Keep negative signs at the start
+    let cleaned = str.replace(/[\$,\s%]/g, '');
+
+    // Handle negative values (could be at start or formatted as "-$123.45")
+    const isNegative = cleaned.startsWith('-') || str.includes('-$');
+    if (isNegative && !cleaned.startsWith('-')) {
+        cleaned = '-' + cleaned;
+    }
+    // Remove any remaining negative signs except the first one
+    if (cleaned.startsWith('-')) {
+        cleaned = '-' + cleaned.substring(1).replace(/-/g, '');
+    } else {
+        cleaned = cleaned.replace(/-/g, '');
+    }
+
+    // Try to parse as float
+    const num = parseFloat(cleaned);
+    const result = isNaN(num) ? NaN : num;
+    if (DEBUG_SORT) console.log(`[PARSE] parseNumericValue: "${str}" -> cleaned="${cleaned}" -> ${result}`);
+    return result;
 }
 
 // Sync card order with table row order
@@ -2391,16 +2700,21 @@ document.addEventListener('DOMContentLoaded', function () {
         if (table) {
             const headerRow = table.querySelector('tr.column-header-row');
             const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
-            headers.forEach((th, idx) => {
-                const colName = th.getAttribute('data-filterable-name') || th.textContent.trim();
-                if (colName.toLowerCase().includes('net_daily_premi') || colName.toLowerCase().includes('net_daily_premium')) {
-                    currentSortColumn[prefix] = idx;
-                    if (!sortDirection[prefix]) sortDirection[prefix] = {};
-                    sortDirection[prefix][idx] = 'desc';
-                    // Add sort class to header
-                    th.classList.add('sort-desc');
-                }
-            });
+            // Set default sort to premium_total (short) descending on first load
+            if (currentSortColumn[prefix] === undefined || currentSortColumn[prefix] < 0) {
+                headers.forEach((th, idx) => {
+                    const colName = th.getAttribute('data-filterable-name') || th.textContent.trim();
+                    // Set default sort to premium_total (short) descending
+                    if (colName.toLowerCase() === 'premium_total' ||
+                        colName.toLowerCase().includes('premium_total')) {
+                        currentSortColumn[prefix] = idx;
+                        if (!sortDirection[prefix]) sortDirection[prefix] = {};
+                        sortDirection[prefix][idx] = 'desc';
+                        // Add sort class to header
+                        th.classList.add('sort-desc');
+                    }
+                });
+            }
         }
     });
 });
