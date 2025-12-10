@@ -818,6 +818,7 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     app.router.add_get("/stock_info/api/covered_calls/analysis", handle_covered_calls_analysis)
     app.router.add_get("/stock_info/api/covered_calls/view", handle_covered_calls_view)
     app.router.add_get("/stock_info/api/covered_calls/{filename}", handle_covered_calls_static)
+    app.router.add_get("/static/stock_info/{filename}", handle_stock_info_static)
     
     # Add stock info HTML page endpoint (parameterized route must be after specific routes)
     app.router.add_get("/stock_info/{symbol}", handle_stock_info_html)
@@ -2469,6 +2470,83 @@ async def handle_covered_calls_static(request: web.Request) -> web.Response:
         logger.error(traceback.format_exc())
         return web.json_response({
             "error": "Internal server error",
+            "message": str(e)
+        }, status=500)
+
+
+async def handle_stock_info_static(request: web.Request) -> web.Response:
+    """Serve static files (CSS, JS) for stock info view.
+    
+    GET /static/stock_info/{filename}
+    
+    Serves static files like render.js from common/web/stock_info/
+    """
+    try:
+        from pathlib import Path
+        
+        filename = request.match_info.get('filename', '')
+        logger.debug(f"[STATIC] Requested filename: {filename}")
+        if not filename:
+            logger.warning("[STATIC] No filename provided")
+            return web.json_response({
+                "error": "Not Found",
+                "message": "Filename required"
+            }, status=404)
+        
+        # Security: only allow specific file extensions
+        allowed_extensions = {'.js', '.css', '.html'}
+        file_ext = Path(filename).suffix.lower()
+        if file_ext not in allowed_extensions:
+            return web.json_response({
+                "error": "Forbidden",
+                "message": f"File type '{file_ext}' not allowed"
+            }, status=403)
+        
+        # Get the path to the static file
+        current_dir = Path(__file__).parent
+        static_file = current_dir / "common" / "web" / "stock_info" / filename
+        
+        logger.debug(f"[STATIC] Looking for file: {static_file}")
+        logger.debug(f"[STATIC] File exists: {static_file.exists()}")
+        
+        if not static_file.exists():
+            logger.warning(f"[STATIC] File not found: {static_file}")
+            return web.json_response({
+                "error": "Not Found",
+                "message": f"File '{filename}' not found"
+            }, status=404)
+        
+        # Security: ensure the file is within the stock_info directory
+        try:
+            static_file.resolve().relative_to((current_dir / "common" / "web" / "stock_info").resolve())
+        except ValueError:
+            return web.json_response({
+                "error": "Forbidden",
+                "message": "Invalid file path"
+            }, status=403)
+        
+        # Determine content type
+        content_type_map = {
+            '.js': 'application/javascript',
+            '.css': 'text/css',
+            '.html': 'text/html'
+        }
+        content_type = content_type_map.get(file_ext, 'application/octet-stream')
+        
+        # Read and return the file
+        with open(static_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        logger.debug(f"[STATIC] Successfully serving file: {filename} ({len(content)} bytes)")
+        return web.Response(
+            text=content,
+            content_type=content_type,
+            charset='utf-8'
+        )
+    except Exception as e:
+        logger.error(f"Error serving stock info static file '{filename}': {e}")
+        return web.json_response({
+            "error": "Internal Server Error",
             "message": str(e)
         }, status=500)
 
@@ -6548,7 +6626,111 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         except Exception as e:
             logger.debug(f"Error fetching options timestamp for {symbol}: {e}")
         
-        # Generate HTML page
+        # Try to use static template with JSON data
+        try:
+            from pathlib import Path
+            import json
+            
+            # Load template
+            current_dir = Path(__file__).parent
+            template_file = current_dir / "common" / "web" / "stock_info" / "template.html"
+            
+            if template_file.exists():
+                with open(template_file, 'r', encoding='utf-8') as f:
+                    template = f.read()
+                
+                # Prepare JSON data for client-side rendering
+                # Extract chart data
+                merged_df = await db_instance.get_merged_price_series(symbol)
+                chart_data = []
+                chart_labels = []
+                merged_series = []
+                
+                if merged_df is not None and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
+                    for _, row in merged_df.iterrows():
+                        close = row.get('close', row.get('price', 0))
+                        timestamp = row.get('timestamp') or row.get('date') or row.get('datetime')
+                        if timestamp and close:
+                            if hasattr(timestamp, 'isoformat'):
+                                timestamp = timestamp.isoformat()
+                            chart_data.append(float(close))
+                            chart_labels.append(str(timestamp))
+                            merged_series.append({
+                                'timestamp': str(timestamp),
+                                'close': float(close),
+                                'source': row.get('source', 'unknown')
+                            })
+                
+                # Prepare JSON payload
+                json_data = {
+                    'symbol': symbol,
+                    'earnings_date': earnings_date_str,
+                    'price_info': result.get('price_info', {}),
+                    'financial_info': result.get('financial_info', {}),
+                    'options_info': result.get('options_info', {}),
+                    'iv_info': result.get('iv_info', {}),
+                    'news_info': result.get('news_info', {}),
+                    'chart_data': chart_data,
+                    'chart_labels': chart_labels,
+                    'merged_series': merged_series
+                }
+                
+                # Recursively clean NaN, Infinity, and other non-JSON values from data structure
+                def clean_for_json(obj):
+                    """Recursively clean data structure to make it JSON-serializable."""
+                    import math
+                    if obj is None:
+                        return None
+                    if isinstance(obj, (int, str, bool)):
+                        return obj
+                    if isinstance(obj, float):
+                        if math.isnan(obj):
+                            return None
+                        if math.isinf(obj):
+                            return None
+                        return obj
+                    if isinstance(obj, dict):
+                        return {k: clean_for_json(v) for k, v in obj.items()}
+                    if isinstance(obj, (list, tuple)):
+                        return [clean_for_json(item) for item in obj]
+                    if isinstance(obj, (pd.Timestamp, pd.DatetimeIndex)):
+                        return obj.isoformat() if hasattr(obj, 'isoformat') else str(obj)
+                    if hasattr(obj, 'isoformat'):  # datetime objects
+                        return obj.isoformat()
+                    if pd.isna(obj):
+                        return None
+                    if isinstance(obj, (pd.Series, pd.DataFrame)):
+                        if isinstance(obj, pd.Series):
+                            return clean_for_json(obj.to_dict())
+                        else:
+                            return clean_for_json(obj.to_dict('records'))
+                    # Try to convert to native Python type
+                    try:
+                        if hasattr(obj, 'item'):  # numpy scalars
+                            return clean_for_json(obj.item())
+                    except (ValueError, AttributeError):
+                        pass
+                    return str(obj)
+                
+                # Clean the data structure before serialization
+                cleaned_json_data = clean_for_json(json_data)
+                
+                # Embed JSON in template - use allow_nan=False to catch any remaining NaN values
+                json_str = json.dumps(cleaned_json_data, default=str, allow_nan=False)
+                html_content = template.replace(
+                    '<script id="stockData" type="application/json"></script>',
+                    f'<script id="stockData" type="application/json">{json_str}</script>'
+                )
+                
+                return web.Response(
+                    text=html_content,
+                    content_type='text/html',
+                    charset='utf-8'
+                )
+        except Exception as e:
+            logger.warning(f"Failed to use static template, falling back to dynamic generation: {e}")
+        
+        # Fallback to original dynamic generation
         html_content = generate_stock_info_html(symbol, result, earnings_date=earnings_date_str)
         
         return web.Response(
