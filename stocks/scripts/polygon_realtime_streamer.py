@@ -1142,7 +1142,7 @@ def parse_args():
     parser.add_argument(
         '--batch-interval',
         type=float,
-        default=5.0,
+        default=1.0,
         help='Interval for sending batched updates to database in seconds (default: 5.0)'
     )
     

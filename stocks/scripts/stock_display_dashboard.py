@@ -101,6 +101,9 @@ class StockData:
         self.last_trade_time = None
         self.quotes_count = 0
         self.trades_count = 0
+        # Track last value change so the UI can briefly highlight updates
+        self.last_price = None
+        self.last_change_time: Optional[datetime] = None
         
     def update_from_websocket(self, data: Dict, data_type: str):
         """Update stock data from WebSocket real-time updates."""
@@ -112,13 +115,21 @@ class StockData:
             self.ask_price = data.get('ask_price', 0)
             self.bid_size = data.get('bid_size', data.get('size', 0))
             self.ask_size = data.get('ask_size', 0)
-            self.current_price = (self.bid_price + self.ask_price) / 2 if (self.bid_price + self.ask_price) > 0 else 0
+            new_price = (self.bid_price + self.ask_price) / 2 if (self.bid_price + self.ask_price) > 0 else 0
+            if new_price != self.current_price:
+                self.last_price = self.current_price
+                self.current_price = new_price
+                self.last_change_time = current_time
             self.last_quote_time = current_time
             self.last_update = current_time
             self.quotes_count += 1
             
         elif data_type == "trade":
-            self.current_price = data.get('price', 0)
+            new_price = data.get('price', 0)
+            if new_price != self.current_price:
+                self.last_price = self.current_price
+                self.current_price = new_price
+                self.last_change_time = current_time
             trade_size = data.get('size', 0)
             if self.volume is None:
                 self.volume = 0
@@ -147,7 +158,10 @@ class StockData:
             quote_size = data.get('size', 0)
             
             # For quotes, use the price directly as current price
-            self.current_price = quote_price
+            if quote_price != self.current_price:
+                self.last_price = self.current_price
+                self.current_price = quote_price
+                self.last_change_time = datetime.now()
             self.bid_price = data.get('bid_price', quote_price)  # Fallback to quote price if no bid
             self.ask_price = data.get('ask_price', quote_price)  # Fallback to quote price if no ask
             self.bid_size = data.get('bid_size', quote_size)
@@ -163,7 +177,11 @@ class StockData:
                     self.last_update = self.last_quote_time
             
         elif data_type == "trade":
-            self.current_price = data.get('price', 0)
+            trade_price = data.get('price', 0)
+            if trade_price != self.current_price:
+                self.last_price = self.current_price
+                self.current_price = trade_price
+                self.last_change_time = datetime.now()
             self.volume = data.get('size', 0)
             
             if 'timestamp' in data:
@@ -980,13 +998,26 @@ class DisplayManager:
     def get_table_rows(self) -> List[List]:
         """Get formatted table rows for display."""
         rows = []
-        
+        now = datetime.now()
+        # Highlight window in seconds for recently changed values
+        highlight_window = 1.0
+
         for symbol in self.symbols:
             stock = self.stock_data[symbol]
+            recently_changed = (
+                stock.last_change_time is not None and
+                (now - stock.last_change_time).total_seconds() <= highlight_window
+            )
             
             # Format each column
             symbol_col = f"[cyan]{symbol}[/cyan]"
-            current_col = f"[white]{stock.format_price(stock.current_price)}[/white]"
+            current_text = stock.format_price(stock.current_price)
+            if recently_changed:
+                # Flash the current price cell briefly when it changes
+                bg_color = "bright_green" if stock.change > 0 else "bright_red" if stock.change < 0 else "bright_yellow"
+                current_col = f"[black on {bg_color}]{current_text}[/black]"
+            else:
+                current_col = f"[white]{current_text}[/white]"
             open_col = f"[white]{stock.format_price(stock.open_price)}[/white]"
             prev_close_col = f"[white]{stock.format_price(stock.prev_close)}[/white]"
             
