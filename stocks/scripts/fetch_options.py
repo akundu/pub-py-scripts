@@ -2816,8 +2816,19 @@ Examples:
         else:
             # Single-date continuous mode (original behavior)
             run_num = 0
+            was_market_open = None  # Track previous market state to detect transitions
             while True:
                 run_num += 1
+                
+                # Check for market transition from open to closed
+                now_utc = datetime.now(timezone.utc)
+                is_market_open_start = HistoricalDataFetcher._is_market_open(now_utc)
+                
+                if was_market_open is True and not is_market_open_start:
+                    if not args.quiet:
+                        print(f"\n--- MARKET TRANSITION DETECTED: OPEN → CLOSED at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+                        print(f"Performing final fetch after market close to capture EOD data...")
+                
                 if not args.quiet:
                     print(f"\n--- Continuous run #{run_num} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
 
@@ -2841,6 +2852,9 @@ Examples:
                 now_utc = datetime.now(timezone.utc)
                 seconds_to_open, seconds_to_close = common_compute_market_transition_times(now_utc, "America/New_York")
                 is_market_open = HistoricalDataFetcher._is_market_open(now_utc)
+                
+                # Check if we just transitioned from open to closed
+                just_closed = (was_market_open is True and not is_market_open)
 
                 sleep_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed'] * 60
                 if is_market_open:
@@ -2861,6 +2875,10 @@ Examples:
                                 f"{HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']}min interval) [MARKET OPEN]"
                             )
                 else:
+                    # Market is closed
+                    if just_closed and not args.quiet:
+                        print(f"Post-close fetch completed. Entering extended sleep until next market open.")
+                    
                     opening_soon_threshold = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
                     if seconds_to_open is not None:
                         if seconds_to_open <= opening_soon_threshold:
@@ -2883,11 +2901,58 @@ Examples:
                                 f"Next run in {sleep_seconds:.0f}s (markets closed, "
                                 f"{HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed']}min interval) [MARKET CLOSED]"
                             )
+                
+                # Update the market state tracker for next iteration
+                was_market_open = is_market_open
 
                 adjusted_sleep = sleep_seconds * (args.interval_multiplier if getattr(args, 'interval_multiplier', None) else 1.0)
                 if not args.quiet:
                     print(f"Next run in {adjusted_sleep:.0f}s")
                 await asyncio.sleep(adjusted_sleep)
+                
+                # After waking up, check if market transitioned from open to closed during sleep
+                # If so, perform one more fetch to capture EOD data before long sleep
+                if was_market_open is True:
+                    current_market_state = HistoricalDataFetcher._is_market_open(datetime.now(timezone.utc))
+                    if not current_market_state:
+                        # Market closed while we were sleeping - fetch once more for EOD data
+                        if not args.quiet:
+                            print(f"\n--- MARKET CLOSED DURING SLEEP - Performing post-close fetch ---")
+                        run_num += 1
+                        
+                        try:
+                            # Run the post-close fetch
+                            iteration_args_dict = vars(args).copy()
+                            payload = await asyncio.to_thread(
+                                run_iteration_in_subprocess,
+                                _options_iteration_worker,
+                                symbols_list,
+                                iteration_args_dict,
+                                api_key,
+                            )
+                            
+                            if payload.get("status") != "ok":
+                                error_text = payload.get("error", "Unknown error in post-close options iteration subprocess")
+                                print(
+                                    f"Error during post-close fetch (process exit {payload.get('exitcode')}): {error_text}",
+                                    file=sys.stderr,
+                                )
+                            elif not args.quiet:
+                                print(f"Post-close fetch #{run_num} completed successfully")
+                            
+                            # Check if we should stop
+                            if args.continuous_max_runs and run_num >= args.continuous_max_runs:
+                                if not args.quiet:
+                                    print("Reached maximum runs, stopping continuous mode.")
+                                break
+                            
+                            # Update market state tracker
+                            was_market_open = False
+                            
+                        except Exception as e:
+                            if not args.quiet:
+                                print(f"Error during post-close fetch: {e}", file=sys.stderr)
+                            was_market_open = False
 
                 if args.continuous_max_runs and run_num >= args.continuous_max_runs:
                     if not args.quiet:

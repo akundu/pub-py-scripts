@@ -217,7 +217,8 @@ def filter_and_prepare_long_options(
     
     # Calculate days to expiry for long options
     long_options_df['expiration_date'] = long_options_df['expiration_date'].apply(normalize_expiration_date_to_utc)
-    today_ts = pd.Timestamp.now(tz='UTC').normalize()
+    # Use current time (not normalized) so we can check if we're before market close on expiration day
+    today_ts = pd.Timestamp.now(tz='UTC')
     long_options_df['days_to_expiry'] = long_options_df['expiration_date'].apply(lambda x: calculate_days_to_expiry(x, today_ts))
     
     return long_options_df

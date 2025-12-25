@@ -110,7 +110,7 @@ def load_data(file_path: Optional[str] = None) -> pd.DataFrame:
     # Convert numeric columns
     # Note: option_ticker, l_option_ticker, expiration_date, l_expiration_date, price_with_change are strings, not numeric
     numeric_cols = [
-        'pe_ratio','market_cap_b','curr_price','current_price','strike_price','price_above_curr','opt_prem.','IV','delta','theta','days_to_expiry','s_prem_tot','s_day_prem','l_strike','l_prem','liv','l_delta','l_theta','l_days_to_expiry','l_prem_tot','l_cnt_avl','prem_diff','net_premium','net_daily_premi','volume','num_contracts','price_change_pct'
+        'pe_ratio','market_cap_b','curr_price','current_price','strike_price','price_above_curr','opt_prem.','IV','delta','theta','days_to_expiry','s_prem_tot','s_day_prem','l_strike','l_prem','liv','l_delta','l_theta','l_days_to_expiry','l_prem_tot','l_cnt_avl','prem_diff','net_premium','net_daily_premi','volume','num_contracts','price_change_pct','premium_ratio_pct'
     ]
     
     for col in numeric_cols:
@@ -255,7 +255,16 @@ def calculate_bid_ask_analysis(df: pd.DataFrame) -> pd.DataFrame:
     try:
         net_prem_after = pd.to_numeric(df['net_premium_after_spread'], errors='coerce')
         days_exp = pd.to_numeric(df['days_to_expiry'], errors='coerce')
-        df['net_daily_premium_after_spread'] = (net_prem_after / days_exp).round(2)
+        # Handle different cases:
+        # - If days < 0 (expired): daily premium is 0.0
+        # - If days = 0 (0DTE): daily premium = net_premium_after_spread (full premium earned today)
+        # - If days > 0: daily premium = net_premium_after_spread / days
+        df['net_daily_premium_after_spread'] = pd.Series([
+            0.0 if (pd.isna(days) or days < 0)  # Expired
+            else (round(net_prem, 2) if pd.notna(net_prem) else 0.0) if days == 0  # 0DTE
+            else round(net_prem / days, 2) if pd.notna(net_prem) else 0.0  # Future dates
+            for net_prem, days in zip(net_prem_after, days_exp)
+        ], index=df.index)
     except Exception as e:
         logger.error(f"Error calculating net_daily_premium_after_spread: {e}")
         logger.error(f"  net_premium_after_spread dtype: {df['net_premium_after_spread'].dtype}")
@@ -320,6 +329,23 @@ def calculate_bid_ask_analysis(df: pd.DataFrame) -> pd.DataFrame:
         (net_daily_after_num / 100) +   # Premium contribution (variable)
         (pe_ratio_quality_num < 25).astype(int) * 2              # Reasonable valuation bonus (0-2 points)
     )
+    
+    # Calculate premium ratio percentage: (short_premium / long_premium) * 100
+    # This shows what percentage of the long hedge cost is covered by the short premium received
+    # Lower values are better (less cost to hedge, more efficient spread)
+    try:
+        s_prem_tot_num = pd.to_numeric(df.get('s_prem_tot', 0), errors='coerce')
+        l_prem_tot_num = pd.to_numeric(df.get('l_prem_tot', 0), errors='coerce')
+        df['premium_ratio_pct'] = (s_prem_tot_num / l_prem_tot_num * 100).round(2)
+        df['premium_ratio_pct'] = df['premium_ratio_pct'].replace([np.inf, -np.inf], np.nan)
+        # Ensure the result is numeric
+        df['premium_ratio_pct'] = pd.to_numeric(df['premium_ratio_pct'], errors='coerce')
+    except Exception as e:
+        logger.error(f"Error calculating premium_ratio_pct: {e}")
+        logger.error(f"  s_prem_tot dtype: {df.get('s_prem_tot', pd.Series()).dtype if 's_prem_tot' in df.columns else 'N/A'}")
+        logger.error(f"  l_prem_tot dtype: {df.get('l_prem_tot', pd.Series()).dtype if 'l_prem_tot' in df.columns else 'N/A'}")
+        # Set to NaN if calculation fails
+        df['premium_ratio_pct'] = np.nan
     
     return df
 

@@ -43,7 +43,8 @@ def calculate_option_metrics(
     
     # Normalize expiration_date and calculate days_to_expiry
     df['expiration_date'] = df['expiration_date'].apply(normalize_expiration_date_to_utc)
-    today = pd.Timestamp.now(tz='UTC').normalize()
+    # Use current time (not normalized) so we can check if we're before market close on expiration day
+    today = pd.Timestamp.now(tz='UTC')
     df['days_to_expiry'] = df['expiration_date'].apply(lambda x: calculate_days_to_expiry(x, today))
     
     # Normalize implied_volatility

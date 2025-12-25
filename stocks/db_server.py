@@ -2215,32 +2215,53 @@ async def handle_covered_calls_data(request: web.Request) -> web.Response:
         total_count = len(df)
         
         # Sort (only if DataFrame has data and sort column exists)
-        if sort_col in df.columns and len(df) > 0:
+        # Special handling: when sorting by current_price, sort by price_change_pct (absolute value) instead
+        actual_sort_col = sort_col
+        if sort_col == 'current_price' and 'price_change_pct' in df.columns:
+            actual_sort_col = 'price_change_pct'
+            logger.debug(f"Sorting by current_price requested, using price_change_pct (absolute value) instead")
+        
+        if actual_sort_col in df.columns and len(df) > 0:
             ascending = (sort_direction == 'asc')
-            logger.debug(f"Sorting by column '{sort_col}' in {sort_direction} order. Column dtype: {df[sort_col].dtype}, sample values: {df[sort_col].head(3).tolist()}")
+            logger.debug(f"Sorting by column '{actual_sort_col}' in {sort_direction} order. Column dtype: {df[actual_sort_col].dtype}, sample values: {df[actual_sort_col].head(3).tolist()}")
             
-            # Create a temporary numeric column for sorting
-            # This handles currency-formatted strings, commas, and other formatting
-            sort_values = df[sort_col].copy()
+            # Check if this is a date column
+            is_date_column = 'date' in actual_sort_col.lower()
             
-            # If the column is object type (strings), try to extract numeric values
-            if sort_values.dtype == 'object':
-                # Remove currency symbols, commas, and whitespace, then convert to numeric
-                sort_values = sort_values.astype(str).str.replace('$', '', regex=False)
-                sort_values = sort_values.str.replace(',', '', regex=False)
-                sort_values = sort_values.str.strip()
-                # Convert to numeric, coercing errors to NaN
-                sort_values = pd.to_numeric(sort_values, errors='coerce')
-                logger.debug(f"Converted string values to numeric. Sample: {sort_values.head(3).tolist()}")
+            if is_date_column:
+                # Handle date sorting - convert to datetime
+                try:
+                    sort_values = pd.to_datetime(df[actual_sort_col], errors='coerce')
+                    logger.debug(f"Converted to datetime for sorting. Sample: {sort_values.head(3).tolist()}")
+                except Exception as e:
+                    logger.warning(f"Could not convert {actual_sort_col} to datetime: {e}. Using original values.")
+                    sort_values = df[actual_sort_col].copy()
             else:
-                # Already numeric, but ensure it's float64 for consistent sorting
-                sort_values = pd.to_numeric(sort_values, errors='coerce')
+                # Create a temporary numeric column for sorting
+                # This handles currency-formatted strings, commas, and other formatting
+                sort_values = df[actual_sort_col].copy()
+                
+                # If the column is object type (strings), try to extract numeric values
+                if sort_values.dtype == 'object':
+                    # Remove currency symbols, commas, and whitespace, then convert to numeric
+                    sort_values = sort_values.astype(str).str.replace('$', '', regex=False)
+                    sort_values = sort_values.str.replace(',', '', regex=False)
+                    sort_values = sort_values.str.strip()
+                    # Convert to numeric, coercing errors to NaN
+                    sort_values = pd.to_numeric(sort_values, errors='coerce')
+                    logger.debug(f"Converted string values to numeric. Sample: {sort_values.head(3).tolist()}")
+                else:
+                    # Already numeric, but ensure it's float64 for consistent sorting
+                    sort_values = pd.to_numeric(sort_values, errors='coerce')
             
-            # Sort by the numeric values, keeping original column intact
+            # No special processing needed for price_change_pct - sort by actual percentage value
+            # This will show biggest positive changes first (desc) or biggest negative changes first (asc)
+            
+            # Sort by the values, keeping original column intact
             df = df.assign(_sort_temp=sort_values)
             df = df.sort_values(by='_sort_temp', ascending=ascending, na_position='last', kind='mergesort')
             df = df.drop(columns=['_sort_temp'])
-            logger.debug(f"Sorted {len(df)} rows. First 3 values after sort: {df[sort_col].head(3).tolist()}")
+            logger.debug(f"Sorted {len(df)} rows. First 3 {sort_col} values after sort: {df[sort_col].head(3).tolist()}")
         
         # Apply pagination (only if DataFrame has data)
         if len(df) > 0:
@@ -3018,18 +3039,41 @@ def _apply_filters(df: pd.DataFrame, filters: list, filter_logic: str = 'AND') -
             else:
                 value_col = value
             
+            # Check if we're comparing date/datetime columns
+            # Normalize to date-only for fair comparison
+            field_data = df[field]
+            value_data = df[value_col]
+            
+            # Detect date columns (by name or type)
+            is_date_comparison = False
+            if 'date' in field.lower() or 'date' in value_col.lower():
+                is_date_comparison = True
+                logger.debug(f"Detected date comparison: {field} {operator} {value_col}")
+                
+                # Normalize both columns to date-only (remove time component)
+                try:
+                    # Try to convert to datetime and extract date
+                    field_data = pd.to_datetime(field_data, errors='coerce').dt.date
+                    value_data = pd.to_datetime(value_data, errors='coerce').dt.date
+                    logger.debug(f"Normalized dates for comparison. Sample field: {field_data.head(2).tolist()}, Sample value: {value_data.head(2).tolist()}")
+                except Exception as e:
+                    logger.warning(f"Could not normalize dates for comparison: {e}")
+                    # Fall back to string comparison
+                    field_data = field_data.astype(str).str[:10]  # Take first 10 chars (YYYY-MM-DD)
+                    value_data = value_data.astype(str).str[:10]
+            
             if operator == '>':
-                filter_mask = (df[field] > df[value_col])
+                filter_mask = (field_data > value_data)
             elif operator == '<':
-                filter_mask = (df[field] < df[value_col])
+                filter_mask = (field_data < value_data)
             elif operator == '>=':
-                filter_mask = (df[field] >= df[value_col])
+                filter_mask = (field_data >= value_data)
             elif operator == '<=':
-                filter_mask = (df[field] <= df[value_col])
+                filter_mask = (field_data <= value_data)
             elif operator == '==':
-                filter_mask = (df[field] == df[value_col])
+                filter_mask = (field_data == value_data)
             elif operator == '!=':
-                filter_mask = (df[field] != df[value_col])
+                filter_mask = (field_data != value_data)
             filter_masks.append(filter_mask)
             continue
         
@@ -3073,6 +3117,53 @@ def _apply_filters(df: pd.DataFrame, filters: list, filter_logic: str = 'AND') -
             # Regular field comparison
             value_to_compare = value
             value_str = filter_obj.get('valueStr', str(value) if value is not None else '')
+            
+            # Check if this is a date column
+            is_date_field = 'date' in field.lower()
+            
+            if is_date_field:
+                # Handle date filtering with special logic
+                try:
+                    import datetime
+                    from datetime import timedelta
+                    
+                    # Convert the field to datetime for comparison
+                    field_dates = pd.to_datetime(df[field], errors='coerce')
+                    
+                    # Check if value is a number (days from now)
+                    if isinstance(value, (int, float)):
+                        # Numeric value = days from now
+                        today = datetime.datetime.now().date()
+                        target_date = today + timedelta(days=int(value))
+                        logger.debug(f"Date filter: {field} {operator} {value} days -> comparing against {target_date}")
+                        value_to_compare = pd.Timestamp(target_date)
+                    elif isinstance(value_str, str) and re.match(r'^\d{4}-\d{2}-\d{2}', value_str):
+                        # String value in date format
+                        value_to_compare = pd.to_datetime(value_str, errors='coerce')
+                        logger.debug(f"Date filter: {field} {operator} {value_str} -> comparing as date")
+                    else:
+                        # Keep original value
+                        logger.debug(f"Date filter: {field} {operator} {value} -> using original value")
+                    
+                    # Apply the operator on the datetime columns
+                    if operator == '>':
+                        filter_mask = (field_dates > value_to_compare)
+                    elif operator == '<':
+                        filter_mask = (field_dates < value_to_compare)
+                    elif operator == '>=':
+                        filter_mask = (field_dates >= value_to_compare)
+                    elif operator == '<=':
+                        filter_mask = (field_dates <= value_to_compare)
+                    elif operator == '==':
+                        filter_mask = (field_dates == value_to_compare)
+                    elif operator == '!=':
+                        filter_mask = (field_dates != value_to_compare)
+                    
+                    filter_masks.append(filter_mask)
+                    continue
+                except Exception as e:
+                    logger.warning(f"Error processing date filter for {field}: {e}. Falling back to regular comparison.")
+                    # Fall through to regular comparison below
             
             # Handle percentage-based filtering
             # When user specifies "spread < 15%", strip the % and use the numeric value

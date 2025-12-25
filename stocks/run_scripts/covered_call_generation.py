@@ -104,6 +104,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--type-input", type=str, default=TYPE_INPUT, help=f"Type input value (default: {TYPE_INPUT}).")
     parser.add_argument("--db-conn", type=str, default=QUERY_LOC, help=f"Database connection string (default: {QUERY_LOC}).")
     parser.add_argument("--max-days", type=int, default=MAX_DAYS, help=f"Maximum days to expiry (default: {MAX_DAYS}).")
+    parser.add_argument("--min-days", type=int, default=None, help="Minimum days to expiry for short-term options (default: None, uses yesterday).")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help=f"Batch size (default: {BATCH_SIZE}).")
     parser.add_argument("--max-workers", type=int, default=MAX_WORKERS, help=f"Maximum workers (default: {MAX_WORKERS}).")
     parser.add_argument("--position-size", type=int, default=POSITION_SIZE, help=f"Position size (default: {POSITION_SIZE}).")
@@ -205,6 +206,7 @@ def build_options_analyzer_command(
     type_flag: str,
     type_input: str,
     max_days: int,
+    min_days: int | None,
     batch_size: int,
     max_workers: int,
     position_size: int,
@@ -258,6 +260,7 @@ def build_options_analyzer_command(
         type_flag: type_input,
         "db_conn": db_conn,
         "max_days": max_days,
+        "min_days": min_days,
         "batch_size": batch_size,
         "max_workers": max_workers,
         "position_size": position_size,
@@ -328,6 +331,7 @@ def run_loop(
     type_input: str,
     db_conn: str,
     max_days: int,
+    min_days: int | None,
     batch_size: int,
     max_workers: int,
     position_size: int,
@@ -408,6 +412,7 @@ def run_loop(
             type_flag,
             type_input,
             max_days,
+            min_days,
             batch_size,
             max_workers,
             position_size,
@@ -547,6 +552,7 @@ def main() -> None:
         type_input=args.type_input,
         db_conn=args.db_conn,
         max_days=args.max_days,
+        min_days=args.min_days,
         batch_size=args.batch_size,
         max_workers=args.max_workers,
         position_size=args.position_size,

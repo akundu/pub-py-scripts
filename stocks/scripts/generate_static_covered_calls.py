@@ -61,34 +61,8 @@ def generate_static_files():
     js_content = get_javascript()
     js_content = modify_javascript(js_content)
     
-    # Create a dummy DataFrame to get the structure (for table headers)
-    # We'll create empty tables that will be populated by API
-    dummy_df = pd.DataFrame({
-        'ticker': [],
-        'option_type': [],
-        'current_price': [],
-        'strike_price': [],
-        'l_strike': [],
-        'opt_prem.': [],
-        'l_prem': [],
-        'expiration_date': [],
-        'l_expiration_date': [],
-        'delta': [],
-        'l_delta': [],
-        'theta': [],
-        'l_theta': [],
-        'net_daily_premi': [],
-        'volume': [],
-        'num_contracts': [],
-        'pe_ratio': [],
-        'market_cap_b': [],
-    })
-    
-    # Split into calls and puts (both will be empty, but structure matters)
-    df_calls, df_puts, has_calls, has_puts = split_calls_and_puts(dummy_df)
-    
-    # We'll show both tabs by default (calls and puts)
-    # In practice, the API will determine what data is available
+    # We always show both Calls and Puts tabs in the static shell.
+    # The actual data (and which side has rows) is determined at runtime by the API.
     has_calls = True
     has_puts = True
     
@@ -129,6 +103,8 @@ def generate_static_files():
             'l_prem': [],
             'expiration_date': [],
             'l_expiration_date': [],
+            'bid:ask': [],  # Short bid/ask prices
+            'l_bid:ask': [],  # Long bid/ask prices
             'delta': [],
             'l_delta': [],
             'theta': [],
@@ -138,6 +114,26 @@ def generate_static_files():
             'num_contracts': [],
             'pe_ratio': [],
             'market_cap_b': [],
+            # Include premium_ratio_pct so the static header has this column
+            'premium_ratio_pct': [],
+            # Include hidden columns so they appear in headers (can be toggled visible)
+            's_prem_tot': [],  # Short premium total
+            's_day_prem': [],  # Short daily premium
+            'l_prem_tot': [],  # Long premium total
+            'latest_option_writets': [],  # Last update timestamp (renamed from latest_opt_ts)
+            'net_premium': [],  # Net premium
+            'spread_slippage': [],  # Spread slippage
+            'net_premium_after_spread': [],  # Net premium after spread
+            'net_daily_premium_after_spread': [],  # Net daily premium after spread
+            'spread_impact_pct': [],  # Spread impact percentage
+            'liquidity_score': [],  # Liquidity score
+            'assignment_risk': [],  # Assignment risk
+            'trade_quality': [],  # Trade quality score
+            'option_ticker': [],  # Option ticker
+            'l_option_ticker': [],  # Long option ticker
+            'days_to_expiry': [],  # Days to expiry
+            'l_days_to_expiry': [],  # Long days to expiry
+            'price_change_pct': [],  # Price change percentage
         })
         from html_report_v2.data_processor import prepare_dataframe_for_display
         calls_display, calls_raw = prepare_dataframe_for_display(calls_df)
@@ -170,6 +166,8 @@ def generate_static_files():
             'l_prem': [],
             'expiration_date': [],
             'l_expiration_date': [],
+            'bid:ask': [],  # Short bid/ask prices
+            'l_bid:ask': [],  # Long bid/ask prices
             'delta': [],
             'l_delta': [],
             'theta': [],
@@ -179,6 +177,26 @@ def generate_static_files():
             'num_contracts': [],
             'pe_ratio': [],
             'market_cap_b': [],
+            # Include premium_ratio_pct so the static header has this column
+            'premium_ratio_pct': [],
+            # Include hidden columns so they appear in headers (can be toggled visible)
+            's_prem_tot': [],  # Short premium total
+            's_day_prem': [],  # Short daily premium
+            'l_prem_tot': [],  # Long premium total
+            'latest_option_writets': [],  # Last update timestamp (renamed from latest_opt_ts)
+            'net_premium': [],  # Net premium
+            'spread_slippage': [],  # Spread slippage
+            'net_premium_after_spread': [],  # Net premium after spread
+            'net_daily_premium_after_spread': [],  # Net daily premium after spread
+            'spread_impact_pct': [],  # Spread impact percentage
+            'liquidity_score': [],  # Liquidity score
+            'assignment_risk': [],  # Assignment risk
+            'trade_quality': [],  # Trade quality score
+            'option_ticker': [],  # Option ticker
+            'l_option_ticker': [],  # Long option ticker
+            'days_to_expiry': [],  # Days to expiry
+            'l_days_to_expiry': [],  # Long days to expiry
+            'price_change_pct': [],  # Price change percentage
         })
         from html_report_v2.data_processor import prepare_dataframe_for_display
         puts_display, puts_raw = prepare_dataframe_for_display(puts_df)

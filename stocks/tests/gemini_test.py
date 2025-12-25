@@ -34,7 +34,8 @@ def query_gemini(prompt: str, model_alias: str):
         return f"Error: Invalid model alias '{model_alias}'. Choose from: {list(MODEL_ALIASES.keys())}"
     
     model_id = MODEL_ALIASES[model_alias]
-    print(f"--- Querying Model: {model_id} ---")
+    # Debug output commented out - uncomment for debugging
+    # print(f"--- Querying Model: {model_id} ---", file=sys.stderr)
     
     # Initialization: The genai.Client() automatically looks for the 
     # GEMINI_API_KEY environment variable. This is the recommended secure method.
@@ -206,12 +207,12 @@ def main():
     # Run the core function
     result = query_gemini(final_prompt, args.model)
     
-    # Print the result
-    print("\n" + "="*50)
-    print("GENERATED RESPONSE")
-    print("="*50)
-    print(result)
-    print("="*50 + "\n")
+    # Print the result (debug output commented out - uncomment for debugging)
+    # print("\n" + "="*50, file=sys.stderr)
+    # print("GENERATED RESPONSE", file=sys.stderr)
+    # print("="*50, file=sys.stderr)
+    print(result)  # Keep this - it's the actual output needed
+    # print("="*50 + "\n", file=sys.stderr)
 
     if "Client initialization failed" in result:
         print("ACTION REQUIRED: Please set your GEMINI_API_KEY environment variable.")

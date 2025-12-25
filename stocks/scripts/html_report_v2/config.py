@@ -24,6 +24,7 @@ COMPACT_HEADER_MAP = {
     'net_daily_premium': 'NET_DAILY',
     's_day_prem': 'DAILY',
     'short_daily_premium': 'DAILY',
+    'premium_ratio_pct': 'PREM%',
 }
 
 # Columns to hide by default (can be shown with toggle)
@@ -72,6 +73,7 @@ COLUMN_GROUPS = {
     'option_premium': {
         'short': ['opt_prem.', 'opt_prem', 'option_premium'],
         'long': ['l_opt_prem', 'l_prem', 'long_option_premium'],
+        'extras': ['premium_ratio_pct'],
         'display_name': 'Option Premium'
     },
     'expiration_date': {

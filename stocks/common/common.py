@@ -875,7 +875,13 @@ def format_bid_ask(row: Any) -> str:
 
 
 def format_price_with_change(current_price: float, prev_close: Optional[float]) -> Tuple[Optional[str], Optional[float]]:
-    """Format price with change percentage. Returns (formatted_string, change_percentage)."""
+    """Format price with change percentage. Returns (formatted_string, change_percentage).
+    
+    Example outputs:
+        - "$124.59 +$0.50 (+0.40%)" for positive change
+        - "$45.00 -$4.87 (-6.21%)" for negative change
+        - "$100.00" when no previous close available
+    """
     if not PANDAS_AVAILABLE:
         if current_price is None:
             return None, None
@@ -884,9 +890,9 @@ def format_price_with_change(current_price: float, prev_close: Optional[float]) 
         change = current_price - prev_close
         change_pct = (change / prev_close) * 100
         if change >= 0:
-            return f"+${change:.2f} (+{change_pct:.2f}%)", change_pct
+            return f"${current_price:.2f} +${change:.2f} (+{change_pct:.2f}%)", change_pct
         else:
-            return f"-${abs(change):.2f} ({change_pct:.2f}%)", change_pct
+            return f"${current_price:.2f} -${abs(change):.2f} ({change_pct:.2f}%)", change_pct
     
     if pd.isna(current_price) or current_price is None:
         return None, None
@@ -898,20 +904,25 @@ def format_price_with_change(current_price: float, prev_close: Optional[float]) 
     change_pct = (change / prev_close) * 100
     
     if change >= 0:
-        return f"+${change:.2f} (+{change_pct:.2f}%)", change_pct
+        return f"${current_price:.2f} +${change:.2f} (+{change_pct:.2f}%)", change_pct
     else:
-        return f"-${abs(change):.2f} ({change_pct:.2f}%)", change_pct
+        return f"${current_price:.2f} -${abs(change):.2f} ({change_pct:.2f}%)", change_pct
 
 
 def calculate_days_to_expiry(exp_date: Any, today_ref: Any) -> int:
-    """Calculate days to expiry from expiration date, handling timezone-aware timestamps."""
+    """Calculate days to expiry from expiration date, handling timezone-aware timestamps.
+    
+    Options expire at market close (4:00 PM ET), not midnight. So if an option expires
+    on 2025-12-19, it's valid until 4:00 PM ET on that day. This function ensures that
+    options expiring today show as 0DTE (0 days to expiry) until market close.
+    """
     if not PANDAS_AVAILABLE:
         return 0
     
     if pd.isna(exp_date):
         return 0
     
-    # Normalize today_ref to UTC Timestamp
+    # Normalize today_ref to UTC Timestamp (use current time, not normalized to midnight)
     if isinstance(today_ref, pd.Timestamp):
         if today_ref.tz is None:
             today_ref = today_ref.tz_localize('UTC')
@@ -935,7 +946,44 @@ def calculate_days_to_expiry(exp_date: Any, today_ref: Any) -> int:
         if exp_date.tz is None:
             exp_date = exp_date.tz_localize('UTC')
     
-    return int((exp_date - today_ref).total_seconds() / 86400)
+    # Get date-only comparison (ignoring time)
+    today_date = today_ref.normalize()  # Midnight UTC of today
+    exp_date_only = exp_date.normalize()  # Midnight UTC of expiration date
+    
+    # Set expiration to market close (4:00 PM ET = 20:00 UTC or 21:00 UTC depending on DST)
+    # Use 20:00 UTC as market close (4:00 PM ET standard time, approximate for DST)
+    try:
+        import pytz
+        et_tz = pytz.timezone('America/New_York')
+        # Get the date in ET timezone
+        exp_date_et = exp_date_only.tz_convert(et_tz) if exp_date_only.tz else exp_date_only.tz_localize('UTC').tz_convert(et_tz)
+        exp_date_et_date = exp_date_et.date()
+        
+        # Set expiration time to 4:00 PM ET (market close) on expiration date
+        from datetime import datetime
+        market_close_et = et_tz.localize(
+            datetime.combine(exp_date_et_date, datetime.strptime('16:00', '%H:%M').time())
+        )
+        # Convert back to UTC
+        exp_date_market_close = market_close_et.astimezone(pytz.UTC)
+    except Exception:
+        # Fallback: if timezone conversion fails, use 20:00 UTC (4:00 PM ET in standard time)
+        # This is approximate but better than midnight
+        exp_date_market_close = exp_date_only + pd.Timedelta(hours=20)
+    
+    # If expiration date is today, it's 0DTE (valid until market close)
+    if exp_date_only == today_date:
+        # Check if current time is before market close
+        if today_ref < exp_date_market_close:
+            return 0  # 0DTE - expires today but market hasn't closed yet
+        else:
+            return -1  # Expired - market has closed
+    
+    # For future dates, calculate days until market close on expiration date
+    # For past dates, this will be negative
+    days_diff = int((exp_date_market_close - today_ref).total_seconds() / 86400)
+    
+    return days_diff
 
 
 def format_age_seconds(age_seconds: Any) -> Optional[str]:

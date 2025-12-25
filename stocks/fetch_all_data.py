@@ -1050,12 +1050,14 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
     The function optimizes fetch intervals based on:
     - The actual time taken for the last fetch
     - Market hours awareness (if enabled), with transition-aware scheduling
+    - When market transitions from open to closed, fetches one more time to capture final close data
     """
     print(f"Starting continuous latest data fetch for {len(all_symbols_list)} symbols...")
     print(f"Max runs: {args.continuous_max_runs if args.continuous_max_runs else 'unlimited'}")
     
     run_count = 0
     last_fetch_duration = 0  # Track how long the last fetch took
+    was_market_open = None  # Track previous market state to detect transitions
     
     while True:
         run_count += 1
@@ -1064,6 +1066,12 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
         if args.use_market_hours:
             is_market_open_start = is_market_hours()
             market_status = "MARKET OPEN" if is_market_open_start else "MARKET CLOSED"
+            
+            # Detect market transition from open to closed
+            if was_market_open is True and not is_market_open_start:
+                print(f"\n--- MARKET TRANSITION DETECTED: OPEN → CLOSED at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} ---")
+                print(f"Performing final fetch after market close to capture EOD data...")
+            
             print(f"\n--- Run #{run_count} at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} [{market_status}] ---")
         else:
             print(f"\n--- Run #{run_count} at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} ---")
@@ -1135,6 +1143,10 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
                 now_utc = datetime.now(timezone.utc)
                 seconds_to_open, seconds_to_close = compute_market_transition_times(now_utc, args.timezone)
                 
+                # Check if we just transitioned from open to closed
+                # If so, we already did a post-close fetch, so now go into long sleep mode
+                just_closed = (was_market_open is True and not is_market_open)
+                
                 if is_market_open:
                     # Prefer staying on open cadence; do not sleep past close
                     base_sleep = max(FETCH_INTERVAL_MARKET_OPEN - fetch_duration, 5)
@@ -1147,6 +1159,11 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
                         sleep_time = base_sleep
                         print(f"Next fetch in {sleep_time:.1f}s (market open, 30s interval) [MARKET OPEN]")
                 else:
+                    # Market is closed
+                    if just_closed:
+                        # We just performed the post-close fetch, now sleep until next market open
+                        print(f"Post-close fetch completed. Entering extended sleep until next market open.")
+                    
                     # Closed: if we know when market opens next, sleep until shortly before it opens
                     opening_soon_threshold = FETCH_INTERVAL_MARKET_OPEN  # 300 seconds (5 minutes)
                     if seconds_to_open is not None:
@@ -1167,6 +1184,9 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
                         # Apply interval multiplier to cadence-based sleep
                         sleep_time = max(base_sleep * (args.interval_multiplier if args.interval_multiplier and args.interval_multiplier > 0 else 1.0), 1)
                         print(f"Next fetch in {sleep_time:.1f}s (markets closed, {FETCH_INTERVAL_MARKET_CLOSED/60:.0f}min interval) [MARKET CLOSED]")
+                
+                # Update the market state tracker for next iteration
+                was_market_open = is_market_open
             else:
                 # Standard behavior - fetch every 30 seconds
                 base_sleep = max(30 - fetch_duration, 5)
@@ -1175,6 +1195,68 @@ async def run_continuous_latest_fetch(all_symbols_list: list[str], args: argpars
             
             # Sleep until next fetch
             await asyncio.sleep(sleep_time)
+            
+            # After waking up, check if market transitioned from open to closed during sleep
+            # If so, perform one more fetch to capture EOD data before long sleep
+            if args.use_market_hours and was_market_open is True:
+                current_market_state = is_market_hours()
+                if not current_market_state:
+                    # Market closed while we were sleeping - fetch once more for EOD data
+                    print(f"\n--- MARKET CLOSED DURING SLEEP - Performing post-close fetch ---")
+                    run_count += 1
+                    start_time_post_close = time.time()
+                    
+                    try:
+                        # Prepare iteration args for post-close fetch
+                        iteration_args = argparse.Namespace(**vars(args))
+                        if (
+                            getattr(iteration_args, 'start_date', None) is None and
+                            getattr(iteration_args, 'end_date', None) is None and
+                            getattr(iteration_args, 'days_back', None) in (None,)
+                        ):
+                            today_str = datetime.now().strftime('%Y-%m-%d')
+                            iteration_args.end_date = today_str
+                            iteration_args.days_back = 0
+                            if hasattr(iteration_args, '_latest_only'):
+                                delattr(iteration_args, '_latest_only')
+                        elif iteration_args.end_date and iteration_args.days_back:
+                            try:
+                                end_dt = datetime.strptime(iteration_args.end_date, '%Y-%m-%d')
+                                start_dt = end_dt - timedelta(days=iteration_args.days_back)
+                                iteration_args.start_date = start_dt.strftime('%Y-%m-%d')
+                            except Exception:
+                                pass
+                        
+                        # Run the post-close fetch
+                        payload = await asyncio.to_thread(
+                            run_iteration_in_subprocess,
+                            _continuous_iteration_worker,
+                            all_symbols_list,
+                            iteration_args,
+                            db_configs_for_workers,
+                        )
+                        
+                        if payload.get("status") != "ok":
+                            error_msg = payload.get("error", "Unknown error in subprocess iteration")
+                            print(f"Error during post-close fetch (process exit {payload.get('exitcode')}): {error_msg}", file=sys.stderr)
+                        else:
+                            result_data = payload.get("result") or {}
+                            success_count = result_data.get("success_count", 0)
+                            failure_count = result_data.get("failure_count", 0)
+                            fetch_duration_post_close = time.time() - start_time_post_close
+                            print(f"Post-close fetch #{run_count} completed in {fetch_duration_post_close:.1f}s: {success_count} successes, {failure_count} failures")
+                        
+                        # Check if we should stop
+                        if args.continuous_max_runs and run_count >= args.continuous_max_runs:
+                            print(f"Reached maximum runs ({args.continuous_max_runs}), stopping continuous fetch.")
+                            break
+                        
+                        # Update market state tracker
+                        was_market_open = False
+                        
+                    except Exception as e:
+                        print(f"Error during post-close fetch: {e}", file=sys.stderr)
+                        was_market_open = False
             
         except KeyboardInterrupt:
             print(f"\nContinuous fetch interrupted by user after {run_count} runs.")

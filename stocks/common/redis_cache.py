@@ -196,22 +196,30 @@ class CacheKeyGenerator:
         return f"stocks:latest_price_data:{ticker}"
     
     @staticmethod
-    def options_query_result(ticker: str, expiration_date: Optional[str] = None, days: Optional[int] = None) -> str:
+    def options_query_result(ticker: str, expiration_date: Optional[str] = None, days: Optional[int] = None,
+                           start_datetime: Optional[str] = None, end_datetime: Optional[str] = None) -> str:
         """Generate cache key for options query results.
         
         Args:
             ticker: Stock ticker symbol
             expiration_date: Optional expiration date filter
             days: Optional days ahead filter
+            start_datetime: Optional start date for expiration filtering (YYYY-MM-DD)
+            end_datetime: Optional end date for expiration filtering (YYYY-MM-DD)
         
         Returns:
-            Cache key: stocks:options_query:{ticker}[:{expiration_date}][:{days}]
+            Cache key: stocks:options_query:{ticker}[:{expiration_date}][:{days}][:{start_datetime}:{end_datetime}]
         """
         key = f"stocks:options_query:{ticker}"
         if expiration_date:
             key += f":{expiration_date}"
         if days:
             key += f":{days}d"
+        # Include date range in cache key to avoid returning stale data with different date filters
+        if start_datetime or end_datetime:
+            start_str = start_datetime if start_datetime else "none"
+            end_str = end_datetime if end_datetime else "none"
+            key += f":{start_str}:{end_str}"
         return key
 
 

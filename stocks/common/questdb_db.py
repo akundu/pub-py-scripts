@@ -999,9 +999,12 @@ class OptionsDataRepository(BaseRepository):
     async def get(self, ticker: str, expiration_date: Optional[str] = None,
                  start_datetime: Optional[str] = None, end_datetime: Optional[str] = None,
                  option_tickers: Optional[List[str]] = None) -> pd.DataFrame:
-        """Get options data using window function to get latest per option."""
+        """Get options data using window function to get latest per option.
+        
+        Default start_datetime is yesterday (allowing options that expired < 24hrs ago).
+        """
         if start_datetime is None:
-            start_datetime = date.today().strftime('%Y-%m-%d')
+            start_datetime = (date.today() - timedelta(days=1)).strftime('%Y-%m-%d')
         
         async with self.connection.get_connection() as conn:
             clauses = ["ticker = $1"]
@@ -1096,12 +1099,14 @@ class OptionsDataRepository(BaseRepository):
         Uses ROW_NUMBER() window function to get the latest row per 
         (option_ticker, expiration_date, strike_price, option_type) combination.
         
+        Default start_datetime is yesterday (allowing options that expired < 24hrs ago).
+        
         Args:
             min_write_timestamp: Optional minimum write_timestamp filter (EST timezone string)
                 If provided, filters results to only include records with write_timestamp >= this value.
         """
         if start_datetime is None:
-            start_datetime = date.today().strftime('%Y-%m-%d')
+            start_datetime = (date.today() - timedelta(days=1)).strftime('%Y-%m-%d')
         
         async with self.connection.get_connection() as conn:
             clauses = ["ticker = $1"]
@@ -3812,14 +3817,16 @@ class OptionsDataService:
         Also caches the aggregated query result for faster subsequent queries.
         """
         # Check cache for aggregated query result first (if no min_write_timestamp filter)
-        # Note: We only cache when there are no special filters to keep cache keys simple
+        # Note: Cache key includes date range parameters to avoid returning stale data
         cached_options_df = None
         last_save_time = None
         if not min_write_timestamp and not expiration_date and self.cache and self.cache.enable_cache:
             try:
-                # Generate cache key based on query parameters
+                # Generate cache key based on query parameters including date range
                 days = timestamp_lookback_days
-                cache_key = CacheKeyGenerator.options_query_result(ticker, days=days)
+                cache_key = CacheKeyGenerator.options_query_result(ticker, days=days, 
+                                                                   start_datetime=start_datetime, 
+                                                                   end_datetime=end_datetime)
                 cached_df = await self.cache.get(cache_key)
                 if cached_df is not None and not cached_df.empty:
                     # Check if this is a cached DataFrame (from service) or a cached dict (from HistoricalDataFetcher)
@@ -3843,7 +3850,7 @@ class OptionsDataService:
                                             last_save_time = last_save_time.astimezone(timezone.utc)
                                     except:
                                         last_save_time = None
-                                self.logger.debug(f"[CACHE HIT] Options query result for {ticker} (days={days}) from HistoricalDataFetcher format")
+                                self.logger.debug(f"[CACHE HIT] Options query result for {ticker} (days={days}, start={start_datetime}, end={end_datetime}) from HistoricalDataFetcher format")
                                 
                                 # Check if background fetch should be triggered
                                 from fetch_symbol_data import _should_trigger_background_fetch, _trigger_background_fetch
@@ -3890,7 +3897,7 @@ class OptionsDataService:
                         except:
                             last_save_time = None
                         
-                        self.logger.debug(f"[CACHE HIT] Options query result for {ticker} (days={days})")
+                        self.logger.debug(f"[CACHE HIT] Options query result for {ticker} (days={days}, start={start_datetime}, end={end_datetime})")
                         
                         # Check if background fetch should be triggered
                         from fetch_symbol_data import _should_trigger_background_fetch, _trigger_background_fetch
@@ -3938,7 +3945,9 @@ class OptionsDataService:
         if not min_write_timestamp and not expiration_date and not result_df.empty and self.cache and self.cache.enable_cache:
             try:
                 days = timestamp_lookback_days
-                cache_key = CacheKeyGenerator.options_query_result(ticker, days=days)
+                cache_key = CacheKeyGenerator.options_query_result(ticker, days=days,
+                                                                   start_datetime=start_datetime,
+                                                                   end_datetime=end_datetime)
                 # Add last_save_time as a metadata column (store in a separate row or as DataFrame attribute)
                 # For simplicity, we'll create a metadata dict and cache it separately
                 # But since we're caching a DataFrame, we'll store last_save_time in a metadata cache key
@@ -3952,7 +3961,7 @@ class OptionsDataService:
                 await self.cache.set(metadata_key, metadata_df, ttl=None)  # No TTL
                 # Cache the DataFrame directly (service-level caching) - no TTL
                 await self.cache.set(cache_key, result_df, ttl=None)  # No TTL (infinite cache)
-                self.logger.debug(f"[CACHE SET] Cached options query result for {ticker} (days={days}, rows={len(result_df)}, no TTL)")
+                self.logger.debug(f"[CACHE SET] Cached options query result for {ticker} (days={days}, start={start_datetime}, end={end_datetime}, rows={len(result_df)}, no TTL)")
             except Exception as e:
                 self.logger.debug(f"[CACHE ERROR] Failed to cache options query result for {ticker}: {e}")
         

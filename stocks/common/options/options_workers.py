@@ -494,9 +494,24 @@ def process_spread_match(args_tuple):
     net_premium = round(short_premium_total - long_premium_total + long_premium_at_short_expiry_total, 2)
     
     # Daily premium calculations
-    # Use max(short_days, 1) to avoid division by zero
-    short_daily_premium = round(short_premium_total / max(short_days, 1), 2) if short_days > 0 else 0.0
-    net_daily_premium = round(net_premium / max(short_days, 1), 2) if short_days > 0 else 0.0
+    # Handle cases where short_days is negative (expired) vs 0 (0DTE - expires today)
+    # For 0DTE (days_to_expiry = 0): calculate daily premium as s_prem_tot / 1 (full premium earned today)
+    # For expired (days_to_expiry < 0): set to 0.0 (no premium to earn)
+    # For future dates (days_to_expiry > 0): calculate normally
+    if short_days is None or pd.isna(short_days) or short_days < 0:
+        # Option expired (market has closed) - no daily premium to earn
+        short_daily_premium = 0.0
+        net_daily_premium = 0.0
+    elif short_days == 0:
+        # 0DTE - expires today but market hasn't closed yet
+        # Daily premium = total premium (earned in 1 day = today)
+        short_daily_premium = round(short_premium_total, 2) if short_premium_total > 0 else 0.0
+        net_daily_premium = round(net_premium, 2)
+    else:
+        # Calculate daily premium: total premium / days remaining
+        effective_short_days = float(short_days)
+        short_daily_premium = round(short_premium_total / effective_short_days, 2) if short_premium_total > 0 else 0.0
+        net_daily_premium = round(net_premium / effective_short_days, 2)
 
     long_contracts_available = best_long.get('open_interest')
     if pd.notna(long_contracts_available):
@@ -884,7 +899,8 @@ def process_ticker_spread_analysis(args_tuple):
                 
                 # Calculate days to expiry for long options
                 long_options_df['expiration_date'] = long_options_df['expiration_date'].apply(normalize_expiration_date_to_utc)
-                today_ts = pd.Timestamp.now(tz='UTC').normalize()
+                # Use current time (not normalized) so we can check if we're before market close on expiration day
+                today_ts = pd.Timestamp.now(tz='UTC')
                 long_options_df['days_to_expiry'] = long_options_df['expiration_date'].apply(lambda x: calculate_days_to_expiry(x, today_ts))
                 
                 if long_options_df.empty:

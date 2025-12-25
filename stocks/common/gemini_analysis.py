@@ -213,6 +213,43 @@ def run_gemini_analysis_on_dataframe(
                 if result.returncode == 0:
                     # Extract HTML from output (Gemini returns HTML)
                     html_content = result.stdout
+                    
+                    # Clean up any debug output that might have leaked into stdout
+                    # Remove lines that look like debug output (e.g., "--- Querying Model:", "GENERATED RESPONSE", etc.)
+                    lines = html_content.split('\n')
+                    cleaned_lines = []
+                    skip_until_html = True
+                    for line in lines:
+                        # Skip debug separator lines and debug messages
+                        if skip_until_html:
+                            # Look for start of HTML content (tags like <html>, <div>, <h1>, etc.)
+                            stripped = line.strip()
+                            if stripped.startswith('<') or stripped.startswith('```html'):
+                                skip_until_html = False
+                                # If it's a markdown code block start, skip it
+                                if stripped.startswith('```html'):
+                                    continue
+                                # If it's a markdown code block end, skip it
+                                if stripped == '```':
+                                    continue
+                            else:
+                                # Skip debug lines
+                                if any(debug_marker in line for debug_marker in [
+                                    '--- Querying Model:',
+                                    'GENERATED RESPONSE',
+                                    '=' * 50,
+                                    '=' * 70,
+                                ]):
+                                    continue
+                                # If we hit a non-debug line before HTML, keep it (might be part of content)
+                                if line.strip() and not line.strip().startswith('---'):
+                                    skip_until_html = False
+                        
+                        if not skip_until_html:
+                            cleaned_lines.append(line)
+                    
+                    html_content = '\n'.join(cleaned_lines).strip()
+                    
                     logger.info(f"[GEMINI] ✓ {opt_type.upper()} analysis completed successfully")
                     logger.debug(f"[GEMINI] {opt_type.upper()} HTML content length: {len(html_content)} characters")
                     # Show first 200 chars of output in debug mode

@@ -10,12 +10,25 @@ from datetime import date, timedelta
 def calculate_date_ranges(
     start_date: Optional[str],
     max_days: Optional[int],
-    end_date: Optional[str]
+    end_date: Optional[str],
+    min_days: Optional[int] = None
 ) -> Tuple[str, Optional[str]]:
-    """Calculate start and end dates for option expiration filtering."""
-    # Default start_date to today if not specified
-    if start_date is None:
-        start_date = date.today().strftime('%Y-%m-%d')
+    """Calculate start and end dates for option expiration filtering.
+    
+    Default start_date is yesterday (allowing options that expired < 24hrs ago).
+    
+    Args:
+        start_date: Explicit start date in YYYY-MM-DD format
+        max_days: Maximum days from today (sets end_date)
+        end_date: Explicit end date in YYYY-MM-DD format
+        min_days: Minimum days from today (sets start_date, overrides start_date if provided)
+    """
+    # If min_days is set, calculate start_date from today (overrides explicit start_date)
+    if min_days is not None:
+        start_date = (date.today() + timedelta(days=min_days)).strftime('%Y-%m-%d')
+    # Otherwise, default start_date to yesterday if not specified (allows options expired < 24hrs ago)
+    elif start_date is None:
+        start_date = (date.today() - timedelta(days=1)).strftime('%Y-%m-%d')
     
     # If max_days is set, calculate end_date from today (overrides explicit end_date)
     if max_days is not None:

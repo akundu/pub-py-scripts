@@ -164,11 +164,16 @@ def get_javascript():
             
             try {
                 // Build query parameters - use filters from both calls and puts
+                // Note: source parameter is optional - server will use default if not provided
                 const params = new URLSearchParams({
-                    source: API_CONFIG.csv_source,
                     option_type: 'all',  // Get all data for comprehensive analysis
                     use_gemini: useGemini ? 'true' : 'false'  // Use checkbox value
                 });
+                
+                // Add source parameter if configured (optional - server has default)
+                if (API_CONFIG.csv_source) {
+                    params.set('source', API_CONFIG.csv_source);
+                }
                 
                 // Combine filters from both calls and puts
                 const allFilters = [];
@@ -351,15 +356,43 @@ def get_javascript():
                     return headerColName;
                 }
                 
-                // Try case-insensitive match
-                const normalized = headerColName.toLowerCase().replace(/\\s+/g, '_').replace(/-/g, '_');
+                // Explicit mappings for known column name variations
+                // Maps HTML table column names to API column names
+                const columnNameMappings = {
+                    'opt_prem.': 'option_premium',
+                    'opt_prem': 'option_premium',
+                    'l_prem': 'long_option_premium',
+                    'l_opt_prem': 'long_option_premium',
+                    'premium_ratio_pct': 'premium_ratio_pct',  // Ensure this maps correctly
+                    'premium_ratio_p': 'premium_ratio_pct',    // Handle truncation
+                };
+                
+                // Check explicit mappings first
+                if (columnNameMappings[headerColName] && data.length > 0 && data[0].hasOwnProperty(columnNameMappings[headerColName])) {
+                    return columnNameMappings[headerColName];
+                }
+                
+                // Special handling for latest_option_writets: API may return latest_opt_ts
+                // (prepare_dataframe_for_display should rename it, but if it doesn't, try both)
+                if (headerColName === 'latest_option_writets') {
+                    if (data.length > 0 && data[0].hasOwnProperty('latest_opt_ts')) {
+                        return 'latest_opt_ts';
+                    }
+                    if (data.length > 0 && data[0].hasOwnProperty('latest_option_writets')) {
+                        return 'latest_option_writets';
+                    }
+                }
+                
+                // Try case-insensitive match (normalize by removing dots and spaces)
+                const normalized = headerColName.toLowerCase().replace(/\\s+/g, '_').replace(/-/g, '_').replace(/\\./g, '');
                 if (apiColumnMap[normalized] && apiColumnMap[normalized].length > 0) {
                     return apiColumnMap[normalized][0]; // Use first match
                 }
                 
-                // Try partial match
+                // Try partial match with normalized names
                 for (const apiKey in data[0] || {}) {
-                    if (apiKey.toLowerCase().replace(/\\s+/g, '_').replace(/-/g, '_') === normalized) {
+                    const normalizedApiKey = apiKey.toLowerCase().replace(/\\s+/g, '_').replace(/-/g, '_').replace(/\\./g, '');
+                    if (normalizedApiKey === normalized) {
                         return apiKey;
                     }
                 }
@@ -401,20 +434,40 @@ def get_javascript():
                     };
                 }
                 
-                // Currency columns (price, premium, strike, cost, total)
-                if (isNumeric && (normalizedCol.includes('price') || normalizedCol.includes('premium') || 
-                    normalizedCol.includes('prem') || normalizedCol.includes('strike') || 
-                    normalizedCol.includes('cost') || normalizedCol.includes('total'))) {
+                // Percentage columns
+                // NOTE: Handle percentage BEFORE currency so columns like 'premium_ratio_pct'
+                //       are formatted as percentages, not dollars.
+                // Check for percentage indicators (pct, percent, or ends with %)
+                // Also explicitly check for premium_ratio_pct to ensure it's always treated as percentage
+                if (isNumeric && (normalizedCol === 'premium_ratio_pct' || 
+                    normalizedCol.includes('_pct') || normalizedCol.includes('_percent') || 
+                    normalizedCol.endsWith('_pct') || normalizedCol.endsWith('_percent') ||
+                    normalizedCol.includes('pct') || normalizedCol.includes('percent') || 
+                    normalizedCol.endsWith('%'))) {
                     return {
-                        display: '$' + numValue.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}),
+                        display: numValue.toFixed(2) + '%',
                         raw: String(numValue)
                     };
                 }
                 
-                // Percentage columns
-                if (isNumeric && (normalizedCol.includes('pct') || normalizedCol.includes('percent') || normalizedCol.endsWith('%'))) {
+                // Currency columns (price, premium, strike, cost, total)
+                // BUT exclude premium_ratio_pct which should already be handled above
+                // Also check if current_price contains price_with_change format (has +$ or -$)
+                if (normalizedCol === 'current_price' && typeof value === 'string' && 
+                    (value.includes('+$') || value.includes('-$') || value.includes('(+') || value.includes('(-'))) {
+                    // This is already formatted as price_with_change, return as-is
                     return {
-                        display: numValue.toFixed(2) + '%',
+                        display: value,
+                        raw: value
+                    };
+                }
+                
+                if (isNumeric && normalizedCol !== 'premium_ratio_pct' &&
+                    (normalizedCol.includes('price') || normalizedCol.includes('premium') || 
+                    normalizedCol.includes('prem') || normalizedCol.includes('strike') || 
+                    normalizedCol.includes('cost') || normalizedCol.includes('total'))) {
+                    return {
+                        display: '$' + numValue.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}),
                         raw: String(numValue)
                     };
                 }
@@ -504,7 +557,8 @@ def get_javascript():
                     
                     // Add color classes for price change columns
                     const normalizedCol = colName.toLowerCase().replace(/\\s+/g, '_');
-                    if ((normalizedCol === 'price_with_change' || normalizedCol === 'change_pct') && formatted.display) {
+                    // Check current_price, price_with_change, and change_pct columns
+                    if ((normalizedCol === 'current_price' || normalizedCol === 'price_with_change' || normalizedCol === 'change_pct') && formatted.display) {
                         const displayStr = String(formatted.display);
                         // Check for positive change (+$ or (+ or positive percentage)
                         if (displayStr.includes('+$') || displayStr.includes('(+') || (displayStr.startsWith('+') && !displayStr.startsWith('+-'))) {
@@ -542,6 +596,13 @@ def get_javascript():
             
             // Initialize column map after data is loaded (needed for filter parsing)
             initColumnMap(prefix);
+            
+            // Apply sort from URL if it wasn't applied yet (table headers now exist)
+            applySortFromURL(prefix);
+            
+            // Apply client-side filtering for virtual fields (bid, ask, l_bid, l_ask, spread, l_spread)
+            // These can't be filtered server-side, so we filter after data loads
+            applyVirtualFieldFilters(prefix);
         }
         
         // Show loading indicator
@@ -658,51 +719,64 @@ def get_javascript():
             return Math.abs(parsed.ask - parsed.bid);
         }
         
-        // Get virtual field value (spread, l_spread) from a row
+        // Extract bid from bid:ask string
+        function extractBid(bidAskStr) {
+            const parsed = parseBidAsk(bidAskStr);
+            return parsed ? parsed.bid : null;
+        }
+        
+        // Extract ask from bid:ask string
+        function extractAsk(bidAskStr) {
+            const parsed = parseBidAsk(bidAskStr);
+            return parsed ? parsed.ask : null;
+        }
+        
+        // Get virtual field value (spread, l_spread, bid, ask, l_bid, l_ask) from a row
         function getVirtualFieldValue(fieldName, row, tableId) {
             const lowerField = fieldName.toLowerCase().replace(/\\s+/g, '_').trim();
             
-            if (lowerField === 'spread') {
-                // Find bid_ask column (short leg)
-                const bidAskColIndex = findColumnIndex('bid_ask', tableId);
-                if (bidAskColIndex < 0) {
-                    // Try alternative names
-                    const altIndex = findColumnIndex('bid:ask', tableId);
-                    if (altIndex < 0) return null;
-                    const cell = row.cells[altIndex];
-                    if (!cell) return null;
-                    const bidAskStr = getRawText(cell);
-                    return calculateSpread(bidAskStr);
+            // Helper to get bid:ask string from a column
+            function getBidAskString(columnNames) {
+                for (const colName of columnNames) {
+                    const colIndex = findColumnIndex(colName, tableId);
+                    if (colIndex >= 0) {
+                        const cell = row.cells[colIndex];
+                        if (cell) {
+                            return getRawText(cell);
+                        }
+                    }
                 }
-                const cell = row.cells[bidAskColIndex];
-                if (!cell) return null;
-                const bidAskStr = getRawText(cell);
-                return calculateSpread(bidAskStr);
+                return null;
+            }
+            
+            if (lowerField === 'spread') {
+                const bidAskStr = getBidAskString(['bid:ask', 'bid_ask']);
+                return bidAskStr ? calculateSpread(bidAskStr) : null;
             }
             
             if (lowerField === 'l_spread' || lowerField === 'long_spread') {
-                // Find long bid_ask column
-                const longBidAskColIndex = findColumnIndex('l_bid_ask', tableId);
-                if (longBidAskColIndex < 0) {
-                    // Try alternative names
-                    const altIndex = findColumnIndex('l_bid:ask', tableId);
-                    if (altIndex < 0) {
-                        const altIndex2 = findColumnIndex('long_bid_ask', tableId);
-                        if (altIndex2 < 0) return null;
-                        const cell = row.cells[altIndex2];
-                        if (!cell) return null;
-                        const bidAskStr = getRawText(cell);
-                        return calculateSpread(bidAskStr);
-                    }
-                    const cell = row.cells[altIndex];
-                    if (!cell) return null;
-                    const bidAskStr = getRawText(cell);
-                    return calculateSpread(bidAskStr);
-                }
-                const cell = row.cells[longBidAskColIndex];
-                if (!cell) return null;
-                const bidAskStr = getRawText(cell);
-                return calculateSpread(bidAskStr);
+                const bidAskStr = getBidAskString(['l_bid:ask', 'l_bid_ask', 'long_bid_ask']);
+                return bidAskStr ? calculateSpread(bidAskStr) : null;
+            }
+            
+            if (lowerField === 'bid') {
+                const bidAskStr = getBidAskString(['bid:ask', 'bid_ask']);
+                return bidAskStr ? extractBid(bidAskStr) : null;
+            }
+            
+            if (lowerField === 'ask') {
+                const bidAskStr = getBidAskString(['bid:ask', 'bid_ask']);
+                return bidAskStr ? extractAsk(bidAskStr) : null;
+            }
+            
+            if (lowerField === 'l_bid' || lowerField === 'long_bid') {
+                const bidAskStr = getBidAskString(['l_bid:ask', 'l_bid_ask', 'long_bid_ask']);
+                return bidAskStr ? extractBid(bidAskStr) : null;
+            }
+            
+            if (lowerField === 'l_ask' || lowerField === 'long_ask') {
+                const bidAskStr = getBidAskString(['l_bid:ask', 'l_bid_ask', 'long_bid_ask']);
+                return bidAskStr ? extractAsk(bidAskStr) : null;
             }
             
             return null;
@@ -715,7 +789,13 @@ def get_javascript():
             return (
                 lowerField === 'spread' ||
                 lowerField === 'l_spread' ||
-                lowerField === 'long_spread'
+                lowerField === 'long_spread' ||
+                lowerField === 'bid' ||
+                lowerField === 'ask' ||
+                lowerField === 'l_bid' ||
+                lowerField === 'long_bid' ||
+                lowerField === 'l_ask' ||
+                lowerField === 'long_ask'
             );
         }
         
@@ -1402,7 +1482,69 @@ def get_javascript():
         // Apply all filters to table
         function applyFilters(prefix) {
             // Use API-based filtering instead of client-side
+            // Note: Virtual fields (bid, ask, l_bid, l_ask, spread, l_spread) will be filtered client-side after data loads
             fetchDataFromAPI(prefix);
+        }
+        
+        // Apply client-side filtering for virtual fields after data loads
+        function applyVirtualFieldFilters(prefix) {
+            if (!activeFilters[prefix] || activeFilters[prefix].length === 0) return;
+            
+            // Check if there are any virtual field filters
+            const hasVirtualFilters = activeFilters[prefix].some(f => isVirtualField(f.field));
+            if (!hasVirtualFilters) return; // No virtual field filters, server-side filtering is sufficient
+            
+            const tableId = prefix + 'resultsTable';
+            const table = document.getElementById(tableId);
+            if (!table) return;
+            
+            const tbody = table.querySelector('tbody');
+            if (!tbody) return;
+            
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            let visibleCount = 0;
+            const logic = filterLogic[prefix] || 'AND';
+            
+            // Check each row against virtual field filters
+            rows.forEach(row => {
+                // Get all virtual field filters
+                const virtualFilters = activeFilters[prefix].filter(f => isVirtualField(f.field));
+                
+                if (virtualFilters.length === 0) {
+                    // No virtual filters, row is already filtered by server
+                    visibleCount++;
+                    return;
+                }
+                
+                let passesVirtualFilters = false;
+                
+                if (logic === 'OR') {
+                    // For OR logic: row passes if ANY virtual filter passes
+                    passesVirtualFilters = virtualFilters.some(filter => evaluateFilter(filter, row, tableId));
+                } else {
+                    // For AND logic: row passes if ALL virtual filters pass
+                    passesVirtualFilters = virtualFilters.every(filter => evaluateFilter(filter, row, tableId));
+                }
+                
+                // Show/hide row based on virtual filter results
+                // Note: Server-side filters are already applied, so we're just applying virtual filters on top
+                if (passesVirtualFilters) {
+                    row.style.display = '';
+                    visibleCount++;
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+            
+            // Update visible count
+            const visibleCountEl = document.getElementById(prefix + 'visibleCount');
+            if (visibleCountEl) {
+                visibleCountEl.textContent = visibleCount;
+            }
+            
+            // Reapply striping after filtering
+            applyRowStriping(prefix);
+            syncCardVisibility(prefix);
         }
         
         // Validate filter fields exist
@@ -1707,6 +1849,10 @@ def get_javascript():
             } else {
                 sortDirection[prefix][columnIndex] = 'asc';
             }
+            // Update visual sort indicators
+            updateSortIndicators(prefix);
+            // Update URL with new sort state
+            updateURL();
             fetchDataFromAPI(prefix);
         }
         
@@ -1842,7 +1988,7 @@ def get_javascript():
             applyColumnStriping(prefix);
         }
         
-        // Update URL with current filters
+        // Update URL with current filters and sort
         function updateURL() {
             const params = new URLSearchParams();
             
@@ -1868,6 +2014,23 @@ def get_javascript():
                 params.set('calls_filters', filterStrings.join('|'));
             }
             
+            // Add sort for calls
+            if (currentSortColumn['calls'] !== undefined && currentSortColumn['calls'] >= 0) {
+                const tableId = 'callsresultsTable';
+                const table = document.getElementById(tableId);
+                if (table) {
+                    const headerRow = table.querySelector('tr.column-header-row');
+                    const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
+                    if (headers[currentSortColumn['calls']]) {
+                        const colName = headers[currentSortColumn['calls']].getAttribute('data-filterable-name') || 
+                                      headers[currentSortColumn['calls']].textContent.trim();
+                        const sortDir = sortDirection['calls'] && sortDirection['calls'][currentSortColumn['calls']] || 'desc';
+                        params.set('calls_sort', colName);
+                        params.set('calls_sort_direction', sortDir);
+                    }
+                }
+            }
+            
             // Add filter logic for puts (only if not default AND)
             if (filterLogic['puts'] && filterLogic['puts'] !== 'AND') {
                 params.set('puts_filterLogic', filterLogic['puts']);
@@ -1890,12 +2053,29 @@ def get_javascript():
                 params.set('puts_filters', filterStrings.join('|'));
             }
             
+            // Add sort for puts
+            if (currentSortColumn['puts'] !== undefined && currentSortColumn['puts'] >= 0) {
+                const tableId = 'putsresultsTable';
+                const table = document.getElementById(tableId);
+                if (table) {
+                    const headerRow = table.querySelector('tr.column-header-row');
+                    const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
+                    if (headers[currentSortColumn['puts']]) {
+                        const colName = headers[currentSortColumn['puts']].getAttribute('data-filterable-name') || 
+                                      headers[currentSortColumn['puts']].textContent.trim();
+                        const sortDir = sortDirection['puts'] && sortDirection['puts'][currentSortColumn['puts']] || 'desc';
+                        params.set('puts_sort', colName);
+                        params.set('puts_sort_direction', sortDir);
+                    }
+                }
+            }
+            
             // Update URL without reloading page
             const newURL = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
             window.history.replaceState({}, '', newURL);
         }
         
-        // Load filters from URL
+        // Load filters and sort from URL
         function loadFiltersFromURL() {
             const params = new URLSearchParams(window.location.search);
             
@@ -1904,6 +2084,89 @@ def get_javascript():
             
             // Load filters for puts
             loadFiltersForPrefix('puts', params);
+            
+            // Load sort for calls and puts
+            loadSortFromURL();
+        }
+        
+        // Store sort state from URL (to be applied when table is rendered)
+        const pendingSortFromURL = {};
+        
+        // Load sort state from URL
+        function loadSortFromURL() {
+            const params = new URLSearchParams(window.location.search);
+            
+            // Store sort for calls (will be applied when table is rendered)
+            const callsSortCol = params.get('calls_sort');
+            const callsSortDir = params.get('calls_sort_direction');
+            if (callsSortCol) {
+                pendingSortFromURL['calls'] = {
+                    column: callsSortCol,
+                    direction: (callsSortDir === 'asc' || callsSortDir === 'desc') ? callsSortDir : 'desc'
+                };
+            }
+            
+            // Store sort for puts (will be applied when table is rendered)
+            const putsSortCol = params.get('puts_sort');
+            const putsSortDir = params.get('puts_sort_direction');
+            if (putsSortCol) {
+                pendingSortFromURL['puts'] = {
+                    column: putsSortCol,
+                    direction: (putsSortDir === 'asc' || putsSortDir === 'desc') ? putsSortDir : 'desc'
+                };
+            }
+        }
+        
+        // Apply sort from URL after table is rendered
+        function applySortFromURL(prefix) {
+            const pendingSort = pendingSortFromURL[prefix];
+            if (!pendingSort) return; // No pending sort for this prefix
+            
+            // Find the column index by matching the column name
+            const tableId = prefix + 'resultsTable';
+            const table = document.getElementById(tableId);
+            if (!table) return;
+            
+            const headerRow = table.querySelector('tr.column-header-row');
+            const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
+            for (let i = 0; i < headers.length; i++) {
+                const colName = headers[i].getAttribute('data-filterable-name') || headers[i].textContent.trim();
+                if (colName === pendingSort.column) {
+                    currentSortColumn[prefix] = i;
+                    if (!sortDirection[prefix]) sortDirection[prefix] = {};
+                    sortDirection[prefix][i] = pendingSort.direction;
+                    // Clear pending sort (already applied)
+                    delete pendingSortFromURL[prefix];
+                    // Update visual sort indicators
+                    updateSortIndicators(prefix);
+                    break;
+                }
+            }
+        }
+        
+        // Update visual sort indicators on column headers
+        function updateSortIndicators(prefix) {
+            const tableId = prefix + 'resultsTable';
+            const table = document.getElementById(tableId);
+            if (!table) return;
+            
+            const headerRow = table.querySelector('tr.column-header-row');
+            const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
+            
+            headers.forEach((th, index) => {
+                // Remove all sort indicator classes
+                th.classList.remove('sort-asc', 'sort-desc');
+                
+                // Add appropriate class if this column is sorted
+                if (currentSortColumn[prefix] === index) {
+                    const dir = sortDirection[prefix] && sortDirection[prefix][index];
+                    if (dir === 'asc') {
+                        th.classList.add('sort-asc');
+                    } else if (dir === 'desc') {
+                        th.classList.add('sort-desc');
+                    }
+                }
+            });
         }
         
         // Helper function to load filters for a specific prefix
@@ -2193,22 +2456,25 @@ def get_javascript():
                 }
                 
                 // Default sort by net_daily_premi descending (will be applied via API)
-                // Set initial sort state
-                const tableId = prefix + 'resultsTable';
-                const table = document.getElementById(tableId);
-                if (table) {
-                    const headerRow = table.querySelector('tr.column-header-row');
-                    const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
-                    headers.forEach((th, idx) => {
-                        const colName = th.getAttribute('data-filterable-name') || th.textContent.trim();
-                        if (colName.toLowerCase().includes('net_daily_premi') || colName.toLowerCase().includes('net_daily_premium')) {
-                            currentSortColumn[prefix] = idx;
-                            if (!sortDirection[prefix]) sortDirection[prefix] = {};
-                            sortDirection[prefix][idx] = 'desc';
-                            // Add sort class to header
-                            th.classList.add('sort-desc');
-                        }
-                    });
+                // But only if no sort is specified in URL
+                // Set initial sort state (only if URL doesn't have sort)
+                if (!pendingSortFromURL[prefix]) {
+                    const tableId = prefix + 'resultsTable';
+                    const table = document.getElementById(tableId);
+                    if (table) {
+                        const headerRow = table.querySelector('tr.column-header-row');
+                        const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
+                        headers.forEach((th, idx) => {
+                            const colName = th.getAttribute('data-filterable-name') || th.textContent.trim();
+                            if (colName.toLowerCase().includes('net_daily_premi') || colName.toLowerCase().includes('net_daily_premium')) {
+                                currentSortColumn[prefix] = idx;
+                                if (!sortDirection[prefix]) sortDirection[prefix] = {};
+                                sortDirection[prefix][idx] = 'desc';
+                                // Add sort class to header
+                                th.classList.add('sort-desc');
+                            }
+                        });
+                    }
                 }
             });
         });

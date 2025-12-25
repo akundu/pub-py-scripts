@@ -221,6 +221,13 @@ def prepare_dataframe_for_display(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Da
                 lambda x: str(x)[:10] if pd.notna(x) else ''
             )
     
+    # Rename latest_opt_ts to latest_option_writets for display (standardize column name)
+    # The API returns latest_opt_ts, but we want to use latest_option_writets consistently
+    if 'latest_opt_ts' in df_display.columns and 'latest_option_writets' not in df_display.columns:
+        df_display = df_display.rename(columns={'latest_opt_ts': 'latest_option_writets'})
+    if 'latest_opt_ts' in df_raw.columns and 'latest_option_writets' not in df_raw.columns:
+        df_raw = df_raw.rename(columns={'latest_opt_ts': 'latest_option_writets'})
+    
     # Format age columns (latest_option_writets)
     age_cols = ['latest_option_writets', 'latest_opt_ts']
     for col in age_cols:
@@ -251,11 +258,14 @@ def prepare_dataframe_for_display(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Da
                 except (ValueError, TypeError):
                     pass
     
-    # Format price_with_change column (combine price and change)
+    # Replace current_price with price_with_change if both exist
+    # This makes current_price show price with change (e.g., "$124.59 (+$0.50 (+0.40%))")
     if 'price_with_change' in df_display.columns and 'current_price' in df_display.columns:
-        # If price_with_change is already formatted, keep it
-        # Otherwise, combine current_price and change_pct
-        pass  # Keep as-is for now
+        # Replace current_price with price_with_change so the price column shows the change
+        df_display['current_price'] = df_display['price_with_change']
+        # Also update df_raw so the raw data matches
+        if 'price_with_change' in df_raw.columns:
+            df_raw['current_price'] = df_raw['price_with_change']
     
     # Reorder columns (basic ordering)
     ordered_cols = []

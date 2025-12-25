@@ -722,6 +722,7 @@ class OptionsAnalyzer:
         days_to_expiry: Optional[int] = None,
         min_volume: int = 0,
         max_days: Optional[int] = None,
+        min_days: Optional[int] = None,
         min_premium: float = 0.0,
         position_size: float = 100000.0,
         filters: Optional[List[FilterExpression]] = None,
@@ -750,6 +751,7 @@ class OptionsAnalyzer:
             days_to_expiry: Number of days to expiry (if None, analyze all available)
             min_volume: Minimum volume filter
             max_days: Maximum days from today for expiration (convenience param that sets end_date, overrides end_date if both provided)
+            min_days: Minimum days from today for expiration (convenience param that sets start_date, overrides start_date if both provided)
             min_premium: Minimum potential premium filter
             position_size: Position size in dollars for calculations
             filters: List of FilterExpression objects to apply
@@ -778,9 +780,11 @@ class OptionsAnalyzer:
         tickers_upper = [ticker.upper() for ticker in tickers]
         
         # Calculate date ranges
-        start_date, end_date = calculate_date_ranges(start_date, max_days, end_date)
+        start_date, end_date = calculate_date_ranges(start_date, max_days, end_date, min_days)
         if self.debug and max_days is not None:
             print(f"DEBUG: Using max_days={max_days}: filtering options expiring through {end_date}", file=sys.stderr)
+        if self.debug and min_days is not None:
+            print(f"DEBUG: Using min_days={min_days}: filtering options expiring from {start_date}", file=sys.stderr)
         
         # Use memory-efficient batch fetching instead of single large query
         try:
@@ -2094,6 +2098,7 @@ def _build_analysis_args(args, tickers: List[str], filters: List[FilterExpressio
         'days_to_expiry': args.days,
         'min_volume': args.min_volume,
         'max_days': args.max_days,
+        'min_days': getattr(args, 'min_days', None),
         'batch_size': args.batch_size,
         'min_premium': args.min_premium,
         'position_size': args.position_size,
@@ -3257,6 +3262,7 @@ def _build_analysis_args(args: argparse.Namespace, symbols_list: List[str], filt
         'days_to_expiry': args.days,
         'min_volume': args.min_volume,
         'max_days': args.max_days,
+        'min_days': getattr(args, 'min_days', None),
         'min_premium': args.min_premium,
         'position_size': args.position_size,
         'filters': filters,

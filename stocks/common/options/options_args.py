@@ -37,6 +37,9 @@ Examples:
   # Show only options expiring within 30 days from today
   python options_analyzer.py --symbols AAPL --max-days 30
   
+  # Show only options expiring between 7 and 30 days from today
+  python options_analyzer.py --symbols AAPL --min-days 7 --max-days 30
+  
   # Show only options expiring today or later (default behavior)
   python options_analyzer.py --symbols AAPL
   
@@ -126,6 +129,12 @@ def add_analysis_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         help="Maximum days from today for option expiration (convenience parameter that sets end-date to today + max-days, overrides --end-date if both are provided)."
+    )
+    parser.add_argument(
+        '--min-days',
+        type=int,
+        default=None,
+        help="Minimum days from today for option expiration (convenience parameter that sets start-date to today + min-days, overrides --start-date if both are provided)."
     )
     parser.add_argument(
         '--batch-size',
