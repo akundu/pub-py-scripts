@@ -511,6 +511,9 @@
                     const td = document.createElement('td');
                     const colMeta = columnMetadata[colIdx] || {};
                     
+                    // Normalize column name for comparison
+                    const normalizedCol = colName.toLowerCase().replace(/\s+/g, '_');
+                    
                     // Find matching column name in API data
                     const apiColName = findApiColumnName(colName);
                     const value = apiColName ? row[apiColName] : null;
@@ -528,7 +531,7 @@
                         // Special handling for current_price with change data - display as compact table
                         if (normalizedCol === 'current_price' && typeof formatted.display === 'string' && 
                             (formatted.display.includes('+$') || formatted.display.includes('-$'))) {
-                            // Parse format like "$54.52 -$0.36 (-0.66%)"
+                            // Parse format like "$73.56 -$4.87 (-6.21%)" or "$124.59 +$0.50 (+0.40%)"
                             const priceMatch = formatted.display.match(/^\$?([\d,]+\.\d+)\s+([\+\-]\$[\d,]+\.\d+)\s+\(([\+\-][\d\.]+%)\)/);
                             if (priceMatch) {
                                 const [_, price, delta, deltaPct] = priceMatch;
@@ -586,6 +589,7 @@
                     // Add color classes for price change columns
                     // Skip if current_price already has nested table (colors applied to inner cells)
                     const hasNestedTable = td.querySelector('table') !== null;
+                    // Use already-defined normalizedCol from above
                     if (!hasNestedTable && (normalizedCol === 'current_price' || normalizedCol === 'price_with_change' || normalizedCol === 'change_pct') && formatted.display) {
                         const displayStr = String(formatted.display);
                         // Check for positive change (+$ or (+ or positive percentage)
