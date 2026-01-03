@@ -746,7 +746,12 @@ class StockDBSQLite(StockDBBase):
         return result
 
     async def get_previous_close_prices(self, tickers: List[str]) -> Dict[str, float | None]:
-        """Get the most recent daily close prices for multiple tickers, excluding today's data."""
+        """Get previous close prices for multiple tickers.
+        
+        Returns the second-to-last close price from the database (if available).
+        This ensures comparisons are made against actual data that exists, not assumptions
+        about today's close. If only one close exists, uses that one.
+        """
         result = {}
         
         with sqlite3.connect(self.db_path) as conn:
@@ -759,17 +764,17 @@ class StockDBSQLite(StockDBBase):
             for ticker in tickers:
                 latest_close = None
                 try:
-                    # Get the most recent close price that is NOT from today
-                    cursor.execute("SELECT close FROM daily_prices WHERE ticker = ? AND date < ? ORDER BY date DESC LIMIT 1", (ticker, today))
-                    row = cursor.fetchone()
-                    if row: 
-                        latest_close = row[0]
-                    else:
-                        # Fallback: if no previous day data, get the most recent available
-                        cursor.execute("SELECT close FROM daily_prices WHERE ticker = ? ORDER BY date DESC LIMIT 1", (ticker,))
-                        row = cursor.fetchone()
-                        if row: 
-                            latest_close = row[0]
+                    # Get the last 2 closes that exist in the database (ordered by date DESC)
+                    # Use the second-to-last one as the reference for comparison
+                    # This ensures we compare against actual data, not assumptions about today's close
+                    cursor.execute("SELECT date, close FROM daily_prices WHERE ticker = ? ORDER BY date DESC LIMIT 2", (ticker,))
+                    rows = cursor.fetchall()
+                    if rows and len(rows) >= 2:
+                        # We have at least 2 closes - use the second-to-last one
+                        latest_close = rows[1][1]  # rows[1] is second row, [1] is close column
+                    elif rows and len(rows) == 1:
+                        # Only one close available - use it
+                        latest_close = rows[0][1]  # rows[0] is first row, [1] is close column
                 except sqlite3.Error as e:
                     print(f"SQLite error (daily_prices for {ticker}): {e}")
                 
@@ -1233,7 +1238,12 @@ class StockDBDuckDB(StockDBBase):
         return result
 
     async def get_previous_close_prices(self, tickers: List[str]) -> Dict[str, float | None]:
-        """Get the most recent daily close prices for multiple tickers, excluding today's data."""
+        """Get previous close prices for multiple tickers.
+        
+        Returns the second-to-last close price from the database (if available).
+        This ensures comparisons are made against actual data that exists, not assumptions
+        about today's close. If only one close exists, uses that one.
+        """
         result = {}
         
         with duckdb.connect(database=self.db_path, read_only=True) as conn:
@@ -1244,15 +1254,16 @@ class StockDBDuckDB(StockDBBase):
             for ticker in tickers:
                 latest_close = None
                 try:
-                    # Get the most recent close price that is NOT from today
-                    res = conn.execute("SELECT close FROM daily_prices WHERE ticker = ? AND date < ? ORDER BY date DESC LIMIT 1", (ticker, today)).fetchone()
-                    if res: 
-                        latest_close = res[0]
-                    else:
-                        # Fallback: if no previous day data, get the most recent available
-                        res = conn.execute("SELECT close FROM daily_prices WHERE ticker = ? ORDER BY date DESC LIMIT 1", (ticker,)).fetchone()
-                        if res: 
-                            latest_close = res[0]
+                    # Get the last 2 closes that exist in the database (ordered by date DESC)
+                    # Use the second-to-last one as the reference for comparison
+                    # This ensures we compare against actual data, not assumptions about today's close
+                    res = conn.execute("SELECT date, close FROM daily_prices WHERE ticker = ? ORDER BY date DESC LIMIT 2", (ticker,)).fetchall()
+                    if res and len(res) >= 2:
+                        # We have at least 2 closes - use the second-to-last one
+                        latest_close = res[1][1]  # res[1] is second row, [1] is close column
+                    elif res and len(res) == 1:
+                        # Only one close available - use it
+                        latest_close = res[0][1]  # res[0] is first row, [1] is close column
                 except duckdb.Error as e:
                     print(f"DuckDB error (daily_prices for {ticker}): {e}")
                 

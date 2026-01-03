@@ -853,6 +853,12 @@ def parse_args():
         help="Data source to use for fetching data (default: polygon)."
     )
     parser.add_argument(
+        "--date",
+        type=str,
+        default=None,
+        help="Fetch data for a specific date (YYYY-MM-DD). Sets both start-date and end-date to this value. Overrides --start-date and --end-date if provided."
+    )
+    parser.add_argument(
         "--start-date",
         type=str,
         default=None,
@@ -1375,6 +1381,12 @@ async def main():
     current_time = get_timezone_aware_time(args.timezone)
     print(f"Starting fetch at {format_time_with_timezone(current_time, args.timezone)}")
     print(f"Using timezone: {args.timezone}")
+    
+    # Handle --date parameter (overrides --start-date and --end-date)
+    if args.date:
+        args.start_date = args.date
+        args.end_date = args.date
+        print(f"--date specified ({args.date}), setting both start-date and end-date to: {args.date}", file=sys.stderr)
     
     # Create base data directories if any action is to be taken
     if args.types or args.symbols or args.symbols_list or args.fetch_market_data:

@@ -368,6 +368,9 @@ class DatabaseClient:
 class DisplayManager:
     """Real-time dashboard that processes WebSocket messages."""
     
+    # Column definitions for sorting
+    COLUMNS = ["Symbol", "Current", "Open", "Prev Close", "Change", "Volume", "Bid/Ask", "Session", "Last Update"]
+    
     def __init__(self, symbols: list, server_url: str, debug_mode: bool = False):
         self.symbols = symbols
         self.server_url = server_url
@@ -381,6 +384,10 @@ class DisplayManager:
         # Debug log buffer
         self.debug_logs: List[str] = []
         self.max_debug_lines = 5
+        
+        # Sorting state
+        self.sort_column = "Symbol"  # Default sort by symbol
+        self.sort_ascending = True   # Default ascending
         
         # Initialize stock data
         for symbol in symbols:
@@ -524,16 +531,27 @@ class DisplayManager:
             border_style="blue"
         )
         
-        # Add all columns from full dashboard
-        table.add_column("Symbol", style="cyan", width=8)
-        table.add_column("Current", style="white", width=10)
-        table.add_column("Open", style="white", width=10)
-        table.add_column("Prev Close", style="white", width=12)
-        table.add_column("Change", style="white", width=20)
-        table.add_column("Volume", style="white", width=12)
-        table.add_column("Bid/Ask", style="white", width=15)
-        table.add_column("Session", style="white", width=8)
-        table.add_column("Last Update", style="white", width=12)
+        # Add all columns with sort indicators
+        columns_config = [
+            ("Symbol", "cyan", 8),
+            ("Current", "white", 10),
+            ("Open", "white", 10),
+            ("Prev Close", "white", 12),
+            ("Change", "white", 20),
+            ("Volume", "white", 12),
+            ("Bid/Ask", "white", 15),
+            ("Session", "white", 8),
+            ("Last Update", "white", 12),
+        ]
+        
+        for col_name, style, width in columns_config:
+            # Add sort indicator to header
+            if col_name == self.sort_column:
+                indicator = " ▲" if self.sort_ascending else " ▼"
+                header_text = f"{col_name}{indicator}"
+            else:
+                header_text = col_name
+            table.add_column(header_text, style=style, width=width)
         
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         last_update = datetime.fromtimestamp(self.last_update_time).strftime("%H:%M:%S")
@@ -541,7 +559,10 @@ class DisplayManager:
         # Count active connections (we'll track this)
         active_conns = len([s for s in self.symbols if self.message_counts[s] > 0])
         
-        for symbol in self.symbols:
+        # Sort symbols based on current sort column
+        sorted_symbols = self._get_sorted_symbols()
+        
+        for symbol in sorted_symbols:
             stock = self.stock_data[symbol]
             
             # Update session status
@@ -587,9 +608,10 @@ class DisplayManager:
                 change_col, volume_col, bid_ask_col, session_col, last_update_col
             )
         
-        # Add footer with stats
+        # Add footer with stats and sort instructions
         ws_status = "🟢 CONNECTED" if active_conns > 0 else "🔴 DISCONNECTED"
-        table.title = f"[bold blue]Real-Time Stock Market Dashboard[/bold blue] - {current_time} | WebSocket: {ws_status} | Last Update: {last_update}"
+        sort_hint = f"Sort: 1-9 for columns, 'r' to reverse | Current: {self.sort_column} {'↑' if self.sort_ascending else '↓'}"
+        table.title = f"[bold blue]Real-Time Stock Market Dashboard[/bold blue] - {current_time} | WebSocket: {ws_status} | Last Update: {last_update} | {sort_hint}"
         
         return table
     
@@ -623,6 +645,55 @@ class DisplayManager:
         )
         return stats_panel
     
+    def _get_sorted_symbols(self) -> List[str]:
+        """Get symbols sorted by the current sort column."""
+        def get_sort_key(symbol: str):
+            stock = self.stock_data[symbol]
+            
+            if self.sort_column == "Symbol":
+                return symbol
+            elif self.sort_column == "Current":
+                return stock.current_price or 0
+            elif self.sort_column == "Open":
+                return stock.open_price if stock.open_price is not None else 0
+            elif self.sort_column == "Prev Close":
+                return stock.prev_close if stock.prev_close is not None else 0
+            elif self.sort_column == "Change":
+                return stock.change
+            elif self.sort_column == "Volume":
+                return stock.volume if stock.volume is not None else 0
+            elif self.sort_column == "Bid/Ask":
+                # Sort by mid-price
+                if stock.bid_price > 0 and stock.ask_price > 0:
+                    return (stock.bid_price + stock.ask_price) / 2.0
+                elif stock.bid_price > 0:
+                    return stock.bid_price
+                elif stock.ask_price > 0:
+                    return stock.ask_price
+                return 0
+            elif self.sort_column == "Session":
+                return stock.session_status
+            elif self.sort_column == "Last Update":
+                if stock.last_update:
+                    return stock.last_update.timestamp()
+                return 0
+            else:
+                return symbol
+        
+        sorted_list = sorted(self.symbols, key=get_sort_key, reverse=not self.sort_ascending)
+        return sorted_list
+    
+    def set_sort_column(self, column: str):
+        """Set the sort column. If same column, toggle direction."""
+        if column in self.COLUMNS:
+            if self.sort_column == column:
+                # Toggle direction
+                self.sort_ascending = not self.sort_ascending
+            else:
+                # New column, default to ascending
+                self.sort_column = column
+                self.sort_ascending = True
+    
     def create_debug_panel(self) -> Panel:
         """Create the debug log panel."""
         if self.debug_logs:
@@ -641,6 +712,8 @@ class DisplayManager:
     
     async def run(self, db_client: DatabaseClient, refresh_rate: float = 2.0):
         """Run the dashboard."""
+        global shutdown_flag
+        
         console = Console()
         
         # Initialize data (previous close, open prices)
@@ -654,23 +727,84 @@ class DisplayManager:
         
         # Start display loop
         print("Starting display...")
+        print("Sorting: Press 1-9 to sort by column (1=Symbol, 2=Current, 3=Open, 4=Prev Close, 5=Change, 6=Volume, 7=Bid/Ask, 8=Session, 9=Last Update), 'r' to reverse")
         
-        with Live(console=console, refresh_per_second=refresh_rate, screen=True) as live:
-            while not shutdown_flag:
+        # Setup keyboard input handling (Unix/macOS only)
+        keyboard_enabled = False
+        old_settings = None
+        try:
+            import select
+            import tty
+            import termios
+            
+            # Save terminal settings
+            old_settings = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+            keyboard_enabled = True
+        except (ImportError, OSError):
+            # Windows or terminal doesn't support this
+            print("Note: Keyboard sorting not available on this platform. Sorting defaults to Symbol.")
+        
+        try:
+            with Live(console=console, refresh_per_second=refresh_rate, screen=True) as live:
+                while not shutdown_flag:
+                    try:
+                        # Check for keyboard input (non-blocking, Unix only)
+                        if keyboard_enabled:
+                            try:
+                                if select.select([sys.stdin], [], [], 0)[0]:
+                                    key = sys.stdin.read(1)
+                                    
+                                    # Handle sort keys
+                                    if key == '1':
+                                        self.set_sort_column("Symbol")
+                                    elif key == '2':
+                                        self.set_sort_column("Current")
+                                    elif key == '3':
+                                        self.set_sort_column("Open")
+                                    elif key == '4':
+                                        self.set_sort_column("Prev Close")
+                                    elif key == '5':
+                                        self.set_sort_column("Change")
+                                    elif key == '6':
+                                        self.set_sort_column("Volume")
+                                    elif key == '7':
+                                        self.set_sort_column("Bid/Ask")
+                                    elif key == '8':
+                                        self.set_sort_column("Session")
+                                    elif key == '9':
+                                        self.set_sort_column("Last Update")
+                                    elif key == 'r' or key == 'R':
+                                        # Reverse current sort
+                                        self.sort_ascending = not self.sort_ascending
+                                    elif key == '\x03':  # Ctrl+C
+                                        shutdown_flag = True
+                                        break
+                            except (OSError, ValueError):
+                                # Terminal input error, continue without keyboard
+                                pass
+                        
+                        # Update last_update_time
+                        self.last_update_time = time.time()
+                        
+                        # Render and update (now returns Layout instead of Table)
+                        display_content = self.render_display()
+                        live.update(display_content)
+                        
+                        # Sleep for refresh rate
+                        await asyncio.sleep(1.0 / refresh_rate)
+                        
+                    except Exception as e:
+                        print(f"Display error: {e}")
+                        await asyncio.sleep(1.0)
+        finally:
+            # Restore terminal settings
+            if old_settings is not None:
                 try:
-                    # Update last_update_time
-                    self.last_update_time = time.time()
-                    
-                    # Render and update (now returns Layout instead of Table)
-                    display_content = self.render_display()
-                    live.update(display_content)
-                    
-                    # Sleep for refresh rate
-                    await asyncio.sleep(1.0 / refresh_rate)
-                    
-                except Exception as e:
-                    print(f"Display error: {e}")
-                    await asyncio.sleep(1.0)
+                    import termios
+                    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                except Exception:
+                    pass
         
         # Wait for listeners to finish
         for task in listen_tasks:

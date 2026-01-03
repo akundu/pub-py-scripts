@@ -12,8 +12,8 @@ from .schemas import (
     ErrorResponse,
     StatisticsResponse,
 )
-from ...lib.common.url_builder import build_short_url
-from ...lib.common.headers import build_base_url
+from lib.common.url_builder import build_short_url
+from lib.common.headers import build_base_url
 
 router = APIRouter()
 
@@ -138,6 +138,7 @@ async def health_check(request: Request):
         cache="healthy" if health["cache"] else "unhealthy",
         timestamp=datetime.now(timezone.utc),
     )
+
 
 
 

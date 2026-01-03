@@ -26,7 +26,7 @@ class URLShortenerQuestDB(URLShortenerDBBase):
         access_count LONG,
         last_accessed TIMESTAMP
     ) TIMESTAMP(created_at) PARTITION BY DAY WAL
-    DEDUP UPSERT KEYS(short_code);
+    DEDUP UPSERT KEYS(created_at, short_code);
     """
     
     def __init__(
@@ -398,6 +398,7 @@ class URLShortenerQuestDB(URLShortenerDBBase):
                 self.logger.error(f"Error closing pool for loop {loop_id}: {e}")
         
         self._pools.clear()
+
 
 
 

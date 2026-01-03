@@ -5,8 +5,8 @@ from fastapi import APIRouter, Request, Form, HTTPException, status
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 
-from ...lib.common.url_builder import build_short_url
-from ...lib.common.headers import build_base_url
+from lib.common.url_builder import build_short_url
+from lib.common.headers import build_base_url
 
 router = APIRouter()
 
@@ -176,6 +176,7 @@ async def health_check_web(request: Request):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Service unhealthy",
         )
+
 
 
 

@@ -50,6 +50,7 @@ class IVAnalyzer:
         data_dir: str = "data",
         redis_url: Optional[str] = None,
         server_url: Optional[str] = None,
+        db_instance: Optional[Any] = None,
         use_polygon: bool = False,
         logger: Optional[logging.Logger] = None
     ):
@@ -57,18 +58,24 @@ class IVAnalyzer:
         Initialize IV Analyzer.
         
         Args:
-            polygon_api_key: Polygon.io API key
+            polygon_api_key: Polygon.io API key (for IV data, not price history)
             data_dir: Directory for storing cached data files
             redis_url: Redis connection URL (optional)
             server_url: Local db_server URL for price history (optional)
-            use_polygon: Force using Polygon API instead of local server
+            db_instance: Direct database instance (StockDBBase) for price history (optional)
+            use_polygon: DEPRECATED - no longer used for price history (only for IV data)
             logger: Logger instance (optional, will create one if not provided)
+        
+        Note:
+            Price history is fetched from HTTP server or database, NOT from Polygon API.
+            Polygon API is only used for IV/options data.
         """
         self.polygon_api_key = polygon_api_key
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.server_url = server_url
-        self.use_polygon = use_polygon
+        self.db_instance = db_instance
+        self.use_polygon = False  # Always False - we don't use Polygon for price history
         self.logger = logger or get_logger(__name__)
         
         # Initialize clients
@@ -243,9 +250,40 @@ class IVAnalyzer:
             self.logger.error(f"[{ticker}] Error fetching IV data: {e}")
             return None, None, None
     
+    async def _fetch_price_history_from_db(self, ticker: str, start_dt: datetime, end_dt: datetime) -> Optional[List[float]]:
+        """Fetch price history directly from database."""
+        if not self.db_instance:
+            return None
+        
+        try:
+            self.logger.debug(f"[{ticker}] Fetching price history from database")
+            # Get daily price data from database
+            df = await self.db_instance.get_stock_data(
+                ticker=ticker,
+                start_date=start_dt.strftime('%Y-%m-%d'),
+                end_date=end_dt.strftime('%Y-%m-%d'),
+                interval="daily"
+            )
+            
+            if df.empty or 'close' not in df.columns:
+                return None
+            
+            # Extract close prices
+            closes = df['close'].dropna().tolist()
+            
+            if closes:
+                self.logger.debug(f"[{ticker}] Retrieved {len(closes)} data points from database")
+                return closes
+            else:
+                return None
+                
+        except Exception as e:
+            self.logger.debug(f"[{ticker}] Database fetch error: {e}")
+            return None
+    
     def _fetch_price_history_from_server(self, ticker: str, start_dt: datetime, end_dt: datetime) -> Optional[List[float]]:
-        """Fetch price history from local db_server."""
-        if not self.server_url or self.use_polygon:
+        """Fetch price history from local db_server HTTP endpoint."""
+        if not self.server_url:
             return None
         
         try:
@@ -302,29 +340,10 @@ class IVAnalyzer:
             self.logger.debug(f"[{ticker}] Server parse error: {e}, falling back to Polygon")
             return None
     
-    def _fetch_price_history_from_polygon(self, ticker: str, start_dt: datetime, end_dt: datetime) -> Optional[List[float]]:
-        """Fetch price history from Polygon API."""
-        try:
-            self.logger.debug(f"[{ticker}] Fetching price history from Polygon")
-            closes = []
-            for agg in self.poly_client.list_aggs(
-                ticker, 1, 'day',
-                start_dt.strftime('%Y-%m-%d'),
-                end_dt.strftime('%Y-%m-%d'),
-                limit=50000
-            ):
-                closes.append(agg.close)
-            
-            if not closes:
-                raise ValueError("No history found from Polygon")
-            
-            return closes
-            
-        except Exception as e:
-            self.logger.error(f"[{ticker}] Polygon fetch error: {e}")
-            return None
+    # Removed _fetch_price_history_from_polygon - we don't use Polygon for price history
+    # Polygon API is only used for IV/options data, not historical prices
     
-    def get_realized_volatility(self, ticker: str, force_refresh: bool = False) -> pd.DataFrame:
+    async def get_realized_volatility(self, ticker: str, force_refresh: bool = False) -> pd.DataFrame:
         """
         Get or calculate realized volatility baseline.
         
@@ -351,17 +370,17 @@ class IVAnalyzer:
         start_dt = end_dt - timedelta(days=365)
         closes = None
         
-        # Try server first (unless use_polygon is True)
-        if not self.use_polygon:
-            closes = self._fetch_price_history_from_server(ticker, start_dt, end_dt)
+        # Try database first (if db_instance provided)
+        if self.db_instance:
+            closes = await self._fetch_price_history_from_db(ticker, start_dt, end_dt)
         
-        # Fallback to Polygon
+        # Try HTTP server if database didn't work
         if closes is None:
-            closes = self._fetch_price_history_from_polygon(ticker, start_dt, end_dt)
+            closes = self._fetch_price_history_from_server(ticker, start_dt, end_dt)
         
         # Fallback to default if both fail
         if not closes:
-            self.logger.warning(f"[{ticker}] No price history available, using default volatility")
+            self.logger.warning(f"[{ticker}] No price history available from database or HTTP server, using default volatility")
             return pd.DataFrame({'iv': [0.45] * 252})
         
         # Calculate realized volatility
@@ -432,7 +451,7 @@ class IVAnalyzer:
             "notes": notes
         }
     
-    def get_iv_analysis(
+    async def get_iv_analysis(
         self,
         ticker: str,
         calendar_days: int = 90,
@@ -504,7 +523,7 @@ class IVAnalyzer:
         
         # Get realized volatility and calculate metrics
         try:
-            hv_df = self.get_realized_volatility(ticker, force_refresh)
+            hv_df = await self.get_realized_volatility(ticker, force_refresh)
             hv_low = hv_df['iv'].min()
             hv_high = hv_df['iv'].max()
             

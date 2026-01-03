@@ -184,15 +184,19 @@ class CacheKeyGenerator:
         return f"stocks:latest_iv:{ticker}"
     
     @staticmethod
-    def latest_price_data(ticker: str) -> str:
+    def latest_price_data(ticker: str, source: Optional[str] = None) -> str:
         """Generate cache key for latest price data (from get_latest_price_with_data).
         
         Args:
             ticker: Stock ticker symbol
+            source: Optional data source filter ('realtime', 'hourly', or 'daily')
         
         Returns:
-            Cache key: stocks:latest_price_data:{ticker}
+            Cache key: stocks:latest_price_data:{ticker} or 
+                      stocks:latest_price_data:{ticker}:{source}
         """
+        if source:
+            return f"stocks:latest_price_data:{ticker}:{source}"
         return f"stocks:latest_price_data:{ticker}"
     
     @staticmethod

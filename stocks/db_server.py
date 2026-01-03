@@ -3123,6 +3123,8 @@ def _apply_filters(df: pd.DataFrame, filters: list, filter_logic: str = 'AND') -
             
             if is_date_field:
                 # Handle date filtering with special logic
+                # Save original value in case we need to fall back
+                original_value = value_to_compare
                 try:
                     import datetime
                     from datetime import timedelta
@@ -3162,7 +3164,11 @@ def _apply_filters(df: pd.DataFrame, filters: list, filter_logic: str = 'AND') -
                     filter_masks.append(filter_mask)
                     continue
                 except Exception as e:
-                    logger.warning(f"Error processing date filter for {field}: {e}. Falling back to regular comparison.")
+                    logger.warning(f"Error processing date filter for {field}: {e}. Falling back to string comparison.")
+                    logger.debug(f"Field dtype: {df[field].dtype}, Sample values: {df[field].head(3).tolist()}")
+                    logger.debug(f"Original value: {original_value} (type: {type(original_value).__name__})")
+                    # Reset value_to_compare to original value for fallback (will be string for date fields)
+                    value_to_compare = original_value
                     # Fall through to regular comparison below
             
             # Handle percentage-based filtering
@@ -4089,6 +4095,9 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
     iv_info = data.get('iv_info', {})
     news_info = data.get('news_info', {})
     
+    # Get price history early (needed for calculating last 2 trading days' closes)
+    price_history = price_info.get('price_data', [])
+    
     # Get financial data first - handle both dict and DataFrame
     financial_data = {}
     if financial_info:
@@ -4160,14 +4169,109 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
             pass  # If market hours check fails, continue with normal logic
         
         # Calculate change from previous close
-        # During pre-market/after-hours: main price = previous close with 0 change
+        # First, try to find the last 2 trading days' closes from price history
+        # This handles cases where the market was closed (holidays, weekends)
+        last_trading_day_close = None
+        previous_trading_day_close = None
+        
+        if price_history is not None:
+            # Convert price_history to list if it's a DataFrame
+            temp_price_history = price_history
+            if hasattr(temp_price_history, 'to_dict'):
+                df = temp_price_history.copy()
+                # Check if 'date' column already exists
+                if 'date' not in df.columns:
+                    if not df.index.empty:
+                        is_range_index = isinstance(df.index, pd.RangeIndex)
+                        if not is_range_index:
+                            index_name = df.index.name if df.index.name else 'date'
+                            df = df.reset_index()
+                            if index_name in df.columns and index_name != 'date':
+                                df = df.rename(columns={index_name: 'date'})
+                            elif 'index' in df.columns:
+                                df = df.rename(columns={'index': 'date'})
+                            if 'date' not in df.columns and len(df.columns) > 0:
+                                first_col = df.columns[0]
+                                standard_cols = ['ticker', 'open', 'high', 'low', 'close', 'volume', 'ma_10', 'ma_50', 'ma_100', 'ma_200', 'ema_8', 'ema_21', 'ema_34', 'ema_55', 'ema_89', 'write_timestamp']
+                                if first_col not in standard_cols:
+                                    df = df.rename(columns={first_col: 'date'})
+                temp_price_history = dataframe_to_json_records(df)
+            elif not isinstance(temp_price_history, list):
+                # If it's neither DataFrame nor list, try to convert
+                temp_price_history = []
+            
+            # Extract last 2 trading days' closes
+            if isinstance(temp_price_history, list) and len(temp_price_history) > 0:
+                # Sort by date (most recent first)
+                sorted_history = sorted(temp_price_history, key=lambda x: (
+                    pd.to_datetime(x.get('date') or x.get('timestamp') or '1900-01-01', errors='coerce') or pd.Timestamp('1900-01-01')
+                ), reverse=True)
+                
+                # Find last 2 unique trading days' closes
+                seen_dates = set()
+                for record in sorted_history:
+                    if not isinstance(record, dict):
+                        continue
+                    date_str = record.get('date') or record.get('timestamp')
+                    if not date_str:
+                        continue
+                    
+                    # Parse date and get date part only (YYYY-MM-DD)
+                    try:
+                        date_obj = pd.to_datetime(date_str, errors='coerce')
+                        if pd.isna(date_obj):
+                            continue
+                        date_key = date_obj.strftime('%Y-%m-%d')
+                        
+                        # Skip if we've already seen this date
+                        if date_key in seen_dates:
+                            continue
+                        
+                        close_price = record.get('close') or record.get('price')
+                        if close_price is not None:
+                            try:
+                                close_val = float(close_price)
+                                if close_val > 0:
+                                    if last_trading_day_close is None:
+                                        last_trading_day_close = close_val
+                                        seen_dates.add(date_key)
+                                    elif previous_trading_day_close is None:
+                                        previous_trading_day_close = close_val
+                                        seen_dates.add(date_key)
+                                        break  # Found both, we're done
+                            except (ValueError, TypeError):
+                                continue
+                    except Exception:
+                        continue
+        
+        # Use the last 2 trading days' closes if we found them, otherwise fall back to previous_close
+        # For change calculation, we want: last_trading_day_close vs previous_trading_day_close
+        if last_trading_day_close is not None and previous_trading_day_close is not None:
+            # We have both closes, calculate change between them
+            actual_previous_close = previous_trading_day_close
+            actual_last_close = last_trading_day_close
+        elif last_trading_day_close is not None:
+            # Only have last trading day close, use previous_close as the previous one
+            actual_last_close = last_trading_day_close
+            actual_previous_close = previous_close if previous_close and isinstance(previous_close, (int, float)) else None
+        else:
+            # Fall back to standard previous_close
+            actual_last_close = closing_price if isinstance(closing_price, (int, float)) and closing_price != 'N/A' else None
+            actual_previous_close = previous_close if previous_close and isinstance(previous_close, (int, float)) else None
+        
+        # During pre-market/after-hours: main price = last trading day close, show change from previous trading day
         # During market hours: main price = current price with change from previous close
-        if (is_premarket or is_afterhours) and previous_close and isinstance(previous_close, (int, float)) and previous_close > 0:
-            # During pre-market/after-hours, main price should be previous close with 0 change
-            # The actual pre-market/after-hours price will be shown in the separate section
-            closing_price = previous_close  # Use previous close as the main displayed price
-            price_change = 0
-            price_change_pct = 0
+        if (is_premarket or is_afterhours) and actual_last_close and isinstance(actual_last_close, (int, float)) and actual_last_close > 0:
+            # During pre-market/after-hours, main price should be last trading day close
+            # Calculate change from previous trading day close
+            closing_price = actual_last_close  # Use last trading day close as the main displayed price
+            if actual_previous_close and isinstance(actual_previous_close, (int, float)) and actual_previous_close > 0:
+                price_change = actual_last_close - actual_previous_close
+                price_change_pct = (price_change / actual_previous_close) * 100
+            else:
+                # Fallback: if we don't have previous trading day close, show 0 change
+                price_change = 0
+                price_change_pct = 0
         else:
             # During market hours: use current price and calculate change from previous close
             price_for_change = None
@@ -4263,8 +4367,8 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
     if is_afterhours and isinstance(current_price, (int, float)) and current_price != 'N/A' and after_hours_price is None:
         after_hours_price = current_price
     
-    # Get price history for chart (daily) and merged series (realtime+hourly+daily)
-    price_history = price_info.get('price_data', [])
+    # Get merged series (realtime+hourly+daily) for chart
+    # Note: price_history was already extracted earlier
     merged_price_series = price_info.get('merged_price_series')
     
     # Debug: Log price_history info
@@ -4860,6 +4964,41 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                 <div class="metric-value" id="earningsDate">{earnings_date_display if earnings_date_display and earnings_date_display != 'N/A' and 'Dividend' not in earnings_date_display and 'Yield' not in earnings_date_display else 'N/A'}</div>
             </div>
         </div>
+            </div>
+        </div>
+        
+        <div class="chart-section">
+            <h2>Price Chart</h2>
+            <div class="chart-controls" style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
+                <div style="display: flex; flex-wrap: wrap; gap: 5px;">
+                    <button class="chart-btn active" onclick="switchTimePeriod('1d')" id="btn-1d">1D</button>
+                    <button class="chart-btn" onclick="switchTimePeriod('1w')" id="btn-1w">1W</button>
+                    <button class="chart-btn" onclick="switchTimePeriod('1m')" id="btn-1m">1M</button>
+                    <button class="chart-btn" onclick="switchTimePeriod('3m')" id="btn-3m">3M</button>
+                    <button class="chart-btn" onclick="switchTimePeriod('6m')" id="btn-6m">6M</button>
+                    <button class="chart-btn" onclick="switchTimePeriod('ytd')" id="btn-ytd">YTD</button>
+                    <button class="chart-btn" onclick="switchTimePeriod('1y')" id="btn-1y">1Y</button>
+                    <button class="chart-btn" onclick="switchTimePeriod('2y')" id="btn-2y">2Y</button>
+                </div>
+                <div id="chartRangeInfo" style="display: flex; flex-direction: column; gap: 6px; margin-left: auto; padding: 8px 12px; background: #161b22; border-radius: 6px; border: 1px solid #30363d; font-size: 13px; color: #c9d1d9; min-width: 200px;">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span id="rangeDates" style="color: #8b949e;">--</span>
+                        <span id="rangeMove" style="font-weight: 600;">--</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 10px; font-size: 12px; color: #8b949e;">
+                        <span>Min: <span id="rangeMin" style="color: #ef5350; font-weight: 500;">--</span></span>
+                        <span>Max: <span id="rangeMax" style="color: #26a69a; font-weight: 500;">--</span></span>
+                    </div>
+                </div>
+            </div>
+            <div class="chart-container">
+                <canvas id="priceChart"></canvas>
+                <div id="chartNoDataMessage" style="display: none; text-align: center; padding: 40px; color: #666;">
+                    <p>No historical price data available for this symbol.</p>
+                    <p style="font-size: 12px; margin-top: 10px;">Try adding <code>?force_fetch=true</code> to the URL to fetch data from the API.</p>
+                </div>
+            </div>
+        </div>
         
         <!-- Financial Ratios Section -->
         {f'''
@@ -4950,32 +5089,77 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                     <div class="metric-value">{format_value(financial_data.get('dividend_yield'), is_percentage=True)}</div>
                 </div>
                 
+                <!-- IV Analysis Section Separator and Header -->
+                {f'''
+                <div style="grid-column: 1 / -1; margin: 20px 0 10px 0; border-top: 2px solid #30363d; padding-top: 15px;">
+                    <h3 style="margin: 0; font-size: 16px; font-weight: 600; color: #667eea; text-transform: uppercase; letter-spacing: 0.5px;">IV Analysis</h3>
+                </div>
+                ''' if (financial_data.get('iv_30d') is not None or financial_data.get('iv_rank') is not None or financial_data.get('relative_rank') is not None or financial_data.get('iv_strategy', {}).get('recommendation') or financial_data.get('iv_strategy', {}).get('risk_score') is not None or financial_data.get('iv_metrics', {}).get('hv_1yr_range') or financial_data.get('iv_metrics', {}).get('roll_yield')) else ''}
+                
+                <!-- IV Analysis Section -->
+                {f'''
+                <div class="metric-card" style="grid-column: span 2; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: 2px solid #5a67d8;">
+                    <div class="metric-label" style="color: white; font-weight: bold; font-size: 14px;">IV Analysis</div>
+                    <div class="metric-value" style="color: white; font-size: 12px; margin-top: 5px;">
+                        {format_value(financial_data.get('iv_30d'), is_percentage=True) if financial_data.get('iv_30d') is not None else 'N/A'}
+                    </div>
+                </div>
+                ''' if financial_data.get('iv_30d') is not None else ''}
+                
+                {f'''
+                <div class="metric-card">
+                    <div class="metric-label">IV Rank</div>
+                    <div class="metric-value">{format_value(financial_data.get('iv_rank'))}</div>
+                </div>
+                ''' if financial_data.get('iv_rank') is not None else ''}
+                
+                {f'''
+                <div class="metric-card">
+                    <div class="metric-label">Relative Rank (vs SPY)</div>
+                    <div class="metric-value">{format_value(financial_data.get('relative_rank'))}</div>
+                </div>
+                ''' if financial_data.get('relative_rank') is not None else ''}
+                
+                {f'''
+                <div class="metric-card" style="grid-column: span 2;">
+                    <div class="metric-label">IV Recommendation</div>
+                    <div class="metric-value" style="font-weight: bold; color: {'#10b981' if financial_data.get('iv_strategy', {}).get('recommendation') == 'BUY LEAP' else '#ef4444' if 'SELL' in str(financial_data.get('iv_strategy', {}).get('recommendation', '')) else '#6b7280'};">
+                        {financial_data.get('iv_strategy', {}).get('recommendation', 'N/A')}
+                    </div>
+                    {f'''
+                    <div style="font-size: 11px; color: #6b7280; margin-top: 5px;">
+                        {financial_data.get('iv_strategy', {}).get('notes', {}).get('meaning', '')}
+                    </div>
+                    ''' if financial_data.get('iv_strategy', {}).get('notes', {}).get('meaning') else ''}
+                </div>
+                ''' if financial_data.get('iv_strategy', {}).get('recommendation') else ''}
+                
+                {f'''
+                <div class="metric-card">
+                    <div class="metric-label">Risk Score</div>
+                    <div class="metric-value">{format_value(financial_data.get('iv_strategy', {}).get('risk_score'))}</div>
+                </div>
+                ''' if financial_data.get('iv_strategy', {}).get('risk_score') is not None else ''}
+                
+                {f'''
+                <div class="metric-card">
+                    <div class="metric-label">HV 1Y Range</div>
+                    <div class="metric-value" style="font-size: 11px;">
+                        {financial_data.get('iv_metrics', {}).get('hv_1yr_range', 'N/A')}
+                    </div>
+                </div>
+                ''' if financial_data.get('iv_metrics', {}).get('hv_1yr_range') else ''}
+                
+                {f'''
+                <div class="metric-card">
+                    <div class="metric-label">Roll Yield</div>
+                    <div class="metric-value">{financial_data.get('iv_metrics', {}).get('roll_yield', 'N/A')}</div>
+                </div>
+                ''' if financial_data.get('iv_metrics', {}).get('roll_yield') else ''}
+                
             </div>
         </div>
         ''' if financial_data else ''}
-            </div>
-        </div>
-        
-        <div class="chart-section">
-            <h2>Price Chart</h2>
-            <div class="chart-controls" style="display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px;">
-                <button class="chart-btn active" onclick="switchTimePeriod('1d')" id="btn-1d">1D</button>
-                <button class="chart-btn" onclick="switchTimePeriod('1w')" id="btn-1w">1W</button>
-                <button class="chart-btn" onclick="switchTimePeriod('1m')" id="btn-1m">1M</button>
-                <button class="chart-btn" onclick="switchTimePeriod('3m')" id="btn-3m">3M</button>
-                <button class="chart-btn" onclick="switchTimePeriod('6m')" id="btn-6m">6M</button>
-                <button class="chart-btn" onclick="switchTimePeriod('ytd')" id="btn-ytd">YTD</button>
-                <button class="chart-btn" onclick="switchTimePeriod('1y')" id="btn-1y">1Y</button>
-                <button class="chart-btn" onclick="switchTimePeriod('2y')" id="btn-2y">2Y</button>
-            </div>
-            <div class="chart-container">
-                <canvas id="priceChart"></canvas>
-                <div id="chartNoDataMessage" style="display: none; text-align: center; padding: 40px; color: #666;">
-                    <p>No historical price data available for this symbol.</p>
-                    <p style="font-size: 12px; margin-top: 10px;">Try adding <code>?force_fetch=true</code> to the URL to fetch data from the API.</p>
-                </div>
-            </div>
-        </div>
         
         
         {f'''
@@ -5646,6 +5830,80 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                 }}
             }});
 
+            // Helper function to update range display (min/max) for the current interval
+            function updateRangeDisplay(series) {{
+                if (!series || !series.data || series.data.length === 0 || !series.labels || series.labels.length === 0) {{
+                    return;
+                }}
+                
+                const startPrice = series.data[0];
+                const endPrice = series.data[series.data.length - 1];
+                const startDate = series.labels[0];
+                const endDate = series.labels[series.labels.length - 1];
+                
+                // Calculate min and max prices in the interval
+                let minPrice = startPrice;
+                let maxPrice = startPrice;
+                for (let i = 0; i < series.data.length; i++) {{
+                    const price = series.data[i];
+                    if (price !== null && price !== undefined && !isNaN(price)) {{
+                        if (price < minPrice) minPrice = price;
+                        if (price > maxPrice) maxPrice = price;
+                    }}
+                }}
+                
+                // Calculate move percentage
+                let movePct = 0;
+                if (startPrice && endPrice && startPrice > 0) {{
+                    movePct = ((endPrice - startPrice) / startPrice) * 100;
+                }}
+                
+                // Format dates - for 1D show time, for others show date
+                let formattedStartDate = startDate;
+                let formattedEndDate = endDate;
+                if (currentTimePeriod !== '1d') {{
+                    // Try to parse and format dates nicely
+                    const startDateObj = parseDate(startDate);
+                    const endDateObj = parseDate(endDate);
+                    if (startDateObj && !isNaN(startDateObj.getTime())) {{
+                        const month = String(startDateObj.getMonth() + 1).padStart(2, '0');
+                        const day = String(startDateObj.getDate()).padStart(2, '0');
+                        const year = startDateObj.getFullYear();
+                        formattedStartDate = `${{month}}/${{day}}/${{year}}`;
+                    }}
+                    if (endDateObj && !isNaN(endDateObj.getTime())) {{
+                        const month = String(endDateObj.getMonth() + 1).padStart(2, '0');
+                        const day = String(endDateObj.getDate()).padStart(2, '0');
+                        const year = endDateObj.getFullYear();
+                        formattedEndDate = `${{month}}/${{day}}/${{year}}`;
+                    }}
+                }}
+                
+                // Update range display
+                const rangeDatesEl = document.getElementById('rangeDates');
+                const rangeMoveEl = document.getElementById('rangeMove');
+                const rangeMinEl = document.getElementById('rangeMin');
+                const rangeMaxEl = document.getElementById('rangeMax');
+                if (rangeDatesEl) {{
+                    rangeDatesEl.textContent = `${{formattedStartDate}} - ${{formattedEndDate}}`;
+                }}
+                if (rangeMoveEl) {{
+                    const moveSign = movePct >= 0 ? '+' : '';
+                    const moveColor = movePct >= 0 ? '#26a69a' : '#ef5350';
+                    rangeMoveEl.textContent = `${{moveSign}}${{movePct.toFixed(2)}}%`;
+                    rangeMoveEl.style.color = moveColor;
+                }}
+                if (rangeMinEl) {{
+                    rangeMinEl.textContent = `$${{minPrice.toFixed(2)}}`;
+                }}
+                if (rangeMaxEl) {{
+                    rangeMaxEl.textContent = `$${{maxPrice.toFixed(2)}}`;
+                }}
+            }}
+            
+            // Update initial range information for 1D period
+            updateRangeDisplay(initialSeries);
+
             // Register zoom plugin for drag-to-zoom selection
             try {{
                 const zoomPlugin = window.ChartZoom || window['chartjs-plugin-zoom'] || window.Zoom;
@@ -5919,8 +6177,20 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
             const series = buildSeriesForPeriod(period);
             if (!priceChart || !series.data || series.data.length === 0) {{
                 console.warn('Cannot switch time period: chart not initialized or no data for this period');
+                // Clear range info if no data
+                const rangeDatesEl = document.getElementById('rangeDates');
+                const rangeMoveEl = document.getElementById('rangeMove');
+                const rangeMinEl = document.getElementById('rangeMin');
+                const rangeMaxEl = document.getElementById('rangeMax');
+                if (rangeDatesEl) rangeDatesEl.textContent = '--';
+                if (rangeMoveEl) rangeMoveEl.textContent = '--';
+                if (rangeMinEl) rangeMinEl.textContent = '--';
+                if (rangeMaxEl) rangeMaxEl.textContent = '--';
                 return;
             }}
+
+            // Calculate and display range information using the helper function
+            updateRangeDisplay(series);
 
             // Reset zoom on period change so selection always reflects the new window
             if (typeof priceChart.resetZoom === 'function') {{
@@ -6236,6 +6506,9 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                     }}
                     
                     priceChart.update('none');
+                    
+                    // Update range display (min/max) with the newly sampled data
+                    updateRangeDisplay(sampled);
                 }}
             }}
         }}
@@ -8357,23 +8630,14 @@ async def handle_db_command(request: web.Request) -> web.Response:
                 if df.empty:
                     return web.json_response({"message": "No historical data found", "data": []})
                 
-                # Reset index and format datetime columns
+                # Reset index to make datetime index available as a column
                 df_reset = df.reset_index()
-                # Convert datetime64 columns to strings
-                for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
-                    df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
-                # Also check object columns for Timestamp objects (can happen after reset_index)
-                for col_name in df_reset.select_dtypes(include=['object']).columns:
-                    if df_reset[col_name].notna().any():
-                        # Check if the column contains Timestamp objects
-                        sample_val = df_reset[col_name].dropna().iloc[0] if not df_reset[col_name].dropna().empty else None
-                        if isinstance(sample_val, pd.Timestamp):
-                            df_reset[col_name] = df_reset[col_name].apply(
-                                lambda x: x.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if pd.notna(x) and isinstance(x, pd.Timestamp) else x
-                            )
                 
-                # Apply limit and convert to records
-                result_data = df_reset.tail(limit).to_dict(orient='records')
+                # Apply limit before conversion
+                df_reset = df_reset.tail(limit)
+                
+                # Use the existing function that properly handles all Timestamp conversions
+                result_data = dataframe_to_json_records(df_reset)
                 return web.json_response({"data": result_data})
                 
             except Exception as e:
@@ -8396,22 +8660,11 @@ async def handle_db_command(request: web.Request) -> web.Response:
                 if df.empty:
                     return web.json_response({"message": "No daily data found for today", "data": []})
                 
-                # Reset index and format datetime columns
+                # Reset index to make datetime index available as a column
                 df_reset = df.reset_index()
-                # Convert datetime64 columns to strings
-                for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
-                    df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
-                # Also check object columns for Timestamp objects (can happen after reset_index)
-                for col_name in df_reset.select_dtypes(include=['object']).columns:
-                    if df_reset[col_name].notna().any():
-                        # Check if the column contains Timestamp objects
-                        sample_val = df_reset[col_name].dropna().iloc[0] if not df_reset[col_name].dropna().empty else None
-                        if isinstance(sample_val, pd.Timestamp):
-                            df_reset[col_name] = df_reset[col_name].apply(
-                                lambda x: x.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if pd.notna(x) and isinstance(x, pd.Timestamp) else x
-                            )
                 
-                result_data = df_reset.to_dict(orient='records')
+                # Use the existing function that properly handles all Timestamp conversions
+                result_data = dataframe_to_json_records(df_reset)
                 return web.json_response({"data": result_data})
                 
             except Exception as e:

@@ -205,3 +205,7 @@
 - Unclosed resources (files, connections, sockets)
 - Silent failures that could hide critical issues
 
+
+## ENV variables
+use "questdb://stock_user:stock_password@ms1.kundu.dev:8812/stock_data" as the --db-file or --db--path options when applicable
+

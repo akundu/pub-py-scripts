@@ -2317,13 +2317,13 @@ Examples:
     parser.add_argument(
         '--date',
         default=datetime.now().strftime('%Y-%m-%d'),
-        help="The start date in YYYY-MM-DD format (default: today). Used as start date for multi-month mode."
+        help="Fetch options for a specific date in YYYY-MM-DD format (default: today). When --months-ahead is 0, fetches data for this single date. When --months-ahead > 0, uses this as the start date for multi-month mode."
     )
     parser.add_argument(
         '--start-date',
         type=str,
         default=None,
-        help="Explicit start date in YYYY-MM-DD format. Overrides --date if provided. Used for multi-month mode."
+        help="Explicit start date in YYYY-MM-DD format. Overrides --date if provided. Primarily used for multi-month mode."
     )
     parser.add_argument(
         '--months-ahead',
@@ -2496,7 +2496,12 @@ Examples:
 
     # Handle start_date: if provided, override date
     if getattr(args, 'start_date', None):
+        print(f"--start-date specified ({args.start_date}), overriding --date", file=sys.stderr)
         args.date = args.start_date
+    elif getattr(args, 'date', None) and args.months_ahead == 0:
+        print(f"--date specified ({args.date}) with --months-ahead 0 (single-date mode)", file=sys.stderr)
+    elif getattr(args, 'date', None):
+        print(f"--date specified ({args.date}) as start date for multi-month mode", file=sys.stderr)
 
     # Backward-compatibility: map deprecated flags to new consolidated flags
     if getattr(args, 'use_csv_cache', False) or getattr(args, 'save_to_csv', False):

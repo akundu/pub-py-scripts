@@ -1958,51 +1958,7 @@ async def _get_current_price_alpaca(symbol: str, current_db_instance: StockDBBas
         print(f"Error fetching current price for {symbol} from Alpaca: {e}", file=sys.stderr)
         raise
 
-async def get_financial_ratios(ticker: str, api_key: str) -> dict[str, Any] | None:
-    """Fetch financial ratios (P/E, P/B, etc.) from Polygon.io for a given ticker."""
-    try:
-        import aiohttp
-        url = f"https://api.polygon.io/stocks/financials/v1/ratios"
-        params = {
-            "ticker": ticker,
-            "apiKey": api_key
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get("status") == "OK" and data.get("results"):
-                        results = data["results"]
-                        # Handle case where results is a list - take the first item
-                        if isinstance(results, list) and len(results) > 0:
-                            return results[0]
-                        elif isinstance(results, dict):
-                            return results
-                        else:
-                            logger.warning(f"Unexpected results format for {ticker}: {type(results)}")
-                            return None
-                    else:
-                        # More detailed error logging
-                        status = data.get("status", "UNKNOWN")
-                        message = data.get("message", "")
-                        results_count = len(data.get("results", [])) if isinstance(data.get("results"), (list, dict)) else 0
-                        
-                        if message:
-                            logger.debug(f"No financial ratios data available for {ticker}: status={status}, message={message}")
-                        elif status != "OK":
-                            logger.debug(f"No financial ratios data available for {ticker}: status={status} (not OK)")
-                        elif results_count == 0:
-                            logger.debug(f"No financial ratios data available for {ticker}: status={status}, but no results returned (this is normal for ETFs and some tickers)")
-                        else:
-                            logger.debug(f"No financial ratios data available for {ticker}: status={status}, results_count={results_count}")
-                        return None
-                else:
-                    logger.error(f"Failed to fetch financial ratios for {ticker}: HTTP {response.status}")
-                    return None
-    except Exception as e:
-        logger.error(f"Error fetching financial ratios for {ticker}: {e}")
-        return None
+# get_financial_ratios is now imported from common.financial_data
 
 async def get_latest_news(
     ticker: str,
@@ -2454,6 +2410,11 @@ def parse_args():
         help="Specify the timeframe for data (daily or hourly, default: daily)."
     )
     parser.add_argument(
+        "--date",
+        default=None,
+        help="Fetch data for a specific date (YYYY-MM-DD). Sets both start-date and end-date to this value. Overrides --start-date and --end-date if provided."
+    )
+    parser.add_argument(
         "--start-date",
         default=None, 
         help="Start date for data query/fetch (YYYY-MM-DD). If not specified with end-date, will be set to 30 days before end-date. If neither specified, assumes latest price request."
@@ -2555,6 +2516,11 @@ def parse_args():
         help="Fetch latest implied volatility data from options for the symbol. Implies --latest mode."
     )
     parser.add_argument(
+        "--show-financials",
+        action="store_true",
+        help="Display all stored financial information for the symbol from the database (ratios, fundamentals, etc.). Implies --latest mode."
+    )
+    parser.add_argument(
         "--log-level",
         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
         default='ERROR',
@@ -2606,8 +2572,18 @@ async def main() -> None:
             print("--fetch-news specified, enabling --latest mode", file=sys.stderr)
         if args.fetch_iv:
             print("--fetch-iv specified, enabling --latest mode", file=sys.stderr)
+    
+    # Handle --show-financials parameter
+    if args.show_financials:
+        # This option implies --latest mode
+        args.latest = True
 
-
+    # Handle --date parameter (overrides --start-date and --end-date)
+    if args.date:
+        args.start_date = args.date
+        args.end_date = args.date
+        print(f"--date specified ({args.date}), setting both start-date and end-date to: {args.date}", file=sys.stderr)
+    
     # Handle start-date and end-date logic based on user requirements
     today_str = datetime.now().strftime('%Y-%m-%d')
     
@@ -2705,6 +2681,7 @@ async def main() -> None:
 
             should_refetch_now = False
             cached_latest_data = None  # Cache the result from freshness check
+            today_daily_check = None  # Cache today's daily data check to avoid duplicate queries
             
             # Check if we need to fetch data for today based on write_timestamp vs last possible update time
             async def _is_today_data_fresh(interval: str) -> bool:
@@ -2884,7 +2861,14 @@ async def main() -> None:
                     return False
             
             # Check freshness for today's data
-            if max_age is not None:
+            # Special case: when --only-fetch daily is specified, skip all freshness checks
+            # Daily bars are historical/complete data, not real-time, so no need for freshness checks
+            # The script will return the latest daily bar available in DB/cache
+            # If user wants to ensure they have today's bar after market close, use --force-fetch
+            if args.only_fetch == 'daily':
+                logging.info(f"Freshness fetch: skipped (--only-fetch daily, using latest daily bar from cache/DB).")
+                should_refetch_now = False
+            elif max_age is not None:
                 # For realtime data, check if we have fresh realtime data
                 if session in ('regular', 'premarket', 'afterhours'):
                     # Check realtime data freshness
@@ -2904,7 +2888,12 @@ async def main() -> None:
                             should_refetch_now = True
                         elif rt_age > max_age:
                             # Check if we have fresh hourly data for today (which might be more relevant than realtime)
-                            if await _is_today_data_fresh('hourly'):
+                            # Skip this check if --only-fetch realtime is specified (we only want realtime, not hourly)
+                            if args.only_fetch == 'realtime':
+                                # When only fetching realtime, accept the realtime data we have (don't check hourly)
+                                cached_latest_data = rt_info.get('latest_data')
+                                should_refetch_now = False
+                            elif await _is_today_data_fresh('hourly'):
                                 logging.info(f"Freshness: today's hourly data is fresh, skipping realtime fetch.")
                                 should_refetch_now = False
                                 cached_latest_data = rt_info.get('latest_data')
@@ -2915,7 +2904,25 @@ async def main() -> None:
                             cached_latest_data = rt_info.get('latest_data')
                 else:
                     # Market closed: check if we have fresh daily data for today
-                    if await _is_today_data_fresh('daily'):
+                    # Skip unnecessary checks based on --only-fetch parameter
+                    if args.only_fetch == 'realtime':
+                        # When only fetching realtime, skip daily/hourly checks (market is closed, use realtime data we have)
+                        logging.info(f"Freshness fetch: skipped (market closed, --only-fetch realtime, using cached realtime data).")
+                        should_refetch_now = False
+                    elif args.only_fetch == 'hourly':
+                        # When only fetching hourly, skip daily checks (only check hourly)
+                        if await _is_today_data_fresh('hourly'):
+                            logging.info(f"Freshness: today's hourly data is fresh, skipping fetch (--only-fetch hourly).")
+                            should_refetch_now = False
+                        else:
+                            logging.info(f"Freshness: today's hourly data is not fresh, will fetch (--only-fetch hourly).")
+                            should_refetch_now = True
+                    elif args.only_fetch == 'daily':
+                        # This case won't be reached now (handled at top of if statement)
+                        # Keeping for defensive programming
+                        logging.info(f"Freshness fetch: skipped (market closed, --only-fetch daily, using latest daily close).")
+                        should_refetch_now = False
+                    elif await _is_today_data_fresh('daily'):
                         logging.info(f"Freshness: today's daily data is fresh, skipping fetch.")
                         should_refetch_now = False
                     else:
@@ -2967,11 +2974,16 @@ async def main() -> None:
                     logging.info(f"Freshness fetch: skipped (realtime recent enough, age<= {max_age}s for {session} session).")
                 else:
                     # Market closed: check if we already have today's data before deciding to fetch
-                    today_daily_check = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=today_str, interval='daily')
-                    if not today_daily_check.empty:
-                        logging.info("Freshness fetch: skipped (market closed, today's daily data already exists).")
+                    # Skip daily check if --only-fetch is specified (we've already decided what to fetch above)
+                    # Cache the result for reuse later (to avoid duplicate queries)
+                    if args.only_fetch in ('realtime', 'hourly', 'daily'):
+                        logging.info(f"Freshness fetch: skipped (market closed, --only-fetch {args.only_fetch}).")
                     else:
-                        logging.info("Freshness fetch: skipped (market closed, no new data available until market opens).")
+                        today_daily_check = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=today_str, interval='daily')
+                        if not today_daily_check.empty:
+                            logging.info("Freshness fetch: skipped (market closed, today's daily data already exists).")
+                        else:
+                            logging.info("Freshness fetch: skipped (market closed, no new data available until market opens).")
 
             print()  # Spacing
 
@@ -2980,7 +2992,7 @@ async def main() -> None:
             # Reuse cached result from freshness check if available to avoid duplicate queries
             # Store latest_data in outer scope so it can be reused for hourly/daily display
             latest_data_for_display = None
-            if args.only_fetch in (None, 'realtime'):
+            if args.only_fetch in (None, 'realtime', 'hourly', 'daily'):
                 try:
                     # Use cached result if available, otherwise fetch fresh
                     if cached_latest_data is not None:
@@ -2992,7 +3004,7 @@ async def main() -> None:
                         use_market_time = not args.no_market_time
                         # Check if the method exists (only available on QuestDB instances)
                         if hasattr(db_instance, 'get_latest_price_with_data'):
-                            latest_data = await db_instance.get_latest_price_with_data(args.symbol, use_market_time=use_market_time)
+                            latest_data = await db_instance.get_latest_price_with_data(args.symbol, use_market_time=use_market_time, only_source=args.only_fetch)
                         else:
                             # Fallback for non-QuestDB instances (e.g., StockDBClient)
                             price_data = await _get_latest_price_with_timestamp(db_instance, args.symbol, use_market_time=use_market_time)
@@ -3121,18 +3133,31 @@ async def main() -> None:
             skip_detailed_checks = False
             if not should_refetch_now and session in ('afterhours', 'closed'):
                 # If we're in afterhours/closed and didn't need to refetch realtime data,
-                # check if we have today's daily data before skipping checks
-                # Only skip if we already have today's data
-                today_daily = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=today_str, interval='daily')
-                if not today_daily.empty:
-                    # We have today's data, skip detailed checks and don't fetch
+                # skip detailed checks since market is closed
+                # When --only-fetch is specified, we've already decided what to fetch above
+                if args.only_fetch in ('realtime', 'hourly', 'daily'):
+                    # Skip additional checks when only-fetch is specified
                     skip_detailed_checks = True
-                    logging.info("Skipping detailed age checks (afterhours/closed session, today's daily data already exists)")
+                    logging.info(f"Skipping detailed age checks (afterhours/closed session, --only-fetch {args.only_fetch})")
                 else:
-                    # We don't have today's data, but market is closed so we won't get new data
-                    # Still skip checks since fetching won't help when market is closed
-                    skip_detailed_checks = True
-                    logging.info("Skipping detailed age checks (afterhours/closed session, market closed so no new data available)")
+                    # Check if we have today's daily data before skipping checks
+                    # Reuse today_daily_check if already fetched earlier (avoid duplicate query)
+                    if today_daily_check is not None:
+                        # Reuse the previous check result
+                        today_daily = today_daily_check
+                    else:
+                        # Need to fetch it now
+                        today_daily = await db_instance.get_stock_data(args.symbol, start_date=today_str, end_date=today_str, interval='daily')
+                    
+                    if not today_daily.empty:
+                        # We have today's data, skip detailed checks and don't fetch
+                        skip_detailed_checks = True
+                        logging.info("Skipping detailed age checks (afterhours/closed session, today's daily data already exists)")
+                    else:
+                        # We don't have today's data, but market is closed so we won't get new data
+                        # Still skip checks since fetching won't help when market is closed
+                        skip_detailed_checks = True
+                        logging.info("Skipping detailed age checks (afterhours/closed session, market closed so no new data available)")
             
             if not skip_detailed_checks and (args.only_fetch in (None, 'daily', 'hourly')):
                 # Log last bar ages for context and check if daily/hourly need refresh
@@ -3632,6 +3657,157 @@ async def main() -> None:
                     print(f"Error fetching IV: {e}")
                     import traceback
                     logger.debug(traceback.format_exc())
+            
+            # Display all stored financial information if requested
+            if args.show_financials:
+                print()  # Spacing
+                print("="*80)
+                print("STORED FINANCIAL INFORMATION")
+                print("="*80)
+                try:
+                    # Query all stored financial data from database
+                    financial_data = await db_instance.get_financial_info(args.symbol)
+                    
+                    if not financial_data.empty:
+                        # Display most recent entry
+                        latest_entry = financial_data.iloc[-1]
+                        
+                        print(f"\nSymbol: {args.symbol}")
+                        if 'date' in latest_entry and pd.notna(latest_entry['date']):
+                            print(f"Data Date: {latest_entry['date']}")
+                        if 'write_timestamp' in latest_entry and pd.notna(latest_entry['write_timestamp']):
+                            print(f"Last Updated: {latest_entry['write_timestamp']}")
+                        
+                        # Valuation Ratios
+                        print(f"\n{'Valuation Ratios:':<30}")
+                        print(f"{'─'*80}")
+                        if 'price_to_earnings' in latest_entry and pd.notna(latest_entry['price_to_earnings']):
+                            print(f"  {'P/E Ratio:':<30} {latest_entry['price_to_earnings']}")
+                        if 'price_to_book' in latest_entry and pd.notna(latest_entry['price_to_book']):
+                            print(f"  {'P/B Ratio:':<30} {latest_entry['price_to_book']}")
+                        if 'price_to_sales' in latest_entry and pd.notna(latest_entry['price_to_sales']):
+                            print(f"  {'P/S Ratio:':<30} {latest_entry['price_to_sales']}")
+                        if 'peg_ratio' in latest_entry and pd.notna(latest_entry['peg_ratio']):
+                            print(f"  {'PEG Ratio:':<30} {latest_entry['peg_ratio']}")
+                        if 'price_to_cash_flow' in latest_entry and pd.notna(latest_entry['price_to_cash_flow']):
+                            print(f"  {'P/CF Ratio:':<30} {latest_entry['price_to_cash_flow']}")
+                        if 'price_to_free_cash_flow' in latest_entry and pd.notna(latest_entry['price_to_free_cash_flow']):
+                            print(f"  {'P/FCF Ratio:':<30} {latest_entry['price_to_free_cash_flow']}")
+                        if 'ev_to_sales' in latest_entry and pd.notna(latest_entry['ev_to_sales']):
+                            print(f"  {'EV/Sales:':<30} {latest_entry['ev_to_sales']}")
+                        if 'ev_to_ebitda' in latest_entry and pd.notna(latest_entry['ev_to_ebitda']):
+                            print(f"  {'EV/EBITDA:':<30} {latest_entry['ev_to_ebitda']}")
+                        
+                        # Profitability Ratios
+                        print(f"\n{'Profitability Ratios:':<30}")
+                        print(f"{'─'*80}")
+                        if 'return_on_equity' in latest_entry and pd.notna(latest_entry['return_on_equity']):
+                            print(f"  {'ROE:':<30} {latest_entry['return_on_equity']}")
+                        if 'return_on_assets' in latest_entry and pd.notna(latest_entry['return_on_assets']):
+                            print(f"  {'ROA:':<30} {latest_entry['return_on_assets']}")
+                        if 'profit_margin' in latest_entry and pd.notna(latest_entry['profit_margin']):
+                            print(f"  {'Profit Margin:':<30} {latest_entry['profit_margin']}")
+                        if 'gross_margin' in latest_entry and pd.notna(latest_entry['gross_margin']):
+                            print(f"  {'Gross Margin:':<30} {latest_entry['gross_margin']}")
+                        if 'operating_margin' in latest_entry and pd.notna(latest_entry['operating_margin']):
+                            print(f"  {'Operating Margin:':<30} {latest_entry['operating_margin']}")
+                        
+                        # Liquidity Ratios
+                        print(f"\n{'Liquidity Ratios:':<30}")
+                        print(f"{'─'*80}")
+                        if 'current' in latest_entry and pd.notna(latest_entry['current']):
+                            print(f"  {'Current Ratio:':<30} {latest_entry['current']}")
+                        if 'quick' in latest_entry and pd.notna(latest_entry['quick']):
+                            print(f"  {'Quick Ratio:':<30} {latest_entry['quick']}")
+                        if 'cash' in latest_entry and pd.notna(latest_entry['cash']):
+                            print(f"  {'Cash Ratio:':<30} {latest_entry['cash']}")
+                        
+                        # Leverage Ratios
+                        print(f"\n{'Leverage Ratios:':<30}")
+                        print(f"{'─'*80}")
+                        if 'debt_to_equity' in latest_entry and pd.notna(latest_entry['debt_to_equity']):
+                            print(f"  {'Debt-to-Equity:':<30} {latest_entry['debt_to_equity']}")
+                        if 'debt_to_assets' in latest_entry and pd.notna(latest_entry['debt_to_assets']):
+                            print(f"  {'Debt-to-Assets:':<30} {latest_entry['debt_to_assets']}")
+                        
+                        # Market Data
+                        print(f"\n{'Market Data:':<30}")
+                        print(f"{'─'*80}")
+                        if 'market_cap' in latest_entry and pd.notna(latest_entry['market_cap']):
+                            market_cap = float(latest_entry['market_cap'])
+                            if market_cap >= 1e12:
+                                print(f"  {'Market Cap:':<30} ${market_cap/1e12:.2f}T")
+                            elif market_cap >= 1e9:
+                                print(f"  {'Market Cap:':<30} ${market_cap/1e9:.2f}B")
+                            elif market_cap >= 1e6:
+                                print(f"  {'Market Cap:':<30} ${market_cap/1e6:.2f}M")
+                            else:
+                                print(f"  {'Market Cap:':<30} ${market_cap:,.0f}")
+                        if 'enterprise_value' in latest_entry and pd.notna(latest_entry['enterprise_value']):
+                            ev = float(latest_entry['enterprise_value'])
+                            if ev >= 1e12:
+                                print(f"  {'Enterprise Value:':<30} ${ev/1e12:.2f}T")
+                            elif ev >= 1e9:
+                                print(f"  {'Enterprise Value:':<30} ${ev/1e9:.2f}B")
+                            elif ev >= 1e6:
+                                print(f"  {'Enterprise Value:':<30} ${ev/1e6:.2f}M")
+                            else:
+                                print(f"  {'Enterprise Value:':<30} ${ev:,.0f}")
+                        if 'shares_outstanding' in latest_entry and pd.notna(latest_entry['shares_outstanding']):
+                            shares = float(latest_entry['shares_outstanding'])
+                            if shares >= 1e9:
+                                print(f"  {'Shares Outstanding:':<30} {shares/1e9:.2f}B")
+                            elif shares >= 1e6:
+                                print(f"  {'Shares Outstanding:':<30} {shares/1e6:.2f}M")
+                            else:
+                                print(f"  {'Shares Outstanding:':<30} {shares:,.0f}")
+                        if 'dividend_yield' in latest_entry and pd.notna(latest_entry['dividend_yield']):
+                            yield_val = float(latest_entry['dividend_yield']) * 100
+                            print(f"  {'Dividend Yield:':<30} {yield_val:.2f}%")
+                        
+                        # Cash Flow
+                        print(f"\n{'Cash Flow:':<30}")
+                        print(f"{'─'*80}")
+                        if 'free_cash_flow' in latest_entry and pd.notna(latest_entry['free_cash_flow']):
+                            fcf = float(latest_entry['free_cash_flow'])
+                            if fcf >= 1e9:
+                                print(f"  {'Free Cash Flow:':<30} ${fcf/1e9:.2f}B")
+                            elif fcf >= 1e6:
+                                print(f"  {'Free Cash Flow:':<30} ${fcf/1e6:.2f}M")
+                            else:
+                                print(f"  {'Free Cash Flow:':<30} ${fcf:,.0f}")
+                        if 'operating_cash_flow' in latest_entry and pd.notna(latest_entry['operating_cash_flow']):
+                            ocf = float(latest_entry['operating_cash_flow'])
+                            if ocf >= 1e9:
+                                print(f"  {'Operating Cash Flow:':<30} ${ocf/1e9:.2f}B")
+                            elif ocf >= 1e6:
+                                print(f"  {'Operating Cash Flow:':<30} ${ocf/1e6:.2f}M")
+                            else:
+                                print(f"  {'Operating Cash Flow:':<30} ${ocf:,.0f}")
+                        
+                        # Show historical data count if available
+                        if len(financial_data) > 1:
+                            print(f"\n{'Historical Data:':<30}")
+                            print(f"{'─'*80}")
+                            print(f"  {'Total Records:':<30} {len(financial_data)}")
+                            if 'date' in financial_data.columns:
+                                dates = financial_data['date'].dropna()
+                                if not dates.empty:
+                                    print(f"  {'Date Range:':<30} {dates.min()} to {dates.max()}")
+                        
+                        print("\n" + "="*80)
+                        print("Tip: Use --fetch-ratios to update financial data from Polygon.io API")
+                        print("="*80)
+                    else:
+                        print("\nNo financial information found in database.")
+                        print("Use --fetch-ratios to fetch and store financial data from Polygon.io API")
+                        print("="*80)
+                
+                except Exception as e:
+                    print(f"\nError retrieving financial information: {e}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+                    print("="*80)
             
             print()  # Spacing
             print("--- End Latest ---")
@@ -4438,160 +4614,8 @@ async def get_options_info(
     return result
 
 
-async def get_financial_info(
-    symbol: str,
-    db_instance: StockDBBase,
-    force_fetch: bool = False
-) -> Dict[str, Any]:
-    """Get financial ratios/information for a symbol."""
-    import time
-    fetch_start = time.time()
-    
-    result = {
-        "symbol": symbol,
-        "financial_data": None,
-        "error": None,
-        "source": None,
-        "fetch_time_ms": None
-    }
-    
-    try:
-        # Get cache instance if available
-        cache_instance = None
-        if hasattr(db_instance, 'cache') and db_instance.cache:
-            cache_instance = db_instance.cache
-        
-        # Check cache first (if not force_fetch)
-        cached_financial = None
-        last_save_time = None
-        if not force_fetch and cache_instance:
-            try:
-                from common.redis_cache import CacheKeyGenerator
-                cache_key = CacheKeyGenerator.financial_info(symbol)
-                cache_check_start = time.time()
-                cached_df = await cache_instance.get(cache_key)
-                cache_check_time = (time.time() - cache_check_start) * 1000
-                
-                if cached_df is not None and not cached_df.empty:
-                    # Convert DataFrame back to dict
-                    cached_financial = cached_df.iloc[0].to_dict()
-                    # Get last_save_time
-                    last_save_time = _get_last_save_time_from_cache(cached_df)
-                    fetch_time = (time.time() - fetch_start) * 1000
-                    result["financial_data"] = cached_financial
-                    result["source"] = "cache"
-                    result["fetch_time_ms"] = fetch_time
-                    logger.info(f"[FINANCIAL CACHE HIT] Financial data for {symbol} (cache_check: {cache_check_time:.1f}ms, total: {fetch_time:.1f}ms)")
-                    
-                    # Check if background fetch should be triggered
-                    if _should_trigger_background_fetch(last_save_time, "financial", symbol):
-                        # Trigger background fetch but return cached data immediately
-                        async def _fetch_financial_background():
-                            try:
-                                # Re-fetch financial data - use force_fetch=True to bypass cache and prevent infinite loop
-                                financial_result = await get_financial_info(
-                                    symbol, db_instance, force_fetch=True
-                                )
-                                return financial_result
-                            except Exception as e:
-                                logger.warning(f"Background financial fetch failed for {symbol}: {e}")
-                                return None
-                        
-                        # Fire-and-forget: create task without awaiting
-                        asyncio.create_task(_trigger_background_fetch(
-                            symbol, db_instance, "financial", _fetch_financial_background
-                        ))
-                    
-                    return result
-                else:
-                    logger.debug(f"[FINANCIAL CACHE MISS] No cached financial data for {symbol} (cache_check: {cache_check_time:.1f}ms)")
-            except Exception as e:
-                logger.debug(f"[FINANCIAL CACHE ERROR] Cache check failed for {symbol}: {e}")
-        
-        # Try DB first if not forcing fetch
-        if not force_fetch:
-            try:
-                db_check_start = time.time()
-                financial_df = await db_instance.get_financial_info(symbol)
-                db_check_time = (time.time() - db_check_start) * 1000
-                
-                if not financial_df.empty:
-                    # Get the most recent entry
-                    latest = financial_df.iloc[-1].to_dict()
-                    fetch_time = (time.time() - fetch_start) * 1000
-                    result["financial_data"] = latest
-                    result["source"] = "database"
-                    result["fetch_time_ms"] = fetch_time
-                    logger.info(f"[FINANCIAL DB HIT] Financial data for {symbol} (db_check: {db_check_time:.1f}ms, total: {fetch_time:.1f}ms)")
-                    
-                    # Cache the result
-                    if cache_instance:
-                        try:
-                            from common.redis_cache import CacheKeyGenerator
-                            import pandas as pd
-                            cache_key = CacheKeyGenerator.financial_info(symbol)
-                            # Add last_save_time to cached data
-                            latest_with_time = latest.copy()
-                            latest_with_time['last_save_time'] = datetime.now(timezone.utc).isoformat()
-                            cache_df = pd.DataFrame([latest_with_time])
-                            cache_set_start = time.time()
-                            await cache_instance.set(cache_key, cache_df, ttl=None)  # No TTL (infinite cache)
-                            cache_set_time = (time.time() - cache_set_start) * 1000
-                            logger.info(f"[FINANCIAL CACHE SET] Cached financial data for {symbol} (set_time: {cache_set_time:.1f}ms, no TTL)")
-                        except Exception as e:
-                            logger.debug(f"[FINANCIAL CACHE ERROR] Failed to cache financial data for {symbol}: {e}")
-                    
-                    return result
-            except Exception as e:
-                logger.debug(f"[FINANCIAL DB ERROR] Error getting financial info from DB for {symbol}: {e}")
-        
-        # Fetch from API
-        api_key = os.getenv("POLYGON_API_KEY")
-        if not api_key:
-            result["error"] = "POLYGON_API_KEY environment variable not set"
-            return result
-        
-        api_fetch_start = time.time()
-        ratios = await get_financial_ratios(symbol, api_key)
-        api_fetch_time = (time.time() - api_fetch_start) * 1000
-        fetch_time = (time.time() - fetch_start) * 1000
-        
-        if ratios:
-            result["financial_data"] = ratios
-            result["source"] = "api"
-            result["fetch_time_ms"] = fetch_time
-            logger.info(f"[FINANCIAL API FETCH] Financial data for {symbol} (api_fetch: {api_fetch_time:.1f}ms, total: {fetch_time:.1f}ms)")
-            
-            # Save to DB if we have a DB instance
-            try:
-                await db_instance.save_financial_info(symbol, ratios)
-            except Exception as e:
-                logger.debug(f"[FINANCIAL DB SAVE ERROR] Error saving financial info to DB for {symbol}: {e}")
-            
-            # Cache the result
-            if cache_instance:
-                try:
-                    from common.redis_cache import CacheKeyGenerator
-                    import pandas as pd
-                    cache_key = CacheKeyGenerator.financial_info(symbol)
-                    # Add last_save_time to cached data
-                    ratios_with_time = ratios.copy()
-                    ratios_with_time['last_save_time'] = datetime.now(timezone.utc).isoformat()
-                    cache_df = pd.DataFrame([ratios_with_time])
-                    cache_set_start = time.time()
-                    await cache_instance.set(cache_key, cache_df, ttl=None)  # No TTL (infinite cache)
-                    cache_set_time = (time.time() - cache_set_start) * 1000
-                    logger.info(f"[FINANCIAL CACHE SET] Cached financial data for {symbol} (set_time: {cache_set_time:.1f}ms, no TTL)")
-                except Exception as e:
-                    logger.debug(f"[FINANCIAL CACHE ERROR] Failed to cache financial data for {symbol}: {e}")
-        else:
-            result["error"] = "No financial ratios data available"
-    
-    except Exception as e:
-        result["error"] = str(e)
-        logger.error(f"[FINANCIAL ERROR] Error getting financial info for {symbol}: {e}")
-    
-    return result
+# Import from common module
+from common.financial_data import get_financial_info, get_financial_ratios
 
 
 async def get_news_info(

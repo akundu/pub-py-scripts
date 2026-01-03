@@ -89,6 +89,7 @@ class Config(BaseSettings):
         "env_file": ".env",
         "env_file_encoding": "utf-8",
         "case_sensitive": False,
+        "extra": "ignore",  # Ignore extra environment variables
     }
     
     def __init__(self, **kwargs):
@@ -102,6 +103,7 @@ class Config(BaseSettings):
 def load_config() -> Config:
     """Load configuration from environment."""
     return Config()
+
 
 
 

@@ -75,7 +75,7 @@ def process_ticker_analysis(args_tuple):
     # Unpack arguments
     (ticker, db_config, start_date, end_date, timestamp_lookback_days,
      position_size, days_to_expiry, min_volume, min_premium, min_write_timestamp,
-     use_market_time, filters, filter_logic, option_type, enable_cache, redis_url, log_level, debug, sensible_price) = args_tuple
+     use_market_time, filters, filter_logic, option_type, enable_cache, redis_url, log_level, debug, sensible_price, max_bid_ask_spread) = args_tuple
     
     # Get Redis client for timestamp caching in worker process
     redis_client = None
@@ -234,6 +234,25 @@ def process_ticker_analysis(args_tuple):
                 if df.empty:
                     return pd.DataFrame(), None
                 
+                # Apply bid-ask spread filter
+                if max_bid_ask_spread > 0 and not df.empty and 'bid' in df.columns and 'ask' in df.columns:
+                    before_spread_filter = len(df)
+                    # Filter options where (ask - bid) / bid > max_bid_ask_spread
+                    # Only filter where both bid and ask are present and bid > 0
+                    valid_quotes = (df['bid'].notna()) & (df['ask'].notna()) & (df['bid'] > 0)
+                    spread_ratio = (df['ask'] - df['bid']) / df['bid']
+                    spread_mask = (~valid_quotes) | (spread_ratio <= max_bid_ask_spread)
+                    df = df[spread_mask].copy()
+                    
+                    if debug and before_spread_filter != len(df):
+                        filtered_count = before_spread_filter - len(df)
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - After bid-ask spread filter (max ratio: {max_bid_ask_spread:.1f}): {len(df)} options (filtered out {filtered_count})", file=sys.stderr)
+                    if debug and df.empty and before_spread_filter > 0:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED: All {before_spread_filter} options filtered out by bid-ask spread filter (max ratio: {max_bid_ask_spread:.1f})", file=sys.stderr)
+                
+                if df.empty:
+                    return pd.DataFrame(), None
+                
                 # Apply basic filters
                 before_basic_filters = len(df)
                 # Debug: Check write_timestamp before applying filters
@@ -328,7 +347,7 @@ def process_spread_match(args_tuple):
     """
     from common.common import black_scholes_call, black_scholes_put
     
-    short_row_dict, long_options_dict, spread_strike_tolerance, spread_long_days, position_size, risk_free_rate, debug = args_tuple
+    short_row_dict, long_options_dict, spread_strike_tolerance, spread_long_days, spread_long_days_tolerance, spread_long_min_days, position_size, risk_free_rate, debug = args_tuple
     
     ticker = short_row_dict.get('ticker')
     # Skip if ticker is NaN or None
@@ -384,20 +403,38 @@ def process_spread_match(args_tuple):
     if debug:
         print(f"DEBUG:   Strike tolerance range: ${strike_min:.2f} to ${strike_max:.2f} ({spread_strike_tolerance}%)")
     
-    # Find matching long options within strike tolerance
+    # Calculate days to expiry range for long options
+    if spread_long_min_days is not None:
+        # If min_days is specified, range is from min_days to spread_long_days
+        days_min = spread_long_min_days
+        days_max = spread_long_days
+    else:
+        # Otherwise, use tolerance around target days
+        days_min = spread_long_days - spread_long_days_tolerance
+        days_max = spread_long_days + spread_long_days_tolerance
+    
+    if debug:
+        print(f"DEBUG:   Days to expiry range: {days_min} to {days_max} days")
+    
+    # Find matching long options within strike tolerance AND days tolerance
     matching_long = ticker_long_options[
         (ticker_long_options['strike_price'] >= strike_min) &
-        (ticker_long_options['strike_price'] <= strike_max)
+        (ticker_long_options['strike_price'] <= strike_max) &
+        (ticker_long_options['days_to_expiry'] >= days_min) &
+        (ticker_long_options['days_to_expiry'] <= days_max)
     ].copy()
     
     if debug:
-        print(f"DEBUG:   Found {len(matching_long)} matching long options within strike tolerance")
+        print(f"DEBUG:   Found {len(matching_long)} matching long options within strike and days tolerance")
     
     if matching_long.empty:
         if debug:
             if not ticker_long_options.empty:
                 available_strikes = ticker_long_options['strike_price'].unique()
                 print(f"DEBUG:   No matches. Available strikes for {ticker}: {sorted(available_strikes)[:10]}..." if len(available_strikes) > 10 else f"DEBUG:   No matches. Available strikes for {ticker}: {sorted(available_strikes)}")
+                # Also show days to expiry info
+                if 'days_to_expiry' in ticker_long_options.columns:
+                    print(f"DEBUG:   Available days to expiry range: {ticker_long_options['days_to_expiry'].min()} to {ticker_long_options['days_to_expiry'].max()}")
             else:
                 print(f"DEBUG:   No long options available for ticker {ticker} in the database")
         return None
@@ -577,13 +614,17 @@ def process_ticker_spread_analysis(args_tuple):
             - use_market_time: Whether to use market hours logic
             - filters: List of FilterExpression objects
             - filter_logic: 'AND' or 'OR'
+            - option_type: 'call', 'put', or 'both'
             - spread_strike_tolerance: Percentage tolerance for strike matching
             - spread_long_days: Target days to expiry for long options
+            - spread_long_days_tolerance: Days tolerance around target (±tolerance)
+            - spread_long_min_days: Optional minimum days for long options (overrides tolerance)
             - risk_free_rate: Risk-free rate for Black-Scholes
             - enable_cache: Whether caching is enabled
             - redis_url: Redis URL for caching
             - log_level: Logging level
             - debug: Whether debug output is enabled
+            - sensible_price: Minimum sensible price threshold
     
     Returns:
         Tuple of (DataFrame with spread results, error_message or None)
@@ -592,7 +633,7 @@ def process_ticker_spread_analysis(args_tuple):
     (ticker, db_config, start_date, end_date, long_start_date, long_end_date,
      timestamp_lookback_days, position_size, days_to_expiry, min_volume, min_premium,
      min_write_timestamp, use_market_time, filters, filter_logic, option_type, spread_strike_tolerance,
-     spread_long_days, risk_free_rate, enable_cache, redis_url, log_level, debug, sensible_price) = args_tuple
+     spread_long_days, spread_long_days_tolerance, spread_long_min_days, risk_free_rate, enable_cache, redis_url, log_level, debug, sensible_price, max_bid_ask_spread, max_bid_ask_spread_long) = args_tuple
     
     # Get Redis client for timestamp caching in worker process
     redis_client = None
@@ -767,6 +808,27 @@ def process_ticker_spread_analysis(args_tuple):
                         _log_cache_stats_spread(ticker, initial_cache_stats, db, enable_cache, debug)
                     return pd.DataFrame(), None
                 
+                # Apply bid-ask spread filter for short options
+                if max_bid_ask_spread > 0 and not df_short.empty and 'bid' in df_short.columns and 'ask' in df_short.columns:
+                    before_spread_filter = len(df_short)
+                    # Filter options where (ask - bid) / bid > max_bid_ask_spread
+                    # Only filter where both bid and ask are present and bid > 0
+                    valid_quotes = (df_short['bid'].notna()) & (df_short['ask'].notna()) & (df_short['bid'] > 0)
+                    spread_ratio = (df_short['ask'] - df_short['bid']) / df_short['bid']
+                    spread_mask = (~valid_quotes) | (spread_ratio <= max_bid_ask_spread)
+                    df_short = df_short[spread_mask].copy()
+                    
+                    if debug and before_spread_filter != len(df_short):
+                        filtered_count = before_spread_filter - len(df_short)
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - After bid-ask spread filter on short options (max ratio: {max_bid_ask_spread:.1f}): {len(df_short)} options (filtered out {filtered_count})", file=sys.stderr)
+                    if debug and df_short.empty and before_spread_filter > 0:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): All {before_spread_filter} short options filtered out by bid-ask spread filter (max ratio: {max_bid_ask_spread:.1f})", file=sys.stderr)
+                
+                if df_short.empty:
+                    if debug:
+                        _log_cache_stats_spread(ticker, initial_cache_stats, db, enable_cache, debug)
+                    return pd.DataFrame(), None
+                
                 # Apply basic filters
                 before_basic_filters = len(df_short)
                 # Debug: Check write_timestamp before applying filters
@@ -891,6 +953,28 @@ def process_ticker_spread_analysis(args_tuple):
                     if debug and long_options_df.empty and before_long_ts_filter > 0:
                         print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): All {before_long_ts_filter} long-term options filtered out by min_write_timestamp={min_write_timestamp}", file=sys.stderr)
                 
+                # Apply bid-ask spread filter for long options
+                if max_bid_ask_spread_long > 0 and not long_options_df.empty and 'bid' in long_options_df.columns and 'ask' in long_options_df.columns:
+                    before_long_spread_filter = len(long_options_df)
+                    # Filter options where (ask - bid) / bid > max_bid_ask_spread_long
+                    # Only filter where both bid and ask are present and bid > 0
+                    valid_quotes = (long_options_df['bid'].notna()) & (long_options_df['ask'].notna()) & (long_options_df['bid'] > 0)
+                    spread_ratio = (long_options_df['ask'] - long_options_df['bid']) / long_options_df['bid']
+                    spread_mask = (~valid_quotes) | (spread_ratio <= max_bid_ask_spread_long)
+                    long_options_df = long_options_df[spread_mask].copy()
+                    
+                    if debug and before_long_spread_filter != len(long_options_df):
+                        filtered_count = before_long_spread_filter - len(long_options_df)
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - After bid-ask spread filter on long options (max ratio: {max_bid_ask_spread_long:.1f}): {len(long_options_df)} options (filtered out {filtered_count})", file=sys.stderr)
+                    if debug and long_options_df.empty and before_long_spread_filter > 0:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): All {before_long_spread_filter} long options filtered out by bid-ask spread filter (max ratio: {max_bid_ask_spread_long:.1f})", file=sys.stderr)
+                
+                if long_options_df.empty:
+                    if debug:
+                        print(f"DEBUG [PID {os.getpid()}]: {ticker} - EXCLUDED (spread): No long-term options remaining after bid-ask spread filter", file=sys.stderr)
+                    _log_cache_stats_spread(ticker, initial_cache_stats, db, enable_cache, debug)
+                    return pd.DataFrame(), None
+                
                 # Normalize implied_volatility
                 if 'implied_volatility' in long_options_df.columns:
                     long_options_df['implied_volatility'] = pd.to_numeric(long_options_df['implied_volatility'], errors='coerce').round(4)
@@ -931,6 +1015,8 @@ def process_ticker_spread_analysis(args_tuple):
                         long_options_dict,
                         spread_strike_tolerance,
                         spread_long_days,
+                        spread_long_days_tolerance,
+                        spread_long_min_days,
                         position_size,
                         risk_free_rate,
                         debug

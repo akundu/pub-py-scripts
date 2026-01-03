@@ -514,7 +514,8 @@ class OptionsAnalyzer:
         filter_logic: str,
         option_type: str,
         max_workers: int,
-        sensible_price: float = 1.0
+        sensible_price: float = 1.0,
+        max_bid_ask_spread: float = 2.0
     ) -> pd.DataFrame:
         """
         Analyze options using multiprocessing where each ticker is processed end-to-end in a separate process.
@@ -548,7 +549,8 @@ class OptionsAnalyzer:
                 self.redis_url,
                 self.log_level,
                 self.debug,
-                sensible_price
+                sensible_price,
+                max_bid_ask_spread
             )
             process_args.append(args)
         
@@ -621,8 +623,12 @@ class OptionsAnalyzer:
         option_type: str,
         spread_strike_tolerance: float,
         spread_long_days: int,
+        spread_long_days_tolerance: int,
+        spread_long_min_days: Optional[int],
         max_workers: int,
-        sensible_price: float = 0.01
+        sensible_price: float = 0.01,
+        max_bid_ask_spread: float = 2.0,
+        max_bid_ask_spread_long: float = 2.0
     ) -> pd.DataFrame:
         """
         Analyze spread options using multiprocessing where each ticker is processed end-to-end in a separate process.
@@ -656,12 +662,16 @@ class OptionsAnalyzer:
                 option_type,
                 spread_strike_tolerance,
                 spread_long_days,
+                spread_long_days_tolerance,
+                spread_long_min_days,
                 self.risk_free_rate,
                 self.enable_cache,
                 self.redis_url,
                 self.log_level,
                 self.debug,
-                sensible_price
+                sensible_price,
+                max_bid_ask_spread,
+                max_bid_ask_spread_long
             )
             process_args.append(args)
         
@@ -740,7 +750,9 @@ class OptionsAnalyzer:
         spread_long_days_tolerance: int = 14,
         spread_long_min_days: Optional[int] = None,
         min_write_timestamp: Optional[str] = None,
-        sensible_price: float = 1.0
+        sensible_price: float = 1.0,
+        max_bid_ask_spread: float = 2.0,
+        max_bid_ask_spread_long: float = 2.0
     ) -> pd.DataFrame:
         """
         Analyze options opportunities for the given tickers.
@@ -769,6 +781,8 @@ class OptionsAnalyzer:
             spread_long_days_tolerance: Days tolerance for long option expiration window (default: 14, searches ±14 days around target, ignored if spread_long_min_days is set)
             spread_long_min_days: Minimum days to expiry for long options (if set, searches from min to spread_long_days instead of using tolerance)
             min_write_timestamp: Minimum write timestamp for options (EST format like '2025-11-05 10:00:00', filters out older options)
+            max_bid_ask_spread: Maximum bid-ask spread ratio for short options (default: 2.0). Formula: (ask - bid) / bid <= max_spread. Set to 0 to disable.
+            max_bid_ask_spread_long: Maximum bid-ask spread ratio for long options in spread mode (default: 2.0). Formula: (ask - bid) / bid <= max_spread. Set to 0 to disable.
             
         Returns:
             DataFrame with analysis results
@@ -810,7 +824,9 @@ class OptionsAnalyzer:
                     filter_logic=filter_logic,
                     option_type=option_type,
                     max_workers=max_workers,
-                    sensible_price=sensible_price
+                    sensible_price=sensible_price,
+                    max_bid_ask_spread=max_bid_ask_spread,
+                    max_bid_ask_spread_long=max_bid_ask_spread_long
                 )
             
             # 1) Fetch options universe (combined short and long if spread mode, otherwise just short)
@@ -891,7 +907,9 @@ class OptionsAnalyzer:
         filter_logic: str,
         option_type: str,
         max_workers: int,
-        sensible_price: float
+        sensible_price: float,
+        max_bid_ask_spread: float = 2.0,
+        max_bid_ask_spread_long: float = 2.0
     ) -> pd.DataFrame:
         """Analyze options using multiprocessing."""
         if spread_mode:
@@ -917,8 +935,12 @@ class OptionsAnalyzer:
                 option_type=option_type,
                 spread_strike_tolerance=spread_strike_tolerance,
                 spread_long_days=spread_long_days,
+                spread_long_days_tolerance=spread_long_days_tolerance,
+                spread_long_min_days=spread_long_min_days,
                 max_workers=max_workers,
-                sensible_price=sensible_price
+                sensible_price=sensible_price,
+                max_bid_ask_spread=max_bid_ask_spread,
+                max_bid_ask_spread_long=max_bid_ask_spread_long
             )
         else:
             return await self._analyze_options_multiprocess(
@@ -936,7 +958,8 @@ class OptionsAnalyzer:
                 filter_logic=filter_logic,
                 option_type=option_type,
                 max_workers=max_workers,
-                sensible_price=sensible_price
+                sensible_price=sensible_price,
+                max_bid_ask_spread=max_bid_ask_spread
             )
     
     async def _process_options_pipeline(
@@ -1783,6 +1806,8 @@ class OptionsAnalyzer:
         long_options_dict: Dict[str, List[Dict]],
         spread_strike_tolerance: float,
         spread_long_days: int,
+        spread_long_days_tolerance: int,
+        spread_long_min_days: Optional[int],
         position_size: float,
         max_workers: int
     ) -> List[Dict]:
@@ -1799,6 +1824,8 @@ class OptionsAnalyzer:
                 long_options_dict,
                 spread_strike_tolerance,
                 spread_long_days,
+                spread_long_days_tolerance,
+                spread_long_min_days,
                 position_size,
                 self.risk_free_rate,
                 self.debug
@@ -1924,6 +1951,8 @@ class OptionsAnalyzer:
                 long_options_dict=long_options_dict,
                 spread_strike_tolerance=spread_strike_tolerance,
                 spread_long_days=spread_long_days,
+                spread_long_days_tolerance=spread_long_days_tolerance,
+                spread_long_min_days=spread_long_min_days,
                 position_size=position_size,
                 max_workers=max_workers
             )
@@ -2115,7 +2144,9 @@ def _build_analysis_args(args, tickers: List[str], filters: List[FilterExpressio
         'spread_long_days_tolerance': args.spread_long_days_tolerance,
         'spread_long_min_days': args.spread_long_min_days,
         'min_write_timestamp': args.min_write_timestamp,
-        'sensible_price': getattr(args, 'sensible_price', 0.01)
+        'sensible_price': getattr(args, 'sensible_price', 0.01),
+        'max_bid_ask_spread': getattr(args, 'max_bid_ask_spread', 2.0),
+        'max_bid_ask_spread_long': getattr(args, 'max_bid_ask_spread_long', 2.0)
     }
 
 
@@ -3280,7 +3311,9 @@ def _build_analysis_args(args: argparse.Namespace, symbols_list: List[str], filt
         'spread_long_days_tolerance': args.spread_long_days_tolerance,
         'spread_long_min_days': args.spread_long_min_days,
         'min_write_timestamp': args.min_write_timestamp,
-        'sensible_price': getattr(args, 'sensible_price', 0.01)
+        'sensible_price': getattr(args, 'sensible_price', 0.01),
+        'max_bid_ask_spread': getattr(args, 'max_bid_ask_spread', 2.0),
+        'max_bid_ask_spread_long': getattr(args, 'max_bid_ask_spread_long', 2.0)
     }
 
 

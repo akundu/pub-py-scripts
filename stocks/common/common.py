@@ -951,18 +951,22 @@ def calculate_days_to_expiry(exp_date: Any, today_ref: Any) -> int:
     exp_date_only = exp_date.normalize()  # Midnight UTC of expiration date
     
     # Set expiration to market close (4:00 PM ET = 20:00 UTC or 21:00 UTC depending on DST)
-    # Use 20:00 UTC as market close (4:00 PM ET standard time, approximate for DST)
+    # IMPORTANT: Expiration dates in the database represent the CALENDAR DATE in ET timezone
+    # E.g., "2025-12-26" means the option expires at 4pm ET on Dec 26, regardless of how it's stored in UTC
     try:
         import pytz
-        et_tz = pytz.timezone('America/New_York')
-        # Get the date in ET timezone
-        exp_date_et = exp_date_only.tz_convert(et_tz) if exp_date_only.tz else exp_date_only.tz_localize('UTC').tz_convert(et_tz)
-        exp_date_et_date = exp_date_et.date()
-        
-        # Set expiration time to 4:00 PM ET (market close) on expiration date
         from datetime import datetime
+        et_tz = pytz.timezone('America/New_York')
+        
+        # Extract the date portion - interpret it as a date in ET timezone
+        # The expiration date in the DB is stored as midnight UTC, but represents a calendar date
+        # We need to extract the YYYY-MM-DD and treat it as the expiration date in ET
+        exp_date_str = exp_date.strftime('%Y-%m-%d')
+        exp_year, exp_month, exp_day = map(int, exp_date_str.split('-'))
+        
+        # Create market close time: 4:00 PM ET on the expiration date
         market_close_et = et_tz.localize(
-            datetime.combine(exp_date_et_date, datetime.strptime('16:00', '%H:%M').time())
+            datetime(exp_year, exp_month, exp_day, 16, 0, 0)
         )
         # Convert back to UTC
         exp_date_market_close = market_close_et.astimezone(pytz.UTC)

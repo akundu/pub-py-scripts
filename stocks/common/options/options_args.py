@@ -206,6 +206,18 @@ def add_analysis_arguments(parser: argparse.ArgumentParser) -> None:
         default=0.01,
         help="Filter strikes based on current price as a percentage multiplier. For calls: only show strikes > current_price * (1 + sensible_price). For puts: only show strikes < current_price * (1 - sensible_price). Default: 0.01 (1%%). Set to 0 to disable. Example: 0.05 means 5%% above/below current price.",
     )
+    parser.add_argument(
+        '--max-bid-ask-spread',
+        type=float,
+        default=2.0,
+        help="Maximum bid-ask spread as a ratio of bid price for short options. Formula: (ask - bid) / bid <= max_spread. Default: 2.0 (200%% spread). Set to 0 to disable. Example: 1.0 means ask can be at most 2x the bid.",
+    )
+    parser.add_argument(
+        '--max-bid-ask-spread-long',
+        type=float,
+        default=2.0,
+        help="Maximum bid-ask spread as a ratio of bid price for long options (spread mode only). Formula: (ask - bid) / bid <= max_spread. Default: 2.0 (200%% spread). Set to 0 to disable.",
+    )
 
 
 def add_spread_arguments(parser: argparse.ArgumentParser) -> None:

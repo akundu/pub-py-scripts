@@ -23,33 +23,60 @@ from common.logging_utils import get_logger
 DATA_DIR = "data"
 
 # --- WORKER FUNCTION ---
-def worker_task(ticker, cal_days, force_api, config, log_level_str="ERROR", server_url=None, use_polygon=False, data_dir="data"):
+def worker_task(ticker, cal_days, force_api, config, log_level_str="ERROR", server_url=None, use_polygon=False, data_dir="data", db_config=None):
     """Worker task for processing a single ticker's IV analysis."""
     # Setup logger for this worker process
     worker_logger = get_logger(f"IVAnalyzer.{os.getpid()}")
     log_level = getattr(logging, log_level_str.upper(), logging.ERROR)
     worker_logger.setLevel(log_level)
     
+    # Create async worker function
+    async def _async_worker():
+        from common.stock_db import get_stock_db
+        
+        # Initialize database if config provided
+        db_instance = None
+        if db_config:
+            try:
+                db = get_stock_db('questdb', db_config=db_config, enable_cache=True,
+                                 redis_url=config.get('redis_url'), log_level=log_level_str,
+                                 auto_init=False)
+                await db._init_db()
+                db_instance = db
+            except Exception as e:
+                worker_logger.warning(f"[{ticker}] Failed to initialize database: {e}, will use HTTP server only")
+        
+        try:
+            # Initialize IV Analyzer
+            analyzer = IVAnalyzer(
+                polygon_api_key=config['poly_key'],
+                data_dir=data_dir,
+                redis_url=config.get('redis_url'),
+                server_url=server_url,
+                db_instance=db_instance,  # Pass database for direct access
+                use_polygon=False,  # Never use Polygon for price history
+                logger=worker_logger
+            )
+            
+            # Get IV analysis (now async)
+            result, needs_update = await analyzer.get_iv_analysis(
+                ticker=ticker,
+                calendar_days=cal_days,
+                force_refresh=force_api
+            )
+            
+            return result, needs_update
+        finally:
+            # Close database if we opened it
+            if db_instance:
+                try:
+                    await db_instance.close()
+                except Exception:
+                    pass
+    
     try:
-        # Initialize IV Analyzer
-        analyzer = IVAnalyzer(
-            polygon_api_key=config['poly_key'],
-            data_dir=data_dir,
-            redis_url=config.get('redis_url'),
-            server_url=server_url,
-            use_polygon=use_polygon,
-            logger=worker_logger
-        )
-        
-        # Get IV analysis
-        result, needs_update = analyzer.get_iv_analysis(
-            ticker=ticker,
-            calendar_days=cal_days,
-            force_refresh=force_api
-        )
-        
-        return result, needs_update
-        
+        # Run async worker in new event loop
+        return asyncio.run(_async_worker())
     except Exception as e:
         worker_logger.error(f"[{ticker}] Worker error: {e}", exc_info=True)
         return {ticker: f"Error: {e}"}, False
@@ -131,14 +158,19 @@ async def main():
         'poly_key': os.getenv("POLYGON_API_KEY"),
         'redis_url': os.getenv("REDIS_URL")
     }
+    
+    # Get database config for worker
+    db_config = args.db_config if hasattr(args, 'db_config') and args.db_config else (
+        os.getenv("QUESTDB_URL") or "questdb://stock_user:stock_password@ms1.kundu.dev:8812/stock_data"
+    )
+    
     total_cores = multiprocessing.cpu_count()
     max_workers = args.workers if args.workers else max(1, int(total_cores * 0.90))
     logger.info(f"Engine starting on {max_workers}/{total_cores} cores.")
     logger.info(f"Processing {len(symbols)} symbol(s): {', '.join(symbols)}")
-    if not args.use_polygon:
-        logger.info(f"Using local server: {args.server_url} for historical data (use --use-polygon to force Polygon)")
-    else:
-        logger.info("Using Polygon API for historical data")
+    logger.info(f"Using database: {db_config[:50]}... for price history")
+    if args.server_url:
+        logger.info(f"HTTP server fallback: {args.server_url}")
 
     results_map = {}
     tickers_needing_update = []
@@ -147,7 +179,7 @@ async def main():
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             future_to_ticker = {
                 executor.submit(worker_task, t, args.calendar_days, args.sync, worker_config, args.log_level, 
-                               args.server_url, args.use_polygon, data_dir): t 
+                               args.server_url, False, data_dir, db_config): t 
                 for t in all_tickers
             }
             for future in as_completed(future_to_ticker):
@@ -183,7 +215,7 @@ async def main():
             with ProcessPoolExecutor(max_workers=max_workers) as executor:
                 futures = [
                     executor.submit(worker_task, t, args.calendar_days, True, worker_config, args.log_level,
-                                   args.server_url, args.use_polygon, data_dir) 
+                                   args.server_url, False, data_dir, db_config) 
                     for t in tickers_needing_update
                 ]
                 for f in as_completed(futures): pass

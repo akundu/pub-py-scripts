@@ -8,10 +8,11 @@ CREATE TABLE IF NOT EXISTS url_mappings (
     access_count LONG,
     last_accessed TIMESTAMP
 ) TIMESTAMP(created_at) PARTITION BY DAY WAL
-DEDUP UPSERT KEYS(short_code);
+DEDUP UPSERT KEYS(created_at, short_code);
 
 -- Note: QuestDB automatically indexes the designated TIMESTAMP column (created_at)
 -- The SYMBOL type for short_code provides fast lookups
--- DEDUP UPSERT KEYS ensures no duplicate short codes
+-- DEDUP UPSERT KEYS ensures no duplicate short codes (must include timestamp column)
+
 
 

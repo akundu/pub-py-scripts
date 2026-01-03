@@ -1628,7 +1628,12 @@ class StockDBPostgreSQL(StockDBBase):
         return await self.get_latest_prices_optimized(tickers)
 
     async def get_previous_close_prices(self, tickers: List[str]) -> Dict[str, float | None]:
-        """Get the most recent daily close prices for multiple tickers, excluding today's data."""
+        """Get previous close prices for multiple tickers.
+        
+        Returns the second-to-last close price from the database (if available).
+        This ensures comparisons are made against actual data that exists, not assumptions
+        about today's close. If only one close exists, uses that one.
+        """
         # Ensure tables are initialized
         await self._ensure_tables_exist()
         
@@ -1647,29 +1652,28 @@ class StockDBPostgreSQL(StockDBBase):
             for ticker in tickers:
                 latest_close = None
                 try:
-                    # First, get the most recent close price that is NOT from today
+                    # Get the last 2 closes that exist in the database (ordered by date DESC)
+                    # Use the second-to-last one as the reference for comparison
+                    # This ensures we compare against actual data, not assumptions about today's close
                     query = """
                         SELECT date, close 
                         FROM daily_prices 
-                        WHERE ticker = $1 AND date < $2 
+                        WHERE ticker = $1 
                         ORDER BY date DESC 
-                        LIMIT 1
+                        LIMIT 2
                     """
-                    res = await conn.fetchrow(query, ticker, today)
+                    rows = await conn.fetch(query, ticker)
                     
-                    if res: 
-                        latest_close = res['close']
-                        self.logger.info(f"Found previous close for {ticker}: {res['date']} = ${res['close']:.2f}")
+                    if rows and len(rows) >= 2:
+                        # We have at least 2 closes - use the second-to-last one
+                        latest_close = rows[1]['close']
+                        self.logger.info(f"Found previous close for {ticker}: {rows[1]['date']} = ${rows[1]['close']:.2f} (second-to-last close)")
+                    elif rows and len(rows) == 1:
+                        # Only one close available - use it but log a warning
+                        latest_close = rows[0]['close']
+                        self.logger.warning(f"Only one close found for {ticker}, using {rows[0]['date']} = ${rows[0]['close']:.2f}")
                     else:
-                        # Fallback: if no previous day data, get the most recent available
-                        self.logger.warning(f"No previous day data found for {ticker}, falling back to most recent")
-                        res = await conn.fetchrow(
-                            "SELECT date, close FROM daily_prices WHERE ticker = $1 ORDER BY date DESC LIMIT 1", 
-                            ticker
-                        )
-                        if res: 
-                            latest_close = res['close']
-                            self.logger.warning(f"Using most recent data for {ticker}: {res['date']} = ${res['close']:.2f}")
+                        self.logger.warning(f"No close data found for {ticker}")
                 except Exception as e:
                     self.logger.error(f"PostgreSQL error (daily_prices for {ticker}): {e}", exc_info=True)
                 

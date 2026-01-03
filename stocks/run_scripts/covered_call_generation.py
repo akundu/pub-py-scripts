@@ -15,6 +15,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List
+from zoneinfo import ZoneInfo
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 if str(BASE_DIR) not in sys.path:
@@ -56,7 +57,7 @@ SENSIBLE_PRICE = 0.001
 
 SPREAD_STRIKE_TOLERANCE = 5
 SPREAD_LONG_DAYS = 120
-SPREAD_LONG_MIN_DAYS = 45
+SPREAD_LONG_MIN_DAYS = None  # Set to None to use tolerance-based range, or set to a specific minimum
 SPREAD_LONG_DAYS_TOLERANCE = 60
 
 REFRESH_RESULTS_BACKGROUND = 600
@@ -122,6 +123,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-stats", action="store_true", help="Disable stats output (default: stats enabled).")
     parser.add_argument("--market-hours-lookback-seconds", type=int, default=MARKET_HOURS_LOOKBACK_SECONDS, help=f"Seconds to look back during market hours (default: {MARKET_HOURS_LOOKBACK_SECONDS}).")
     parser.add_argument("--off-hours-lookback-seconds", type=int, default=OFF_HOURS_LOOKBACK_SECONDS, help=f"Seconds to look back outside market hours (default: {OFF_HOURS_LOOKBACK_SECONDS}).")
+    parser.add_argument("--max-bid-ask-spread", type=float, default=2.0, help="Maximum bid-ask spread ratio for short options. Formula: (ask - bid) / bid <= max_spread. Default: 2.0 (200%% spread). Set to 0 to disable.")
+    parser.add_argument("--max-bid-ask-spread-long", type=float, default=2.0, help="Maximum bid-ask spread ratio for long options (spread mode). Formula: (ask - bid) / bid <= max_spread. Default: 2.0 (200%% spread). Set to 0 to disable.")
     
     return parser.parse_args()
 
@@ -222,6 +225,9 @@ def build_options_analyzer_command(
     sort: str,
     top_n: int,
     stats: bool,
+    min_write_timestamp: str | None = None,
+    max_bid_ask_spread: float = 2.0,
+    max_bid_ask_spread_long: float = 2.0,
 ) -> List[str]:
     """Build command line arguments for options_analyzer.py using argparse."""
     # Import the argument parser functions
@@ -273,11 +279,14 @@ def build_options_analyzer_command(
         "log_level": log_level,
         "option_type": option_type,
         "sensible_price": sensible_price,
-        "filter": [f"volume > {min_vol}"],
+        "min_volume": min_vol,
         "sort": sort,
         "top_n": top_n,
         "stats": stats,
         "no_cache": no_cache,
+        "min_write_timestamp": min_write_timestamp,
+        "max_bid_ask_spread": max_bid_ask_spread,
+        "max_bid_ask_spread_long": max_bid_ask_spread_long,
     }
 
     # Build command line arguments using parser actions
@@ -351,6 +360,8 @@ def run_loop(
     off_hours_lookback_seconds: int,
     db_server_host: str,
     db_server_port: int,
+    max_bid_ask_spread: float,
+    max_bid_ask_spread_long: float,
     output_file: Path | None = None,
     html_output_dir: Path | None = None,
 ) -> None:
@@ -387,11 +398,15 @@ def run_loop(
         now_utc = datetime.now(timezone.utc)
         market_hours = common_is_market_hours(now_utc)
 
+        # Calculate min_write_timestamp based on market hours and lookback seconds
         if market_hours:
-            # During market hours: sleep for short interval
+            # During market hours: use market hours lookback
+            lookback_seconds = market_hours_lookback_seconds
             sleep_time = DEFAULT_SLEEP_SECONDS
         else:
-            # Outside market hours: calculate time until next market open
+            # Outside market hours: use off-hours lookback
+            lookback_seconds = off_hours_lookback_seconds
+            # Calculate time until next market open
             seconds_to_open, _ = compute_market_transition_times(now_utc)
             if seconds_to_open is None or seconds_to_open <= 0:
                 # Fallback to max sleep if calculation fails
@@ -404,7 +419,16 @@ def run_loop(
                 sleep_time = min(MAX_OFF_HOURS_SLEEP, int(seconds_to_open))
             market_hours = False
 
+        # Calculate min_write_timestamp in Eastern time (EST/EDT depending on DST)
+        lookback_time = now_utc - timedelta(seconds=lookback_seconds)
+        # Convert to America/New_York timezone (handles DST automatically)
+        eastern_tz = ZoneInfo("America/New_York")
+        lookback_time_eastern = lookback_time.astimezone(eastern_tz)
+        # Format as naive datetime string (without timezone indicator) as expected by options_analyzer
+        min_write_timestamp = lookback_time_eastern.strftime("%Y-%m-%d %H:%M:%S")
+
         print(datetime.now(), file=sys.stderr, flush=True)
+        print(f"Market hours: {market_hours}, Lookback: {lookback_seconds}s, Min write timestamp (Eastern): {min_write_timestamp}", file=sys.stderr, flush=True)
         command = build_options_analyzer_command(
             download_loc,
             db_conn,
@@ -428,6 +452,9 @@ def run_loop(
             sort,
             top_n,
             stats,
+            min_write_timestamp,
+            max_bid_ask_spread,
+            max_bid_ask_spread_long,
         )
         print(f"Executing: {' '.join(command)}", file=sys.stderr, flush=True)
         start_time = time.time()
@@ -572,6 +599,8 @@ def main() -> None:
         off_hours_lookback_seconds=args.off_hours_lookback_seconds,
         db_server_host=args.db_server_host,
         db_server_port=args.db_server_port,
+        max_bid_ask_spread=args.max_bid_ask_spread,
+        max_bid_ask_spread_long=args.max_bid_ask_spread_long,
         output_file=output_file,
         html_output_dir=html_output_dir,
     )

@@ -1570,6 +1570,11 @@ class FinancialInfoRepository(BaseRepository):
                 'ev_to_ebitda': financial_data.get('ev_to_ebitda'),
                 'enterprise_value': financial_data.get('enterprise_value'),
                 'free_cash_flow': financial_data.get('free_cash_flow'),
+                'iv_30d': financial_data.get('iv_30d'),
+                'iv_rank': financial_data.get('iv_rank'),
+                'relative_rank': financial_data.get('relative_rank'),
+                'iv_analysis_json': financial_data.get('iv_analysis_json'),
+                'iv_analysis_spare': financial_data.get('iv_analysis_spare'),
                 'write_timestamp': datetime.now(timezone.utc)
             }
             
@@ -3301,6 +3306,9 @@ class OptionsDataService:
                 df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, option_tickers, timestamp_lookback_days, min_write_timestamp)
             else:
                 df = await self.options_repo.get(ticker, expiration_date, start_datetime, end_datetime, option_tickers)
+            # Ensure df is never None (should always be DataFrame, but guard against edge cases)
+            if df is None:
+                df = pd.DataFrame()
             return None, None, df
         
         # Check if resolved expiration dates cover the full requested range
@@ -3319,6 +3327,9 @@ class OptionsDataService:
                             df = await self.options_repo.get_latest(ticker, expiration_date, start_datetime, end_datetime, None, timestamp_lookback_days, min_write_timestamp)
                         else:
                             df = await self.options_repo.get(ticker, expiration_date, start_datetime, end_datetime, None)
+                        # Ensure df is never None (should always be DataFrame, but guard against edge cases)
+                        if df is None:
+                            df = pd.DataFrame()
                         return None, None, df
             except (ValueError, TypeError) as e:
                 self.logger.debug(f"[CACHE] Could not verify date range coverage: {e}, continuing with normal flow")
@@ -3773,6 +3784,11 @@ class OptionsDataService:
             self.logger.debug(f"[TIMING] OptionsDataService.get END for {ticker}: {total_elapsed:.3f}s, returning direct DB result ({len(direct_db_result)} rows)")
             return direct_db_result
         
+        # Guard against None option_tickers (shouldn't happen, but prevents 'NoneType' object is not iterable error)
+        if option_tickers is None:
+            self.logger.warning(f"[OPTIONS SERVICE] option_tickers is None for {ticker}, returning empty DataFrame")
+            return pd.DataFrame()
+        
         # Step 2: Generate cache keys
         keygen_start = time.time()
         cache_keys = self._generate_cache_keys(ticker, option_tickers, option_ticker_exp_map, expiration_date)
@@ -4061,8 +4077,13 @@ class PriceService:
         result = await self.get_latest_price_with_data(ticker, use_market_time)
         return result['price'] if result else None
     
-    async def get_latest_price_with_data(self, ticker: str, use_market_time: bool = True) -> Optional[Dict[str, Any]]:
+    async def get_latest_price_with_data(self, ticker: str, use_market_time: bool = True, only_source: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get latest price with full data (price, timestamp, source, realtime_df).
+        
+        Args:
+            ticker: Stock ticker symbol
+            use_market_time: Whether to adjust behavior based on market hours
+            only_source: If specified, only query this data source ('realtime', 'hourly', or 'daily')
         
         Returns:
             Dict with keys: 'price', 'timestamp', 'source', 'realtime_df' (if from realtime)
@@ -4073,7 +4094,7 @@ class PriceService:
         last_save_time = None
         if self.cache and self.cache.enable_cache:
             try:
-                cache_key = CacheKeyGenerator.latest_price_data(ticker)
+                cache_key = CacheKeyGenerator.latest_price_data(ticker, source=only_source)
                 cached_df = await self.cache.get(cache_key)
                 if cached_df is not None and not cached_df.empty:
                     # Convert DataFrame back to dict
@@ -4090,16 +4111,26 @@ class PriceService:
                             last_save_time = None
                     # Restore nested structures
                     import json
+                    import math
                     # Note: cached realtime_df/hourly_df/daily_df are stored as JSON strings of records
                     # Convert them back into DataFrames when possible
                     for key in ('realtime_df', 'hourly_df', 'daily_df'):
-                        if key in cached_data and isinstance(cached_data[key], str):
-                            try:
-                                records = json.loads(cached_data[key])
-                                # Only convert to DataFrame if we actually have records
-                                cached_data[key] = pd.DataFrame.from_records(records) if records else pd.DataFrame()
-                            except Exception:
+                        if key in cached_data:
+                            value = cached_data[key]
+                            # Handle NaN/float values (pandas stores None as NaN in DataFrames)
+                            if isinstance(value, float) and math.isnan(value):
                                 cached_data[key] = None
+                            elif isinstance(value, str):
+                                # Empty string means None (we use this to avoid pandas NaN conversion)
+                                if value == '':
+                                    cached_data[key] = None
+                                else:
+                                    try:
+                                        records = json.loads(value)
+                                        # Only convert to DataFrame if we actually have records
+                                        cached_data[key] = pd.DataFrame.from_records(records) if records else pd.DataFrame()
+                                    except Exception:
+                                        cached_data[key] = None
                     
                     # Decide whether cached data is fresh enough to use
                     use_cached = True
@@ -4130,14 +4161,17 @@ class PriceService:
                                 # Unknown source: be conservative and refetch
                                 use_cached = False
                         else:
-                            # Market closed: cached daily/hourly data is usually fine for a couple of days
+                            # Market closed: cached daily/hourly data is usually fine for a longer period
                             if source == 'realtime':
-                                # When market is closed, realtime prices are not expected; prefer refetch
-                                use_cached = age_seconds <= 300
+                                # When market is closed, realtime prices are stale until next market open
+                                # But they're still valid - accept up to 7 days (to cover weekends/holidays)
+                                use_cached = age_seconds <= 604800  # 7 days
                             elif source == 'hourly':
                                 use_cached = age_seconds <= 172800  # 48 hours
                             elif source == 'daily':
-                                use_cached = age_seconds <= 259200  # 72 hours
+                                # When market is closed, daily data can be trusted for up to 7 days
+                                # This handles weekends and holidays better
+                                use_cached = age_seconds <= 604800  # 7 days (168 hours)
                             else:
                                 use_cached = False
 
@@ -4198,7 +4232,7 @@ class PriceService:
             try:
                 # Use get() method with constraints to get latest hourly data
                 # Limit query to cutoff to now to avoid fetching thousands of hours
-                cutoff = datetime.now(timezone.utc) - timedelta(days=3)
+                cutoff = datetime.now(timezone.utc) - timedelta(days=7)
                 now = datetime.now(timezone.utc)
                 cutoff_str = cutoff.strftime('%Y-%m-%dT%H:%M:%S')
                 end_str = now.strftime('%Y-%m-%dT%H:%M:%S')
@@ -4208,8 +4242,12 @@ class PriceService:
                     timestamp = df.index[-1] if isinstance(df.index, pd.DatetimeIndex) else latest_row.get('datetime')
                     price = float(latest_row['close'])
                     return ('hourly', timestamp, price, df)  # Return DataFrame for reuse
+                else:
+                    self.logger.debug(f"Hourly fetch for {ticker}: DataFrame is empty (no data in last 3 days)")
             except Exception as e:
                 self.logger.debug(f"Hourly fetch failed for {ticker}: {e}")
+                import traceback
+                self.logger.debug(traceback.format_exc())
             return None
         
         async def fetch_daily():
@@ -4226,35 +4264,63 @@ class PriceService:
                     timestamp = df.index[-1] if isinstance(df.index, pd.DatetimeIndex) else latest_row.get('date')
                     price = float(latest_row['close'])
                     return ('daily', timestamp, price, df)  # Return DataFrame for reuse
+                else:
+                    self.logger.debug(f"Daily fetch for {ticker}: DataFrame is empty (no data in last 7 days)")
             except Exception as e:
                 self.logger.debug(f"Daily fetch failed for {ticker}: {e}")
+                import traceback
+                self.logger.debug(traceback.format_exc())
             return None
         
         # When market is open: use latest realtime price (most current)
         # When market is closed: use last close price from daily data
         if not use_market_time or market_is_open:
             # Market open: prioritize realtime data, fallback to hourly/daily
-            rt_task = asyncio.create_task(fetch_realtime())
-            hr_task = asyncio.create_task(fetch_hourly())
-            dy_task = asyncio.create_task(fetch_daily())
-            results = await asyncio.gather(rt_task, hr_task, dy_task, return_exceptions=False)
-            
-            valid_results = [r for r in results if r is not None]
-            if not valid_results:
-                return None
-            
-            # Pick the result with the most recent timestamp (normalize to UTC-aware for comparison)
-            latest = max(valid_results, key=lambda r: normalize_timestamp(r[1]))
-            source, timestamp, price, data_df = latest
-            
-            # Extract hourly_df and daily_df from results for reuse
-            hourly_df = None
-            daily_df = None
-            for r in valid_results:
-                if r[0] == 'hourly' and r[3] is not None:
-                    hourly_df = r[3]
-                elif r[0] == 'daily' and r[3] is not None:
-                    daily_df = r[3]
+            # If only_source is specified, only fetch from that source
+            if only_source == 'realtime':
+                rt_result = await fetch_realtime()
+                if not rt_result:
+                    return None
+                source, timestamp, price, data_df = rt_result
+                hourly_df = None
+                daily_df = None
+            elif only_source == 'hourly':
+                hr_result = await fetch_hourly()
+                if not hr_result:
+                    return None
+                source, timestamp, price, data_df = hr_result
+                hourly_df = data_df
+                daily_df = None
+            elif only_source == 'daily':
+                dy_result = await fetch_daily()
+                if not dy_result:
+                    return None
+                source, timestamp, price, data_df = dy_result
+                hourly_df = None
+                daily_df = data_df
+            else:
+                # Fetch from all sources and pick the most recent
+                rt_task = asyncio.create_task(fetch_realtime())
+                hr_task = asyncio.create_task(fetch_hourly())
+                dy_task = asyncio.create_task(fetch_daily())
+                results = await asyncio.gather(rt_task, hr_task, dy_task, return_exceptions=False)
+                
+                valid_results = [r for r in results if r is not None]
+                if not valid_results:
+                    return None
+                
+                # Pick the result with the most recent timestamp (normalize to UTC-aware for comparison)
+                latest = max(valid_results, key=lambda r: normalize_timestamp(r[1]))
+                source, timestamp, price, data_df = latest
+                
+                # Extract hourly_df and daily_df from results for reuse
+                hourly_df = None
+                daily_df = None
+                for r in valid_results:
+                    if r[0] == 'hourly' and r[3] is not None:
+                        hourly_df = r[3]
+                    elif r[0] == 'daily' and r[3] is not None:
+                        daily_df = r[3]
             
             self.logger.debug(f"[DB] Market OPEN: Using {source} price ${price:.2f} for {ticker} (timestamp: {timestamp})")
             result = {
@@ -4270,18 +4336,16 @@ class PriceService:
             # Cache the result
             if self.cache and self.cache.enable_cache:
                 try:
-                    cache_key = CacheKeyGenerator.latest_price_data(ticker)
+                    cache_key = CacheKeyGenerator.latest_price_data(ticker, source=only_source)
                     cache_dict = result.copy()
                     # Serialize nested DataFrames
-                    if 'realtime_df' in cache_dict and cache_dict['realtime_df'] is not None:
-                        if isinstance(cache_dict['realtime_df'], pd.DataFrame):
-                            cache_dict['realtime_df'] = cache_dict['realtime_df'].to_json(orient='records')
-                    if 'hourly_df' in cache_dict and cache_dict['hourly_df'] is not None:
-                        if isinstance(cache_dict['hourly_df'], pd.DataFrame):
-                            cache_dict['hourly_df'] = cache_dict['hourly_df'].to_json(orient='records')
-                    if 'daily_df' in cache_dict and cache_dict['daily_df'] is not None:
-                        if isinstance(cache_dict['daily_df'], pd.DataFrame):
-                            cache_dict['daily_df'] = cache_dict['daily_df'].to_json(orient='records')
+                    # Convert None to empty string to avoid pandas converting to NaN
+                    for key in ('realtime_df', 'hourly_df', 'daily_df'):
+                        if key in cache_dict:
+                            if cache_dict[key] is None:
+                                cache_dict[key] = ''  # Empty string instead of None
+                            elif isinstance(cache_dict[key], pd.DataFrame):
+                                cache_dict[key] = cache_dict[key].to_json(orient='records')
                     # Add last_save_time
                     cache_dict['last_save_time'] = datetime.now(timezone.utc).isoformat()
                     cache_df = pd.DataFrame([cache_dict])
@@ -4293,52 +4357,103 @@ class PriceService:
             return result
         else:
             # Market closed: use last close price from daily data (most reliable)
-            # Fetch both daily and hourly in parallel to get both DataFrames for reuse
-            daily_task = asyncio.create_task(fetch_daily())
-            hourly_task = asyncio.create_task(fetch_hourly())
-            daily_result, hourly_result = await asyncio.gather(daily_task, hourly_task)
-            
-            if daily_result:
-                source, timestamp, price, daily_df = daily_result
-                hourly_df = hourly_result[3] if hourly_result and hourly_result[3] is not None else None
-                self.logger.debug(f"[DB] Market CLOSED: Using daily close price ${price:.2f} for {ticker} (timestamp: {timestamp})")
+            # If only_source is specified, only fetch from that source
+            if only_source == 'realtime':
+                rt_result = await fetch_realtime()
+                if not rt_result:
+                    self.logger.warning(f"[DB] Market CLOSED: No realtime price found for {ticker}")
+                    return None
+                source, timestamp, price, data_df = rt_result
                 result = {
                     'price': price,
                     'timestamp': timestamp,
                     'source': source,
-                    'realtime_df': None,  # No realtime data when market is closed
-                    'hourly_df': hourly_df,
-                    'daily_df': daily_df,
+                    'realtime_df': data_df,
+                    'hourly_df': None,
+                    'daily_df': None,
                     'fetched_at': datetime.now(timezone.utc).isoformat()
                 }
-            elif hourly_result:
-                source, timestamp, price, hourly_df = hourly_result
-                self.logger.debug(f"[DB] Market CLOSED: Using hourly close price ${price:.2f} for {ticker} (timestamp: {timestamp})")
+                self.logger.debug(f"[DB] Market CLOSED: Using realtime price ${price:.2f} for {ticker} (as requested by only_source)")
+            elif only_source == 'hourly':
+                hr_result = await fetch_hourly()
+                if not hr_result:
+                    self.logger.warning(f"[DB] Market CLOSED: No hourly price found for {ticker}")
+                    return None
+                source, timestamp, price, hourly_df = hr_result
                 result = {
                     'price': price,
                     'timestamp': timestamp,
                     'source': source,
-                    'realtime_df': None,  # No realtime data when market is closed
+                    'realtime_df': None,
                     'hourly_df': hourly_df,
                     'daily_df': None,
                     'fetched_at': datetime.now(timezone.utc).isoformat()
                 }
+                self.logger.debug(f"[DB] Market CLOSED: Using hourly close price ${price:.2f} for {ticker}")
+            elif only_source == 'daily':
+                dy_result = await fetch_daily()
+                if not dy_result:
+                    self.logger.warning(f"[DB] Market CLOSED: No daily price found for {ticker}")
+                    return None
+                source, timestamp, price, daily_df = dy_result
+                result = {
+                    'price': price,
+                    'timestamp': timestamp,
+                    'source': source,
+                    'realtime_df': None,
+                    'hourly_df': None,
+                    'daily_df': daily_df,
+                    'fetched_at': datetime.now(timezone.utc).isoformat()
+                }
+                self.logger.debug(f"[DB] Market CLOSED: Using daily close price ${price:.2f} for {ticker}")
             else:
-                self.logger.warning(f"[DB] Market CLOSED: No daily or hourly price found for {ticker}")
-                return None
+                # Fetch both daily and hourly in parallel to get both DataFrames for reuse
+                daily_task = asyncio.create_task(fetch_daily())
+                hourly_task = asyncio.create_task(fetch_hourly())
+                daily_result, hourly_result = await asyncio.gather(daily_task, hourly_task)
+                
+                if daily_result:
+                    source, timestamp, price, daily_df = daily_result
+                    hourly_df = hourly_result[3] if hourly_result and hourly_result[3] is not None else None
+                    self.logger.debug(f"[DB] Market CLOSED: Using daily close price ${price:.2f} for {ticker} (timestamp: {timestamp})")
+                    result = {
+                        'price': price,
+                        'timestamp': timestamp,
+                        'source': source,
+                        'realtime_df': None,  # No realtime data when market is closed
+                        'hourly_df': hourly_df,
+                        'daily_df': daily_df,
+                        'fetched_at': datetime.now(timezone.utc).isoformat()
+                    }
+                elif hourly_result:
+                    source, timestamp, price, hourly_df = hourly_result
+                    self.logger.debug(f"[DB] Market CLOSED: Using hourly close price ${price:.2f} for {ticker} (timestamp: {timestamp})")
+                    result = {
+                        'price': price,
+                        'timestamp': timestamp,
+                        'source': source,
+                        'realtime_df': None,  # No realtime data when market is closed
+                        'hourly_df': hourly_df,
+                        'daily_df': None,
+                        'fetched_at': datetime.now(timezone.utc).isoformat()
+                    }
+                else:
+                    self.logger.warning(f"[DB] Market CLOSED: No daily or hourly price found for {ticker}")
+                    return None
             
             # Cache the result
             if self.cache and self.cache.enable_cache and result:
                 try:
-                    cache_key = CacheKeyGenerator.latest_price_data(ticker)
+                    cache_key = CacheKeyGenerator.latest_price_data(ticker, source=only_source)
                     cache_dict = result.copy()
                     # Serialize nested DataFrames
-                    if 'hourly_df' in cache_dict and cache_dict['hourly_df'] is not None:
-                        if isinstance(cache_dict['hourly_df'], pd.DataFrame):
-                            cache_dict['hourly_df'] = cache_dict['hourly_df'].to_json(orient='records')
-                    if 'daily_df' in cache_dict and cache_dict['daily_df'] is not None:
-                        if isinstance(cache_dict['daily_df'], pd.DataFrame):
-                            cache_dict['daily_df'] = cache_dict['daily_df'].to_json(orient='records')
+                    # Convert None to empty string to avoid pandas converting to NaN
+                    for key in ('realtime_df', 'hourly_df', 'daily_df'):
+                        if key in cache_dict:
+                            if cache_dict[key] is None:
+                                cache_dict[key] = ''  # Empty string instead of None
+                            elif isinstance(cache_dict[key], pd.DataFrame):
+                                cache_dict[key] = cache_dict[key].to_json(orient='records')
                     # Add last_save_time
                     cache_dict['last_save_time'] = datetime.now(timezone.utc).isoformat()
                     cache_df = pd.DataFrame([cache_dict])
@@ -4358,6 +4473,11 @@ class StockQuestDB(StockDBBase):
     """
     QuestDB implementation optimized for high-performance time-series stock data.
     Drop-in replacement for the original implementation with layered architecture.
+    
+    Environment Variables:
+        QUESTDB_ENSURE_TABLES: Set to 'true', '1', 'yes', or 'on' to enable automatic
+                               table creation on initialization. This can be overridden
+                               by explicitly passing ensure_tables=True parameter.
     """
     
     def __init__(self, 
@@ -4371,13 +4491,37 @@ class StockQuestDB(StockDBBase):
                  redis_url: Optional[str] = None,
                  enable_cache: bool = True,
                  ensure_tables: bool = False):
-        """Initialize QuestDB with layered architecture."""
+        """Initialize QuestDB with layered architecture.
+        
+        Args:
+            db_config: Database connection string (e.g., questdb://user:pass@host:port/db)
+            pool_max_size: Maximum size of the connection pool
+            pool_connection_timeout_minutes: Timeout for pool connections in minutes
+            connection_timeout_seconds: Timeout for individual connections in seconds
+            logger: Optional logger instance
+            log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
+            auto_init: Whether to automatically initialize database on creation
+            redis_url: Redis URL for caching (e.g., redis://localhost:6379/0)
+            enable_cache: Whether to enable Redis caching
+            ensure_tables: Whether to create tables if they don't exist. Can also be 
+                          enabled via QUESTDB_ENSURE_TABLES environment variable 
+                          (set to 'true', '1', 'yes', or 'on'). Defaults to False 
+                          for safety in production environments.
+        """
         super().__init__(db_config, logger)
         
         if logger is None:
             self.logger = get_logger("questdb_db", logger=None, level=log_level)
         else:
             self.logger = logger
+        
+        # Check environment variable for ensure_tables if not explicitly set to True
+        # Environment variable can override the default False value
+        if not ensure_tables:
+            env_ensure_tables = os.getenv('QUESTDB_ENSURE_TABLES', '').lower()
+            if env_ensure_tables in ('true', '1', 'yes', 'on'):
+                ensure_tables = True
+                self.logger.debug("Table creation enabled via QUESTDB_ENSURE_TABLES environment variable")
         
         # Create configuration
         config = QuestDBConfig(
@@ -4739,9 +4883,9 @@ class StockQuestDB(StockDBBase):
         """Get latest price."""
         return await self.price_service.get_latest_price(ticker, use_market_time)
     
-    async def get_latest_price_with_data(self, ticker: str, use_market_time: bool = True) -> Optional[Dict[str, Any]]:
+    async def get_latest_price_with_data(self, ticker: str, use_market_time: bool = True, only_source: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get latest price with full data (price, timestamp, source, realtime_df)."""
-        return await self.price_service.get_latest_price_with_data(ticker, use_market_time)
+        return await self.price_service.get_latest_price_with_data(ticker, use_market_time, only_source=only_source)
     
     async def get_latest_prices(self, tickers: List[str], num_simultaneous: int = 25,
                                use_market_time: bool = True) -> Dict[str, Optional[float]]:
@@ -4767,7 +4911,10 @@ class StockQuestDB(StockDBBase):
     async def get_previous_close_prices(self, tickers: List[str]) -> Dict[str, Optional[float]]:
         """Get previous close prices.
         
-        Returns the close price from the last trading day (not today).
+        Returns the second-to-last close price from the database (if available).
+        This ensures comparisons are made against actual data that exists, not assumptions
+        about today's close. If only one close exists, uses that one.
+        
         Uses ET timezone to query daily_prices table because the table's 'date' column
         stores market dates (ET trading days). All actual timestamp storage in the database
         is in UTC via TimezoneHandler.to_naive_utc().
@@ -4804,45 +4951,37 @@ class StockQuestDB(StockDBBase):
             
             for ticker in tickers:
                 try:
-                    # Get the most recent close from before today (last trading day)
-                    # The date column stores timestamps (UTC) representing market dates (ET trading days)
-                    # We need to compare dates, not timestamps, so we'll use the start of today in UTC
-                    # which corresponds to the start of today in ET converted to UTC
-                    
-                    # Query: get close where date < start of today (in UTC, representing ET market date)
+                    # Get the last 2 closes that exist in the database (ordered by date DESC)
+                    # Use the second-to-last one as the reference for comparison
+                    # This ensures we compare against actual data, not assumptions about today's close
                     rows = await conn.fetch(
-                        "SELECT date, close FROM daily_prices WHERE ticker = $1 AND date < $2 ORDER BY date DESC LIMIT 1",
-                        ticker, today_start_utc
+                        "SELECT date, close FROM daily_prices WHERE ticker = $1 ORDER BY date DESC LIMIT 2",
+                        ticker
                     )
-                    if rows:
-                        prev_close = rows[0]['close']
-                        prev_date = rows[0]['date']
+                    if rows and len(rows) >= 2:
+                        # We have at least 2 closes - use the second-to-last one
+                        prev_close = rows[1]['close']
+                        prev_date = rows[1]['date']
                         # Extract date portion from timestamp for logging
                         if isinstance(prev_date, datetime):
                             prev_date_str = prev_date.strftime('%Y-%m-%d')
                         else:
                             prev_date_str = str(prev_date)
                         result[ticker] = prev_close
-                        self.logger.debug(f"[PREV CLOSE] {ticker}: {prev_close} from date {prev_date_str} (today ET: {today_et})")
-                    else:
-                        # Fallback: if no data before today, try to get most recent (but this shouldn't be today)
-                        # This fallback should rarely be needed if data exists
-                        rows = await conn.fetch(
-                            "SELECT date, close FROM daily_prices WHERE ticker = $1 AND date < $2 ORDER BY date DESC LIMIT 1",
-                            ticker, today_start_utc
-                        )
-                        if rows:
-                            prev_close = rows[0]['close']
-                            prev_date = rows[0]['date']
-                            if isinstance(prev_date, datetime):
-                                prev_date_str = prev_date.strftime('%Y-%m-%d')
-                            else:
-                                prev_date_str = str(prev_date)
-                            result[ticker] = prev_close
-                            self.logger.debug(f"[PREV CLOSE] {ticker}: {prev_close} from date {prev_date_str} (fallback, today ET: {today_et})")
+                        self.logger.debug(f"[PREV CLOSE] {ticker}: {prev_close} from date {prev_date_str} (second-to-last close, today ET: {today_et})")
+                    elif rows and len(rows) == 1:
+                        # Only one close available - use it but log a warning
+                        prev_close = rows[0]['close']
+                        prev_date = rows[0]['date']
+                        if isinstance(prev_date, datetime):
+                            prev_date_str = prev_date.strftime('%Y-%m-%d')
                         else:
-                            result[ticker] = None
-                            self.logger.warning(f"[PREV CLOSE] {ticker}: No close price found (today ET: {today_et})")
+                            prev_date_str = str(prev_date)
+                        result[ticker] = prev_close
+                        self.logger.warning(f"[PREV CLOSE] {ticker}: Only one close found, using {prev_close} from date {prev_date_str} (today ET: {today_et})")
+                    else:
+                        result[ticker] = None
+                        self.logger.warning(f"[PREV CLOSE] {ticker}: No close price found (today ET: {today_et})")
                 except Exception as e:
                     self.logger.error(f"Error getting previous close for {ticker}: {e}")
                     result[ticker] = None
@@ -5393,6 +5532,11 @@ class StockQuestDB(StockDBBase):
         ev_to_ebitda DOUBLE,
         enterprise_value LONG,
         free_cash_flow LONG,
+        iv_30d DOUBLE,
+        iv_rank DOUBLE,
+        relative_rank DOUBLE,
+        iv_analysis_json STRING,
+        iv_analysis_spare STRING,
         write_timestamp TIMESTAMP
     ) TIMESTAMP(date) PARTITION BY MONTH WAL
     DEDUP UPSERT KEYS(date, ticker);

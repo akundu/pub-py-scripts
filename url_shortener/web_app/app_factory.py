@@ -55,16 +55,22 @@ def create_app(
     app.add_middleware(ForwardedHeadersMiddleware)
     app.add_middleware(LoggingMiddleware)
     
-    # Mount static files if directory exists
-    static_path = os.path.join(os.path.dirname(__file__), "..", "ux", "web")
-    if os.path.exists(static_path):
-        app.mount("/static", StaticFiles(directory=static_path), name="static")
+    # Mount static file directories (CSS and JS)
+    base_path = os.path.join(os.path.dirname(__file__), "..", "ux", "web")
+    css_path = os.path.join(base_path, "css")
+    js_path = os.path.join(base_path, "js")
+    
+    if os.path.exists(css_path):
+        app.mount("/css", StaticFiles(directory=css_path), name="css")
+    if os.path.exists(js_path):
+        app.mount("/js", StaticFiles(directory=js_path), name="js")
     
     # Include routers
     app.include_router(api_router, prefix="/api", tags=["API"])
     app.include_router(web_router, tags=["Web"])
     
     return app
+
 
 
 

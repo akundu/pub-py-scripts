@@ -22,11 +22,18 @@ fi
 echo "✅ Docker and Docker Compose are installed"
 echo ""
 
-# Check if .env exists, if not create from example
+# Navigate to the project root (url_shortener directory)
+cd "$(dirname "$0")/../.." || exit 1
+
+# Check if .env exists, if not create from example (if example exists)
 if [ ! -f .env ]; then
-    echo "📝 Creating .env from .env.example..."
-    cp .env.example .env
-    echo "✅ .env file created. Please review and update if needed."
+    if [ -f .env.example ]; then
+        echo "📝 Creating .env from .env.example..."
+        cp .env.example .env
+        echo "✅ .env file created. Please review and update if needed."
+    else
+        echo "ℹ️  No .env.example found. Using default configuration from docker-compose.yml"
+    fi
 else
     echo "✅ .env file already exists"
 fi
