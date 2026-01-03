@@ -1,4 +1,18 @@
-from alpaca_trade_api.rest import REST, TimeFrame, APIError
+# Import Alpaca API components
+try:
+    import alpaca_trade_api.rest as alpaca_rest
+    REST = alpaca_rest.REST
+    APIError = alpaca_rest.APIError
+    TimeFrame = alpaca_rest.TimeFrame
+except (ImportError, AttributeError) as e:
+    # Fallback: try direct import
+    try:
+        from alpaca_trade_api.rest import REST, APIError, TimeFrame
+    except ImportError:
+        raise ImportError(
+            f"Failed to import Alpaca Trade API components: {e}. "
+            "Please ensure alpaca-trade-api is installed: pip install alpaca-trade-api"
+        )
 from datetime import datetime, timedelta, timezone
 import pandas as pd
 import os
