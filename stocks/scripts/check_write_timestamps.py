@@ -280,7 +280,7 @@ async def main():
     parser = argparse.ArgumentParser(description='Check write_timestamp values for options data')
     parser.add_argument('ticker', help='Ticker symbol to check (e.g., GOOG)')
     parser.add_argument('--db-conn', 
-                       default='questdb://stock_user:stock_password@localhost:8812/stock_data',
+                       default='questdb://user:password@localhost:8812/stock_data',
                        help='Database connection string')
     parser.add_argument('--min-write-timestamp',
                        help='Minimum write timestamp in EST format (e.g., "2025-11-14 17:52:38")')

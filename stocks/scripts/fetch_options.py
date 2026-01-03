@@ -2289,13 +2289,13 @@ Examples:
   python historical_stock_options.py TQQQ --date 2024-05-01 --max-days-to-expiry 14 --include-expired
 
   # Save to QuestDB database
-  python historical_stock_options.py AAPL --date 2024-06-05 --db-path questdb://stock_user:stock_password@localhost:8812/stock_data
+  python historical_stock_options.py AAPL --date 2024-06-05 --db-path questdb://user:password@localhost:8812/stock_data
 
   # Save to HTTP database server (db_server.py)
   python historical_stock_options.py MSFT --date 2024-06-05 --db-path localhost:9002
   
   # Save to direct QuestDB connection (explicit protocol)
-  python historical_stock_options.py MSFT --date 2024-06-05 --db-path questdb://stock_user:stock_password@localhost:8812/stock_data
+  python historical_stock_options.py MSFT --date 2024-06-05 --db-path questdb://user:password@localhost:8812/stock_data
 
   # Save with custom batch size for large datasets (default: 100)
   python historical_stock_options.py SPX --date 2024-06-05 --db-path localhost:9002 --db-batch-size 50

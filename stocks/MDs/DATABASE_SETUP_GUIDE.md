@@ -114,8 +114,8 @@ POSTGRES_PORT=5432
 
 # Stock database credentials (created automatically)
 STOCK_DB_NAME=stock_data
-STOCK_DB_USER=stock_user
-STOCK_DB_PASSWORD=stock_password
+STOCK_DB_USER=user
+STOCK_DB_PASSWORD=password
 
 # API Keys for market data
 POLYGON_API_KEY=your_polygon_api_key
@@ -146,7 +146,7 @@ chmod +x scripts/verify_db_permissions.sh
 #### Step 3: Verify Installation
 ```bash
 # Check database is ready
-docker-compose exec postgres pg_isready -U stock_user -d stock_data
+docker-compose exec postgres pg_isready -U user -d stock_data
 
 # Verify permissions and tables
 ./scripts/verify_db_permissions.sh
@@ -157,7 +157,7 @@ import asyncio
 from common.postgres_db import StockDBPostgreSQL
 
 async def check():
-    db = StockDBPostgreSQL('postgresql://stock_user:stock_password@localhost:5432/stock_data')
+    db = StockDBPostgreSQL('postgresql://user:password@localhost:5432/stock_data')
     stats = await db.get_database_stats()
     print('Database Statistics:', stats)
     await db.close_pool()
@@ -185,14 +185,14 @@ export POSTGRES_PORT="5432"
 
 # The script creates:
 # - Database: stock_data
-# - User: stock_user (password: stock_password)
+# - User: user (password: password)
 # - Grants all necessary permissions
 ```
 
 #### Step 3: Initialize Schema & Optimizations
 ```bash
 # Connect to your database and apply optimizations
-python scripts/apply_db_optimizations.py --db-url "postgresql://stock_user:stock_password@your_host:5432/stock_data"
+python scripts/apply_db_optimizations.py --db-url "postgresql://user:password@your_host:5432/stock_data"
 ```
 
 ### Method 3: Manual Setup
@@ -207,21 +207,21 @@ Connect to PostgreSQL as admin and run:
 CREATE DATABASE stock_data;
 
 -- Create user
-CREATE USER stock_user WITH PASSWORD 'stock_password';
+CREATE USER user WITH PASSWORD 'password';
 
 -- Grant database privileges
-GRANT ALL PRIVILEGES ON DATABASE stock_data TO stock_user;
+GRANT ALL PRIVILEGES ON DATABASE stock_data TO user;
 
 -- Connect to stock_data database
 \c stock_data
 
 -- Grant schema privileges
-GRANT ALL PRIVILEGES ON SCHEMA public TO stock_user;
+GRANT ALL PRIVILEGES ON SCHEMA public TO user;
 
 -- Grant default privileges for future objects
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO stock_user;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO stock_user;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO stock_user;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO user;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO user;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO user;
 ```
 
 #### Step 2: Initialize Tables
@@ -230,7 +230,7 @@ import asyncio
 from common.postgres_db import StockDBPostgreSQL
 
 async def setup():
-    db = StockDBPostgreSQL('postgresql://stock_user:stock_password@localhost:5432/stock_data')
+    db = StockDBPostgreSQL('postgresql://user:password@localhost:5432/stock_data')
     # Tables are created automatically on first connection
     await db._ensure_tables_exist()
     print("✅ Tables created successfully")
@@ -241,7 +241,7 @@ asyncio.run(setup())
 
 #### Step 3: Apply Optimizations
 ```bash
-python scripts/apply_db_optimizations.py --db-url "postgresql://stock_user:stock_password@localhost:5432/stock_data"
+python scripts/apply_db_optimizations.py --db-url "postgresql://user:password@localhost:5432/stock_data"
 ```
 
 ## 🔧 Database Optimizations Applied
@@ -277,7 +277,7 @@ import asyncio
 from common.postgres_db import StockDBPostgreSQL
 
 async def test():
-    db = StockDBPostgreSQL('postgresql://stock_user:stock_password@localhost:5432/stock_data')
+    db = StockDBPostgreSQL('postgresql://user:password@localhost:5432/stock_data')
     
     # Test basic operations
     stats = await db.get_database_stats()
@@ -300,7 +300,7 @@ import time
 from common.postgres_db import StockDBPostgreSQL
 
 async def performance_test():
-    db = StockDBPostgreSQL('postgresql://stock_user:stock_password@localhost:5432/stock_data')
+    db = StockDBPostgreSQL('postgresql://user:password@localhost:5432/stock_data')
     
     # Test fast count vs regular count
     start = time.time()
@@ -317,7 +317,7 @@ asyncio.run(performance_test())
 ### 3. Multi-Process Server Test
 ```bash
 # Start the database server
-python db_server.py --db-file "postgresql://stock_user:stock_password@localhost:5432/stock_data" --port 9003 --workers 4
+python db_server.py --db-file "postgresql://user:password@localhost:5432/stock_data" --port 9003 --workers 4
 
 # Test endpoints
 curl http://localhost:9003/health
@@ -330,7 +330,7 @@ curl http://localhost:9003/stats/pool
 ### For Your Applications:
 ```python
 # PostgreSQL connection string
-DB_URL = "postgresql://stock_user:stock_password@localhost:5432/stock_data"
+DB_URL = "postgresql://user:password@localhost:5432/stock_data"
 
 # Initialize database
 from common.postgres_db import StockDBPostgreSQL
@@ -340,14 +340,14 @@ db = StockDBPostgreSQL(DB_URL)
 ### For External Tools:
 ```bash
 # psql command line
-psql "postgresql://stock_user:stock_password@localhost:5432/stock_data"
+psql "postgresql://user:password@localhost:5432/stock_data"
 
 # DBeaver/pgAdmin connection:
 Host: localhost
 Port: 5432
 Database: stock_data
-Username: stock_user
-Password: stock_password
+Username: user
+Password: password
 ```
 
 ## 🎯 Production Considerations
@@ -374,10 +374,10 @@ wal_buffers = 16MB                  # WAL buffer size
 ### 3. Backup Strategy
 ```bash
 # Regular database backups
-pg_dump "postgresql://stock_user:stock_password@localhost:5432/stock_data" > backup_$(date +%Y%m%d).sql
+pg_dump "postgresql://user:password@localhost:5432/stock_data" > backup_$(date +%Y%m%d).sql
 
 # Restore from backup
-psql "postgresql://stock_user:stock_password@localhost:5432/stock_data" < backup_20240120.sql
+psql "postgresql://user:password@localhost:5432/stock_data" < backup_20240120.sql
 ```
 
 ### 4. Monitoring
@@ -422,7 +422,7 @@ pg_isready -h localhost -p 5432
 #### 2. **"Authentication failed"**
 ```bash
 # Verify credentials
-psql "postgresql://stock_user:stock_password@localhost:5432/stock_data" -c "SELECT current_user;"
+psql "postgresql://user:password@localhost:5432/stock_data" -c "SELECT current_user;"
 ```
 
 #### 3. **"Database does not exist"**
@@ -447,7 +447,7 @@ python scripts/apply_db_optimizations.py --db-url "your_connection_string"
 
 - [ ] PostgreSQL server running and accessible
 - [ ] `stock_data` database created
-- [ ] `stock_user` with proper permissions
+- [ ] `user` with proper permissions
 - [ ] All tables created (`daily_prices`, `hourly_prices`, `realtime_data`)
 - [ ] Optimization tables and views created
 - [ ] Fast count functions working

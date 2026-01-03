@@ -352,8 +352,8 @@ async def main():
     )
     parser.add_argument(
         '--db-conn',
-        default='questdb://stock_user:stock_password@localhost:8812/stock_data',
-        help='Database connection string (default: questdb://stock_user:stock_password@localhost:8812/stock_data)'
+        default='questdb://user:password@localhost:8812/stock_data',
+        help='Database connection string (default: questdb://user:password@localhost:8812/stock_data)'
     )
     parser.add_argument(
         '--confirm',

@@ -235,7 +235,7 @@ The service automatically creates tables when `QUESTDB_CREATE_TABLES=1`.
 
 To manually initialize tables:
 ```bash
-python scripts/database/init_tables.py
+python scripts/database/init_questdb_database.py
 ```
 
 To seed test data:
@@ -356,7 +356,7 @@ If tables aren't being created:
 export QUESTDB_CREATE_TABLES=1
 
 # Or manually create tables
-python scripts/database/init_tables.py
+python scripts/database/init_questdb_database.py
 ```
 
 ### Redis Connection

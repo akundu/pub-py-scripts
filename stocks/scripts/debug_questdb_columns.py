@@ -95,7 +95,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Debug QuestDB column names")
     parser.add_argument(
         "--db-path",
-        default="questdb://stock_user:stock_password@localhost:8812/stock_data",
+        default="questdb://user:password@localhost:8812/stock_data",
         help="QuestDB connection string"
     )
     

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Database Permissions Verification Script
-# This script verifies that stock_user owns the database and has all necessary permissions
+# This script verifies that user owns the database and has all necessary permissions
 
 set -e
 
@@ -20,7 +20,7 @@ echo "✅ PostgreSQL container is running"
 # Wait for PostgreSQL to be ready
 echo ""
 echo "⏳ Waiting for PostgreSQL to be ready..."
-until docker-compose exec -T postgres pg_isready -U stock_user -d stock_data; do
+until docker-compose exec -T postgres pg_isready -U user -d stock_data; do
     echo "   Waiting for PostgreSQL..."
     sleep 2
 done
@@ -30,13 +30,13 @@ echo "✅ PostgreSQL is ready!"
 # Run the verification script
 echo ""
 echo "🔍 Running database ownership and permissions verification..."
-docker-compose exec -T postgres psql -U stock_user -d stock_data -f /docker-entrypoint-initdb.d/verify_db_permissions.sql
+docker-compose exec -T postgres psql -U user -d stock_data -f /docker-entrypoint-initdb.d/verify_db_permissions.sql
 
 echo ""
 echo "✅ Verification complete!"
 echo ""
 echo "📋 To run verification manually:"
-echo "   docker-compose exec postgres psql -U stock_user -d stock_data -f /docker-entrypoint-initdb.d/verify_db_permissions.sql"
+echo "   docker-compose exec postgres psql -U user -d stock_data -f /docker-entrypoint-initdb.d/verify_db_permissions.sql"
 echo ""
 echo "📋 To connect to database manually:"
-echo "   docker-compose exec postgres psql -U stock_user -d stock_data" 
+echo "   docker-compose exec postgres psql -U user -d stock_data" 

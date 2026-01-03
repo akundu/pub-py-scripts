@@ -61,7 +61,7 @@ ulimit -n 65536
 python scripts/polygon_realtime_streamer.py \
   --types all \
   --feed quotes \
-  --db-server ms1.kundu.dev:9100 \
+  --db-server localhost:9100 \
   --symbols-per-connection 25 \
   --log-level ERROR \
   --batch-interval 1

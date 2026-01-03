@@ -58,7 +58,7 @@ python fetch_all_data.py --symbols-list examples/sample_symbols.yaml
 ```bash
 # Fetch market data for S&P 500
 python fetch_all_data.py --types sp-500 --fetch-market-data \
-  --db-path questdb://stock_user:stock_password@localhost:8812/stock_data
+  --db-path questdb://user:password@localhost:8812/stock_data
 
 # With custom concurrency
 python fetch_all_data.py --types sp-500 --fetch-market-data \
@@ -249,7 +249,7 @@ python fetch_all_data.py --types sp-500 --fetch-market-data --client-timeout 300
 
 2. Check database connectivity:
 ```bash
-psql -h localhost -p 9000 -U stock_user -d qdb
+psql -h localhost -p 9000 -U user -d qdb
 ```
 
 ### Slow Performance

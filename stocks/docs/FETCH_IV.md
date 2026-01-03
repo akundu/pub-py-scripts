@@ -86,7 +86,7 @@ python scripts/fetch_iv.py --types sp-500 -c 90 -w 16
 python scripts/fetch_iv.py --symbols AAPL --server-url localhost:9102
 
 # Remote server
-python scripts/fetch_iv.py --symbols AAPL --server-url ms1.kundu.dev:9100
+python scripts/fetch_iv.py --symbols AAPL --server-url localhost:9100
 ```
 
 ### Cache Control
@@ -248,7 +248,7 @@ ORDER BY iv_rank DESC;
 python scripts/fetch_iv.py --symbols AAPL MSFT GOOGL
 
 # Query via SQL
-psql -h localhost -p 9000 -U stock_user -d qdb \
+psql -h localhost -p 9000 -U user -d qdb \
   -c "SELECT ticker, iv_rank FROM financial_info WHERE date = CURRENT_DATE"
 ```
 

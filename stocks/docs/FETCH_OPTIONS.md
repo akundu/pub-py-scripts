@@ -97,7 +97,7 @@ python scripts/fetch_options.py TQQQ --date 2024-05-01 \
 ```bash
 # Save to QuestDB
 python scripts/fetch_options.py AAPL --date 2024-06-05 \
-  --db-path questdb://stock_user:stock_password@localhost:8812/stock_data
+  --db-path questdb://user:password@localhost:8812/stock_data
 
 # Save to HTTP database server
 python scripts/fetch_options.py MSFT --date 2024-06-05 \
@@ -268,7 +268,7 @@ Columns:
 ```bash
 # Fetch and save to database
 python scripts/fetch_options.py AAPL --date 2024-06-05 \
-  --db-path questdb://stock_user:stock_password@localhost:8812/stock_data
+  --db-path questdb://user:password@localhost:8812/stock_data
 ```
 
 ### With db_server.py

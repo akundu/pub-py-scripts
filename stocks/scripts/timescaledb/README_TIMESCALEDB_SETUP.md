@@ -42,7 +42,7 @@ We've implemented a comprehensive solution:
 
 **Usage**:
 ```bash
-python setup_timescaledb_from_scratch.py 'timescaledb://stock_user:stock_password@localhost:5432/stock_data'
+python setup_timescaledb_from_scratch.py 'timescaledb://user:password@localhost:5432/stock_data'
 ```
 
 **When to use**:
@@ -62,7 +62,7 @@ python setup_timescaledb_from_scratch.py 'timescaledb://stock_user:stock_passwor
 
 **Usage**:
 ```bash
-python cleanup_duplicate_tables.py 'timescaledb://stock_user:stock_password@localhost:5432/stock_data'
+python cleanup_duplicate_tables.py 'timescaledb://user:password@localhost:5432/stock_data'
 ```
 
 **When to use**:
@@ -83,7 +83,7 @@ python cleanup_duplicate_tables.py 'timescaledb://stock_user:stock_password@loca
 
 **Usage**:
 ```bash
-python fix_timescaledb_constraints.py 'timescaledb://stock_user:stock_password@localhost:5432/stock_data'
+python fix_timescaledb_constraints.py 'timescaledb://user:password@localhost:5432/stock_data'
 ```
 
 **When to use**:
@@ -97,12 +97,12 @@ python fix_timescaledb_constraints.py 'timescaledb://stock_user:stock_password@l
 
 1. **Set up from scratch**:
    ```bash
-   python setup_timescaledb_from_scratch.py 'timescaledb://stock_user:stock_password@localhost:5432/stock_data'
+   python setup_timescaledb_from_scratch.py 'timescaledb://user:password@localhost:5432/stock_data'
    ```
 
 2. **Clean up any remaining duplicates** (if needed):
    ```bash
-   python cleanup_duplicate_tables.py 'timescaledb://stock_user:stock_password@localhost:5432/stock_data'
+   python cleanup_duplicate_tables.py 'timescaledb://user:password@localhost:5432/stock_data'
    ```
 
 3. **Start your application** - it should now work without constraint errors.
@@ -111,12 +111,12 @@ python fix_timescaledb_constraints.py 'timescaledb://stock_user:stock_password@l
 
 1. **Fix constraints on existing tables**:
    ```bash
-   python fix_timescaledb_constraints.py 'timescaledb://stock_user:stock_password@localhost:5432/stock_data'
+   python fix_timescaledb_constraints.py 'timescaledb://user:password@localhost:5432/stock_data'
    ```
 
 2. **Clean up duplicates** (if needed):
    ```bash
-   python cleanup_duplicate_tables.py 'timescaledb://stock_user:stock_password@localhost:5432/stock_data'
+   python cleanup_duplicate_tables.py 'timescaledb://user:password@localhost:5432/stock_data'
    ```
 
 ## Database Schema Structure

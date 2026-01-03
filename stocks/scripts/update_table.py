@@ -9,7 +9,7 @@ from common.questdb_db import StockQuestDB
 
 async def add_write_timestamp_columns():
     """Add write_timestamp columns to existing QuestDB tables."""
-    db_path = "questdb://stock_user:stock_password@localhost:8812/stock_data"  # Your connection string
+    db_path = "questdb://user:password@localhost:8812/stock_data"  # Your connection string
     db = StockQuestDB(db_path, pool_max_size=1, connection_timeout_seconds=30)
     
     async with db.get_connection() as conn:

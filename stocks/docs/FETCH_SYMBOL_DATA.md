@@ -319,7 +319,7 @@ echo $QUESTDB_URL
 
 2. Test database connection:
 ```bash
-psql -h localhost -p 9000 -U stock_user -d qdb
+psql -h localhost -p 9000 -U user -d qdb
 ```
 
 ### Slow Performance

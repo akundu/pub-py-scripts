@@ -9,13 +9,13 @@ display and real-time data reception.
 
 Usage Examples:
     # Display dashboard for specific symbols
-    python stock_display_dashboard.py --symbols AAPL MSFT GOOGL --db-server ms1.kundu.dev:9100
+    python stock_display_dashboard.py --symbols AAPL MSFT GOOGL --db-server localhost:9100
 
     # Display with debug mode (shows scrolling debug log)
-    python stock_display_dashboard.py --symbols AAPL MSFT GOOGL --db-server ms1.kundu.dev:9100 --debug
+    python stock_display_dashboard.py --symbols AAPL MSFT GOOGL --db-server localhost:9100 --debug
 
     # Display with custom refresh rate
-    python stock_display_dashboard.py --symbols AAPL MSFT GOOGL --display-refresh 2 --db-server ms1.kundu.dev:9100
+    python stock_display_dashboard.py --symbols AAPL MSFT GOOGL --display-refresh 2 --db-server localhost:9100
 """
 
 import asyncio
@@ -832,8 +832,8 @@ async def main():
     parser.add_argument(
         '--db-server',
         type=str,
-        default='ms1.kundu.dev:9100',
-        help='Database server address in host:port format (default: ms1.kundu.dev:9100)'
+        default='localhost:9100',
+        help='Database server address in host:port format (default: localhost:9100)'
     )
     
     parser.add_argument(

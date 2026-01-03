@@ -11,7 +11,7 @@ Usage:
     python scripts/cleanup_questdb_duplicates.py --db-path questdb://localhost:9002
     python scripts/cleanup_questdb_duplicates.py --db-path questdb://localhost:9002 --ticker AAPL
     python scripts/cleanup_questdb_duplicates.py --db-path questdb://localhost:9002 --dry-run
-    python scripts/cleanup_questdb_duplicates.py --db-path 'questdb://stock_user:stock_password@localhost:8812/stock_data'  --ticker AAPL --table daily_prices --dry-run
+    python scripts/cleanup_questdb_duplicates.py --db-path 'questdb://user:password@localhost:8812/stock_data'  --ticker AAPL --table daily_prices --dry-run
 
 """
 

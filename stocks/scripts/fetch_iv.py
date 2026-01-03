@@ -100,7 +100,7 @@ async def main():
     parser.add_argument("--data-dir", type=str, default="data",
                         help="Data directory for symbol lists (default: data)")
     parser.add_argument("--db-config", type=str, default=None,
-                        help="Database connection string (default: from QUESTDB_URL env var or questdb://stock_user:stock_password@ms1.kundu.dev:8812/stock_data)")
+                        help="Database connection string (default: from QUESTDB_URL env var or questdb://user:password@localhost:8812/stock_data)")
     args = parser.parse_args()
     
     # Normalize server URL - add http:// if missing
@@ -161,7 +161,7 @@ async def main():
     
     # Get database config for worker
     db_config = args.db_config if hasattr(args, 'db_config') and args.db_config else (
-        os.getenv("QUESTDB_URL") or "questdb://stock_user:stock_password@ms1.kundu.dev:8812/stock_data"
+        os.getenv("QUESTDB_URL") or "questdb://user:password@localhost:8812/stock_data"
     )
     
     total_cores = multiprocessing.cpu_count()
@@ -232,7 +232,7 @@ async def save_iv_analysis_to_db(results: list, db_config: Optional[str], logger
     try:
         # Get database config
         if not db_config:
-            db_config = os.getenv("QUESTDB_URL") or "questdb://stock_user:stock_password@ms1.kundu.dev:8812/stock_data"
+            db_config = os.getenv("QUESTDB_URL") or "questdb://user:password@localhost:8812/stock_data"
         
         # Import database utilities
         from common.stock_db import get_stock_db

@@ -48,7 +48,7 @@ async def check_tables(db_path: str):
 async def main():
     if len(sys.argv) != 2:
         print("Usage: python check_questdb_tables.py <db_path>")
-        print("Example: python check_questdb_tables.py 'questdb://stock_user:stock_password@localhost:8812/stock_data'")
+        print("Example: python check_questdb_tables.py 'questdb://user:password@localhost:8812/stock_data'")
         return 1
     
     db_path = sys.argv[1]

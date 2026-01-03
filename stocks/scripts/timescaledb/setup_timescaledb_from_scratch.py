@@ -10,7 +10,7 @@ This script creates a complete TimescaleDB setup with:
 5. Proper unique constraints for ON CONFLICT support
 
 Usage: python setup_timescaledb_from_scratch.py <database_connection_string>
-Example: python setup_timescaledb_from_scratch.py 'timescaledb://stock_user:stock_password@localhost:5432/stock_data'
+Example: python setup_timescaledb_from_scratch.py 'timescaledb://user:password@localhost:5432/stock_data'
 """
 
 import asyncio
@@ -356,7 +356,7 @@ async def main():
     """Main function to run the TimescaleDB setup."""
     if len(sys.argv) != 2:
         print("Usage: python setup_timescaledb_from_scratch.py <database_connection_string>")
-        print("Example: python setup_timescaledb_from_scratch.py 'timescaledb://stock_user:stock_password@localhost:5432/stock_data'")
+        print("Example: python setup_timescaledb_from_scratch.py 'timescaledb://user:password@localhost:5432/stock_data'")
         sys.exit(1)
     
     db_config = sys.argv[1]

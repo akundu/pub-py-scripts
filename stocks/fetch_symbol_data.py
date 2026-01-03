@@ -2400,7 +2400,7 @@ def parse_args():
     parser.add_argument(
         "--db-path",
         type=str,
-        default='ms1.kundu.dev:9100',
+        default='localhost:9100',
         help="Path to the database file or PostgreSQL connection string (e.g., postgresql://user:pass@host:port/db). If not provided, uses default for selected db-type."
     )
     parser.add_argument(

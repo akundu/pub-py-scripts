@@ -186,7 +186,7 @@ Examples:
         db_config = os.getenv("QUESTDB_URL") or os.getenv("DB_PATH")
         if not db_config:
             # Default QuestDB connection
-            db_config = "questdb://stock_user:stock_password@localhost:9009/stock_data"
+            db_config = "questdb://user:password@localhost:9009/stock_data"
     
     # Initialize database
     enable_cache = not args.no_cache

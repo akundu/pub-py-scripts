@@ -207,8 +207,8 @@ Examples:
     
     parser.add_argument(
         "--db-url",
-        default="postgresql://stock_user:stock_password@localhost:5432/stock_data",
-        help="Database connection URL (default: postgresql://stock_user:stock_password@localhost:5432/stock_data)"
+        default="postgresql://user:password@localhost:5432/stock_data",
+        help="Database connection URL (default: postgresql://user:password@localhost:5432/stock_data)"
     )
     
     args = parser.parse_args()

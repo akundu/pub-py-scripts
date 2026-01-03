@@ -10,7 +10,7 @@ This script tests the database setup by:
 5. Testing basic SELECT operations
 
 Usage: python test_timescaledb_setup.py <database_connection_string>
-Example: python test_timescaledb_setup.py 'timescaledb://stock_user:stock_password@localhost:5432/stock_data'
+Example: python test_timescaledb_setup.py 'timescaledb://user:password@localhost:5432/stock_data'
 """
 
 import asyncio
@@ -249,7 +249,7 @@ async def main():
     """Main function to run the tests."""
     if len(sys.argv) != 2:
         print("Usage: python test_timescaledb_setup.py <database_connection_string>")
-        print("Example: python test_timescaledb_setup.py 'timescaledb://stock_user:stock_password@localhost:5432/stock_data'")
+        print("Example: python test_timescaledb_setup.py 'timescaledb://user:password@localhost:5432/stock_data'")
         sys.exit(1)
     
     db_config = sys.argv[1]

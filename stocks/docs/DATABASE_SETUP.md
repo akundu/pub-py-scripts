@@ -43,7 +43,7 @@ questdb://username:password@host:port/database
 
 Example:
 ```
-questdb://stock_user:stock_password@localhost:8812/stock_data
+questdb://user:password@localhost:8812/stock_data
 ```
 
 ## Setup Methods
@@ -64,8 +64,8 @@ services:
     volumes:
       - questdb-data:/var/lib/questdb
     environment:
-      - QDB_PG_USER=stock_user
-      - QDB_PG_PASSWORD=stock_password
+      - QDB_PG_USER=user
+      - QDB_PG_PASSWORD=password
     restart: unless-stopped
 
 volumes:
@@ -79,7 +79,7 @@ docker-compose up -d
 
 3. **Verify connection**:
 ```bash
-psql -h localhost -p 9000 -U stock_user -d qdb
+psql -h localhost -p 9000 -U user -d qdb
 ```
 
 #### Using Docker Run
@@ -89,8 +89,8 @@ docker run -d \
   --name questdb-stocks \
   -p 8812:9000 \
   -p 9000:9000 \
-  -e QDB_PG_USER=stock_user \
-  -e QDB_PG_PASSWORD=stock_password \
+  -e QDB_PG_USER=user \
+  -e QDB_PG_PASSWORD=password \
   -v questdb-data:/var/lib/questdb \
   questdb/questdb:latest
 ```
@@ -109,8 +109,8 @@ cd questdb-7.3.4-rt-linux-x86_64
 Edit `conf/server.conf`:
 ```
 pg.net.bind.to=0.0.0.0:9000
-pg.net.user=stock_user
-pg.net.password=stock_password
+pg.net.user=user
+pg.net.password=password
 ```
 
 3. **Start QuestDB**:
@@ -133,13 +133,13 @@ Use the setup script:
 python scripts/setup_questdb_tables.py \
   --action create \
   --all \
-  --db-conn "questdb://stock_user:stock_password@localhost:8812/stock_data"
+  --db-conn "questdb://user:password@localhost:8812/stock_data"
 
 # Create specific tables
 python scripts/setup_questdb_tables.py \
   --action create \
   --tables daily_prices options_data \
-  --db-conn "questdb://stock_user:stock_password@localhost:8812/stock_data"
+  --db-conn "questdb://user:password@localhost:8812/stock_data"
 ```
 
 ### Table Schemas
@@ -243,7 +243,7 @@ DEDUP UPSERT KEYS(date, ticker);
 ```bash
 python scripts/setup_questdb_tables.py \
   --action list \
-  --db-conn "questdb://stock_user:stock_password@localhost:8812/stock_data"
+  --db-conn "questdb://user:password@localhost:8812/stock_data"
 ```
 
 ### Verify Table Structure
@@ -252,7 +252,7 @@ python scripts/setup_questdb_tables.py \
 python scripts/setup_questdb_tables.py \
   --action verify \
   --tables daily_prices options_data \
-  --db-conn "questdb://stock_user:stock_password@localhost:8812/stock_data"
+  --db-conn "questdb://user:password@localhost:8812/stock_data"
 ```
 
 ### Truncate Tables (Remove Data, Keep Structure)
@@ -261,7 +261,7 @@ python scripts/setup_questdb_tables.py \
 python scripts/setup_questdb_tables.py \
   --action truncate \
   --tables options_data \
-  --db-conn "questdb://stock_user:stock_password@localhost:8812/stock_data" \
+  --db-conn "questdb://user:password@localhost:8812/stock_data" \
   --confirm
 ```
 
@@ -271,7 +271,7 @@ python scripts/setup_questdb_tables.py \
 python scripts/setup_questdb_tables.py \
   --action recreate \
   --tables options_data \
-  --db-conn "questdb://stock_user:stock_password@localhost:8812/stock_data" \
+  --db-conn "questdb://user:password@localhost:8812/stock_data" \
   --confirm
 ```
 
@@ -348,7 +348,7 @@ The Python clients use connection pooling:
 curl http://localhost:8812/exec?query=SELECT+*+FROM+sys.tables
 
 # Via PostgreSQL client
-psql -h localhost -p 9000 -U stock_user -d qdb -c "SELECT COUNT(*) FROM daily_prices;"
+psql -h localhost -p 9000 -U user -d qdb -c "SELECT COUNT(*) FROM daily_prices;"
 ```
 
 ### Monitor Disk Usage
@@ -475,7 +475,7 @@ ORDER BY age DESC;
 Set these for automatic database connection:
 
 ```bash
-export QUESTDB_URL="questdb://stock_user:stock_password@localhost:8812/stock_data"
+export QUESTDB_URL="questdb://user:password@localhost:8812/stock_data"
 ```
 
 ## Related Documentation

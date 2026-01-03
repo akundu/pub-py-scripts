@@ -3,7 +3,7 @@
 Manually initialize QuestDB tables for URL shortener.
 
 Usage:
-    python init_tables.py --db-url questdb://admin:quest@localhost:8812/qdb
+    python init_questdb_database.py --db-path questdb://admin:quest@localhost:8812/qdb
 """
 
 import argparse
@@ -21,7 +21,7 @@ from lib.common.logging_config import setup_logging
 async def main():
     parser = argparse.ArgumentParser(description="Initialize QuestDB tables")
     parser.add_argument(
-        "--db-url",
+        "--db-path",
         default=os.getenv("QUESTDB_URL", "questdb://admin:quest@localhost:8812/qdb"),
         help="QuestDB connection URL"
     )
@@ -34,15 +34,18 @@ async def main():
     try:
         logger.info("Connecting to QuestDB...")
         
-        # Temporarily set environment variable to force table creation
-        os.environ["QUESTDB_CREATE_TABLES"] = "1"
-        
+        # Don't set QUESTDB_CREATE_TABLES to avoid background task creation
+        # We'll enable table creation and call it explicitly instead
         db = URLShortenerQuestDB(
-            db_config=args.db_url,
+            db_config=args.db_path,
             logger=logger,
         )
         
-        # Tables are created automatically in __init__ when QUESTDB_CREATE_TABLES=1
+        # Enable table creation flag and explicitly create tables
+        # This avoids the background task race condition
+        db._should_create_tables = True
+        logger.info("Initializing database tables...")
+        await db._ensure_tables()
         logger.info("Tables initialized successfully")
         
         # Test connection
@@ -68,9 +71,4 @@ async def main():
 if __name__ == "__main__":
     exit_code = asyncio.run(main())
     sys.exit(exit_code)
-
-
-
-
-
 

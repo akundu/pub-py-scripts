@@ -3,7 +3,7 @@ services:
   db-server-postgres:
     build: .
     command: >
-      sh -c "ulimit -n 65536 && python db_server.py --db-file \"postgresql://stock_user:stock_password@pgbouncer:5432/stock_data\" --port 9003 --log-level ERROR --heartbeat-interval 60 --workers 8 --heartbeat-interval 5 --worker-restart-timeout 5"
+      sh -c "ulimit -n 65536 && python db_server.py --db-file \"postgresql://user:password@pgbouncer:5432/stock_data\" --port 9003 --log-level ERROR --heartbeat-interval 60 --workers 8 --heartbeat-interval 5 --worker-restart-timeout 5"
     ports:
       - "9003:9003"
     volumes:

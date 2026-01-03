@@ -32,7 +32,7 @@ case $DEMO_MODE in
         python scripts/stock_display_dashboard.py \
             --symbols ${SYMBOLS} \
             --display-refresh 2 \
-            --db-server ms1.kundu.dev:9100 \
+            --db-server localhost:9100 \
             --test-mode 30
         ;;
     2)
@@ -40,7 +40,7 @@ case $DEMO_MODE in
         python scripts/stock_display_dashboard.py \
             --symbols  ${SYMBOLS} \
             --display-refresh 1 \
-            --db-server ms1.kundu.dev:9100 \
+            --db-server localhost:9100 \
             --test-mode 20
         ;;
     3)
@@ -48,7 +48,7 @@ case $DEMO_MODE in
         python scripts/stock_display_dashboard.py \
             --symbols  ${SYMBOLS} \
             --display-refresh 2 \
-            --db-server ms1.kundu.dev:9100 \
+            --db-server localhost:9100 \
             --test-mode 45
         ;;
     4)
@@ -56,7 +56,7 @@ case $DEMO_MODE in
         python scripts/stock_display_dashboard.py \
             --symbols AAPL MSFT GOOGL NVDA TSLA AMZN META NFLX SPY QQQ \
             --display-refresh 1 \
-            --db-server ms1.kundu.dev:9100 \
+            --db-server localhost:9100 \
             --test-mode 60
         ;;
     *)
@@ -74,4 +74,4 @@ echo "   # Dedicated display dashboard"
 echo "   python scripts/stock_display_dashboard.py --symbols AAPL MSFT --display-refresh 1"
 echo ""
 echo "   # Stream data separately (in another terminal)"
-echo "   python polygon_realtime_streamer.py --symbols AAPL MSFT --feed both --db-server ms1.kundu.dev:9100"
+echo "   python polygon_realtime_streamer.py --symbols AAPL MSFT --feed both --db-server localhost:9100"

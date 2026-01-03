@@ -32,7 +32,7 @@ OUTPUT_DIR_NAME = "stocks_to_buy"
 ANALYSIS_FILE_BASENAME = "analysis"
 DOWNLOAD_LOC_DEFAULT = Path.home() / "Downloads" / "results.csv"
 GEMINI_PROG = BASE_DIR / "tests" / "gemini_test.py"
-QUERY_LOC = "questdb://stock_user:stock_password@localhost:8812/stock_data"
+QUERY_LOC = "questdb://user:password@localhost:8812/stock_data"
 
 TYPE_FLAG = "types"
 TYPE_INPUT = "all"

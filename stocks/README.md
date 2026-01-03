@@ -32,6 +32,7 @@ This system consists of multiple integrated components. For detailed documentati
 
 ## Table of Contents
 
+- [📚 Documentation Index](#-documentation-index)
 - [Features](#features)
 - [Installation](#installation)
 - [Configuration](#configuration)
@@ -41,6 +42,8 @@ This system consists of multiple integrated components. For detailed documentati
   - [fetch_symbol_data.py](#fetchsymboldatapy)
   - [scripts/fetch_options.py](#scriptsfetchoptionspy)
   - [scripts/fetch_iv.py](#scriptsfetchivpy)
+  - [scripts/polygon_realtime_streamer.py](#scriptspolygon_realtime_streamerpy)
+  - [scripts/stock_display_dashboard.py](#scriptsstock_display_dashboardpy)
 - [Architecture](#architecture)
 - [Database Support](#database-support)
 - [Testing](#testing)
@@ -104,8 +107,7 @@ export ALPACA_API_KEY="your_alpaca_api_key"
 export ALPACA_SECRET_KEY="your_alpaca_secret_key"
 
 # Database connection (QuestDB)
-export QUESTDB_URL="questdb://stock_user:stock_password@localhost:8812/stock_data"
-# Or use default: questdb://stock_user:stock_password@ms1.kundu.dev:8812/stock_data
+export QUESTDB_URL="questdb://user:password@localhost:8812/stock_data"
 
 # Optional: Redis for caching
 export REDIS_URL="redis://localhost:6379/0"
@@ -113,8 +115,13 @@ export REDIS_URL="redis://localhost:6379/0"
 
 5. **Initialize database tables**:
 ```bash
-# Tables are auto-created on first use, or manually:
-python scripts/setup_questdb_tables.py
+# Recommended: Initialize all tables in a new database instance
+python scripts/init_questdb_database.py --db-path "questdb://user:password@localhost:8812/stock_data"
+
+# Alternative: Use setup_questdb_tables.py for advanced table management (create, recreate, truncate, verify, list)
+python scripts/setup_questdb_tables.py --action create --all --db-conn "questdb://user:password@localhost:8812/stock_data"
+
+# Note: Tables are also auto-created on first use if QUESTDB_ENSURE_TABLES environment variable is set
 ```
 
 ## Configuration
@@ -126,7 +133,7 @@ python scripts/setup_questdb_tables.py
 | `POLYGON_API_KEY` | Polygon.io API key (required for options/IV/financials) | None |
 | `ALPACA_API_KEY` | Alpaca Markets API key | None |
 | `ALPACA_SECRET_KEY` | Alpaca Markets secret key | None |
-| `QUESTDB_URL` | QuestDB connection string | `questdb://stock_user:stock_password@ms1.kundu.dev:8812/stock_data` |
+| `QUESTDB_URL` | QuestDB connection string | `questdb://user:password@localhost:8812/stock_data` |
 | `REDIS_URL` | Redis connection URL (optional) | None |
 | `DATA_DIR` | Directory for data files | `./data` |
 
@@ -146,59 +153,40 @@ localhost:9100  # http:// is auto-added
 
 ## Main Scripts
 
+> **📖 Detailed Documentation**: Each script has comprehensive documentation with architecture, usage examples, and troubleshooting. See the [Documentation Index](#-documentation-index) above for links to detailed guides.
+
 ### db_server.py
 
-HTTP/WebSocket server for accessing stock data via REST API.
+HTTP/WebSocket server for accessing stock data via REST API. Provides multi-process architecture, WebSocket support, and comprehensive API endpoints.
 
-#### Usage
-
+**Quick Start**:
 ```bash
-# Basic usage
-python db_server.py --db-file questdb://stock_user:stock_password@localhost:8812/stock_data --port 9100
-
-# With logging and access log
-ulimit -n 65536
-python db_server.py \
-  --db-file questdb://stock_user:stock_password@localhost:8812/stock_data \
-  --port 9100 \
-  --log-level DEBUG \
-  --heartbeat-interval 180 \
-  --workers 1 \
-  --enable-access-log \
-  > db_server.log 2>&1
-
-# Production setup with multiple workers
-python db_server.py \
-  --db-file questdb://stock_user:stock_password@localhost:8812/stock_data \
-  --port 9102 \
-  --log-level WARNING \
-  --heartbeat-interval 180 \
-  --workers 2 \
-  --enable-access-log
+python db_server.py --db-file questdb://user:password@localhost:8812/stock_data --port 9100
 ```
 
-#### Options
+**📚 [Full Documentation →](./docs/DB_SERVER.md)** - Architecture, process management, API endpoints, SQL operations, deployment
 
-- `--db-file` (required): Database connection string
-- `--port`: Server port (default: 8080)
-- `--log-level`: Logging level - DEBUG, INFO, WARNING, ERROR, CRITICAL (default: INFO)
-- `--log-file`: Path to log file (default: stdout)
-- `--heartbeat-interval`: WebSocket heartbeat interval in seconds (default: 1.0)
-- `--stale-data-timeout`: Seconds before fetching new data during market hours (default: 120.0)
-- `--workers`: Number of worker processes (default: 1)
-- `--enable-access-log`: Enable HTTP access logging
-- `--max-body-mb`: Maximum request body size in MB (default: 10)
-- `--worker-restart-timeout`: Worker restart timeout in seconds (default: 300)
-- `--startup-delay`: Delay before accepting connections (default: 1.0)
-- `--questdb-connection-timeout`: QuestDB connection timeout in seconds (default: 180)
+**Key Features**:
+- Multi-process forking model for high performance
+- RESTful API and WebSocket support
+- Automatic worker management and restart
+- Connection pooling and caching
 
-#### API Endpoints
+### fetch_all_data.py
 
-- `GET /api/stock_info/{ticker}` - Get stock information
-- `GET /api/options/{ticker}` - Get options chain data
-- `GET /api/financial_info/{ticker}` - Get financial ratios
-- `GET /health` - Health check
-- `WS /ws` - WebSocket connection for real-time updates
+Batch data fetching for multiple symbols with parallel processing support.
+
+**Quick Start**:
+```bash
+python fetch_all_data.py --types sp-500 --fetch-market-data --db-path $QUESTDB_URL
+```
+
+**📚 [Full Documentation →](./docs/FETCH_ALL_DATA.md)** - Parallel processing, executor configuration, symbol loading
+
+**Key Features**:
+- Process and thread pool executors
+- Symbol list loading from types and YAML
+- Configurable batch sizes and chunking
 
 ### fetch_all_data.py
 
@@ -212,7 +200,7 @@ python fetch_all_data.py --types sp-500
 
 # Fetch market data for S&P 500 stocks
 python fetch_all_data.py --types sp-500 --fetch-market-data \
-  --db-path questdb://stock_user:stock_password@localhost:8812/stock_data
+  --db-path questdb://user:password@localhost:8812/stock_data
 
 # Fetch with custom concurrency
 python fetch_all_data.py --types sp-500 --fetch-market-data \
@@ -242,285 +230,76 @@ python fetch_all_data.py --symbols-list examples/sample_symbols.yaml \
 
 ### fetch_symbol_data.py
 
-Fetch and display stock data for individual symbols with advanced caching and filtering.
+Fetch and display stock data for individual symbols with advanced caching and filtering. Supports real-time, hourly, and daily data sources with 100% cache hit rate optimization.
 
-#### Usage
-
+**Quick Start**:
 ```bash
-# Get latest price
 python fetch_symbol_data.py NVDA --db-path $QUESTDB_URL --latest
-
-# Get latest price from specific source
-python fetch_symbol_data.py NVDA --db-path $QUESTDB_URL --latest --only-fetch realtime
-python fetch_symbol_data.py NVDA --db-path $QUESTDB_URL --latest --only-fetch hourly
-python fetch_symbol_data.py NVDA --db-path $QUESTDB_URL --latest --only-fetch daily
-
-# Get historical data
-python fetch_symbol_data.py NVDA --db-path $QUESTDB_URL \
-  --start-date 2025-12-28 \
-  --end-date 2026-01-02
-
-# Show financial information
-python fetch_symbol_data.py TQQQ --db-path $QUESTDB_URL --latest --show-financials
-
-# Fetch and display financial ratios
-python fetch_symbol_data.py NVDA --db-path $QUESTDB_URL --fetch-ratios --show-financials
-
-# Fetch news
-python fetch_symbol_data.py NVDA --db-path $QUESTDB_URL --fetch-news
-
-# Fetch IV analysis
-python fetch_symbol_data.py NVDA --db-path $QUESTDB_URL --fetch-iv
-
-# Combined options
-python fetch_symbol_data.py TQQQ --db-path $QUESTDB_URL \
-  --start-date 2025-12-28 \
-  --end-date 2026-01-02 \
-  --only-fetch daily \
-  --show-financials \
-  --fetch-news
 ```
 
-#### Options
+**📚 [Full Documentation →](./docs/FETCH_SYMBOL_DATA.md)** - Caching strategy, source-specific data retrieval, performance optimization
 
-- `--db-path` (required): Database connection string
-- `--latest`: Get latest price data
-- `--only-fetch`: Fetch only from specific source - realtime, hourly, or daily
-- `--start-date`: Start date (YYYY-MM-DD)
-- `--end-date`: End date (YYYY-MM-DD)
-- `--show-financials`: Display stored financial information
-- `--fetch-ratios`: Fetch financial ratios from Polygon API
-- `--fetch-news`: Fetch latest news articles
-- `--fetch-iv`: Fetch implied volatility analysis
-- `--log-level`: Logging level - DEBUG, INFO, WARNING, ERROR (default: INFO)
-- `--timezone`: Display timezone (default: America/New_York)
-- `--enable-cache`: Enable Redis caching (default: True)
-- `--redis-url`: Redis connection URL (overrides REDIS_URL env var)
-
-#### Cache Optimization
-
-The `--only-fetch` option provides source-specific caching:
-- Each source (realtime, hourly, daily) has isolated cache entries
-- Cache hit rate achieves 100% on subsequent runs
-- No unnecessary database queries on cache hits
+**Key Features**:
+- Source-specific caching (realtime/hourly/daily)
+- 100% cache hit rate on subsequent runs
+- Financial data, news, and IV analysis support
 
 ### scripts/fetch_options.py
 
-Fetch historical stock and options data from Polygon.io.
+Fetch historical stock and options data from Polygon.io with comprehensive filtering and multi-month mode support.
 
-#### Usage
-
+**Quick Start**:
 ```bash
-# Get options for a specific date (single symbol)
 python scripts/fetch_options.py AAPL --date 2024-06-05
-
-# Get options for multiple symbols
-python scripts/fetch_options.py --symbols AAPL MSFT GOOGL --date 2024-06-05
-
-# Get options from YAML file
-python scripts/fetch_options.py --symbols-list examples/sample_symbols.yaml --date 2024-06-05
-
-# Get options for S&P 500 stocks
-python scripts/fetch_options.py --types sp-500 --date 2024-06-05
-
-# Filter by option type
-python scripts/fetch_options.py TSLA --option-type call
-python scripts/fetch_options.py TSLA --option-type put
-
-# Filter by strike range
-python scripts/fetch_options.py GOOGL --date 2024-05-01 \
-  --option-type put \
-  --strike-range-percent 10 \
-  --max-days-to-expiry 90
-
-# Include expired contracts (can be slow)
-python scripts/fetch_options.py TQQQ --date 2024-05-01 \
-  --max-days-to-expiry 14 \
-  --include-expired
-
-# Save to QuestDB
-python scripts/fetch_options.py AAPL --date 2024-06-05 \
-  --db-path questdb://stock_user:stock_password@localhost:8812/stock_data
-
-# Save to HTTP database server
-python scripts/fetch_options.py MSFT --date 2024-06-05 \
-  --db-path localhost:9002
-
-# Multi-month mode (fetch 6 months ahead)
-python scripts/fetch_options.py AAPL --date 2024-06-05 --months-ahead 6
-
-# Continuous mode (fetch in loop)
-python scripts/fetch_options.py AAPL --continuous
-
-# Use CSV cache
-python scripts/fetch_options.py AAPL --date 2024-06-05 --use-csv
 ```
 
-#### Options
+**📚 [Full Documentation →](./docs/FETCH_OPTIONS.md)** - Single-date and multi-month modes, options filtering, CSV caching
 
-- `--symbols`: Comma-separated list of symbols (or positional)
-- `--symbols-list`: YAML file with symbol lists
-- `--types`: Stock list types (sp-500, nasdaq-100, etc.)
-- `--date`: Target date in YYYY-MM-DD format (default: today)
-- `--start-date`: Explicit start date for multi-month mode
-- `--months-ahead`: Number of 30-day periods to fetch ahead (default: 6, set to 0 for single-date)
-- `--option-type`: Filter by option type - call, put, or all (default: all)
-- `--strike-range-percent`: Show options within percentage of stock price (e.g., 10 for ±10%)
-- `--options-per-expiry`: Number of options to show on each side of stock price (default: 5)
-- `--max-days-to-expiry`: Window around target date for expirations (default: 30)
-- `--include-expired`: Include expired options (can be slow)
-- `--data-dir`: Directory to store CSV files (default: data)
-- `--use-csv`: Enable CSV cache (read/write CSV files)
-- `--quiet`: Suppress output but still save CSV files
-- `--continuous`: Continuously fetch in a loop
-- `--interval-multiplier`: Multiplier for cadence-based intervals (default: 1.0)
-- `--db-path`: Database connection string
-- `--db-batch-size`: Batch size for database writes (default: 100)
-- `--force-fresh`: Force fresh fetch from API (bypass cache)
+**Key Features**:
+- Single-date and multi-month processing modes
+- Advanced options filtering (strike range, expiry, type)
+- CSV caching for faster repeated runs
 
 ### scripts/fetch_iv.py
 
-Fetch and analyze implied volatility (IV) data for stocks.
+Fetch and analyze implied volatility (IV) data for stocks. Calculates IV rank, roll yield, risk scores, and generates trading recommendations.
 
-#### Usage
-
+**Quick Start**:
 ```bash
-# Fetch IV for single symbol
 python scripts/fetch_iv.py --symbols AAPL
-
-# Fetch IV for multiple symbols
-python scripts/fetch_iv.py --symbols AVGO NVDA PLTR GOOG META CSCO UBER TSM ASML AMD
-
-# Fetch IV for S&P 500 stocks
-python scripts/fetch_iv.py --types sp-500 -c 90 -w 16
-
-# Use custom server URL
-python scripts/fetch_iv.py --symbols AAPL --server-url localhost:9102
-
-# Use cache (don't force API refresh)
-python scripts/fetch_iv.py --types sp-500 -c 90 -w 16 --dont-sync
-
-# Don't save to database
-python scripts/fetch_iv.py --symbols AAPL --dont-save
-
-# Debug mode
-python scripts/fetch_iv.py --symbols AAPL --log-level DEBUG
-
-# From YAML file
-python scripts/fetch_iv.py --symbols-list examples/sample_symbols.yaml -c 90
 ```
 
-#### Options
+**📚 [Full Documentation →](./docs/FETCH_IV.md)** - IV analysis pipeline, metrics calculation, trading recommendations, database storage
 
-- `--symbols`: Comma-separated list of symbols
-- `--symbols-list`: YAML file with symbol lists
-- `--types`: Stock list types (sp-500, nasdaq-100, etc.)
-- `-c, --calendar-days`: Days ahead to check for earnings (default: 90)
-- `--dont-sync`: Don't force API refresh (use cache)
-- `--dont-save`: Don't save IV analysis to database
-- `--log-level`: Logging level - DEBUG, INFO, WARNING, ERROR (default: ERROR)
-- `-w, --workers`: Number of worker processes (default: 90% of CPU cores)
-- `--server-url`: URL of local db_server endpoint (default: http://localhost:9100)
-- `--data-dir`: Data directory for symbol lists (default: data)
-- `--db-config`: Database connection string (default: from QUESTDB_URL env var)
-
-#### Output
-
-The script outputs JSON with IV analysis including:
-- `iv_30d`: 30-day implied volatility
-- `hv_1yr_range`: Historical volatility range over 1 year
-- `rank`: IV rank percentile (0-100)
-- `roll_yield`: Term structure roll yield
-- `recommendation`: Trading recommendation (SELL FRONT MONTH, BUY LEAP, SELL PREMIUM, HOLD)
-- `risk_score`: Risk score (0-10)
-- `relative_rank`: Rank relative to SPY
+**Key Features**:
+- IV rank and roll yield calculations
+- Trading recommendations (SELL FRONT MONTH, BUY LEAP, SELL PREMIUM, HOLD)
+- Multi-process parallel execution
+- Automatic database storage
 
 ### scripts/polygon_realtime_streamer.py
 
-Stream real-time market data from Polygon.io WebSocket API into the database server. This is the data ingestion component that feeds real-time quotes and trades into the system.
+Stream real-time market data from Polygon.io WebSocket API into the database server. Primary data ingestion component for real-time quotes and trades.
 
-#### Usage
-
+**Quick Start**:
 ```bash
-# Stream quotes for all symbol types to remote database server
 ulimit -n 65536
 python scripts/polygon_realtime_streamer.py \
   --types all \
   --feed quotes \
-  --db-server ms1.kundu.dev:9100 \
+  --db-server localhost:9100 \
   --symbols-per-connection 25 \
   --log-level ERROR \
   --batch-interval 1
-
-# Stream quotes and trades for specific symbols
-python scripts/polygon_realtime_streamer.py \
-  --symbols AAPL MSFT GOOGL \
-  --feed both \
-  --market stocks \
-  --db-server localhost:9100
-
-# Stream only trades for S&P 500 stocks
-python scripts/polygon_realtime_streamer.py \
-  --types sp500 \
-  --feed trades \
-  --db-server localhost:9100 \
-  --market stocks
-
-# Stream from YAML file with custom connection settings
-python scripts/polygon_realtime_streamer.py \
-  --symbols-list examples/sample_symbols.yaml \
-  --feed quotes \
-  --symbols-per-connection 5 \
-  --db-server localhost:9100 \
-  --market stocks
-
-# Stream options contracts (requires Polygon options subscription)
-python scripts/polygon_realtime_streamer.py \
-  --symbols AAPL \
-  --feed both \
-  --market options \
-  --max-expiry-days 30 \
-  --db-server localhost:9100
-
-# Stream only call options
-python scripts/polygon_realtime_streamer.py \
-  --symbols AAPL \
-  --feed both \
-  --market options \
-  --option-type call \
-  --max-expiry-days 14 \
-  --db-server localhost:9100
 ```
 
-#### Options
+**📚 [Full Documentation →](./docs/POLYGON_REALTIME_STREAMER.md)** - Streaming architecture, connection management, data flow, performance optimization
 
-- `--symbols`: One or more stock ticker symbols (e.g., AAPL MSFT GOOGL)
-- `--symbols-list`: Path to YAML file containing symbols under "symbols" key
-- `--types`: Stock list types (sp-500, nasdaq-100, etc.) or 'all' for all types
-- `--market`: Market type - stocks or options (default: stocks)
-- `--feed`: Data feed type - quotes, trades, or both (default: quotes)
-- `--db-server`: Database server address (host:port, e.g., localhost:9100)
-- `--symbols-per-connection`: Number of symbols per WebSocket connection (default: 25)
-- `--batch-interval`: Interval in seconds for batching data before sending to database (default: 1)
-- `--log-level`: Logging level - DEBUG, INFO, WARNING, ERROR (default: INFO)
-- `--max-expiry-days`: Maximum days to expiry for options (default: 30)
-- `--option-type`: Filter options by type - call, put, or both (default: both)
-- `--redis-url`: Redis URL for Pub/Sub (optional, for distributed streaming)
-
-#### Features
-
-- **Multiple WebSocket Connections**: Automatically splits symbols across multiple connections for better performance
-- **Automatic Reconnection**: Handles connection drops and reconnects automatically
-- **Batching**: Batches data before sending to database for efficiency
-- **Stocks and Options**: Supports both stock and options market data (requires appropriate Polygon subscription)
-- **Error Handling**: Robust error handling and logging
-- **High Performance**: Uses `ulimit -n 65536` to handle many concurrent connections
-
-#### Requirements
-
-- Polygon.io API key with WebSocket access
-- Database server (`db_server.py`) must be running
-- High file descriptor limit: `ulimit -n 65536` recommended
+**Key Features**:
+- Multiple WebSocket connections with automatic load balancing
+- Automatic reconnection and error handling
+- Data batching for efficiency
+- Support for stocks and options markets
 
 ### scripts/stock_display_dashboard.py
 
@@ -539,7 +318,7 @@ python scripts/stock_display_dashboard.py \
 # Display with custom refresh rate
 python scripts/stock_display_dashboard.py \
   --symbols AAPL MSFT GOOGL \
-  --db-server ms1.kundu.dev:9100 \
+  --db-server localhost:9100 \
   --display-refresh 2.0
 
 # Display without debug mode
@@ -551,7 +330,7 @@ python scripts/stock_display_dashboard.py \
 #### Options
 
 - `--symbols` (required): One or more stock ticker symbols to display
-- `--db-server`: Database server address (host:port, default: ms1.kundu.dev:9100)
+- `--db-server`: Database server address (host:port, default: localhost:9100)
 - `--display-refresh`: Refresh interval in seconds for display updates (default: 2.0)
 - `--debug`: Enable debug mode with scrolling debug log panel
 
@@ -644,6 +423,13 @@ Primary time-series database for storing:
 - Options chain data
 - Financial ratios
 - IV analysis results
+
+**Initializing Tables**: For a new QuestDB instance, initialize all required tables using:
+```bash
+python scripts/init_questdb_database.py --db-path "questdb://user:password@localhost:8812/stock_data"
+```
+
+See the [Database Setup Guide](./docs/DATABASE_SETUP.md) for detailed information on table creation, cleanup operations, and database management.
 
 ### Table Schema
 
@@ -777,7 +563,7 @@ Tests for `scripts/fetch_iv.py`:
 
 ```bash
 # Set database connection
-export QUEST_DB_STRING="questdb://stock_user:stock_password@ms1.kundu.dev:8812/stock_data"
+export QUEST_DB_STRING="questdb://user:password@localhost:8812/stock_data"
 
 # Run integration tests
 python tests/fetch_symbol_data_test.py integration

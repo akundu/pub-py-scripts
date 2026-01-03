@@ -221,19 +221,19 @@ $$ LANGUAGE plpgsql;
 -- ============================================================================
 
 -- Grant permissions on new objects
-GRANT ALL PRIVILEGES ON TABLE table_counts TO stock_user;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO stock_user;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO stock_user;
+GRANT ALL PRIVILEGES ON TABLE table_counts TO user;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO user;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO user;
 
 -- Grant permissions on materialized views
-GRANT SELECT ON mv_hourly_prices_count TO stock_user;
-GRANT SELECT ON mv_daily_prices_count TO stock_user;
-GRANT SELECT ON mv_realtime_data_count TO stock_user;
+GRANT SELECT ON mv_hourly_prices_count TO user;
+GRANT SELECT ON mv_daily_prices_count TO user;
+GRANT SELECT ON mv_realtime_data_count TO user;
 
 -- Grant permissions on views
-GRANT SELECT ON hourly_prices_count TO stock_user;
-GRANT SELECT ON daily_prices_count TO stock_user;
-GRANT SELECT ON realtime_data_count TO stock_user;
+GRANT SELECT ON hourly_prices_count TO user;
+GRANT SELECT ON daily_prices_count TO user;
+GRANT SELECT ON realtime_data_count TO user;
 
 -- ============================================================================
 -- PERFORMANCE TESTING FUNCTIONS

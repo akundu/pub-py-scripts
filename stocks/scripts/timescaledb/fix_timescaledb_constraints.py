@@ -93,7 +93,7 @@ async def main():
     """Main function to run the constraint fix."""
     if len(sys.argv) != 2:
         print("Usage: python fix_timescaledb_constraints.py <database_connection_string>")
-        print("Example: python fix_timescaledb_constraints.py 'timescaledb://stock_user:stock_password@localhost:5432/stock_data'")
+        print("Example: python fix_timescaledb_constraints.py 'timescaledb://user:password@localhost:5432/stock_data'")
         sys.exit(1)
     
     db_config = sys.argv[1]

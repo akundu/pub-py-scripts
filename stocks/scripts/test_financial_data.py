@@ -34,7 +34,7 @@ async def test_async_financial_fetch(symbol: str = "AAPL", force_fetch: bool = F
     print(f"{'='*60}")
     
     # Get database config
-    db_config = os.getenv("QUESTDB_URL") or "questdb://stock_user:stock_password@ms1.kundu.dev:8812/stock_data"
+    db_config = os.getenv("QUESTDB_URL") or "questdb://user:password@localhost:8812/stock_data"
     
     # Initialize database
     db = get_stock_db('questdb', db_config=db_config, enable_cache=True, 
@@ -94,7 +94,7 @@ async def test_iv_analysis_integration(symbol: str = "AAPL"):
     print(f"{'='*60}")
     
     # Get database config
-    db_config = os.getenv("QUESTDB_URL") or "questdb://stock_user:stock_password@ms1.kundu.dev:8812/stock_data"
+    db_config = os.getenv("QUESTDB_URL") or "questdb://user:password@localhost:8812/stock_data"
     
     # Initialize database
     db = get_stock_db('questdb', db_config=db_config, enable_cache=True, 
@@ -185,7 +185,7 @@ def test_multiprocessing_worker(symbol: str = "MSFT"):
     print(f"{'='*60}")
     
     # Get database config
-    db_config = os.getenv("QUESTDB_URL") or "questdb://stock_user:stock_password@ms1.kundu.dev:8812/stock_data"
+    db_config = os.getenv("QUESTDB_URL") or "questdb://user:password@localhost:8812/stock_data"
     
     print(f"\nRunning worker for {symbol} using ProcessPoolExecutor...")
     print("Note: This creates a separate process with its own event loop.")
@@ -249,7 +249,7 @@ async def test_caching_behavior(symbol: str = "AAPL"):
     print(f"{'='*60}")
     
     # Get database config
-    db_config = os.getenv("QUESTDB_URL") or "questdb://stock_user:stock_password@ms1.kundu.dev:8812/stock_data"
+    db_config = os.getenv("QUESTDB_URL") or "questdb://user:password@localhost:8812/stock_data"
     
     # Initialize database
     db = get_stock_db('questdb', db_config=db_config, enable_cache=True, 

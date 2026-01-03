@@ -1274,8 +1274,8 @@ def initialize_database(db_file_path: str, log_level: str = "INFO", questdb_conn
                 host = parts[0]
                 port = parts[1]
                 database = parts[2]
-                username = parts[3] if len(parts) > 3 else "stock_user"
-                password = parts[4] if len(parts) > 4 else "stock_password"
+                username = parts[3] if len(parts) > 3 else "user"
+                password = parts[4] if len(parts) > 4 else "password"
                 if db_type_arg == "questdb":
                     db_config = f"questdb://{username}:{password}@{host}:{port}/{database}"
                 else:
@@ -1283,9 +1283,9 @@ def initialize_database(db_file_path: str, log_level: str = "INFO", questdb_conn
             else:
                 # Default to localhost with standard credentials
                 if db_type_arg == "questdb":
-                    db_config = "questdb://stock_user:stock_password@localhost:9009/stock_data"
+                    db_config = "questdb://user:password@localhost:9009/stock_data"
                 else:
-                    db_config = "postgresql://stock_user:stock_password@localhost:5432/stock_data"
+                    db_config = "postgresql://user:password@localhost:5432/stock_data"
     else:
         # For other database types, use the file path as config
         db_config = db_file_path
@@ -8944,7 +8944,7 @@ def main_server_runner():
                              "For DuckDB: data/stock_data.duckdb, "
                              "For PostgreSQL: postgresql://user:pass@host:port/db, "
                              "For TimescaleDB: timescaledb://user:pass@host:port/db "
-                             "or localhost:5432:stock_data:stock_user:stock_password")
+                             "or localhost:5432:stock_data:user:password")
     parser.add_argument("--port", type=int, default=8080, help="Port to run the server on (default: 8080).")
     parser.add_argument("--log-file", type=str, default=None, help="Path to a log file. If not provided, logs to stdout.")
     parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],

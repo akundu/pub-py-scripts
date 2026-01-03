@@ -86,7 +86,7 @@ async def main():
     """Main function."""
     if len(sys.argv) < 2:
         print("Usage: python scripts/drop_questdb_tables.py <db_path>")
-        print("Example: python scripts/drop_questdb_tables.py 'questdb://stock_user:stock_password@localhost:8812/stock_data'")
+        print("Example: python scripts/drop_questdb_tables.py 'questdb://user:password@localhost:8812/stock_data'")
         sys.exit(1)
     
     db_path = sys.argv[1]

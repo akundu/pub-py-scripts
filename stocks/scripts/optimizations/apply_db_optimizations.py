@@ -10,7 +10,7 @@ Usage:
     python scripts/apply_db_optimizations.py [--db-url DATABASE_URL]
     
 Example:
-    python scripts/apply_db_optimizations.py --db-url "postgresql://stock_user:stock_password@localhost:5432/stock_data"
+    python scripts/apply_db_optimizations.py --db-url "postgresql://user:password@localhost:5432/stock_data"
 """
 
 import argparse
@@ -169,8 +169,8 @@ Examples:
     
     parser.add_argument(
         "--db-url",
-        default="postgresql://stock_user:stock_password@localhost:5432/stock_data",
-        help="Database connection URL (default: postgresql://stock_user:stock_password@localhost:5432/stock_data)"
+        default="postgresql://user:password@localhost:5432/stock_data",
+        help="Database connection URL (default: postgresql://user:password@localhost:5432/stock_data)"
     )
     
     args = parser.parse_args()

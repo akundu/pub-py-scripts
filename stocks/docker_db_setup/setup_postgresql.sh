@@ -45,7 +45,7 @@ docker-compose up -d postgres
 # Wait for PostgreSQL to be ready
 echo ""
 echo "⏳ Waiting for PostgreSQL to be ready..."
-until docker-compose exec -T postgres pg_isready -U stock_user -d stock_data; do
+until docker-compose exec -T postgres pg_isready -U user -d stock_data; do
     echo "   Waiting for PostgreSQL..."
     sleep 2
 done
@@ -60,27 +60,27 @@ sleep 10
 # Verify database ownership and permissions
 echo ""
 echo "🔍 Verifying database ownership and permissions..."
-docker-compose exec -T postgres psql -U stock_user -d stock_data -c "
+docker-compose exec -T postgres psql -U user -d stock_data -c "
 DO \$\$
 BEGIN
     -- Verify database ownership
     IF EXISTS (
         SELECT 1 FROM pg_database 
-        WHERE datname = 'stock_data' AND datdba = (SELECT oid FROM pg_roles WHERE rolname = 'stock_user')
+        WHERE datname = 'stock_data' AND datdba = (SELECT oid FROM pg_roles WHERE rolname = 'user')
     ) THEN
-        RAISE NOTICE '✅ stock_data database is owned by stock_user';
+        RAISE NOTICE '✅ stock_data database is owned by user';
     ELSE
-        RAISE WARNING '⚠️ stock_data database is NOT owned by stock_user';
+        RAISE WARNING '⚠️ stock_data database is NOT owned by user';
     END IF;
     
     -- Verify schema ownership
     IF EXISTS (
         SELECT 1 FROM information_schema.schemata 
-        WHERE schema_name = 'public' AND schema_owner = 'stock_user'
+        WHERE schema_name = 'public' AND schema_owner = 'user'
     ) THEN
-        RAISE NOTICE '✅ public schema is owned by stock_user';
+        RAISE NOTICE '✅ public schema is owned by user';
     ELSE
-        RAISE WARNING '⚠️ public schema is NOT owned by stock_user';
+        RAISE WARNING '⚠️ public schema is NOT owned by user';
     END IF;
     
     -- Verify table ownership
@@ -88,23 +88,23 @@ BEGIN
         SELECT 1 FROM information_schema.tables 
         WHERE table_schema = 'public' 
         AND table_name IN ('daily_prices', 'hourly_prices', 'realtime_data', 'db_stats')
-        AND table_owner = 'stock_user'
+        AND table_owner = 'user'
     ) THEN
-        RAISE NOTICE '✅ All tables are owned by stock_user';
+        RAISE NOTICE '✅ All tables are owned by user';
     ELSE
-        RAISE WARNING '⚠️ Some tables are NOT owned by stock_user';
+        RAISE WARNING '⚠️ Some tables are NOT owned by user';
     END IF;
     
     -- Verify permissions
     IF EXISTS (
         SELECT 1 FROM information_schema.role_table_grants 
-        WHERE grantee = 'stock_user' 
+        WHERE grantee = 'user' 
         AND table_schema = 'public'
         AND privilege_type = 'ALL'
     ) THEN
-        RAISE NOTICE '✅ stock_user has ALL privileges on public schema tables';
+        RAISE NOTICE '✅ user has ALL privileges on public schema tables';
     ELSE
-        RAISE WARNING '⚠️ stock_user may not have ALL privileges on public schema tables';
+        RAISE WARNING '⚠️ user may not have ALL privileges on public schema tables';
     END IF;
 END \$\$;
 "
@@ -119,8 +119,8 @@ try:
         host='localhost',
         port=5432,
         database='stock_data',
-        user='stock_user',
-        password='stock_password'
+        user='user',
+        password='password'
     )
     print('✅ Database connection successful!')
     
@@ -146,7 +146,7 @@ except Exception as e:
 # Apply database optimizations
 echo ""
 echo "🔧 Applying database optimizations from MDs/db_optimizations/*.md..."
-docker-compose exec -T postgres psql -U stock_user -d stock_data -c "
+docker-compose exec -T postgres psql -U user -d stock_data -c "
 -- Test fast count optimizations
 SELECT 'Testing fast count optimizations...' as status;
 
@@ -176,20 +176,20 @@ echo ""
 echo "📋 Connection Details:"
 echo "   Host: localhost"
 echo "   Port: 5432"
-echo "   Database: stock_data (owned by stock_user)"
-echo "   Username: stock_user"
-echo "   Password: stock_password"
+echo "   Database: stock_data (owned by user)"
+echo "   Username: user"
+echo "   Password: password"
 echo ""
 echo "🔧 Useful Commands:"
 echo "   Start database: docker-compose up -d postgres"
 echo "   Stop database:  docker-compose down"
 echo "   View logs:      docker-compose logs postgres"
-echo "   Connect via psql: psql -h localhost -p 5432 -U stock_user -d stock_data"
+echo "   Connect via psql: psql -h localhost -p 5432 -U user -d stock_data"
 echo ""
 echo "📊 Database Features:"
-echo "   - Database owned by: stock_user"
-echo "   - All tables owned by: stock_user"
-echo "   - Full permissions granted to: stock_user"
+echo "   - Database owned by: user"
+echo "   - All tables owned by: user"
+echo "   - Full permissions granted to: user"
 echo "   - Tables: daily_prices, hourly_prices, realtime_data, db_stats, table_counts"
 echo "   - Indexes: Optimized for latest data queries and COUNT operations"
 echo "   - Functions: get_latest_price(), get_latest_prices(), get_stock_data(), get_realtime_data()"

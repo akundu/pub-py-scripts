@@ -9,7 +9,7 @@ WARNING: This will DELETE data from the public schema tables!
 Only use this if you're sure you want to remove the duplicate tables.
 
 Usage: python cleanup_duplicate_tables.py <database_connection_string>
-Example: python cleanup_duplicate_tables.py 'timescaledb://stock_user:stock_password@localhost:5432/stock_data'
+Example: python cleanup_duplicate_tables.py 'timescaledb://user:password@localhost:5432/stock_data'
 """
 
 import asyncio
@@ -151,7 +151,7 @@ async def main():
     """Main function to run the duplicate table cleanup."""
     if len(sys.argv) != 2:
         print("Usage: python cleanup_duplicate_tables.py <database_connection_string>")
-        print("Example: python cleanup_duplicate_tables.py 'timescaledb://stock_user:stock_password@localhost:5432/stock_data'")
+        print("Example: python cleanup_duplicate_tables.py 'timescaledb://user:password@localhost:5432/stock_data'")
         sys.exit(1)
     
     db_config = sys.argv[1]

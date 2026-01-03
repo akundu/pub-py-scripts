@@ -35,7 +35,7 @@ case $DEMO_MODE in
             --feed both \
             --batch-interval 5 \
             --display-refresh 4 \
-            --db-server ms1.kundu.dev:9100 \
+            --db-server localhost:9100 \
             --test-mode 60
         ;;
     2)
@@ -45,7 +45,7 @@ case $DEMO_MODE in
             --feed quotes \
             --batch-interval 5 \
             --display-refresh 2 \
-            --db-server ms1.kundu.dev:9100 \
+            --db-server localhost:9100 \
             --test-mode 30
         ;;
     3)
@@ -55,7 +55,7 @@ case $DEMO_MODE in
             --feed both \
             --batch-interval 1 \
             --display-refresh 10 \
-            --db-server ms1.kundu.dev:9100 \
+            --db-server localhost:9100 \
             --test-mode 45
         ;;
     4)
@@ -64,7 +64,7 @@ case $DEMO_MODE in
             --symbols AAPL MSFT GOOGL \
             --feed both \
             --no-display \
-            --db-server ms1.kundu.dev:9100 \
+            --db-server localhost:9100 \
             --test-mode 20
         ;;
     *)

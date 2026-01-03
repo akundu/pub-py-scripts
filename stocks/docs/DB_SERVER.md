@@ -61,7 +61,7 @@ WebSocketManager
 
 ```bash
 python db_server.py \
-  --db-file questdb://stock_user:stock_password@localhost:8812/stock_data \
+  --db-file questdb://user:password@localhost:8812/stock_data \
   --port 9100 \
   --log-level DEBUG \
   --heartbeat-interval 180 \
@@ -84,7 +84,7 @@ python db_server.py \
 ### Environment Variables
 
 ```bash
-export QUESTDB_URL="questdb://stock_user:stock_password@localhost:8812/stock_data"
+export QUESTDB_URL="questdb://user:password@localhost:8812/stock_data"
 export REDIS_URL="redis://localhost:6379/0"  # Optional, for caching
 ```
 
@@ -410,7 +410,7 @@ ulimit -n 65536
 
 # Start server with multiple workers
 python db_server.py \
-  --db-file questdb://stock_user:stock_password@localhost:8812/stock_data \
+  --db-file questdb://user:password@localhost:8812/stock_data \
   --port 9100 \
   --workers 4 \
   --log-level WARNING \
@@ -427,7 +427,7 @@ services:
     build: .
     command: >
       sh -c "ulimit -n 65536 && python db_server.py
-      --db-file questdb://stock_user:stock_password@questdb:8812/stock_data
+      --db-file questdb://user:password@questdb:8812/stock_data
       --port 9100
       --workers 4
       --log-level WARNING"
@@ -468,7 +468,7 @@ netstat -tuln | grep 9100
 
 2. **Check database connectivity**:
 ```bash
-psql -h localhost -p 9000 -U stock_user -d qdb
+psql -h localhost -p 9000 -U user -d qdb
 ```
 
 3. **Check worker processes**:
