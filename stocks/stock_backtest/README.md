@@ -509,6 +509,30 @@ For questions, issues, or contributions:
 - [ ] Advanced caching strategies
 - [ ] Memory optimization for large datasets
 
+## System Components
+
+This backtesting framework integrates with the broader stock market data system. For detailed documentation on system components, see:
+
+### Core Data Infrastructure
+
+- **[Database Setup Guide](../docs/DATABASE_SETUP.md)** - QuestDB setup, table creation, cleanup operations, and database management
+- **[Database Server (db_server.py)](../docs/DB_SERVER.md)** - HTTP/WebSocket API server architecture, process management, SQL operations, and API endpoints
+
+### Data Fetching Scripts
+
+- **[fetch_symbol_data.py](../docs/FETCH_SYMBOL_DATA.md)** - Individual symbol data fetching with advanced caching, source-specific data retrieval, and performance optimization
+- **[fetch_all_data.py](../docs/FETCH_ALL_DATA.md)** - Batch data fetching for multiple symbols with parallel processing and executor configuration
+- **[fetch_options.py](../docs/FETCH_OPTIONS.md)** - Historical options data fetching from Polygon.io with filtering, multi-month mode, and CSV caching
+- **[fetch_iv.py](../docs/FETCH_IV.md)** - Implied volatility analysis with IV rank calculation, trading recommendations, and database storage
+
+### Real-Time Data Streaming
+
+- **[polygon_realtime_streamer.py](../docs/POLYGON_REALTIME_STREAMER.md)** - Real-time market data streaming from Polygon.io WebSocket API with connection management and batching
+
+### Additional Resources
+
+- **[Main Project README](../README.md)** - Complete project overview, installation, and all script documentation
+
 ---
 
 **Note**: This framework is for educational and research purposes. Always conduct thorough testing before using any strategy for live trading.
