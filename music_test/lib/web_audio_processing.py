@@ -43,10 +43,12 @@ def recognize_audio_web(audio_chunk, state, config):
     
     # Debug mode - check amplitude (match CLI behavior exactly)
     # CLI only checks in debug mode, and uses silence_threshold for the check
+    # Only check and raise in debug mode, but don't log unless SERVER_LOG_LEVEL is DEBUG
     if config.get('debug'):
         rms_energy = np.sqrt(np.mean(new_samples.astype(np.float64)**2))
         silence_threshold = config.get('silence_threshold', 0.005)
-        print(f"[{get_timestamp()}] Audio Level: {rms_energy:.4f} (threshold: {silence_threshold})", end='\r', file=sys.stderr)
+        if SERVER_LOG_LEVEL == 'DEBUG':
+            print(f"[{get_timestamp()}] Audio Level: {rms_energy:.4f} (threshold: {silence_threshold})", end='\r', file=sys.stderr)
         if rms_energy < silence_threshold:
             raise ValueError("Too low audio level")
     
@@ -187,7 +189,8 @@ def recognize_audio_web(audio_chunk, state, config):
                     return pending
             
             if detected_notes:
-                if config.get('debug') or SERVER_LOG_LEVEL == 'DEBUG':
+                # Only print detected_notes in DEBUG log level (not ERROR/INFO/WARNING)
+                if SERVER_LOG_LEVEL == 'DEBUG':
                     print(f"[{get_timestamp()}] detected_notes: {detected_notes}", file=sys.stderr)
                 
                 state.notes_history.append(detected_notes)
@@ -198,7 +201,8 @@ def recognize_audio_web(audio_chunk, state, config):
                 if state.chroma_history is not None and chroma_vector is not None:
                     state.chroma_history.append(chroma_vector)
                 
-                if config.get('debug') or SERVER_LOG_LEVEL == 'DEBUG':
+                # Only print notes_history in DEBUG log level (not ERROR/INFO/WARNING)
+                if SERVER_LOG_LEVEL == 'DEBUG':
                     print(f"[{get_timestamp()}] notes_history length: {len(state.notes_history)}, contents: {list(state.notes_history)}", file=sys.stderr)
                 
                 # Use enhanced chord analysis when multi-pitch is enabled
@@ -211,7 +215,7 @@ def recognize_audio_web(audio_chunk, state, config):
                 if config.get('progression', True):
                     # Wait for history to build up (progression needs multiple samples)
                     if len(state.notes_history) < 3:
-                        if config.get('debug') or SERVER_LOG_LEVEL == 'DEBUG':
+                        if SERVER_LOG_LEVEL == 'DEBUG':
                             print(f"[{get_timestamp()}] Building history: {len(state.notes_history)}/3 samples", file=sys.stderr)
                         return None  # Not enough history yet
                     
@@ -247,7 +251,8 @@ def recognize_audio_web(audio_chunk, state, config):
                 confidence_threshold = config.get('confidence_threshold', 0.6)
                 log_mode = config.get('log', False)
                 
-                if config.get('debug') or SERVER_LOG_LEVEL == 'DEBUG':
+                # Only print chord analysis in DEBUG log level (not ERROR/INFO/WARNING)
+                if SERVER_LOG_LEVEL == 'DEBUG':
                     print(f"[{get_timestamp()}] chord analysis: {chord_name}, confidence: {confidence:.3f}, threshold: {confidence_threshold}", file=sys.stderr)
                 
                 # In log mode, always show chords (even if below threshold) - matches CLI behavior

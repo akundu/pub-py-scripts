@@ -152,6 +152,9 @@ def recognize_audio(args, audio_buffer, buffer_index, low_freq, high_freq, notes
                 chord_name = None
                 confidence = result.get('chord_confidence', 0.0) if result else 0.0
                 
+                # Check confidence threshold (define before using in debug print)
+                confidence_threshold = getattr(args, 'confidence_threshold', 0.6)
+                
                 if result:
                     if result.get('primary_chords'):
                         chord_name = result['primary_chords'][0]
@@ -160,10 +163,8 @@ def recognize_audio(args, audio_buffer, buffer_index, low_freq, high_freq, notes
                     elif result.get('intervals'):
                         chord_name = result['intervals'][0]
                 
-                print(f"chord analysis: {chord_name}, confidence: {confidence:.3f}", file=sys.stderr) if debug else None
-                
-                # Check confidence threshold - NEW CORE LOGIC
-                confidence_threshold = getattr(args, 'confidence_threshold', 0.6)
+                if debug:
+                    print(f"chord analysis: {chord_name}, confidence: {confidence:.3f}, threshold: {confidence_threshold}", file=sys.stderr)
                 
                 if chord_name and confidence >= confidence_threshold:
                     # Stability check for clean output

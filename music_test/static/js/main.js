@@ -135,28 +135,9 @@ async function connectWebSocket() {
   ws.onopen = () => {
     updateStatus(true, 'Connected');
 
-    // Log configuration parameters only in debug mode
+    // Log connection attempt (parameters will be logged when server confirms connection)
     if (config.debug) {
-      logWithTimestamp('📊 Configuration Parameters:');
-      logWithTimestamp('  Instrument:', config.instrument);
-      logWithTimestamp('  Sensitivity:', config.sensitivity);
-      logWithTimestamp('  Confidence Threshold:', config.confidence_threshold);
-      logWithTimestamp('  Silence Threshold:', config.silence_threshold);
-      logWithTimestamp('  Amplitude Threshold:', config.amplitude_threshold);
-      logWithTimestamp('  Overlap:', config.overlap);
-      logWithTimestamp('  Progression:', config.progression);
-      logWithTimestamp('  Multi-pitch:', config.multi_pitch);
-      logWithTimestamp('  Single-pitch:', config.single_pitch);
-      logWithTimestamp('  Show Frequencies:', config.show_frequencies);
-      logWithTimestamp('  Show Chroma:', config.show_chroma);
-      logWithTimestamp('  Show FFT:', config.show_fft);
-      logWithTimestamp('  Raw Frequencies:', config.raw_frequencies);
-      logWithTimestamp('  Frequencies Only:', config.frequencies_only);
-      logWithTimestamp('  Notes Only:', config.notes_only);
-      logWithTimestamp('  Debug:', config.debug);
-      logWithTimestamp('  Log:', config.log);
-      logWithTimestamp('  Log Interval:', config.log_interval);
-      logWithTimestamp('📊 Full Config Object:', JSON.stringify(config, null, 2));
+      logWithTimestamp('🔌 WebSocket connection opened, sending configuration...');
     }
 
     // Send initial configuration
@@ -186,7 +167,36 @@ async function connectWebSocket() {
 // Handle WebSocket messages
 function handleWebSocketMessage(data) {
   if (data.type === 'connected') {
-    debugLog('Connected:', data.message);
+    // Log connection info
+    logWithTimestamp('✅ Connected:', data.message);
+    
+    // Log configuration parameters if debug is enabled OR server is in DEBUG mode
+    const serverDebug = data.server_log_level === 'DEBUG';
+    if (config.debug || serverDebug) {
+      logWithTimestamp('📊 Configuration Parameters:');
+      logWithTimestamp('  Instrument:', config.instrument);
+      logWithTimestamp('  Sensitivity:', config.sensitivity);
+      logWithTimestamp('  Confidence Threshold:', config.confidence_threshold);
+      logWithTimestamp('  Silence Threshold:', config.silence_threshold);
+      logWithTimestamp('  Amplitude Threshold:', config.amplitude_threshold);
+      logWithTimestamp('  Overlap:', config.overlap);
+      logWithTimestamp('  Progression:', config.progression);
+      logWithTimestamp('  Multi-pitch:', config.multi_pitch);
+      logWithTimestamp('  Single-pitch:', config.single_pitch);
+      logWithTimestamp('  Show Frequencies:', config.show_frequencies);
+      logWithTimestamp('  Show Chroma:', config.show_chroma);
+      logWithTimestamp('  Show FFT:', config.show_fft);
+      logWithTimestamp('  Raw Frequencies:', config.raw_frequencies);
+      logWithTimestamp('  Frequencies Only:', config.frequencies_only);
+      logWithTimestamp('  Notes Only:', config.notes_only);
+      logWithTimestamp('  Debug:', config.debug);
+      logWithTimestamp('  Log:', config.log);
+      logWithTimestamp('  Log Interval:', config.log_interval);
+      if (serverDebug) {
+        logWithTimestamp('  Server Log Level: DEBUG (server-side debug enabled)');
+      }
+      logWithTimestamp('📊 Full Config Object:', JSON.stringify(config, null, 2));
+    }
     return;
   }
 

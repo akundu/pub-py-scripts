@@ -14,7 +14,7 @@ def parse_args():
     parser.add_argument('--log-interval', type=float, default=0.5, help='Logging interval in seconds (default: 0.5)')
     parser.add_argument('--progression', action='store_true', default=True, help='Enable chord progression analysis (default: enabled)')
     parser.add_argument('--sensitivity', type=float, default=1.0, help='Detection sensitivity (0.1-2.0, default: 1.0)')
-    parser.add_argument('--silence-threshold', type=int, default=0.005, help='Silence threshold (0-1, default: 0.005)')
+    parser.add_argument('--silence-threshold', type=float, default=0.005, help='Silence threshold (0-1, default: 0.005)')
     parser.add_argument('--debug', action='store_true', help='Show audio levels for threshold tuning')
     parser.add_argument('--instrument', choices=list(INSTRUMENT_PRESETS.keys()), default='guitar', 
                        help='Instrument preset for frequency filtering (default: guitar)')

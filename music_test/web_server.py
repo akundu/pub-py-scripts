@@ -135,7 +135,13 @@ async def websocket_endpoint(websocket: WebSocket):
         
         # Only print detailed configuration in debug mode (client debug OR server log level DEBUG)
         if config.get('debug') or SERVER_LOG_LEVEL == 'DEBUG':
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📊 Configuration Parameters:")
+            debug_source = []
+            if SERVER_LOG_LEVEL == 'DEBUG':
+                debug_source.append("server log-level=DEBUG")
+            if config.get('debug'):
+                debug_source.append("client debug=true")
+            debug_note = f" (debug enabled: {', '.join(debug_source)})" if debug_source else ""
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📊 Configuration Parameters{debug_note}:")
             print(f"  Instrument: {config.get('instrument', 'guitar')} ({state.instrument_name})")
             print(f"  Frequency Range: {state.low_freq}-{state.high_freq} Hz")
             print(f"  Sensitivity: {config.get('sensitivity', 1.0)}")
@@ -157,11 +163,12 @@ async def websocket_endpoint(websocket: WebSocket):
             print(f"  Log Interval: {config.get('log_interval', 0.5)}s")
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📊 Full Config JSON: {json.dumps(config, indent=2)}")
         
-        # Send initial acknowledgment
+        # Send initial acknowledgment (include server log level for client awareness)
         await websocket.send_json({
             "type": "connected",
             "message": f"Connected for {state.instrument_name}",
-            "config": config
+            "config": config,
+            "server_log_level": SERVER_LOG_LEVEL
         })
         
         # Main processing loop
@@ -225,8 +232,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
                             
                 except ValueError as e:
-                    # Silently handle low audio level (unless debug mode)
-                    if config.get('debug') or SERVER_LOG_LEVEL == 'DEBUG':
+                    # Silently handle low audio level (only log in DEBUG mode, not ERROR/WARNING/INFO)
+                    if SERVER_LOG_LEVEL == 'DEBUG':
                         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⚠️  {connection_id}: {str(e)}", file=sys.stderr)
                     # Still send periodic updates even when audio is low
                     if audio_chunk_count % 20 == 0:
