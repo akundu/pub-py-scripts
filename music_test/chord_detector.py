@@ -63,14 +63,31 @@ def main():
 
     print(f"🎸 Chord detector listening for {instrument_name}... Press Ctrl+C to stop.")
     
-    # Show configuration only in debug mode or with specific flags
-    if args.debug or args.show_frequencies or args.frequencies_only or args.notes_only:
-        if args.raw_frequencies:
-            print("🔓 RAW MODE: Using unfiltered frequencies (no frequency range limits)")
-        else:
-            print(f"📊 Frequency range: {low_freq}-{high_freq} Hz")
-        print(f"🔄 Overlap: {get_overlap_ratio()*100:.0f}% (hop size: {get_hop_size()} samples)")
-        print(f"📊 Amplitude threshold: {args.amplitude_threshold}")
+    # Always print all configuration parameters
+    print("📊 Configuration Parameters:")
+    print(f"  Instrument: {args.instrument} ({instrument_name})")
+    if args.low_freq and args.high_freq:
+        print(f"  Frequency Range: {low_freq}-{high_freq} Hz (Custom)")
+    else:
+        print(f"  Frequency Range: {low_freq}-{high_freq} Hz")
+    print(f"  Sensitivity: {args.sensitivity}")
+    print(f"  Confidence Threshold: {args.confidence_threshold}")
+    print(f"  Silence Threshold: {args.silence_threshold}")
+    print(f"  Amplitude Threshold: {args.amplitude_threshold}")
+    print(f"  Overlap: {args.overlap} ({get_overlap_ratio()*100:.0f}%, hop size: {get_hop_size()} samples)")
+    print(f"  Progression: {args.progression}")
+    print(f"  Multi-pitch: {getattr(args, 'multi_pitch', True)}")
+    print(f"  Single-pitch: {args.single_pitch}")
+    print(f"  Show Frequencies: {args.show_frequencies}")
+    print(f"  Show Chroma: {getattr(args, 'show_chroma', False)}")
+    print(f"  Show FFT: {args.show_fft}")
+    print(f"  Raw Frequencies: {args.raw_frequencies}")
+    print(f"  Frequencies Only: {args.frequencies_only}")
+    print(f"  Notes Only: {args.notes_only}")
+    print(f"  Debug: {args.debug}")
+    print(f"  Log: {args.log}")
+    print(f"  Log Interval: {args.log_interval}s")
+    print(f"  Wait Time: {args.wait_time}s")
     
     # Show mode information
     if args.frequencies_only:
@@ -84,7 +101,6 @@ def main():
             print("📝 Logging mode: Showing timestamped chord detections")
     
     if args.debug:
-        print(f"⏱️  Wait time: {args.wait_time} seconds" if args.wait_time > 0 else "⏱️  Wait time: 0 seconds")
         if getattr(args, 'multi_pitch', True):
             print("🎼 Multi-pitch detection enabled (default, better for chords)")
         else:

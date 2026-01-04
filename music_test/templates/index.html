@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chord Detector</title>
+    <link rel="stylesheet" href="static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎸 Chord Detector</h1>
+            <div class="status" id="status">
+                <span class="status-indicator" id="statusIndicator"></span>
+                <span id="statusText">Disconnected</span>
+            </div>
+        </header>
+
+        <main>
+            <!-- Controls Section -->
+            <section class="controls">
+                <button id="startBtn" class="btn btn-primary">Start Detection</button>
+                <button id="stopBtn" class="btn btn-secondary" disabled>Stop Detection</button>
+                <button id="settingsBtn" class="btn btn-secondary">Settings</button>
+            </section>
+
+            <!-- Main Display Section -->
+            <section class="display-section">
+                <div class="chord-display" id="chordDisplay">
+                    <div class="chord-name" id="chordName">--</div>
+                    <div class="chord-confidence" id="chordConfidence"></div>
+                    <div class="chord-stability" id="chordStability"></div>
+                </div>
+
+                <div class="notes-display" id="notesDisplay">
+                    <h3>Detected Notes</h3>
+                    <div class="notes-list" id="notesList">No notes detected</div>
+                </div>
+            </section>
+
+            <!-- Visualizations Section -->
+            <section class="visualizations">
+                <div class="viz-panel">
+                    <h3>Frequency Spectrum</h3>
+                    <canvas id="frequencyCanvas" width="800" height="200"></canvas>
+                </div>
+                
+                <div class="viz-panel">
+                    <h3>Chroma Vector</h3>
+                    <canvas id="chromaCanvas" width="800" height="150"></canvas>
+                </div>
+
+                <div class="viz-panel">
+                    <h3>Audio Waveform</h3>
+                    <canvas id="waveformCanvas" width="800" height="150"></canvas>
+                </div>
+            </section>
+
+            <!-- Settings Modal -->
+            <div id="settingsModal" class="modal">
+                <div class="modal-content">
+                    <span class="close">&times;</span>
+                    <h2>Settings</h2>
+                    <form id="settingsForm">
+                        <div class="form-group">
+                            <label for="instrument">Instrument:</label>
+                            <select id="instrument" name="instrument">
+                                <option value="guitar">Guitar</option>
+                                <option value="piano">Piano</option>
+                                <option value="bass">Bass</option>
+                                <option value="violin">Violin</option>
+                                <option value="cello">Cello</option>
+                                <option value="flute">Flute</option>
+                                <option value="clarinet">Clarinet</option>
+                                <option value="saxophone">Saxophone</option>
+                                <option value="trumpet">Trumpet</option>
+                                <option value="voice">Voice</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="sensitivity">Sensitivity:</label>
+                            <input type="range" id="sensitivity" name="sensitivity" min="0.1" max="2.0" step="0.1" value="1.0">
+                            <span id="sensitivityValue">1.0</span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="confidenceThreshold">Confidence Threshold:</label>
+                            <input type="range" id="confidenceThreshold" name="confidence_threshold" min="0.1" max="1.0" step="0.1" value="0.6">
+                            <span id="confidenceValue">0.6</span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="silenceThreshold">Silence Threshold:</label>
+                            <input type="range" id="silenceThreshold" name="silence_threshold" min="0.001" max="0.1" step="0.001" value="0.005">
+                            <span id="silenceValue">0.005</span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="overlap">Overlap Ratio:</label>
+                            <input type="range" id="overlap" name="overlap" min="0.0" max="0.9" step="0.05" value="0.75">
+                            <span id="overlapValue">0.75</span>
+                        </div>
+
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="progression" name="progression" checked>
+                                Enable Chord Progression Analysis
+                            </label>
+                        </div>
+
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="multiPitch" name="multi_pitch" checked>
+                                Multi-pitch Detection (better for chords)
+                            </label>
+                        </div>
+
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="showFrequencies" name="show_frequencies">
+                                Show Frequencies
+                            </label>
+                        </div>
+
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="showChroma" name="show_chroma">
+                                Show Chroma Vector
+                            </label>
+                        </div>
+
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="debug" name="debug">
+                                Debug Mode (server logging)
+                            </label>
+                        </div>
+
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="log" name="log">
+                                Log Mode (timestamped output)
+                            </label>
+                        </div>
+
+                        <div class="form-actions">
+                            <button type="submit" class="btn btn-primary">Apply Settings</button>
+                            <button type="button" class="btn btn-secondary" id="resetSettings">Reset to Defaults</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="static/js/audio_handler.js"></script>
+    <script src="static/js/visualizations.js"></script>
+    <script src="static/js/main.js"></script>
+</body>
+</html>
+
