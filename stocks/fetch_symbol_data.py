@@ -2916,6 +2916,9 @@ async def _handle_date_range_mode(args) -> None:
             except Exception as init_error:
                 logger.debug(f"Database already initialized or init error: {init_error}")
         
+        # Calculate enable_cache from args.no_cache
+        enable_cache = not args.no_cache
+        
         final_df = await process_symbol_data(
             symbol=args.symbol, 
             timeframe=args.timeframe, 
