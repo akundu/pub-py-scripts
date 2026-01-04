@@ -5699,6 +5699,77 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
             }}
         }}
         
+        // Helper function to update range display (min/max) for the current interval
+        function updateRangeDisplay(series) {{
+            if (!series || !series.data || series.data.length === 0 || !series.labels || series.labels.length === 0) {{
+                return;
+            }}
+            
+            const startPrice = series.data[0];
+            const endPrice = series.data[series.data.length - 1];
+            const startDate = series.labels[0];
+            const endDate = series.labels[series.labels.length - 1];
+            
+            // Calculate min and max prices in the interval
+            let minPrice = startPrice;
+            let maxPrice = startPrice;
+            for (let i = 0; i < series.data.length; i++) {{
+                const price = series.data[i];
+                if (price !== null && price !== undefined && !isNaN(price)) {{
+                    if (price < minPrice) minPrice = price;
+                    if (price > maxPrice) maxPrice = price;
+                }}
+            }}
+            
+            // Calculate move percentage
+            let movePct = 0;
+            if (startPrice && endPrice && startPrice > 0) {{
+                movePct = ((endPrice - startPrice) / startPrice) * 100;
+            }}
+            
+            // Format dates - for 1D show time, for others show date
+            let formattedStartDate = startDate;
+            let formattedEndDate = endDate;
+            if (currentTimePeriod !== '1d') {{
+                // Try to parse and format dates nicely
+                const startDateObj = parseDate(startDate);
+                const endDateObj = parseDate(endDate);
+                if (startDateObj && !isNaN(startDateObj.getTime())) {{
+                    const month = String(startDateObj.getMonth() + 1).padStart(2, '0');
+                    const day = String(startDateObj.getDate()).padStart(2, '0');
+                    const year = startDateObj.getFullYear();
+                    formattedStartDate = `${{month}}/${{day}}/${{year}}`;
+                }}
+                if (endDateObj && !isNaN(endDateObj.getTime())) {{
+                    const month = String(endDateObj.getMonth() + 1).padStart(2, '0');
+                    const day = String(endDateObj.getDate()).padStart(2, '0');
+                    const year = endDateObj.getFullYear();
+                    formattedEndDate = `${{month}}/${{day}}/${{year}}`;
+                }}
+            }}
+            
+            // Update range display
+            const rangeDatesEl = document.getElementById('rangeDates');
+            const rangeMoveEl = document.getElementById('rangeMove');
+            const rangeMinEl = document.getElementById('rangeMin');
+            const rangeMaxEl = document.getElementById('rangeMax');
+            if (rangeDatesEl) {{
+                rangeDatesEl.textContent = `${{formattedStartDate}} - ${{formattedEndDate}}`;
+            }}
+            if (rangeMoveEl) {{
+                const moveSign = movePct >= 0 ? '+' : '';
+                const moveColor = movePct >= 0 ? '#26a69a' : '#ef5350';
+                rangeMoveEl.textContent = `${{moveSign}}${{movePct.toFixed(2)}}%`;
+                rangeMoveEl.style.color = moveColor;
+            }}
+            if (rangeMinEl) {{
+                rangeMinEl.textContent = `$${{minPrice.toFixed(2)}}`;
+            }}
+            if (rangeMaxEl) {{
+                rangeMaxEl.textContent = `$${{maxPrice.toFixed(2)}}`;
+            }}
+        }}
+        
         function initChart() {{
             if (priceChart) {{
                 priceChart.destroy();
@@ -5851,77 +5922,6 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                 }}
             }});
 
-            // Helper function to update range display (min/max) for the current interval
-            function updateRangeDisplay(series) {{
-                if (!series || !series.data || series.data.length === 0 || !series.labels || series.labels.length === 0) {{
-                    return;
-                }}
-                
-                const startPrice = series.data[0];
-                const endPrice = series.data[series.data.length - 1];
-                const startDate = series.labels[0];
-                const endDate = series.labels[series.labels.length - 1];
-                
-                // Calculate min and max prices in the interval
-                let minPrice = startPrice;
-                let maxPrice = startPrice;
-                for (let i = 0; i < series.data.length; i++) {{
-                    const price = series.data[i];
-                    if (price !== null && price !== undefined && !isNaN(price)) {{
-                        if (price < minPrice) minPrice = price;
-                        if (price > maxPrice) maxPrice = price;
-                    }}
-                }}
-                
-                // Calculate move percentage
-                let movePct = 0;
-                if (startPrice && endPrice && startPrice > 0) {{
-                    movePct = ((endPrice - startPrice) / startPrice) * 100;
-                }}
-                
-                // Format dates - for 1D show time, for others show date
-                let formattedStartDate = startDate;
-                let formattedEndDate = endDate;
-                if (currentTimePeriod !== '1d') {{
-                    // Try to parse and format dates nicely
-                    const startDateObj = parseDate(startDate);
-                    const endDateObj = parseDate(endDate);
-                    if (startDateObj && !isNaN(startDateObj.getTime())) {{
-                        const month = String(startDateObj.getMonth() + 1).padStart(2, '0');
-                        const day = String(startDateObj.getDate()).padStart(2, '0');
-                        const year = startDateObj.getFullYear();
-                        formattedStartDate = `${{month}}/${{day}}/${{year}}`;
-                    }}
-                    if (endDateObj && !isNaN(endDateObj.getTime())) {{
-                        const month = String(endDateObj.getMonth() + 1).padStart(2, '0');
-                        const day = String(endDateObj.getDate()).padStart(2, '0');
-                        const year = endDateObj.getFullYear();
-                        formattedEndDate = `${{month}}/${{day}}/${{year}}`;
-                    }}
-                }}
-                
-                // Update range display
-                const rangeDatesEl = document.getElementById('rangeDates');
-                const rangeMoveEl = document.getElementById('rangeMove');
-                const rangeMinEl = document.getElementById('rangeMin');
-                const rangeMaxEl = document.getElementById('rangeMax');
-                if (rangeDatesEl) {{
-                    rangeDatesEl.textContent = `${{formattedStartDate}} - ${{formattedEndDate}}`;
-                }}
-                if (rangeMoveEl) {{
-                    const moveSign = movePct >= 0 ? '+' : '';
-                    const moveColor = movePct >= 0 ? '#26a69a' : '#ef5350';
-                    rangeMoveEl.textContent = `${{moveSign}}${{movePct.toFixed(2)}}%`;
-                    rangeMoveEl.style.color = moveColor;
-                }}
-                if (rangeMinEl) {{
-                    rangeMinEl.textContent = `$${{minPrice.toFixed(2)}}`;
-                }}
-                if (rangeMaxEl) {{
-                    rangeMaxEl.textContent = `$${{maxPrice.toFixed(2)}}`;
-                }}
-            }}
-            
             // Update initial range information for 1D period
             updateRangeDisplay(initialSeries);
 
