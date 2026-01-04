@@ -1,6 +1,7 @@
 from common.symbol_loader import add_symbol_arguments, fetch_lists_data
 from common.common import run_iteration_in_subprocess
-from fetch_symbol_data import fetch_and_save_data, get_current_price, get_financial_ratios
+from fetch_symbol_data import fetch_and_save_data, get_current_price
+from common.financial_data import get_financial_info
 from common.market_hours import is_market_hours, compute_market_transition_times
 from common.stock_db import get_stock_db, get_default_db_path
 import asyncio
@@ -259,36 +260,36 @@ def fetch_financial_info(
         else:
             worker_db_instance = get_stock_db(db_type_for_worker, db_config_for_worker, enable_cache=enable_cache, redis_url=redis_url, log_level=log_level, auto_init=False)
         
-        # Get API key from environment
-        api_key = os.getenv('POLYGON_API_KEY')
-        if not api_key:
-            return {"symbol": symbol, "error": "POLYGON_API_KEY environment variable not set"}
+        # Use get_financial_info() which handles both ratios and IV analysis
+        # This ensures IV analysis is calculated when --fetch-ratios is used
+        financial_result = loop.run_until_complete(get_financial_info(
+            symbol=symbol,
+            db_instance=worker_db_instance,
+            force_fetch=True,  # Force API fetch
+            include_iv_analysis=True,  # Include IV analysis
+            iv_calendar_days=90,
+            iv_server_url=os.getenv("DB_SERVER_URL", "http://localhost:9100"),
+            iv_use_polygon=False,
+            iv_data_dir="data"
+        ))
         
-        # Fetch financial ratios
-        ratios = loop.run_until_complete(get_financial_ratios(symbol, api_key))
-        if ratios:
-            # Add current date to the ratios data
-            ratios['date'] = datetime.now().strftime('%Y-%m-%d')
-            
-            # Save financial info to database
-            try:
-                loop.run_until_complete(worker_db_instance.save_financial_info(symbol, ratios))
-                return {
-                    "symbol": symbol,
-                    "success": True,
-                    "financial_info": ratios,
-                    "timestamp": get_timezone_aware_time().isoformat(),
-                    "timezone": "America/New_York"
-                }
-            except Exception as save_error:
-                return {
-                    "symbol": symbol,
-                    "success": False,
-                    "error": f"Failed to save financial info: {save_error}",
-                    "financial_info": ratios
-                }
+        if financial_result and financial_result.get('financial_data'):
+            financial_data = financial_result['financial_data']
+            return {
+                "symbol": symbol,
+                "success": True,
+                "financial_info": financial_data,
+                "timestamp": get_timezone_aware_time().isoformat(),
+                "timezone": "America/New_York"
+            }
+        elif financial_result and financial_result.get('error'):
+            return {
+                "symbol": symbol,
+                "success": False,
+                "error": financial_result['error']
+            }
         else:
-            return {"symbol": symbol, "success": False, "error": "No financial ratios data available"}
+            return {"symbol": symbol, "success": False, "error": "No financial data available"}
         
     except Exception as e:
         return {"symbol": symbol, "success": False, "error": str(e)}
