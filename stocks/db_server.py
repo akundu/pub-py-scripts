@@ -5115,7 +5115,7 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                 
                 {f'''
                 <div class="metric-card">
-                    <div class="metric-label">Relative Rank (vs SPY)</div>
+                    <div class="metric-label">Relative Rank (vs VOO)</div>
                     <div class="metric-value">{format_value(financial_data.get('relative_rank'))}</div>
                 </div>
                 ''' if financial_data.get('relative_rank') is not None else ''}

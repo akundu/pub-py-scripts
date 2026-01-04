@@ -151,8 +151,8 @@ async def main():
         logger.error("No symbols found. Please check your input.")
         return
     
-    # Always include SPY for relative ranking
-    all_tickers = list(set(["SPY"] + [t.upper() for t in symbols]))
+    # Always include VOO for relative ranking
+    all_tickers = list(set(["VOO"] + [t.upper() for t in symbols]))
     
     worker_config = {
         'poly_key': os.getenv("POLYGON_API_KEY"),
@@ -190,9 +190,9 @@ async def main():
                     if needs_update: tickers_needing_update.append(ticker)
                 except Exception as e: logger.error(f"Worker failed for {ticker}: {e}")
 
-        spy_rank = 50.0
-        if "SPY" in results_map and "metrics" in results_map["SPY"]:
-            spy_rank = results_map["SPY"]["metrics"]["rank"]
+        voo_rank = 50.0
+        if "VOO" in results_map and "metrics" in results_map["VOO"]:
+            voo_rank = results_map["VOO"]["metrics"]["rank"]
         
         final_output = []
         for t in symbols:
@@ -200,7 +200,13 @@ async def main():
             if t_upper in results_map:
                 data = results_map[t_upper]
                 if "metrics" in data:
-                    data['relative_rank'] = round(data['metrics']['rank'] - spy_rank, 2)
+                    ticker_rank = data['metrics']['rank']
+                    # Calculate relative rank as ratio (ticker_rank / voo_rank)
+                    # 1.0 = equal, >1.0 = higher, <1.0 = lower
+                    if voo_rank > 0:
+                        data['relative_rank'] = round(ticker_rank / voo_rank, 2)
+                    else:
+                        data['relative_rank'] = 1.0 if ticker_rank == 0 else None
                     final_output.append(data)
                 else: final_output.append(data)
 
@@ -232,7 +238,8 @@ async def save_iv_analysis_to_db(results: list, db_config: Optional[str], logger
     try:
         # Get database config
         if not db_config:
-            db_config = os.getenv("QUESTDB_URL") or "questdb://user:password@localhost:8812/stock_data"
+            # Try environment variable first, then fallback to default
+            db_config = os.getenv("QUESTDB_URL") or os.getenv("QUEST_DB_STRING") or "questdb://user:password@localhost:8812/stock_data"
         
         # Import database utilities
         from common.stock_db import get_stock_db

@@ -1547,42 +1547,141 @@ class FinancialInfoRepository(BaseRepository):
         if not financial_data:
             return
         
+        # Ensure date is always set to today to update the latest record
+        if 'date' not in financial_data or not financial_data.get('date'):
+            financial_data['date'] = date.today().isoformat()
+        else:
+            # Override any existing date to ensure we always use today's date
+            financial_data['date'] = date.today().isoformat()
+        
         async with self.connection.get_connection() as conn:
-            record = {
-                'ticker': ticker,
-                'date': financial_data.get('date'),
-                'price': financial_data.get('price'),
-                'market_cap': financial_data.get('market_cap'),
-                'earnings_per_share': financial_data.get('earnings_per_share'),
-                'price_to_earnings': financial_data.get('price_to_earnings'),
-                'price_to_book': financial_data.get('price_to_book'),
-                'price_to_sales': financial_data.get('price_to_sales'),
-                'price_to_cash_flow': financial_data.get('price_to_cash_flow'),
-                'price_to_free_cash_flow': financial_data.get('price_to_free_cash_flow'),
-                'dividend_yield': financial_data.get('dividend_yield'),
-                'return_on_assets': financial_data.get('return_on_assets'),
-                'return_on_equity': financial_data.get('return_on_equity'),
-                'debt_to_equity': financial_data.get('debt_to_equity'),
-                'current_ratio': financial_data.get('current'),
-                'quick_ratio': financial_data.get('quick'),
-                'cash_ratio': financial_data.get('cash'),
-                'ev_to_sales': financial_data.get('ev_to_sales'),
-                'ev_to_ebitda': financial_data.get('ev_to_ebitda'),
-                'enterprise_value': financial_data.get('enterprise_value'),
-                'free_cash_flow': financial_data.get('free_cash_flow'),
-                'iv_30d': financial_data.get('iv_30d'),
-                'iv_rank': financial_data.get('iv_rank'),
-                'relative_rank': financial_data.get('relative_rank'),
-                'iv_analysis_json': financial_data.get('iv_analysis_json'),
-                'iv_analysis_spare': financial_data.get('iv_analysis_spare'),
-                'write_timestamp': datetime.now(timezone.utc)
-            }
+            # Fetch existing data first to preserve it during DEDUP UPSERT
+            # DEDUP UPSERT will overwrite fields with NULL if not provided, so we need to merge
+            existing_record = None
+            record_date = financial_data.get('date')
+            if record_date:
+                if isinstance(record_date, str):
+                    record_date = date_parser.parse(record_date)
+                record_date = TimezoneHandler.to_naive_utc(record_date, "financial_info date")
+                try:
+                    existing_df = await self.get(ticker, start_date=record_date.strftime('%Y-%m-%d') if record_date else None)
+                    if not existing_df.empty:
+                        # Find record with matching date - try both index and date column
+                        # Create a temporary date column for matching, but don't include it in the final record
+                        if 'date' in existing_df.columns:
+                            existing_df_temp = existing_df.copy()
+                            existing_df_temp['_date_col'] = pd.to_datetime(existing_df_temp['date'])
+                        else:
+                            existing_df_temp = existing_df.copy()
+                            existing_df_temp['_date_col'] = pd.to_datetime(existing_df_temp.index)
+                        
+                        # Try to match by date (within same day)
+                        record_date_start = record_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                        record_date_end = record_date_start + pd.Timedelta(days=1)
+                        matching = existing_df_temp[(existing_df_temp['_date_col'] >= record_date_start) & (existing_df_temp['_date_col'] < record_date_end)]
+                        if not matching.empty:
+                            # Convert to dict, excluding the temporary _date_col column
+                            existing_record = matching.iloc[-1].drop('_date_col', errors='ignore').to_dict()
+                            self.logger.debug(f"[FINANCIAL SAVE] Found existing record for {ticker} on {record_date}, will merge")
+                        else:
+                            # If no exact match, use the most recent record
+                            existing_record = existing_df.iloc[-1].drop('_date_col', errors='ignore').to_dict()
+                            self.logger.debug(f"[FINANCIAL SAVE] No exact date match for {ticker}, using most recent record")
+                except Exception as e:
+                    self.logger.debug(f"[FINANCIAL SAVE] Could not fetch existing record: {e}")
             
-            if record['date'] and isinstance(record['date'], str):
+            # Build record dict, starting with existing data if available
+            record = {}
+            if existing_record:
+                # Map display column names back to database column names
+                # get() returns 'current', 'quick', 'cash' but DB expects 'current_ratio', 'quick_ratio', 'cash_ratio'
+                display_to_db_mapping = {
+                    'current': 'current_ratio',
+                    'quick': 'quick_ratio',
+                    'cash': 'cash_ratio',
+                }
+                
+                # Start with existing record to preserve ALL non-NULL fields
+                # Copy all keys from existing_record, but map display names to DB names
+                # IMPORTANT: Only preserve fields that are NOT NULL in existing record
+                # This prevents overwriting new data with old NULL values
+                for key, value in existing_record.items():
+                    if value is not None and not pd.isna(value):  # Only preserve non-None, non-NaN values
+                        # Map display name to DB name if needed
+                        db_key = display_to_db_mapping.get(key, key)
+                        record[db_key] = value
+                self.logger.debug(f"[FINANCIAL SAVE] Preserved {len(record)} non-NULL fields from existing record for {ticker}")
+            
+            # Now update/override with new data from financial_data (only non-None values)
+            # IMPORTANT: Only update fields that are explicitly provided and not None
+            # This prevents overwriting existing data with NULL values
+            record['ticker'] = ticker
+            if financial_data.get('date'):
+                record['date'] = financial_data.get('date')
+            if financial_data.get('price') is not None:
+                record['price'] = financial_data.get('price')
+            if financial_data.get('market_cap') is not None:
+                record['market_cap'] = financial_data.get('market_cap')
+            if financial_data.get('earnings_per_share') is not None:
+                record['earnings_per_share'] = financial_data.get('earnings_per_share')
+            if financial_data.get('price_to_earnings') is not None:
+                record['price_to_earnings'] = financial_data.get('price_to_earnings')
+            if financial_data.get('price_to_book') is not None:
+                record['price_to_book'] = financial_data.get('price_to_book')
+            if financial_data.get('price_to_sales') is not None:
+                record['price_to_sales'] = financial_data.get('price_to_sales')
+            if financial_data.get('price_to_cash_flow') is not None:
+                record['price_to_cash_flow'] = financial_data.get('price_to_cash_flow')
+            if financial_data.get('price_to_free_cash_flow') is not None:
+                record['price_to_free_cash_flow'] = financial_data.get('price_to_free_cash_flow')
+            if financial_data.get('dividend_yield') is not None:
+                record['dividend_yield'] = financial_data.get('dividend_yield')
+            if financial_data.get('return_on_assets') is not None:
+                record['return_on_assets'] = financial_data.get('return_on_assets')
+            if financial_data.get('return_on_equity') is not None:
+                record['return_on_equity'] = financial_data.get('return_on_equity')
+            if financial_data.get('debt_to_equity') is not None:
+                record['debt_to_equity'] = financial_data.get('debt_to_equity')
+            if financial_data.get('current') is not None:
+                record['current_ratio'] = financial_data.get('current')
+            if financial_data.get('quick') is not None:
+                record['quick_ratio'] = financial_data.get('quick')
+            if financial_data.get('cash') is not None:
+                record['cash_ratio'] = financial_data.get('cash')
+            
+            if financial_data.get('ev_to_sales') is not None:
+                record['ev_to_sales'] = financial_data.get('ev_to_sales')
+            if financial_data.get('ev_to_ebitda') is not None:
+                record['ev_to_ebitda'] = financial_data.get('ev_to_ebitda')
+            if financial_data.get('enterprise_value') is not None:
+                record['enterprise_value'] = financial_data.get('enterprise_value')
+            if financial_data.get('free_cash_flow') is not None:
+                record['free_cash_flow'] = financial_data.get('free_cash_flow')
+            if financial_data.get('iv_30d') is not None:
+                record['iv_30d'] = financial_data.get('iv_30d')
+            if financial_data.get('iv_rank') is not None:
+                record['iv_rank'] = financial_data.get('iv_rank')
+            if financial_data.get('relative_rank') is not None:
+                record['relative_rank'] = financial_data.get('relative_rank')
+            if financial_data.get('iv_analysis_json') is not None:
+                record['iv_analysis_json'] = financial_data.get('iv_analysis_json')
+            if financial_data.get('iv_analysis_spare') is not None:
+                record['iv_analysis_spare'] = financial_data.get('iv_analysis_spare')
+            
+            # Always set write_timestamp
+            record['write_timestamp'] = datetime.now(timezone.utc)
+            
+            # Parse and normalize date - ensure it's always set to today
+            if not record.get('date'):
+                record['date'] = date.today()
+            if isinstance(record['date'], str):
                 record['date'] = date_parser.parse(record['date'])
-            
             record['date'] = TimezoneHandler.to_naive_utc(record['date'], "financial_info date")
+            
             record['write_timestamp'] = TimezoneHandler.to_naive_utc(record['write_timestamp'], "financial_info write_timestamp")
+            
+            # Remove any temporary columns that shouldn't be saved
+            record = {k: v for k, v in record.items() if not k.startswith('_') and k != 'date_col'}
             
             columns = list(record.keys())
             placeholders = [f'${i+1}' for i in range(len(columns))]
@@ -1597,9 +1696,12 @@ class FinancialInfoRepository(BaseRepository):
                     values.append(value)
             
             try:
-                await conn.execute(insert_sql, *values)
+                result = await conn.execute(insert_sql, *values)
+                self.logger.debug(f"[FINANCIAL SAVE] Successfully executed INSERT for {ticker}. Result: {result}")
             except Exception as e:
                 self.logger.error(f"Error saving financial info for {ticker}: {e}")
+                import traceback
+                self.logger.debug(f"[FINANCIAL SAVE ERROR] Traceback: {traceback.format_exc()}")
                 raise
     
     async def get(self, ticker: str, start_date: Optional[str] = None,
@@ -1631,6 +1733,16 @@ class FinancialInfoRepository(BaseRepository):
                     if 'date' in df.columns:
                         df['date'] = pd.to_datetime(df['date'])
                         df.set_index('date', inplace=True)
+                    # Map database column names to expected field names for compatibility
+                    # Database has current_ratio, quick_ratio, cash_ratio but code expects current, quick, cash
+                    column_mapping = {
+                        'current_ratio': 'current',
+                        'quick_ratio': 'quick',
+                        'cash_ratio': 'cash'
+                    }
+                    for db_col, expected_col in column_mapping.items():
+                        if db_col in df.columns and expected_col not in df.columns:
+                            df[expected_col] = df[db_col]
                     return df
                 else:
                     return pd.DataFrame()
@@ -3996,17 +4108,10 @@ class FinancialDataService:
         """Save financial info with caching on write."""
         await self.financial_repo.save(ticker, financial_data)
         
-        # Cache financial info (cache on write)
-        date_str = financial_data.get('date')
-        # Financial info cache key doesn't include date
-        cache_key = CacheKeyGenerator.financial_info(ticker)
-        # Convert financial_data dict to DataFrame for caching
-        # Add last_save_time
-        financial_data_with_time = financial_data.copy()
-        financial_data_with_time['last_save_time'] = datetime.now(timezone.utc).isoformat()
-        df = pd.DataFrame([financial_data_with_time])
-        self.cache.set_fire_and_forget(cache_key, df, ttl=None)  # No TTL (infinite cache)
-        self.logger.debug(f"[CACHE SET] Cached financial info on write (fire-and-forget): {cache_key} (rows: 1, no TTL)")
+        # Don't cache here - let the get() method cache after retrieving from DB
+        # This ensures the cache has the correct structure (DB column names mapped to display names)
+        # The cache will be populated on the next read, which will have the correct structure
+        self.logger.debug(f"[CACHE SKIP] Skipping cache on write for {ticker} - will cache on next read with correct structure")
     
     async def get(self, ticker: str, start_date: Optional[str] = None,
                  end_date: Optional[str] = None) -> pd.DataFrame:
@@ -4052,6 +4157,14 @@ class FinancialDataService:
         self.logger.debug(f"[DB] Fetching financial info from database: {ticker}")
         df = await self.financial_repo.get(ticker, start_date, end_date)
         self.logger.debug(f"[DB] Fetched {len(df)} rows from database for {ticker} financial info")
+        if not df.empty:
+            latest_date = df.index[-1] if hasattr(df.index, '__getitem__') else (df.iloc[-1].get('date') if 'date' in df.columns else 'N/A')
+            latest_ratios = {
+                'price_to_earnings': df.iloc[-1].get('price_to_earnings'),
+                'price_to_book': df.iloc[-1].get('price_to_book'),
+                'current_ratio': df.iloc[-1].get('current_ratio') if 'current_ratio' in df.columns else df.iloc[-1].get('current'),
+            }
+            self.logger.debug(f"[DB GET] Fetched record for {ticker} with date: {latest_date}, ratios: {latest_ratios}")
         
         # Cache the result with no TTL (infinite cache)
         # Add last_save_time to each row

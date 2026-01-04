@@ -2396,6 +2396,313 @@ def get_stock_price_simple(symbol: str, data_source: str = "polygon", max_age_se
         print(f"Error getting price for {symbol}: {e}", file=sys.stderr)
         return None
 
+async def _display_financials(symbol: str, db_instance: StockDBBase, logger: logging.Logger, log_level: str = "INFO", fetch_ratios: bool = False) -> None:
+    """Display stored financial information for a symbol.
+    
+    Args:
+        symbol: Stock ticker symbol
+        db_instance: Database instance
+        logger: Logger instance
+        log_level: Logging level
+        fetch_ratios: Whether --fetch-ratios was passed (to suppress tip message)
+    """
+    print()  # Spacing
+    print("="*80)
+    print("STORED FINANCIAL INFORMATION")
+    print("="*80)
+    try:
+        # Query all stored financial data from database
+        financial_data = await db_instance.get_financial_info(symbol)
+        
+        if not financial_data.empty:
+            # Display most recent entry
+            latest_entry = financial_data.iloc[-1]
+            
+            # Debug: Check what columns and values we have
+            if log_level == "DEBUG":
+                logger.debug(f"[DISPLAY_FINANCIALS] Checking for IV analysis in latest_entry for {symbol}")
+                logger.debug(f"[DISPLAY_FINANCIALS] Columns in latest_entry: {list(latest_entry.index) if hasattr(latest_entry, 'index') else list(latest_entry.keys())}")
+                logger.debug(f"[DISPLAY_FINANCIALS] Has iv_analysis_json: {'iv_analysis_json' in latest_entry}")
+                # Check for ratio fields with both display and DB names
+                ratio_fields = ['price_to_earnings', 'price_to_book', 'price_to_sales', 
+                               'current', 'quick', 'cash', 'current_ratio', 'quick_ratio', 'cash_ratio']
+                for field in ratio_fields:
+                    if field in latest_entry:
+                        value = latest_entry[field]
+                        logger.debug(f"[DISPLAY_FINANCIALS] {field}: {value} (type: {type(value)}, isna: {pd.isna(value) if hasattr(pd, 'isna') else (value is None or value == '')})")
+                if 'iv_analysis_json' in latest_entry:
+                    logger.debug(f"[DISPLAY_FINANCIALS] iv_analysis_json value type: {type(latest_entry.get('iv_analysis_json'))}")
+                    logger.debug(f"[DISPLAY_FINANCIALS] iv_analysis_json is not None/empty: {latest_entry.get('iv_analysis_json') is not None and latest_entry.get('iv_analysis_json') != ''}")
+            
+            print(f"\nSymbol: {symbol}")
+            if 'date' in latest_entry and pd.notna(latest_entry['date']):
+                try:
+                    date_val = latest_entry['date']
+                    # Handle various date formats
+                    if isinstance(date_val, (str, pd.Timestamp, datetime)):
+                        print(f"Data Date: {date_val}")
+                    elif isinstance(date_val, dict):
+                        # Skip dict dates
+                        pass
+                    else:
+                        print(f"Data Date: {str(date_val)}")
+                except Exception as date_err:
+                    logger.debug(f"Error displaying date: {date_err}")
+            if 'write_timestamp' in latest_entry and pd.notna(latest_entry['write_timestamp']):
+                try:
+                    ts_val = latest_entry['write_timestamp']
+                    # Handle various timestamp formats
+                    if isinstance(ts_val, (str, pd.Timestamp, datetime)):
+                        print(f"Last Updated: {ts_val}")
+                    elif isinstance(ts_val, dict):
+                        # Skip dict timestamps
+                        pass
+                    else:
+                        print(f"Last Updated: {str(ts_val)}")
+                except Exception as ts_err:
+                    logger.debug(f"Error displaying timestamp: {ts_err}")
+            
+            # Valuation Ratios
+            print(f"\n{'Valuation Ratios:':<30}")
+            print(f"{'─'*80}")
+            if 'price_to_earnings' in latest_entry and pd.notna(latest_entry['price_to_earnings']):
+                print(f"  {'P/E Ratio:':<30} {latest_entry['price_to_earnings']}")
+            if 'price_to_book' in latest_entry and pd.notna(latest_entry['price_to_book']):
+                print(f"  {'P/B Ratio:':<30} {latest_entry['price_to_book']}")
+            if 'price_to_sales' in latest_entry and pd.notna(latest_entry['price_to_sales']):
+                print(f"  {'P/S Ratio:':<30} {latest_entry['price_to_sales']}")
+            if 'peg_ratio' in latest_entry and pd.notna(latest_entry['peg_ratio']):
+                print(f"  {'PEG Ratio:':<30} {latest_entry['peg_ratio']}")
+            if 'price_to_cash_flow' in latest_entry and pd.notna(latest_entry['price_to_cash_flow']):
+                print(f"  {'P/CF Ratio:':<30} {latest_entry['price_to_cash_flow']}")
+            if 'price_to_free_cash_flow' in latest_entry and pd.notna(latest_entry['price_to_free_cash_flow']):
+                print(f"  {'P/FCF Ratio:':<30} {latest_entry['price_to_free_cash_flow']}")
+            if 'ev_to_sales' in latest_entry and pd.notna(latest_entry['ev_to_sales']):
+                print(f"  {'EV/Sales:':<30} {latest_entry['ev_to_sales']}")
+            if 'ev_to_ebitda' in latest_entry and pd.notna(latest_entry['ev_to_ebitda']):
+                print(f"  {'EV/EBITDA:':<30} {latest_entry['ev_to_ebitda']}")
+            
+            # Profitability Ratios
+            print(f"\n{'Profitability Ratios:':<30}")
+            print(f"{'─'*80}")
+            if 'return_on_equity' in latest_entry and pd.notna(latest_entry['return_on_equity']):
+                print(f"  {'ROE:':<30} {latest_entry['return_on_equity']}")
+            if 'return_on_assets' in latest_entry and pd.notna(latest_entry['return_on_assets']):
+                print(f"  {'ROA:':<30} {latest_entry['return_on_assets']}")
+            if 'profit_margin' in latest_entry and pd.notna(latest_entry['profit_margin']):
+                print(f"  {'Profit Margin:':<30} {latest_entry['profit_margin']}")
+            if 'gross_margin' in latest_entry and pd.notna(latest_entry['gross_margin']):
+                print(f"  {'Gross Margin:':<30} {latest_entry['gross_margin']}")
+            if 'operating_margin' in latest_entry and pd.notna(latest_entry['operating_margin']):
+                print(f"  {'Operating Margin:':<30} {latest_entry['operating_margin']}")
+            
+            # Liquidity Ratios
+            print(f"\n{'Liquidity Ratios:':<30}")
+            print(f"{'─'*80}")
+            # Handle both display names (current, quick, cash) and DB names (current_ratio, quick_ratio, cash_ratio)
+            current_ratio = latest_entry.get('current') if 'current' in latest_entry else latest_entry.get('current_ratio')
+            if current_ratio is not None and pd.notna(current_ratio):
+                print(f"  {'Current Ratio:':<30} {current_ratio}")
+            quick_ratio = latest_entry.get('quick') if 'quick' in latest_entry else latest_entry.get('quick_ratio')
+            if quick_ratio is not None and pd.notna(quick_ratio):
+                print(f"  {'Quick Ratio:':<30} {quick_ratio}")
+            cash_ratio = latest_entry.get('cash') if 'cash' in latest_entry else latest_entry.get('cash_ratio')
+            if cash_ratio is not None and pd.notna(cash_ratio):
+                print(f"  {'Cash Ratio:':<30} {cash_ratio}")
+            
+            # Leverage Ratios
+            print(f"\n{'Leverage Ratios:':<30}")
+            print(f"{'─'*80}")
+            if 'debt_to_equity' in latest_entry and pd.notna(latest_entry['debt_to_equity']):
+                print(f"  {'Debt-to-Equity:':<30} {latest_entry['debt_to_equity']}")
+            if 'debt_to_assets' in latest_entry and pd.notna(latest_entry['debt_to_assets']):
+                print(f"  {'Debt-to-Assets:':<30} {latest_entry['debt_to_assets']}")
+            
+            # Market Data
+            print(f"\n{'Market Data:':<30}")
+            print(f"{'─'*80}")
+            if 'market_cap' in latest_entry and pd.notna(latest_entry['market_cap']):
+                market_cap = float(latest_entry['market_cap'])
+                if market_cap >= 1e12:
+                    print(f"  {'Market Cap:':<30} ${market_cap/1e12:.2f}T")
+                elif market_cap >= 1e9:
+                    print(f"  {'Market Cap:':<30} ${market_cap/1e9:.2f}B")
+                elif market_cap >= 1e6:
+                    print(f"  {'Market Cap:':<30} ${market_cap/1e6:.2f}M")
+                else:
+                    print(f"  {'Market Cap:':<30} ${market_cap:,.0f}")
+            if 'enterprise_value' in latest_entry and pd.notna(latest_entry['enterprise_value']):
+                ev = float(latest_entry['enterprise_value'])
+                if ev >= 1e12:
+                    print(f"  {'Enterprise Value:':<30} ${ev/1e12:.2f}T")
+                elif ev >= 1e9:
+                    print(f"  {'Enterprise Value:':<30} ${ev/1e9:.2f}B")
+                elif ev >= 1e6:
+                    print(f"  {'Enterprise Value:':<30} ${ev/1e6:.2f}M")
+                else:
+                    print(f"  {'Enterprise Value:':<30} ${ev:,.0f}")
+            if 'shares_outstanding' in latest_entry and pd.notna(latest_entry['shares_outstanding']):
+                shares = float(latest_entry['shares_outstanding'])
+                if shares >= 1e9:
+                    print(f"  {'Shares Outstanding:':<30} {shares/1e9:.2f}B")
+                elif shares >= 1e6:
+                    print(f"  {'Shares Outstanding:':<30} {shares/1e6:.2f}M")
+                else:
+                    print(f"  {'Shares Outstanding:':<30} {shares:,.0f}")
+            if 'dividend_yield' in latest_entry and pd.notna(latest_entry['dividend_yield']):
+                yield_val = float(latest_entry['dividend_yield']) * 100
+                print(f"  {'Dividend Yield:':<30} {yield_val:.2f}%")
+            
+            # Cash Flow
+            print(f"\n{'Cash Flow:':<30}")
+            print(f"{'─'*80}")
+            if 'free_cash_flow' in latest_entry and pd.notna(latest_entry['free_cash_flow']):
+                fcf = float(latest_entry['free_cash_flow'])
+                if fcf >= 1e9:
+                    print(f"  {'Free Cash Flow:':<30} ${fcf/1e9:.2f}B")
+                elif fcf >= 1e6:
+                    print(f"  {'Free Cash Flow:':<30} ${fcf/1e6:.2f}M")
+                else:
+                    print(f"  {'Free Cash Flow:':<30} ${fcf:,.0f}")
+            if 'operating_cash_flow' in latest_entry and pd.notna(latest_entry['operating_cash_flow']):
+                ocf = float(latest_entry['operating_cash_flow'])
+                if ocf >= 1e9:
+                    print(f"  {'Operating Cash Flow:':<30} ${ocf/1e9:.2f}B")
+                elif ocf >= 1e6:
+                    print(f"  {'Operating Cash Flow:':<30} ${ocf/1e6:.2f}M")
+                else:
+                    print(f"  {'Operating Cash Flow:':<30} ${ocf:,.0f}")
+            
+            # IV Analysis (30-day and 90-day)
+            print(f"\n{'IV Analysis:':<30}")
+            print(f"{'─'*80}")
+            # Check if IV analysis is in the iv_analysis_json column
+            if 'iv_analysis_json' in latest_entry and latest_entry.get('iv_analysis_json'):
+                import json
+                try:
+                    iv_analysis = json.loads(latest_entry['iv_analysis_json'])
+                    metrics = iv_analysis.get('metrics', {})
+                    strategy = iv_analysis.get('strategy', {})
+                    
+                    # Display all metrics
+                    if metrics.get('iv_30d'):
+                        print(f"  {'30-day IV:':<30} {metrics.get('iv_30d', 'N/A')}")
+                    if metrics.get('iv_90d'):
+                        print(f"  {'90-day IV:':<30} {metrics.get('iv_90d', 'N/A')}")
+                    if metrics.get('hv_1yr_range'):
+                        print(f"  {'1-Year HV Range:':<30} {metrics.get('hv_1yr_range', 'N/A')}")
+                    if metrics.get('rank') is not None:
+                        print(f"  {'IV Rank:':<30} {metrics.get('rank', 'N/A')}")
+                    if metrics.get('roll_yield'):
+                        print(f"  {'Roll Yield:':<30} {metrics.get('roll_yield', 'N/A')}")
+                    if metrics.get('realized_vol_30d'):
+                        print(f"  {'30-day Realized Vol:':<30} {metrics.get('realized_vol_30d', 'N/A')}")
+                    if metrics.get('realized_vol_90d'):
+                        print(f"  {'90-day Realized Vol:':<30} {metrics.get('realized_vol_90d', 'N/A')}")
+                    if metrics.get('iv_percentile_30d'):
+                        print(f"  {'30-day IV Percentile:':<30} {metrics.get('iv_percentile_30d', 'N/A')}")
+                    if metrics.get('iv_percentile_90d'):
+                        print(f"  {'90-day IV Percentile:':<30} {metrics.get('iv_percentile_90d', 'N/A')}")
+                    
+                    # Display relative_rank (can be at top level or in metrics)
+                    relative_rank = iv_analysis.get('relative_rank') or metrics.get('relative_rank')
+                    if relative_rank is not None:
+                        print(f"  {'Relative Rank (vs VOO):':<30} {relative_rank}")
+                    
+                    # Display strategy information
+                    if strategy.get('recommendation'):
+                        print(f"  {'Strategy:':<30} {strategy.get('recommendation', 'N/A')}")
+                    if strategy.get('risk_score') is not None:
+                        print(f"  {'Risk Score:':<30} {strategy.get('risk_score', 'N/A')}")
+                    if strategy.get('confidence'):
+                        print(f"  {'Confidence:':<30} {strategy.get('confidence', 'N/A')}")
+                    if strategy.get('notes'):
+                        notes = strategy.get('notes', '')
+                        if notes:
+                            # Handle multi-line notes - ensure notes is a string
+                            if isinstance(notes, dict):
+                                # If notes is a dict, convert to string representation
+                                notes = str(notes)
+                            elif not isinstance(notes, str):
+                                # Convert other types to string
+                                notes = str(notes)
+                            
+                            # Handle multi-line notes
+                            note_lines = notes.split('\n')
+                            print(f"  {'Notes:':<30} {note_lines[0] if note_lines else 'N/A'}")
+                            for note_line in note_lines[1:]:
+                                if note_line.strip():
+                                    print(f"  {'':<30} {note_line}")
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.debug(f"Could not parse IV analysis JSON: {e}")
+                    print(f"  {'IV Analysis:':<30} Error parsing IV analysis data")
+            # Also check if IV data is in separate columns (for backwards compatibility)
+            elif 'iv_30d' in latest_entry and pd.notna(latest_entry['iv_30d']):
+                print(f"  {'30-day IV:':<30} {latest_entry['iv_30d']}")
+            elif 'iv_90d' in latest_entry and pd.notna(latest_entry['iv_90d']):
+                print(f"  {'90-day IV:':<30} {latest_entry['iv_90d']}")
+            else:
+                print(f"  {'IV Analysis:':<30} Not available (use --fetch-iv with --fetch-ratios to calculate)")
+            
+            # Show historical data count if available
+            if len(financial_data) > 1:
+                print(f"\n{'Historical Data:':<30}")
+                print(f"{'─'*80}")
+                print(f"  {'Total Records:':<30} {len(financial_data)}")
+                if 'date' in financial_data.columns:
+                    try:
+                        dates = financial_data['date'].dropna()
+                        if not dates.empty:
+                            # Convert to string/datetime if needed, handling various types
+                            date_values = []
+                            for date_val in dates:
+                                if isinstance(date_val, (str, pd.Timestamp, datetime)):
+                                    date_values.append(date_val)
+                                elif isinstance(date_val, dict):
+                                    # Skip dict values
+                                    continue
+                                else:
+                                    try:
+                                        date_values.append(str(date_val))
+                                    except Exception:
+                                        continue
+                            
+                            if date_values:
+                                # Convert to pandas Series for min/max operations
+                                date_series = pd.Series(date_values)
+                                # Try to convert to datetime if they're strings
+                                try:
+                                    date_series = pd.to_datetime(date_series)
+                                except Exception:
+                                    pass
+                                min_date = date_series.min()
+                                max_date = date_series.max()
+                                print(f"  {'Date Range:':<30} {min_date} to {max_date}")
+                    except Exception as date_error:
+                        logger.debug(f"Could not process date range: {date_error}")
+                        # Silently skip date range display if there's an error
+            
+            if not fetch_ratios:
+                print("\n" + "="*80)
+                print("Tip: Use --fetch-ratios to update financial data from Polygon.io API")
+                print("="*80)
+        else:
+            print("\nNo financial information found in database.")
+            print("Use --fetch-ratios to fetch and store financial data from Polygon.io API")
+            print("="*80)
+    
+    except Exception as e:
+        error_msg = str(e) if e else "Unknown error"
+        print(f"\nError retrieving financial information: {error_msg}")
+        import traceback
+        logger.debug(traceback.format_exc())
+        # Print more details in debug mode
+        if log_level == "DEBUG":
+            print(f"Error type: {type(e).__name__}")
+            print(f"Error details: {traceback.format_exc()}")
+        print("="*80)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Fetch, save, and query historical stock data for a specific symbol.")
     parser.add_argument("symbol", help="The stock symbol to process (e.g., AAPL).")
@@ -2532,7 +2839,7 @@ def parse_args():
     parser.add_argument(
         "--show-financials",
         action="store_true",
-        help="Display all stored financial information for the symbol from the database (ratios, fundamentals, etc.). Implies --latest mode."
+        help="Display all stored financial information for the symbol from the database (ratios, fundamentals, IV analysis, etc.). Shows after date range data if dates are specified, or after latest data if --latest is used."
     )
     parser.add_argument(
         "--log-level",
@@ -2578,19 +2885,23 @@ async def main() -> None:
         if args.data_source != "polygon":
             print("Error: --fetch-ratios, --fetch-news, and --fetch-iv require --data-source polygon", file=sys.stderr)
             exit(1)
-        # Imply --latest mode when fetching these
-        args.latest = True
-        if args.fetch_ratios:
-            print("--fetch-ratios specified, enabling --latest mode", file=sys.stderr)
-        if args.fetch_news:
-            print("--fetch-news specified, enabling --latest mode", file=sys.stderr)
-        if args.fetch_iv:
-            print("--fetch-iv specified, enabling --latest mode", file=sys.stderr)
+        # Note: These flags no longer force --latest mode
+        # They will work with date ranges or latest mode depending on what's specified
+        # If no dates are specified, default to --latest mode for convenience
+        if args.start_date is None and args.end_date == datetime.now().strftime('%Y-%m-%d'):
+            # No explicit dates, default to latest mode for convenience
+            args.latest = True
+            if args.fetch_ratios:
+                print("--fetch-ratios specified, no dates specified, using --latest mode", file=sys.stderr)
+            if args.fetch_news:
+                print("--fetch-news specified, no dates specified, using --latest mode", file=sys.stderr)
+            if args.fetch_iv:
+                print("--fetch-iv specified, no dates specified, using --latest mode", file=sys.stderr)
     
     # Handle --show-financials parameter
-    if args.show_financials:
-        # This option implies --latest mode
-        args.latest = True
+    # Note: --show-financials no longer forces --latest mode
+    # It will show financials after the date range data if dates are specified
+    # or after latest data if --latest is explicitly used
 
     # Handle --date parameter (overrides --start-date and --end-date)
     if args.date:
@@ -3524,27 +3835,52 @@ async def main() -> None:
                     print("No hourly rows found in DB.")
             
             # Display financial ratios if requested
+            # Use get_financial_info() to ensure IV analysis is calculated when --fetch-iv is also specified
             if args.fetch_ratios:
                 print()  # Spacing
                 print("Financial Ratios:")
                 try:
-                    # Get API key from environment
-                    api_key = os.getenv('POLYGON_API_KEY')
-                    if not api_key:
-                        print("Error: POLYGON_API_KEY environment variable not set")
-                    else:
-                        ratios = await get_financial_ratios(args.symbol, api_key)
-                        if ratios:
-                            # Add current date to the ratios data
-                            ratios['date'] = datetime.now().strftime('%Y-%m-%d')
-                            
-                            # Save financial info to database
-                            try:
-                                await db_instance.save_financial_info(args.symbol, ratios)
-                                print("Financial info saved to database")
-                            except Exception as save_error:
-                                print(f"Warning: Could not save financial info to database: {save_error}")
-                            
+                    # Get cache instance if available
+                    cache_instance = None
+                    if hasattr(db_instance, 'cache') and db_instance.cache:
+                        cache_instance = db_instance.cache
+                    
+                    # Use get_financial_info() which handles both ratios and IV analysis
+                    # Include IV analysis if --fetch-iv is also specified
+                    logger.debug(f"Calling get_financial_info with force_fetch=True, include_iv_analysis={args.fetch_iv}")
+                    financial_result = await get_financial_info(
+                        symbol=args.symbol,
+                        db_instance=db_instance,
+                        force_fetch=True,  # Force API fetch
+                        include_iv_analysis=args.fetch_iv,  # Include IV analysis if --fetch-iv is set
+                        iv_calendar_days=90,
+                        iv_server_url=os.getenv("DB_SERVER_URL", "http://localhost:9100"),
+                        iv_use_polygon=False,
+                        iv_data_dir="data"
+                    )
+                    logger.debug(f"get_financial_info returned: has_financial_data={financial_result and financial_result.get('financial_data') is not None}, error={financial_result.get('error') if financial_result else None}")
+                    
+                    if financial_result and financial_result.get('financial_data'):
+                        ratios = financial_result['financial_data']
+                        print(f"Source: {financial_result.get('source', 'unknown')}")
+                        print(f"Fetch time: {financial_result.get('fetch_time_ms', 0):.2f}ms")
+                        
+                        # Check if IV analysis was included in the financial_data
+                        has_iv_analysis = 'iv_analysis_json' in ratios and ratios.get('iv_analysis_json')
+                        if args.fetch_iv and has_iv_analysis:
+                            logger.debug(f"[FETCH_RATIOS] IV analysis is present in financial_data for {args.symbol}")
+                        elif args.fetch_iv and not has_iv_analysis:
+                            logger.warning(f"[FETCH_RATIOS] IV analysis was requested but not found in financial_data for {args.symbol}")
+                        
+                        # Check if we have financial ratios to display
+                        has_ratios = any([
+                            ratios.get('price_to_earnings'),
+                            ratios.get('price_to_book'),
+                            ratios.get('price_to_sales'),
+                            ratios.get('market_cap')
+                        ])
+                        
+                        if has_ratios:
                             # Display key ratios in a nice format
                             print("Financial Ratios:")
                             print(f"P/E Ratio: {ratios.get('price_to_earnings', 'N/A')}")
@@ -3565,10 +3901,70 @@ async def main() -> None:
                             print(f"EV to EBITDA: {ratios.get('ev_to_ebitda', 'N/A')}")
                             print(f"Price to Cash Flow: {ratios.get('price_to_cash_flow', 'N/A')}")
                             print(f"Price to Free Cash Flow: {ratios.get('price_to_free_cash_flow', 'N/A')}")
+                        
+                        # Display IV analysis if it was calculated (check iv_analysis_json in financial_data)
+                        if args.fetch_iv and 'iv_analysis_json' in ratios:
+                            import json
+                            try:
+                                iv_analysis = json.loads(ratios['iv_analysis_json'])
+                                if iv_analysis:
+                                    print()
+                                    print("IV Analysis (30-day and 90-day):")
+                                    metrics = iv_analysis.get('metrics', {})
+                                    if metrics.get('iv_30d'):
+                                        print(f"  30-day IV: {metrics.get('iv_30d', 'N/A')}")
+                                    if metrics.get('iv_90d'):
+                                        print(f"  90-day IV: {metrics.get('iv_90d', 'N/A')}")
+                                    if metrics.get('hv_1yr_range'):
+                                        print(f"  1-Year HV Range: {metrics.get('hv_1yr_range', 'N/A')}")
+                                    if metrics.get('rank') is not None:
+                                        print(f"  IV Rank: {metrics.get('rank', 'N/A')}")
+                                    if metrics.get('roll_yield'):
+                                        print(f"  Roll Yield: {metrics.get('roll_yield', 'N/A')}")
+                                    relative_rank = iv_analysis.get('relative_rank') or ratios.get('relative_rank')
+                                    if relative_rank is not None:
+                                        print(f"  Relative Rank (vs VOO): {relative_rank}")
+                                    strategy = iv_analysis.get('strategy', {})
+                                    if strategy.get('recommendation'):
+                                        print(f"  Strategy: {strategy.get('recommendation', 'N/A')}")
+                                    if strategy.get('risk_score') is not None:
+                                        print(f"  Risk Score: {strategy.get('risk_score', 'N/A')}")
+                                    if strategy.get('notes'):
+                                        notes = strategy.get('notes', '')
+                                        if isinstance(notes, dict):
+                                            notes = str(notes)
+                                        elif not isinstance(notes, str):
+                                            notes = str(notes)
+                                        print(f"  Notes: {notes}")
+                            except (json.JSONDecodeError, TypeError) as e:
+                                logger.debug(f"Could not parse IV analysis JSON: {e}")
+                        elif args.fetch_iv and not has_ratios:
+                            print("Note: IV analysis was requested but not found in financial data")
+                    elif financial_result and financial_result.get('error'):
+                        print(f"Error: {financial_result['error']}")
+                        if args.fetch_iv:
+                            print("Note: IV analysis may still be available in database. Use --show-financials to view.")
+                    else:
+                        # Check if IV analysis was calculated even if ratios weren't available
+                        if args.fetch_iv:
+                            # Try to retrieve IV analysis from database to confirm it was saved
+                            try:
+                                financial_df = await db_instance.get_financial_info(args.symbol)
+                                if not financial_df.empty:
+                                    latest = financial_df.iloc[-1]
+                                    if 'iv_analysis_json' in latest and latest.get('iv_analysis_json'):
+                                        print("Note: IV analysis was calculated and saved. Use --show-financials to view.")
+                                    else:
+                                        print("Note: IV analysis was requested but not found in database.")
+                            except Exception as check_error:
+                                logger.debug(f"Could not verify IV analysis in database: {check_error}")
+                            print("No financial ratios data available. IV analysis may still be available in database. Use --show-financials to view.")
                         else:
                             print("No financial ratios data available")
                 except Exception as e:
-                    print(f"Error fetching financial ratios: {e}")
+                    logger.error(f"Error fetching financial ratios: {e}", exc_info=True)
+                    import traceback
+                    logger.debug(traceback.format_exc())
             
             # Display latest news if requested
             if args.fetch_news:
@@ -3619,6 +4015,32 @@ async def main() -> None:
                     if hasattr(db_instance, 'cache') and db_instance.cache:
                         cache_instance = db_instance.cache
                     
+                    # First, ensure IV analysis (30/90-day) is calculated and saved
+                    # This is done via get_financial_info() with include_iv_analysis=True
+                    if not args.fetch_ratios:  # Only trigger if not already done by fetch_ratios
+                        print("Calculating IV analysis (30-day and 90-day IV)...")
+                        try:
+                            financial_result = await get_financial_info(
+                                symbol=args.symbol,
+                                db_instance=db_instance,
+                                force_fetch=True,  # Force API fetch
+                                include_iv_analysis=True,  # Include IV analysis
+                                iv_calendar_days=90,
+                                iv_server_url=os.getenv("DB_SERVER_URL", "http://localhost:9100"),
+                                iv_use_polygon=False,
+                                iv_data_dir="data"
+                            )
+                            if financial_result and financial_result.get('financial_data'):
+                                ratios = financial_result['financial_data']
+                                if 'iv_analysis' in ratios:
+                                    iv_analysis = ratios.get('iv_analysis', {})
+                                    if iv_analysis:
+                                        print("IV Analysis calculated and saved to database")
+                        except Exception as iv_analysis_error:
+                            print(f"Warning: Could not calculate IV analysis: {iv_analysis_error}")
+                            logger.debug(f"IV analysis error: {iv_analysis_error}")
+                    
+                    # Get basic IV statistics from options data
                     iv_data = await get_latest_iv(
                         args.symbol,
                         db_instance=db_instance,
@@ -3632,7 +4054,7 @@ async def main() -> None:
                         if iv_data.get('current_price'):
                             print(f"Current price: ${iv_data['current_price']:.2f}")
                         print()
-                        print("IV Statistics:")
+                        print("IV Statistics (from options data):")
                         print(f"  Count: {stats.get('count', 'N/A')}")
                         if stats.get('mean') is not None:
                             print(f"  Mean IV: {stats['mean']:.4f} ({stats['mean']*100:.2f}%)")
@@ -3665,7 +4087,35 @@ async def main() -> None:
                                 print(f"\nPut Options IV:")
                                 print(f"  Mean: {put['mean']:.4f} ({put['mean']*100:.2f}%)")
                                 print(f"  Count: {put.get('count', 'N/A')}")
-                    else:
+                    
+                    # Also display 30/90-day IV from financial data if available
+                    try:
+                        financial_df = await db_instance.get_financial_info(args.symbol)
+                        if not financial_df.empty:
+                            latest_financial = financial_df.iloc[-1]
+                            if 'iv_analysis_json' in latest_financial and latest_financial.get('iv_analysis_json'):
+                                import json
+                                try:
+                                    iv_analysis = json.loads(latest_financial['iv_analysis_json'])
+                                    metrics = iv_analysis.get('metrics', {})
+                                    if metrics.get('iv_30d') or metrics.get('iv_90d'):
+                                        print()
+                                        print("IV Analysis (30-day and 90-day):")
+                                        if metrics.get('iv_30d'):
+                                            print(f"  30-day IV: {metrics.get('iv_30d', 'N/A')}")
+                                        if metrics.get('iv_90d'):
+                                            print(f"  90-day IV: {metrics.get('iv_90d', 'N/A')}")
+                                        if metrics.get('relative_rank'):
+                                            print(f"  Relative Rank: {metrics.get('relative_rank', 'N/A')}")
+                                        strategy = iv_analysis.get('strategy', {})
+                                        if strategy.get('recommendation'):
+                                            print(f"  Strategy: {strategy.get('recommendation', 'N/A')}")
+                                except (json.JSONDecodeError, TypeError) as e:
+                                    logger.debug(f"Could not parse IV analysis JSON: {e}")
+                    except Exception as e:
+                        logger.debug(f"Could not retrieve IV analysis from database: {e}")
+                    
+                    if not iv_data:
                         print("No IV data available (options data may not be available)")
                 except Exception as e:
                     print(f"Error fetching IV: {e}")
@@ -3674,154 +4124,20 @@ async def main() -> None:
             
             # Display all stored financial information if requested
             if args.show_financials:
-                print()  # Spacing
-                print("="*80)
-                print("STORED FINANCIAL INFORMATION")
-                print("="*80)
-                try:
-                    # Query all stored financial data from database
-                    financial_data = await db_instance.get_financial_info(args.symbol)
-                    
-                    if not financial_data.empty:
-                        # Display most recent entry
-                        latest_entry = financial_data.iloc[-1]
-                        
-                        print(f"\nSymbol: {args.symbol}")
-                        if 'date' in latest_entry and pd.notna(latest_entry['date']):
-                            print(f"Data Date: {latest_entry['date']}")
-                        if 'write_timestamp' in latest_entry and pd.notna(latest_entry['write_timestamp']):
-                            print(f"Last Updated: {latest_entry['write_timestamp']}")
-                        
-                        # Valuation Ratios
-                        print(f"\n{'Valuation Ratios:':<30}")
-                        print(f"{'─'*80}")
-                        if 'price_to_earnings' in latest_entry and pd.notna(latest_entry['price_to_earnings']):
-                            print(f"  {'P/E Ratio:':<30} {latest_entry['price_to_earnings']}")
-                        if 'price_to_book' in latest_entry and pd.notna(latest_entry['price_to_book']):
-                            print(f"  {'P/B Ratio:':<30} {latest_entry['price_to_book']}")
-                        if 'price_to_sales' in latest_entry and pd.notna(latest_entry['price_to_sales']):
-                            print(f"  {'P/S Ratio:':<30} {latest_entry['price_to_sales']}")
-                        if 'peg_ratio' in latest_entry and pd.notna(latest_entry['peg_ratio']):
-                            print(f"  {'PEG Ratio:':<30} {latest_entry['peg_ratio']}")
-                        if 'price_to_cash_flow' in latest_entry and pd.notna(latest_entry['price_to_cash_flow']):
-                            print(f"  {'P/CF Ratio:':<30} {latest_entry['price_to_cash_flow']}")
-                        if 'price_to_free_cash_flow' in latest_entry and pd.notna(latest_entry['price_to_free_cash_flow']):
-                            print(f"  {'P/FCF Ratio:':<30} {latest_entry['price_to_free_cash_flow']}")
-                        if 'ev_to_sales' in latest_entry and pd.notna(latest_entry['ev_to_sales']):
-                            print(f"  {'EV/Sales:':<30} {latest_entry['ev_to_sales']}")
-                        if 'ev_to_ebitda' in latest_entry and pd.notna(latest_entry['ev_to_ebitda']):
-                            print(f"  {'EV/EBITDA:':<30} {latest_entry['ev_to_ebitda']}")
-                        
-                        # Profitability Ratios
-                        print(f"\n{'Profitability Ratios:':<30}")
-                        print(f"{'─'*80}")
-                        if 'return_on_equity' in latest_entry and pd.notna(latest_entry['return_on_equity']):
-                            print(f"  {'ROE:':<30} {latest_entry['return_on_equity']}")
-                        if 'return_on_assets' in latest_entry and pd.notna(latest_entry['return_on_assets']):
-                            print(f"  {'ROA:':<30} {latest_entry['return_on_assets']}")
-                        if 'profit_margin' in latest_entry and pd.notna(latest_entry['profit_margin']):
-                            print(f"  {'Profit Margin:':<30} {latest_entry['profit_margin']}")
-                        if 'gross_margin' in latest_entry and pd.notna(latest_entry['gross_margin']):
-                            print(f"  {'Gross Margin:':<30} {latest_entry['gross_margin']}")
-                        if 'operating_margin' in latest_entry and pd.notna(latest_entry['operating_margin']):
-                            print(f"  {'Operating Margin:':<30} {latest_entry['operating_margin']}")
-                        
-                        # Liquidity Ratios
-                        print(f"\n{'Liquidity Ratios:':<30}")
-                        print(f"{'─'*80}")
-                        if 'current' in latest_entry and pd.notna(latest_entry['current']):
-                            print(f"  {'Current Ratio:':<30} {latest_entry['current']}")
-                        if 'quick' in latest_entry and pd.notna(latest_entry['quick']):
-                            print(f"  {'Quick Ratio:':<30} {latest_entry['quick']}")
-                        if 'cash' in latest_entry and pd.notna(latest_entry['cash']):
-                            print(f"  {'Cash Ratio:':<30} {latest_entry['cash']}")
-                        
-                        # Leverage Ratios
-                        print(f"\n{'Leverage Ratios:':<30}")
-                        print(f"{'─'*80}")
-                        if 'debt_to_equity' in latest_entry and pd.notna(latest_entry['debt_to_equity']):
-                            print(f"  {'Debt-to-Equity:':<30} {latest_entry['debt_to_equity']}")
-                        if 'debt_to_assets' in latest_entry and pd.notna(latest_entry['debt_to_assets']):
-                            print(f"  {'Debt-to-Assets:':<30} {latest_entry['debt_to_assets']}")
-                        
-                        # Market Data
-                        print(f"\n{'Market Data:':<30}")
-                        print(f"{'─'*80}")
-                        if 'market_cap' in latest_entry and pd.notna(latest_entry['market_cap']):
-                            market_cap = float(latest_entry['market_cap'])
-                            if market_cap >= 1e12:
-                                print(f"  {'Market Cap:':<30} ${market_cap/1e12:.2f}T")
-                            elif market_cap >= 1e9:
-                                print(f"  {'Market Cap:':<30} ${market_cap/1e9:.2f}B")
-                            elif market_cap >= 1e6:
-                                print(f"  {'Market Cap:':<30} ${market_cap/1e6:.2f}M")
-                            else:
-                                print(f"  {'Market Cap:':<30} ${market_cap:,.0f}")
-                        if 'enterprise_value' in latest_entry and pd.notna(latest_entry['enterprise_value']):
-                            ev = float(latest_entry['enterprise_value'])
-                            if ev >= 1e12:
-                                print(f"  {'Enterprise Value:':<30} ${ev/1e12:.2f}T")
-                            elif ev >= 1e9:
-                                print(f"  {'Enterprise Value:':<30} ${ev/1e9:.2f}B")
-                            elif ev >= 1e6:
-                                print(f"  {'Enterprise Value:':<30} ${ev/1e6:.2f}M")
-                            else:
-                                print(f"  {'Enterprise Value:':<30} ${ev:,.0f}")
-                        if 'shares_outstanding' in latest_entry and pd.notna(latest_entry['shares_outstanding']):
-                            shares = float(latest_entry['shares_outstanding'])
-                            if shares >= 1e9:
-                                print(f"  {'Shares Outstanding:':<30} {shares/1e9:.2f}B")
-                            elif shares >= 1e6:
-                                print(f"  {'Shares Outstanding:':<30} {shares/1e6:.2f}M")
-                            else:
-                                print(f"  {'Shares Outstanding:':<30} {shares:,.0f}")
-                        if 'dividend_yield' in latest_entry and pd.notna(latest_entry['dividend_yield']):
-                            yield_val = float(latest_entry['dividend_yield']) * 100
-                            print(f"  {'Dividend Yield:':<30} {yield_val:.2f}%")
-                        
-                        # Cash Flow
-                        print(f"\n{'Cash Flow:':<30}")
-                        print(f"{'─'*80}")
-                        if 'free_cash_flow' in latest_entry and pd.notna(latest_entry['free_cash_flow']):
-                            fcf = float(latest_entry['free_cash_flow'])
-                            if fcf >= 1e9:
-                                print(f"  {'Free Cash Flow:':<30} ${fcf/1e9:.2f}B")
-                            elif fcf >= 1e6:
-                                print(f"  {'Free Cash Flow:':<30} ${fcf/1e6:.2f}M")
-                            else:
-                                print(f"  {'Free Cash Flow:':<30} ${fcf:,.0f}")
-                        if 'operating_cash_flow' in latest_entry and pd.notna(latest_entry['operating_cash_flow']):
-                            ocf = float(latest_entry['operating_cash_flow'])
-                            if ocf >= 1e9:
-                                print(f"  {'Operating Cash Flow:':<30} ${ocf/1e9:.2f}B")
-                            elif ocf >= 1e6:
-                                print(f"  {'Operating Cash Flow:':<30} ${ocf/1e6:.2f}M")
-                            else:
-                                print(f"  {'Operating Cash Flow:':<30} ${ocf:,.0f}")
-                        
-                        # Show historical data count if available
-                        if len(financial_data) > 1:
-                            print(f"\n{'Historical Data:':<30}")
-                            print(f"{'─'*80}")
-                            print(f"  {'Total Records:':<30} {len(financial_data)}")
-                            if 'date' in financial_data.columns:
-                                dates = financial_data['date'].dropna()
-                                if not dates.empty:
-                                    print(f"  {'Date Range:':<30} {dates.min()} to {dates.max()}")
-                        
-                        print("\n" + "="*80)
-                        print("Tip: Use --fetch-ratios to update financial data from Polygon.io API")
-                        print("="*80)
-                    else:
-                        print("\nNo financial information found in database.")
-                        print("Use --fetch-ratios to fetch and store financial data from Polygon.io API")
-                        print("="*80)
-                
-                except Exception as e:
-                    print(f"\nError retrieving financial information: {e}")
-                    import traceback
-                    logger.debug(traceback.format_exc())
-                    print("="*80)
+                # If we just fetched ratios with IV analysis, wait a moment for DB write to complete
+                # and clear any cache to ensure we get the latest data
+                if args.fetch_ratios and args.fetch_iv:
+                    await asyncio.sleep(0.2)  # Small delay to ensure DB write completes
+                    # Clear cache if available to force fresh read
+                    if hasattr(db_instance, 'cache') and db_instance.cache:
+                        try:
+                            from common.redis_cache import CacheKeyGenerator
+                            cache_key = CacheKeyGenerator.financial_info(args.symbol)
+                            await db_instance.cache.delete(cache_key)
+                            logger.debug(f"[SHOW_FINANCIALS] Cleared cache for {args.symbol} to ensure fresh data")
+                        except Exception as cache_error:
+                            logger.debug(f"[SHOW_FINANCIALS] Could not clear cache: {cache_error}")
+                await _display_financials(args.symbol, db_instance, logger, args.log_level, fetch_ratios=args.fetch_ratios)
             
             print()  # Spacing
             print("--- End Latest ---")
@@ -3849,6 +4165,30 @@ async def main() -> None:
             
             return
         finally:
+            # Clean up background tasks before closing
+            try:
+                # Get current task to avoid cancelling it
+                current_task = asyncio.current_task()
+                # Get all pending tasks except the current one
+                all_tasks = asyncio.all_tasks()
+                pending_tasks = [task for task in all_tasks if not task.done() and task is not current_task]
+                if pending_tasks:
+                    # Cancel all pending background tasks
+                    for task in pending_tasks:
+                        if not task.done():
+                            task.cancel()
+                    # Wait a short time for cancellations to complete (with timeout)
+                    if pending_tasks:
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.gather(*pending_tasks, return_exceptions=True),
+                                timeout=2.0
+                            )
+                        except asyncio.TimeoutError:
+                            logging.debug("Timeout waiting for background tasks to cancel")
+            except Exception as cleanup_error:
+                logging.debug(f"Error cleaning up background tasks: {cleanup_error}")
+            
             # Wait for pending cache writes to complete before closing
             if db_instance and hasattr(db_instance, 'cache') and hasattr(db_instance.cache, 'wait_for_pending_writes'):
                 try:
@@ -3879,6 +4219,13 @@ async def main() -> None:
             actual_db_path = args.db_path or (get_default_db_path("duckdb") if args.db_type == 'duckdb' else get_default_db_path("db"))
             db_instance_for_cleanup = get_stock_db(args.db_type, actual_db_path, log_level=args.log_level)
         
+        # Initialize database if instance was created
+        if db_instance_for_cleanup and hasattr(db_instance_for_cleanup, '_init_db'):
+            try:
+                await db_instance_for_cleanup._init_db()
+            except Exception as init_error:
+                logger.debug(f"Database already initialized or init error: {init_error}")
+        
         final_df = await process_symbol_data(
             symbol=args.symbol, 
             timeframe=args.timeframe, 
@@ -3904,7 +4251,24 @@ async def main() -> None:
             # Convert timezone for display if this is hourly data
             display_df = _convert_dataframe_timezone(final_df, args.timezone)
             
-            print(f"\n--- {args.symbol} ({args.timeframe.capitalize()}) Data ({args.start_date or 'Earliest'} to {args.end_date}) ---")
+            # Check if date range is incomplete
+            date_range_note = ""
+            if args.end_date:
+                try:
+                    end_date_dt = pd.to_datetime(args.end_date)
+                    if isinstance(display_df.index, pd.DatetimeIndex) and not display_df.empty:
+                        max_date_in_df = pd.to_datetime(display_df.index.max())
+                        if max_date_in_df < end_date_dt:
+                            # Data ends before requested end date
+                            today_dt = pd.to_datetime(datetime.now().strftime('%Y-%m-%d'))
+                            if end_date_dt > today_dt:
+                                date_range_note = f" (Note: Requested end date {args.end_date} is in the future. Showing data up to {max_date_in_df.strftime('%Y-%m-%d')})"
+                            else:
+                                date_range_note = f" (Note: Data only available up to {max_date_in_df.strftime('%Y-%m-%d')}, requested end date was {args.end_date})"
+                except Exception:
+                    pass  # Ignore date parsing errors
+            
+            print(f"\n--- {args.symbol} ({args.timeframe.capitalize()}) Data ({args.start_date or 'Earliest'} to {args.end_date}){date_range_note} ---")
             
             # Determine if we should show complete data (no truncation)
             show_complete = args.days_back is not None or (args.csv_file == '-')
@@ -3953,8 +4317,72 @@ async def main() -> None:
                     print(f"Error saving to CSV file {args.csv_file}: {e}", file=sys.stderr)
             
             print(f"--- End of Data ---")
+            
+            # Display financials after date range data if requested
+            if args.show_financials:
+                await _display_financials(args.symbol, db_instance_for_cleanup, logger, args.log_level)
         elif not args.query_only: 
             print(f"No data to display for {args.symbol} ({args.timeframe}) with the given parameters after all operations.")
+            
+            # Display financials even if no date range data, if requested
+            if args.show_financials:
+                await _display_financials(args.symbol, db_instance_for_cleanup, logger, args.log_level)
+        
+        # Debug: Fetch and display data from cache and DB after saves
+        # This runs regardless of query_only to help debug save issues
+        if args.fetch_ratios or args.fetch_iv:
+            try:
+                print("\n" + "=" * 80, flush=True)
+                print("DEBUG: Checking stored data in Cache and DB", flush=True)
+                print("=" * 80, flush=True)
+                
+                # Check Redis cache
+                if db_instance_for_cleanup and hasattr(db_instance_for_cleanup, 'cache'):
+                    from common.redis_cache import CacheKeyGenerator
+                    cache_key = CacheKeyGenerator.financial_info(args.symbol)
+                    try:
+                        cached_data = await db_instance_for_cleanup.cache.get(cache_key)
+                        if cached_data is not None and not cached_data.empty:
+                            print(f"\n[DEBUG] Redis Cache Data for {args.symbol}:", flush=True)
+                            latest_cached = cached_data.iloc[-1].to_dict()
+                            key_ratios = ['price_to_earnings', 'price_to_book', 'price_to_sales', 'market_cap', 
+                                         'current', 'quick', 'cash', 'current_ratio', 'quick_ratio', 'cash_ratio',
+                                         'return_on_equity', 'debt_to_equity', 'dividend_yield', 'iv_30d', 'iv_rank']
+                            for key in key_ratios:
+                                if key in latest_cached:
+                                    print(f"  {key}: {latest_cached[key]}", flush=True)
+                        else:
+                            print(f"\n[DEBUG] Redis Cache: No data found for {args.symbol} (key: {cache_key})", flush=True)
+                    except Exception as cache_error:
+                        import traceback
+                        print(f"\n[DEBUG] Redis Cache Error: {cache_error}", flush=True)
+                        print(f"[DEBUG] Traceback: {traceback.format_exc()}", flush=True)
+                
+                # Check Database
+                if db_instance_for_cleanup:
+                    try:
+                        db_data = await db_instance_for_cleanup.get_financial_info(args.symbol)
+                        if not db_data.empty:
+                            print(f"\n[DEBUG] Database Data for {args.symbol}:", flush=True)
+                            latest_db = db_data.iloc[-1].to_dict()
+                            key_ratios = ['price_to_earnings', 'price_to_book', 'price_to_sales', 'market_cap',
+                                         'current', 'quick', 'cash', 'current_ratio', 'quick_ratio', 'cash_ratio',
+                                         'return_on_equity', 'debt_to_equity', 'dividend_yield', 'iv_30d', 'iv_rank']
+                            for key in key_ratios:
+                                if key in latest_db:
+                                    print(f"  {key}: {latest_db[key]}", flush=True)
+                        else:
+                            print(f"\n[DEBUG] Database: No data found for {args.symbol}", flush=True)
+                    except Exception as db_error:
+                        import traceback
+                        print(f"\n[DEBUG] Database Error: {db_error}", flush=True)
+                        print(f"[DEBUG] Traceback: {traceback.format_exc()}", flush=True)
+            except Exception as debug_error:
+                import traceback
+                print(f"\n[DEBUG] Error checking stored data: {debug_error}", flush=True)
+                print(f"[DEBUG] Traceback: {traceback.format_exc()}", flush=True)
+            
+            print("=" * 80 + "\n", flush=True)
     finally:
         # Clean up database session
         # Print cache statistics if available and in DEBUG mode
@@ -3984,6 +4412,30 @@ async def main() -> None:
                 await db_instance_for_cleanup.cache.wait_for_pending_writes(timeout=10.0)
             except Exception as e:
                 logging.debug(f"Error waiting for pending cache writes: {e}")
+        
+        # Clean up background tasks before closing
+        try:
+            # Get current task to avoid cancelling it
+            current_task = asyncio.current_task()
+            # Get all pending tasks except the current one
+            all_tasks = asyncio.all_tasks()
+            pending_tasks = [task for task in all_tasks if not task.done() and task is not current_task]
+            if pending_tasks:
+                # Cancel all pending background tasks
+                for task in pending_tasks:
+                    if not task.done():
+                        task.cancel()
+                # Wait a short time for cancellations to complete (with timeout)
+                if pending_tasks:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.gather(*pending_tasks, return_exceptions=True),
+                            timeout=2.0
+                        )
+                    except asyncio.TimeoutError:
+                        logger.debug("Timeout waiting for background tasks to cancel")
+        except Exception as cleanup_error:
+            logger.debug(f"Error cleaning up background tasks: {cleanup_error}")
         
         if db_instance_for_cleanup and hasattr(db_instance_for_cleanup, 'close_session') and callable(db_instance_for_cleanup.close_session):
             try:

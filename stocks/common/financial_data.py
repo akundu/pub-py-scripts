@@ -19,6 +19,7 @@ import aiohttp
 from datetime import datetime, timezone, date
 from typing import Optional, Dict, Any, Tuple
 import pandas as pd
+import numpy as np
 
 from .stock_db import StockDBBase
 from .redis_cache import CacheKeyGenerator
@@ -230,7 +231,8 @@ async def _calculate_iv_analysis(
     polygon_api_key: Optional[str] = None,
     redis_url: Optional[str] = None,
     server_url: Optional[str] = None,
-    data_dir: str = "data"
+    data_dir: str = "data",
+    benchmark_ticker: str = "VOO"  # Changed from SPY to VOO
 ) -> Optional[Dict[str, Any]]:
     """Calculate IV analysis for a symbol.
     
@@ -242,13 +244,16 @@ async def _calculate_iv_analysis(
         redis_url: Redis connection URL
         server_url: Local db_server URL for price history (fallback if db_instance fails)
         data_dir: Data directory for caching
+        benchmark_ticker: Benchmark ticker for relative rank calculation (default: VOO)
     
     Returns:
-        IV analysis result dictionary or None on error
+        IV analysis result dictionary with relative_rank included, or None on error
     
-    Note:
+        Note:
         Price history is fetched from database or HTTP server, NOT from Polygon API.
         Polygon API is only used for IV/options data.
+        Relative rank is calculated as: ticker_rank / benchmark_rank (ratio)
+        A value of 1.0 means equal IV rank, >1.0 means ticker has higher IV rank, <1.0 means lower
     """
     try:
         if not polygon_api_key:
@@ -267,11 +272,57 @@ async def _calculate_iv_analysis(
             logger=logger
         )
         
+        # Calculate IV analysis for the symbol
         result, _ = await analyzer.get_iv_analysis(
             ticker=symbol,
             calendar_days=calendar_days,
             force_refresh=True  # Always force refresh when syncing
         )
+        
+        # Calculate benchmark (VOO) IV rank for relative ranking
+        # If symbol is the benchmark, set relative_rank to 1.0 (ratio of 1.0 = equal)
+        if result:
+            if symbol.upper() == benchmark_ticker.upper():
+                # Symbol is the benchmark - relative rank is always 1.0 (ratio)
+                result["relative_rank"] = 1.0
+                logger.debug(f"[IV] Symbol {symbol} is the benchmark ({benchmark_ticker}), setting relative_rank to 1.0")
+            else:
+                # Calculate relative rank vs benchmark
+                try:
+                    benchmark_result, _ = await analyzer.get_iv_analysis(
+                        ticker=benchmark_ticker,
+                        calendar_days=calendar_days,
+                        force_refresh=False  # Use cache for benchmark if available
+                    )
+                    
+                    if benchmark_result and "metrics" in benchmark_result:
+                        benchmark_rank = benchmark_result["metrics"].get("rank")
+                        ticker_rank = result.get("metrics", {}).get("rank")
+                        
+                        if benchmark_rank is not None and ticker_rank is not None:
+                            if benchmark_rank > 0:
+                                # Calculate relative rank as ratio (ticker_rank / benchmark_rank)
+                                # This shows how many times higher/lower the ticker's IV rank is vs benchmark
+                                # Example: 1.46 means ticker is 46% higher, 0.5 means ticker is 50% lower
+                                relative_rank = round(ticker_rank / benchmark_rank, 2)
+                                result["relative_rank"] = relative_rank
+                                logger.debug(f"[IV] Calculated relative_rank for {symbol}: {relative_rank} (ticker_rank={ticker_rank}, {benchmark_ticker}_rank={benchmark_rank})")
+                            elif benchmark_rank == 0 and ticker_rank == 0:
+                                # Both are 0, so they're equal
+                                result["relative_rank"] = 1.0
+                                logger.debug(f"[IV] Both {symbol} and {benchmark_ticker} have IV rank 0, setting relative_rank to 1.0")
+                            else:
+                                # Benchmark is 0 but ticker is not - can't calculate ratio meaningfully
+                                # Set to None or a large number to indicate ticker is much higher
+                                result["relative_rank"] = None
+                                logger.debug(f"[IV] Cannot calculate relative_rank: benchmark_rank={benchmark_rank} (zero), ticker_rank={ticker_rank}")
+                        else:
+                            logger.debug(f"[IV] Could not calculate relative_rank: ticker_rank={ticker_rank}, benchmark_rank={benchmark_rank}")
+                    else:
+                        logger.debug(f"[IV] Could not get benchmark ({benchmark_ticker}) IV analysis for relative ranking")
+                except Exception as benchmark_error:
+                    logger.warning(f"[IV] Error calculating benchmark ({benchmark_ticker}) IV rank: {benchmark_error}")
+                    # Continue without relative_rank if benchmark calculation fails
         
         return result
     except Exception as e:
@@ -456,79 +507,218 @@ async def get_financial_info(
         ratios = await get_financial_ratios(symbol, api_key)
         api_fetch_time = (time.time() - api_fetch_start) * 1000
         
+        # Log what we got from Polygon API - use print to ensure it shows up
+        if ratios:
+            logger.debug(f"[FINANCIAL API] Fetched ratios from Polygon for {symbol}: {len(ratios)} keys")
+        else:
+            logger.warning(f"[FINANCIAL API] No ratios returned from Polygon API for {symbol}")
+        
         # Calculate IV analysis if requested and syncing
         iv_analysis_result = None
+        iv_fetch_time = None
         if force_fetch and include_iv_analysis:
+            logger.info(f"[FINANCIAL IV] Starting IV analysis calculation for {symbol}")
             iv_fetch_start = time.time()
-            iv_analysis_result = await _calculate_iv_analysis(
-                symbol=symbol,
-                db_instance=db_instance,  # Pass database instance for direct access
-                calendar_days=iv_calendar_days,
-                polygon_api_key=api_key,
-                redis_url=os.getenv("REDIS_URL"),
-                server_url=iv_server_url,
-                data_dir=iv_data_dir
-            )
-            iv_fetch_time = (time.time() - iv_fetch_start) * 1000
-            if iv_analysis_result:
-                logger.info(f"[FINANCIAL IV] Calculated IV analysis for {symbol} (iv_fetch: {iv_fetch_time:.1f}ms)")
+            try:
+                iv_analysis_result = await _calculate_iv_analysis(
+                    symbol=symbol,
+                    db_instance=db_instance,  # Pass database instance for direct access
+                    calendar_days=iv_calendar_days,
+                    polygon_api_key=api_key,
+                    redis_url=os.getenv("REDIS_URL"),
+                    server_url=iv_server_url,
+                    data_dir=iv_data_dir
+                )
+                iv_fetch_time = (time.time() - iv_fetch_start) * 1000
+                if iv_analysis_result:
+                    logger.info(f"[FINANCIAL IV] Calculated IV analysis for {symbol} (iv_fetch: {iv_fetch_time:.1f}ms)")
+                else:
+                    logger.warning(f"[FINANCIAL IV] IV analysis calculation returned None for {symbol}")
+            except Exception as iv_error:
+                iv_fetch_time = (time.time() - iv_fetch_start) * 1000
+                logger.error(f"[FINANCIAL IV] Error calculating IV analysis for {symbol}: {iv_error}")
+                import traceback
+                logger.debug(f"[FINANCIAL IV] IV analysis error traceback: {traceback.format_exc()}")
+        elif include_iv_analysis and not force_fetch:
+            logger.debug(f"[FINANCIAL IV] IV analysis requested for {symbol} but force_fetch=False, skipping calculation")
         
         fetch_time = (time.time() - fetch_start) * 1000
         
+        # Prepare financial data dict - start with ratios if available, otherwise empty dict
+        # If we have existing data in DB and ratios is None, try to preserve existing ratios
+        financial_data = {}
+        
+        # If force_fetch and we have ratios, use them; otherwise try to preserve existing data
         if ratios:
-            # Merge IV analysis into financial data if available
-            if iv_analysis_result:
-                # Extract IV metrics for database columns
-                metrics = iv_analysis_result.get("metrics", {})
-                strategy = iv_analysis_result.get("strategy", {})
-                
-                # Parse IV_30d from percentage string (e.g., "40.41%")
-                iv_30d_str = metrics.get("iv_30d", "")
-                iv_30d = None
-                if iv_30d_str and iv_30d_str.endswith("%"):
-                    try:
-                        iv_30d = float(iv_30d_str.rstrip("%")) / 100.0
-                    except (ValueError, AttributeError):
-                        pass
-                
-                # Get rank values
-                iv_rank = metrics.get("rank")
-                relative_rank = iv_analysis_result.get("relative_rank")
-                
-                # Add IV columns to ratios
-                ratios['iv_30d'] = iv_30d
-                ratios['iv_rank'] = float(iv_rank) if iv_rank is not None else None
-                ratios['relative_rank'] = float(relative_rank) if relative_rank is not None else None
-                ratios['iv_analysis_json'] = json.dumps(iv_analysis_result)
-                ratios['iv_analysis_spare'] = None  # Spare column for future use
+            financial_data = ratios.copy()
+            logger.info(f"[FINANCIAL] Using ratios from API for {symbol} ({len(ratios)} keys)")
+            logger.info(f"[FINANCIAL] Ratio keys: {list(ratios.keys())[:20]}...")  # Show first 20 keys
+            # Log some sample values to verify structure
+            sample_keys = ['price_to_earnings', 'price_to_book', 'market_cap', 'current_ratio', 'current', 'quick_ratio', 'quick']
+            sample_values = {k: ratios.get(k) for k in sample_keys if k in ratios}
+            logger.info(f"[FINANCIAL] Sample ratio values from Polygon: {sample_values}")
             
-            result["financial_data"] = ratios
+            # Map Polygon API field names to database column names
+            # Database save function expects 'current', 'quick', 'cash' but Polygon may return 'current_ratio', etc.
+            field_mapping = {
+                'current_ratio': 'current',
+                'quick_ratio': 'quick',
+                'cash_ratio': 'cash',
+                # Also handle if they come as 'current', 'quick', 'cash' already
+            }
+            for polygon_key, db_key in field_mapping.items():
+                if polygon_key in financial_data and db_key not in financial_data:
+                    financial_data[db_key] = financial_data[polygon_key]
+                    logger.debug(f"[FINANCIAL] Mapped {polygon_key} -> {db_key} for {symbol}")
+            logger.debug(f"[FINANCIAL] After mapping, financial_data keys: {list(financial_data.keys())[:15]}...")
+            
+            # ALWAYS use today's date when saving to ensure we update the latest record
+            # This prevents creating multiple records with different dates
+            financial_data['date'] = date.today().isoformat()
+            logger.debug(f"[FINANCIAL] Set date to today for {symbol}: {financial_data['date']}")
+        elif not force_fetch:
+            # If not forcing fetch and no ratios, try to get existing data from DB to preserve it
+            try:
+                existing_df = await db_instance.get_financial_info(symbol)
+                if not existing_df.empty:
+                    existing = existing_df.iloc[-1].to_dict()
+                    # Copy existing ratio fields to preserve them
+                    ratio_fields = ['price', 'market_cap', 'earnings_per_share', 'price_to_earnings', 
+                                   'price_to_book', 'price_to_sales', 'price_to_cash_flow', 
+                                   'price_to_free_cash_flow', 'dividend_yield', 'return_on_assets',
+                                   'return_on_equity', 'debt_to_equity', 'current', 'quick', 'cash',
+                                   'ev_to_sales', 'ev_to_ebitda', 'enterprise_value', 'free_cash_flow']
+                    for field in ratio_fields:
+                        if field in existing and pd.notna(existing[field]):
+                            financial_data[field] = existing[field]
+                    logger.debug(f"[FINANCIAL] Preserved existing ratios from DB for {symbol}")
+            except Exception as preserve_error:
+                logger.debug(f"[FINANCIAL] Could not preserve existing ratios: {preserve_error}")
+        
+        # Merge IV analysis into financial data if available (even if ratios is None)
+        if iv_analysis_result:
+            logger.debug(f"[FINANCIAL IV] Merging IV analysis into financial_data for {symbol}")
+            
+            # If we don't have ratios in financial_data but are forcing fetch, 
+            # try to preserve existing ratios from DB before adding IV analysis
+            if not ratios and force_fetch and not financial_data:
+                try:
+                    existing_df = await db_instance.get_financial_info(symbol)
+                    if not existing_df.empty:
+                        existing = existing_df.iloc[-1].to_dict()
+                        # Preserve existing ratio fields that aren't None
+                        # Map database column names (current_ratio) to expected field names (current)
+                        ratio_field_mapping = {
+                            'current_ratio': 'current',
+                            'quick_ratio': 'quick',
+                            'cash_ratio': 'cash'
+                        }
+                        ratio_fields = ['price', 'market_cap', 'earnings_per_share', 'price_to_earnings', 
+                                       'price_to_book', 'price_to_sales', 'price_to_cash_flow', 
+                                       'price_to_free_cash_flow', 'dividend_yield', 'return_on_assets',
+                                       'return_on_equity', 'debt_to_equity', 'ev_to_sales', 
+                                       'ev_to_ebitda', 'enterprise_value', 'free_cash_flow']
+                        for field in ratio_fields:
+                            if field in existing and pd.notna(existing[field]) and field not in financial_data:
+                                financial_data[field] = existing[field]
+                        # Handle mapped fields
+                        for db_field, expected_field in ratio_field_mapping.items():
+                            if db_field in existing and pd.notna(existing[db_field]) and expected_field not in financial_data:
+                                financial_data[expected_field] = existing[db_field]
+                        logger.debug(f"[FINANCIAL IV] Preserved existing ratios from DB for {symbol} before merging IV")
+                except Exception as preserve_error:
+                    logger.debug(f"[FINANCIAL IV] Could not preserve existing ratios when merging IV: {preserve_error}")
+            
+            # Extract IV metrics for database columns
+            metrics = iv_analysis_result.get("metrics", {})
+            strategy = iv_analysis_result.get("strategy", {})
+            
+            # Parse IV_30d from percentage string (e.g., "40.41%")
+            iv_30d_str = metrics.get("iv_30d", "")
+            iv_30d = None
+            if iv_30d_str and iv_30d_str.endswith("%"):
+                try:
+                    iv_30d = float(iv_30d_str.rstrip("%")) / 100.0
+                except (ValueError, AttributeError):
+                    pass
+            
+            # Get rank values
+            iv_rank = metrics.get("rank")
+            relative_rank = iv_analysis_result.get("relative_rank")
+            
+            # Add IV columns to financial_data (works whether ratios exists or not)
+            financial_data['iv_30d'] = iv_30d
+            financial_data['iv_rank'] = float(iv_rank) if iv_rank is not None else None
+            financial_data['relative_rank'] = float(relative_rank) if relative_rank is not None else None
+            financial_data['iv_analysis_json'] = json.dumps(iv_analysis_result)
+            financial_data['iv_analysis_spare'] = None  # Spare column for future use
+            
+            # Ensure date field exists (required by database) - ALWAYS use today's date to ensure we update the latest record
+            # This prevents creating multiple records with different dates
+            financial_data['date'] = date.today().isoformat()
+            logger.debug(f"[FINANCIAL IV] Set date field to today for {symbol}: {financial_data['date']}")
+            
+            logger.debug(f"[FINANCIAL IV] financial_data keys after IV merge: {list(financial_data.keys())}")
+        
+        # Only set error if we have neither ratios nor IV analysis
+        if not ratios and not iv_analysis_result:
+            result["error"] = "No financial ratios data available and IV analysis could not be calculated"
+            logger.warning(f"[FINANCIAL] No data available for {symbol}: ratios={ratios is not None}, iv_analysis={iv_analysis_result is not None}")
+        elif financial_data:
+            # We have at least ratios or IV analysis (or both)
+            result["financial_data"] = financial_data
             result["source"] = "api"
             result["fetch_time_ms"] = fetch_time
-            logger.info(f"[FINANCIAL API FETCH] Financial data for {symbol} (api_fetch: {api_fetch_time:.1f}ms, total: {fetch_time:.1f}ms)")
             
-            # Save to DB if we have a DB instance
-            try:
-                await db_instance.save_financial_info(symbol, ratios)
-            except Exception as e:
-                logger.debug(f"[FINANCIAL DB SAVE ERROR] Error saving financial info to DB for {symbol}: {e}")
+            if ratios:
+                logger.info(f"[FINANCIAL API FETCH] Financial data for {symbol} (api_fetch: {api_fetch_time:.1f}ms, total: {fetch_time:.1f}ms)")
+            elif iv_analysis_result:
+                iv_time_str = f"{iv_fetch_time:.1f}ms" if iv_fetch_time is not None else "N/A"
+                logger.info(f"[FINANCIAL IV] IV analysis for {symbol} (iv_fetch: {iv_time_str}, total: {fetch_time:.1f}ms)")
+            
+            # Save to DB if we have a DB instance and financial_data is not empty
+            if financial_data:
+                # Ensure date is always set to today before saving
+                financial_data['date'] = date.today().isoformat()
+                logger.debug(f"[FINANCIAL DB SAVE] Saving financial_data for {symbol} with date: {financial_data['date']}")
+                try:
+                    await db_instance.save_financial_info(symbol, financial_data)
+                    logger.debug(f"[FINANCIAL DB SAVE] Successfully saved financial_info for {symbol}")
+                    # Clear cache after saving to ensure fresh data on next read
+                    if cache_instance:
+                        try:
+                            cache_key = CacheKeyGenerator.financial_info(symbol)
+                            await cache_instance.delete(cache_key)
+                            logger.debug(f"[FINANCIAL DB SAVE] Cleared cache for {symbol} after saving IV analysis")
+                        except Exception as cache_del_error:
+                            logger.debug(f"[FINANCIAL DB SAVE] Could not clear cache: {cache_del_error}")
+                    if not ratios and iv_analysis_result:
+                        logger.info(f"[FINANCIAL DB SAVE] Saved IV analysis (without ratios) for {symbol} to database")
+                    elif ratios and iv_analysis_result:
+                        logger.info(f"[FINANCIAL DB SAVE] Saved financial data with IV analysis for {symbol} to database")
+                    elif ratios:
+                        logger.info(f"[FINANCIAL DB SAVE] Saved financial ratios for {symbol} to database")
+                except Exception as e:
+                    logger.error(f"[FINANCIAL DB SAVE ERROR] Error saving financial info to DB for {symbol}: {e}")
+                    import traceback
+                    logger.debug(f"[FINANCIAL DB SAVE ERROR] Traceback: {traceback.format_exc()}")
+            else:
+                logger.warning(f"[FINANCIAL DB SAVE] financial_data is empty for {symbol}, skipping save")
             
             # Cache the result
             if cache_instance:
                 try:
                     cache_key = CacheKeyGenerator.financial_info(symbol)
                     # Add last_save_time to cached data
-                    ratios_with_time = ratios.copy()
-                    ratios_with_time['last_save_time'] = datetime.now(timezone.utc).isoformat()
-                    cache_df = pd.DataFrame([ratios_with_time])
+                    financial_data_with_time = financial_data.copy()
+                    financial_data_with_time['last_save_time'] = datetime.now(timezone.utc).isoformat()
+                    cache_df = pd.DataFrame([financial_data_with_time])
                     cache_set_start = time.time()
                     await cache_instance.set(cache_key, cache_df, ttl=None)  # No TTL (infinite cache)
                     cache_set_time = (time.time() - cache_set_start) * 1000
                     logger.info(f"[FINANCIAL CACHE SET] Cached financial data for {symbol} (set_time: {cache_set_time:.1f}ms, no TTL)")
                 except Exception as e:
                     logger.debug(f"[FINANCIAL CACHE ERROR] Failed to cache financial data for {symbol}: {e}")
-        else:
-            result["error"] = "No financial ratios data available"
     
     except Exception as e:
         result["error"] = str(e)
