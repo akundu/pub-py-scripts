@@ -27,6 +27,10 @@ except Exception:
 
 # Per-connection state
 class ConnectionState:
+    """
+    State container for a WebSocket connection.
+    Provides the interface expected by the core audio processing function.
+    """
     def __init__(self, config):
         self.audio_buffer = np.zeros(get_buffer_size(), dtype=np.float32)
         self.buffer_index = 0
@@ -37,9 +41,66 @@ class ConnectionState:
         self.chord_stability = 0
         self.last_log_time = time.time()
         self.config = config
-        self.low_freq = config.get('low_freq', 80)
-        self.high_freq = config.get('high_freq', 2000)
-        self.instrument_name = config.get('instrument_name', 'Guitar')
+        
+        # Get instrument preset if low_freq/high_freq not explicitly set
+        instrument = config.get('instrument', 'guitar')
+        preset = INSTRUMENT_PRESETS.get(instrument, INSTRUMENT_PRESETS['guitar'])
+        
+        self.low_freq = config.get('low_freq') or preset['low_freq']
+        self.high_freq = config.get('high_freq') or preset['high_freq']
+        self.instrument_name = config.get('instrument_name') or preset['name']
+    
+    def update_buffer(self, new_samples, chunk_size):
+        """Update circular audio buffer with new samples."""
+        buffer_size = len(self.audio_buffer)
+        actual_chunk_size = min(chunk_size, len(new_samples))
+        end_index = min(self.buffer_index + actual_chunk_size, buffer_size)
+        copy_size = end_index - self.buffer_index
+        
+        if copy_size > 0:
+            self.audio_buffer[self.buffer_index:end_index] = new_samples[:copy_size]
+        
+        if actual_chunk_size > copy_size:
+            remaining = actual_chunk_size - copy_size
+            self.audio_buffer[:remaining] = new_samples[copy_size:copy_size + remaining]
+        
+        self.buffer_index = (self.buffer_index + actual_chunk_size) % buffer_size
+        return self.buffer_index
+    
+    def add_detection(self, notes, frequencies, chroma):
+        """Add detection results to history."""
+        if notes:
+            self.notes_history.append(notes)
+        if frequencies:
+            self.frequencies_history.append(frequencies)
+        if chroma is not None:
+            self.chroma_history.append(chroma)
+    
+    def update_chord_stability(self, chord_name):
+        """Update chord stability tracking."""
+        if chord_name == self.last_chord:
+            self.chord_stability += 1
+        else:
+            self.chord_stability = 0
+            self.last_chord = chord_name
+        return self.chord_stability
+    
+    def reset_stability(self):
+        """Reset chord stability when no chord detected."""
+        self.chord_stability = 0
+        self.last_chord = None
+    
+    def should_log(self, log_interval):
+        """Check if enough time has passed for logging."""
+        current_time = time.time()
+        if current_time - self.last_log_time >= log_interval:
+            self.last_log_time = current_time
+            return True
+        return False
+    
+    def has_enough_history(self, min_samples=3):
+        """Check if we have enough history for progression analysis."""
+        return len(self.notes_history) >= min_samples
 
 # Store active connections
 active_connections: dict[str, ConnectionState] = {}

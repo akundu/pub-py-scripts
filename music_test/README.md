@@ -21,11 +21,18 @@ Real-time audio chord detection using your microphone. Available as a command-li
 ### Install Dependencies
 
 ```bash
+# Create virtual environment (recommended)
+python -m venv .venv
+source .venv/bin/activate
+
 # Core dependencies
 pip install numpy scipy sounddevice
 
 # For web interface
 pip install -r requirements/requirements_web.txt
+
+# For running tests
+pip install pytest pytest-asyncio
 ```
 
 ## Quick Start
@@ -209,11 +216,23 @@ Output format: `C`, `Am`, `G7`, `Dm7`, `Fsus4`, `E5`, etc.
 music_test/
 ├── chord_detector.py      # CLI application
 ├── web_server.py          # FastAPI web server
+├── pytest.ini             # Test configuration
 ├── lib/
 │   ├── common.py          # Shared constants and utilities
-│   ├── music_understanding.py  # Chord detection algorithms
-│   ├── sound_capture.py   # Audio capture and processing
-│   └── web_audio_processing.py # Web-specific audio processing
+│   ├── config.py          # Unified configuration interface
+│   ├── state.py           # Audio processing state management
+│   ├── output.py          # Output handlers (console/dict)
+│   ├── audio_processing.py    # Core audio processing (shared)
+│   ├── music_understanding.py # Chord detection algorithms
+│   ├── sound_capture.py   # CLI audio capture wrapper
+│   └── web_audio_processing.py # Web audio processing wrapper
+├── tests/
+│   ├── conftest.py        # Pytest fixtures
+│   ├── test_common.py     # Tests for common.py
+│   ├── test_music_understanding.py  # Chord detection tests
+│   ├── test_audio_processing.py     # Audio processing tests
+│   ├── test_integration.py          # End-to-end tests
+│   └── test_unified_classes.py      # Tests for unified classes
 ├── static/
 │   ├── css/style.css      # Web interface styles
 │   └── js/
@@ -224,6 +243,50 @@ music_test/
 │   └── index.html         # Web interface template
 └── requirements/
     └── requirements_web.txt   # Web server dependencies
+```
+
+## Architecture
+
+The CLI and web interfaces share a unified core processing function:
+
+```
+                    ┌─────────────────────────────┐
+                    │  lib/audio_processing.py    │
+                    │  process_audio_chunk()      │
+                    │  (Core Logic)               │
+                    └─────────────┬───────────────┘
+                                  │
+            ┌─────────────────────┼─────────────────────┐
+            │                     │                     │
+    ┌───────▼───────┐     ┌───────▼───────┐     ┌───────▼───────┐
+    │ lib/config.py │     │ lib/state.py  │     │ lib/output.py │
+    │ AudioConfig   │     │ AudioProcess- │     │ Console/Dict  │
+    │               │     │ ingState      │     │ OutputHandler │
+    └───────────────┘     └───────────────┘     └───────────────┘
+            │                     │                     │
+    ┌───────┴─────────────────────┴─────────────────────┴───────┐
+    │                         Consumers                          │
+    ├────────────────────────┬──────────────────────────────────┤
+    │ lib/sound_capture.py   │  lib/web_audio_processing.py     │
+    │ recognize_audio()      │  recognize_audio_web()           │
+    │ (CLI)                  │  (Web)                           │
+    └────────────────────────┴──────────────────────────────────┘
+```
+
+## Running Tests
+
+```bash
+# Activate virtual environment
+source .venv/bin/activate
+
+# Run all tests
+python -m pytest tests/ -v
+
+# Run specific test file
+python -m pytest tests/test_music_understanding.py -v
+
+# Run with coverage
+python -m pytest tests/ --cov=lib --cov-report=html
 ```
 
 ---
