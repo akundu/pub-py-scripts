@@ -355,7 +355,13 @@ def display_iv_analysis(latest_entry: pd.Series, log_level: str = "INFO") -> Non
             if metrics.get('hv_1yr_range'):
                 print(f"  {'1-Year HV Range:':<30} {metrics.get('hv_1yr_range', 'N/A')}")
             if metrics.get('rank') is not None:
-                print(f"  {'IV Rank:':<30} {metrics.get('rank', 'N/A')}")
+                print(f"  {'IV Rank (30-day):':<30} {metrics.get('rank', 'N/A')}")
+            if metrics.get('rank_90d') is not None:
+                print(f"  {'IV Rank (90-day):':<30} {metrics.get('rank_90d', 'N/A')}")
+            if metrics.get('rank_diff') is not None:
+                rank_diff = metrics.get('rank_diff')
+                diff_label = 'Rank Ratio (30d/90d):'
+                print(f"  {diff_label:<30} {rank_diff:.3f}")
             if metrics.get('roll_yield'):
                 print(f"  {'Roll Yield:':<30} {metrics.get('roll_yield', 'N/A')}")
             if metrics.get('realized_vol_30d'):

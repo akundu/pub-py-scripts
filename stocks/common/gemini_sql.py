@@ -97,6 +97,14 @@ TABLE_SCHEMAS = """
 - ev_to_ebitda (DOUBLE) - EV/EBITDA
 - enterprise_value (LONG) - Enterprise value
 - free_cash_flow (LONG) - Free cash flow
+- iv_30d (DOUBLE) - 30-day implied volatility
+- iv_90d (DOUBLE) - 90-day implied volatility
+- iv_rank (DOUBLE) - 30-day IV rank (percentile within 1-year historical range)
+- iv_90d_rank (DOUBLE) - 90-day IV rank (percentile within 1-year historical range)
+- iv_rank_diff (DOUBLE) - Rank ratio (30-day rank / 90-day rank). Shows 30-day IV rank in context of 90-day IV rank. > 1.0 = front month more expensive relative to history, < 1.0 = back month more expensive, = 1.0 = equal
+- relative_rank (DOUBLE) - Relative IV rank vs benchmark (VOO)
+- iv_analysis_json (STRING) - Full IV analysis as JSON
+- iv_analysis_spare (STRING) - Spare column for future use
 - write_timestamp (TIMESTAMP) - When the record was written
 
 ## Important Notes:

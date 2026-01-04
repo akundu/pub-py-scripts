@@ -417,39 +417,65 @@ class IVAnalyzer:
         
         Returns:
             Dictionary with metrics and strategy recommendations
+            
+        Note:
+        - IV Rank: Compares current IV (30-day or 90-day) against 1-year historical 
+          realized volatility range (hv_low to hv_high). Formula: ((iv - hv_low) / (hv_high - hv_low)) * 100
+        - Roll Yield: Compares 30-day IV against 90-day IV. Formula: ((iv_30 - iv_90) / iv_90) * 100
+          Positive = backwardation (front month higher), Negative = contango (back month higher)
         """
-        # Calculate IV rank (percentile within historical range)
-        iv_rank = ((iv_30 - hv_low) / (hv_high - hv_low)) * 100 if (hv_high - hv_low) > 0 else 50.0
+        # Calculate 30-day IV rank (percentile within historical range)
+        iv_rank_30 = ((iv_30 - hv_low) / (hv_high - hv_low)) * 100 if (hv_high - hv_low) > 0 else 50.0
         
-        # Calculate roll yield (term structure)
+        # Calculate 90-day IV rank if iv_90 is available
+        iv_rank_90 = None
+        if iv_90 is not None:
+            iv_rank_90 = ((iv_90 - hv_low) / (hv_high - hv_low)) * 100 if (hv_high - hv_low) > 0 else 50.0
+        
+        # Calculate roll yield (term structure: 30-day vs 90-day IV)
         roll_yield = ((iv_30 - iv_90) / iv_90) * 100 if iv_90 else 0.0
         
-        # Calculate risk score (0-10)
+        # Calculate risk score (0-10) based on how much current IV exceeds historical low
         risk_score = min(10.0, round(((iv_30 / hv_low) - 1) * 5, 1)) if hv_low > 0 else 5.0
         
-        # Generate recommendation
+        # Generate recommendation based on 30-day IV rank
         if roll_yield > 5:
             recommendation = "SELL FRONT MONTH"
             notes = {"meaning": "Backwardation Spike.", "action": "Sell Short Leg."}
-        elif iv_rank < 25:
+        elif iv_rank_30 < 25:
             recommendation = "BUY LEAP"
             notes = {"meaning": "Vol is cheap vs History.", "action": "Buy Long Leg."}
-        elif iv_rank > 85:
+        elif iv_rank_30 > 85:
             recommendation = "SELL PREMIUM"
             notes = {"meaning": "Expensive vs History.", "action": "Credit Spreads."}
         else:
             recommendation = "HOLD / NEUTRAL"
             notes = {"meaning": "Normal.", "action": "Hold."}
         
-        return {
+        result = {
             "iv_30d": f"{iv_30:.2%}",
             "hv_1yr_range": f"{hv_low:.2%} - {hv_high:.2%}",
-            "rank": round(iv_rank, 2),
+            "rank": round(iv_rank_30, 2),  # 30-day IV rank
             "roll_yield": f"{roll_yield:.2f}%",
             "recommendation": recommendation,
             "risk_score": risk_score,
             "notes": notes
         }
+        
+        # Add 90-day IV and rank if available
+        if iv_90 is not None:
+            result["iv_90d"] = f"{iv_90:.2%}"
+            if iv_rank_90 is not None and iv_rank_90 > 0:
+                result["rank_90d"] = round(iv_rank_90, 2)
+                # Calculate rank ratio: 30-day rank / 90-day rank
+                # Shows 30-day IV rank in the context of 90-day IV rank
+                # > 1.0 = 30-day rank is higher than 90-day (front month more expensive relative to history)
+                # < 1.0 = 30-day rank is lower than 90-day (back month more expensive relative to history)
+                # = 1.0 = Both ranks are equal
+                rank_diff = round(iv_rank_30 / iv_rank_90, 3) if iv_rank_90 > 0 else None
+                result["rank_diff"] = rank_diff
+        
+        return result
     
     async def get_iv_analysis(
         self,
@@ -534,7 +560,7 @@ class IVAnalyzer:
                 "metrics": {
                     "iv_30d": metrics["iv_30d"],
                     "hv_1yr_range": metrics["hv_1yr_range"],
-                    "rank": metrics["rank"],
+                    "rank": metrics["rank"],  # 30-day IV rank
                     "roll_yield": metrics["roll_yield"]
                 },
                 "strategy": {
@@ -543,6 +569,14 @@ class IVAnalyzer:
                     "notes": metrics["notes"]
                 }
             }
+            
+            # Add 90-day IV and rank if available
+            if "iv_90d" in metrics:
+                result["metrics"]["iv_90d"] = metrics["iv_90d"]
+            if "rank_90d" in metrics:
+                result["metrics"]["rank_90d"] = metrics["rank_90d"]
+            if "rank_diff" in metrics:
+                result["metrics"]["rank_diff"] = metrics["rank_diff"]
             
             return result, needs_update
             

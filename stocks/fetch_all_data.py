@@ -275,19 +275,19 @@ def fetch_financial_info(
         
         if financial_result and financial_result.get('financial_data'):
             financial_data = financial_result['financial_data']
-            return {
-                "symbol": symbol,
-                "success": True,
+                return {
+                    "symbol": symbol,
+                    "success": True,
                 "financial_info": financial_data,
-                "timestamp": get_timezone_aware_time().isoformat(),
-                "timezone": "America/New_York"
-            }
+                    "timestamp": get_timezone_aware_time().isoformat(),
+                    "timezone": "America/New_York"
+                }
         elif financial_result and financial_result.get('error'):
-            return {
-                "symbol": symbol,
-                "success": False,
+                return {
+                    "symbol": symbol,
+                    "success": False,
                 "error": financial_result['error']
-            }
+                }
         else:
             return {"symbol": symbol, "success": False, "error": "No financial data available"}
         

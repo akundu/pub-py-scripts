@@ -249,7 +249,7 @@ async def _calculate_iv_analysis(
     Returns:
         IV analysis result dictionary with relative_rank included, or None on error
     
-        Note:
+    Note:
         Price history is fetched from database or HTTP server, NOT from Polygon API.
         Polygon API is only used for IV/options data.
         Relative rank is calculated as: ticker_rank / benchmark_rank (ratio)
@@ -642,13 +642,30 @@ async def get_financial_info(
                 except (ValueError, AttributeError):
                     pass
             
+            # Parse IV_90d from percentage string if available
+            iv_90d_str = metrics.get("iv_90d", "")
+            iv_90d = None
+            if iv_90d_str and iv_90d_str.endswith("%"):
+                try:
+                    iv_90d = float(iv_90d_str.rstrip("%")) / 100.0
+                except (ValueError, AttributeError):
+                    pass
+            
             # Get rank values
-            iv_rank = metrics.get("rank")
+            iv_rank = metrics.get("rank")  # 30-day IV rank
+            iv_rank_90d = metrics.get("rank_90d")  # 90-day IV rank
+            rank_diff = metrics.get("rank_diff")  # 30-day rank / 90-day rank (ratio)
             relative_rank = iv_analysis_result.get("relative_rank")
             
             # Add IV columns to financial_data (works whether ratios exists or not)
             financial_data['iv_30d'] = iv_30d
             financial_data['iv_rank'] = float(iv_rank) if iv_rank is not None else None
+            if iv_90d is not None:
+                financial_data['iv_90d'] = iv_90d
+            if iv_rank_90d is not None:
+                financial_data['iv_90d_rank'] = float(iv_rank_90d)
+            if rank_diff is not None:
+                financial_data['iv_rank_diff'] = float(rank_diff)
             financial_data['relative_rank'] = float(relative_rank) if relative_rank is not None else None
             financial_data['iv_analysis_json'] = json.dumps(iv_analysis_result)
             financial_data['iv_analysis_spare'] = None  # Spare column for future use

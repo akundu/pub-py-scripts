@@ -1659,8 +1659,14 @@ class FinancialInfoRepository(BaseRepository):
                 record['free_cash_flow'] = financial_data.get('free_cash_flow')
             if financial_data.get('iv_30d') is not None:
                 record['iv_30d'] = financial_data.get('iv_30d')
+            if financial_data.get('iv_90d') is not None:
+                record['iv_90d'] = financial_data.get('iv_90d')
             if financial_data.get('iv_rank') is not None:
                 record['iv_rank'] = financial_data.get('iv_rank')
+            if financial_data.get('iv_90d_rank') is not None:
+                record['iv_90d_rank'] = financial_data.get('iv_90d_rank')
+            if financial_data.get('iv_rank_diff') is not None:
+                record['iv_rank_diff'] = financial_data.get('iv_rank_diff')
             if financial_data.get('relative_rank') is not None:
                 record['relative_rank'] = financial_data.get('relative_rank')
             if financial_data.get('iv_analysis_json') is not None:
@@ -1683,7 +1689,34 @@ class FinancialInfoRepository(BaseRepository):
             # Remove any temporary columns that shouldn't be saved
             record = {k: v for k, v in record.items() if not k.startswith('_') and k != 'date_col'}
             
+            # Check which columns exist in the table to avoid "Invalid column" errors
+            # This handles cases where the table schema hasn't been updated yet
+            try:
+                # Query table schema to get existing columns
+                schema_query = """
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name = 'financial_info'
+                """
+                existing_columns_result = await conn.fetch(schema_query)
+                existing_columns = {row['column_name'] for row in existing_columns_result} if existing_columns_result else set()
+                
+                # Filter record to only include columns that exist in the table
+                if existing_columns:
+                    record = {k: v for k, v in record.items() if k in existing_columns}
+                    self.logger.debug(f"[FINANCIAL SAVE] Filtered columns to existing table schema: {list(record.keys())}")
+                else:
+                    # If we can't query schema, log warning but proceed (might be a new table)
+                    self.logger.debug(f"[FINANCIAL SAVE] Could not query table schema, proceeding with all columns")
+            except Exception as schema_error:
+                # If schema query fails, log warning but proceed (table might not exist yet or different DB)
+                self.logger.debug(f"[FINANCIAL SAVE] Could not query table schema: {schema_error}, proceeding with all columns")
+            
             columns = list(record.keys())
+            if not columns:
+                self.logger.warning(f"[FINANCIAL SAVE] No valid columns to save for {ticker} after filtering")
+                return
+            
             placeholders = [f'${i+1}' for i in range(len(columns))]
             insert_sql = f"INSERT INTO financial_info ({', '.join(columns)}) VALUES ({', '.join(placeholders)})"
             
@@ -1699,7 +1732,16 @@ class FinancialInfoRepository(BaseRepository):
                 result = await conn.execute(insert_sql, *values)
                 self.logger.debug(f"[FINANCIAL SAVE] Successfully executed INSERT for {ticker}. Result: {result}")
             except Exception as e:
-                self.logger.error(f"Error saving financial info for {ticker}: {e}")
+                # If error mentions invalid column, provide helpful message
+                error_msg = str(e)
+                if "Invalid column" in error_msg or "column" in error_msg.lower():
+                    self.logger.error(f"Error saving financial info for {ticker}: {e}")
+                    self.logger.error(f"Table schema may be outdated. Please run migration script to add missing columns:")
+                    self.logger.error(f"  python scripts/migrate_financial_info_iv_analysis.py --db-conn <your_db_connection>")
+                    self.logger.error(f"Or recreate the table using:")
+                    self.logger.error(f"  python scripts/setup_questdb_tables.py --action recreate --tables financial_info --db-conn <your_db_connection>")
+                else:
+                    self.logger.error(f"Error saving financial info for {ticker}: {e}")
                 import traceback
                 self.logger.debug(f"[FINANCIAL SAVE ERROR] Traceback: {traceback.format_exc()}")
                 raise
@@ -5646,7 +5688,10 @@ class StockQuestDB(StockDBBase):
         enterprise_value LONG,
         free_cash_flow LONG,
         iv_30d DOUBLE,
+        iv_90d DOUBLE,
         iv_rank DOUBLE,
+        iv_90d_rank DOUBLE,
+        iv_rank_diff DOUBLE,
         relative_rank DOUBLE,
         iv_analysis_json STRING,
         iv_analysis_spare STRING,

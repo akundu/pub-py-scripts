@@ -1153,10 +1153,20 @@ async def process_symbol_data(
             "%Y-%m-%d"
         )
     elif start_date is None:
-        if timeframe == 'hourly':
-            start_date = (datetime.now() - timedelta(days=2*365)).strftime('%Y-%m-%d')
-        else: 
-            start_date = (datetime.now() - timedelta(days=5*365)).strftime('%Y-%m-%d')
+        # Only default to historical range if explicitly fetching data
+        # If no dates and no force_fetch, don't default to huge ranges
+        if force_fetch:
+            if timeframe == 'hourly':
+                start_date = (datetime.now() - timedelta(days=2*365)).strftime('%Y-%m-%d')
+            else: 
+                # Default to 1 year for daily data (was 5 years, too much)
+                start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+        else:
+            # For query-only mode, use a reasonable default (1 year) instead of 5 years
+            if timeframe == 'hourly':
+                start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+            else:
+                start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
 
     if end_date is None:
         end_date = datetime.now().strftime('%Y-%m-%d')
@@ -2781,14 +2791,76 @@ def _setup_database(args) -> StockDBBase:
 async def _handle_latest_mode(args) -> None:
     """Handle --latest mode: fetch and display latest data.
     
-    TODO: This function needs to be implemented with the latest mode logic.
-    For now, it's a placeholder to fix linter errors.
-    
     Args:
         args: Parsed command-line arguments
     """
-    print(f"Latest mode for {args.symbol} - implementation pending")
-    # TODO: Implement latest mode logic here
+    db_instance_for_cleanup = None
+    try:
+        # Create database instance
+        db_instance_for_cleanup = _setup_database(args)
+        
+        # Initialize database if instance was created
+        if db_instance_for_cleanup and hasattr(db_instance_for_cleanup, '_init_db'):
+            try:
+                await db_instance_for_cleanup._init_db()
+            except Exception as init_error:
+                logger.debug(f"Database already initialized or init error: {init_error}")
+        
+        # Calculate enable_cache from args.no_cache
+        enable_cache = not args.no_cache
+        
+        # Fetch financial/IV/news data if requested
+        if args.fetch_ratios or args.fetch_iv or args.fetch_news:
+            logger.info(f"Fetching requested data for {args.symbol} (ratios={args.fetch_ratios}, iv={args.fetch_iv}, news={args.fetch_news})")
+            
+            # Fetch financial ratios and/or IV analysis
+            if args.fetch_ratios or args.fetch_iv:
+                try:
+                    from common.financial_data import get_financial_info
+                    financial_result = await get_financial_info(
+                        symbol=args.symbol,
+                        db_instance=db_instance_for_cleanup,
+                        force_fetch=True,  # Force API fetch
+                        include_iv_analysis=args.fetch_iv,  # Include IV if --fetch-iv is set
+                        iv_calendar_days=90,
+                        iv_server_url=os.getenv("DB_SERVER_URL", "http://localhost:9100"),
+                        iv_use_polygon=False,
+                        iv_data_dir=args.data_dir
+                    )
+                    if financial_result.get('error'):
+                        logger.warning(f"Error fetching financial data: {financial_result.get('error')}")
+                    else:
+                        logger.info(f"Successfully fetched financial data for {args.symbol}")
+                except Exception as e:
+                    logger.error(f"Error fetching financial/IV data for {args.symbol}: {e}")
+            
+            # Fetch news if requested
+            if args.fetch_news:
+                try:
+                    news_result = await get_news_info(
+                        symbol=args.symbol,
+                        db_instance=db_instance_for_cleanup,
+                        force_fetch=True,
+                        enable_cache=enable_cache
+                    )
+                    if news_result.get('error'):
+                        logger.warning(f"Error fetching news: {news_result.get('error')}")
+                    else:
+                        logger.info(f"Successfully fetched news for {args.symbol} (count: {news_result.get('news_data', {}).get('count', 0)})")
+                except Exception as e:
+                    logger.error(f"Error fetching news for {args.symbol}: {e}")
+        
+        # Display financials if requested
+        if args.show_financials:
+            await _display_financials(args.symbol, db_instance_for_cleanup, logger, args.log_level, fetch_ratios=args.fetch_ratios)
+        else:
+            logger.info(f"Latest mode completed for {args.symbol}. Use --show-financials to display stored data.")
+    
+    except Exception as e:
+        logger.error(f"Error in latest mode for {args.symbol}: {e}", exc_info=True)
+    finally:
+        # Cleanup
+        await _cleanup_resources(db_instance_for_cleanup, args)
 
 
 async def _handle_date_range_mode(args) -> None:
@@ -2894,9 +2966,6 @@ async def _cleanup_resources(db_instance: StockDBBase | None, args) -> None:
         except Exception as e:
             print(f"Warning: Error closing database session: {e}", file=sys.stderr)
 
-    # Handle date range mode
-    await _handle_date_range_mode(args)
-
 
 async def _handle_date_range_mode(args) -> None:
     """Handle date range mode: fetch and display historical data.
@@ -2904,6 +2973,11 @@ async def _handle_date_range_mode(args) -> None:
     Args:
         args: Parsed command-line arguments
     """
+    # Skip if latest mode is active (shouldn't happen, but safety check)
+    if args.latest:
+        logger.debug("Skipping _handle_date_range_mode because --latest mode is active")
+        return
+    
     db_instance_for_cleanup = None
     try:
         # Create database instance
@@ -2919,7 +2993,13 @@ async def _handle_date_range_mode(args) -> None:
         # Calculate enable_cache from args.no_cache
         enable_cache = not args.no_cache
         
-        final_df = await process_symbol_data(
+        # Only fetch price data if we have date constraints or force_fetch
+        # Avoid fetching 5 years of data when no dates are specified
+        should_fetch_price_data = (args.start_date is not None or args.end_date is not None or args.force_fetch)
+        
+        final_df = pd.DataFrame()
+        if should_fetch_price_data:
+            final_df = await process_symbol_data(
             symbol=args.symbol, 
             timeframe=args.timeframe, 
             start_date=args.start_date, 
@@ -3011,15 +3091,100 @@ async def _handle_date_range_mode(args) -> None:
             
             print(f"--- End of Data ---")
             
+            # Fetch financial/IV/news data if requested (before displaying)
+            # Skip if we're in latest mode and already fetched (to avoid duplicate fetches)
+            if (args.fetch_ratios or args.fetch_iv or args.fetch_news) and not args.latest:
+                logger.info(f"Fetching requested data for {args.symbol} (ratios={args.fetch_ratios}, iv={args.fetch_iv}, news={args.fetch_news})")
+                
+                # Fetch financial ratios and/or IV analysis
+                if args.fetch_ratios or args.fetch_iv:
+                    try:
+                        from common.financial_data import get_financial_info
+                        financial_result = await get_financial_info(
+                            symbol=args.symbol,
+                            db_instance=db_instance_for_cleanup,
+                            force_fetch=True,  # Force API fetch
+                            include_iv_analysis=args.fetch_iv,  # Include IV if --fetch-iv is set
+                            iv_calendar_days=90,
+                            iv_server_url=os.getenv("DB_SERVER_URL", "http://localhost:9100"),
+                            iv_use_polygon=False,
+                            iv_data_dir=args.data_dir
+                        )
+                        if financial_result.get('error'):
+                            logger.warning(f"Error fetching financial data: {financial_result.get('error')}")
+                        else:
+                            logger.info(f"Successfully fetched financial data for {args.symbol}")
+                    except Exception as e:
+                        logger.error(f"Error fetching financial/IV data for {args.symbol}: {e}")
+                
+                # Fetch news if requested
+                if args.fetch_news:
+                    try:
+                        # get_news_info is defined in this file, no need to import
+                        news_result = await get_news_info(
+                            symbol=args.symbol,
+                            db_instance=db_instance_for_cleanup,
+                            force_fetch=True,
+                            enable_cache=enable_cache
+                        )
+                        if news_result.get('error'):
+                            logger.warning(f"Error fetching news: {news_result.get('error')}")
+                        else:
+                            logger.info(f"Successfully fetched news for {args.symbol} (count: {news_result.get('news_data', {}).get('count', 0)})")
+                    except Exception as e:
+                        logger.error(f"Error fetching news for {args.symbol}: {e}")
+            
             # Display financials after date range data if requested
             if args.show_financials:
-                await _display_financials(args.symbol, db_instance_for_cleanup, logger, args.log_level)
+                await _display_financials(args.symbol, db_instance_for_cleanup, logger, args.log_level, fetch_ratios=args.fetch_ratios)
         elif not args.query_only: 
             print(f"No data to display for {args.symbol} ({args.timeframe}) with the given parameters after all operations.")
             
+            # Fetch financial/IV/news data if requested (even if no date range data)
+            if args.fetch_ratios or args.fetch_iv or args.fetch_news:
+                logger.info(f"Fetching requested data for {args.symbol} (ratios={args.fetch_ratios}, iv={args.fetch_iv}, news={args.fetch_news})")
+                
+                # Fetch financial ratios and/or IV analysis
+                if args.fetch_ratios or args.fetch_iv:
+                    try:
+                        from common.financial_data import get_financial_info
+                        financial_result = await get_financial_info(
+                            symbol=args.symbol,
+                            db_instance=db_instance_for_cleanup,
+                            force_fetch=True,
+                            include_iv_analysis=args.fetch_iv,
+                            iv_calendar_days=90,
+                            iv_server_url=os.getenv("DB_SERVER_URL", "http://localhost:9100"),
+                            iv_use_polygon=False,
+                            iv_data_dir=args.data_dir
+                        )
+                        if financial_result.get('error'):
+                            logger.warning(f"Error fetching financial data: {financial_result.get('error')}")
+                        else:
+                            logger.info(f"Successfully fetched financial data for {args.symbol}")
+                    except Exception as e:
+                        logger.error(f"Error fetching financial/IV data for {args.symbol}: {e}")
+                
+                # Fetch news if requested
+                if args.fetch_news:
+                    try:
+                        # get_news_info is defined in this file, no need to import
+                        news_result = await get_news_info(
+                            symbol=args.symbol,
+                            db_instance=db_instance_for_cleanup,
+                            force_fetch=True,
+                            enable_cache=enable_cache
+                        )
+                        if news_result.get('error'):
+                            logger.warning(f"Error fetching news: {news_result.get('error')}")
+                        else:
+                            logger.info(f"Successfully fetched news for {args.symbol}")
+                    except Exception as e:
+                        logger.error(f"Error fetching news for {args.symbol}: {e}")
+            
             # Display financials even if no date range data, if requested
             if args.show_financials:
-                await _display_financials(args.symbol, db_instance_for_cleanup, logger, args.log_level)
+                await _display_financials(args.symbol, db_instance_for_cleanup, logger, args.log_level, fetch_ratios=args.fetch_ratios)
         
         # Debug: Fetch and display data from cache and DB after saves
         # This runs regardless of query_only to help debug save issues

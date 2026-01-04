@@ -5094,7 +5094,7 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                 <div style="grid-column: 1 / -1; margin: 20px 0 10px 0; border-top: 2px solid #30363d; padding-top: 15px;">
                     <h3 style="margin: 0; font-size: 16px; font-weight: 600; color: #667eea; text-transform: uppercase; letter-spacing: 0.5px;">IV Analysis</h3>
                 </div>
-                ''' if (financial_data.get('iv_30d') is not None or financial_data.get('iv_rank') is not None or financial_data.get('relative_rank') is not None or financial_data.get('iv_strategy', {}).get('recommendation') or financial_data.get('iv_strategy', {}).get('risk_score') is not None or financial_data.get('iv_metrics', {}).get('hv_1yr_range') or financial_data.get('iv_metrics', {}).get('roll_yield')) else ''}
+                ''' if (financial_data.get('iv_30d') is not None or financial_data.get('iv_rank') is not None or financial_data.get('iv_90d_rank') is not None or financial_data.get('iv_rank_diff') is not None or financial_data.get('relative_rank') is not None or financial_data.get('iv_strategy', {}).get('recommendation') or financial_data.get('iv_strategy', {}).get('risk_score') is not None or financial_data.get('iv_metrics', {}).get('hv_1yr_range') or financial_data.get('iv_metrics', {}).get('roll_yield') or financial_data.get('iv_metrics', {}).get('rank_90d') or financial_data.get('iv_metrics', {}).get('rank_diff')) else ''}
                 
                 <!-- IV Analysis Section -->
                 {f'''
@@ -5103,15 +5103,36 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
                     <div class="metric-value" style="color: white; font-size: 12px; margin-top: 5px;">
                         {format_value(financial_data.get('iv_30d'), is_percentage=True) if financial_data.get('iv_30d') is not None else 'N/A'}
                     </div>
+                    {f'''
+                    <div style="color: white; font-size: 11px; margin-top: 3px; opacity: 0.9;">
+                        90-day: {format_value(financial_data.get('iv_90d') or financial_data.get('iv_metrics', {}).get('iv_90d'), is_percentage=True)}
+                    </div>
+                    ''' if (financial_data.get('iv_90d') is not None or financial_data.get('iv_metrics', {}).get('iv_90d') is not None) else ''}
                 </div>
                 ''' if financial_data.get('iv_30d') is not None else ''}
                 
                 {f'''
                 <div class="metric-card">
-                    <div class="metric-label">IV Rank</div>
+                    <div class="metric-label">IV Rank (30-day)</div>
                     <div class="metric-value">{format_value(financial_data.get('iv_rank'))}</div>
                 </div>
                 ''' if financial_data.get('iv_rank') is not None else ''}
+                
+                {f'''
+                <div class="metric-card">
+                    <div class="metric-label">IV Rank (90-day)</div>
+                    <div class="metric-value">{format_value(financial_data.get('iv_90d_rank') or financial_data.get('iv_metrics', {}).get('rank_90d'))}</div>
+                </div>
+                ''' if (financial_data.get('iv_90d_rank') is not None or financial_data.get('iv_metrics', {}).get('rank_90d') is not None) else ''}
+                
+                {f'''
+                <div class="metric-card">
+                    <div class="metric-label">Rank Ratio (30d/90d)</div>
+                    <div class="metric-value" style="color: {'#ef4444' if (financial_data.get('iv_rank_diff') or financial_data.get('iv_metrics', {}).get('rank_diff', 1)) > 1.0 else '#10b981' if (financial_data.get('iv_rank_diff') or financial_data.get('iv_metrics', {}).get('rank_diff', 1)) < 1.0 else '#6b7280'};">
+                        {format_value(financial_data.get('iv_rank_diff') or financial_data.get('iv_metrics', {}).get('rank_diff'), is_percentage=False) if (financial_data.get('iv_rank_diff') is not None or financial_data.get('iv_metrics', {}).get('rank_diff') is not None) else 'N/A'}
+                    </div>
+                </div>
+                ''' if (financial_data.get('iv_rank_diff') is not None or financial_data.get('iv_metrics', {}).get('rank_diff') is not None) else ''}
                 
                 {f'''
                 <div class="metric-card">
