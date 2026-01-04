@@ -120,9 +120,17 @@ function getBasePath() {
   if (pathname.startsWith('/chord_detector/') || pathname === '/chord_detector') {
     return '/chord_detector';
   }
+  // If we're under /c_d/ or exactly /c_d, use that as base (alias for chord_detector)
+  if (pathname.startsWith('/c_d/') || pathname === '/c_d') {
+    return '/c_d';
+  }
   // Otherwise use root
   return '';
 }
+
+// Track if we've received the server's "connected" message (module-level so handleWebSocketMessage can access it)
+let serverConnected = false;
+let connectionTimeout = null;
 
 // Connect WebSocket
 async function connectWebSocket() {
@@ -130,33 +138,61 @@ async function connectWebSocket() {
   const basePath = getBasePath();
   const wsUrl = `${protocol}//${window.location.host}${basePath}/ws`;
 
+  if (config.debug) {
+    logWithTimestamp(`🔌 Attempting WebSocket connection to: ${wsUrl}`);
+    logWithTimestamp(`   Protocol: ${protocol}, Base path: ${basePath}, Host: ${window.location.host}`);
+  }
+
+  // Reset connection tracking
+  serverConnected = false;
+  if (connectionTimeout) {
+    clearTimeout(connectionTimeout);
+    connectionTimeout = null;
+  }
+
   ws = new WebSocket(wsUrl);
 
   ws.onopen = () => {
-    updateStatus(true, 'Connected');
-
-    // Log connection attempt (parameters will be logged when server confirms connection)
     if (config.debug) {
       logWithTimestamp('🔌 WebSocket connection opened, sending configuration...');
     }
+    updateStatus(true, 'Connecting...');
 
     // Send initial configuration
-    ws.send(JSON.stringify(config));
-    // Enable start button when connected
-    document.getElementById('startBtn').disabled = false;
+    try {
+      ws.send(JSON.stringify(config));
+      
+      // Set up a timeout to detect if server doesn't respond
+      connectionTimeout = setTimeout(() => {
+        if (!serverConnected) {
+          errorWithTimestamp('Server did not respond. Check server logs.');
+          updateStatus(false, 'Connection Timeout');
+        }
+      }, 5000);
+    } catch (error) {
+      console.error('Error sending configuration:', error);
+      updateStatus(false, 'Send Error');
+    }
   };
 
   ws.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-    handleWebSocketMessage(data);
+    try {
+      const data = JSON.parse(event.data);
+      handleWebSocketMessage(data);
+    } catch (error) {
+      console.error('Error parsing WebSocket message:', error);
+    }
   };
 
   ws.onerror = (error) => {
-    errorWithTimestamp('WebSocket error:', error);
+    console.error('WebSocket error:', error);
     updateStatus(false, 'Connection Error');
   };
 
-  ws.onclose = () => {
+  ws.onclose = (event) => {
+    if (config.debug) {
+      logWithTimestamp(`WebSocket closed. Code: ${event.code}, Clean: ${event.wasClean}`);
+    }
     updateStatus(false, 'Disconnected');
     if (isRecording) {
       stopRecording();
@@ -167,6 +203,17 @@ async function connectWebSocket() {
 // Handle WebSocket messages
 function handleWebSocketMessage(data) {
   if (data.type === 'connected') {
+    // Mark that server has confirmed connection
+    serverConnected = true;
+    if (connectionTimeout) {
+      clearTimeout(connectionTimeout);
+      connectionTimeout = null;
+    }
+    
+    // Update status to Connected and enable start button
+    updateStatus(true, 'Connected');
+    document.getElementById('startBtn').disabled = false;
+    
     // Log connection info
     logWithTimestamp('✅ Connected:', data.message);
     
