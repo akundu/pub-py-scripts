@@ -59,8 +59,12 @@
                         const headerRow = table.querySelector('tr.column-header-row');
                         const headers = headerRow ? headerRow.querySelectorAll('th') : table.querySelectorAll('th');
                         if (headers[currentSortColumn[prefix]]) {
-                            const colName = headers[currentSortColumn[prefix]].getAttribute('data-filterable-name') || 
+                            let colName = headers[currentSortColumn[prefix]].getAttribute('data-filterable-name') || 
                                           headers[currentSortColumn[prefix]].textContent.trim();
+                            // When sorting on tkr_info, sort by risk_score instead
+                            if (colName === 'tkr_info') {
+                                colName = 'risk_score';
+                            }
                             params.set('sort', colName);
                             params.set('sort_direction', sortDirection[prefix][currentSortColumn[prefix]] || 'desc');
                         }
@@ -523,13 +527,154 @@
                         console.warn(`Column "${colName}" not found in API data. Available:`, Object.keys(row));
                     }
                     
+                    // Special handling for tkr_info column - display as table with 4 rows (check before formatting)
+                    // Check both normalized name and original column name
+                    const isTkrInfoCol = normalizedCol === 'tkr_info' || 
+                                         colName.toLowerCase().includes('tkr_info') ||
+                                         colName.toLowerCase().replace(/\s+/g, '_') === 'tkr_info';
+                    
+                    if (isTkrInfoCol) {
+                        // Helper function to safely parse numeric values, handling empty strings and NaN
+                        function safeParseFloat(value) {
+                            if (value === undefined || value === null || value === '' || value === 'NaN' || String(value).trim() === '') {
+                                return null;
+                            }
+                            const parsed = parseFloat(value);
+                            return (isNaN(parsed) || !isFinite(parsed)) ? null : parsed;
+                        }
+                        
+                        // Get IV metrics from row data directly (not from column value)
+                        // These columns should be in the API response
+                        // Handle both full and truncated column names (e.g., iv_recommendation vs iv_recommendati)
+                        const riskScore = safeParseFloat(row['risk_score']);
+                        const ivRank30 = safeParseFloat(row['iv_rank_30']);
+                        const ivRank90 = safeParseFloat(row['iv_rank_90']);
+                        // Try multiple possible column names (full, truncated, compact)
+                        const ivRecommendationRaw = (row['iv_recommendation'] || row['iv_recommendati'] || row['iv_rec'] || null);
+                        const ivRecommendation = ivRecommendationRaw ? String(ivRecommendationRaw).trim() : null;
+                        const rollYield = safeParseFloat(row['roll_yield']);
+                        
+                        // Debug logging (only for first row to avoid spam)
+                        if (rowIdx === 0 && colIdx === 1) {
+                            console.log('=== tkr_info column detected ===');
+                            console.log('Column name:', colName);
+                            console.log('Normalized col:', normalizedCol);
+                            console.log('Column index:', colIdx);
+                            console.log('Row index:', rowIdx);
+                            console.log('All row keys:', Object.keys(row));
+                            console.log('IV-related keys:', Object.keys(row).filter(k => k.includes('risk') || k.includes('iv') || k.includes('roll') || k.includes('recommend')));
+                            console.log('Raw values:', {
+                                risk_score: row['risk_score'],
+                                iv_rank_30: row['iv_rank_30'],
+                                iv_rank_90: row['iv_rank_90'],
+                                iv_recommendation: row['iv_recommendation'],
+                                iv_recommendati: row['iv_recommendati'],
+                                iv_rec: row['iv_rec'],
+                                roll_yield: row['roll_yield']
+                            });
+                            console.log('Parsed values:', {
+                                riskScore: riskScore,
+                                ivRank30: ivRank30,
+                                ivRank90: ivRank90,
+                                ivRecommendation: ivRecommendation,
+                                rollYield: rollYield
+                            });
+                            console.log('===============================');
+                        }
+                        
+                        // Create compact nested table
+                        const table = document.createElement('table');
+                        table.style.cssText = 'width:100%; border-collapse:collapse; margin:0; padding:0; line-height:1.2; font-size:0.85em;';
+                        
+                        // Risk Score row
+                        const riskRow = table.insertRow();
+                        const riskLabelCell = riskRow.insertCell();
+                        riskLabelCell.textContent = 'Risk:';
+                        riskLabelCell.style.cssText = 'padding:2px 4px 2px 0; margin:0; font-weight:600; border:none; text-align:left; white-space:nowrap;';
+                        const riskValueCell = riskRow.insertCell();
+                        riskValueCell.textContent = (riskScore !== null && !isNaN(riskScore)) ? riskScore.toFixed(1) : 'N/A';
+                        riskValueCell.style.cssText = 'padding:2px 0; margin:0; border:none; text-align:right;';
+                        
+                        // IV Rank row (30/90)
+                        const rankRow = table.insertRow();
+                        const rankLabelCell = rankRow.insertCell();
+                        rankLabelCell.textContent = 'IV Rank:';
+                        rankLabelCell.style.cssText = 'padding:2px 4px 2px 0; margin:0; font-weight:600; border:none; text-align:left; white-space:nowrap;';
+                        const rankValueCell = rankRow.insertCell();
+                        if (ivRank30 !== null && !isNaN(ivRank30) && ivRank90 !== null && !isNaN(ivRank90)) {
+                            rankValueCell.textContent = `${ivRank30.toFixed(1)}/${ivRank90.toFixed(1)}`;
+                        } else if (ivRank30 !== null && !isNaN(ivRank30)) {
+                            rankValueCell.textContent = `${ivRank30.toFixed(1)}/-`;
+                        } else if (ivRank90 !== null && !isNaN(ivRank90)) {
+                            rankValueCell.textContent = `-/${ivRank90.toFixed(1)}`;
+                        } else {
+                            rankValueCell.textContent = 'N/A';
+                        }
+                        rankValueCell.style.cssText = 'padding:2px 0; margin:0; border:none; text-align:right;';
+                        
+                        // IV Recommendation row
+                        const recRow = table.insertRow();
+                        const recLabelCell = recRow.insertCell();
+                        recLabelCell.textContent = 'IV Rec:';
+                        recLabelCell.style.cssText = 'padding:2px 4px 2px 0; margin:0; font-weight:600; border:none; text-align:left; white-space:nowrap;';
+                        const recValueCell = recRow.insertCell();
+                        recValueCell.textContent = ivRecommendation || 'N/A';
+                        recValueCell.style.cssText = 'padding:2px 0; margin:0; border:none; text-align:right; font-size:0.9em;';
+                        
+                        // Roll Yield row
+                        const rollRow = table.insertRow();
+                        const rollLabelCell = rollRow.insertCell();
+                        rollLabelCell.textContent = 'Roll Yield:';
+                        rollLabelCell.style.cssText = 'padding:2px 4px 2px 0; margin:0; font-weight:600; border:none; text-align:left; white-space:nowrap;';
+                        const rollValueCell = rollRow.insertCell();
+                        if (rollYield !== null && !isNaN(rollYield)) {
+                            // Parse roll yield - it might be a string like "2.5%" or a number
+                            let rollYieldValue = rollYield;
+                            if (typeof rollYield === 'string' && rollYield.endsWith('%')) {
+                                rollYieldValue = parseFloat(rollYield.replace('%', ''));
+                            }
+                            if (!isNaN(rollYieldValue) && isFinite(rollYieldValue)) {
+                                rollValueCell.textContent = rollYieldValue.toFixed(2) + '%';
+                            } else {
+                                rollValueCell.textContent = 'N/A';
+                            }
+                        } else {
+                            rollValueCell.textContent = 'N/A';
+                        }
+                        rollValueCell.style.cssText = 'padding:2px 0; margin:0; border:none; text-align:right;';
+                        
+                        td.innerHTML = '';
+                        td.appendChild(table);
+                        td.style.cssText = 'padding:4px 6px; vertical-align:top;';
+                        
+                        // Debug: verify table was created
+                        if (rowIdx === 0 && colIdx === 1) {
+                            console.log('Table created, rows:', table.rows.length);
+                            console.log('Table HTML:', td.innerHTML.substring(0, 200));
+                        }
+                        
+                        // Set raw value for filtering/sorting (for tkr_info, use risk_score as raw value)
+                        td.setAttribute('data-raw', riskScore !== null ? riskScore : '');
+                        
+                        // Add CSS classes for hidden columns
+                        if (colMeta.isHidden) {
+                            td.classList.add('is-hidden-col');
+                        }
+                        if (colMeta.isAlwaysHidden) {
+                            td.classList.add('always-hidden');
+                        }
+                        
+                        tr.appendChild(td);
+                        return; // Skip the rest of the column processing for tkr_info
+                    }
+                    
                     // Format the value (handle null/undefined gracefully)
                     const formatted = formatCellValue(value !== undefined ? value : null, colName);
                     
                     // Set display value
                     if (formatted.display) {
-                        // Special handling for current_price with change data - display as compact table
-                        if (normalizedCol === 'current_price' && typeof formatted.display === 'string' && 
+                            // Special handling for current_price with change data - display as compact table
+                            if (normalizedCol === 'current_price' && typeof formatted.display === 'string' && 
                             (formatted.display.includes('+$') || formatted.display.includes('-$'))) {
                             // Parse format like "$73.56 -$4.87 (-6.21%)" or "$124.59 +$0.50 (+0.40%)"
                             const priceMatch = formatted.display.match(/^\$?([\d,]+\.\d+)\s+([\+\-]\$[\d,]+\.\d+)\s+\(([\+\-][\d\.]+%)\)/);
@@ -602,13 +747,45 @@
                         }
                     }
                     
-                    // Make ticker column a link
+                    // Make ticker column a link with tooltip showing IV metrics
                     if (normalizedCol === 'ticker' && formatted.display) {
                         const tickerLink = document.createElement('a');
                         tickerLink.href = `/stock_info/${encodeURIComponent(formatted.display.trim())}`;
                         tickerLink.target = '_blank';
-                        tickerLink.style.cssText = 'color: #667eea; text-decoration: none; font-weight: 500;';
+                        tickerLink.style.cssText = 'color: #667eea; text-decoration: none; font-weight: 500; cursor: help;';
                         tickerLink.textContent = formatted.display;
+                        
+                        // Get IV metrics for tooltip
+                        const riskScore = row['risk_score'] !== undefined && row['risk_score'] !== null ? parseFloat(row['risk_score']) : null;
+                        const ivRank30 = row['iv_rank_30'] !== undefined && row['iv_rank_30'] !== null ? parseFloat(row['iv_rank_30']) : null;
+                        const ivRank90 = row['iv_rank_90'] !== undefined && row['iv_rank_90'] !== null ? parseFloat(row['iv_rank_90']) : null;
+                        // Try multiple possible column names (full, truncated, compact)
+                        const ivRecommendationRaw = (row['iv_recommendation'] || row['iv_recommendati'] || row['iv_rec'] || null);
+                        const ivRecommendation = ivRecommendationRaw ? String(ivRecommendationRaw).trim() : null;
+                        const rollYield = row['roll_yield'] !== undefined && row['roll_yield'] !== null ? parseFloat(row['roll_yield']) : null;
+                        
+                        // Build tooltip text
+                        let tooltipText = 'IV Metrics:\n';
+                        tooltipText += `Risk Score: ${riskScore !== null ? riskScore.toFixed(1) : 'N/A'}\n`;
+                        if (ivRank30 !== null && ivRank90 !== null) {
+                            tooltipText += `IV Rank: ${ivRank30.toFixed(1)}/${ivRank90.toFixed(1)}\n`;
+                        } else if (ivRank30 !== null) {
+                            tooltipText += `IV Rank: ${ivRank30.toFixed(1)}/-\n`;
+                        } else {
+                            tooltipText += 'IV Rank: N/A\n';
+                        }
+                        tooltipText += `IV Recommendation: ${ivRecommendation || 'N/A'}\n`;
+                        if (rollYield !== null) {
+                            let rollYieldValue = rollYield;
+                            if (typeof rollYield === 'string' && rollYield.endsWith('%')) {
+                                rollYieldValue = parseFloat(rollYield.replace('%', ''));
+                            }
+                            tooltipText += `Roll Yield: ${rollYieldValue.toFixed(2)}%`;
+                        } else {
+                            tooltipText += 'Roll Yield: N/A';
+                        }
+                        
+                        tickerLink.title = tooltipText;
                         td.innerHTML = '';
                         td.appendChild(tickerLink);
                     }
@@ -763,7 +940,7 @@
             return parsed ? parsed.ask : null;
         }
         
-        // Get virtual field value (spread, l_spread, bid, ask, l_bid, l_ask) from a row
+        // Get virtual field value (spread, l_spread, bid, ask, l_bid, l_ask, tkr_info.*) from a row
         function getVirtualFieldValue(fieldName, row, tableId) {
             const lowerField = fieldName.toLowerCase().replace(/\s+/g, '_').trim();
             
@@ -777,6 +954,38 @@
                             return getRawText(cell);
                         }
                     }
+                }
+                return null;
+            }
+            
+            // Handle tkr_info.* fields - extract from row data directly
+            if (lowerField.startsWith('tkr_info.')) {
+                const subField = lowerField.substring(9); // Remove 'tkr_info.' prefix
+                // Map subfield names to actual row data keys
+                const fieldMap = {
+                    'risk_score': 'risk_score',
+                    'risk': 'risk_score',
+                    'iv_rank_30': 'iv_rank_30',
+                    'iv_rank30': 'iv_rank_30',
+                    'rank_30': 'iv_rank_30',
+                    'iv_rank_90': 'iv_rank_90',
+                    'iv_rank90': 'iv_rank_90',
+                    'rank_90': 'iv_rank_90',
+                    'iv_recommendation': 'iv_recommendation',
+                    'recommendation': 'iv_recommendation',
+                    'rec': 'iv_recommendation',
+                    'roll_yield': 'roll_yield',
+                    'roll': 'roll_yield',
+                    'yield': 'roll_yield'
+                };
+                const actualField = fieldMap[subField] || subField;
+                const value = row[actualField];
+                if (value !== undefined && value !== null) {
+                    // Parse roll yield if it's a string with %
+                    if (actualField === 'roll_yield' && typeof value === 'string' && value.endsWith('%')) {
+                        return parseFloat(value.replace('%', ''));
+                    }
+                    return typeof value === 'number' ? value : parseFloat(value);
                 }
                 return null;
             }
@@ -827,7 +1036,8 @@
                 lowerField === 'l_bid' ||
                 lowerField === 'long_bid' ||
                 lowerField === 'l_ask' ||
-                lowerField === 'long_ask'
+                lowerField === 'long_ask' ||
+                lowerField.startsWith('tkr_info.')
             );
         }
         
