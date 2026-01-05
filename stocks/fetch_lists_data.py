@@ -6,6 +6,7 @@ import os
 import yaml
 import sys
 from pathlib import Path
+from typing import List, Tuple
 
 import pandas as pd
 import io
@@ -13,6 +14,31 @@ import io
 # Define all available concrete types
 FULL_AVAILABLE_TYPES = ['nyse', 'nasdaq', 'nasdaq-new', 'nyse-new', 'dow-jones', 'sp-500', 'etfs', 'crypto', 'stocks_to_track', 'stocks_to_track2']
 ALL_AVAILABLE_TYPES = ['nyse', 'nasdaq', 'dow-jones', 'sp-500', 'etfs', 'crypto', 'stocks_to_track', 'stocks_to_track2']
+
+
+def parse_types_with_subtraction(types: List[str]) -> Tuple[List[str], List[str]]:
+    """
+    Parse types list into add_types and subtract_types.
+    
+    Args:
+        types: List of type strings, where types prefixed with '-' are subtracted
+        
+    Returns:
+        Tuple of (add_types, subtract_types) where both are lists of type names without prefixes
+    """
+    add_types = []
+    subtract_types = []
+    
+    for type_str in types:
+        if type_str.startswith('-'):
+            # Remove the '-' prefix
+            subtract_type = type_str[1:]
+            if subtract_type:
+                subtract_types.append(subtract_type)
+        else:
+            add_types.append(type_str)
+    
+    return add_types, subtract_types
 
 async def fetch_nasdaq_companies():
     """
@@ -344,19 +370,28 @@ async def fetch_data_by_type(data_type):
         # We return an empty list here and let fetch_types() handle disk-only types explicitly.
         return []
 
-async def fetch_types(args):
-    """Fetch all types of symbols"""
-    if not args.types:
+async def fetch_types(args, add_types: List[str] | None = None, subtract_types: List[str] | None = None):
+    """Fetch all types of symbols with optional subtraction support"""
+    # Use provided add_types/subtract_types if available, otherwise parse from args.types
+    if add_types is None or subtract_types is None:
+        if not args.types:
+            return []
+        
+        # Parse types into add and subtract lists
+        add_types, subtract_types = parse_types_with_subtraction(args.types)
+    
+    if not add_types:
+        print("No valid symbol types selected for fetching.")
         return []
     
     # When "all" is specified, use ALL_AVAILABLE_TYPES (excludes -new types)
     # When specific types are specified (including -new types), use them explicitly
-    if "all" in args.types:
+    if "all" in add_types:
         # Use ALL_AVAILABLE_TYPES which excludes nasdaq-new and nyse-new
         current_types_for_fetching = list(ALL_AVAILABLE_TYPES)
     else:
         # Use explicitly specified types (can include -new types if user requests them)
-        current_types_for_fetching = [ty for ty in args.types if ty != "all" and ty in FULL_AVAILABLE_TYPES]
+        current_types_for_fetching = [ty for ty in add_types if ty != "all" and ty in FULL_AVAILABLE_TYPES]
     
     # Remove duplicates
     current_types_for_fetching = sorted(list(set(current_types_for_fetching)))
@@ -422,32 +457,88 @@ async def fetch_types(args):
         else:
             print(f"No symbols found or fetched for type: {data_type}")
 
+    # 3) Handle subtraction if subtract_types are specified
+    if subtract_types:
+        subtract_symbols = set()
+        
+        # Determine which subtract types to process
+        if "all" in subtract_types:
+            subtract_types_to_process = list(ALL_AVAILABLE_TYPES)
+        else:
+            subtract_types_to_process = [ty for ty in subtract_types if ty != "all" and ty in FULL_AVAILABLE_TYPES]
+        
+        # Load symbols for subtract types from disk or network
+        for subtract_type in subtract_types_to_process:
+            if subtract_type in disk_only_types:
+                # Load from disk
+                yaml_file = os.path.join(list_dir_path, f'{subtract_type}_symbols.yaml')
+                if not os.path.exists(yaml_file):
+                    yaml_file = os.path.join(list_dir_path, f'{subtract_type}.yaml')
+                try:
+                    with open(yaml_file, 'r') as f:
+                        data = yaml.safe_load(f)
+                        if data and 'symbols' in data and isinstance(data['symbols'], list):
+                            subtract_symbols.update(data['symbols'])
+                            print(f"Loaded {len(data['symbols'])} symbols for subtraction from {subtract_type}", file=sys.stderr)
+                except Exception as e:
+                    print(f"Warning: Could not load {subtract_type} for subtraction: {e}", file=sys.stderr)
+            else:
+                # Fetch from network
+                try:
+                    symbols = await fetch_data_by_type(subtract_type)
+                    if symbols:
+                        subtract_symbols.update(symbols)
+                        print(f"Fetched {len(symbols)} symbols for subtraction from {subtract_type}", file=sys.stderr)
+                except Exception as e:
+                    print(f"Warning: Could not fetch {subtract_type} for subtraction: {e}", file=sys.stderr)
+        
+        # Subtract symbols
+        original_count = len(all_symbols)
+        all_symbols -= subtract_symbols
+        removed_count = original_count - len(all_symbols)
+        if removed_count > 0:
+            print(f"Subtracted {removed_count} symbols from {subtract_types} (remaining: {len(all_symbols)})", file=sys.stderr)
+
     all_symbols_list = sorted(list(all_symbols))
     print(f"Total unique symbols from specified types: {len(all_symbols_list)}")
     return all_symbols_list
 
-def load_symbols_from_disk(args):
+def load_symbols_from_disk(args, add_types: List[str] | None = None, subtract_types: List[str] | None = None):
     """Load symbols from previously saved YAML files based on specified types.
+    
+    Args:
+        args: Parsed command line arguments
+        add_types: List of types to add (if None, parsed from args.types)
+        subtract_types: List of types to subtract (if None, parsed from args.types)
     
     Returns:
         dict with 'symbols' (list) and 'loaded_types' (list) keys, or empty list for backward compatibility
     """
+    # Use provided add_types/subtract_types if available, otherwise parse from args.types
+    if add_types is None or subtract_types is None:
+        if not args.types:
+            print("Info: --load-only used but no --types specified. No symbol lists to load.")
+            return {'symbols': [], 'loaded_types': []}
+        
+        # Parse types into add and subtract lists
+        add_types, subtract_types = parse_types_with_subtraction(args.types)
+    
+    if not add_types:
+        print("No valid symbol types selected for loading from disk.")
+        return {'symbols': [], 'loaded_types': []}
+    
     all_symbols = set()
     loaded_types = []  # Track which types were successfully loaded
     list_dir_path = os.path.join(args.data_dir, 'lists')
 
-    if not args.types:
-        print("Info: --load-only used but no --types specified. No symbol lists to load.")
-        return {'symbols': [], 'loaded_types': []}
-
     # When "all" is specified, use ALL_AVAILABLE_TYPES (excludes -new types)
     # When specific types are specified (including -new types), use them explicitly
-    if "all" in args.types:
+    if "all" in add_types:
         # Use ALL_AVAILABLE_TYPES which excludes nasdaq-new and nyse-new
         current_types_to_load = list(ALL_AVAILABLE_TYPES)
     else:
         # Use explicitly specified types (can include -new types if user requests them)
-        current_types_to_load = [ty for ty in args.types if ty != "all" and ty in FULL_AVAILABLE_TYPES]
+        current_types_to_load = [ty for ty in add_types if ty != "all" and ty in FULL_AVAILABLE_TYPES]
     
     # Remove duplicates
     current_types_to_load = sorted(list(set(current_types_to_load)))
@@ -482,11 +573,44 @@ def load_symbols_from_disk(args):
         except Exception as e:
             print(f"Error loading {yaml_file} for type {data_type}: {e}", file=sys.stderr)
     
+    # Handle subtraction if subtract_types are specified
+    if subtract_types:
+        subtract_symbols = set()
+        
+        # Determine which subtract types to process
+        if "all" in subtract_types:
+            subtract_types_to_process = list(ALL_AVAILABLE_TYPES)
+        else:
+            subtract_types_to_process = [ty for ty in subtract_types if ty != "all" and ty in FULL_AVAILABLE_TYPES]
+        
+        # Load symbols for subtract types from disk
+        for subtract_type in subtract_types_to_process:
+            yaml_file = os.path.join(list_dir_path, f'{subtract_type}_symbols.yaml')
+            if not os.path.exists(yaml_file):
+                yaml_file = os.path.join(list_dir_path, f'{subtract_type}.yaml')
+            try:
+                with open(yaml_file, 'r') as f:
+                    data = yaml.safe_load(f)
+                    if data and 'symbols' in data and isinstance(data['symbols'], list):
+                        subtract_symbols.update(data['symbols'])
+                        print(f"Loaded {len(data['symbols'])} symbols for subtraction from {subtract_type}", file=sys.stderr)
+            except FileNotFoundError:
+                print(f"Warning: File {yaml_file} not found for subtract type {subtract_type}. Skipping.", file=sys.stderr)
+            except Exception as e:
+                print(f"Warning: Could not load {subtract_type} for subtraction: {e}", file=sys.stderr)
+        
+        # Subtract symbols
+        original_count = len(all_symbols)
+        all_symbols -= subtract_symbols
+        removed_count = original_count - len(all_symbols)
+        if removed_count > 0:
+            print(f"Subtracted {removed_count} symbols from {subtract_types} (remaining: {len(all_symbols)})", file=sys.stderr)
+    
     all_symbols_list = sorted(list(all_symbols))
     if all_symbols_list:
         print(f"Total unique symbols loaded from disk for specified types: {len(all_symbols_list)}", file=sys.stderr)
     else:
-        if args.types: # Only print this if types were specified but nothing loaded
+        if add_types: # Only print this if types were specified but nothing loaded
             print("No symbols were loaded from disk for the specified types.", file=sys.stderr)
     
     # Return dict with symbols and loaded_types for new logic, but maintain backward compatibility

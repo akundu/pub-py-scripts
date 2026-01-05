@@ -4166,20 +4166,26 @@ async def get_stock_info_parallel(
     ))
     task_keys.append('price')
     
-    # Options info (always needed)
-    tasks.append(get_options_info(
-        symbol,
-        db_instance,
-        options_days=options_days,
-        force_fetch=force_fetch,
-        data_source=data_source,
-        option_type=option_type,
-        strike_range_percent=strike_range_percent,
-        max_options_per_expiry=max_options_per_expiry,
-        enable_cache=enable_cache,
-        redis_url=redis_url
-    ))
-    task_keys.append('options')
+    # Options info (skip if options_days <= 0 for lazy loading)
+    if options_days > 0:
+        tasks.append(get_options_info(
+            symbol,
+            db_instance,
+            options_days=options_days,
+            force_fetch=force_fetch,
+            data_source=data_source,
+            option_type=option_type,
+            strike_range_percent=strike_range_percent,
+            max_options_per_expiry=max_options_per_expiry,
+            enable_cache=enable_cache,
+            redis_url=redis_url
+        ))
+        task_keys.append('options')
+    else:
+        async def return_none_options():
+            return None
+        tasks.append(return_none_options())
+        task_keys.append('options')
     
     # Financial info (always needed)
     tasks.append(get_financial_info(
