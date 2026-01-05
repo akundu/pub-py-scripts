@@ -51,16 +51,18 @@
 
     .header-content-wrapper {
       display: flex;
-      flex-direction: column;
-      gap: 20px;
+      flex-direction: row;
+      gap: 40px;
       margin: 20px 0;
+      align-items: flex-start;
     }
 
     .price-section {
       display: flex;
       flex-direction: column;
       gap: 10px;
-      width: 100%;
+      flex: 0 0 auto;
+      min-width: 300px;
     }
 
     .price-row {
@@ -121,8 +123,8 @@
     .metrics-grid.main-metrics {
       grid-template-columns: repeat(3, 1fr);
       gap: 0;
-      width: 100%;
-      margin-top: 20px;
+      flex: 1 1 auto;
+      margin-top: 0;
     }
 
     .metrics-grid.financial-ratios {
@@ -307,15 +309,20 @@
       </div>
     </div>
 
-    <div class="data-section" id="financialRatiosSection" style="display: none;">
-      <h2>Financial Ratios & Metrics</h2>
-      <div class="metrics-grid financial-ratios" id="financialRatiosGrid">
-        <!-- Will be populated by JavaScript -->
-      </div>
-    </div>
-
     <div class="chart-section">
-      <h2>Price Chart</h2>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h2 style="margin: 0;">Price Chart</h2>
+        <div id="chartRangeInfo" style="display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; background: #161b22; border-radius: 6px; border: 1px solid #30363d; font-size: 13px; color: #c9d1d9; min-width: 200px;">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <span id="rangeDates" style="color: #8b949e;">--</span>
+            <span id="rangeMove" style="font-weight: 600;">--</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 10px; font-size: 12px; color: #8b949e;">
+            <span>Min: <span id="rangeMin" style="color: #ef5350; font-weight: 500;">--</span></span>
+            <span>Max: <span id="rangeMax" style="color: #26a69a; font-weight: 500;">--</span></span>
+          </div>
+        </div>
+      </div>
       <div class="chart-controls" style="display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px;">
         <button class="chart-btn active" onclick="switchTimePeriod('1d')" id="btn-1d">1D</button>
         <button class="chart-btn" onclick="switchTimePeriod('1w')" id="btn-1w">1W</button>
@@ -333,6 +340,13 @@
           <p style="font-size: 12px; margin-top: 10px;">Try adding <code>?force_fetch=true</code> to the URL to fetch
             data from the API.</p>
         </div>
+      </div>
+    </div>
+
+    <div class="data-section" id="financialRatiosSection" style="display: none;">
+      <h2>Financial Ratios & Metrics</h2>
+      <div class="metrics-grid financial-ratios" id="financialRatiosGrid">
+        <!-- Will be populated by JavaScript -->
       </div>
     </div>
 
