@@ -104,25 +104,53 @@ async def fetch_lists_data(
                     error_msg += " Please ensure fetch_lists_data.py is accessible and all dependencies are installed."
                 print(error_msg, file=sys.stderr)
             return []
+        
+        # Parse types into add and subtract lists
+        # Import locally to avoid circular import
+        from fetch_lists_data import parse_types_with_subtraction
+        add_types, subtract_types = parse_types_with_subtraction(args.types)
+        
+        # Validate types
+        all_valid_types = set(FULL_AVAILABLE_TYPES + ['all'])
+        invalid_add_types = [t for t in add_types if t not in all_valid_types]
+        invalid_subtract_types = [t for t in subtract_types if t not in all_valid_types]
+        
+        if invalid_add_types:
+            if not quiet:
+                print(f"Error: Invalid types specified: {invalid_add_types}. Valid types: {sorted(FULL_AVAILABLE_TYPES + ['all'])}", file=sys.stderr)
+            return []
+        
+        if invalid_subtract_types:
+            if not quiet:
+                print(f"Error: Invalid subtract types specified: {invalid_subtract_types}. Valid types: {sorted(FULL_AVAILABLE_TYPES + ['all'])}", file=sys.stderr)
+            return []
+        
+        if not add_types:
+            if not quiet:
+                print("Error: At least one type must be specified without '-' prefix to add symbols.", file=sys.stderr)
+            return []
             
         if args.fetch_online:
             # Force fetch from network
             if not quiet:
-                print("Fetching symbol lists from network as --fetch-online was specified.")
-            all_symbols_list = await fetch_types(args)
+                if subtract_types:
+                    print(f"Fetching symbol lists from network: adding {add_types}, subtracting {subtract_types}")
+                else:
+                    print(f"Fetching symbol lists from network: {add_types}")
+            all_symbols_list = await fetch_types(args, add_types=add_types, subtract_types=subtract_types)
         else:
             # Try loading from disk first
-            disk_result = load_symbols_from_disk(args)
+            disk_result = load_symbols_from_disk(args, add_types=add_types, subtract_types=subtract_types)
             all_symbols_list = disk_result.get('symbols', []) if isinstance(disk_result, dict) else disk_result
             loaded_types = disk_result.get('loaded_types', []) if isinstance(disk_result, dict) else []
             
-            # Determine which types were requested
+            # Determine which types were requested (for add types only)
             # When "all" is specified, use ALL_AVAILABLE_TYPES (excludes -new types)
             # When specific types are specified (including -new types), use them explicitly
-            if "all" in args.types:
+            if "all" in add_types:
                 requested_types = list(ALL_AVAILABLE_TYPES)
             else:
-                requested_types = [t for t in args.types if t in FULL_AVAILABLE_TYPES]
+                requested_types = [t for t in add_types if t in FULL_AVAILABLE_TYPES]
             
             # Find types that weren't loaded from disk but are fetchable
             missing_types = [t for t in requested_types if t not in loaded_types]
@@ -138,7 +166,7 @@ async def fetch_lists_data(
                 # Create a temporary args object with only the missing types
                 temp_args = argparse.Namespace(**vars(args))
                 temp_args.types = missing_types
-                network_symbols = await fetch_types(temp_args)
+                network_symbols = await fetch_types(temp_args, add_types=missing_types, subtract_types=[])
                 
                 # Combine symbols from disk and network
                 all_symbols_set = set(all_symbols_list)
@@ -150,7 +178,7 @@ async def fetch_lists_data(
             elif not all_symbols_list:
                 # Nothing was loaded and nothing to fetch
                 if not quiet:
-                    print(f"Info: Could not load symbols for {args.types} from disk. Use --fetch-online to fetch them.")
+                    print(f"Info: Could not load symbols for {add_types} from disk. Use --fetch-online to fetch them.")
     
     if apply_exclusions and all_symbols_list:
         all_symbols_list = await apply_symbol_exclusions(all_symbols_list, args, quiet)
@@ -202,8 +230,7 @@ def add_symbol_arguments(
         )
     
     symbol_group.add_argument('--types', nargs='+', 
-                      choices=(FULL_AVAILABLE_TYPES + ['all']) if SYMBOL_LOADING_AVAILABLE else ['all'],
-                      help='Types of symbol lists to process. \'all\' processes all. Used with --fetch-online for network fetch. Mutually exclusive with symbol, --symbols, and --symbols-list.')
+                      help='Types of symbol lists to process. \'all\' processes all. Prefix with \'-\' to subtract a list (e.g., --types sp500 stocks_to_track -etfs). Used with --fetch-online for network fetch. Mutually exclusive with symbol, --symbols, and --symbols-list.')
     
     # Add common symbol-related arguments
     parser.add_argument(
