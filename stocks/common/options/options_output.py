@@ -34,8 +34,67 @@ def enrich_dataframe_with_financial_data(
         lambda x: round(x / 1e9, 2) if pd.notna(x) and x is not None else None
     )
     
+    # Add IV metrics from financial_data
+    # Risk score (0-10) - check multiple locations
+    df_renamed['risk_score'] = df_renamed['ticker'].map(
+        lambda x: (
+            financial_data.get(x, {}).get('risk_score')  # Root level (from options_analyzer)
+            or financial_data.get(x, {}).get('iv_strategy', {}).get('risk_score')  # From iv_strategy (from stock info)
+            or (financial_data.get(x, {}).get('iv_metrics', {}).get('risk_score') 
+                if isinstance(financial_data.get(x, {}).get('iv_metrics'), dict) else None)
+        )
+    )
+    
+    # IV Rank 30-day
+    df_renamed['iv_rank_30'] = df_renamed['ticker'].map(
+        lambda x: financial_data.get(x, {}).get('iv_rank')
+    )
+    
+    # IV Rank 90-day
+    df_renamed['iv_rank_90'] = df_renamed['ticker'].map(
+        lambda x: financial_data.get(x, {}).get('iv_90d_rank') 
+        or financial_data.get(x, {}).get('iv_metrics', {}).get('rank_90d')
+        if isinstance(financial_data.get(x, {}).get('iv_metrics'), dict)
+        else None
+    )
+    
+    # IV Recommendation - check multiple locations
+    df_renamed['iv_recommendation'] = df_renamed['ticker'].map(
+        lambda x: (
+            financial_data.get(x, {}).get('iv_recommendation')  # Root level (from options_analyzer)
+            or financial_data.get(x, {}).get('iv_strategy', {}).get('recommendation')  # From iv_strategy (from stock info)
+            or (financial_data.get(x, {}).get('iv_metrics', {}).get('recommendation')
+                if isinstance(financial_data.get(x, {}).get('iv_metrics'), dict) else None)
+        )
+    )
+    
+    # Roll Yield (percentage)
+    def parse_roll_yield(value):
+        """Parse roll_yield from string like '2.5%' to float, or return as-is if already numeric."""
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            # Remove % sign and parse
+            cleaned = value.rstrip('%').strip()
+            try:
+                return float(cleaned)
+            except (ValueError, TypeError):
+                return None
+        return None
+    
+    df_renamed['roll_yield'] = df_renamed['ticker'].map(
+        lambda x: parse_roll_yield(
+            financial_data.get(x, {}).get('iv_metrics', {}).get('roll_yield')
+            if isinstance(financial_data.get(x, {}).get('iv_metrics'), dict)
+            else financial_data.get(x, {}).get('roll_yield')
+        )
+    )
+    
     # Normalize numeric columns
-    for col in ['implied_volatility', 'long_implied_volatility', 'long_contracts_available']:
+    for col in ['implied_volatility', 'long_implied_volatility', 'long_contracts_available',
+                'risk_score', 'iv_rank_30', 'iv_rank_90', 'roll_yield']:
         if col in df_renamed.columns:
             df_renamed[col] = pd.to_numeric(df_renamed[col], errors='coerce')
     
@@ -93,10 +152,15 @@ def format_timestamp_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def get_display_columns(is_spread_mode: bool) -> List[str]:
     """Get the list of display columns based on mode."""
+    # IV metrics columns to include
+    iv_metrics_columns = ['risk_score', 'iv_rank_30', 'iv_rank_90', 'iv_recommendation', 'roll_yield']
+    
     if is_spread_mode:
         return [
             'ticker', 'option_type', 'pe_ratio', 'market_cap_b', 'current_price', 
             'price_with_change', 'price_change_pct',
+            # IV metrics (for tkr_info column)
+            *iv_metrics_columns,
             # Short option details
             'strike_price', 'price_above_current', 'option_premium', 'bid_ask',
             'implied_volatility', 'delta', 'theta', 'expiration_date', 'days_to_expiry',
@@ -116,7 +180,10 @@ def get_display_columns(is_spread_mode: bool) -> List[str]:
     else:
         return [
             'ticker', 'option_type', 'pe_ratio', 'market_cap_b', 'current_price', 
-            'price_with_change', 'price_change_pct', 'strike_price',
+            'price_with_change', 'price_change_pct',
+            # IV metrics (for tkr_info column)
+            *iv_metrics_columns,
+            'strike_price',
             'price_above_current', 'option_premium', 'bid_ask', 
             'premium_above_diff_percentage',
             'implied_volatility', 'delta', 'theta',

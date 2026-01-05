@@ -113,6 +113,7 @@ def create_compact_headers(df: pd.DataFrame) -> Dict[str, str]:
         'short_premium_total': 's_prem_tot',
         'short_daily_premium': 's_day_prem',
         'long_premium_total': 'l_prem_tot',
+        'iv_recommendation': 'iv_rec',  # Prevent truncation
     }
     
     for col in df.columns:
