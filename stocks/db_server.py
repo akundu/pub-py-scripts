@@ -3351,10 +3351,14 @@ async def handle_stock_info(request: web.Request) -> web.Response:
         }, status=500)
     
     try:
+        # Start overall timing
+        overall_start = time.time()
+        
         # Import functions from fetch_symbol_data
         from fetch_symbol_data import get_stock_info_parallel
         
         # Parse query parameters
+        parse_start = time.time()
         latest = request.query.get('latest', 'false').lower() == 'true'
         start_date = request.query.get('start_date')
         end_date = request.query.get('end_date')
@@ -3392,8 +3396,11 @@ async def handle_stock_info(request: web.Request) -> web.Response:
                 end_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
             if not start_date:
                 start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')  # 1 year default
+        parse_time = (time.time() - parse_start) * 1000
+        logger.info(f"[TIMING] {symbol}: Parameter parsing took {parse_time:.2f}ms")
         
         # Call the parallel helper function
+        parallel_start = time.time()
         result = await get_stock_info_parallel(
             symbol,
             db_instance,
@@ -3413,9 +3420,12 @@ async def handle_stock_info(request: web.Request) -> web.Response:
             redis_url=redis_url,
             price_timeframe=timeframe,
         )
+        parallel_time = (time.time() - parallel_start) * 1000
+        logger.info(f"[TIMING] {symbol}: get_stock_info_parallel took {parallel_time:.2f}ms")
 
         # Attach merged price series (realtime + hourly + daily) for consumers that
         # want a single time-ordered series (e.g. the HTML chart/frontend).
+        merged_start = time.time()
         try:
             merged_df = await db_instance.get_merged_price_series(symbol)
         except NotImplementedError:
@@ -3423,7 +3433,10 @@ async def handle_stock_info(request: web.Request) -> web.Response:
         except Exception as e:
             logger.warning(f"Error fetching merged price series for {symbol}: {e}")
             merged_df = None
+        merged_fetch_time = (time.time() - merged_start) * 1000
+        logger.info(f"[TIMING] {symbol}: get_merged_price_series took {merged_fetch_time:.2f}ms")
 
+        merged_serialize_start = time.time()
         if merged_df is not None and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
             try:
                 # Ensure index is available as 'timestamp' column
@@ -3438,8 +3451,12 @@ async def handle_stock_info(request: web.Request) -> web.Response:
                 price_info['merged_price_series'] = merged_records
             except Exception as e:
                 logger.warning(f"Error serializing merged price series for {symbol}: {e}")
+        merged_serialize_time = (time.time() - merged_serialize_start) * 1000
+        if merged_serialize_time > 0.1:  # Only log if it took meaningful time
+            logger.info(f"[TIMING] {symbol}: Merged price series serialization took {merged_serialize_time:.2f}ms")
         
         # Convert DataFrames to JSON-serializable format
+        price_df_convert_start = time.time()
         if result.get('price_info') and result['price_info'].get('price_data') is not None:
             price_df = result['price_info']['price_data']
             if hasattr(price_df, 'to_dict'):
@@ -3486,8 +3503,12 @@ async def handle_stock_info(request: web.Request) -> web.Response:
                 
                 # Convert DataFrame to records format
                 result['price_info']['price_data'] = dataframe_to_json_records(df)
+        price_df_convert_time = (time.time() - price_df_convert_start) * 1000
+        if price_df_convert_time > 0.1:  # Only log if it took meaningful time
+            logger.info(f"[TIMING] {symbol}: Price DataFrame conversion took {price_df_convert_time:.2f}ms")
         
         # Convert all Timestamp objects in the result to ISO strings for JSON serialization
+        timestamp_convert_start = time.time()
         def convert_timestamps_recursive(obj: Any) -> Any:
             """Recursively convert Timestamp/datetime objects to ISO strings."""
             import pandas as pd
@@ -3510,9 +3531,21 @@ async def handle_stock_info(request: web.Request) -> web.Response:
         
         # Apply conversion to entire result
         result = convert_timestamps_recursive(result)
+        timestamp_convert_time = (time.time() - timestamp_convert_start) * 1000
+        if timestamp_convert_time > 0.1:  # Only log if it took meaningful time
+            logger.info(f"[TIMING] {symbol}: Timestamp conversion took {timestamp_convert_time:.2f}ms")
         
         # Return JSON response
-        return web.json_response(result)
+        json_response_start = time.time()
+        response = web.json_response(result)
+        json_response_time = (time.time() - json_response_start) * 1000
+        if json_response_time > 0.1:  # Only log if it took meaningful time
+            logger.info(f"[TIMING] {symbol}: JSON response creation took {json_response_time:.2f}ms")
+        
+        overall_time = (time.time() - overall_start) * 1000
+        logger.info(f"[TIMING] {symbol}: Total /stock_info/ endpoint time: {overall_time:.2f}ms")
+        
+        return response
         
     except Exception as e:
         logger.error(f"Error handling stock info request for {symbol}: {e}")
@@ -6795,10 +6828,14 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         )
     
     try:
+        # Start overall timing
+        overall_start = time.time()
+        
         # Import functions from fetch_symbol_data
         from fetch_symbol_data import get_stock_info_parallel
         
         # Parse query parameters - same as API endpoint
+        parse_start = time.time()
         latest = request.query.get('latest', 'false').lower() == 'true'
         start_date = request.query.get('start_date')
         end_date = request.query.get('end_date')
@@ -6833,8 +6870,11 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         
         # If we have dates but no data is found, we'll try a wider range in the fallback
         # For now, let's try to get any available data if the initial query fails
+        parse_time = (time.time() - parse_start) * 1000
+        logger.info(f"[TIMING] {symbol}: Parameter parsing took {parse_time:.2f}ms")
         
         # Call the parallel helper function
+        parallel_start = time.time()
         result = await get_stock_info_parallel(
             symbol,
             db_instance,
@@ -6853,8 +6893,11 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
             enable_cache=enable_cache,
             redis_url=redis_url
         )
+        parallel_time = (time.time() - parallel_start) * 1000
+        logger.info(f"[TIMING] {symbol}: get_stock_info_parallel took {parallel_time:.2f}ms")
         
         # Attach merged price series for the HTML view (used by the chart JS).
+        merged_start = time.time()
         try:
             merged_df = await db_instance.get_merged_price_series(symbol)
         except NotImplementedError:
@@ -6862,7 +6905,10 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         except Exception as e:
             logger.warning(f"Error fetching merged price series for HTML view {symbol}: {e}")
             merged_df = None
+        merged_fetch_time = (time.time() - merged_start) * 1000
+        logger.info(f"[TIMING] {symbol}: get_merged_price_series (first) took {merged_fetch_time:.2f}ms")
 
+        merged_serialize_start = time.time()
         if merged_df is not None and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
             try:
                 mdf = merged_df.copy()
@@ -6875,6 +6921,9 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 price_info['merged_price_series'] = merged_records
             except Exception as e:
                 logger.warning(f"Error serializing merged price series for HTML {symbol}: {e}")
+        merged_serialize_time = (time.time() - merged_serialize_start) * 1000
+        if merged_serialize_time > 0.1:
+            logger.info(f"[TIMING] {symbol}: Merged price series serialization (first) took {merged_serialize_time:.2f}ms")
         
         # If no price_data was fetched and we're not in latest_only mode, try to fetch it
         # This handles the case where the database doesn't have historical data yet
@@ -6884,11 +6933,15 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
             # we could trigger a background fetch here if needed
         
         # Fetch earnings date (async, cached)
+        earnings_start = time.time()
         earnings_date_str = await fetch_earnings_date(symbol)
+        earnings_time = (time.time() - earnings_start) * 1000
+        logger.info(f"[TIMING] {symbol}: fetch_earnings_date took {earnings_time:.2f}ms")
         
         # Fetch additional data from database
         # 1. Previous close price
         # Get the close from the last trading day (not today)
+        additional_data_start = time.time()
         prev_close_map = await db_instance.get_previous_close_prices([symbol])
         previous_close = prev_close_map.get(symbol)
         
@@ -6903,6 +6956,7 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         open_price = open_price_map.get(symbol)
         
         # 3. After-hours price from realtime DB (latest quote - always fetch, let JS decide when to show)
+        after_hours_start = time.time()
         after_hours_price = None
         try:
             # Get latest realtime quote (regardless of market hours - JS will determine when to display)
@@ -6914,8 +6968,12 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 after_hours_price = latest_quote.get('ask_price') or latest_quote.get('price')
         except Exception as e:
             logger.debug(f"Error fetching after-hours price for {symbol}: {e}")
+        after_hours_time = (time.time() - after_hours_start) * 1000
+        if after_hours_time > 0.1:
+            logger.info(f"[TIMING] {symbol}: After-hours price fetch took {after_hours_time:.2f}ms")
         
         # 4. Bid/Ask from realtime, hourly, or daily (in that order)
+        bid_ask_start = time.time()
         bid_price = None
         ask_price = None
         bid_size = None
@@ -6960,8 +7018,12 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                         ask_price = latest_daily.get('ask') or latest_daily.get('ask_price')
             except Exception as e:
                 logger.debug(f"Error fetching bid/ask from daily for {symbol}: {e}")
+        bid_ask_time = (time.time() - bid_ask_start) * 1000
+        if bid_ask_time > 0.1:
+            logger.info(f"[TIMING] {symbol}: Bid/Ask fetch took {bid_ask_time:.2f}ms")
         
         # 5. Fetch daily price range (high/low) from Redis
+        daily_range_start = time.time()
         # Note: The range automatically includes today's open price from daily_prices
         # when updated via _update_daily_price_range
         daily_range = None
@@ -6970,6 +7032,12 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 daily_range = await db_instance.get_daily_price_range(symbol)
         except Exception as e:
             logger.debug(f"Error fetching daily price range for {symbol}: {e}")
+        daily_range_time = (time.time() - daily_range_start) * 1000
+        if daily_range_time > 0.1:
+            logger.info(f"[TIMING] {symbol}: Daily price range fetch took {daily_range_time:.2f}ms")
+        
+        additional_data_time = (time.time() - additional_data_start) * 1000
+        logger.info(f"[TIMING] {symbol}: Additional data fetches (prev_close, open, etc.) took {additional_data_time:.2f}ms")
         
         # Add fetched data to result
         price_info = result.setdefault('price_info', {})
@@ -6998,6 +7066,7 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 logger.warning(f"No daily range found for {symbol}")
         
         # Fetch options last update timestamp
+        options_timestamp_start = time.time()
         options_last_update = None
         try:
             from common.common import fetch_latest_write_timestamp_from_db
@@ -7010,8 +7079,12 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 result['options_info']['last_update_timestamp'] = options_last_update
         except Exception as e:
             logger.debug(f"Error fetching options timestamp for {symbol}: {e}")
+        options_timestamp_time = (time.time() - options_timestamp_start) * 1000
+        if options_timestamp_time > 0.1:
+            logger.info(f"[TIMING] {symbol}: Options timestamp fetch took {options_timestamp_time:.2f}ms")
         
         # Try to use static template with JSON data
+        template_start = time.time()
         try:
             from pathlib import Path
             import json
@@ -7025,28 +7098,78 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                     template = f.read()
                 
                 # Prepare JSON data for client-side rendering
-                # Extract chart data
-                merged_df = await db_instance.get_merged_price_series(symbol)
+                # Extract chart data - reuse merged_df we already fetched earlier
+                chart_data_start = time.time()
                 chart_data = []
                 chart_labels = []
                 merged_series = []
                 
-                if merged_df is not None and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
-                    for _, row in merged_df.iterrows():
-                        close = row.get('close', row.get('price', 0))
-                        timestamp = row.get('timestamp') or row.get('date') or row.get('datetime')
-                        if timestamp and close:
-                            if hasattr(timestamp, 'isoformat'):
-                                timestamp = timestamp.isoformat()
-                            chart_data.append(float(close))
-                            chart_labels.append(str(timestamp))
-                            merged_series.append({
-                                'timestamp': str(timestamp),
-                                'close': float(close),
-                                'source': row.get('source', 'unknown')
-                            })
+                # Use the merged_df we already fetched (don't fetch again!)
+                # Note: merged_df was already fetched and serialized earlier in the function
+                # We need to use the original DataFrame, not the serialized version
+                # Check if we have the DataFrame in memory or need to reconstruct from serialized data
+                chart_df = merged_df  # Use the DataFrame we already have
+                
+                if chart_df is not None and isinstance(chart_df, pd.DataFrame) and not chart_df.empty:
+                    # Optimize: use vectorized operations instead of iterrows()
+                    # Get close/price column (try 'close' first, then 'price')
+                    close_col = None
+                    if 'close' in chart_df.columns:
+                        close_col = chart_df['close']
+                    elif 'price' in chart_df.columns:
+                        close_col = chart_df['price']
+                    
+                    # Get timestamp from index or column
+                    if isinstance(chart_df.index, pd.DatetimeIndex):
+                        timestamps = chart_df.index
+                    elif 'timestamp' in chart_df.columns:
+                        timestamps = pd.to_datetime(chart_df['timestamp'], errors='coerce')
+                    elif 'date' in chart_df.columns:
+                        timestamps = pd.to_datetime(chart_df['date'], errors='coerce')
+                    elif 'datetime' in chart_df.columns:
+                        timestamps = pd.to_datetime(chart_df['datetime'], errors='coerce')
+                    else:
+                        timestamps = None
+                    
+                    # Get source column if available
+                    source_col = chart_df.get('source') if 'source' in chart_df.columns else None
+                    
+                    # Vectorized extraction
+                    if close_col is not None and timestamps is not None:
+                        # Filter out NaN values
+                        valid_mask = pd.notna(close_col) & pd.notna(timestamps)
+                        valid_closes = close_col[valid_mask].values
+                        valid_timestamps = timestamps[valid_mask]
+                        
+                        # Convert to lists efficiently
+                        chart_data = valid_closes.tolist()
+                        chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in valid_timestamps]
+                        
+                        # Build merged_series efficiently
+                        if source_col is not None:
+                            valid_sources = source_col[valid_mask].values
+                            merged_series = [
+                                {
+                                    'timestamp': str(ts),
+                                    'close': float(close),
+                                    'source': str(src) if pd.notna(src) else 'unknown'
+                                }
+                                for ts, close, src in zip(valid_timestamps, valid_closes, valid_sources)
+                            ]
+                        else:
+                            merged_series = [
+                                {
+                                    'timestamp': str(ts),
+                                    'close': float(close),
+                                    'source': 'unknown'
+                                }
+                                for ts, close in zip(valid_timestamps, valid_closes)
+                            ]
+                chart_data_time = (time.time() - chart_data_start) * 1000
+                logger.info(f"[TIMING] {symbol}: Chart data extraction took {chart_data_time:.2f}ms")
                 
                 # Prepare JSON payload
+                json_prep_start = time.time()
                 json_data = {
                     'symbol': symbol,
                     'earnings_date': earnings_date_str,
@@ -7059,6 +7182,9 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                     'chart_labels': chart_labels,
                     'merged_series': merged_series
                 }
+                json_prep_time = (time.time() - json_prep_start) * 1000
+                if json_prep_time > 0.1:
+                    logger.info(f"[TIMING] {symbol}: JSON payload preparation took {json_prep_time:.2f}ms")
                 
                 # Recursively clean NaN, Infinity, and other non-JSON values from data structure
                 def clean_for_json(obj):
@@ -7098,14 +7224,30 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                     return str(obj)
                 
                 # Clean the data structure before serialization
+                clean_start = time.time()
                 cleaned_json_data = clean_for_json(json_data)
+                clean_time = (time.time() - clean_start) * 1000
+                logger.info(f"[TIMING] {symbol}: JSON data cleaning took {clean_time:.2f}ms")
                 
                 # Embed JSON in template - use allow_nan=False to catch any remaining NaN values
+                json_serialize_start = time.time()
                 json_str = json.dumps(cleaned_json_data, default=str, allow_nan=False)
+                json_serialize_time = (time.time() - json_serialize_start) * 1000
+                logger.info(f"[TIMING] {symbol}: JSON serialization took {json_serialize_time:.2f}ms")
+                template_replace_start = time.time()
                 html_content = template.replace(
                     '<script id="stockData" type="application/json"></script>',
                     f'<script id="stockData" type="application/json">{json_str}</script>'
                 )
+                template_replace_time = (time.time() - template_replace_start) * 1000
+                if template_replace_time > 0.1:
+                    logger.info(f"[TIMING] {symbol}: Template replacement took {template_replace_time:.2f}ms")
+                
+                template_total_time = (time.time() - template_start) * 1000
+                logger.info(f"[TIMING] {symbol}: Static template processing total took {template_total_time:.2f}ms")
+                
+                overall_time = (time.time() - overall_start) * 1000
+                logger.info(f"[TIMING] {symbol}: Total /stock_info/ HTML endpoint time: {overall_time:.2f}ms")
                 
                 return web.Response(
                     text=html_content,
@@ -7113,16 +7255,23 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                     charset='utf-8'
                 )
         except Exception as e:
-            logger.warning(f"Failed to use static template, falling back to dynamic generation: {e}")
-        
-        # Fallback to original dynamic generation
-        html_content = generate_stock_info_html(symbol, result, earnings_date=earnings_date_str)
-        
-        return web.Response(
-            text=html_content,
-            content_type='text/html',
-            charset='utf-8'
-        )
+            template_total_time = (time.time() - template_start) * 1000
+            logger.warning(f"Failed to use static template after {template_total_time:.2f}ms, falling back to dynamic generation: {e}")
+            
+            # Fallback to dynamic generation
+            dynamic_start = time.time()
+            html_content = generate_stock_info_html(symbol, result, earnings_date=earnings_date_str)
+            dynamic_time = (time.time() - dynamic_start) * 1000
+            logger.info(f"[TIMING] {symbol}: Dynamic HTML generation took {dynamic_time:.2f}ms")
+            
+            overall_time = (time.time() - overall_start) * 1000
+            logger.info(f"[TIMING] {symbol}: Total /stock_info/ HTML endpoint time: {overall_time:.2f}ms")
+            
+            return web.Response(
+                text=html_content,
+                content_type='text/html',
+                charset='utf-8'
+            )
         
     except Exception as e:
         logger.error(f"Error generating stock info HTML for {symbol}: {e}", exc_info=True)

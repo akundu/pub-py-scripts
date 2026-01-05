@@ -3627,6 +3627,9 @@ async def get_price_info(
     Args:
         latest_only: If True, only fetch latest price and skip historical data
     """
+    import time
+    price_info_start = time.time()
+    
     result = {
         "symbol": symbol,
         "current_price": None,
@@ -3636,6 +3639,7 @@ async def get_price_info(
     
     try:
         # Get current/latest price
+        current_price_start = time.time()
         if force_fetch:
             # Force fetch from API
             price_info = await get_current_price(
@@ -3652,6 +3656,8 @@ async def get_price_info(
                 stock_db_instance=db_instance,
                 max_age_seconds=600  # 10 minutes
             )
+        current_price_time = (time.time() - current_price_start) * 1000
+        logger.info(f"[TIMING] {symbol}: get_price_info.get_current_price took {current_price_time:.2f}ms")
         
         if price_info:
             result["current_price"] = price_info
@@ -3675,6 +3681,7 @@ async def get_price_info(
         
         # Get historical price data if not latest_only
         # If no dates provided, try to get any available data
+        historical_start = time.time()
         if not latest_only:
             # If no dates provided, we still want to try to get data for the chart
             if not start_date and not end_date:
@@ -3751,10 +3758,16 @@ async def get_price_info(
                 except Exception as e:
                     logger.error(f"Error fetching historical {timeframe} price data for {symbol}: {e}", exc_info=True)
                     result["price_data"] = None
+        historical_time = (time.time() - historical_start) * 1000
+        if not latest_only and historical_time > 0.1:  # Only log if it took meaningful time
+            logger.info(f"[TIMING] {symbol}: get_price_info.historical_data took {historical_time:.2f}ms")
         
     except Exception as e:
         result["error"] = str(e)
         logger.error(f"Error getting price info for {symbol}: {e}")
+    
+    price_info_total = (time.time() - price_info_start) * 1000
+    logger.info(f"[TIMING] {symbol}: get_price_info total took {price_info_total:.2f}ms")
     
     return result
 
@@ -3935,6 +3948,14 @@ async def get_options_info(
         result["error"] = str(e)
         logger.error(f"Error getting options info for {symbol}: {e}")
     
+    # Log total time if not already set
+    if result.get("fetch_time_ms") is None:
+        fetch_time = (time.time() - fetch_start) * 1000
+        result["fetch_time_ms"] = fetch_time
+    
+    # Always log total time for consistency
+    logger.info(f"[TIMING] {symbol}: get_options_info total took {result.get('fetch_time_ms', 0):.2f}ms")
+    
     return result
 
 
@@ -4004,6 +4025,10 @@ async def get_news_info(
         result["error"] = str(e)
         logger.error(f"Error getting news info for {symbol}: {e}")
     
+    # Log total time
+    fetch_time = (time.time() - fetch_start) * 1000
+    logger.info(f"[TIMING] {symbol}: get_news_info total took {fetch_time:.2f}ms")
+    
     return result
 
 
@@ -4014,6 +4039,9 @@ async def get_iv_info(
     enable_cache: bool = True
 ) -> Dict[str, Any]:
     """Get latest IV information for a symbol."""
+    import time
+    iv_info_start = time.time()
+    
     result = {
         "symbol": symbol,
         "iv_data": None,
@@ -4063,6 +4091,10 @@ async def get_iv_info(
     except Exception as e:
         result["error"] = str(e)
         logger.error(f"Error getting IV info for {symbol}: {e}")
+    
+    # Log total time
+    iv_info_total = (time.time() - iv_info_start) * 1000
+    logger.info(f"[TIMING] {symbol}: get_iv_info total took {iv_info_total:.2f}ms")
     
     return result
 
@@ -4188,18 +4220,21 @@ async def get_stock_info_parallel(
         task_keys.append('iv')
     
     # Execute all tasks in parallel
-    logger.debug(f"[PARALLEL] Starting {len(tasks)} parallel data fetches for {symbol}")
+    logger.info(f"[TIMING] {symbol}: Starting {len(tasks)} parallel data fetches")
     results = await asyncio.gather(*tasks, return_exceptions=True)
     parallel_time = (time.time() - parallel_start) * 1000
-    logger.debug(f"[PARALLEL] Completed all {len(tasks)} parallel fetches for {symbol} in {parallel_time:.1f}ms")
+    logger.info(f"[TIMING] {symbol}: Completed all {len(tasks)} parallel fetches in {parallel_time:.2f}ms")
     
-    # Map results to keys
+    # Map results to keys and log individual task timings if available
     for key, res in zip(task_keys, results):
         if isinstance(res, Exception):
             logger.error(f"Error fetching {key} info for {symbol}: {res}")
             result[f"{key}_info"] = {"error": str(res)}
         else:
             result[f"{key}_info"] = res
+            # Log individual task timing if available in the result
+            if isinstance(res, dict) and res.get('fetch_time_ms') is not None:
+                logger.info(f"[TIMING] {symbol}: {key}_info.fetch_time_ms = {res['fetch_time_ms']:.2f}ms")
     
     result["fetch_time_ms"] = parallel_time
     
