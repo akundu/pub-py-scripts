@@ -967,7 +967,14 @@ def parse_args():
     time_group.add_argument('--days-back', type=int,
                             help='Number of days back to fetch historical market data.')
     
-    args = parser.parse_args()
+    # Use parse_known_args to handle --types with subtraction (e.g., -stocks_to_track)
+    # which argparse might interpret as a flag
+    args, unknown = parser.parse_known_args()
+    
+    # Post-process to merge unknown args that are part of --types
+    if hasattr(args, 'types') and args.types:
+        from common.symbol_loader import post_process_types_argument
+        post_process_types_argument(args, parser, unknown)
 
     # The shared parser may or may not include --symbols-list; normalize attribute to simplify downstream logic
     if not hasattr(args, 'symbols_list'):

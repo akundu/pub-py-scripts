@@ -13,6 +13,75 @@ import argparse
 from typing import List, Optional, Set, Tuple
 from pathlib import Path
 
+
+def post_process_types_argument(args: argparse.Namespace, parser: argparse.ArgumentParser, unknown: List[str] | None = None) -> None:
+    """
+    Post-process arguments to handle --types with subtraction (e.g., -etfs).
+    
+    This function collects arguments that argparse might interpret as flags
+    but are actually part of --types (e.g., -stocks_to_track).
+    
+    Args:
+        args: Parsed arguments namespace
+        parser: The argument parser (used to get known arguments)
+        unknown: List of unknown arguments from parse_known_args (optional)
+    """
+    if not hasattr(args, 'types') or not args.types:
+        return
+    
+    # Get all known argument names from the parser
+    known_flags = set()
+    for action in parser._actions:
+        if action.option_strings:
+            known_flags.update(action.option_strings)
+    
+    types_list = list(args.types) if args.types else []
+    
+    # First, check unknown arguments - these might be type names that were
+    # interpreted as flags
+    if unknown:
+        for arg in unknown:
+            # If it starts with - but is not a known flag, it's likely a type name
+            if arg.startswith('-') and not arg.startswith('--'):
+                # Multi-character arguments starting with - are likely type names
+                # (e.g., -stocks_to_track)
+                if len(arg) > 2 and arg not in types_list:
+                    types_list.append(arg)
+    
+    # Also check sys.argv directly to catch any arguments after --types
+    try:
+        types_idx = sys.argv.index('--types')
+        # Start collecting from the position after --types
+        i = types_idx + 1
+        while i < len(sys.argv):
+            arg = sys.argv[i]
+            
+            # Stop if we hit a known flag (starts with --)
+            if arg.startswith('--') and arg in known_flags:
+                break
+            
+            # For arguments starting with single -, check if it's a known short option
+            if arg.startswith('-') and not arg.startswith('--'):
+                # Single character flags are likely not types
+                if len(arg) == 2:
+                    if arg in known_flags:
+                        break
+                # Multi-character -arg is likely a type name (e.g., -stocks_to_track)
+                if len(arg) > 2 and arg not in types_list:
+                    types_list.append(arg)
+            elif not arg.startswith('-'):
+                # Regular argument, should already be in types_list
+                if arg not in types_list:
+                    types_list.append(arg)
+            
+            i += 1
+    except (ValueError, IndexError):
+        # --types not found in sys.argv or other error, keep original
+        pass
+    
+    # Update args.types with the complete list
+    args.types = types_list
+
 # Import symbol loading functions from fetch_lists_data
 # Define fallback constants in case import fails
 _FALLBACK_FULL_AVAILABLE_TYPES = ['nyse', 'nasdaq', 'nasdaq-new', 'nyse-new', 'dow-jones', 'sp-500', 'etfs', 'crypto', 'stocks_to_track', 'stocks_to_track2']
@@ -229,8 +298,8 @@ def add_symbol_arguments(
             help='Path to a YAML file containing a list of symbols under the \'symbols\' key. Mutually exclusive with symbol, --symbols, and --types.'
         )
     
-    symbol_group.add_argument('--types', nargs='+', 
-                      help='Types of symbol lists to process. \'all\' processes all. Prefix with \'-\' to subtract a list (e.g., --types sp500 stocks_to_track -etfs). Used with --fetch-online for network fetch. Mutually exclusive with symbol, --symbols, and --symbols-list.')
+    symbol_group.add_argument('--types', nargs='+',
+                      help='Types of symbol lists to process. \'all\' processes all. Prefix with \'-\' to subtract a list (e.g., --types sp500 stocks_to_track -etfs or --types all "-stocks_to_track"). Used with --fetch-online for network fetch. Mutually exclusive with symbol, --symbols, and --symbols-list.')
     
     # Add common symbol-related arguments
     parser.add_argument(
