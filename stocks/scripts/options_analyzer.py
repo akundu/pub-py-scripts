@@ -2304,16 +2304,72 @@ def _process_ticker_financial_info(args_tuple):
                     market_cap = row['market_cap'] if 'market_cap' in df.columns else None
                     price = row['price'] if 'price' in df.columns else None
                     
-                    return (ticker, {
+                    # Extract IV metrics from financial info
+                    financial_data_dict = {
                         'pe_ratio': pe_ratio,
                         'market_cap': market_cap,
                         'price': price
-                    })
+                    }
+                    
+                    # Extract IV rank (30-day)
+                    if 'iv_rank' in df.columns:
+                        financial_data_dict['iv_rank'] = row['iv_rank']
+                    
+                    # Extract IV rank (90-day)
+                    if 'iv_90d_rank' in df.columns:
+                        financial_data_dict['iv_90d_rank'] = row['iv_90d_rank']
+                    
+                    # Parse IV analysis JSON if present
+                    if 'iv_analysis_json' in df.columns and pd.notna(row.get('iv_analysis_json')):
+                        import json
+                        try:
+                            iv_analysis = json.loads(row['iv_analysis_json'])
+                            # Store full iv_metrics dict for enrich_dataframe_with_financial_data
+                            if 'metrics' in iv_analysis:
+                                financial_data_dict['iv_metrics'] = iv_analysis['metrics']
+                            
+                            # Extract individual metrics for easier access
+                            metrics = iv_analysis.get('metrics', {})
+                            strategy = iv_analysis.get('strategy', {})
+                            
+                            # Store strategy data for compatibility with stock info page format
+                            if strategy:
+                                financial_data_dict['iv_strategy'] = strategy
+                            
+                            # Risk score is in strategy, not metrics - store at root level for backward compatibility
+                            if 'risk_score' in strategy:
+                                financial_data_dict['risk_score'] = strategy['risk_score']
+                            
+                            # IV rank 90-day is in metrics as rank_90d
+                            if 'rank_90d' in metrics:
+                                financial_data_dict['iv_90d_rank'] = metrics['rank_90d']
+                            
+                            # Roll yield is in metrics as a string like "2.5%"
+                            if 'roll_yield' in metrics:
+                                roll_yield_str = metrics['roll_yield']
+                                if isinstance(roll_yield_str, str) and roll_yield_str.endswith('%'):
+                                    financial_data_dict['roll_yield'] = float(roll_yield_str.rstrip('%'))
+                                else:
+                                    financial_data_dict['roll_yield'] = roll_yield_str
+                            
+                            # Recommendation is in strategy - store at root level for backward compatibility
+                            if 'recommendation' in strategy:
+                                financial_data_dict['iv_recommendation'] = strategy['recommendation']
+                        except (json.JSONDecodeError, TypeError, ValueError) as e:
+                            if debug:
+                                print(f"DEBUG: Could not parse IV analysis JSON for {ticker}: {e}", file=sys.stderr)
+                    
+                    return (ticker, financial_data_dict)
                 else:
                     return (ticker, {
                         'pe_ratio': None,
                         'market_cap': None,
-                        'price': None
+                        'price': None,
+                        'iv_rank': None,
+                        'iv_90d_rank': None,
+                        'risk_score': None,
+                        'iv_recommendation': None,
+                        'roll_yield': None
                     })
         except Exception as e:
             if debug:
