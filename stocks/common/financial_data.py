@@ -694,13 +694,20 @@ async def get_financial_info(
                 logger.info(f"[FINANCIAL IV] IV analysis for {symbol} (iv_fetch: {iv_time_str}, total: {fetch_time:.1f}ms)")
             
             # Calculate 52-week high/low from price history if not already in financial_data
-            if db_instance and ('week_52_low' not in financial_data or 'week_52_high' not in financial_data):
+            has_week52_low = 'week_52_low' in financial_data and financial_data.get('week_52_low') is not None
+            has_week52_high = 'week_52_high' in financial_data and financial_data.get('week_52_high') is not None
+            logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: Checking 52-week calculation - has_low={has_week52_low}, has_high={has_week52_high}, db_instance={db_instance is not None}")
+            
+            if db_instance and (not has_week52_low or not has_week52_high):
                 try:
                     from datetime import datetime, timedelta
                     import pandas as pd
                     
+                    logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: Starting 52-week range calculation from price history")
                     # Get merged price series for last 365 days
                     merged_df = await db_instance.get_merged_price_series(symbol)
+                    logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: Got merged_df - is_none={merged_df is None}, is_df={isinstance(merged_df, pd.DataFrame) if merged_df is not None else False}, empty={merged_df.empty if isinstance(merged_df, pd.DataFrame) else 'N/A'}")
+                    
                     if merged_df is not None and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
                         # Get close column
                         close_col = None
@@ -708,6 +715,8 @@ async def get_financial_info(
                             close_col = merged_df['close']
                         elif 'price' in merged_df.columns:
                             close_col = merged_df['price']
+                        
+                        logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: close_col available={close_col is not None}, columns={list(merged_df.columns)}")
                         
                         if close_col is not None:
                             # Filter to last 365 days
@@ -726,20 +735,95 @@ async def get_financial_info(
                             else:
                                 valid_prices = close_col.dropna()
                             
+                            logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: Found {len(valid_prices)} valid prices for 52-week calculation")
+                            
                             if len(valid_prices) > 0:
-                                if 'week_52_low' not in financial_data:
+                                if not has_week52_low:
                                     financial_data['week_52_low'] = float(valid_prices.min())
-                                if 'week_52_high' not in financial_data:
+                                    logger.info(f"[FINANCIAL 52-WEEK] {symbol}: Calculated week_52_low={financial_data.get('week_52_low')}")
+                                if not has_week52_high:
                                     financial_data['week_52_high'] = float(valid_prices.max())
-                                logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: Calculated week_52_low={financial_data.get('week_52_low')}, week_52_high={financial_data.get('week_52_high')}")
+                                    logger.info(f"[FINANCIAL 52-WEEK] {symbol}: Calculated week_52_high={financial_data.get('week_52_high')}")
+                            else:
+                                logger.warning(f"[FINANCIAL 52-WEEK] {symbol}: No valid prices found for 52-week calculation")
+                        else:
+                            logger.warning(f"[FINANCIAL 52-WEEK] {symbol}: No close/price column found in merged_df")
+                    else:
+                        logger.warning(f"[FINANCIAL 52-WEEK] {symbol}: merged_df is None, empty, or not a DataFrame - cannot calculate 52-week range")
                 except Exception as e:
-                    logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: Error calculating 52-week range: {e}")
+                    logger.warning(f"[FINANCIAL 52-WEEK] {symbol}: Error calculating 52-week range: {e}", exc_info=True)
+            else:
+                if has_week52_low and has_week52_high:
+                    logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: 52-week range already exists in financial_data - skipping calculation")
+                elif not db_instance:
+                    logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: No db_instance available - cannot calculate 52-week range")
+            
+            # Calculate 52-week range BEFORE saving if not already calculated
+            # This ensures it's calculated even if we didn't fetch from API (e.g., updating existing record)
+            if db_instance and financial_data:
+                has_week52_low = 'week_52_low' in financial_data and financial_data.get('week_52_low') is not None
+                has_week52_high = 'week_52_high' in financial_data and financial_data.get('week_52_high') is not None
+                
+                if not has_week52_low or not has_week52_high:
+                    try:
+                        from datetime import datetime, timedelta
+                        import pandas as pd
+                        
+                        logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: Calculating 52-week range before save - has_low={has_week52_low}, has_high={has_week52_high}")
+                        # Get merged price series for last 365 days
+                        merged_df = await db_instance.get_merged_price_series(symbol)
+                        logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: Got merged_df - is_none={merged_df is None}, is_df={isinstance(merged_df, pd.DataFrame) if merged_df is not None else False}, empty={merged_df.empty if isinstance(merged_df, pd.DataFrame) else 'N/A'}")
+                        
+                        if merged_df is not None and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
+                            # Get close column
+                            close_col = None
+                            if 'close' in merged_df.columns:
+                                close_col = merged_df['close']
+                            elif 'price' in merged_df.columns:
+                                close_col = merged_df['price']
+                            
+                            logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: close_col available={close_col is not None}, columns={list(merged_df.columns)}")
+                            
+                            if close_col is not None:
+                                # Filter to last 365 days
+                                if isinstance(merged_df.index, pd.DatetimeIndex):
+                                    one_year_ago = pd.Timestamp.now() - pd.Timedelta(days=365)
+                                    recent_df = merged_df[merged_df.index >= one_year_ago]
+                                    if not recent_df.empty:
+                                        if 'close' in recent_df.columns:
+                                            valid_prices = recent_df['close'].dropna()
+                                        elif 'price' in recent_df.columns:
+                                            valid_prices = recent_df['price'].dropna()
+                                        else:
+                                            valid_prices = close_col.dropna()
+                                    else:
+                                        valid_prices = close_col.dropna()
+                                else:
+                                    valid_prices = close_col.dropna()
+                                
+                                logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: Found {len(valid_prices)} valid prices for 52-week calculation")
+                                
+                                if len(valid_prices) > 0:
+                                    if not has_week52_low:
+                                        financial_data['week_52_low'] = float(valid_prices.min())
+                                        logger.info(f"[FINANCIAL 52-WEEK] {symbol}: Calculated week_52_low={financial_data.get('week_52_low')}")
+                                    if not has_week52_high:
+                                        financial_data['week_52_high'] = float(valid_prices.max())
+                                        logger.info(f"[FINANCIAL 52-WEEK] {symbol}: Calculated week_52_high={financial_data.get('week_52_high')}")
+                                else:
+                                    logger.warning(f"[FINANCIAL 52-WEEK] {symbol}: No valid prices found for 52-week calculation")
+                            else:
+                                logger.warning(f"[FINANCIAL 52-WEEK] {symbol}: No close/price column found in merged_df")
+                        else:
+                            logger.warning(f"[FINANCIAL 52-WEEK] {symbol}: merged_df is None, empty, or not a DataFrame - cannot calculate 52-week range")
+                    except Exception as e:
+                        logger.warning(f"[FINANCIAL 52-WEEK] {symbol}: Error calculating 52-week range before save: {e}", exc_info=True)
             
             # Save to DB if we have a DB instance and financial_data is not empty
             if financial_data:
                 # Ensure date is always set to today before saving
                 financial_data['date'] = date.today().isoformat()
-                logger.debug(f"[FINANCIAL DB SAVE] Saving financial_data for {symbol} with date: {financial_data['date']}")
+                logger.debug(f"[FINANCIAL DB SAVE] Saving financial_data for {symbol} with date: {financial_data['date']}, week_52_low={financial_data.get('week_52_low')}, week_52_high={financial_data.get('week_52_high')}")
                 try:
                     await db_instance.save_financial_info(symbol, financial_data)
                     logger.debug(f"[FINANCIAL DB SAVE] Successfully saved financial_info for {symbol}")

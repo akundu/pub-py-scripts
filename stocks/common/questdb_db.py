@@ -1673,6 +1673,10 @@ class FinancialInfoRepository(BaseRepository):
                 record['iv_analysis_json'] = financial_data.get('iv_analysis_json')
             if financial_data.get('iv_analysis_spare') is not None:
                 record['iv_analysis_spare'] = financial_data.get('iv_analysis_spare')
+            if financial_data.get('week_52_low') is not None:
+                record['week_52_low'] = financial_data.get('week_52_low')
+            if financial_data.get('week_52_high') is not None:
+                record['week_52_high'] = financial_data.get('week_52_high')
             
             # Always set write_timestamp
             record['write_timestamp'] = datetime.now(timezone.utc)

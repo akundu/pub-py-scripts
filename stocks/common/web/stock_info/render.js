@@ -712,25 +712,12 @@
     stockData_keys: Object.keys(stockData)
   });
 
-  // If chart data is missing, lazy-load it (default to 1d period)
-  if (window.mergedSeries.length === 0 && (!stockData.chart_data || stockData.chart_data.length === 0)) {
-    console.log(`[${symbol}] 📦 Chart data NOT in initial payload - will lazy-load`);
-    debugLog(`[${symbol}] Chart data not in initial payload, will lazy-load`);
-    // Lazy-load chart data for initial 1d view
-    lazyLoadChartData('1d', 'merged');
-  } else if (window.mergedSeries.length === 0 && stockData.merged_series && stockData.merged_series.length > 0) {
-    // Fallback: if mergedSeries is empty but stockData has it, use it directly
-    debugLog(`[${symbol}] mergedSeries was empty, using stockData.merged_series directly`);
-    window.mergedSeries = stockData.merged_series;
-    window.allChartData = stockData.merged_series.map(s => s.close || s.price || 0);
-    window.allChartLabels = stockData.merged_series.map(s => s.timestamp || '');
-  }
-  
-  // Lazy-load chart data function
+  // Lazy-load chart data function (define before use)
   async function lazyLoadChartData(period, dataType = 'merged', autoInit = true) {
     try {
-      const baseUrl = window.location.origin + window.location.pathname.split('/').slice(0, -1).join('/');
-      const chartUrl = `${baseUrl}/api/lazy/chart/${symbol}?period=${period}&data_type=${dataType}`;
+      // Construct URL: /stock_info/api/lazy/chart/{symbol}
+      const basePath = '/stock_info';
+      const chartUrl = `${basePath}/api/lazy/chart/${symbol}?period=${period}&data_type=${dataType}`;
       console.log(`[${symbol}] 📊 Lazy-loading chart data: ${chartUrl}`);
       debugLog(`[${symbol}] Lazy-loading chart data for period=${period}, data_type=${dataType}...`);
       
@@ -775,6 +762,22 @@
   // Make lazyLoadChartData available globally for period switching
   window.lazyLoadChartData = lazyLoadChartData;
   
+  // If chart data is missing, lazy-load it (default to 1d period)
+  if (window.mergedSeries.length === 0 && (!stockData.chart_data || stockData.chart_data.length === 0)) {
+    console.log(`[${symbol}] 📦 Chart data NOT in initial payload - will lazy-load`);
+    debugLog(`[${symbol}] Chart data not in initial payload, will lazy-load`);
+    // Lazy-load chart data for initial 1d view
+    lazyLoadChartData('1d', 'merged', true).catch(err => {
+      console.error(`[${symbol}] Failed to lazy-load initial chart data:`, err);
+    });
+  } else if (window.mergedSeries.length === 0 && stockData.merged_series && stockData.merged_series.length > 0) {
+    // Fallback: if mergedSeries is empty but stockData has it, use it directly
+    debugLog(`[${symbol}] mergedSeries was empty, using stockData.merged_series directly`);
+    window.mergedSeries = stockData.merged_series;
+    window.allChartData = stockData.merged_series.map(s => s.close || s.price || 0);
+    window.allChartLabels = stockData.merged_series.map(s => s.timestamp || '');
+  }
+
   // Trigger chart initialization if it's waiting for data
   // This ensures the chart initializes after render.js sets the data
   if (window.mergedSeries && window.mergedSeries.length > 0) {
@@ -1510,6 +1513,15 @@
 
         optionsDisplay.innerHTML = html;
         debugLog(`[${symbol}] Options rendered: ${sortedExpirations.length} expirations, ${contracts.length} total contracts`);
+
+        // Apply default filter of ±10 strikes around ATM after rendering
+        // Use setTimeout to ensure DOM is updated before filtering
+        setTimeout(() => {
+          if (typeof filterStrikesByRange === 'function') {
+            filterStrikesByRange('10');
+            debugLog(`[${symbol}] Applied default ±10 strike filter after lazy-load`);
+          }
+        }, 50);
       }
     } else if (optionsInfo && optionsInfo.error) {
       const optionsSection = document.getElementById('optionsSection');

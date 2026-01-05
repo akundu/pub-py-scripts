@@ -885,15 +885,19 @@ class RequestFormatter(logging.Formatter):
         super().__init__(fmt=self.basic_log_format, datefmt=None, style='%') # Default to basic
 
     def format(self, record):
+        # Store original format string before modifying
+        original_fmt = self._style._fmt
+        
         # Check if request-specific fields are present
         if hasattr(record, 'client_ip'):
             self._style._fmt = self.access_log_format
             # Ensure duration_ms is set (default to 0 if not present)
             if not hasattr(record, 'duration_ms'):
                 record.duration_ms = 0
-            # Format duration_ms as string with "ms" suffix
-            if hasattr(record, 'duration_ms'):
+            # Format duration_ms as string with "ms" suffix (only if it's a number)
+            if isinstance(record.duration_ms, (int, float)):
                 record.duration_ms = f"{record.duration_ms:.0f}ms"
+            # If it's already a string, leave it as is
         else:
             self._style._fmt = self.basic_log_format
         
@@ -904,21 +908,6 @@ class RequestFormatter(logging.Formatter):
         if record.args:
             record.msg = record.msg % record.args
             record.args = () # Clear args after formatting into msg
-        
-        # Temporarily store original format string
-        original_fmt = self._style._fmt
-
-        # Choose format based on record attributes
-        if hasattr(record, 'client_ip'):
-            self._style._fmt = self.access_log_format
-            # Ensure duration_ms is set (default to 0 if not present)
-            if not hasattr(record, 'duration_ms'):
-                record.duration_ms = "0ms"
-            # Format duration_ms as string with "ms" suffix if it's a number
-            elif isinstance(record.duration_ms, (int, float)):
-                record.duration_ms = f"{record.duration_ms:.0f}ms"
-        else:
-            self._style._fmt = self.basic_log_format
         
         # Call superclass format
         result = logging.Formatter.format(self, record)
@@ -1411,12 +1400,21 @@ async def logging_middleware(request: web.Request, handler):
     try:
         response = await handler(request)
         duration_ms = (time.time() - start_time) * 1000  # Convert to milliseconds
+        
+        # Check if response is None (shouldn't happen, but handle gracefully)
+        if response is None:
+            extra_log_info["status_code"] = 500
+            extra_log_info["response_size"] = 0
+            extra_log_info["duration_ms"] = duration_ms
+            logger.error(f"Access: {client_ip} - \"{request_line}\" 500 0 \"{user_agent}\" {duration_ms:.0f}ms - Handler returned None", extra=extra_log_info)
+            return web.Response(text="Internal Server Error: Handler returned None", status=500)
+        
         extra_log_info["status_code"] = response.status
         
         # Calculate response size - try multiple methods
         response_size = 0
         # Method 1: Check Content-Length header (most reliable for prepared responses)
-        if 'Content-Length' in response.headers:
+        if hasattr(response, 'headers') and 'Content-Length' in response.headers:
             try:
                 response_size = int(response.headers['Content-Length'])
             except (ValueError, TypeError):
@@ -1503,9 +1501,14 @@ async def logging_middleware(request: web.Request, handler):
     except Exception as e: # Catch all other exceptions
         duration_ms = (time.time() - start_time) * 1000
         extra_log_info["status_code"] = 500
+        extra_log_info["response_size"] = 0
         extra_log_info["duration_ms"] = duration_ms
+        
+        # Format response size for display
+        size_str = "0B"
+        
         if enable_access_log:
-            logger.error(f"Access: {client_ip} - \"{request_line}\" 500 0 \"{user_agent}\" {duration_ms:.0f}ms - Unhandled exception: {str(e)}", extra=extra_log_info, exc_info=True)
+            logger.error(f"Access: {client_ip} - \"{request_line}\" 500 {size_str} (0 bytes) \"{user_agent}\" {duration_ms:.0f}ms - Unhandled exception: {str(e)}", extra=extra_log_info, exc_info=True)
         else:
             logger.error(f"Unhandled exception during request: {str(e)} ({duration_ms:.0f}ms)", extra=extra_log_info, exc_info=True)
         raise
@@ -6960,25 +6963,35 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         if enable_cache:
             redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
         
-        # Get date range for historical data (default: last 1 year for better chart)
+        # Optimize: Skip historical data fetch in initial load since chart data is lazy-loaded
+        # This saves ~1 second by avoiding the expensive 1-year historical data query
+        # Historical data will be fetched on-demand when user selects a chart period
         from datetime import datetime, timedelta
+        
+        # Only fetch historical data if explicitly requested (not for initial page load)
+        # For initial load, use latest_only=True to skip expensive historical queries
+        skip_historical = lazy_load  # If lazy loading is enabled, skip historical data in initial load
+        
         if not end_date:
             # Set end_date to today (or tomorrow to ensure we cover all of today)
             end_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
-        if not start_date:
-            # Default to 1 year ago
+        if not start_date and not skip_historical:
+            # Default to 1 year ago only if we're not skipping historical
             start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')  # 1 year default
         
-        # If we have dates but no data is found, we'll try a wider range in the fallback
-        # For now, let's try to get any available data if the initial query fails
         parse_time = (time.time() - parse_start) * 1000
         logger.info(f"[TIMING] {symbol}: Parameter parsing took {parse_time:.2f}ms")
         
-        # Run get_stock_info_parallel and get_merged_price_series in parallel
+        # Run get_stock_info_parallel in parallel (skip merged_price_series since chart is lazy-loaded)
         parallel_start = time.time()
         
-        # Create tasks for parallel execution
+        # Skip merged_price_series fetch since chart data is lazy-loaded
+        # This saves significant time as merged_price_series can be expensive
+        # Chart data will be fetched on-demand via /stock_info/api/lazy/chart/{symbol}
         async def fetch_merged_series():
+            # Skip merged series fetch for initial load - chart is lazy-loaded
+            if skip_historical:
+                return None
             try:
                 return await db_instance.get_merged_price_series(symbol)
             except NotImplementedError:
@@ -6988,18 +7001,18 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 return None
         
         # Start both operations in parallel
-        # If lazy_load is enabled, skip options and news in initial load for faster page render
+        # If lazy_load is enabled, skip options, news, and historical data in initial load for faster page render
         try:
             results = await asyncio.gather(
                 get_stock_info_parallel(
                     symbol,
                     db_instance,
-                    start_date=start_date if not latest else None,
-                    end_date=end_date if not latest else None,
+                    start_date=None if skip_historical else (start_date if not latest else None),
+                    end_date=None if skip_historical else (end_date if not latest else None),
                     force_fetch=force_fetch,
                     data_source=data_source,
                     timezone_str=timezone_str,
-                    latest_only=latest,
+                    latest_only=latest or skip_historical,  # Skip historical if lazy loading
                     options_days=options_days if not lazy_load else 0,  # Skip options if lazy loading
                     option_type=option_type,
                     strike_range_percent=strike_range_percent,
@@ -7215,227 +7228,230 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 current_dir = Path(__file__).parent
                 template_file = current_dir / "common" / "web" / "stock_info" / "template.html"
                 
-                if template_file.exists():
-                    with open(template_file, 'r', encoding='utf-8') as f:
-                        template = f.read()
+                if not template_file.exists():
+                    raise FileNotFoundError(f"Template file not found: {template_file}")
+                
+                with open(template_file, 'r', encoding='utf-8') as f:
+                    template = f.read()
+                
+                # Prepare JSON data for client-side rendering
+                # Extract chart data - reuse merged_df we already fetched earlier
+                chart_data_start = time.time()
+                chart_data = []
+                chart_labels = []
+                merged_series = []
+                
+                # Use the merged_df we already fetched (don't fetch again!)
+                # Note: merged_df was already fetched and serialized earlier in the function
+                # We need to use the original DataFrame, not the serialized version
+                # Check if we have the DataFrame in memory or need to reconstruct from serialized data
+                chart_df = merged_df  # Use the DataFrame we already have
+                
+                # Initialize variables to avoid scope issues
+                close_col = None
+                timestamps = None
+                
+                if chart_df is not None and isinstance(chart_df, pd.DataFrame) and not chart_df.empty:
+                    # Optimize: use vectorized operations instead of iterrows()
+                    # Get close/price column (try 'close' first, then 'price')
+                    if 'close' in chart_df.columns:
+                        close_col = chart_df['close']
+                    elif 'price' in chart_df.columns:
+                        close_col = chart_df['price']
                     
-                    # Prepare JSON data for client-side rendering
-                    # Extract chart data - reuse merged_df we already fetched earlier
-                    chart_data_start = time.time()
-                    chart_data = []
-                    chart_labels = []
-                    merged_series = []
+                    # Get timestamp from index or column
+                    if isinstance(chart_df.index, pd.DatetimeIndex):
+                        timestamps = chart_df.index
+                    elif 'timestamp' in chart_df.columns:
+                        timestamps = pd.to_datetime(chart_df['timestamp'], errors='coerce')
+                    elif 'date' in chart_df.columns:
+                        timestamps = pd.to_datetime(chart_df['date'], errors='coerce')
+                    elif 'datetime' in chart_df.columns:
+                        timestamps = pd.to_datetime(chart_df['datetime'], errors='coerce')
                     
-                    # Use the merged_df we already fetched (don't fetch again!)
-                    # Note: merged_df was already fetched and serialized earlier in the function
-                    # We need to use the original DataFrame, not the serialized version
-                    # Check if we have the DataFrame in memory or need to reconstruct from serialized data
-                    chart_df = merged_df  # Use the DataFrame we already have
+                    # Get source column if available
+                    source_col = chart_df.get('source') if 'source' in chart_df.columns else None
                     
-                    if chart_df is not None and isinstance(chart_df, pd.DataFrame) and not chart_df.empty:
-                        # Optimize: use vectorized operations instead of iterrows()
-                        # Get close/price column (try 'close' first, then 'price')
-                        close_col = None
-                        if 'close' in chart_df.columns:
-                            close_col = chart_df['close']
-                        elif 'price' in chart_df.columns:
-                            close_col = chart_df['price']
+                    # Vectorized extraction
+                    if close_col is not None and timestamps is not None:
+                        # Filter out NaN values
+                        valid_mask = pd.notna(close_col) & pd.notna(timestamps)
+                        valid_closes = close_col[valid_mask].values
+                        valid_timestamps = timestamps[valid_mask]
                         
-                        # Get timestamp from index or column
-                        if isinstance(chart_df.index, pd.DatetimeIndex):
-                            timestamps = chart_df.index
-                        elif 'timestamp' in chart_df.columns:
-                            timestamps = pd.to_datetime(chart_df['timestamp'], errors='coerce')
-                        elif 'date' in chart_df.columns:
-                            timestamps = pd.to_datetime(chart_df['date'], errors='coerce')
-                        elif 'datetime' in chart_df.columns:
-                            timestamps = pd.to_datetime(chart_df['datetime'], errors='coerce')
+                        # Convert to lists efficiently
+                        chart_data = valid_closes.tolist()
+                        chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in valid_timestamps]
+                        
+                        # Build merged_series efficiently
+                        if source_col is not None:
+                            valid_sources = source_col[valid_mask].values
+                            merged_series = [
+                                {
+                                    'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
+                                    'close': float(close),
+                                    'source': str(src) if pd.notna(src) else 'unknown'
+                                }
+                                for ts, close, src in zip(valid_timestamps, valid_closes, valid_sources)
+                            ]
                         else:
-                            timestamps = None
+                            merged_series = [
+                                {
+                                    'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
+                                    'close': float(close),
+                                    'source': 'unknown'
+                                }
+                                for ts, close in zip(valid_timestamps, valid_closes)
+                            ]
                         
-                        # Get source column if available
-                        source_col = chart_df.get('source') if 'source' in chart_df.columns else None
+                        logger.info(f"[CHART DATA] {symbol}: Extracted {len(merged_series)} data points for chart")
+                        if len(merged_series) > 0:
+                            logger.debug(f"[CHART DATA] {symbol}: Sample data point: {merged_series[0]}")
+                else:
+                    logger.warning(f"[CHART DATA] {symbol}: No valid chart data extracted - chart_df is None or empty")
+                chart_data_time = (time.time() - chart_data_start) * 1000
+                logger.info(f"[TIMING] {symbol}: Chart data extraction took {chart_data_time:.2f}ms")
+                
+                # Prepare JSON payload
+                json_prep_start = time.time()
+                # Get 52-week range from financial_info if available (preferred source)
+                price_info_dict = result.get('price_info', {}).copy()
+                financial_info_dict = result.get('financial_info', {}).copy()
+                financial_data = financial_info_dict.get('financial_data', {})
+                
+                # Try to get 52-week range from financial_info first (stored during fetch_all_data.py runs)
+                week_52_low = financial_data.get('week_52_low') or price_info_dict.get('week_52_low')
+                week_52_high = financial_data.get('week_52_high') or price_info_dict.get('week_52_high')
+                
+                # Fallback: Calculate from merged_df if not in financial_info or price_info
+                # (This is a fallback - ideally financial_info should have it from fetch_all_data.py)
+                if (not week_52_low or not week_52_high) and merged_df is not None and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
+                    try:
+                        # Get close column
+                        close_col = None
+                        if 'close' in merged_df.columns:
+                            close_col = merged_df['close']
+                        elif 'price' in merged_df.columns:
+                            close_col = merged_df['price']
                         
-                        # Vectorized extraction
-                        if close_col is not None and timestamps is not None:
-                            # Filter out NaN values
-                            valid_mask = pd.notna(close_col) & pd.notna(timestamps)
-                            valid_closes = close_col[valid_mask].values
-                            valid_timestamps = timestamps[valid_mask]
-                            
-                            # Convert to lists efficiently
-                            chart_data = valid_closes.tolist()
-                            chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in valid_timestamps]
-                            
-                            # Build merged_series efficiently
-                            if source_col is not None:
-                                valid_sources = source_col[valid_mask].values
-                                merged_series = [
-                                    {
-                                        'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
-                                        'close': float(close),
-                                        'source': str(src) if pd.notna(src) else 'unknown'
-                                    }
-                                    for ts, close, src in zip(valid_timestamps, valid_closes, valid_sources)
-                                ]
-                            else:
-                                merged_series = [
-                                    {
-                                        'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
-                                        'close': float(close),
-                                        'source': 'unknown'
-                                    }
-                                    for ts, close in zip(valid_timestamps, valid_closes)
-                                ]
-                            
-                            logger.info(f"[CHART DATA] {symbol}: Extracted {len(merged_series)} data points for chart")
-                            if len(merged_series) > 0:
-                                logger.debug(f"[CHART DATA] {symbol}: Sample data point: {merged_series[0]}")
-                    else:
-                        logger.warning(f"[CHART DATA] {symbol}: No valid chart data extracted - close_col={close_col is not None}, timestamps={timestamps is not None}")
-                    chart_data_time = (time.time() - chart_data_start) * 1000
-                    logger.info(f"[TIMING] {symbol}: Chart data extraction took {chart_data_time:.2f}ms")
-                    
-                    # Prepare JSON payload
-                    json_prep_start = time.time()
-                    # Get 52-week range from financial_info if available (preferred source)
-                    price_info_dict = result.get('price_info', {}).copy()
-                    financial_info_dict = result.get('financial_info', {}).copy()
-                    financial_data = financial_info_dict.get('financial_data', {})
-                    
-                    # Try to get 52-week range from financial_info first (stored during fetch_all_data.py runs)
-                    week_52_low = financial_data.get('week_52_low') or price_info_dict.get('week_52_low')
-                    week_52_high = financial_data.get('week_52_high') or price_info_dict.get('week_52_high')
-                    
-                    # Fallback: Calculate from merged_df if not in financial_info or price_info
-                    # (This is a fallback - ideally financial_info should have it from fetch_all_data.py)
-                    if (not week_52_low or not week_52_high) and merged_df is not None and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
-                        try:
-                            # Get close column
-                            close_col = None
-                            if 'close' in merged_df.columns:
-                                close_col = merged_df['close']
-                            elif 'price' in merged_df.columns:
-                                close_col = merged_df['price']
-                            
-                            if close_col is not None:
-                                # Filter to last 365 days
-                                if isinstance(merged_df.index, pd.DatetimeIndex):
-                                    one_year_ago = pd.Timestamp.now() - pd.Timedelta(days=365)
-                                    recent_df = merged_df[merged_df.index >= one_year_ago]
-                                    if not recent_df.empty and 'close' in recent_df.columns:
-                                        valid_prices = recent_df['close'].dropna()
-                                    elif not recent_df.empty and 'price' in recent_df.columns:
-                                        valid_prices = recent_df['price'].dropna()
-                                    else:
-                                        valid_prices = close_col.dropna()
+                        if close_col is not None:
+                            # Filter to last 365 days
+                            if isinstance(merged_df.index, pd.DatetimeIndex):
+                                one_year_ago = pd.Timestamp.now() - pd.Timedelta(days=365)
+                                recent_df = merged_df[merged_df.index >= one_year_ago]
+                                if not recent_df.empty and 'close' in recent_df.columns:
+                                    valid_prices = recent_df['close'].dropna()
+                                elif not recent_df.empty and 'price' in recent_df.columns:
+                                    valid_prices = recent_df['price'].dropna()
                                 else:
                                     valid_prices = close_col.dropna()
-                                
-                                if len(valid_prices) > 0:
-                                    if not week_52_low:
-                                        week_52_low = float(valid_prices.min())
-                                    if not week_52_high:
-                                        week_52_high = float(valid_prices.max())
-                                    logger.info(f"[52-WEEK] {symbol}: Calculated from merged_df (fallback) - low={week_52_low}, high={week_52_high}")
-                        except Exception as e:
-                            logger.warning(f"[52-WEEK] {symbol}: Error calculating 52-week range from merged_df: {e}")
-                    
-                    # Add week_52 values to price_info if we have them
-                    if week_52_low:
-                        price_info_dict['week_52_low'] = week_52_low
-                    if week_52_high:
-                        price_info_dict['week_52_high'] = week_52_high
-                    
-                    # Don't include large chart data in initial payload - it will be lazy-loaded
-                    # Only include minimal metadata needed for initial render
-                    json_data = {
-                        'symbol': symbol,
-                        'earnings_date': earnings_date_str,
-                        'price_info': price_info_dict,
-                        'financial_info': financial_info_dict,  # Contains week_52_low/high if available
-                        'options_info': result.get('options_info', {}),
-                        'iv_info': result.get('iv_info', {}),
-                        'news_info': result.get('news_info', {}),
-                        # Chart data removed - will be lazy-loaded via /stock_info/api/lazy/chart/{symbol}
-                        # 'chart_data': chart_data,
-                        # 'chart_labels': chart_labels,
-                        # 'merged_series': merged_series
-                    }
-                    json_prep_time = (time.time() - json_prep_start) * 1000
-                    if json_prep_time > 0.1:
-                        logger.info(f"[TIMING] {symbol}: JSON payload preparation took {json_prep_time:.2f}ms")
-                    
-                    # Log chart data summary for debugging
-                    # Note: Chart data is now lazy-loaded, so these should be 0 or empty
-                    chart_data_len = len(json_data.get('chart_data', []))
-                    chart_labels_len = len(json_data.get('chart_labels', []))
-                    merged_series_len = len(json_data.get('merged_series', []))
-                    if chart_data_len > 0 or merged_series_len > 0:
-                        logger.warning(f"[CHART DATA] {symbol}: WARNING - Chart data still in initial payload! chart_data={chart_data_len}, merged_series={merged_series_len}")
-                    else:
-                        logger.info(f"[CHART DATA] {symbol}: Chart data excluded from initial payload (will be lazy-loaded) ✓")
-                    
-                    # Recursively clean NaN, Infinity, and other non-JSON values from data structure
-                    def clean_for_json(obj):
-                        """Recursively clean data structure to make it JSON-serializable."""
-                        import math
-                        if obj is None:
+                            else:
+                                valid_prices = close_col.dropna()
+                            
+                            if len(valid_prices) > 0:
+                                if not week_52_low:
+                                    week_52_low = float(valid_prices.min())
+                                if not week_52_high:
+                                    week_52_high = float(valid_prices.max())
+                                logger.info(f"[52-WEEK] {symbol}: Calculated from merged_df (fallback) - low={week_52_low}, high={week_52_high}")
+                    except Exception as e:
+                        logger.warning(f"[52-WEEK] {symbol}: Error calculating 52-week range from merged_df: {e}")
+                
+                # Add week_52 values to price_info if we have them
+                if week_52_low:
+                    price_info_dict['week_52_low'] = week_52_low
+                if week_52_high:
+                    price_info_dict['week_52_high'] = week_52_high
+                
+                # Don't include large chart data in initial payload - it will be lazy-loaded
+                # Only include minimal metadata needed for initial render
+                json_data = {
+                    'symbol': symbol,
+                    'earnings_date': earnings_date_str,
+                    'price_info': price_info_dict,
+                    'financial_info': financial_info_dict,  # Contains week_52_low/high if available
+                    'options_info': result.get('options_info', {}),
+                    'iv_info': result.get('iv_info', {}),
+                    'news_info': result.get('news_info', {}),
+                    # Chart data removed - will be lazy-loaded via /stock_info/api/lazy/chart/{symbol}
+                    # 'chart_data': chart_data,
+                    # 'chart_labels': chart_labels,
+                    # 'merged_series': merged_series
+                }
+                json_prep_time = (time.time() - json_prep_start) * 1000
+                if json_prep_time > 0.1:
+                    logger.info(f"[TIMING] {symbol}: JSON payload preparation took {json_prep_time:.2f}ms")
+                
+                # Log chart data summary for debugging
+                # Note: Chart data is now lazy-loaded, so these should be 0 or empty
+                chart_data_len = len(json_data.get('chart_data', []))
+                chart_labels_len = len(json_data.get('chart_labels', []))
+                merged_series_len = len(json_data.get('merged_series', []))
+                if chart_data_len > 0 or merged_series_len > 0:
+                    logger.warning(f"[CHART DATA] {symbol}: WARNING - Chart data still in initial payload! chart_data={chart_data_len}, merged_series={merged_series_len}")
+                else:
+                    logger.info(f"[CHART DATA] {symbol}: Chart data excluded from initial payload (will be lazy-loaded) ✓")
+                
+                # Recursively clean NaN, Infinity, and other non-JSON values from data structure
+                def clean_for_json(obj):
+                    """Recursively clean data structure to make it JSON-serializable."""
+                    import math
+                    if obj is None:
+                        return None
+                    if isinstance(obj, (int, str, bool)):
+                        return obj
+                    if isinstance(obj, float):
+                        if math.isnan(obj):
                             return None
-                        if isinstance(obj, (int, str, bool)):
-                            return obj
-                        if isinstance(obj, float):
-                            if math.isnan(obj):
-                                return None
-                            if math.isinf(obj):
-                                return None
-                            return obj
-                        # Check for pandas types BEFORE pd.isna() to avoid ambiguous truth value errors
-                        if isinstance(obj, pd.DataFrame):
-                            return clean_for_json(obj.to_dict('records'))
-                        if isinstance(obj, pd.Series):
-                            return clean_for_json(obj.to_dict())
-                        if isinstance(obj, (pd.Timestamp, pd.DatetimeIndex)):
-                            return obj.isoformat() if hasattr(obj, 'isoformat') else str(obj)
-                        if isinstance(obj, dict):
-                            return {k: clean_for_json(v) for k, v in obj.items()}
-                        if isinstance(obj, (list, tuple)):
-                            return [clean_for_json(item) for item in obj]
-                        if hasattr(obj, 'isoformat'):  # datetime objects
-                            return obj.isoformat()
-                        # Check for NaN only for scalar values (not DataFrames/Series)
-                        try:
-                            if pd.isna(obj):
-                                return None
-                        except (ValueError, TypeError):
-                            # pd.isna() can fail for some types, continue
-                            pass
-                        # Try to convert to native Python type
-                        try:
-                            if hasattr(obj, 'item'):  # numpy scalars
-                                return clean_for_json(obj.item())
-                        except (ValueError, AttributeError):
-                            pass
-                        return str(obj)
-                    
-                    # Clean the data structure before serialization
-                    clean_start = time.time()
-                    cleaned_json_data = clean_for_json(json_data)
-                    clean_time = (time.time() - clean_start) * 1000
-                    logger.info(f"[TIMING] {symbol}: JSON data cleaning took {clean_time:.2f}ms")
-                    
-                    # Embed JSON in template - use allow_nan=False to catch any remaining NaN values
-                    json_serialize_start = time.time()
-                    json_str = json.dumps(cleaned_json_data, default=str, allow_nan=False)
-                    json_serialize_time = (time.time() - json_serialize_start) * 1000
-                    logger.info(f"[TIMING] {symbol}: JSON serialization took {json_serialize_time:.2f}ms")
-                    template_replace_start = time.time()
-                    html_content = template.replace(
-                        '<script id="stockData" type="application/json"></script>',
-                        f'<script id="stockData" type="application/json">{json_str}</script>'
-                    )
-                    # Inject WebSocket initialization code
-                    ws_init_code = f'''
+                        if math.isinf(obj):
+                            return None
+                        return obj
+                    # Check for pandas types BEFORE pd.isna() to avoid ambiguous truth value errors
+                    if isinstance(obj, pd.DataFrame):
+                        return clean_for_json(obj.to_dict('records'))
+                    if isinstance(obj, pd.Series):
+                        return clean_for_json(obj.to_dict())
+                    if isinstance(obj, (pd.Timestamp, pd.DatetimeIndex)):
+                        return obj.isoformat() if hasattr(obj, 'isoformat') else str(obj)
+                    if isinstance(obj, dict):
+                        return {k: clean_for_json(v) for k, v in obj.items()}
+                    if isinstance(obj, (list, tuple)):
+                        return [clean_for_json(item) for item in obj]
+                    if hasattr(obj, 'isoformat'):  # datetime objects
+                        return obj.isoformat()
+                    # Check for NaN only for scalar values (not DataFrames/Series)
+                    try:
+                        if pd.isna(obj):
+                            return None
+                    except (ValueError, TypeError):
+                        # pd.isna() can fail for some types, continue
+                        pass
+                    # Try to convert to native Python type
+                    try:
+                        if hasattr(obj, 'item'):  # numpy scalars
+                            return clean_for_json(obj.item())
+                    except (ValueError, AttributeError):
+                        pass
+                    return str(obj)
+                
+                # Clean the data structure before serialization
+                clean_start = time.time()
+                cleaned_json_data = clean_for_json(json_data)
+                clean_time = (time.time() - clean_start) * 1000
+                logger.info(f"[TIMING] {symbol}: JSON data cleaning took {clean_time:.2f}ms")
+                
+                # Embed JSON in template - use allow_nan=False to catch any remaining NaN values
+                json_serialize_start = time.time()
+                json_str = json.dumps(cleaned_json_data, default=str, allow_nan=False)
+                json_serialize_time = (time.time() - json_serialize_start) * 1000
+                logger.info(f"[TIMING] {symbol}: JSON serialization took {json_serialize_time:.2f}ms")
+                template_replace_start = time.time()
+                html_content = template.replace(
+                    '<script id="stockData" type="application/json"></script>',
+                    f'<script id="stockData" type="application/json">{json_str}</script>'
+                )
+                # Inject WebSocket initialization code
+                ws_init_code = f'''
         <script>
         // WebSocket connection for real-time updates
         // Check for debug flag in URL query parameters (only if not already set)
@@ -7449,7 +7465,7 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         if (typeof debugLog === 'undefined') {{
             function debugLog(...args) {{
                 if (window.debugMode) {{
-                    console.log(...args);
+                console.log(...args);
                 }}
             }}
         }}
@@ -7463,7 +7479,7 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
             try {{
                 // Close existing connection if any
                 if (ws && ws.readyState !== WebSocket.CLOSED) {{
-                    ws.close();
+                ws.close();
                 }}
                 
                 // Determine WebSocket protocol and URL
@@ -7480,92 +7496,92 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 // If no port specified and we're on HTTPS, don't specify port (uses default 443 for wss://)
                 // If no port specified and we're on HTTP, use 9100
                 if (!port || port === '') {{
-                    if (pageProtocol === 'https:') {{
-                        // For HTTPS, use default port (443) - don't specify in URL
-                        const wsUrl = `${{wsProtocol}}//${{host}}/stock_info/ws?symbol={symbol}`;
-                        debugLog('Connecting to WebSocket (HTTPS, default port):', wsUrl, 'from page:', window.location.href);
-                        ws = new WebSocket(wsUrl);
-                    }} else {{
-                        // For HTTP, use port 9100
-                        port = '9100';
-                        const wsUrl = `${{wsProtocol}}//${{host}}:${{port}}/stock_info/ws?symbol={symbol}`;
-                        debugLog('Connecting to WebSocket (HTTP, port 9100):', wsUrl, 'from page:', window.location.href);
-                        ws = new WebSocket(wsUrl);
-                    }}
-                }} else {{
-                    // Port is specified, use it
-                    const wsUrl = `${{wsProtocol}}//${{host}}:${{port}}/stock_info/ws?symbol={symbol}`;
-                    debugLog('Connecting to WebSocket (with port):', wsUrl, 'from page:', window.location.href, 'page protocol:', pageProtocol, 'ws protocol:', wsProtocol);
+                if (pageProtocol === 'https:') {{
+                    // For HTTPS, use default port (443) - don't specify in URL
+                    const wsUrl = `${{wsProtocol}}//${{host}}/stock_info/ws?symbol={symbol}`;
+                    debugLog('Connecting to WebSocket (HTTPS, default port):', wsUrl, 'from page:', window.location.href);
                     ws = new WebSocket(wsUrl);
+                }} else {{
+                    // For HTTP, use port 9100
+                    port = '9100';
+                    const wsUrl = `${{wsProtocol}}//${{host}}:${{port}}/stock_info/ws?symbol={symbol}`;
+                    debugLog('Connecting to WebSocket (HTTP, port 9100):', wsUrl, 'from page:', window.location.href);
+                    ws = new WebSocket(wsUrl);
+                }}
+                }} else {{
+                // Port is specified, use it
+                const wsUrl = `${{wsProtocol}}//${{host}}:${{port}}/stock_info/ws?symbol={symbol}`;
+                debugLog('Connecting to WebSocket (with port):', wsUrl, 'from page:', window.location.href, 'page protocol:', pageProtocol, 'ws protocol:', wsProtocol);
+                ws = new WebSocket(wsUrl);
                 }}
                 
                 // Verify WebSocket was created
                 if (!ws) {{
-                    console.error('Failed to create WebSocket');
-                    return;
+                console.error('Failed to create WebSocket');
+                return;
                 }}
                 
                 ws.onopen = function() {{
-                    debugLog('WebSocket connected successfully');
-                    const wsStatus = document.getElementById('wsStatus');
-                    const wsStatusText = document.getElementById('wsStatusText');
-                    debugLog('WebSocket status elements:', {{ wsStatus: !!wsStatus, wsStatusText: !!wsStatusText }});
-                    if (wsStatus) {{
-                        wsStatus.classList.remove('disconnected');
-                        wsStatus.classList.add('connected');
-                        debugLog('WebSocket status indicator updated to connected');
-                    }}
-                    if (wsStatusText) {{
-                        wsStatusText.textContent = 'Connected to real-time data';
-                        debugLog('WebSocket status text updated');
-                    }}
-                    reconnectAttempts = 0;
+                debugLog('WebSocket connected successfully');
+                const wsStatus = document.getElementById('wsStatus');
+                const wsStatusText = document.getElementById('wsStatusText');
+                debugLog('WebSocket status elements:', {{ wsStatus: !!wsStatus, wsStatusText: !!wsStatusText }});
+                if (wsStatus) {{
+                    wsStatus.classList.remove('disconnected');
+                    wsStatus.classList.add('connected');
+                    debugLog('WebSocket status indicator updated to connected');
+                }}
+                if (wsStatusText) {{
+                    wsStatusText.textContent = 'Connected to real-time data';
+                    debugLog('WebSocket status text updated');
+                }}
+                reconnectAttempts = 0;
                 }};
                 
                 ws.onmessage = function(event) {{
-                    try {{
-                        const data = JSON.parse(event.data);
-                        if (data.symbol === '{symbol}' && data.data) {{
-                            // Update real-time price display
-                            const realtimePrice = document.getElementById('realtimePrice');
-                            if (realtimePrice && data.data.price) {{
-                                realtimePrice.textContent = '$' + parseFloat(data.data.price).toFixed(2);
-                            }}
+                try {{
+                    const data = JSON.parse(event.data);
+                    if (data.symbol === '{symbol}' && data.data) {{
+                        // Update real-time price display
+                        const realtimePrice = document.getElementById('realtimePrice');
+                        if (realtimePrice && data.data.price) {{
+                            realtimePrice.textContent = '$' + parseFloat(data.data.price).toFixed(2);
                         }}
-                    }} catch (e) {{
-                        console.error('Error parsing WebSocket message:', e);
                     }}
+                }} catch (e) {{
+                    console.error('Error parsing WebSocket message:', e);
+                }}
                 }};
                 
                 ws.onerror = function(error) {{
-                    console.error('WebSocket error:', error);
-                    const wsStatus = document.getElementById('wsStatus');
-                    const wsStatusText = document.getElementById('wsStatusText');
-                    if (wsStatus) {{
-                        wsStatus.classList.remove('connected');
-                        wsStatus.classList.add('disconnected');
-                    }}
-                    if (wsStatusText) {{
-                        wsStatusText.textContent = 'Connection error';
-                    }}
+                console.error('WebSocket error:', error);
+                const wsStatus = document.getElementById('wsStatus');
+                const wsStatusText = document.getElementById('wsStatusText');
+                if (wsStatus) {{
+                    wsStatus.classList.remove('connected');
+                    wsStatus.classList.add('disconnected');
+                }}
+                if (wsStatusText) {{
+                    wsStatusText.textContent = 'Connection error';
+                }}
                 }};
                 
                 ws.onclose = function() {{
-                    console.log('WebSocket closed');
-                    const wsStatus = document.getElementById('wsStatus');
-                    const wsStatusText = document.getElementById('wsStatusText');
-                    if (wsStatus) {{
-                        wsStatus.classList.remove('connected');
-                        wsStatus.classList.add('disconnected');
-                    }}
-                    if (wsStatusText) {{
-                        wsStatusText.textContent = 'Disconnected';
-                    }}
-                    
-                    if (reconnectAttempts < maxReconnectAttempts) {{
-                        reconnectAttempts++;
-                        setTimeout(connectWebSocket, 3000);
-                    }}
+                console.log('WebSocket closed');
+                const wsStatus = document.getElementById('wsStatus');
+                const wsStatusText = document.getElementById('wsStatusText');
+                if (wsStatus) {{
+                    wsStatus.classList.remove('connected');
+                    wsStatus.classList.add('disconnected');
+                }}
+                if (wsStatusText) {{
+                    wsStatusText.textContent = 'Disconnected';
+                }}
+                
+                if (reconnectAttempts < maxReconnectAttempts) {{
+                    reconnectAttempts++;
+                    setTimeout(connectWebSocket, 3000);
+                }}
                 }};
             }} catch (e) {{
                 console.error('Error connecting WebSocket:', e);
@@ -7590,10 +7606,10 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
             }}
         }});
         </script>
-                    '''
-                    # Inject chart initialization code (full chart setup with period switching)
-                    # Get the chart initialization code from the dynamic version
-                    chart_init_code = f'''
+                '''
+                # Inject chart initialization code (full chart setup with period switching)
+                # Get the chart initialization code from the dynamic version
+                chart_init_code = f'''
         <script>
         // Chart initialization for static template
         // Check for debug flag in URL query parameters (only if not already set)
@@ -7607,7 +7623,7 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         if (typeof debugLog === 'undefined') {{
             function debugLog(...args) {{
                 if (window.debugMode) {{
-                    console.log(...args);
+                console.log(...args);
                 }}
             }}
         }}
@@ -7624,9 +7640,9 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 '3m': 90,
                 '6m': 180,
                 'ytd': (() => {{
-                    const now = new Date();
-                    const startOfYear = new Date(now.getFullYear(), 0, 1);
-                    return Math.ceil((now - startOfYear) / (1000 * 60 * 60 * 24));
+                const now = new Date();
+                const startOfYear = new Date(now.getFullYear(), 0, 1);
+                return Math.ceil((now - startOfYear) / (1000 * 60 * 60 * 24));
                 }})(),
                 '1y': 365,
                 '2y': 730
@@ -7701,34 +7717,34 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 // Multi-day: one point per day
                 const dailyMap = new Map();
                 for (const r of mergedSeries) {{
-                    if (!r || typeof r !== 'object') continue;
-                    const dt = parseDate(r.timestamp);
-                    if (!dt) {{
-                        parseFailures++;
-                        continue;
-                    }}
-                    const t = dt.getTime();
-                    if (t < windowStartMs) {{
-                        dateOutOfRange++;
-                        continue;
-                    }}
-                    const key = dt.toISOString().slice(0, 10);
-                    const val = Number(r.close);
-                    if (Number.isNaN(val)) {{
-                        nanValues++;
-                        continue;
-                    }}
-                    validPoints++;
-                    const existing = dailyMap.get(key);
-                    if (!existing || dt > existing.dt) {{
-                        dailyMap.set(key, {{ dt, val }});
-                    }}
+                if (!r || typeof r !== 'object') continue;
+                const dt = parseDate(r.timestamp);
+                if (!dt) {{
+                    parseFailures++;
+                    continue;
+                }}
+                const t = dt.getTime();
+                if (t < windowStartMs) {{
+                    dateOutOfRange++;
+                    continue;
+                }}
+                const key = dt.toISOString().slice(0, 10);
+                const val = Number(r.close);
+                if (Number.isNaN(val)) {{
+                    nanValues++;
+                    continue;
+                }}
+                validPoints++;
+                const existing = dailyMap.get(key);
+                if (!existing || dt > existing.dt) {{
+                    dailyMap.set(key, {{ dt, val }});
+                }}
                 }}
                 debugLog(`buildSeriesForPeriod(${{period}}): parseFailures=${{parseFailures}}, dateOutOfRange=${{dateOutOfRange}}, nanValues=${{nanValues}}, validPoints=${{validPoints}}, dailyMap.size=${{dailyMap.size}}`);
                 const entries = Array.from(dailyMap.values()).sort((a, b) => a.dt - b.dt);
                 if (entries.length === 0) {{
-                    console.warn(`buildSeriesForPeriod(${{period}}): No entries after filtering. Sample timestamp: ${{mergedSeries[0]?.timestamp}}`);
-                    return {{ labels: [], data: [], dateMarkers: [] }};
+                console.warn(`buildSeriesForPeriod(${{period}}): No entries after filtering. Sample timestamp: ${{mergedSeries[0]?.timestamp}}`);
+                return {{ labels: [], data: [], dateMarkers: [] }};
                 }}
                 const labels = entries.map(p => formatLabel(p.dt, period));
                 const data = entries.map(p => p.val);
@@ -7738,46 +7754,46 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 const windowed = [];
                 const allValid = []; // Store all valid points for fallback
                 for (const r of mergedSeries) {{
-                    if (!r || typeof r !== 'object') continue;
-                    const dt = parseDate(r.timestamp);
-                    if (!dt) {{
-                        parseFailures++;
-                        continue;
-                    }}
-                    const t = dt.getTime();
-                    const val = Number(r.close);
-                    if (Number.isNaN(val)) {{
-                        nanValues++;
-                        continue;
-                    }}
-                    // Store all valid points
-                    allValid.push({{ dt, val, t }});
-                    // Check if within window
-                    if (t >= windowStartMs) {{
-                        validPoints++;
-                        windowed.push({{ dt, val }});
-                    }} else {{
-                        dateOutOfRange++;
-                    }}
+                if (!r || typeof r !== 'object') continue;
+                const dt = parseDate(r.timestamp);
+                if (!dt) {{
+                    parseFailures++;
+                    continue;
+                }}
+                const t = dt.getTime();
+                const val = Number(r.close);
+                if (Number.isNaN(val)) {{
+                    nanValues++;
+                    continue;
+                }}
+                // Store all valid points
+                allValid.push({{ dt, val, t }});
+                // Check if within window
+                if (t >= windowStartMs) {{
+                    validPoints++;
+                    windowed.push({{ dt, val }});
+                }} else {{
+                    dateOutOfRange++;
+                }}
                 }}
                 debugLog(`buildSeriesForPeriod(${{period}}): parseFailures=${{parseFailures}}, dateOutOfRange=${{dateOutOfRange}}, nanValues=${{nanValues}}, validPoints=${{validPoints}}, windowed.length=${{windowed.length}}`);
                 
                 // If no data in window, use most recent data points (up to last 24 hours worth, or last 100 points)
                 let dataToUse = windowed;
                 if (windowed.length === 0 && allValid.length > 0) {{
-                    console.warn(`buildSeriesForPeriod(${{period}}): No data in 1d window, using most recent data. Total valid points: ${{allValid.length}}`);
-                    // Sort by timestamp (most recent first)
-                    allValid.sort((a, b) => b.t - a.t);
-                    // Take the most recent points (up to 100, or all if less)
-                    const recentPoints = allValid.slice(0, Math.min(100, allValid.length));
-                    // Sort back chronologically for display
-                    recentPoints.sort((a, b) => a.t - b.t);
-                    dataToUse = recentPoints.map(p => ({{ dt: p.dt, val: p.val }}));
-                    debugLog(`buildSeriesForPeriod(${{period}}): Using ${{dataToUse.length}} most recent data points`);
+                console.warn(`buildSeriesForPeriod(${{period}}): No data in 1d window, using most recent data. Total valid points: ${{allValid.length}}`);
+                // Sort by timestamp (most recent first)
+                allValid.sort((a, b) => b.t - a.t);
+                // Take the most recent points (up to 100, or all if less)
+                const recentPoints = allValid.slice(0, Math.min(100, allValid.length));
+                // Sort back chronologically for display
+                recentPoints.sort((a, b) => a.t - b.t);
+                dataToUse = recentPoints.map(p => ({{ dt: p.dt, val: p.val }}));
+                debugLog(`buildSeriesForPeriod(${{period}}): Using ${{dataToUse.length}} most recent data points`);
                 }} else if (windowed.length === 0 && mergedSeries.length > 0) {{
-                    const sample = mergedSeries[0];
-                    const sampleDt = parseDate(sample?.timestamp);
-                    console.warn(`buildSeriesForPeriod(${{period}}): No valid data. Sample: timestamp=${{sample?.timestamp}}, parsed=${{sampleDt}}, close=${{sample?.close}}, windowStart=${{new Date(windowStartMs).toISOString()}}, now=${{new Date(nowMs).toISOString()}}`);
+                const sample = mergedSeries[0];
+                const sampleDt = parseDate(sample?.timestamp);
+                console.warn(`buildSeriesForPeriod(${{period}}): No valid data. Sample: timestamp=${{sample?.timestamp}}, parsed=${{sampleDt}}, close=${{sample?.close}}, windowStart=${{new Date(windowStartMs).toISOString()}}, now=${{new Date(nowMs).toISOString()}}`);
                 }}
                 
                 dataToUse.sort((a, b) => a.dt - b.dt);
@@ -7814,15 +7830,15 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
             for (let i = 0; i < series.data.length; i++) {{
                 const price = series.data[i];
                 if (price !== null && price !== undefined && !isNaN(price) && typeof price === 'number') {{
-                    if (minPrice === null || price < minPrice) minPrice = price;
-                    if (maxPrice === null || price > maxPrice) maxPrice = price;
+                if (minPrice === null || price < minPrice) minPrice = price;
+                if (maxPrice === null || price > maxPrice) maxPrice = price;
                 }}
             }}
             
             if (minPrice === null || maxPrice === null) {{
                 console.warn('updateRangeDisplay: No valid prices found in series', {{
-                    dataLength: series.data.length,
-                    sampleData: series.data.slice(0, 5)
+                dataLength: series.data.length,
+                sampleData: series.data.slice(0, 5)
                 }});
                 return;
             }}
@@ -7843,16 +7859,16 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 const startDateObj = parseDate(startDate);
                 const endDateObj = parseDate(endDate);
                 if (startDateObj && !isNaN(startDateObj.getTime())) {{
-                    const month = String(startDateObj.getMonth() + 1).padStart(2, '0');
-                    const day = String(startDateObj.getDate()).padStart(2, '0');
-                    const year = startDateObj.getFullYear();
-                    formattedStartDate = `${{month}}/${{day}}/${{year}}`;
+                const month = String(startDateObj.getMonth() + 1).padStart(2, '0');
+                const day = String(startDateObj.getDate()).padStart(2, '0');
+                const year = startDateObj.getFullYear();
+                formattedStartDate = `${{month}}/${{day}}/${{year}}`;
                 }}
                 if (endDateObj && !isNaN(endDateObj.getTime())) {{
-                    const month = String(endDateObj.getMonth() + 1).padStart(2, '0');
-                    const day = String(endDateObj.getDate()).padStart(2, '0');
-                    const year = endDateObj.getFullYear();
-                    formattedEndDate = `${{month}}/${{day}}/${{year}}`;
+                const month = String(endDateObj.getMonth() + 1).padStart(2, '0');
+                const day = String(endDateObj.getDate()).padStart(2, '0');
+                const year = endDateObj.getFullYear();
+                formattedEndDate = `${{month}}/${{day}}/${{year}}`;
                 }}
             }}
             
@@ -7885,9 +7901,9 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
             // Update button states
             document.querySelectorAll('[id^="btn-"]').forEach(btn => {{
                 if (btn.id.startsWith('btn-1d') || btn.id.startsWith('btn-1w') || btn.id.startsWith('btn-1m') || 
-                    btn.id.startsWith('btn-3m') || btn.id.startsWith('btn-6m') || btn.id.startsWith('btn-ytd') || 
-                    btn.id.startsWith('btn-1y') || btn.id.startsWith('btn-2y')) {{
-                    btn.classList.remove('active');
+                btn.id.startsWith('btn-3m') || btn.id.startsWith('btn-6m') || btn.id.startsWith('btn-ytd') || 
+                btn.id.startsWith('btn-1y') || btn.id.startsWith('btn-2y')) {{
+                btn.classList.remove('active');
                 }}
             }});
             const btn = document.getElementById(`btn-${{period}}`);
@@ -7907,60 +7923,60 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 // Show loading indicator
                 const noDataMsg = document.getElementById('chartNoDataMessage');
                 if (noDataMsg) {{
-                    noDataMsg.style.display = 'block';
-                    noDataMsg.textContent = `Loading ${{period}} data...`;
+                noDataMsg.style.display = 'block';
+                noDataMsg.textContent = `Loading ${{period}} data...`;
                 }}
                 
                 // Fetch data for the new period (autoInit=false so we handle chart update ourselves)
                 const loadSuccess = await window.lazyLoadChartData(period, dataType, false);
                 if (!loadSuccess) {{
-                    console.error(`[Chart] Failed to load data for period ${{period}}`);
-                    if (noDataMsg) {{
-                        noDataMsg.style.display = 'block';
-                        noDataMsg.textContent = 'Error loading chart data';
-                    }}
-                    return;
+                console.error(`[Chart] Failed to load data for period ${{period}}`);
+                if (noDataMsg) {{
+                    noDataMsg.style.display = 'block';
+                    noDataMsg.textContent = 'Error loading chart data';
+                }}
+                return;
                 }}
                 
                 // After loading, rebuild series and update chart
                 const newSeries = buildSeriesForPeriod(period);
                 if (newSeries && newSeries.data && newSeries.data.length > 0) {{
-                    // Hide loading message
-                    if (noDataMsg) noDataMsg.style.display = 'none';
-                    
-                    // Update chart if initialized
-                    if (priceChart) {{
-                        priceChart.data.labels = newSeries.labels;
-                        if (priceChart.data.datasets.length > 0) {{
-                            priceChart.data.datasets[0].data = newSeries.data;
-                        }}
-                        // Update annotations for date markers
-                        if (newSeries.dateMarkers && newSeries.dateMarkers.length > 0) {{
-                            const annotations = buildDateMarkerAnnotations(newSeries.dateMarkers, newSeries.labels);
-                            if (priceChart.options.plugins && priceChart.options.plugins.annotation) {{
-                                priceChart.options.plugins.annotation.annotations = annotations;
-                            }}
-                        }}
-                        priceChart.update();
-                        updateRangeDisplay(newSeries);
-                        debugLog(`[Chart] Updated chart for period ${{period}} with ${{newSeries.data.length}} data points`);
-                    }} else {{
-                        console.warn(`[Chart] Chart not initialized, cannot update for period ${{period}}`);
+                // Hide loading message
+                if (noDataMsg) noDataMsg.style.display = 'none';
+                
+                // Update chart if initialized
+                if (priceChart) {{
+                    priceChart.data.labels = newSeries.labels;
+                    if (priceChart.data.datasets.length > 0) {{
+                        priceChart.data.datasets[0].data = newSeries.data;
                     }}
+                    // Update annotations for date markers
+                    if (newSeries.dateMarkers && newSeries.dateMarkers.length > 0) {{
+                        const annotations = buildDateMarkerAnnotations(newSeries.dateMarkers, newSeries.labels);
+                        if (priceChart.options.plugins && priceChart.options.plugins.annotation) {{
+                            priceChart.options.plugins.annotation.annotations = annotations;
+                        }}
+                    }}
+                    priceChart.update();
+                    updateRangeDisplay(newSeries);
+                    debugLog(`[Chart] Updated chart for period ${{period}} with ${{newSeries.data.length}} data points`);
                 }} else {{
-                    // No data available even after fetching
-                    if (noDataMsg) {{
-                        noDataMsg.style.display = 'block';
-                        noDataMsg.textContent = 'No historical price data available for this period';
-                    }}
-                    console.warn(`[Chart] No data available for period ${{period}} after fetching`);
+                    console.warn(`[Chart] Chart not initialized, cannot update for period ${{period}}`);
+                }}
+                }} else {{
+                // No data available even after fetching
+                if (noDataMsg) {{
+                    noDataMsg.style.display = 'block';
+                    noDataMsg.textContent = 'No historical price data available for this period';
+                }}
+                console.warn(`[Chart] No data available for period ${{period}} after fetching`);
                 }}
             }} else {{
                 console.error('Cannot switch time period: lazyLoadChartData function not available');
                 const noDataMsg = document.getElementById('chartNoDataMessage');
                 if (noDataMsg) {{
-                    noDataMsg.style.display = 'block';
-                    noDataMsg.textContent = 'Error: Chart data loader not available';
+                noDataMsg.style.display = 'block';
+                noDataMsg.textContent = 'Error: Chart data loader not available';
                 }}
             }}
         }}
@@ -7976,10 +7992,10 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
             // Destroy existing chart if it exists
             if (priceChart) {{
                 try {{
-                    priceChart.destroy();
-                    debugLog('Destroyed existing chart before creating new one');
+                priceChart.destroy();
+                debugLog('Destroyed existing chart before creating new one');
                 }} catch (e) {{
-                    debugLog('Error destroying existing chart:', e);
+                debugLog('Error destroying existing chart:', e);
                 }}
                 priceChart = null;
             }}
@@ -8022,37 +8038,37 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
             priceChart = new Chart(ctx, {{
                 type: 'line',
                 data: {{
-                    labels: initialSeries.labels,
-                    datasets: [{{
-                        label: '{symbol} Price',
-                        data: initialSeries.data,
-                        borderColor: '#667eea',
-                        backgroundColor: 'rgba(102, 126, 234, 0.1)',
-                        borderWidth: 2,
-                        fill: true,
-                        tension: 0.4
-                    }}]
+                labels: initialSeries.labels,
+                datasets: [{{
+                    label: '{symbol} Price',
+                    data: initialSeries.data,
+                    borderColor: '#667eea',
+                    backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.4
+                }}]
                 }},
                 options: {{
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {{
-                        legend: {{ display: false }},
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {{
+                    legend: {{ display: false }},
+                    zoom: {{
                         zoom: {{
-                            zoom: {{
-                                wheel: {{ enabled: true }},
-                                drag: {{ enabled: true }},
-                                mode: 'x'
-                            }},
-                            pan: {{
-                                enabled: true,
-                                mode: 'x'
-                            }}
+                            wheel: {{ enabled: true }},
+                            drag: {{ enabled: true }},
+                            mode: 'x'
+                        }},
+                        pan: {{
+                            enabled: true,
+                            mode: 'x'
                         }}
-                    }},
-                    scales: {{
-                        y: {{ beginAtZero: false }}
                     }}
+                }},
+                scales: {{
+                    y: {{ beginAtZero: false }}
+                }}
                 }}
             }});
         }}
@@ -8073,13 +8089,13 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
             
             if (!mergedSeries || !Array.isArray(mergedSeries) || mergedSeries.length === 0) {{
                 if (chartInitAttempts < maxChartInitAttempts) {{
-                    // Wait a bit more for render.js to set the data
-                    setTimeout(window.tryInitChart, 200);
-                    return;
+                // Wait a bit more for render.js to set the data
+                setTimeout(window.tryInitChart, 200);
+                return;
                 }} else {{
-                    console.warn('Chart initialization timeout - no data available after', chartInitAttempts, 'attempts');
-                    const noDataMsg = document.getElementById('chartNoDataMessage');
-                    if (noDataMsg) noDataMsg.style.display = 'block';
+                console.warn('Chart initialization timeout - no data available after', chartInitAttempts, 'attempts');
+                const noDataMsg = document.getElementById('chartNoDataMessage');
+                if (noDataMsg) noDataMsg.style.display = 'block';
                 }}
                 return;
             }}
@@ -8102,29 +8118,31 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
             document.addEventListener('DOMContentLoaded', () => setTimeout(window.tryInitChart, 300));
         }}
         </script>
-                    '''
-                    html_content = html_content.replace(
-                        '<script id="chartInitScript"></script>',
-                        ws_init_code + chart_init_code
-                    )
-                    template_replace_time = (time.time() - template_replace_start) * 1000
-                    if template_replace_time > 0.1:
-                        logger.info(f"[TIMING] {symbol}: Template replacement took {template_replace_time:.2f}ms")
-                    
-                    template_total_time = (time.time() - template_start) * 1000
-                    logger.info(f"[TIMING] {symbol}: Static template processing total took {template_total_time:.2f}ms")
-                    
-                    overall_time = (time.time() - overall_start) * 1000
-                    logger.info(f"[TIMING] {symbol}: Total /stock_info/ HTML endpoint time: {overall_time:.2f}ms")
-                    
-                    return web.Response(
-                        text=html_content,
-                        content_type='text/html',
-                        charset='utf-8'
-                    )
+                '''
+                html_content = html_content.replace(
+                    '<script id="chartInitScript"></script>',
+                    ws_init_code + chart_init_code
+                )
+                template_replace_time = (time.time() - template_replace_start) * 1000
+                if template_replace_time > 0.1:
+                    logger.info(f"[TIMING] {symbol}: Template replacement took {template_replace_time:.2f}ms")
+                
+                template_total_time = (time.time() - template_start) * 1000
+                logger.info(f"[TIMING] {symbol}: Static template processing total took {template_total_time:.2f}ms")
+                
+                overall_time = (time.time() - overall_start) * 1000
+                logger.info(f"[TIMING] {symbol}: Total /stock_info/ HTML endpoint time: {overall_time:.2f}ms")
+                
+                return web.Response(
+                    text=html_content,
+                    content_type='text/html',
+                    charset='utf-8'
+                )
             except Exception as e:
                 template_total_time = (time.time() - template_start) * 1000
                 logger.warning(f"Failed to use static template after {template_total_time:.2f}ms, falling back to dynamic generation: {e}")
+                # Force fallback to dynamic generation
+                use_static_template = False
         
         # Use dynamic generation (either as fallback or primary)
         if not use_static_template:
@@ -8140,6 +8158,21 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
             overall_time = (time.time() - overall_start) * 1000
             logger.info(f"[TIMING] {symbol}: Total /stock_info/ HTML endpoint time: {overall_time:.2f}ms")
             
+            return web.Response(
+                text=html_content,
+                content_type='text/html',
+                charset='utf-8'
+            )
+        else:
+            # If use_static_template is True but we didn't return above, something went wrong
+            # Fall back to dynamic generation
+            logger.warning(f"Static template was enabled but no response was generated for {symbol}, falling back to dynamic")
+            if result is None:
+                logger.error(f"Result is None, cannot generate HTML for {symbol}")
+                raise ValueError(f"Result is None and static template failed for {symbol}")
+            html_content = generate_stock_info_html(symbol, result, earnings_date=earnings_date_str)
+            overall_time = (time.time() - overall_start) * 1000
+            logger.info(f"[TIMING] {symbol}: Total /stock_info/ HTML endpoint time (fallback): {overall_time:.2f}ms")
             return web.Response(
                 text=html_content,
                 content_type='text/html',
@@ -8526,11 +8559,12 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
         logger.info(f"[LAZY LOAD CHART] {symbol}: Served {len(merged_series)} data points ({data_size_kb:.1f}KB) in {lazy_load_time:.1f}ms")
         
         # Add cache headers for 60 seconds browser caching
+        CHART_CACHE_TIME = 60
         response = web.Response(
             text=json_str,
             content_type='application/json',
             headers={
-                'Cache-Control': 'public, max-age=60',
+                'Cache-Control': f'public, max-age={CHART_CACHE_TIME}',
                 'Vary': 'Accept'
             }
         )
