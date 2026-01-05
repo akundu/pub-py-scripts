@@ -694,8 +694,7 @@
   }
 
   // Initialize chart and other dynamic features
-  // This will be handled by the existing JavaScript code that's already in the template
-  // We just need to make the data available globally
+  // Chart data is now lazy-loaded to reduce initial payload size
   window.stockData = stockData;
   window.allChartData = stockData.chart_data || [];
   window.allChartLabels = stockData.chart_labels || [];
@@ -708,18 +707,73 @@
     chart_data_length: window.allChartData.length,
     chart_labels_length: window.allChartLabels.length,
     merged_series_length: window.mergedSeries.length,
-    merged_series_sample: window.mergedSeries.slice(0, 3),
-    stockData_keys: Object.keys(stockData),
-    stockData_merged_series: stockData.merged_series ? stockData.merged_series.length : 'missing'
+    has_chart_data: !!stockData.chart_data,
+    has_merged_series: !!stockData.merged_series,
+    stockData_keys: Object.keys(stockData)
   });
 
-  // If mergedSeries is empty but stockData has it, try to use it directly
-  if (window.mergedSeries.length === 0 && stockData.merged_series && stockData.merged_series.length > 0) {
+  // If chart data is missing, lazy-load it (default to 1d period)
+  if (window.mergedSeries.length === 0 && (!stockData.chart_data || stockData.chart_data.length === 0)) {
+    console.log(`[${symbol}] 📦 Chart data NOT in initial payload - will lazy-load`);
+    debugLog(`[${symbol}] Chart data not in initial payload, will lazy-load`);
+    // Lazy-load chart data for initial 1d view
+    lazyLoadChartData('1d', 'merged');
+  } else if (window.mergedSeries.length === 0 && stockData.merged_series && stockData.merged_series.length > 0) {
+    // Fallback: if mergedSeries is empty but stockData has it, use it directly
     debugLog(`[${symbol}] mergedSeries was empty, using stockData.merged_series directly`);
     window.mergedSeries = stockData.merged_series;
     window.allChartData = stockData.merged_series.map(s => s.close || s.price || 0);
     window.allChartLabels = stockData.merged_series.map(s => s.timestamp || '');
   }
+  
+  // Lazy-load chart data function
+  async function lazyLoadChartData(period, dataType = 'merged', autoInit = true) {
+    try {
+      const baseUrl = window.location.origin + window.location.pathname.split('/').slice(0, -1).join('/');
+      const chartUrl = `${baseUrl}/api/lazy/chart/${symbol}?period=${period}&data_type=${dataType}`;
+      console.log(`[${symbol}] 📊 Lazy-loading chart data: ${chartUrl}`);
+      debugLog(`[${symbol}] Lazy-loading chart data for period=${period}, data_type=${dataType}...`);
+      
+      const startTime = performance.now();
+      const response = await fetch(chartUrl);
+      const loadTime = performance.now() - startTime;
+      
+      if (response.ok) {
+        const chartData = await response.json();
+        if (chartData && chartData.merged_series) {
+          window.mergedSeries = chartData.merged_series || [];
+          window.allChartData = chartData.chart_data || [];
+          window.allChartLabels = chartData.chart_labels || [];
+          console.log(`[${symbol}] ✅ Chart data lazy-loaded: ${window.mergedSeries.length} points in ${loadTime.toFixed(0)}ms`);
+          debugLog(`[${symbol}] Chart data lazy-loaded: ${window.mergedSeries.length} points`);
+          
+          // Only trigger chart initialization if autoInit is true (initial page load)
+          // When called from period switching, the caller will handle chart update
+          if (autoInit) {
+            if (typeof window.tryInitChart === 'function') {
+              window.tryInitChart();
+            } else if (typeof window.initChart === 'function') {
+              window.initChart();
+            }
+          }
+          
+          return true; // Success
+        } else {
+          console.warn(`[${symbol}] ⚠️ Chart data loaded but no merged_series found`);
+          return false;
+        }
+      } else {
+        console.error(`[${symbol}] ❌ Failed to lazy-load chart data: ${response.status} ${response.statusText}`);
+        return false;
+      }
+    } catch (e) {
+      console.error(`[${symbol}] ❌ Error lazy-loading chart data:`, e);
+      return false;
+    }
+  }
+  
+  // Make lazyLoadChartData available globally for period switching
+  window.lazyLoadChartData = lazyLoadChartData;
   
   // Trigger chart initialization if it's waiting for data
   // This ensures the chart initializes after render.js sets the data

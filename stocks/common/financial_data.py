@@ -693,6 +693,48 @@ async def get_financial_info(
                 iv_time_str = f"{iv_fetch_time:.1f}ms" if iv_fetch_time is not None else "N/A"
                 logger.info(f"[FINANCIAL IV] IV analysis for {symbol} (iv_fetch: {iv_time_str}, total: {fetch_time:.1f}ms)")
             
+            # Calculate 52-week high/low from price history if not already in financial_data
+            if db_instance and ('week_52_low' not in financial_data or 'week_52_high' not in financial_data):
+                try:
+                    from datetime import datetime, timedelta
+                    import pandas as pd
+                    
+                    # Get merged price series for last 365 days
+                    merged_df = await db_instance.get_merged_price_series(symbol)
+                    if merged_df is not None and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
+                        # Get close column
+                        close_col = None
+                        if 'close' in merged_df.columns:
+                            close_col = merged_df['close']
+                        elif 'price' in merged_df.columns:
+                            close_col = merged_df['price']
+                        
+                        if close_col is not None:
+                            # Filter to last 365 days
+                            if isinstance(merged_df.index, pd.DatetimeIndex):
+                                one_year_ago = pd.Timestamp.now() - pd.Timedelta(days=365)
+                                recent_df = merged_df[merged_df.index >= one_year_ago]
+                                if not recent_df.empty:
+                                    if 'close' in recent_df.columns:
+                                        valid_prices = recent_df['close'].dropna()
+                                    elif 'price' in recent_df.columns:
+                                        valid_prices = recent_df['price'].dropna()
+                                    else:
+                                        valid_prices = close_col.dropna()
+                                else:
+                                    valid_prices = close_col.dropna()
+                            else:
+                                valid_prices = close_col.dropna()
+                            
+                            if len(valid_prices) > 0:
+                                if 'week_52_low' not in financial_data:
+                                    financial_data['week_52_low'] = float(valid_prices.min())
+                                if 'week_52_high' not in financial_data:
+                                    financial_data['week_52_high'] = float(valid_prices.max())
+                                logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: Calculated week_52_low={financial_data.get('week_52_low')}, week_52_high={financial_data.get('week_52_high')}")
+                except Exception as e:
+                    logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: Error calculating 52-week range: {e}")
+            
             # Save to DB if we have a DB instance and financial_data is not empty
             if financial_data:
                 # Ensure date is always set to today before saving

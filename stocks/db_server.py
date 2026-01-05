@@ -820,6 +820,7 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     app.router.add_get("/stock_info/api/covered_calls/{filename}", handle_covered_calls_static)
     app.router.add_get("/stock_info/api/lazy/options/{symbol}", handle_lazy_load_options)
     app.router.add_get("/stock_info/api/lazy/news/{symbol}", handle_lazy_load_news)
+    app.router.add_get("/stock_info/api/lazy/chart/{symbol}", handle_lazy_load_chart)
     app.router.add_get("/static/stock_info/{filename}", handle_stock_info_static)
     
     # Add stock info HTML page endpoint (parameterized route must be after specific routes)
@@ -1411,30 +1412,87 @@ async def logging_middleware(request: web.Request, handler):
         response = await handler(request)
         duration_ms = (time.time() - start_time) * 1000  # Convert to milliseconds
         extra_log_info["status_code"] = response.status
-        extra_log_info["response_size"] = response.body_length if hasattr(response, 'body_length') else len(response.body) if response.body else 0
+        
+        # Calculate response size - try multiple methods
+        response_size = 0
+        # Method 1: Check Content-Length header (most reliable for prepared responses)
+        if 'Content-Length' in response.headers:
+            try:
+                response_size = int(response.headers['Content-Length'])
+            except (ValueError, TypeError):
+                pass
+        
+        # Method 2: If Content-Length not available, try to get from response body
+        if response_size == 0:
+            if hasattr(response, '_body') and response._body:
+                # Response body is already prepared
+                if isinstance(response._body, bytes):
+                    response_size = len(response._body)
+                elif isinstance(response._body, str):
+                    response_size = len(response._body.encode('utf-8'))
+            elif hasattr(response, 'body') and response.body:
+                # Try to get size from body attribute
+                if isinstance(response.body, bytes):
+                    response_size = len(response.body)
+                elif isinstance(response.body, str):
+                    response_size = len(response.body.encode('utf-8'))
+        
+        extra_log_info["response_size"] = response_size
         extra_log_info["duration_ms"] = duration_ms
+        
+        # Format response size for display (bytes, KB, MB)
+        if response_size < 1024:
+            size_str = f"{response_size}B"
+        elif response_size < 1024 * 1024:
+            size_str = f"{response_size / 1024:.1f}KB"
+        else:
+            size_str = f"{response_size / (1024 * 1024):.1f}MB"
         
         # Log based on access log setting
         if enable_access_log:
-            # Full access logging when enabled - include duration in milliseconds
-            access_log_msg = f"Access: {client_ip} - \"{request_line}\" {response.status} {extra_log_info['response_size']} \"{user_agent}\" {duration_ms:.0f}ms"
+            # Full access logging when enabled - include duration in milliseconds and response size
+            access_log_msg = f"Access: {client_ip} - \"{request_line}\" {response.status} {size_str} ({response_size} bytes) \"{user_agent}\" {duration_ms:.0f}ms"
             logger.warning(f"ACCESS: {access_log_msg}")
         else:
             # Reduced logging for health checks and static resources
             if request.path in ["/", "/health", "/healthz", "/ready", "/live"] or request.path.endswith(('.js', '.css', '.ico', '.png', '.jpg', '.jpeg', '.gif')):
-                logger.warning(f"Request handled for {request.path} ({duration_ms:.0f}ms)", extra=extra_log_info)
+                logger.warning(f"Request handled for {request.path} ({duration_ms:.0f}ms, {size_str})", extra=extra_log_info)
             else:
-                logger.warning(f"Request handled for {request.path} ({duration_ms:.0f}ms)", extra=extra_log_info)
+                logger.warning(f"Request handled for {request.path} ({duration_ms:.0f}ms, {size_str})", extra=extra_log_info)
         return response
     except web.HTTPException as ex: # Catch HTTP exceptions to log them correctly
         duration_ms = (time.time() - start_time) * 1000
         extra_log_info["status_code"] = ex.status_code
-        extra_log_info["response_size"] = ex.body.tell() if ex.body and hasattr(ex.body, 'tell') else (len(ex.body) if ex.body else 0)
+        
+        # Calculate response size for HTTP exceptions
+        response_size = 0
+        if hasattr(ex, 'text') and ex.text:
+            response_size = len(ex.text.encode('utf-8'))
+        elif hasattr(ex, 'body') and ex.body:
+            if isinstance(ex.body, bytes):
+                response_size = len(ex.body)
+            elif isinstance(ex.body, str):
+                response_size = len(ex.body.encode('utf-8'))
+            elif hasattr(ex.body, 'tell'):
+                try:
+                    response_size = ex.body.tell()
+                except:
+                    pass
+        
+        extra_log_info["response_size"] = response_size
         extra_log_info["duration_ms"] = duration_ms
+        
+        # Format response size for display
+        if response_size < 1024:
+            size_str = f"{response_size}B"
+        elif response_size < 1024 * 1024:
+            size_str = f"{response_size / 1024:.1f}KB"
+        else:
+            size_str = f"{response_size / (1024 * 1024):.1f}MB"
         
         # Log based on access log setting
         if enable_access_log:
-            logger.error(f"Access: {client_ip} - \"{request_line}\" {ex.status_code} {extra_log_info['response_size']} \"{user_agent}\" {duration_ms:.0f}ms - {ex.reason}", extra=extra_log_info, exc_info=False)
+            logger.error(f"Access: {client_ip} - \"{request_line}\" {ex.status_code} {size_str} ({response_size} bytes) \"{user_agent}\" {duration_ms:.0f}ms - {ex.reason}", extra=extra_log_info, exc_info=False)
         else:
             # Reduced logging for health checks and static resources
             if request.path in ["/", "/health", "/healthz", "/ready", "/live"] or request.path.endswith(('.js', '.css', '.ico', '.png', '.jpg', '.jpeg', '.gif')):
@@ -7240,12 +7298,17 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                     
                     # Prepare JSON payload
                     json_prep_start = time.time()
-                    # Calculate 52-week range from merged_df if not in price_info
+                    # Get 52-week range from financial_info if available (preferred source)
                     price_info_dict = result.get('price_info', {}).copy()
-                    week_52_low = price_info_dict.get('week_52_low')
-                    week_52_high = price_info_dict.get('week_52_high')
+                    financial_info_dict = result.get('financial_info', {}).copy()
+                    financial_data = financial_info_dict.get('financial_data', {})
                     
-                    # Check if we need to calculate from merged_df
+                    # Try to get 52-week range from financial_info first (stored during fetch_all_data.py runs)
+                    week_52_low = financial_data.get('week_52_low') or price_info_dict.get('week_52_low')
+                    week_52_high = financial_data.get('week_52_high') or price_info_dict.get('week_52_high')
+                    
+                    # Fallback: Calculate from merged_df if not in financial_info or price_info
+                    # (This is a fallback - ideally financial_info should have it from fetch_all_data.py)
                     if (not week_52_low or not week_52_high) and merged_df is not None and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
                         try:
                             # Get close column
@@ -7274,36 +7337,44 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                                         week_52_low = float(valid_prices.min())
                                     if not week_52_high:
                                         week_52_high = float(valid_prices.max())
-                                    logger.info(f"[52-WEEK] {symbol}: Calculated from merged_df - low={week_52_low}, high={week_52_high}")
+                                    logger.info(f"[52-WEEK] {symbol}: Calculated from merged_df (fallback) - low={week_52_low}, high={week_52_high}")
                         except Exception as e:
                             logger.warning(f"[52-WEEK] {symbol}: Error calculating 52-week range from merged_df: {e}")
                     
-                    # Add week_52 values to price_info if calculated
+                    # Add week_52 values to price_info if we have them
                     if week_52_low:
                         price_info_dict['week_52_low'] = week_52_low
                     if week_52_high:
                         price_info_dict['week_52_high'] = week_52_high
                     
+                    # Don't include large chart data in initial payload - it will be lazy-loaded
+                    # Only include minimal metadata needed for initial render
                     json_data = {
                         'symbol': symbol,
                         'earnings_date': earnings_date_str,
                         'price_info': price_info_dict,
-                        'financial_info': result.get('financial_info', {}),
+                        'financial_info': financial_info_dict,  # Contains week_52_low/high if available
                         'options_info': result.get('options_info', {}),
                         'iv_info': result.get('iv_info', {}),
                         'news_info': result.get('news_info', {}),
-                        'chart_data': chart_data,
-                        'chart_labels': chart_labels,
-                        'merged_series': merged_series
+                        # Chart data removed - will be lazy-loaded via /stock_info/api/lazy/chart/{symbol}
+                        # 'chart_data': chart_data,
+                        # 'chart_labels': chart_labels,
+                        # 'merged_series': merged_series
                     }
                     json_prep_time = (time.time() - json_prep_start) * 1000
                     if json_prep_time > 0.1:
                         logger.info(f"[TIMING] {symbol}: JSON payload preparation took {json_prep_time:.2f}ms")
                     
                     # Log chart data summary for debugging
-                    logger.info(f"[CHART DATA] {symbol}: Final JSON data - chart_data={len(json_data.get('chart_data', []))}, "
-                               f"chart_labels={len(json_data.get('chart_labels', []))}, "
-                               f"merged_series={len(json_data.get('merged_series', []))}")
+                    # Note: Chart data is now lazy-loaded, so these should be 0 or empty
+                    chart_data_len = len(json_data.get('chart_data', []))
+                    chart_labels_len = len(json_data.get('chart_labels', []))
+                    merged_series_len = len(json_data.get('merged_series', []))
+                    if chart_data_len > 0 or merged_series_len > 0:
+                        logger.warning(f"[CHART DATA] {symbol}: WARNING - Chart data still in initial payload! chart_data={chart_data_len}, merged_series={merged_series_len}")
+                    else:
+                        logger.info(f"[CHART DATA] {symbol}: Chart data excluded from initial payload (will be lazy-loaded) ✓")
                     
                     # Recursively clean NaN, Infinity, and other non-JSON values from data structure
                     def clean_for_json(obj):
@@ -7808,7 +7879,7 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         }}
         
         // Chart time period switching function
-        function switchTimePeriod(period) {{
+        async function switchTimePeriod(period) {{
             currentTimePeriod = period;
             
             // Update button states
@@ -7824,17 +7895,72 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 btn.classList.add('active');
             }}
             
-            // Update chart if initialized
-            if (priceChart) {{
-                const series = buildSeriesForPeriod(period);
-                if (series && series.data && series.data.length > 0) {{
-                    priceChart.data.labels = series.labels;
-                    if (priceChart.data.datasets.length > 0) {{
-                        priceChart.data.datasets[0].data = series.data;
+            // Always fetch new data for the selected period from the server
+            // This ensures we get the correct data range for each period
+            debugLog(`[Chart] Switching to period ${{period}}, fetching data from server...`);
+            if (typeof window.lazyLoadChartData === 'function') {{
+                // Determine data type based on period
+                // For 1d, use merged (includes realtime/hourly/daily)
+                // For longer periods, use daily (more efficient, sufficient detail)
+                const dataType = (period === '1d') ? 'merged' : 'daily';
+                
+                // Show loading indicator
+                const noDataMsg = document.getElementById('chartNoDataMessage');
+                if (noDataMsg) {{
+                    noDataMsg.style.display = 'block';
+                    noDataMsg.textContent = `Loading ${{period}} data...`;
+                }}
+                
+                // Fetch data for the new period (autoInit=false so we handle chart update ourselves)
+                const loadSuccess = await window.lazyLoadChartData(period, dataType, false);
+                if (!loadSuccess) {{
+                    console.error(`[Chart] Failed to load data for period ${{period}}`);
+                    if (noDataMsg) {{
+                        noDataMsg.style.display = 'block';
+                        noDataMsg.textContent = 'Error loading chart data';
                     }}
-                    priceChart.update();
-                    // Update range display
-                    updateRangeDisplay(series);
+                    return;
+                }}
+                
+                // After loading, rebuild series and update chart
+                const newSeries = buildSeriesForPeriod(period);
+                if (newSeries && newSeries.data && newSeries.data.length > 0) {{
+                    // Hide loading message
+                    if (noDataMsg) noDataMsg.style.display = 'none';
+                    
+                    // Update chart if initialized
+                    if (priceChart) {{
+                        priceChart.data.labels = newSeries.labels;
+                        if (priceChart.data.datasets.length > 0) {{
+                            priceChart.data.datasets[0].data = newSeries.data;
+                        }}
+                        // Update annotations for date markers
+                        if (newSeries.dateMarkers && newSeries.dateMarkers.length > 0) {{
+                            const annotations = buildDateMarkerAnnotations(newSeries.dateMarkers, newSeries.labels);
+                            if (priceChart.options.plugins && priceChart.options.plugins.annotation) {{
+                                priceChart.options.plugins.annotation.annotations = annotations;
+                            }}
+                        }}
+                        priceChart.update();
+                        updateRangeDisplay(newSeries);
+                        debugLog(`[Chart] Updated chart for period ${{period}} with ${{newSeries.data.length}} data points`);
+                    }} else {{
+                        console.warn(`[Chart] Chart not initialized, cannot update for period ${{period}}`);
+                    }}
+                }} else {{
+                    // No data available even after fetching
+                    if (noDataMsg) {{
+                        noDataMsg.style.display = 'block';
+                        noDataMsg.textContent = 'No historical price data available for this period';
+                    }}
+                    console.warn(`[Chart] No data available for period ${{period}} after fetching`);
+                }}
+            }} else {{
+                console.error('Cannot switch time period: lazyLoadChartData function not available');
+                const noDataMsg = document.getElementById('chartNoDataMessage');
+                if (noDataMsg) {{
+                    noDataMsg.style.display = 'block';
+                    noDataMsg.textContent = 'Error: Chart data loader not available';
                 }}
             }}
         }}
@@ -8191,6 +8317,226 @@ async def handle_lazy_load_news(request: web.Request) -> web.Response:
         return web.Response(text=json_str, content_type='application/json')
     except Exception as e:
         logger.error(f"Error lazy-loading news for {symbol}: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def handle_lazy_load_chart(request: web.Request) -> web.Response:
+    """Handle lazy-loading of chart data for stock info page.
+    
+    GET /stock_info/api/lazy/chart/{symbol}
+    
+    Query Parameters:
+        period: str (default: '1d')
+            Time period: '1d', '1w', '1m', '3m', '6m', 'ytd', '1y', '2y'
+        data_type: str (default: 'merged')
+            Data type: 'daily', 'hourly', 'realtime', or 'merged' (merged combines all)
+    
+    Returns chart data filtered for the specified period and data type.
+    """
+    symbol = request.match_info.get('symbol', '').upper().strip()
+    if not symbol:
+        return web.json_response({"error": "Missing symbol"}, status=400)
+    
+    db_instance = request.app.get('db_instance')
+    if not db_instance:
+        return web.json_response({"error": "Database instance not available"}, status=500)
+    
+    try:
+        import time
+        lazy_load_start = time.time()
+        period = request.query.get('period', '1d')
+        data_type = request.query.get('data_type', 'merged')
+        logger.info(f"[LAZY LOAD CHART] {symbol}: Fetching chart data - period={period}, data_type={data_type}")
+        period = request.query.get('period', '1d')
+        data_type = request.query.get('data_type', 'merged')  # 'daily', 'hourly', 'realtime', or 'merged'
+        
+        # Calculate date range based on period
+        from datetime import datetime, timedelta
+        now = datetime.now()
+        period_days = {
+            '1d': 1,
+            '1w': 7,
+            '1m': 30,
+            '3m': 90,
+            '6m': 180,
+            'ytd': (now - datetime(now.year, 1, 1)).days,
+            '1y': 365,
+            '2y': 730
+        }.get(period, 1)
+        
+        start_date = (now - timedelta(days=period_days)).strftime('%Y-%m-%d')
+        end_date = now.strftime('%Y-%m-%d')
+        
+        # Fetch chart data based on data_type
+        chart_data = []
+        chart_labels = []
+        merged_series = []
+        
+        if data_type == 'merged':
+            # Use merged price series (combines daily, hourly, realtime)
+            merged_df = await db_instance.get_merged_price_series(symbol)
+            if merged_df is not None and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
+                # Filter to requested period
+                if isinstance(merged_df.index, pd.DatetimeIndex):
+                    start_ts = pd.Timestamp(start_date)
+                    end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+                    filtered_df = merged_df[(merged_df.index >= start_ts) & (merged_df.index <= end_ts)]
+                else:
+                    filtered_df = merged_df
+                
+                # Extract data efficiently
+                close_col = filtered_df.get('close') if 'close' in filtered_df.columns else filtered_df.get('price')
+                if close_col is not None:
+                    valid_mask = pd.notna(close_col)
+                    if isinstance(filtered_df.index, pd.DatetimeIndex):
+                        timestamps = filtered_df.index[valid_mask]
+                    else:
+                        timestamps = pd.to_datetime(filtered_df.get('timestamp', filtered_df.index)[valid_mask], errors='coerce')
+                    
+                    valid_closes = close_col[valid_mask].values
+                    source_col = filtered_df.get('source') if 'source' in filtered_df.columns else None
+                    
+                    chart_data = valid_closes.tolist()
+                    chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in timestamps]
+                    
+                    if source_col is not None:
+                        valid_sources = source_col[valid_mask].values
+                        merged_series = [
+                            {
+                                'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
+                                'close': float(close),
+                                'source': str(src) if pd.notna(src) else 'unknown'
+                            }
+                            for ts, close, src in zip(timestamps, valid_closes, valid_sources)
+                        ]
+                    else:
+                        merged_series = [
+                            {
+                                'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
+                                'close': float(close),
+                                'source': 'unknown'
+                            }
+                            for ts, close in zip(timestamps, valid_closes)
+                        ]
+        elif data_type == 'daily':
+            # Fetch daily data only
+            daily_df = await db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval='daily')
+            if daily_df is not None and not daily_df.empty:
+                close_col = daily_df.get('close') if 'close' in daily_df.columns else daily_df.get('price')
+                if close_col is not None:
+                    valid_mask = pd.notna(close_col)
+                    timestamps = daily_df.index[valid_mask] if isinstance(daily_df.index, pd.DatetimeIndex) else pd.to_datetime(daily_df.index[valid_mask], errors='coerce')
+                    chart_data = close_col[valid_mask].tolist()
+                    chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in timestamps]
+                    merged_series = [
+                        {
+                            'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
+                            'close': float(close),
+                            'source': 'daily'
+                        }
+                        for ts, close in zip(timestamps, close_col[valid_mask])
+                    ]
+        elif data_type == 'hourly':
+            # Fetch hourly data only
+            hourly_df = await db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval='hourly')
+            if hourly_df is not None and not hourly_df.empty:
+                close_col = hourly_df.get('close') if 'close' in hourly_df.columns else hourly_df.get('price')
+                if close_col is not None:
+                    valid_mask = pd.notna(close_col)
+                    timestamps = hourly_df.index[valid_mask] if isinstance(hourly_df.index, pd.DatetimeIndex) else pd.to_datetime(hourly_df.index[valid_mask], errors='coerce')
+                    chart_data = close_col[valid_mask].tolist()
+                    chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in timestamps]
+                    merged_series = [
+                        {
+                            'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
+                            'close': float(close),
+                            'source': 'hourly'
+                        }
+                        for ts, close in zip(timestamps, close_col[valid_mask])
+                    ]
+        elif data_type == 'realtime':
+            # Fetch realtime data only
+            realtime_df = await db_instance.get_realtime_data(symbol, start_date=start_date, end_date=end_date, data_type='trade')
+            if realtime_df is not None and not realtime_df.empty:
+                price_col = realtime_df.get('price') if 'price' in realtime_df.columns else realtime_df.get('last_price')
+                if price_col is not None:
+                    valid_mask = pd.notna(price_col)
+                    timestamps = realtime_df.index[valid_mask] if isinstance(realtime_df.index, pd.DatetimeIndex) else pd.to_datetime(realtime_df.index[valid_mask], errors='coerce')
+                    chart_data = price_col[valid_mask].tolist()
+                    chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in timestamps]
+                    merged_series = [
+                        {
+                            'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
+                            'close': float(price),
+                            'source': 'realtime'
+                        }
+                        for ts, price in zip(timestamps, price_col[valid_mask])
+                    ]
+        
+        # Clean the data for JSON serialization
+        def clean_for_json(obj):
+            """Recursively clean data structure to make it JSON-serializable."""
+            import math
+            if obj is None:
+                return None
+            if isinstance(obj, (int, str, bool)):
+                return obj
+            if isinstance(obj, float):
+                if math.isnan(obj):
+                    return None
+                if math.isinf(obj):
+                    return None
+                return obj
+            if isinstance(obj, pd.DataFrame):
+                return clean_for_json(obj.to_dict('records'))
+            if isinstance(obj, pd.Series):
+                return clean_for_json(obj.to_dict())
+            if isinstance(obj, (pd.Timestamp, pd.DatetimeIndex)):
+                return obj.isoformat() if hasattr(obj, 'isoformat') else str(obj)
+            if isinstance(obj, dict):
+                return {k: clean_for_json(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [clean_for_json(item) for item in obj]
+            if hasattr(obj, 'isoformat'):
+                return obj.isoformat()
+            try:
+                if pd.isna(obj):
+                    return None
+            except (ValueError, TypeError):
+                pass
+            try:
+                if hasattr(obj, 'item'):
+                    return clean_for_json(obj.item())
+            except (ValueError, AttributeError):
+                pass
+            return str(obj)
+        
+        cleaned_data = clean_for_json({
+            'symbol': symbol,
+            'period': period,
+            'data_type': data_type,
+            'chart_data': chart_data,
+            'chart_labels': chart_labels,
+            'merged_series': merged_series
+        })
+        
+        json_str = json.dumps(cleaned_data, default=str, allow_nan=False)
+        lazy_load_time = (time.time() - lazy_load_start) * 1000
+        data_size_kb = len(json_str) / 1024
+        logger.info(f"[LAZY LOAD CHART] {symbol}: Served {len(merged_series)} data points ({data_size_kb:.1f}KB) in {lazy_load_time:.1f}ms")
+        
+        # Add cache headers for 60 seconds browser caching
+        response = web.Response(
+            text=json_str,
+            content_type='application/json',
+            headers={
+                'Cache-Control': 'public, max-age=60',
+                'Vary': 'Accept'
+            }
+        )
+        return response
+    except Exception as e:
+        logger.error(f"Error lazy-loading chart data for {symbol}: {e}", exc_info=True)
         return web.json_response({"error": str(e)}, status=500)
 
 
@@ -10235,6 +10581,7 @@ def main_server_runner():
         app.router.add_get("/stock_info/api/covered_calls/{filename}", handle_covered_calls_static)
         app.router.add_get("/stock_info/api/lazy/options/{symbol}", handle_lazy_load_options)
         app.router.add_get("/stock_info/api/lazy/news/{symbol}", handle_lazy_load_news)
+        app.router.add_get("/stock_info/api/lazy/chart/{symbol}", handle_lazy_load_chart)
         app.router.add_get("/static/stock_info/{filename}", handle_stock_info_static)
         
         # Add stock info HTML page endpoint (parameterized route must be after specific routes)

@@ -5693,6 +5693,8 @@ class StockQuestDB(StockDBBase):
         iv_90d_rank DOUBLE,
         iv_rank_diff DOUBLE,
         relative_rank DOUBLE,
+        week_52_low DOUBLE,
+        week_52_high DOUBLE,
         iv_analysis_json STRING,
         iv_analysis_spare STRING,
         write_timestamp TIMESTAMP
