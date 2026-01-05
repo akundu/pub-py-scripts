@@ -718,7 +718,7 @@
       // Construct URL: /stock_info/api/lazy/chart/{symbol}
       const basePath = '/stock_info';
       const chartUrl = `${basePath}/api/lazy/chart/${symbol}?period=${period}&data_type=${dataType}`;
-      console.log(`[${symbol}] 📊 Lazy-loading chart data: ${chartUrl}`);
+      debugLog(`[${symbol}] 📊 Lazy-loading chart data: ${chartUrl}`);
       debugLog(`[${symbol}] Lazy-loading chart data for period=${period}, data_type=${dataType}...`);
       
       const startTime = performance.now();
@@ -731,7 +731,7 @@
           window.mergedSeries = chartData.merged_series || [];
           window.allChartData = chartData.chart_data || [];
           window.allChartLabels = chartData.chart_labels || [];
-          console.log(`[${symbol}] ✅ Chart data lazy-loaded: ${window.mergedSeries.length} points in ${loadTime.toFixed(0)}ms`);
+          debugLog(`[${symbol}] ✅ Chart data lazy-loaded: ${window.mergedSeries.length} points in ${loadTime.toFixed(0)}ms`);
           debugLog(`[${symbol}] Chart data lazy-loaded: ${window.mergedSeries.length} points`);
           
           // Only trigger chart initialization if autoInit is true (initial page load)
@@ -764,7 +764,7 @@
   
   // If chart data is missing, lazy-load it (default to 1d period)
   if (window.mergedSeries.length === 0 && (!stockData.chart_data || stockData.chart_data.length === 0)) {
-    console.log(`[${symbol}] 📦 Chart data NOT in initial payload - will lazy-load`);
+    debugLog(`[${symbol}] 📦 Chart data NOT in initial payload - will lazy-load`);
     debugLog(`[${symbol}] Chart data not in initial payload, will lazy-load`);
     // Lazy-load chart data for initial 1d view
     lazyLoadChartData('1d', 'merged', true).catch(err => {
@@ -795,7 +795,7 @@
       }
     }, 200);
   } else {
-    console.warn(`[${symbol}] No mergedSeries data available for chart:`, {
+    debugLog(`[${symbol}] ⚠️ No mergedSeries data available for chart:`, {
       hasMergedSeries: !!window.mergedSeries,
       length: window.mergedSeries ? window.mergedSeries.length : 0,
       stockDataKeys: Object.keys(stockData),
@@ -819,7 +819,7 @@
       }
     }, 200);
   } else {
-    console.warn(`[${symbol}] No mergedSeries data available for chart:`, {
+    debugLog(`[${symbol}] ⚠️ No mergedSeries data available for chart:`, {
       hasMergedSeries: !!window.mergedSeries,
       length: window.mergedSeries ? window.mergedSeries.length : 0,
       stockDataKeys: Object.keys(stockData),
