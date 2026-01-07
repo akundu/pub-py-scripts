@@ -1752,26 +1752,47 @@ class FinancialInfoRepository(BaseRepository):
     
     async def get(self, ticker: str, start_date: Optional[str] = None,
                  end_date: Optional[str] = None) -> pd.DataFrame:
-        """Get financial info."""
+        """Get financial info.
+        
+        Uses QuestDB's LATEST ON syntax to ensure we always get the latest record
+        per ticker based on the designated timestamp (date) column.
+        """
         async with self.connection.get_connection() as conn:
-            query = "SELECT * FROM financial_info WHERE ticker = $1"
-            params = [ticker]
-            
-            if start_date:
-                query += " AND date >= $2"
-                params.append(date_parser.parse(start_date))
-            if end_date:
-                query += f" AND date <= ${len(params) + 1}"
-                params.append(date_parser.parse(end_date))
-            
-            query += " ORDER BY date DESC LIMIT 1"
-            
-            # Debug: Log the query and parameters
-            self.logger.debug(f"[DB QUERY] financial info for {ticker}")
-            self.logger.debug(f"[DB QUERY] SQL: {query}")
-            self.logger.debug(f"[DB QUERY] Params: {params}")
-            
+            # Use LATEST ON to get the most recent record per ticker
+            # This is more efficient than ORDER BY + LIMIT and ensures we always get the latest data
+            # QuestDB syntax: SELECT * FROM table LATEST ON timestamp_column PARTITION BY partition_column [WHERE conditions]
             try:
+                if start_date or end_date:
+                    # If date range is specified, filter first then apply LATEST ON
+                    # Use subquery to ensure LATEST ON works correctly with date filters
+                    query = """
+                        SELECT * FROM (
+                            SELECT * FROM financial_info 
+                            WHERE ticker = $1
+                    """
+                    params = [ticker]
+                    param_idx = 2
+                    
+                    if start_date:
+                        query += f" AND date >= ${param_idx}"
+                        params.append(date_parser.parse(start_date))
+                        param_idx += 1
+                    if end_date:
+                        query += f" AND date <= ${param_idx}"
+                        params.append(date_parser.parse(end_date))
+                        param_idx += 1
+                    
+                    query += ") LATEST ON date PARTITION BY ticker"
+                else:
+                    # No date range - use LATEST ON directly (most efficient)
+                    query = "SELECT * FROM financial_info LATEST ON date PARTITION BY ticker WHERE ticker = $1"
+                    params = [ticker]
+                
+                # Debug: Log the query and parameters
+                self.logger.debug(f"[DB QUERY] financial info for {ticker}")
+                self.logger.debug(f"[DB QUERY] SQL: {query}")
+                self.logger.debug(f"[DB QUERY] Params: {params}")
+                
                 rows = await conn.fetch(query, *params)
                 self.logger.debug(f"[DB QUERY] Fetched {len(rows)} rows from financial_info for {ticker}")
                 if rows:
@@ -1793,8 +1814,42 @@ class FinancialInfoRepository(BaseRepository):
                 else:
                     return pd.DataFrame()
             except Exception as e:
-                self.logger.error(f"Error retrieving financial info for {ticker}: {e}")
-                return pd.DataFrame()
+                # Fallback to original query if LATEST ON syntax fails
+                self.logger.warning(f"[DB QUERY] LATEST ON syntax failed for {ticker}, falling back to ORDER BY: {e}")
+                try:
+                    query = "SELECT * FROM financial_info WHERE ticker = $1"
+                    params = [ticker]
+                    
+                    if start_date:
+                        query += " AND date >= $2"
+                        params.append(date_parser.parse(start_date))
+                    if end_date:
+                        query += f" AND date <= ${len(params) + 1}"
+                        params.append(date_parser.parse(end_date))
+                    
+                    query += " ORDER BY date DESC LIMIT 1"
+                    
+                    rows = await conn.fetch(query, *params)
+                    if rows:
+                        df = pd.DataFrame([dict(row) for row in rows])
+                        if 'date' in df.columns:
+                            df['date'] = pd.to_datetime(df['date'])
+                            df.set_index('date', inplace=True)
+                        # Map database column names to expected field names
+                        column_mapping = {
+                            'current_ratio': 'current',
+                            'quick_ratio': 'quick',
+                            'cash_ratio': 'cash'
+                        }
+                        for db_col, expected_col in column_mapping.items():
+                            if db_col in df.columns and expected_col not in df.columns:
+                                df[expected_col] = df[db_col]
+                        return df
+                    else:
+                        return pd.DataFrame()
+                except Exception as fallback_error:
+                    self.logger.error(f"Error retrieving financial info for {ticker} (fallback also failed): {fallback_error}")
+                    return pd.DataFrame()
 
 
 # ============================================================================
