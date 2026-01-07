@@ -229,6 +229,14 @@ class StockData:
     def update_session_status(self):
         """Update session status based on current time."""
         self.session_status = get_session_status()
+    
+    def reset_daily_data(self):
+        """Reset all daily metrics (volume, change calculations, etc.)."""
+        self.volume = None
+        self.change = 0.0
+        self.change_percent = 0.0
+        # Note: prev_close and open_price will be refetched from database
+        # current_price, bid_price, ask_price, etc. are kept as they're real-time
 
 class DatabaseClient:
     """Client for fetching data from the database server."""
@@ -389,6 +397,14 @@ class DisplayManager:
         self.sort_column = "Symbol"  # Default sort by symbol
         self.sort_ascending = True   # Default ascending
         
+        # Track current trading day for daily reset
+        try:
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            now_et = datetime.now()
+        self.current_trading_day = now_et.date()
+        self.last_day_reset_check = time.time()
+        
         # Initialize stock data
         for symbol in symbols:
             self.stock_data[symbol] = StockData(symbol)
@@ -409,6 +425,25 @@ class DisplayManager:
         """Initialize stock data with previous close and open prices."""
         print("Fetching initial data from database...")
         
+        # Check if we're starting during pre-market hours on a trading day
+        # If so, we should reset daily data (this handles the case where dashboard
+        # starts fresh during pre-market hours)
+        try:
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            now_et = datetime.now()
+        
+        # If we're in pre-market hours (4:00 AM - 9:30 AM ET) on a weekday,
+        # reset daily data to ensure fresh start
+        if now_et.weekday() < 5:  # Monday-Friday
+            pre_open_start = now_et.replace(hour=4, minute=0, second=0, microsecond=0)
+            market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+            
+            if pre_open_start <= now_et < market_open:
+                # Reset daily metrics before fetching data
+                for symbol in self.symbols:
+                    self.stock_data[symbol].reset_daily_data()
+        
         # Fetch previous close prices
         prev_close_map = await db_client.fetch_previous_close_batch(self.symbols)
         for symbol, prev_close_val in prev_close_map.items():
@@ -422,6 +457,66 @@ class DisplayManager:
                 self.stock_data[symbol].set_open(float(open_val))
         
         print("Initial data fetch completed")
+    
+    def _check_day_transition(self) -> bool:
+        """Check if we've transitioned to a new trading day (right before market opens).
+        
+        Returns True if we need to reset daily data (new trading day detected before market open).
+        """
+        try:
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            now_et = datetime.now()
+        
+        today = now_et.date()
+        
+        # Check if it's a new trading day
+        if today != self.current_trading_day:
+            # Check if we're in pre-market hours (4:00 AM - 9:30 AM ET) on a weekday
+            if now_et.weekday() < 5:  # Monday-Friday
+                pre_open_start = now_et.replace(hour=4, minute=0, second=0, microsecond=0)
+                market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+                
+                # If we're in pre-market hours, it's time to reset
+                if pre_open_start <= now_et < market_open:
+                    return True
+        
+        return False
+    
+    async def _reset_daily_data(self, db_client: DatabaseClient):
+        """Reset all daily data and refetch previous close prices for new trading day."""
+        try:
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            now_et = datetime.now()
+        
+        new_day = now_et.date()
+        
+        if self.debug_mode:
+            self.add_debug_log(f"Day transition detected: {self.current_trading_day} -> {new_day}")
+            self.add_debug_log("Resetting daily data and refetching previous close...")
+        
+        # Reset all daily metrics for all symbols
+        for symbol in self.symbols:
+            self.stock_data[symbol].reset_daily_data()
+        
+        # Update current trading day
+        self.current_trading_day = new_day
+        
+        # Refetch previous close prices for the new day
+        prev_close_map = await db_client.fetch_previous_close_batch(self.symbols)
+        for symbol, prev_close_val in prev_close_map.items():
+            if prev_close_val is not None and float(prev_close_val) > 0:
+                self.stock_data[symbol].set_prev_close(float(prev_close_val))
+        
+        # Refetch opening prices for the new day
+        open_map = await db_client.fetch_today_open_batch(self.symbols)
+        for symbol, open_val in open_map.items():
+            if open_val is not None and float(open_val) > 0:
+                self.stock_data[symbol].set_open(float(open_val))
+        
+        if self.debug_mode:
+            self.add_debug_log("Daily data reset completed")
     
     def build_ws_url(self, symbol: str) -> str:
         """Build WebSocket URL for a symbol."""
@@ -749,6 +844,13 @@ class DisplayManager:
             with Live(console=console, refresh_per_second=refresh_rate, screen=True) as live:
                 while not shutdown_flag:
                     try:
+                        # Check for day transition (check every 60 seconds to avoid excessive checks)
+                        current_time = time.time()
+                        if current_time - self.last_day_reset_check >= 60.0:
+                            self.last_day_reset_check = current_time
+                            if self._check_day_transition():
+                                await self._reset_daily_data(db_client)
+                        
                         # Check for keyboard input (non-blocking, Unix only)
                         if keyboard_enabled:
                             try:
