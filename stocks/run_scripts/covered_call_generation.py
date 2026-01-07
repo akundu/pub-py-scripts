@@ -508,11 +508,17 @@ def run_loop(
                     "--db-path", db_conn,
                     "--symbols-dir", symbols_dir,
                     "--csv", str(stock_analysis_csv),
-                    "--top-n", "20",
+                    "--top-n", "10",
                 ]
-                print(f"Executing: {' '.join(analyze_cmd)}", file=sys.stderr, flush=True)
+                # Don't display the command output -- ensure no output shown
                 analyze_start_time = time.time()
-                analyze_result = subprocess.run(analyze_cmd, cwd=str(BASE_DIR))
+                with open(os.devnull, 'w') as devnull:
+                    analyze_result = subprocess.run(
+                        analyze_cmd,
+                        cwd=str(BASE_DIR),
+                        stdout=devnull,
+                        stderr=devnull,
+                    )
                 analyze_elapsed = int(time.time() - analyze_start_time)
                 print(f"Stock analysis elapsed: {analyze_elapsed} seconds with result = {analyze_result.returncode}", file=sys.stderr, flush=True)
                 

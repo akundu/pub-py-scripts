@@ -154,16 +154,15 @@
             
             try {
                 // Build query parameters - use filters from both calls and puts
-                // Note: source parameter is optional - server will use default if not provided
+                // Note: source parameter is required for analysis endpoint
                 const params = new URLSearchParams({
                     option_type: 'all',  // Get all data for comprehensive analysis
                     use_gemini: useGemini ? 'true' : 'false'  // Use checkbox value
                 });
                 
-                // Add source parameter if configured (optional - server has default)
-                if (API_CONFIG.csv_source) {
-                    params.set('source', API_CONFIG.csv_source);
-                }
+                // Add source parameter - use configured source or default
+                const source = API_CONFIG.csv_source || '~/Downloads/results.csv';
+                params.set('source', source);
                 
                 // Combine filters from both calls and puts
                 const allFilters = [];

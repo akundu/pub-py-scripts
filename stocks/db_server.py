@@ -2694,12 +2694,10 @@ async def handle_covered_calls_analysis(request: web.Request) -> web.Response:
     try:
         # Get query parameters (same as data endpoint)
         source = request.query.get('source')
+        # If no source provided, use default (same as data endpoint)
         if not source:
-            return web.Response(
-                text="<div class='error'>Missing required parameter: source</div>",
-                status=400,
-                content_type='text/html'
-            )
+            source = os.path.expanduser("~/Downloads/results.csv")
+            logger.info(f"No source provided for analysis, using default: {source}")
         
         option_type = request.query.get('option_type', 'all').lower()
         filters_json = request.query.get('filters', '[]')
