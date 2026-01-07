@@ -2731,10 +2731,15 @@ def _validate_and_normalize_args(args) -> None:
             args.start_date = start_dt.strftime('%Y-%m-%d')
             print(f"Using --days-back {args.days_back} with today as end-date, setting start-date to: {args.start_date}", file=sys.stderr)
     # Case 1: No start-date and no end-date specified -> assume latest price
-    elif args.start_date is None and args.end_date == today_str:
+    # But skip this message if --latest was explicitly provided
+    elif args.start_date is None and args.end_date == today_str and not args.latest:
         # This is the default case - treat as latest price request
         print("No start-date or end-date specified, assuming latest price request.", file=sys.stderr)
         # Set both to None to trigger current price logic
+        args.start_date = None
+        args.end_date = None
+    elif args.latest:
+        # --latest flag was explicitly provided, ensure dates are None
         args.start_date = None
         args.end_date = None
     # Case 2: End-date is set but no start-date -> set start-date to 30 days before end-date
@@ -2818,6 +2823,89 @@ async def _handle_latest_mode(args) -> None:
         # Calculate enable_cache from args.no_cache
         enable_cache = not args.no_cache
         
+        # Fetch and display latest price data from all sources (realtime, hourly, daily)
+        print(f"\n{'='*80}")
+        print(f"LATEST PRICE DATA FOR {args.symbol}")
+        print(f"{'='*80}")
+        
+        price_data = {}
+        
+        # Get latest from realtime_data
+        try:
+            if args.only_fetch is None or args.only_fetch == "realtime":
+                realtime_df = await db_instance_for_cleanup.get_realtime_data(args.symbol, data_type="quote")
+                if isinstance(realtime_df, pd.DataFrame) and not realtime_df.empty:
+                    latest_realtime = realtime_df.iloc[0]
+                    price_data['realtime'] = {
+                        'price': latest_realtime.get('price'),
+                        'timestamp': _normalize_index_timestamp(latest_realtime.name),
+                        'write_timestamp': latest_realtime.get('write_timestamp')
+                    }
+        except Exception as e:
+            logger.debug(f"Error fetching realtime data: {e}")
+        
+        # Get latest from hourly_prices
+        try:
+            if args.only_fetch is None or args.only_fetch == "hourly":
+                hourly_df = await db_instance_for_cleanup.get_stock_data(args.symbol, interval="hourly")
+                if isinstance(hourly_df, pd.DataFrame) and not hourly_df.empty:
+                    latest_hourly = hourly_df.iloc[-1]
+                    price_data['hourly'] = {
+                        'price': latest_hourly.get('close'),
+                        'open': latest_hourly.get('open'),
+                        'high': latest_hourly.get('high'),
+                        'low': latest_hourly.get('low'),
+                        'volume': latest_hourly.get('volume'),
+                        'timestamp': _normalize_index_timestamp(latest_hourly.name)
+                    }
+        except Exception as e:
+            logger.debug(f"Error fetching hourly data: {e}")
+        
+        # Get latest from daily_prices
+        try:
+            if args.only_fetch is None or args.only_fetch == "daily":
+                daily_df = await db_instance_for_cleanup.get_stock_data(args.symbol, interval="daily")
+                if isinstance(daily_df, pd.DataFrame) and not daily_df.empty:
+                    latest_daily = daily_df.iloc[-1]
+                    price_data['daily'] = {
+                        'price': latest_daily.get('close'),
+                        'open': latest_daily.get('open'),
+                        'high': latest_daily.get('high'),
+                        'low': latest_daily.get('low'),
+                        'volume': latest_daily.get('volume'),
+                        'timestamp': _normalize_index_timestamp(latest_daily.name)
+                    }
+        except Exception as e:
+            logger.debug(f"Error fetching daily data: {e}")
+        
+        # Display the price data
+        if price_data:
+            for source in ['realtime', 'hourly', 'daily']:
+                if source in price_data:
+                    data = price_data[source]
+                    print(f"\n{source.upper()}:")
+                    if data.get('price') is not None:
+                        print(f"  Price: ${data['price']:.2f}")
+                    if data.get('timestamp'):
+                        print(f"  Timestamp: {data['timestamp']}")
+                    if data.get('write_timestamp'):
+                        print(f"  Write Timestamp: {data['write_timestamp']}")
+                    if data.get('open') is not None:
+                        print(f"  Open: ${data['open']:.2f}")
+                    if data.get('high') is not None:
+                        print(f"  High: ${data['high']:.2f}")
+                    if data.get('low') is not None:
+                        print(f"  Low: ${data['low']:.2f}")
+                    if data.get('volume') is not None:
+                        print(f"  Volume: {data['volume']:,.0f}")
+                else:
+                    print(f"\n{source.upper()}: No data available")
+        else:
+            print("\nNo price data found in any source (realtime, hourly, daily)")
+            print("Try using --force-fetch to fetch fresh data from the API")
+        
+        print(f"\n{'='*80}")
+        
         # Fetch financial/IV/news data if requested
         if args.fetch_ratios or args.fetch_iv or args.fetch_news:
             logger.info(f"Fetching requested data for {args.symbol} (ratios={args.fetch_ratios}, iv={args.fetch_iv}, news={args.fetch_news})")
@@ -2862,8 +2950,6 @@ async def _handle_latest_mode(args) -> None:
         # Display financials if requested
         if args.show_financials:
             await _display_financials(args.symbol, db_instance_for_cleanup, logger, args.log_level, fetch_ratios=args.fetch_ratios)
-        else:
-            logger.info(f"Latest mode completed for {args.symbol}. Use --show-financials to display stored data.")
     
     except Exception as e:
         logger.error(f"Error in latest mode for {args.symbol}: {e}", exc_info=True)

@@ -948,6 +948,7 @@
                 <button class="tab-button active" onclick="switchTab(0)">📞 Calls</button>
                 <button class="tab-button" onclick="switchTab(1)">📉 Puts</button>
                 <button class="tab-button" onclick="switchTab(2)">📊 Comprehensive Analysis</button>
+                <button class="tab-button" onclick="switchTab(3)">📈 Stock Analysis</button>
             </div>
             <p id="generatedTime" data-generated="">Data updated: <span id="dataTimestamp">Loading...</span> <span id="timeAgo"></span></p>
             <p class="desktop-only">Click column headers to sort • 0 total results</p>
@@ -1373,6 +1374,16 @@
         <div id="analysisContent">
             <div class="loading-indicator"><div class="spinner"></div><div class="loading-text">Loading rule-based analysis...</div></div>
         </div>
+        </div>
+
+        <div class="tab-content" id="stockAnalysisTab">
+            <div class="loading-indicator" id="stockAnalysisLoadingIndicator">
+                <div class="loading-spinner"></div>
+                <div class="loading-text">Loading stock analysis...</div>
+            </div>
+            <div id="stockAnalysisContent" style="padding: 20px;">
+                <!-- Content will be populated by JavaScript -->
+            </div>
         </div>
 
     </div>

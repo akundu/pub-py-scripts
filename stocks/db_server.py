@@ -799,6 +799,9 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     # Add stock info API endpoint
     app.router.add_get("/api/stock_info/{symbol}", handle_stock_info)
     
+    # Add stock analysis API endpoint
+    app.router.add_get("/api/stock_analysis", handle_stock_analysis)
+    
     # Add Yahoo Finance news API endpoint
     app.router.add_get("/api/yahoo_news/{symbol}", handle_yahoo_finance_news)
     
@@ -818,9 +821,11 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     app.router.add_get("/stock_info/api/covered_calls/analysis", handle_covered_calls_analysis)
     app.router.add_get("/stock_info/api/covered_calls/view", handle_covered_calls_view)
     app.router.add_get("/stock_info/api/covered_calls/{filename}", handle_covered_calls_static)
+    app.router.add_get("/stock_info/api/stock_analysis/data", handle_stock_analysis_data)
     app.router.add_get("/stock_info/api/lazy/options/{symbol}", handle_lazy_load_options)
     app.router.add_get("/stock_info/api/lazy/news/{symbol}", handle_lazy_load_news)
     app.router.add_get("/stock_info/api/lazy/chart/{symbol}", handle_lazy_load_chart)
+    app.router.add_get("/stock_info/api/lazy/strategies/{symbol}", handle_lazy_load_strategies)
     app.router.add_get("/static/stock_info/{filename}", handle_stock_info_static)
     
     # Add stock info HTML page endpoint (parameterized route must be after specific routes)
@@ -3055,6 +3060,136 @@ async def handle_covered_calls_analysis(request: web.Request) -> web.Response:
             status=500,
             content_type='text/html'
         )
+
+
+async def handle_stock_analysis_data(request: web.Request) -> web.Response:
+    """Handle stock analysis data API requests.
+    
+    GET /stock_info/api/stock_analysis/data
+    
+    Query Parameters:
+        source: str (optional)
+            - Local file path (e.g., "~/Downloads/stock_analysis.csv")
+            - If not provided, defaults to ~/Downloads/stock_analysis.csv
+    
+    Returns:
+        JSON response with stock analysis data formatted for display
+    """
+    try:
+        # Get query parameters
+        source = request.query.get('source')
+        if not source:
+            source = os.path.expanduser("~/Downloads/stock_analysis.csv")
+            logger.info(f"No source provided, using default: {source}")
+        
+        # Expand user path if needed
+        source = os.path.expanduser(source)
+        
+        # Check if file exists
+        if not os.path.exists(source):
+            return web.json_response({
+                "error": "File not found",
+                "message": f"Stock analysis CSV file not found: {source}"
+            }, status=404)
+        
+        # Read CSV file
+        try:
+            df = pd.read_csv(source)
+            
+            # Clean up duplicate header rows if present
+            if not df.empty and 'ticker' in df.columns:
+                df = df[df['ticker'] != 'ticker']
+            
+            # Get file modification time
+            try:
+                data_source_mtime = os.path.getmtime(source)
+            except Exception:
+                data_source_mtime = time.time()
+            
+            # Format data for display - group by strategy
+            strategies = {
+                'BACKWARDATION': [],
+                'WHALE SQUEEZE': [],
+                'SECTOR RELATIVE': [],
+                'CASH FLOW KING': [],
+                'MEAN REVERSION': [],
+                'ACCUMULATION': []
+            }
+            
+            # Replace NaN values with None for JSON serialization
+            # Use replace() with np.nan for pandas 3.14+ compatibility (fillna doesn't accept None)
+            if NUMPY_AVAILABLE:
+                df = df.replace({np.nan: None})
+            else:
+                # Fallback: use where() to replace NaN with None
+                df = df.where(pd.notna(df), None)
+            
+            # Get top 20 for each strategy
+            for strategy in strategies.keys():
+                if 'strategies' in df.columns:
+                    strategy_df = df[df['strategies'].str.contains(strategy, na=False)].copy()
+                    if not strategy_df.empty:
+                        # Sort by iv_rank ascending (lower is better for most strategies)
+                        strategy_df = strategy_df.sort_values('iv_rank', ascending=True).head(20)
+                        # Replace NaN with None before converting to dict
+                        if NUMPY_AVAILABLE:
+                            strategy_df = strategy_df.replace({np.nan: None})
+                        else:
+                            strategy_df = strategy_df.where(pd.notna(strategy_df), None)
+                        strategies[strategy] = strategy_df.to_dict('records')
+            
+            # Get final ranked opportunities (conviction score > 0)
+            final_ranked = []
+            if 'conviction_score' in df.columns:
+                ranked_df = df[df['conviction_score'] > 0].copy()
+                if not ranked_df.empty:
+                    ranked_df = ranked_df.sort_values(['conviction_score', 'iv_rank'], ascending=[False, True]).head(20)
+                    # Replace NaN with None before converting to dict
+                    if NUMPY_AVAILABLE:
+                        ranked_df = ranked_df.replace({np.nan: None})
+                    else:
+                        ranked_df = ranked_df.where(pd.notna(ranked_df), None)
+                    final_ranked = ranked_df.to_dict('records')
+            
+            # Get total tickers analyzed
+            total_tickers = len(df) if not df.empty else 0
+            
+            # Replace NaN with None for all_data before converting to dict
+            if NUMPY_AVAILABLE:
+                df_all = df.replace({np.nan: None})
+            else:
+                df_all = df.where(pd.notna(df), None)
+            
+            # Return JSON response
+            return web.json_response({
+                "success": True,
+                "data": {
+                    "strategies": strategies,
+                    "final_ranked": final_ranked,
+                    "total_tickers": total_tickers,
+                    "all_data": df_all.to_dict('records')  # Full CSV data for table rendering
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "source_mtime": data_source_mtime
+            })
+            
+        except Exception as e:
+            logger.error(f"Error reading stock analysis CSV: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return web.json_response({
+                "error": "Error reading CSV",
+                "message": str(e)
+            }, status=500)
+            
+    except Exception as e:
+        logger.error(f"Error handling stock analysis data request: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return web.json_response({
+            "error": "Internal server error",
+            "message": str(e)
+        }, status=500)
 
 
 def _apply_filters(df: pd.DataFrame, filters: list, filter_logic: str = 'AND') -> pd.DataFrame:
@@ -7165,10 +7300,76 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         additional_data_time = (time.time() - additional_data_start) * 1000
         logger.info(f"[TIMING] {symbol}: Additional data fetches (parallel) took {additional_data_time:.2f}ms")
         
+        # Determine correct price based on market status
+        from common.market_hours import is_market_hours
+        market_is_open = is_market_hours()
+        
         # Add fetched data to result
         price_info = result.setdefault('price_info', {})
         current_price_data = price_info.setdefault('current_price', {})
+        
         if isinstance(current_price_data, dict):
+            # When market is open: use most recent realtime price
+            # When market is closed: use most recent daily close price
+            if market_is_open:
+                # Market is open: ensure we're using realtime price
+                # get_current_price should already return realtime, but verify
+                realtime_price = current_price_data.get('price')
+                if realtime_price is None:
+                    # Try to get from realtime_data directly
+                    try:
+                        realtime_df = await db_instance.get_realtime_data(symbol, data_type='quote')
+                        if not realtime_df.empty:
+                            latest_quote = realtime_df.iloc[-1]
+                            realtime_price = latest_quote.get('price') or latest_quote.get('ask_price')
+                            if realtime_price:
+                                current_price_data['price'] = realtime_price
+                                logger.info(f"[PRICE] {symbol}: Market OPEN - Using realtime price: ${realtime_price:.2f}")
+                    except Exception as e:
+                        logger.debug(f"Error fetching realtime price for {symbol}: {e}")
+            else:
+                # Market is closed: use most recent daily close price
+                try:
+                    daily_df = await db_instance.get_stock_data(symbol, interval='daily')
+                    if not daily_df.empty:
+                        # Get the most recent daily close
+                        latest_daily = daily_df.iloc[-1]
+                        most_recent_close = float(latest_daily['close'])
+                        current_price_data['price'] = most_recent_close
+                        current_price_data['most_recent_close'] = most_recent_close
+                        current_price_data['close'] = most_recent_close
+                        
+                        # Get the date of the most recent close
+                        import pandas as pd
+                        if isinstance(daily_df.index, pd.DatetimeIndex):
+                            most_recent_date = daily_df.index[-1]
+                        elif hasattr(daily_df.index, '__getitem__'):
+                            most_recent_date = daily_df.index[-1]
+                        else:
+                            most_recent_date = latest_daily.get('date', latest_daily.name if hasattr(latest_daily, 'name') else None)
+                        
+                        current_price_data['most_recent_close_date'] = most_recent_date.isoformat() if hasattr(most_recent_date, 'isoformat') else str(most_recent_date)
+                        
+                        logger.info(f"[PRICE] {symbol}: Market CLOSED - Using most recent daily close: ${most_recent_close:.2f} from {most_recent_date}")
+                        
+                        # Calculate diff to previous close
+                        if len(daily_df) > 1:
+                            previous_daily = daily_df.iloc[-2]
+                            previous_close_price = float(previous_daily['close'])
+                            price_diff = most_recent_close - previous_close_price
+                            price_diff_pct = (price_diff / previous_close_price) * 100 if previous_close_price > 0 else 0
+                            
+                            current_price_data['change'] = price_diff
+                            current_price_data['change_amount'] = price_diff
+                            current_price_data['change_percent'] = price_diff_pct
+                            current_price_data['change_pct'] = price_diff_pct
+                            
+                            logger.info(f"[PRICE] {symbol}: Price change from previous close: ${price_diff:.2f} ({price_diff_pct:+.2f}%)")
+                    else:
+                        logger.warning(f"[PRICE] {symbol}: Market CLOSED but no daily data found")
+                except Exception as e:
+                    logger.warning(f"[PRICE] {symbol}: Error fetching most recent daily close: {e}")
+            
             if previous_close is not None:
                 current_price_data['previous_close'] = previous_close
             if open_price is not None:
@@ -7317,7 +7518,32 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 # Get 52-week range from financial_info if available (preferred source)
                 price_info_dict = result.get('price_info', {}).copy()
                 financial_info_dict = result.get('financial_info', {}).copy()
+                
+                # Debug: Log what's in financial_info_dict
+                logger.info(f"[IV DEBUG] {symbol}: financial_info_dict keys: {list(financial_info_dict.keys())}")
+                logger.info(f"[IV DEBUG] {symbol}: financial_info_dict.get('financial_data') type: {type(financial_info_dict.get('financial_data'))}")
+                
                 financial_data = financial_info_dict.get('financial_data', {})
+                if financial_data is None:
+                    logger.warning(f"[IV DEBUG] {symbol}: financial_data is None, using empty dict")
+                    financial_data = {}
+                
+                # Debug: Log IV-related fields in financial_data
+                iv_fields = {k: v for k, v in financial_data.items() if 'iv' in k.lower() or 'IV' in k}
+                if iv_fields:
+                    logger.info(f"[IV DEBUG] {symbol}: IV fields in financial_data: {list(iv_fields.keys())}")
+                    if 'iv_analysis_json' in iv_fields:
+                        json_val = iv_fields['iv_analysis_json']
+                        logger.info(f"[IV DEBUG] {symbol}: iv_analysis_json present, type: {type(json_val)}, length: {len(str(json_val)) if json_val else 0} chars")
+                    if 'iv_metrics' in iv_fields:
+                        logger.info(f"[IV DEBUG] {symbol}: iv_metrics present, type: {type(iv_fields['iv_metrics'])}, keys: {list(iv_fields['iv_metrics'].keys()) if isinstance(iv_fields['iv_metrics'], dict) else 'N/A'}")
+                    if 'iv_strategy' in iv_fields:
+                        logger.info(f"[IV DEBUG] {symbol}: iv_strategy present, type: {type(iv_fields['iv_strategy'])}, keys: {list(iv_fields['iv_strategy'].keys()) if isinstance(iv_fields['iv_strategy'], dict) else 'N/A'}")
+                    if 'iv_analysis' in iv_fields:
+                        logger.info(f"[IV DEBUG] {symbol}: iv_analysis present, type: {type(iv_fields['iv_analysis'])}, keys: {list(iv_fields['iv_analysis'].keys()) if isinstance(iv_fields['iv_analysis'], dict) else 'N/A'}")
+                else:
+                    logger.warning(f"[IV DEBUG] {symbol}: No IV fields found in financial_data. Available keys: {list(financial_data.keys())[:30]}")
+                    logger.warning(f"[IV DEBUG] {symbol}: financial_data is empty: {len(financial_data) == 0}")
                 
                 # Try to get 52-week range from financial_info first (stored during fetch_all_data.py runs)
                 week_52_low = financial_data.get('week_52_low') or price_info_dict.get('week_52_low')
@@ -8571,6 +8797,338 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
         return response
     except Exception as e:
         logger.error(f"Error lazy-loading chart data for {symbol}: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def handle_stock_analysis(request: web.Request) -> web.Response:
+    """Handle stock analysis API requests.
+    
+    GET /api/stock_analysis
+    
+    Returns stock analysis results with all strategy evaluations.
+    Supports all parameters from analyze_stocks.py script.
+    
+    Query Parameters (all optional with defaults):
+        - ticker: str (comma-separated list, e.g., "AAPL,MSFT")
+            Specific ticker(s) to analyze. If not provided, returns all tickers.
+        - vol_oi_ratio: float (default: 1.5)
+            Whale Squeeze trigger - Vol/OI ratio threshold
+        - spike_threshold: float (default: 1.12)
+            Backwardation trigger - IV spike threshold
+        - fcf_cap: float (default: 20.0)
+            FCF ratio cap for cash flow king
+        - iv_rank_cap: float (default: 45.0)
+            IV rank cap for accumulation
+        - ma_floor: float (default: 0.85)
+            MA floor for mean reversion
+        - workers: int (default: 90% of CPU count)
+            Number of worker processes
+        - symbols_dir: str (default: ~/var/US-Stock-Symbols)
+            Directory for sector metadata
+        - no_whale, no_cf, no_mean, no_accum, no_income, no_back, no_sector_rel: bool
+            Disable specific strategies
+        - no_cache: bool (default: false)
+            Disable Redis caching
+    
+    Response Format:
+        {
+            "results": [
+                {
+                    "ticker": str,
+                    "sector": str,
+                    "price": float,
+                    "iv_rank": float,
+                    "sector_z": float,
+                    "conviction_score": int,
+                    "strategies": str,
+                    "action_plan": str
+                }
+            ],
+            "strategy_details": {
+                "TICKER": {
+                    "BACKWARDATION": {...},
+                    "WHALE SQUEEZE": {...},
+                    ...
+                }
+            },
+            "cache_ttl": int (seconds),
+            "cached": bool
+        }
+    """
+    db_instance = request.app.get('db_instance')
+    if not db_instance:
+        return web.json_response({"error": "Database instance not available"}, status=500)
+    
+    try:
+        import multiprocessing
+        from pathlib import Path
+        from common.analysis.stocks import analyze_stocks
+        
+        # Parse query parameters with defaults
+        ticker_param = request.query.get('ticker', '').strip()
+        tickers = [t.upper().strip() for t in ticker_param.split(',') if t.strip()] if ticker_param else []
+        
+        # Strategy parameters
+        vol_oi_ratio = float(request.query.get('vol_oi_ratio', '1.5'))
+        spike_threshold = float(request.query.get('spike_threshold', '1.12'))
+        fcf_cap = float(request.query.get('fcf_cap', '20.0'))
+        iv_rank_cap = float(request.query.get('iv_rank_cap', '45.0'))
+        ma_floor = float(request.query.get('ma_floor', '0.85'))
+        
+        # Workers
+        workers = int(request.query.get('workers', max(1, int(multiprocessing.cpu_count() * 0.9))))
+        
+        # Symbols directory
+        symbols_dir = request.query.get('symbols_dir', '~/var/US-Stock-Symbols')
+        expanded_path = os.path.expandvars(os.path.expanduser(symbols_dir))
+        symbols_dir = str(Path(expanded_path).resolve())
+        
+        # Strategy toggles
+        no_whale = request.query.get('no_whale', 'false').lower() == 'true'
+        no_cf = request.query.get('no_cf', 'false').lower() == 'true'
+        no_mean = request.query.get('no_mean', 'false').lower() == 'true'
+        no_accum = request.query.get('no_accum', 'false').lower() == 'true'
+        no_income = request.query.get('no_income', 'false').lower() == 'true'
+        no_back = request.query.get('no_back', 'false').lower() == 'true'
+        no_sector_rel = request.query.get('no_sector_rel', 'false').lower() == 'true'
+        
+        # Cache settings
+        no_cache = request.query.get('no_cache', 'false').lower() == 'true'
+        
+        # Build config dict
+        config = {
+            'vol_oi_ratio': vol_oi_ratio,
+            'spike_threshold': spike_threshold,
+            'fcf_cap': fcf_cap,
+            'iv_rank_cap': iv_rank_cap,
+            'ma_floor': ma_floor,
+            'no_whale': no_whale,
+            'no_cf': no_cf,
+            'no_mean': no_mean,
+            'no_accum': no_accum,
+            'no_income': no_income,
+            'no_back': no_back,
+            'no_sector_rel': no_sector_rel
+        }
+        
+        # Check Redis cache (1 hour TTL)
+        cache_key = None
+        cached_result = None
+        if not no_cache and REDIS_PUBSUB_AVAILABLE:
+            try:
+                redis_client = await _get_earnings_redis_client()
+                if redis_client:
+                    # Create cache key from all parameters
+                    import hashlib
+                    import json as json_lib
+                    cache_params = {
+                        'tickers': sorted(tickers) if tickers else 'all',
+                        'config': config,
+                        'workers': workers,
+                        'symbols_dir': symbols_dir
+                    }
+                    cache_key_str = json_lib.dumps(cache_params, sort_keys=True)
+                    cache_key = f"stocks:analysis:{hashlib.sha256(cache_key_str.encode()).hexdigest()}"
+                    
+                    # Try to get from cache
+                    cached_data = await redis_client.get(cache_key)
+                    if cached_data:
+                        cached_result = json_lib.loads(cached_data)
+                        logger.info(f"[ANALYSIS CACHE HIT] Cache key: {cache_key[:50]}...")
+            except Exception as e:
+                logger.debug(f"Error checking analysis cache: {e}")
+        
+        if cached_result:
+            return web.json_response({
+                **cached_result,
+                "cached": True
+            })
+        
+        # Perform analysis
+        logger.info(f"[STOCK ANALYSIS] Starting analysis for {len(tickers) if tickers else 'all'} ticker(s)")
+        final_df, strategy_details_map = await analyze_stocks(
+            db_instance=db_instance,
+            symbols_dir=symbols_dir,
+            config=config,
+            workers=workers,
+            shutdown_event=None
+        )
+        
+        # Filter by tickers if specified
+        if tickers:
+            final_df = final_df[final_df['ticker'].isin(tickers)]
+            strategy_details_map = {k: v for k, v in strategy_details_map.items() if k in tickers}
+        
+        # Convert DataFrame to records
+        results = final_df.to_dict('records')
+        
+        # Clean data for JSON serialization
+        def clean_for_json(obj):
+            if obj is None:
+                return None
+            if isinstance(obj, (str, int, float, bool)):
+                try:
+                    if pd.isna(obj):
+                        return None
+                except (ValueError, TypeError):
+                    pass
+                return obj
+            if isinstance(obj, pd.DataFrame):
+                return clean_for_json(obj.to_dict('records'))
+            if isinstance(obj, pd.Series):
+                return clean_for_json(obj.to_dict())
+            if isinstance(obj, dict):
+                return {k: clean_for_json(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [clean_for_json(item) for item in obj]
+            if hasattr(obj, 'isoformat'):
+                return obj.isoformat()
+            try:
+                if pd.isna(obj):
+                    return None
+            except (ValueError, TypeError):
+                pass
+            try:
+                if hasattr(obj, 'item'):
+                    return clean_for_json(obj.item())
+            except (ValueError, AttributeError):
+                pass
+            return str(obj)
+        
+        response_data = {
+            "results": clean_for_json(results),
+            "strategy_details": clean_for_json(strategy_details_map),
+            "cache_ttl": 3600,  # 1 hour
+            "cached": False
+        }
+        
+        # Cache the result
+        if not no_cache and REDIS_PUBSUB_AVAILABLE and cache_key:
+            try:
+                redis_client = await _get_earnings_redis_client()
+                if redis_client:
+                    await redis_client.setex(
+                        cache_key,
+                        3600,  # 1 hour TTL
+                        json.dumps(response_data, default=str, allow_nan=False)
+                    )
+                    logger.info(f"[ANALYSIS CACHE SET] Cached analysis results for {cache_key[:50]}...")
+            except Exception as e:
+                logger.debug(f"Error caching analysis results: {e}")
+        
+        return web.json_response(response_data)
+        
+    except Exception as e:
+        logger.error(f"Error in stock analysis: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def handle_lazy_load_strategies(request: web.Request) -> web.Response:
+    """Handle lazy-loading of strategy analysis data for stock info page.
+    
+    GET /stock_info/api/lazy/strategies/{symbol}
+    
+    Returns strategy analysis data that can be loaded after initial page render.
+    """
+    symbol = request.match_info.get('symbol', '').upper().strip()
+    if not symbol:
+        return web.json_response({"error": "Missing symbol"}, status=400)
+    
+    db_instance = request.app.get('db_instance')
+    if not db_instance:
+        return web.json_response({"error": "Database instance not available"}, status=500)
+    
+    try:
+        import multiprocessing
+        from pathlib import Path
+        from common.analysis.stocks import analyze_stocks
+        
+        # Use defaults for strategy parameters
+        symbols_dir = os.path.expandvars(os.path.expanduser('~/var/US-Stock-Symbols'))
+        symbols_dir = str(Path(symbols_dir).resolve())
+        
+        config = {
+            'vol_oi_ratio': 1.5,
+            'spike_threshold': 1.12,
+            'fcf_cap': 20.0,
+            'iv_rank_cap': 45.0,
+            'ma_floor': 0.85,
+            'no_whale': False,
+            'no_cf': False,
+            'no_mean': False,
+            'no_accum': False,
+            'no_income': False,
+            'no_back': False,
+            'no_sector_rel': False
+        }
+        
+        workers = max(1, int(multiprocessing.cpu_count() * 0.9))
+        
+        # Perform analysis for this specific ticker
+        final_df, strategy_details_map = await analyze_stocks(
+            db_instance=db_instance,
+            symbols_dir=symbols_dir,
+            config=config,
+            workers=workers,
+            shutdown_event=None
+        )
+        
+        # Filter to this ticker
+        ticker_data = final_df[final_df['ticker'] == symbol]
+        ticker_strategy_details = strategy_details_map.get(symbol, {})
+        
+        if ticker_data.empty:
+            return web.json_response({
+                "symbol": symbol,
+                "error": "Ticker not found in analysis results"
+            }, status=404)
+        
+        # Convert to dict
+        result = ticker_data.iloc[0].to_dict()
+        
+        # Clean for JSON
+        def clean_for_json(obj):
+            if obj is None:
+                return None
+            if isinstance(obj, (str, int, float, bool)):
+                try:
+                    if pd.isna(obj):
+                        return None
+                except (ValueError, TypeError):
+                    pass
+                return obj
+            if isinstance(obj, pd.DataFrame):
+                return clean_for_json(obj.to_dict('records'))
+            if isinstance(obj, pd.Series):
+                return clean_for_json(obj.to_dict())
+            if isinstance(obj, dict):
+                return {k: clean_for_json(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [clean_for_json(item) for item in obj]
+            if hasattr(obj, 'isoformat'):
+                return obj.isoformat()
+            try:
+                if pd.isna(obj):
+                    return None
+            except (ValueError, TypeError):
+                pass
+            try:
+                if hasattr(obj, 'item'):
+                    return clean_for_json(obj.item())
+            except (ValueError, AttributeError):
+                pass
+            return str(obj)
+        
+        response_data = {
+            "symbol": symbol,
+            "analysis": clean_for_json(result),
+            "strategy_details": clean_for_json(ticker_strategy_details)
+        }
+        
+        return web.json_response(response_data)
+        
+    except Exception as e:
+        logger.error(f"Error lazy-loading strategies for {symbol}: {e}", exc_info=True)
         return web.json_response({"error": str(e)}, status=500)
 
 
@@ -10594,6 +11152,9 @@ def main_server_runner():
         app.router.add_get("/api/stock_info/{symbol}", handle_stock_info)
         app.router.add_get("/stock_info/api/{symbol}", handle_stock_info)
         
+        # Add stock analysis API endpoint
+        app.router.add_get("/api/stock_analysis", handle_stock_analysis)
+        
         # Add Yahoo Finance news API endpoint
         app.router.add_get("/api/yahoo_news/{symbol}", handle_yahoo_finance_news)
         
@@ -10613,9 +11174,11 @@ def main_server_runner():
         app.router.add_get("/stock_info/api/covered_calls/analysis", handle_covered_calls_analysis)
         app.router.add_get("/stock_info/api/covered_calls/view", handle_covered_calls_view)
         app.router.add_get("/stock_info/api/covered_calls/{filename}", handle_covered_calls_static)
+        app.router.add_get("/stock_info/api/stock_analysis/data", handle_stock_analysis_data)
         app.router.add_get("/stock_info/api/lazy/options/{symbol}", handle_lazy_load_options)
         app.router.add_get("/stock_info/api/lazy/news/{symbol}", handle_lazy_load_news)
         app.router.add_get("/stock_info/api/lazy/chart/{symbol}", handle_lazy_load_chart)
+        app.router.add_get("/stock_info/api/lazy/strategies/{symbol}", handle_lazy_load_strategies)
         app.router.add_get("/static/stock_info/{filename}", handle_stock_info_static)
         
         # Add stock info HTML page endpoint (parameterized route must be after specific routes)

@@ -539,6 +539,61 @@
     document.getElementById('financialRatiosSection').style.display = 'block';
     const ratiosGrid = document.getElementById('financialRatiosGrid');
 
+    // Parse IV analysis JSON if available
+    let ivMetrics = null;
+    let ivStrategy = null;
+    let ivAnalysis = null;
+
+    // First check if server already parsed it (from get_financial_info)
+    if (financialData.iv_analysis && typeof financialData.iv_analysis === 'object') {
+      ivAnalysis = financialData.iv_analysis;
+      ivMetrics = ivAnalysis.metrics || {};
+      ivStrategy = ivAnalysis.strategy || {};
+      debugLog(`[${symbol}] Using pre-parsed iv_analysis from server`);
+    }
+
+    // Also check if already parsed as separate fields (from server-side parsing)
+    if (!ivMetrics && financialData.iv_metrics) {
+      ivMetrics = financialData.iv_metrics;
+      debugLog(`[${symbol}] Using pre-parsed iv_metrics from server`);
+    }
+    if (!ivStrategy && financialData.iv_strategy) {
+      ivStrategy = financialData.iv_strategy;
+      debugLog(`[${symbol}] Using pre-parsed iv_strategy from server`);
+    }
+
+    // If not pre-parsed, try parsing from JSON string
+    if (!ivAnalysis && financialData.iv_analysis_json) {
+      try {
+        ivAnalysis = JSON.parse(financialData.iv_analysis_json);
+        if (!ivMetrics && ivAnalysis.metrics) {
+          ivMetrics = ivAnalysis.metrics || {};
+        }
+        if (!ivStrategy && ivAnalysis.strategy) {
+          ivStrategy = ivAnalysis.strategy || {};
+        }
+        debugLog(`[${symbol}] Successfully parsed iv_analysis_json`);
+      } catch (e) {
+        debugLog(`[${symbol}] Failed to parse iv_analysis_json: ${e}`);
+      }
+    }
+
+    // Helper function to format IV percentage
+    function formatIV(value) {
+      if (value === null || value === undefined || isNaN(value)) return 'N/A';
+      // If value is already a percentage string, return as-is
+      if (typeof value === 'string' && value.endsWith('%')) return value;
+      // If value is a decimal (0.4205), convert to percentage
+      if (typeof value === 'number' && value < 1) {
+        return (value * 100).toFixed(2) + '%';
+      }
+      // If value is already a percentage number (42.05), add %
+      if (typeof value === 'number') {
+        return value.toFixed(2) + '%';
+      }
+      return String(value);
+    }
+
     const ratios = [
       // First row (6 metrics)
       { label: 'EPS (TTM)', value: formatValue(financialData.earnings_per_share || financialData.eps) },
@@ -567,6 +622,226 @@
         ratiosGrid.appendChild(createMetricCard(ratio.label, ratio.value));
       }
     });
+
+    // Debug: Log what IV data we have
+    debugLog(`[${symbol}] IV Data Check:`, {
+      has_iv_30d: financialData.iv_30d !== null && financialData.iv_30d !== undefined,
+      iv_30d: financialData.iv_30d,
+      has_iv_90d: financialData.iv_90d !== null && financialData.iv_90d !== undefined,
+      iv_90d: financialData.iv_90d,
+      has_iv_rank: financialData.iv_rank !== null && financialData.iv_rank !== undefined,
+      iv_rank: financialData.iv_rank,
+      has_iv_90d_rank: financialData.iv_90d_rank !== null && financialData.iv_90d_rank !== undefined,
+      iv_90d_rank: financialData.iv_90d_rank,
+      has_iv_analysis_json: !!financialData.iv_analysis_json,
+      iv_analysis_json_length: financialData.iv_analysis_json ? financialData.iv_analysis_json.length : 0,
+      has_iv_metrics: !!ivMetrics,
+      iv_metrics_keys: ivMetrics ? Object.keys(ivMetrics) : [],
+      has_iv_strategy: !!ivStrategy,
+      iv_strategy_keys: ivStrategy ? Object.keys(ivStrategy) : [],
+      financialData_keys: Object.keys(financialData).filter(k => k.includes('iv') || k.includes('IV'))
+    });
+
+    // Add IV Analysis metrics if available
+    // Check for any IV-related data: direct columns, parsed metrics, or JSON string
+    const hasIVData =
+      (financialData.iv_30d !== null && financialData.iv_30d !== undefined) ||
+      (financialData.iv_90d !== null && financialData.iv_90d !== undefined) ||
+      (financialData.iv_rank !== null && financialData.iv_rank !== undefined) ||
+      (financialData.iv_90d_rank !== null && financialData.iv_90d_rank !== undefined) ||
+      (financialData.iv_rank_diff !== null && financialData.iv_rank_diff !== undefined) ||
+      (financialData.relative_rank !== null && financialData.relative_rank !== undefined) ||
+      (financialData.iv_analysis_json && financialData.iv_analysis_json.length > 0) ||
+      (ivMetrics && Object.keys(ivMetrics).length > 0) ||
+      (ivStrategy && Object.keys(ivStrategy).length > 0);
+
+    debugLog(`[${symbol}] hasIVData result:`, hasIVData);
+
+    if (hasIVData) {
+      // Add separator and header
+      const separator = document.createElement('div');
+      separator.style.cssText = 'grid-column: 1 / -1; margin: 20px 0 10px 0; border-top: 2px solid #30363d; padding-top: 15px;';
+
+      // Create header container with flex layout
+      const headerContainer = document.createElement('div');
+      headerContainer.style.cssText = 'display: flex; align-items: baseline; gap: 10px;';
+
+      const header = document.createElement('h3');
+      header.textContent = 'IV ANALYSIS';
+      header.style.cssText = 'margin: 0; font-size: 16px; font-weight: 600; color: #667eea; text-transform: uppercase; letter-spacing: 0.5px;';
+      headerContainer.appendChild(header);
+
+      // Add timestamp if available
+      // Try date first (when IV analysis was calculated), then write_timestamp (when record was written)
+      const dateField = financialData.date || financialData.write_timestamp ||
+        (financialInfo.financial_data && (financialInfo.financial_data.date || financialInfo.financial_data.write_timestamp));
+      if (dateField) {
+        try {
+          // Parse the date (could be ISO string, timestamp number, or Date object)
+          let dateObj;
+          if (dateField instanceof Date) {
+            dateObj = dateField;
+          } else if (typeof dateField === 'string') {
+            // Handle ISO string format (e.g., "2026-01-05T00:00:00" or "2026-01-05")
+            dateObj = new Date(dateField);
+          } else if (typeof dateField === 'number') {
+            // Handle timestamp (milliseconds or seconds)
+            dateObj = new Date(dateField > 1e12 ? dateField : dateField * 1000);
+          } else {
+            dateObj = null;
+          }
+
+          if (dateObj && !isNaN(dateObj.getTime())) {
+            // Format as "Last updated: Jan 5, 2026"
+            const formattedDate = dateObj.toLocaleDateString('en-US', {
+              year: 'numeric',
+              month: 'short',
+              day: 'numeric'
+            });
+
+            const timestampSpan = document.createElement('span');
+            timestampSpan.textContent = `Last updated: ${formattedDate}`;
+            timestampSpan.style.cssText = 'font-size: 11px; color: #8b949e; font-weight: normal; text-transform: none; letter-spacing: normal;';
+            headerContainer.appendChild(timestampSpan);
+          } else {
+            debugLog(`[${symbol}] Invalid date field for IV analysis:`, dateField, typeof dateField);
+          }
+        } catch (e) {
+          debugLog(`[${symbol}] Error formatting IV analysis date:`, e, dateField);
+        }
+      } else {
+        debugLog(`[${symbol}] No date field found for IV analysis timestamp`);
+      }
+
+      separator.appendChild(headerContainer);
+      ratiosGrid.appendChild(separator);
+
+      // IV metrics array
+      const ivRatios = [];
+
+      // 30-day IV (from direct column or metrics)
+      const iv30d = financialData.iv_30d !== null && financialData.iv_30d !== undefined
+        ? financialData.iv_30d
+        : (ivMetrics?.iv_30d || null);
+      if (iv30d !== null && iv30d !== undefined) {
+        ivRatios.push({ label: '30-day IV', value: formatIV(iv30d) });
+      }
+
+      // 90-day IV (from direct column or metrics)
+      const iv90d = financialData.iv_90d !== null && financialData.iv_90d !== undefined
+        ? financialData.iv_90d
+        : (ivMetrics?.iv_90d || null);
+      if (iv90d !== null && iv90d !== undefined) {
+        ivRatios.push({ label: '90-day IV', value: formatIV(iv90d) });
+      }
+
+      // 1-Year HV Range (from metrics)
+      if (ivMetrics?.hv_1yr_range) {
+        ivRatios.push({ label: '1-Year HV Range', value: ivMetrics.hv_1yr_range });
+      }
+
+      // IV Rank (30-day) - from direct column or metrics
+      const ivRank = financialData.iv_rank !== null && financialData.iv_rank !== undefined
+        ? financialData.iv_rank
+        : (ivMetrics?.rank || null);
+      if (ivRank !== null && ivRank !== undefined) {
+        ivRatios.push({ label: 'IV Rank (30-day)', value: formatValue(ivRank) });
+      }
+
+      // IV Rank (90-day) - from direct column or metrics
+      const ivRank90d = financialData.iv_90d_rank !== null && financialData.iv_90d_rank !== undefined
+        ? financialData.iv_90d_rank
+        : (ivMetrics?.rank_90d || null);
+      if (ivRank90d !== null && ivRank90d !== undefined) {
+        ivRatios.push({ label: 'IV Rank (90-day)', value: formatValue(ivRank90d) });
+      }
+
+      // Rank Ratio (30d/90d) - from direct column or metrics
+      const rankDiff = financialData.iv_rank_diff !== null && financialData.iv_rank_diff !== undefined
+        ? financialData.iv_rank_diff
+        : (ivMetrics?.rank_diff || null);
+      if (rankDiff !== null && rankDiff !== undefined) {
+        ivRatios.push({ label: 'Rank Ratio (30d/90d)', value: formatValue(rankDiff) });
+      }
+
+      // Roll Yield (from metrics)
+      if (ivMetrics?.roll_yield !== null && ivMetrics?.roll_yield !== undefined) {
+        const rollYield = ivMetrics.roll_yield;
+        // Format as percentage if it's a number
+        const rollYieldValue = typeof rollYield === 'number'
+          ? (rollYield < 1 ? (rollYield * 100).toFixed(2) + '%' : rollYield.toFixed(2) + '%')
+          : (typeof rollYield === 'string' && !rollYield.endsWith('%') ? rollYield + '%' : rollYield);
+        ivRatios.push({ label: 'Roll Yield', value: rollYieldValue });
+      }
+
+      // Relative Rank (vs VOO) - from direct column or top-level
+      const relativeRank = financialData.relative_rank !== null && financialData.relative_rank !== undefined
+        ? financialData.relative_rank
+        : (ivAnalysis?.relative_rank || financialData.iv_analysis?.relative_rank || ivMetrics?.relative_rank || null);
+      if (relativeRank !== null && relativeRank !== undefined) {
+        ivRatios.push({ label: 'Relative Rank (vs VOO)', value: formatValue(relativeRank) });
+      }
+
+      // Strategy Recommendation
+      const strategyRec = ivStrategy?.recommendation || null;
+      if (strategyRec) {
+        const recCard = document.createElement('div');
+        recCard.className = 'metric-card';
+        recCard.style.cssText = 'grid-column: span 2;';
+        const recLabel = document.createElement('div');
+        recLabel.className = 'metric-label';
+        recLabel.textContent = 'Strategy';
+        const recValue = document.createElement('div');
+        recValue.className = 'metric-value';
+        recValue.textContent = strategyRec;
+        const rec = strategyRec.toUpperCase();
+        recValue.style.cssText = `font-weight: bold; color: ${rec.includes('BUY') ? '#10b981' : rec.includes('SELL') ? '#ef4444' : '#6b7280'};`;
+        recCard.appendChild(recLabel);
+        recCard.appendChild(recValue);
+        ratiosGrid.appendChild(recCard);
+      }
+
+      // Risk Score
+      const riskScore = ivStrategy?.risk_score !== null && ivStrategy?.risk_score !== undefined
+        ? ivStrategy.risk_score
+        : null;
+      if (riskScore !== null && riskScore !== undefined) {
+        ivRatios.push({ label: 'Risk Score', value: formatValue(riskScore) });
+      }
+
+      // Notes (from strategy.notes)
+      if (ivStrategy?.notes) {
+        const notes = ivStrategy.notes;
+        let notesText = '';
+        if (typeof notes === 'string') {
+          notesText = notes;
+        } else if (typeof notes === 'object' && notes.meaning) {
+          notesText = notes.meaning;
+        }
+        if (notesText) {
+          const notesCard = document.createElement('div');
+          notesCard.className = 'metric-card';
+          notesCard.style.cssText = 'grid-column: span 2;';
+          const notesLabel = document.createElement('div');
+          notesLabel.className = 'metric-label';
+          notesLabel.textContent = 'Notes';
+          const notesValue = document.createElement('div');
+          notesValue.className = 'metric-value';
+          notesValue.textContent = notesText;
+          notesValue.style.cssText = 'font-size: 12px; color: #8b949e;';
+          notesCard.appendChild(notesLabel);
+          notesCard.appendChild(notesValue);
+          ratiosGrid.appendChild(notesCard);
+        }
+      }
+
+      // Add all IV ratio cards
+      ivRatios.forEach(ratio => {
+        if (ratio.value && ratio.value !== 'N/A' && ratio.value !== 'undefined') {
+          ratiosGrid.appendChild(createMetricCard(ratio.label, ratio.value));
+        }
+      });
+    }
   }
 
   // Initialize chart and other dynamic features
@@ -1040,6 +1315,114 @@
       optionsSection.style.display = 'block';
       optionsDisplay.innerHTML = `<p style="color: #f85149;">Error loading options: ${optionsInfo.error}</p>`;
     }
+  }
+
+  // Lazy-load strategy analysis
+  async function lazyLoadStrategies() {
+    const strategySection = document.getElementById('strategies');
+    const strategyDisplay = document.getElementById('strategyDisplay');
+    if (!strategySection || !strategyDisplay) return;
+
+    try {
+      strategySection.style.display = 'block';
+      strategyDisplay.innerHTML = '<p>Loading strategy analysis...</p>';
+
+      const basePath = '/stock_info';
+      const strategiesUrl = `${basePath}/api/lazy/strategies/${symbol}`;
+      debugLog(`[${symbol}] Lazy-loading strategy analysis: ${strategiesUrl}`);
+
+      const response = await fetch(strategiesUrl);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.analysis && data.strategy_details) {
+          renderStrategySection(data.analysis, data.strategy_details);
+          debugLog(`[${symbol}] Strategy analysis loaded successfully`);
+        } else {
+          strategyDisplay.innerHTML = '<p style="color: #8b949e;">No strategy analysis available for this ticker.</p>';
+        }
+      } else {
+        strategyDisplay.innerHTML = `<p style="color: #f85149;">Error loading strategy analysis: ${response.statusText}</p>`;
+      }
+    } catch (e) {
+      console.error(`[${symbol}] Error lazy-loading strategies:`, e);
+      strategyDisplay.innerHTML = `<p style="color: #f85149;">Error loading strategy analysis: ${e.message}</p>`;
+    }
+  }
+
+  function renderStrategySection(analysis, strategyDetails) {
+    const strategyDisplay = document.getElementById('strategyDisplay');
+    if (!strategyDisplay) return;
+
+    let html = '<div style="margin-bottom: 20px;">';
+    html += `<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px;">`;
+    html += `<div class="metric-card"><div class="metric-label">Price</div><div class="metric-value">$${analysis.price || 'N/A'}</div></div>`;
+    html += `<div class="metric-card"><div class="metric-label">IV Rank</div><div class="metric-value">${analysis.iv_rank || 'N/A'}</div></div>`;
+    html += `<div class="metric-card"><div class="metric-label">Sector Z</div><div class="metric-value">${analysis.sector_z || 'N/A'}</div></div>`;
+    html += `<div class="metric-card"><div class="metric-label">Conviction Score</div><div class="metric-value">${analysis.conviction_score || 0}</div></div>`;
+    html += `<div class="metric-card"><div class="metric-label">Sector</div><div class="metric-value">${analysis.sector || 'N/A'}</div></div>`;
+    html += `</div>`;
+
+    if (analysis.action_plan) {
+      html += `<div style="background: #0d1117; padding: 15px; border-radius: 6px; border: 1px solid #30363d; margin-bottom: 20px;">`;
+      html += `<div style="font-weight: 600; color: #f0f6fc; margin-bottom: 8px;">Action Plan:</div>`;
+      html += `<div style="color: #c9d1d9;">${analysis.action_plan}</div>`;
+      html += `</div>`;
+    }
+
+    html += '<div class="strategy-grid">';
+
+    const strategies = ['BACKWARDATION', 'WHALE SQUEEZE', 'SECTOR RELATIVE', 'CASH FLOW KING', 'MEAN REVERSION', 'ACCUMULATION'];
+    strategies.forEach(strategyName => {
+      const details = strategyDetails[strategyName] || {};
+      const isActive = details.active || false;
+      const cardClass = isActive ? 'strategy-card active' : 'strategy-card inactive';
+      const statusIcon = isActive ? '✅' : '❌';
+      const statusText = isActive ? 'ACTIVE' : 'INACTIVE';
+
+      html += `<div class="${cardClass}">`;
+      html += `<div class="strategy-name">${statusIcon} ${strategyName} - ${statusText}</div>`;
+      html += `<div class="strategy-details">`;
+
+      if (strategyName === 'BACKWARDATION') {
+        html += `<div><strong>Spike Score:</strong> ${details.spike_score || 'N/A'} (threshold: ${details.threshold || 'N/A'})</div>`;
+        html += `<div><strong>IV30:</strong> ${details.iv_30 || 'N/A'}% | <strong>IV90:</strong> ${details.iv_90 || 'N/A'}%</div>`;
+      } else if (strategyName === 'WHALE SQUEEZE') {
+        html += `<div><strong>Vol/OI Ratio:</strong> ${details.vol_oi_ratio || 'N/A'} (threshold: ${details.threshold || 'N/A'})</div>`;
+        html += `<div><strong>Max OI Delta:</strong> ${details.max_oi_delta || 'N/A'} (range: ${details.delta_range || 'N/A'})</div>`;
+        html += `<div><strong>Time Fill Factor:</strong> ${details.time_fill_factor || 'N/A'}</div>`;
+      } else if (strategyName === 'SECTOR RELATIVE') {
+        html += `<div><strong>Sector Z:</strong> ${details.sector_z || 'N/A'} (threshold: ${details.threshold || 'N/A'})</div>`;
+        html += `<div><strong>Sector Avg IV Rank:</strong> ${details.sector_avg_rank || 'N/A'}</div>`;
+        html += `<div><strong>IV Rank:</strong> ${details.iv_rank || 'N/A'}</div>`;
+      } else if (strategyName === 'CASH FLOW KING') {
+        html += `<div><strong>FCF Ratio:</strong> ${details.fcf_ratio || 'N/A'} (cap: ${details.fcf_cap || 'N/A'})</div>`;
+        html += `<div><strong>IV Rank:</strong> ${details.iv_rank || 'N/A'} (threshold: ${details.iv_rank_threshold || 'N/A'})</div>`;
+      } else if (strategyName === 'MEAN REVERSION') {
+        html += `<div><strong>Price:</strong> $${details.price || 'N/A'}</div>`;
+        html += `<div><strong>MA50:</strong> $${details.ma_50 || 'N/A'}</div>`;
+        html += `<div><strong>Price/MA Ratio:</strong> ${details.price_vs_ma || 'N/A'} (range: ${details.ma_floor || 'N/A'}-${details.ma_ceiling || 'N/A'})</div>`;
+        html += `<div><strong>IV Rank:</strong> ${details.iv_rank || 'N/A'} (threshold: ${details.iv_rank_threshold || 'N/A'})</div>`;
+      } else if (strategyName === 'ACCUMULATION') {
+        html += `<div><strong>Price:</strong> $${details.price || 'N/A'}</div>`;
+        html += `<div><strong>MA50:</strong> $${details.ma_50 || 'N/A'}</div>`;
+        html += `<div><strong>Above MA:</strong> ${details.price_above_ma ? 'Yes' : 'No'}</div>`;
+        html += `<div><strong>IV Rank:</strong> ${details.iv_rank || 'N/A'} (cap: ${details.iv_rank_cap || 'N/A'})</div>`;
+      }
+
+      html += `</div></div>`;
+    });
+
+    html += '</div>';
+    strategyDisplay.innerHTML = html;
+  }
+
+  // Lazy-load strategies after page load
+  if (document.readyState === 'complete') {
+    setTimeout(lazyLoadStrategies, 500);
+  } else {
+    window.addEventListener('load', () => {
+      setTimeout(lazyLoadStrategies, 500);
+    });
   }
 
   // Render news data

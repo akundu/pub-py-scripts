@@ -235,7 +235,7 @@ def parse_args():
         '--top-n',
         type=int,
         default=10,
-        help="Number of results to print per category (default: 10)."
+        help="Number of top results to print for each strategy category and final ranked opportunities (default: 10)."
     )
     parser.add_argument(
         '--csv',

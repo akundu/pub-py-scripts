@@ -212,6 +212,105 @@
       color: #667eea;
     }
 
+    .tabs-container {
+      background: #161b22;
+      padding: 0;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      border: 1px solid #30363d;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      padding: 15px 20px;
+      border-bottom: 1px solid #30363d;
+    }
+
+    .tab {
+      padding: 10px 20px;
+      background: transparent;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      color: #8b949e;
+      transition: all 0.2s;
+      text-decoration: none;
+    }
+
+    .tab:hover {
+      background: #21262d;
+      color: #c9d1d9;
+      border-color: #58a6ff;
+    }
+
+    .tab.active {
+      background: #1f6feb;
+      color: white;
+      border-color: #1f6feb;
+    }
+
+    .strategy-section {
+      background: #161b22;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      border: 1px solid #30363d;
+      min-height: 200px;
+    }
+
+    .strategy-loading {
+      text-align: center;
+      padding: 40px;
+      color: #8b949e;
+    }
+
+    .strategy-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 15px;
+      margin-top: 15px;
+    }
+
+    .strategy-card {
+      background: #0d1117;
+      padding: 15px;
+      border-radius: 6px;
+      border: 1px solid #30363d;
+    }
+
+    .strategy-card.active {
+      border-color: #26a641;
+      background: #0d1f0d;
+    }
+
+    .strategy-card.inactive {
+      border-color: #f85149;
+      opacity: 0.7;
+    }
+
+    .strategy-name {
+      font-size: 16px;
+      font-weight: 600;
+      color: #f0f6fc;
+      margin-bottom: 10px;
+    }
+
+    .strategy-details {
+      font-size: 13px;
+      color: #8b949e;
+      line-height: 1.6;
+    }
+
+    .strategy-details strong {
+      color: #c9d1d9;
+    }
+
     .data-table {
       width: 100%;
       border-collapse: collapse;
@@ -309,7 +408,18 @@
       </div>
     </div>
 
+    <div class="tabs-container">
+      <div class="tabs">
+        <a href="#chart" class="tab active" onclick="scrollToSection('chart'); return false;">Price Chart</a>
+        <a href="#financial" class="tab" onclick="scrollToSection('financial'); return false;">Financial Ratios</a>
+        <a href="#strategies" class="tab" onclick="scrollToSection('strategies'); return false;">Strategy Analysis</a>
+        <a href="#options" class="tab" onclick="scrollToSection('options'); return false;">Options</a>
+        <a href="#news" class="tab" onclick="scrollToSection('news'); return false;">News</a>
+      </div>
+    </div>
+
     <div class="chart-section">
+      <a id="chart"></a>
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
         <h2 style="margin: 0;">Price Chart</h2>
         <div id="chartRangeInfo" style="display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; background: #161b22; border-radius: 6px; border: 1px solid #30363d; font-size: 13px; color: #c9d1d9; min-width: 200px;">
@@ -344,13 +454,22 @@
     </div>
 
     <div class="data-section" id="financialRatiosSection" style="display: none;">
+      <a id="financial"></a>
       <h2>Financial Ratios & Metrics</h2>
       <div class="metrics-grid financial-ratios" id="financialRatiosGrid">
         <!-- Will be populated by JavaScript -->
       </div>
     </div>
 
+    <div class="strategy-section" id="strategies" style="display: none;">
+      <h2>Strategy Analysis</h2>
+      <div id="strategyDisplay" class="strategy-loading">
+        <p>Loading strategy analysis...</p>
+      </div>
+    </div>
+
     <div class="data-section" id="optionsSection" style="display: none;">
+      <a id="options"></a>
       <h2 id="optionsHeader">Options</h2>
       <div id="optionsDisplay">
         <!-- Will be populated by JavaScript -->
@@ -358,12 +477,45 @@
     </div>
 
     <div class="data-section" id="newsSection" style="display: none;">
+      <a id="news"></a>
       <h2>Latest News (Database)</h2>
       <div id="newsDisplay">
         <!-- Will be populated by JavaScript -->
       </div>
     </div>
   </div>
+
+  <script>
+    function scrollToSection(sectionId) {
+      const section = document.getElementById(sectionId);
+      if (section) {
+        section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        // Update active tab
+        document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+        event.target.classList.add('active');
+      }
+    }
+
+    // Update active tab on scroll
+    window.addEventListener('scroll', () => {
+      const sections = ['chart', 'financial', 'strategies', 'options', 'news'];
+      const scrollPos = window.scrollY + 100;
+
+      for (const sectionId of sections) {
+        const section = document.getElementById(sectionId);
+        if (section) {
+          const top = section.offsetTop;
+          const bottom = top + section.offsetHeight;
+          if (scrollPos >= top && scrollPos < bottom) {
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            const tab = document.querySelector(`.tab[href="#${sectionId}"]`);
+            if (tab) tab.classList.add('active');
+            break;
+          }
+        }
+      }
+    });
+  </script>
 
   <!-- Embedded JSON data -->
   <script id="stockData" type="application/json"></script>

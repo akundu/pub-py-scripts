@@ -2151,6 +2151,14 @@
                     tabButtons[tabIndex].classList.add('active');
                 }
                 
+                // Update URL with tab parameter
+                const tabNames = ['calls', 'puts', 'analysis', 'stock_analysis'];
+                const tabName = tabNames[tabIndex] || 'calls';
+                const params = new URLSearchParams(window.location.search);
+                params.set('tab', tabName);
+                const newURL = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
+                window.history.pushState({ tab: tabIndex }, '', newURL);
+
                 // Fetch data for the active tab
                 const activeTab = tabContents[tabIndex];
                 if (activeTab.id === 'callsTab') {
@@ -2165,10 +2173,28 @@
                         // Only auto-load if Gemini is not checked (rule-based analysis)
                         fetchAnalysisFromAPI();
                     }
+                } else if (activeTab.id === 'stockAnalysisTab') {
+                    fetchStockAnalysisData();
                 }
             }
         }
         
+// Get initial tab from URL
+function getInitialTab() {
+    const params = new URLSearchParams(window.location.search);
+    const tabParam = params.get('tab');
+    if (tabParam) {
+        const tabMap = {
+            'calls': 0,
+            'puts': 1,
+            'analysis': 2,
+            'stock_analysis': 3
+        };
+        return tabMap[tabParam] !== undefined ? tabMap[tabParam] : 0;
+    }
+    return 0; // Default to calls tab
+}
+
         // Handle Enter key in filter input
         function handleFilterKeyPress(event, prefix) {
             if (event.key === 'Enter') {
@@ -2659,6 +2685,385 @@
             }
         }
         
+// Fetch and render stock analysis data
+async function fetchStockAnalysisData() {
+    const loadingIndicator = document.getElementById('stockAnalysisLoadingIndicator');
+    const contentDiv = document.getElementById('stockAnalysisContent');
+
+    if (loadingIndicator) {
+        loadingIndicator.classList.add('active');
+    }
+    if (contentDiv) {
+        contentDiv.innerHTML = '';
+    }
+
+    try {
+        const url = '/stock_info/api/stock_analysis/data';
+        const response = await fetch(url);
+
+        if (!response.ok) {
+            throw new Error(`API error: ${response.status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+
+        if (data.success) {
+            renderStockAnalysis(data.data);
+        } else {
+            throw new Error(data.message || 'Unknown error');
+        }
+    } catch (error) {
+        console.error('Error fetching stock analysis data:', error);
+        if (contentDiv) {
+            contentDiv.innerHTML = `<div style="padding: 20px; color: red; text-align: center;">Error loading stock analysis: ${error.message}</div>`;
+        }
+    } finally {
+        if (loadingIndicator) {
+            loadingIndicator.classList.remove('active');
+        }
+    }
+}
+
+// Render stock analysis data
+function renderStockAnalysis(data) {
+    const contentDiv = document.getElementById('stockAnalysisContent');
+    if (!contentDiv) return;
+
+    let html = '';
+
+    // Total tickers analyzed
+    html += `<div style="margin-bottom: 30px; padding: 20px; background: #f8f9fa; border-radius: 8px;">`;
+    html += `<h2 style="color: #667eea; margin-bottom: 10px;">✅ ANALYZED ${data.total_tickers} TICKERS</h2>`;
+    html += `</div>`;
+
+    // Strategy sections
+    const strategyConfig = [
+        { key: 'BACKWARDATION', emoji: '⚠️', name: 'BACKWARDATION' },
+        { key: 'WHALE SQUEEZE', emoji: '🐳', name: 'WHALE SQUEEZE' },
+        { key: 'SECTOR RELATIVE', emoji: '📊', name: 'SECTOR RELATIVE' },
+        { key: 'CASH FLOW KING', emoji: '👑', name: 'CASH FLOW KINGS' },
+        { key: 'MEAN REVERSION', emoji: '📈', name: 'MEAN REVERSION' },
+        { key: 'ACCUMULATION', emoji: '🟢', name: 'ACCUMULATION' }
+    ];
+
+    for (const config of strategyConfig) {
+        const strategyData = data.strategies[config.key] || [];
+        if (strategyData.length === 0) continue;
+
+        html += `<div style="margin-bottom: 30px;">`;
+        html += `<h3 style="color: #667eea; font-size: 1.5em; margin-bottom: 15px;">${config.emoji} ${config.name} (Top ${strategyData.length})</h3>`;
+        html += `<table style="width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">`;
+        html += `<thead style="background: #667eea; color: white;">`;
+        html += `<tr>`;
+        html += `<th style="padding: 12px; text-align: left;">Ticker</th>`;
+        html += `<th style="padding: 12px; text-align: right;">Price</th>`;
+        html += `<th style="padding: 12px; text-align: right;">IV Rank</th>`;
+        html += `<th style="padding: 12px; text-align: left;">Sector</th>`;
+        html += `</tr>`;
+        html += `</thead>`;
+        html += `<tbody>`;
+
+        for (const row of strategyData) {
+            const ticker = row.ticker || 'N/A';
+            const tickerLink = ticker !== 'N/A' ? `<a href="/stock_info/${ticker}" style="color: #667eea; text-decoration: none; font-weight: 600;">${ticker}</a>` : ticker;
+            html += `<tr style="border-bottom: 1px solid #dee2e6;">`;
+            html += `<td style="padding: 10px 12px; font-weight: 600;">${tickerLink}</td>`;
+            html += `<td style="padding: 10px 12px; text-align: right;">$${(row.price || 0).toFixed(2)}</td>`;
+            html += `<td style="padding: 10px 12px; text-align: right;">${(row.iv_rank || 0).toFixed(1)}</td>`;
+            html += `<td style="padding: 10px 12px;">${row.sector || 'Unknown'}</td>`;
+            html += `</tr>`;
+        }
+
+        html += `</tbody>`;
+        html += `</table>`;
+        html += `</div>`;
+    }
+
+    // Final ranked opportunities
+    if (data.final_ranked && data.final_ranked.length > 0) {
+        html += `<div style="margin-top: 40px; margin-bottom: 30px;">`;
+        html += `<h2 style="color: #667eea; font-size: 2em; margin-bottom: 20px; text-align: center; border-bottom: 3px solid #667eea; padding-bottom: 10px;">🏆 FINAL RANKED OPPORTUNITIES (CONVICTION RANK)</h2>`;
+        html += `<table style="width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">`;
+        html += `<thead style="background: #667eea; color: white;">`;
+        html += `<tr>`;
+        html += `<th style="padding: 12px; text-align: left;">Ticker</th>`;
+        html += `<th style="padding: 12px; text-align: center;">Score</th>`;
+        html += `<th style="padding: 12px; text-align: right;">Price</th>`;
+        html += `<th style="padding: 12px; text-align: left;">Strategies</th>`;
+        html += `<th style="padding: 12px; text-align: left;">Action Plan</th>`;
+        html += `</tr>`;
+        html += `</thead>`;
+        html += `<tbody>`;
+
+        for (const row of data.final_ranked) {
+            const ticker = row.ticker || 'N/A';
+            const tickerLink = ticker !== 'N/A' ? `<a href="/stock_info/${ticker}" style="color: #667eea; text-decoration: none; font-weight: 600;">${ticker}</a>` : ticker;
+            html += `<tr style="border-bottom: 1px solid #dee2e6;">`;
+            html += `<td style="padding: 10px 12px; font-weight: 600;">${tickerLink}</td>`;
+            html += `<td style="padding: 10px 12px; text-align: center;">${row.conviction_score || 0}</td>`;
+            html += `<td style="padding: 10px 12px; text-align: right;">$${(row.price || 0).toFixed(2)}</td>`;
+            html += `<td style="padding: 10px 12px;">${row.strategies || 'N/A'}</td>`;
+            html += `<td style="padding: 10px 12px;">${row.action_plan || 'N/A'}</td>`;
+            html += `</tr>`;
+        }
+
+        html += `</tbody>`;
+        html += `</table>`;
+        html += `</div>`;
+    }
+
+    // Full CSV table
+    if (data.all_data && data.all_data.length > 0) {
+        html += `<div style="margin-top: 40px; margin-bottom: 30px;">`;
+        html += `<h2 style="color: #667eea; font-size: 2em; margin-bottom: 10px; text-align: center; border-bottom: 3px solid #667eea; padding-bottom: 10px;">📊 Full Analysis Results</h2>`;
+
+        // Filter to only show tickers with at least one strategy
+        const filteredData = data.all_data.filter(row => {
+            const strategies = row.strategies || '';
+            return strategies.trim().length > 0;
+        });
+
+        if (filteredData.length === 0) {
+            html += `<div style="text-align: center; padding: 40px; color: #666;">No tickers with active strategies found.</div>`;
+            html += `</div>`;
+            contentDiv.innerHTML = html;
+            return;
+        }
+
+        // Define strategy types
+        const strategyTypes = ['BACKWARDATION', 'WHALE SQUEEZE', 'SECTOR RELATIVE', 'CASH FLOW KING', 'MEAN REVERSION', 'ACCUMULATION'];
+
+        // Process data to extract individual strategies and count them
+        const processedData = filteredData.map(row => {
+            const newRow = { ...row };
+            // Parse strategies string and create individual columns
+            const strategiesStr = row.strategies || '';
+            let strategyCount = 0;
+            strategyTypes.forEach(strategy => {
+                const hasStrategy = strategiesStr.includes(strategy);
+                newRow['strategy_' + strategy] = hasStrategy ? '✓' : '';
+                if (hasStrategy) strategyCount++;
+            });
+            // Add strategy count for sorting
+            newRow._strategyCount = strategyCount;
+            return newRow;
+        });
+
+        // Sort by number of strategies (descending), then by ticker name
+        processedData.sort((a, b) => {
+            if (b._strategyCount !== a._strategyCount) {
+                return b._strategyCount - a._strategyCount;
+            }
+            // If same number of strategies, sort by ticker alphabetically
+            const tickerA = (a.ticker || '').toUpperCase();
+            const tickerB = (b.ticker || '').toUpperCase();
+            return tickerA.localeCompare(tickerB);
+        });
+
+        // Add count of entries being shown
+        html += `<div style="text-align: center; margin-bottom: 20px; color: #666; font-size: 0.9em;">Showing ${processedData.length} ticker${processedData.length !== 1 ? 's' : ''} with active strategies</div>`;
+
+        // Get all unique column names from the processed data
+        const allColumns = new Set();
+        processedData.forEach(row => {
+            Object.keys(row).forEach(key => {
+                // Skip internal sorting field
+                if (key !== '_strategyCount') {
+                    allColumns.add(key);
+                }
+            });
+        });
+
+        // Remove 'strategies' from columns and add individual strategy columns
+        allColumns.delete('strategies');
+        strategyTypes.forEach(strategy => allColumns.add('strategy_' + strategy));
+
+        // Reorder columns: ticker first, then other columns (excluding strategies), then strategy columns
+        const columns = Array.from(allColumns);
+        const tickerIndex = columns.indexOf('ticker');
+        if (tickerIndex > -1) {
+            columns.splice(tickerIndex, 1);
+        }
+        // Sort non-strategy columns (excluding ticker)
+        const nonStrategyCols = columns.filter(col => !col.startsWith('strategy_')).sort();
+        const strategyCols = columns.filter(col => col.startsWith('strategy_')).sort();
+        // Final order: ticker, then other columns, then strategy columns
+        const finalColumns = ['ticker', ...nonStrategyCols, ...strategyCols];
+
+        html += `<div style="overflow-x: auto;">`;
+        html += `<table id="stockAnalysisTable" style="width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); font-size: 0.9em;">`;
+        html += `<thead style="background: #667eea; color: white; position: sticky; top: 0;">`;
+        html += `<tr>`;
+        for (let i = 0; i < finalColumns.length; i++) {
+            const col = finalColumns[i];
+            const isStrategy = col.startsWith('strategy_');
+            const displayName = isStrategy ? col.replace('strategy_', '') : col;
+            html += `<th style="padding: 10px 8px; text-align: ${isStrategy ? 'center' : 'left'}; white-space: nowrap; cursor: pointer; user-select: none;" onclick="sortStockAnalysisTable(${i})" data-col-index="${i}" data-col-name="${col}">`;
+            html += `${displayName} <span class="sort-indicator" style="opacity: 0.5;">↕</span>`;
+            html += `</th>`;
+        }
+        html += `</tr>`;
+        html += `</thead>`;
+        html += `<tbody id="stockAnalysisTableBody">`;
+
+        for (const row of processedData) {
+            html += `<tr style="border-bottom: 1px solid #dee2e6;">`;
+            for (const col of finalColumns) {
+                const value = row[col];
+                let displayValue = value;
+                const isStrategy = col.startsWith('strategy_');
+                const isTicker = col === 'ticker';
+
+                if (value === null || value === undefined) {
+                    displayValue = '';
+                } else if (typeof value === 'number') {
+                    // Format numbers nicely
+                    if (Math.abs(value) >= 1000) {
+                        displayValue = value.toFixed(2);
+                    } else if (Math.abs(value) >= 1) {
+                        displayValue = value.toFixed(2);
+                    } else {
+                        displayValue = value.toFixed(4);
+                    }
+                } else {
+                    displayValue = String(value);
+                }
+
+                // Make ticker a clickable link
+                if (isTicker && displayValue) {
+                    const tickerValue = String(value);
+                    displayValue = `<a href="/stock_info/${tickerValue}" style="color: #667eea; text-decoration: none; font-weight: 600;">${tickerValue}</a>`;
+                }
+
+                html += `<td style="padding: 8px; white-space: nowrap; text-align: ${isStrategy ? 'center' : 'left'};" data-value="${value !== null && value !== undefined ? (typeof value === 'number' ? value : String(value).toLowerCase()) : ''}">${displayValue}</td>`;
+            }
+            html += `</tr>`;
+        }
+
+        html += `</tbody>`;
+        html += `</table>`;
+        html += `</div>`;
+        html += `</div>`;
+
+        // Store processed data for sorting
+        window.stockAnalysisData = processedData;
+        window.stockAnalysisColumns = finalColumns;
+    }
+
+    contentDiv.innerHTML = html;
+}
+
+// Sort function for stock analysis table
+function sortStockAnalysisTable(columnIndex) {
+    const table = document.getElementById('stockAnalysisTable');
+    const tbody = document.getElementById('stockAnalysisTableBody');
+    if (!table || !tbody || !window.stockAnalysisData || !window.stockAnalysisColumns) return;
+
+    const columnName = window.stockAnalysisColumns[columnIndex];
+    const headers = table.querySelectorAll('th');
+    const currentHeader = headers[columnIndex];
+
+    // Get current sort direction
+    let sortDirection = 'asc';
+    const sortIndicator = currentHeader.querySelector('.sort-indicator');
+
+    // Check if already sorted (has sort class)
+    if (currentHeader.classList.contains('sort-asc')) {
+        sortDirection = 'desc';
+    } else if (currentHeader.classList.contains('sort-desc')) {
+        sortDirection = 'asc';
+    }
+
+    // Remove sort classes from all headers
+    headers.forEach((th, idx) => {
+        th.classList.remove('sort-asc', 'sort-desc');
+        const indicator = th.querySelector('.sort-indicator');
+        if (indicator) {
+            indicator.textContent = '↕';
+            indicator.style.opacity = '0.5';
+        }
+    });
+
+    // Add sort class to current header
+    currentHeader.classList.add('sort-' + sortDirection);
+    if (sortIndicator) {
+        sortIndicator.textContent = sortDirection === 'asc' ? '↑' : '↓';
+        sortIndicator.style.opacity = '1';
+    }
+
+    // Sort the data
+    const sortedData = [...window.stockAnalysisData].sort((a, b) => {
+        let aVal = a[columnName];
+        let bVal = b[columnName];
+
+        // Handle null/undefined
+        if (aVal === null || aVal === undefined) aVal = '';
+        if (bVal === null || bVal === undefined) bVal = '';
+
+        // Handle strategy columns (checkmark)
+        if (columnName.startsWith('strategy_')) {
+            const aHas = aVal === '✓' || aVal === true || aVal === 1;
+            const bHas = bVal === '✓' || bVal === true || bVal === 1;
+            if (aHas && !bHas) return sortDirection === 'asc' ? -1 : 1;
+            if (!aHas && bHas) return sortDirection === 'asc' ? 1 : -1;
+            return 0;
+        }
+
+        // Handle numbers
+        if (typeof aVal === 'number' && typeof bVal === 'number') {
+            return sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
+        }
+
+        // Handle strings
+        const aStr = String(aVal).toLowerCase();
+        const bStr = String(bVal).toLowerCase();
+        if (aStr < bStr) return sortDirection === 'asc' ? -1 : 1;
+        if (aStr > bStr) return sortDirection === 'asc' ? 1 : -1;
+        return 0;
+    });
+
+    // Update the table body
+    tbody.innerHTML = '';
+    const columns = window.stockAnalysisColumns;
+    for (const row of sortedData) {
+        let rowHtml = '<tr style="border-bottom: 1px solid #dee2e6;">';
+        for (const col of columns) {
+            const value = row[col];
+            let displayValue = value;
+            const isStrategy = col.startsWith('strategy_');
+            const isTicker = col === 'ticker';
+
+            if (value === null || value === undefined) {
+                displayValue = '';
+            } else if (typeof value === 'number') {
+                // Format numbers nicely
+                if (Math.abs(value) >= 1000) {
+                    displayValue = value.toFixed(2);
+                } else if (Math.abs(value) >= 1) {
+                    displayValue = value.toFixed(2);
+                } else {
+                    displayValue = value.toFixed(4);
+                }
+            } else {
+                displayValue = String(value);
+            }
+
+            // Make ticker a clickable link
+            if (isTicker && displayValue) {
+                const tickerValue = String(value);
+                displayValue = `<a href="/stock_info/${tickerValue}" style="color: #667eea; text-decoration: none; font-weight: 600;">${tickerValue}</a>`;
+            }
+
+            rowHtml += `<td style="padding: 8px; white-space: nowrap; text-align: ${isStrategy ? 'center' : 'left'};" data-value="${value !== null && value !== undefined ? (typeof value === 'number' ? value : String(value).toLowerCase()) : ''}">${displayValue}</td>`;
+        }
+        rowHtml += '</tr>';
+        tbody.innerHTML += rowHtml;
+    }
+
+    // Update stored data
+    window.stockAnalysisData = sortedData;
+}
+
             // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             // Initialize state for both prefixes
@@ -2668,8 +3073,11 @@
             // Load filters from URL first (before fetching data)
             loadFiltersFromURL();
             
+            // Get initial tab from URL, default to 0 (calls)
+            const initialTab = getInitialTab();
+
             // Fetch data from API for active tab
-            switchTab(0);
+            switchTab(initialTab);
             
             // Update filter displays
             updateFilterDisplay('calls');

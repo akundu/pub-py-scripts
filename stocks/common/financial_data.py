@@ -455,22 +455,34 @@ async def get_financial_info(
                     # Get the most recent entry
                     latest = financial_df.iloc[-1].to_dict()
                     
+                    # Debug: Log what columns we got from the database
+                    iv_related_cols = [k for k in latest.keys() if 'iv' in k.lower()]
+                    logger.info(f"[FINANCIAL DB] {symbol}: IV-related columns from DB: {iv_related_cols}")
+                    if 'iv_analysis_json' in latest:
+                        json_val = latest.get('iv_analysis_json')
+                        logger.info(f"[FINANCIAL DB] {symbol}: iv_analysis_json present: {json_val is not None}, type: {type(json_val)}, length: {len(str(json_val)) if json_val else 0}")
+                    
                     # Parse IV analysis JSON if present
                     if 'iv_analysis_json' in latest and latest.get('iv_analysis_json'):
                         try:
                             iv_analysis = json.loads(latest['iv_analysis_json'])
+                            logger.info(f"[FINANCIAL DB] {symbol}: Successfully parsed iv_analysis_json, keys: {list(iv_analysis.keys())}")
                             # Merge IV analysis data into financial_data for easy access
                             if 'metrics' in iv_analysis:
                                 latest['iv_metrics'] = iv_analysis['metrics']
+                                logger.info(f"[FINANCIAL DB] {symbol}: Added iv_metrics with keys: {list(iv_analysis['metrics'].keys())}")
                             if 'strategy' in iv_analysis:
                                 latest['iv_strategy'] = iv_analysis['strategy']
+                                logger.info(f"[FINANCIAL DB] {symbol}: Added iv_strategy with keys: {list(iv_analysis['strategy'].keys())}")
                             # Use relative_rank from JSON if database column is None
                             if latest.get('relative_rank') is None and 'relative_rank' in iv_analysis:
                                 latest['relative_rank'] = iv_analysis['relative_rank']
                             # Also keep the full JSON for reference
                             latest['iv_analysis'] = iv_analysis
                         except (json.JSONDecodeError, TypeError) as e:
-                            logger.debug(f"[FINANCIAL IV PARSE] Could not parse IV analysis JSON for {symbol}: {e}")
+                            logger.warning(f"[FINANCIAL IV PARSE] Could not parse IV analysis JSON for {symbol}: {e}")
+                    else:
+                        logger.info(f"[FINANCIAL DB] {symbol}: No iv_analysis_json found in database record")
                     
                     fetch_time = (time.time() - fetch_start) * 1000
                     result["financial_data"] = latest

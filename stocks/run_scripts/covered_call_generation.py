@@ -495,6 +495,35 @@ def run_loop(
                 print(f"Error during cache warmup (non-fatal): {e}", file=sys.stderr, flush=True)
                 # Don't fail the whole process if warmup fails
 
+        # Run stock analysis after options analysis completes successfully
+        if result.returncode == 0:
+            try:
+                stock_analysis_csv = Path.home() / "Downloads" / "stock_analysis.csv"
+                symbols_dir = os.path.expanduser("~/programs/var/US-Stock-Symbols")
+                
+                print("Running stock analysis...", file=sys.stderr, flush=True)
+                analyze_cmd = [
+                    sys.executable,
+                    str(BASE_DIR / "scripts" / "analyze_stocks.py"),
+                    "--db-path", db_conn,
+                    "--symbols-dir", symbols_dir,
+                    "--csv", str(stock_analysis_csv),
+                    "--top-n", "20",
+                ]
+                print(f"Executing: {' '.join(analyze_cmd)}", file=sys.stderr, flush=True)
+                analyze_start_time = time.time()
+                analyze_result = subprocess.run(analyze_cmd, cwd=str(BASE_DIR))
+                analyze_elapsed = int(time.time() - analyze_start_time)
+                print(f"Stock analysis elapsed: {analyze_elapsed} seconds with result = {analyze_result.returncode}", file=sys.stderr, flush=True)
+                
+                if analyze_result.returncode == 0 and stock_analysis_csv.exists():
+                    print(f"Stock analysis CSV generated: {stock_analysis_csv}", file=sys.stderr, flush=True)
+                else:
+                    print(f"Stock analysis failed or CSV not found (non-fatal)", file=sys.stderr, flush=True)
+            except Exception as e:
+                print(f"Error during stock analysis (non-fatal): {e}", file=sys.stderr, flush=True)
+                # Don't fail the whole process if stock analysis fails
+
         # don't need to generate this any more as it should be generated once on a change if necessary
         # if result.returncode == 0:
         #     evaluate_cmd = [

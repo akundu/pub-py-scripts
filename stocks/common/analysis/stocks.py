@@ -39,7 +39,19 @@ def analyze_ticker_task(row: Dict[str, Any], spy_rank: float, sector_avgs: Dict[
     sector = row.get('sector', 'Unknown')
     iv_rank = row.get('iv_rank', 50)
     # Pricing Trap fix: use current_price if exists, else fallback to financial_info price
-    price = row.get('current_price') if pd.notnull(row.get('current_price')) else row.get('price', 0)
+    # Priority: realtime_data > hourly_prices > financial_info.price
+    # Note: realtime_data and hourly_prices are merged as 'current_price' in fetch_latest_market_data
+    # This means current_price could be from realtime (most recent quote) or hourly (most recent hourly bar close)
+    # which may differ from the daily close price shown in fetch_symbol_data.py
+    current_price_val = row.get('current_price')
+    financial_price_val = row.get('price', 0)
+    price = current_price_val if pd.notnull(current_price_val) else financial_price_val
+    
+    # Log price source for specific tickers (when DEBUG is enabled)
+    logger = logging.getLogger("StrategyEngine")
+    if logger.isEnabledFor(logging.DEBUG) and ticker in ['WDC', 'SPY', 'AAPL']:  # Log for common tickers
+        price_source = 'realtime/hourly' if pd.notnull(current_price_val) else 'financial_info'
+        logger.debug(f"[PRICE SOURCE] {ticker}: Using {price_source} - current_price={current_price_val}, financial_price={financial_price_val}, final={price}")
     ma_50 = row.get('ma_50', 0)
     fcf_ratio = row.get('price_to_free_cash_flow')
     iv_30 = row.get('iv_30d', 0)
@@ -211,9 +223,18 @@ async def fetch_latest_market_data(db_instance: StockDBBase, symbols_dir: str) -
     
     logger.debug(f"Financial data: {len(df_f)} rows, Realtime: {len(df_rt)} rows, Hourly: {len(df_hr)} rows, Trend: {len(df_t)} rows, Whale: {len(df_w)} rows")
 
-    # Combine Prices
+    # Combine Prices (realtime has priority over hourly)
     df_p = pd.concat([df_rt.assign(s=1), df_hr.assign(s=2)]).sort_values('s').drop_duplicates('ticker').drop(columns='s')
     logger.debug(f"Combined price data: {len(df_p)} rows")
+    
+    # Log price source for debugging
+    if logger.isEnabledFor(logging.DEBUG):
+        for ticker in df_p['ticker'].head(10):  # Log first 10 for debugging
+            rt_price = df_rt[df_rt['ticker'] == ticker]['current_price'].values[0] if not df_rt[df_rt['ticker'] == ticker].empty else None
+            hr_price = df_hr[df_hr['ticker'] == ticker]['current_price'].values[0] if not df_hr[df_hr['ticker'] == ticker].empty else None
+            fin_price = df_f[df_f['ticker'] == ticker]['price'].values[0] if not df_f[df_f['ticker'] == ticker].empty else None
+            final_price = df_p[df_p['ticker'] == ticker]['current_price'].values[0] if not df_p[df_p['ticker'] == ticker].empty else None
+            logger.debug(f"Price sources for {ticker}: realtime={rt_price}, hourly={hr_price}, financial={fin_price}, final={final_price}")
     
     # Process Whale Metrics
     if not df_w.empty:
