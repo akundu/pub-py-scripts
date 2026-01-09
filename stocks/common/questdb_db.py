@@ -4223,8 +4223,19 @@ class FinancialDataService:
         cached_df = await self.cache.get(cache_key)
         last_save_time = None
         if cached_df is not None and not cached_df.empty:
-            # Get last_save_time from cached data
-            if 'last_save_time' in cached_df.columns:
+            # Get last_save_time from cached data - prefer write_timestamp if available (actual DB write time)
+            if 'write_timestamp' in cached_df.columns:
+                try:
+                    ts_val = cached_df.iloc[0]['write_timestamp']
+                    if ts_val is not None:
+                        last_save_time = pd.to_datetime(ts_val)
+                        if last_save_time.tzinfo is None:
+                            last_save_time = last_save_time.replace(tzinfo=timezone.utc)
+                        elif last_save_time.tzinfo != timezone.utc:
+                            last_save_time = last_save_time.astimezone(timezone.utc)
+                except:
+                    last_save_time = None
+            elif 'last_save_time' in cached_df.columns:
                 try:
                     last_save_time = pd.to_datetime(cached_df.iloc[0]['last_save_time'])
                     if last_save_time.tzinfo is None:
@@ -4268,10 +4279,27 @@ class FinancialDataService:
             self.logger.debug(f"[DB GET] Fetched record for {ticker} with date: {latest_date}, ratios: {latest_ratios}")
         
         # Cache the result with no TTL (infinite cache)
-        # Add last_save_time to each row
+        # Preserve write_timestamp from database if it exists, otherwise use current time for last_save_time
         if not df.empty:
             df = df.copy()
-            df['last_save_time'] = datetime.now(timezone.utc).isoformat()
+            # Check if write_timestamp exists in the dataframe
+            if 'write_timestamp' in df.columns:
+                # Ensure write_timestamp is properly formatted as ISO string
+                for idx in df.index:
+                    ts = df.at[idx, 'write_timestamp']
+                    if ts is not None:
+                        if isinstance(ts, pd.Timestamp):
+                            df.at[idx, 'write_timestamp'] = ts.isoformat()
+                        elif isinstance(ts, datetime):
+                            df.at[idx, 'write_timestamp'] = ts.isoformat()
+                        elif not isinstance(ts, str):
+                            df.at[idx, 'write_timestamp'] = str(ts)
+                # Also set last_save_time to write_timestamp for backward compatibility
+                if 'write_timestamp' in df.columns:
+                    df['last_save_time'] = df['write_timestamp']
+            else:
+                # No write_timestamp in DB result, use current time as fallback
+                df['last_save_time'] = datetime.now(timezone.utc).isoformat()
         await self.cache.set(cache_key, df, ttl=None)  # No TTL (infinite cache)
         
         return df

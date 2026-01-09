@@ -535,6 +535,15 @@
 
   // Render financial ratios
   const financialData = financialInfo.financial_data || {};
+  debugLog(`[${symbol}] financialInfo structure:`, {
+    has_financial_info: !!financialInfo,
+    has_financial_data: !!financialInfo.financial_data,
+    financial_data_type: typeof financialInfo.financial_data,
+    financial_data_keys: financialInfo.financial_data ? Object.keys(financialInfo.financial_data) : [],
+    financialData_keys: Object.keys(financialData),
+    financialData_length: Object.keys(financialData).length
+  });
+  
   if (Object.keys(financialData).length > 0) {
     document.getElementById('financialRatiosSection').style.display = 'block';
     const ratiosGrid = document.getElementById('financialRatiosGrid');
@@ -656,8 +665,11 @@
       (ivStrategy && Object.keys(ivStrategy).length > 0);
 
     debugLog(`[${symbol}] hasIVData result:`, hasIVData);
+    debugLog(`[${symbol}] Full financialData object:`, financialData);
+    debugLog(`[${symbol}] All financialData keys:`, Object.keys(financialData));
 
     if (hasIVData) {
+      debugLog(`[${symbol}] Rendering IV Analysis section`);
       // Add separator and header
       const separator = document.createElement('div');
       separator.style.cssText = 'grid-column: 1 / -1; margin: 20px 0 10px 0; border-top: 2px solid #30363d; padding-top: 15px;';
@@ -672,9 +684,9 @@
       headerContainer.appendChild(header);
 
       // Add timestamp if available
-      // Try date first (when IV analysis was calculated), then write_timestamp (when record was written)
-      const dateField = financialData.date || financialData.write_timestamp ||
-        (financialInfo.financial_data && (financialInfo.financial_data.date || financialInfo.financial_data.write_timestamp));
+      // Prioritize write_timestamp (has actual time) over date (date-only, defaults to midnight)
+      const dateField = financialData.write_timestamp || financialData.date ||
+        (financialInfo.financial_data && (financialInfo.financial_data.write_timestamp || financialInfo.financial_data.date));
       if (dateField) {
         try {
           // Parse the date (could be ISO string, timestamp number, or Date object)
@@ -692,15 +704,20 @@
           }
 
           if (dateObj && !isNaN(dateObj.getTime())) {
-            // Format as "Last updated: Jan 5, 2026"
+            // Format as "Last updated: Jan 5, 2026, 3:45 PM"
             const formattedDate = dateObj.toLocaleDateString('en-US', {
               year: 'numeric',
               month: 'short',
               day: 'numeric'
             });
+            const formattedTime = dateObj.toLocaleTimeString('en-US', {
+              hour: 'numeric',
+              minute: '2-digit',
+              hour12: true
+            });
 
             const timestampSpan = document.createElement('span');
-            timestampSpan.textContent = `Last updated: ${formattedDate}`;
+            timestampSpan.textContent = `Last updated: ${formattedDate}, ${formattedTime}`;
             timestampSpan.style.cssText = 'font-size: 11px; color: #8b949e; font-weight: normal; text-transform: none; letter-spacing: normal;';
             headerContainer.appendChild(timestampSpan);
           } else {
@@ -852,6 +869,9 @@
   window.mergedSeries = stockData.merged_series || [];
   window.backendPreviousClose = previousClose;
   window.symbol = symbol;
+  
+  // Set timezone info if available in stockData, otherwise default
+  window.chartTimezone = stockData.timezone || 'America/New_York (ET)';
 
   // Debug logging
   debugLog(`[${symbol}] Chart data setup:`, {
@@ -882,6 +902,15 @@
           window.mergedSeries = chartData.merged_series || [];
           window.allChartData = chartData.chart_data || [];
           window.allChartLabels = chartData.chart_labels || [];
+          
+          // Store timezone info if provided
+          if (chartData.timezone) {
+            window.chartTimezone = chartData.timezone;
+            debugLog(`[${symbol}] Chart timezone: ${chartData.timezone}`);
+          } else {
+            window.chartTimezone = 'America/New_York (ET)';
+          }
+          
           debugLog(`[${symbol}] ✅ Chart data lazy-loaded: ${window.mergedSeries.length} points in ${loadTime.toFixed(0)}ms`);
           debugLog(`[${symbol}] Chart data lazy-loaded: ${window.mergedSeries.length} points`);
           

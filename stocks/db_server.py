@@ -7526,6 +7526,17 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                     logger.warning(f"[IV DEBUG] {symbol}: financial_data is None, using empty dict")
                     financial_data = {}
                 
+                # Ensure iv_analysis_json is preserved if we have parsed versions
+                # Sometimes the parsed objects exist but the original JSON string is missing
+                if 'iv_analysis' in financial_data and isinstance(financial_data['iv_analysis'], dict) and 'iv_analysis_json' not in financial_data:
+                    # Reconstruct the JSON string from the parsed object if missing
+                    try:
+                        import json
+                        financial_data['iv_analysis_json'] = json.dumps(financial_data['iv_analysis'])
+                        logger.info(f"[IV DEBUG] {symbol}: Reconstructed iv_analysis_json from parsed iv_analysis object")
+                    except Exception as e:
+                        logger.warning(f"[IV DEBUG] {symbol}: Could not reconstruct iv_analysis_json: {e}")
+                
                 # Debug: Log IV-related fields in financial_data
                 iv_fields = {k: v for k, v in financial_data.items() if 'iv' in k.lower() or 'IV' in k}
                 if iv_fields:
@@ -7968,11 +7979,12 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 const entries = Array.from(dailyMap.values()).sort((a, b) => a.dt - b.dt);
                 if (entries.length === 0) {{
                 console.warn(`buildSeriesForPeriod(${{period}}): No entries after filtering. Sample timestamp: ${{mergedSeries[0]?.timestamp}}`);
-                return {{ labels: [], data: [], dateMarkers: [] }};
+                return {{ labels: [], data: [], dateMarkers: [], dateObjects: [] }};
                 }}
                 const labels = entries.map(p => formatLabel(p.dt, period));
                 const data = entries.map(p => p.val);
-                return {{ labels, data, dateMarkers: [] }};
+                const dateObjects = entries.map(p => p.dt);
+                return {{ labels, data, dateMarkers: [], dateObjects }};
             }} else {{
                 // 1D: use all data in window, or most recent data if window is empty
                 const windowed = [];
@@ -8023,7 +8035,9 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 dataToUse.sort((a, b) => a.dt - b.dt);
                 const labels = dataToUse.map(p => formatLabel(p.dt, period));
                 const data = dataToUse.map(p => p.val);
-                return {{ labels, data, dateMarkers: [] }};
+                // Store the actual date objects for market hour annotations
+                const dateObjects = dataToUse.map(p => p.dt);
+                return {{ labels, data, dateMarkers: [], dateObjects }};
             }}
         }}
         
@@ -8120,6 +8134,14 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         
         // Chart time period switching function
         async function switchTimePeriod(period) {{
+            // Prevent multiple simultaneous switches
+            if (window.chartSwitching) {{
+                debugLog(`[Chart] Already switching period, ignoring request for ${{period}}`);
+                return;
+            }}
+            
+            try {{
+                window.chartSwitching = true;
             currentTimePeriod = period;
             
             // Update button states
@@ -8157,8 +8179,10 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 console.error(`[Chart] Failed to load data for period ${{period}}`);
                 if (noDataMsg) {{
                     noDataMsg.style.display = 'block';
-                    noDataMsg.textContent = 'Error loading chart data';
+                        noDataMsg.textContent = 'Error loading chart data. Click the period button again to retry.';
                 }}
+                    // Reset button state on error so user can retry
+                    if (btn) btn.classList.remove('active');
                 return;
                 }}
                 
@@ -8172,20 +8196,38 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 if (priceChart) {{
                     priceChart.data.labels = newSeries.labels;
                     if (priceChart.data.datasets.length > 0) {{
+                            const chartTimezone = window.chartTimezone || 'America/New_York (ET)';
+                            priceChart.data.datasets[0].label = `${{'{symbol}'}} Price (${{chartTimezone}})`;
                         priceChart.data.datasets[0].data = newSeries.data;
                     }}
-                    // Update annotations for date markers
-                    if (newSeries.dateMarkers && newSeries.dateMarkers.length > 0) {{
-                        const annotations = buildDateMarkerAnnotations(newSeries.dateMarkers, newSeries.labels);
+                        
+                    // Build all annotations - pass dateObjects for market hours
+                    const marketHourAnnotations = buildMarketHourAnnotations(newSeries.labels, period, newSeries.dateObjects);
+                    const timePeriodMarkers = buildTimePeriodMarkers(newSeries.labels, period);
+                    const dateMarkerAnnotations = buildDateMarkerAnnotations(newSeries.dateMarkers || [], newSeries.labels);
+                        
+                        // Combine all annotations
+                        const allAnnotations = {{}};
+                        Object.assign(allAnnotations, marketHourAnnotations.annotations || {{}});
+                        Object.assign(allAnnotations, timePeriodMarkers.annotations || {{}});
+                        Object.assign(allAnnotations, dateMarkerAnnotations.annotations || {{}});
+                        
+                        // Update annotations
                         if (priceChart.options.plugins && priceChart.options.plugins.annotation) {{
-                            priceChart.options.plugins.annotation.annotations = annotations;
+                            priceChart.options.plugins.annotation.annotations = allAnnotations;
                         }}
-                    }}
+                        
                     priceChart.update();
                     updateRangeDisplay(newSeries);
                     debugLog(`[Chart] Updated chart for period ${{period}} with ${{newSeries.data.length}} data points`);
                 }} else {{
                     console.warn(`[Chart] Chart not initialized, cannot update for period ${{period}}`);
+                        if (noDataMsg) {{
+                            noDataMsg.style.display = 'block';
+                            noDataMsg.textContent = 'Chart not ready. Please refresh the page.';
+                        }}
+                        // Reset button state
+                        if (btn) btn.classList.remove('active');
                 }}
                 }} else {{
                 // No data available even after fetching
@@ -8194,6 +8236,8 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                     noDataMsg.textContent = 'No historical price data available for this period';
                 }}
                 console.warn(`[Chart] No data available for period ${{period}} after fetching`);
+                    // Reset button state
+                    if (btn) btn.classList.remove('active');
                 }}
             }} else {{
                 console.error('Cannot switch time period: lazyLoadChartData function not available');
@@ -8202,7 +8246,331 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 noDataMsg.style.display = 'block';
                 noDataMsg.textContent = 'Error: Chart data loader not available';
                 }}
+                    // Reset button state
+                    if (btn) btn.classList.remove('active');
+                }}
+            }} finally {{
+                // Always clear the switching flag, even on error
+                window.chartSwitching = false;
             }}
+        }}
+        
+        // Build market hour annotations (vertical bars for market open/close, pre/post market)
+        function buildMarketHourAnnotations(labels, period, dateObjects) {{
+            const annotations = {{}};
+            
+            // Only show market hour bars for 1d period
+            if (period !== '1d') {{
+                return {{ annotations }};
+            }}
+            
+            if (!labels || labels.length === 0) {{
+                return {{ annotations }};
+            }}
+            
+            try {{
+                // Use dateObjects if provided (from buildSeriesForPeriod), otherwise try to parse from mergedSeries
+                let dateObjectsToUse = dateObjects;
+                
+                if (!dateObjectsToUse || dateObjectsToUse.length === 0) {{
+                    // Fallback: try to get dates from mergedSeries
+                    const mergedSeries = window.mergedSeries || [];
+                    dateObjectsToUse = [];
+                    for (let i = 0; i < Math.min(labels.length, mergedSeries.length); i++) {{
+                        const timestamp = mergedSeries[i]?.timestamp;
+                        if (timestamp) {{
+                            const date = parseDate(timestamp);
+                            if (date) {{
+                                dateObjectsToUse.push(date);
+                            }} else {{
+                                dateObjectsToUse.push(null);
+                            }}
+                        }} else {{
+                            dateObjectsToUse.push(null);
+                        }}
+                    }}
+                }}
+                
+                if (!dateObjectsToUse || dateObjectsToUse.length === 0 || dateObjectsToUse.length !== labels.length) {{
+                    debugLog('[Market Hours] No date objects available or length mismatch');
+                    return {{ annotations }};
+                }}
+                
+                // Group by day and find market hours for each day
+                const dayGroups = new Map();
+                for (let i = 0; i < dateObjectsToUse.length; i++) {{
+                    const date = dateObjectsToUse[i];
+                    if (!date) continue;
+                    
+                    const dayKey = date.toDateString();
+                    if (!dayGroups.has(dayKey)) {{
+                        dayGroups.set(dayKey, []);
+                    }}
+                    dayGroups.get(dayKey).push({{ labelIdx: i, date }});
+                }}
+                
+                // Find market open/close for each day
+                for (const [dayKey, dayData] of dayGroups.entries()) {{
+                    // Sort by time
+                    dayData.sort((a, b) => a.date.getTime() - b.date.getTime());
+                    
+                    let marketOpenIdx = -1, marketCloseIdx = -1;
+                    let minOpenDiff = Infinity, minCloseDiff = Infinity;
+                    let marketOpenDate = null, marketCloseDate = null;
+                    
+                    for (const {{ labelIdx, date }} of dayData) {{
+                        const hours = date.getHours();
+                        const minutes = date.getMinutes();
+                        const timeInMinutes = hours * 60 + minutes;
+                        
+                        // Market open: 9:30 AM (570 minutes)
+                        const targetOpen = 9 * 60 + 30;
+                        const openDiff = Math.abs(timeInMinutes - targetOpen);
+                        if (openDiff < minOpenDiff) {{
+                            minOpenDiff = openDiff;
+                            marketOpenIdx = labelIdx;
+                            marketOpenDate = date;
+                        }}
+                        
+                        // Market close: 4:00 PM (960 minutes)
+                        const targetClose = 16 * 60;
+                        const closeDiff = Math.abs(timeInMinutes - targetClose);
+                        if (closeDiff < minCloseDiff) {{
+                            minCloseDiff = closeDiff;
+                            marketCloseIdx = labelIdx;
+                            marketCloseDate = date;
+                        }}
+                    }}
+                    
+                    // Add market open annotation if found (within 30 minutes)
+                    if (marketOpenIdx >= 0 && minOpenDiff <= 30 && marketOpenDate) {{
+                        const openTimeStr = marketOpenDate.toLocaleTimeString('en-US', {{ 
+                            hour: 'numeric', 
+                            minute: '2-digit', 
+                            hour12: true 
+                        }});
+                        
+                        annotations[`marketOpen_${{dayKey}}`] = {{
+                            type: 'line',
+                            xMin: marketOpenIdx,
+                            xMax: marketOpenIdx,
+                            borderColor: 'rgba(76, 175, 80, 0.7)',
+                            borderWidth: 2,
+                            label: {{
+                                display: true,
+                                content: `Market Open (${{openTimeStr}})`,
+                                position: 'start',
+                                backgroundColor: 'rgba(76, 175, 80, 0.8)',
+                                color: '#fff',
+                                font: {{ size: 10 }}
+                            }}
+                        }};
+                        debugLog(`[Market Hours] Added market open annotation at index ${{marketOpenIdx}}, time: ${{openTimeStr}}`);
+                    }}
+                    
+                    // Add market close annotation if found (within 30 minutes)
+                    if (marketCloseIdx >= 0 && minCloseDiff <= 30 && marketCloseDate) {{
+                        const closeTimeStr = marketCloseDate.toLocaleTimeString('en-US', {{ 
+                            hour: 'numeric', 
+                            minute: '2-digit', 
+                            hour12: true 
+                        }});
+                        
+                        annotations[`marketClose_${{dayKey}}`] = {{
+                            type: 'line',
+                            xMin: marketCloseIdx,
+                            xMax: marketCloseIdx,
+                            borderColor: 'rgba(244, 67, 54, 0.7)',
+                            borderWidth: 2,
+                            label: {{
+                                display: true,
+                                content: `Market Close (${{closeTimeStr}})`,
+                                position: 'end',
+                                backgroundColor: 'rgba(244, 67, 54, 0.8)',
+                                color: '#fff',
+                                font: {{ size: 10 }}
+                            }}
+                        }};
+                        debugLog(`[Market Hours] Added market close annotation at index ${{marketCloseIdx}}, time: ${{closeTimeStr}}`);
+                    }}
+                }}
+                
+                debugLog(`[Market Hours] Created ${{Object.keys(annotations).length}} market hour annotations`);
+            }} catch (e) {{
+                console.warn('Error building market hour annotations:', e);
+                debugLog('[Market Hours] Error details:', e);
+            }}
+            
+            return {{ annotations }};
+        }}
+        
+        // Build time period markers (vertical lines for month boundaries, etc.)
+        function buildTimePeriodMarkers(labels, period) {{
+            const annotations = {{}};
+            
+            // Only show markers for periods > 1 day
+            if (period === '1d' || period === '1w') {{
+                return {{ annotations }};
+            }}
+            
+            if (!labels || labels.length === 0) {{
+                return {{ annotations }};
+            }}
+            
+            let lastMonth = null;
+            let lastYear = null;
+            
+            for (let i = 0; i < labels.length; i++) {{
+                const label = labels[i];
+                const date = parseDate(label);
+                if (!date) continue;
+                
+                const currentMonth = date.getMonth();
+                const currentYear = date.getFullYear();
+                
+                // Add marker at month boundary
+                if (lastMonth !== null && (currentMonth !== lastMonth || currentYear !== lastYear)) {{
+                    annotations[`monthMarker_${{i}}`] = {{
+                        type: 'line',
+                        xMin: i,
+                        xMax: i,
+                        borderColor: 'rgba(158, 158, 158, 0.4)',
+                        borderWidth: 1,
+                        borderDash: [3, 3],
+                        label: {{
+                            display: true,
+                            content: date.toLocaleDateString('en-US', {{ month: 'short', year: 'numeric' }}),
+                            position: 'start',
+                            backgroundColor: 'rgba(158, 158, 158, 0.6)',
+                            color: '#fff',
+                            font: {{ size: 9 }}
+                        }}
+                    }};
+                }}
+                
+                lastMonth = currentMonth;
+                lastYear = currentYear;
+            }}
+            
+            return {{ annotations }};
+        }}
+        
+        // Helper function to build annotation configuration from date markers
+        function buildDateMarkerAnnotations(dateMarkers, labels) {{
+            if (!dateMarkers || dateMarkers.length === 0) {{
+                return {{ annotations: {{}} }};
+            }}
+            
+            const annotations = {{}};
+            dateMarkers.forEach((index, idx) => {{
+                if (index < 0 || index >= labels.length) return;
+                
+                // Use unique key for each annotation
+                const key = `dateMarker_${{idx}}`;
+                const labelValue = labels[index];
+                
+                // Extract the actual date from mergedSeries for this index
+                let dateLabel = labelValue;
+                
+                // Check if label is already a date (YYYY-MM-DD format)
+                if (/^\\d{{4}}-\\d{{2}}-\\d{{2}}$/.test(labelValue)) {{
+                    // Already a date, use it
+                    dateLabel = labelValue;
+                }} else {{
+                    // It's a time, need to get the date from mergedSeries at this index
+                    const mergedSeries = window.mergedSeries || [];
+                    if (Array.isArray(mergedSeries) && mergedSeries.length > 0) {{
+                        const days = getDateRange(currentTimePeriod);
+                        const nowMs = Date.now();
+                        const windowStartMs = nowMs - days * 24 * 60 * 60 * 1000;
+                        
+                        let foundDate = null;
+                        
+                        if (days > 1) {{
+                            // Multi-day: build daily map and get date at index
+                            const dailyMap = new Map();
+                            for (const r of mergedSeries) {{
+                                if (!r || typeof r !== 'object') continue;
+                                const dt = parseDate(r.timestamp);
+                                if (!dt) continue;
+                                const t = dt.getTime();
+                                if (t < windowStartMs) continue;
+                                const key = dt.toISOString().slice(0, 10);
+                                const val = Number(r.close);
+                                if (Number.isNaN(val)) continue;
+                                const existing = dailyMap.get(key);
+                                if (!existing || dt > existing.dt) {{
+                                    dailyMap.set(key, {{ dt, val }});
+                                }}
+                            }}
+                            const entries = Array.from(dailyMap.values()).sort((a, b) => a.dt - b.dt);
+                            if (index < entries.length) {{
+                                foundDate = entries[index].dt;
+                            }}
+                        }} else {{
+                            // 1D: get windowed data and find date at index
+                            const windowed = [];
+                            for (const r of mergedSeries) {{
+                                if (!r || typeof r !== 'object') continue;
+                                const dt = parseDate(r.timestamp);
+                                if (!dt) continue;
+                                const t = dt.getTime();
+                                if (t < windowStartMs) continue;
+                                const val = Number(r.close);
+                                if (!Number.isNaN(val)) {{
+                                    windowed.push({{ dt, val }});
+                                }}
+                            }}
+                            windowed.sort((a, b) => a.dt - b.dt);
+                            
+                            if (index < windowed.length) {{
+                                foundDate = windowed[index].dt;
+                            }} else if (windowed.length > 0) {{
+                                foundDate = windowed[windowed.length - 1].dt;
+                            }}
+                        }}
+                        
+                        // Format the date for display
+                        if (foundDate) {{
+                            const dateStr = foundDate.toISOString().slice(0, 10); // YYYY-MM-DD
+                            dateLabel = dateStr;
+                        }}
+                    }}
+                }}
+                
+                // For category scale, use xMin/xMax with index
+                annotations[key] = {{
+                    type: 'line',
+                    xMin: index,
+                    xMax: index,
+                    borderColor: 'rgba(100, 100, 100, 0.7)',
+                    borderWidth: 2,
+                    borderDash: [8, 4],
+                    label: {{
+                        display: true,
+                        content: dateLabel,
+                        position: 'start',
+                        yAdjust: 10,
+                        backgroundColor: 'rgba(100, 100, 100, 0.9)',
+                        color: '#fff',
+                        font: {{
+                            size: 11,
+                            weight: 'bold'
+                        }},
+                        padding: {{
+                            top: 5,
+                            bottom: 5,
+                            left: 8,
+                            right: 8
+                        }},
+                        textAlign: 'center'
+                    }}
+                }};
+            }});
+            
+            return {{
+                annotations: annotations
+            }};
         }}
         
         // Initialize chart
@@ -8259,12 +8627,26 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
             // Update range display with initial series
             updateRangeDisplay(initialSeries);
             
+            // Get timezone info (from chart data or default)
+            const chartTimezone = window.chartTimezone || 'America/New_York (ET)';
+            
+            // Build all annotations - pass dateObjects for market hours
+            const marketHourAnnotations = buildMarketHourAnnotations(initialSeries.labels, '1d', initialSeries.dateObjects);
+            const timePeriodMarkers = buildTimePeriodMarkers(initialSeries.labels, '1d');
+            const dateMarkerAnnotations = buildDateMarkerAnnotations(initialSeries.dateMarkers || [], initialSeries.labels);
+            
+            // Combine all annotations
+            const allAnnotations = {{}};
+            Object.assign(allAnnotations, marketHourAnnotations.annotations || {{}});
+            Object.assign(allAnnotations, timePeriodMarkers.annotations || {{}});
+            Object.assign(allAnnotations, dateMarkerAnnotations.annotations || {{}});
+            
             priceChart = new Chart(ctx, {{
                 type: 'line',
                 data: {{
                 labels: initialSeries.labels,
                 datasets: [{{
-                    label: '{symbol} Price',
+                    label: `${{'{symbol}'}} Price (${{chartTimezone}})`,
                     data: initialSeries.data,
                     borderColor: '#667eea',
                     backgroundColor: 'rgba(102, 126, 234, 0.1)',
@@ -8277,7 +8659,18 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 responsive: true,
                 maintainAspectRatio: false,
                 plugins: {{
-                    legend: {{ display: false }},
+                    legend: {{ 
+                        display: true,
+                        position: 'top',
+                        labels: {{
+                            usePointStyle: true,
+                            padding: 15,
+                            font: {{
+                                size: 12
+                            }},
+                            color: '#c9d1d9'
+                        }}
+                    }},
                     zoom: {{
                         zoom: {{
                             wheel: {{ enabled: true }},
@@ -8288,10 +8681,24 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                             enabled: true,
                             mode: 'x'
                         }}
+                    }},
+                    annotation: {{
+                        annotations: allAnnotations
                     }}
                 }},
                 scales: {{
-                    y: {{ beginAtZero: false }}
+                    y: {{ beginAtZero: false }},
+                    x: {{
+                        ticks: {{
+                            color: '#8b949e',
+                            font: {{
+                                size: 11
+                            }}
+                        }},
+                        grid: {{
+                            color: 'rgba(48, 54, 61, 0.3)'
+                        }}
+                    }}
                 }}
                 }}
             }});
@@ -8650,11 +9057,24 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                     else:
                         timestamps = pd.to_datetime(filtered_df.get('timestamp', filtered_df.index)[valid_mask], errors='coerce')
                     
+                    # Convert timestamps to local timezone
+                    from zoneinfo import ZoneInfo
+                    local_tz = ZoneInfo('America/New_York')  # Market timezone
+                    timestamps_local = []
+                    for ts in timestamps:
+                        if pd.notna(ts):
+                            if ts.tzinfo is None:
+                                ts = ts.replace(tzinfo=timezone.utc)
+                            ts_local = ts.astimezone(local_tz)
+                            timestamps_local.append(ts_local)
+                        else:
+                            timestamps_local.append(ts)
+                    
                     valid_closes = close_col[valid_mask].values
                     source_col = filtered_df.get('source') if 'source' in filtered_df.columns else None
                     
                     chart_data = valid_closes.tolist()
-                    chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in timestamps]
+                    chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in timestamps_local]
                     
                     if source_col is not None:
                         valid_sources = source_col[valid_mask].values
@@ -8664,7 +9084,7 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                                 'close': float(close),
                                 'source': str(src) if pd.notna(src) else 'unknown'
                             }
-                            for ts, close, src in zip(timestamps, valid_closes, valid_sources)
+                            for ts, close, src in zip(timestamps_local, valid_closes, valid_sources)
                         ]
                     else:
                         merged_series = [
@@ -8673,7 +9093,7 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                                 'close': float(close),
                                 'source': 'unknown'
                             }
-                            for ts, close in zip(timestamps, valid_closes)
+                            for ts, close in zip(timestamps_local, valid_closes)
                         ]
         elif data_type == 'daily':
             # Fetch daily data only
@@ -8683,15 +9103,29 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                 if close_col is not None:
                     valid_mask = pd.notna(close_col)
                     timestamps = daily_df.index[valid_mask] if isinstance(daily_df.index, pd.DatetimeIndex) else pd.to_datetime(daily_df.index[valid_mask], errors='coerce')
+                    
+                    # Convert timestamps to local timezone
+                    from zoneinfo import ZoneInfo
+                    local_tz = ZoneInfo('America/New_York')
+                    timestamps_local = []
+                    for ts in timestamps:
+                        if pd.notna(ts):
+                            if ts.tzinfo is None:
+                                ts = ts.replace(tzinfo=timezone.utc)
+                            ts_local = ts.astimezone(local_tz)
+                            timestamps_local.append(ts_local)
+                        else:
+                            timestamps_local.append(ts)
+                    
                     chart_data = close_col[valid_mask].tolist()
-                    chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in timestamps]
+                    chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in timestamps_local]
                     merged_series = [
                         {
                             'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
                             'close': float(close),
                             'source': 'daily'
                         }
-                        for ts, close in zip(timestamps, close_col[valid_mask])
+                        for ts, close in zip(timestamps_local, close_col[valid_mask])
                     ]
         elif data_type == 'hourly':
             # Fetch hourly data only
@@ -8701,15 +9135,29 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                 if close_col is not None:
                     valid_mask = pd.notna(close_col)
                     timestamps = hourly_df.index[valid_mask] if isinstance(hourly_df.index, pd.DatetimeIndex) else pd.to_datetime(hourly_df.index[valid_mask], errors='coerce')
+                    
+                    # Convert timestamps to local timezone
+                    from zoneinfo import ZoneInfo
+                    local_tz = ZoneInfo('America/New_York')
+                    timestamps_local = []
+                    for ts in timestamps:
+                        if pd.notna(ts):
+                            if ts.tzinfo is None:
+                                ts = ts.replace(tzinfo=timezone.utc)
+                            ts_local = ts.astimezone(local_tz)
+                            timestamps_local.append(ts_local)
+                        else:
+                            timestamps_local.append(ts)
+                    
                     chart_data = close_col[valid_mask].tolist()
-                    chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in timestamps]
+                    chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in timestamps_local]
                     merged_series = [
                         {
                             'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
                             'close': float(close),
                             'source': 'hourly'
                         }
-                        for ts, close in zip(timestamps, close_col[valid_mask])
+                        for ts, close in zip(timestamps_local, close_col[valid_mask])
                     ]
         elif data_type == 'realtime':
             # Fetch realtime data only
@@ -8719,15 +9167,29 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                 if price_col is not None:
                     valid_mask = pd.notna(price_col)
                     timestamps = realtime_df.index[valid_mask] if isinstance(realtime_df.index, pd.DatetimeIndex) else pd.to_datetime(realtime_df.index[valid_mask], errors='coerce')
+                    
+                    # Convert timestamps to local timezone
+                    from zoneinfo import ZoneInfo
+                    local_tz = ZoneInfo('America/New_York')
+                    timestamps_local = []
+                    for ts in timestamps:
+                        if pd.notna(ts):
+                            if ts.tzinfo is None:
+                                ts = ts.replace(tzinfo=timezone.utc)
+                            ts_local = ts.astimezone(local_tz)
+                            timestamps_local.append(ts_local)
+                        else:
+                            timestamps_local.append(ts)
+                    
                     chart_data = price_col[valid_mask].tolist()
-                    chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in timestamps]
+                    chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in timestamps_local]
                     merged_series = [
                         {
                             'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
                             'close': float(price),
                             'source': 'realtime'
                         }
-                        for ts, price in zip(timestamps, price_col[valid_mask])
+                        for ts, price in zip(timestamps_local, price_col[valid_mask])
                     ]
         
         # Clean the data for JSON serialization
@@ -8768,13 +9230,27 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                 pass
             return str(obj)
         
+        # Get local timezone name for display
+        from zoneinfo import ZoneInfo
+        local_tz = ZoneInfo('America/New_York')
+        import time as time_module
+        tz_name = time_module.tzname[0] if hasattr(time_module, 'tzname') else 'America/New_York'
+        # Try to get actual timezone name
+        try:
+            now_local = datetime.now(local_tz)
+            tz_abbr = now_local.strftime('%Z')
+            tz_name = f"America/New_York ({tz_abbr})"
+        except Exception:
+            tz_name = "America/New_York (ET)"
+        
         cleaned_data = clean_for_json({
             'symbol': symbol,
             'period': period,
             'data_type': data_type,
             'chart_data': chart_data,
             'chart_labels': chart_labels,
-            'merged_series': merged_series
+            'merged_series': merged_series,
+            'timezone': tz_name
         })
         
         json_str = json.dumps(cleaned_data, default=str, allow_nan=False)

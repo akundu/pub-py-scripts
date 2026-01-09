@@ -2421,18 +2421,76 @@ async def _display_financials(symbol: str, db_instance: StockDBBase, logger: log
     print("STORED FINANCIAL INFORMATION")
     print("="*80)
     try:
-        # Query all stored financial data from database
-        financial_data = await db_instance.get_financial_info(symbol)
+        # Use get_financial_info from common.financial_data to get cached data with IV analysis fallback
+        # This ensures we get IV analysis even if cache is stale
+        from common.financial_data import get_financial_info
+        
+        financial_result = await get_financial_info(
+            symbol=symbol,
+            db_instance=db_instance,
+            force_fetch=False  # Don't force fetch, use cache/DB
+        )
+        
+        if financial_result.get('error'):
+            logger.warning(f"Error fetching financial data: {financial_result.get('error')}")
+            financial_data_dict = None
+        else:
+            financial_data_dict = financial_result.get('financial_data')
+        
+        # Convert dict to DataFrame format for compatibility with existing display code
+        import pandas as pd
+        if financial_data_dict:
+            # Create a DataFrame with a single row for display compatibility
+            financial_data = pd.DataFrame([financial_data_dict])
+            # Set date as index if available
+            if 'date' in financial_data.columns:
+                try:
+                    financial_data['date'] = pd.to_datetime(financial_data['date'])
+                    financial_data.set_index('date', inplace=True)
+                except Exception:
+                    pass
+        else:
+            financial_data = pd.DataFrame()
         
         if not financial_data.empty:
             # Display most recent entry
             latest_entry = financial_data.iloc[-1]
             
-            # Debug: Check what columns and values we have
+            # Debug: Check what columns and values we have (always log IV-related info for troubleshooting)
+            # Check IV data availability
+            has_iv_json = False
+            if hasattr(latest_entry, 'index'):
+                has_iv_json = 'iv_analysis_json' in latest_entry.index
+                if has_iv_json:
+                    json_val = latest_entry.get('iv_analysis_json') if hasattr(latest_entry, 'get') else latest_entry['iv_analysis_json']
+                    has_iv_json = json_val is not None and str(json_val).strip() != ''
+            elif 'iv_analysis_json' in latest_entry:
+                json_val = latest_entry.get('iv_analysis_json') if hasattr(latest_entry, 'get') else latest_entry['iv_analysis_json']
+                has_iv_json = json_val is not None and str(json_val).strip() != ''
+            
             if log_level == "DEBUG":
                 logger.debug(f"[DISPLAY_FINANCIALS] Checking for IV analysis in latest_entry for {symbol}")
                 logger.debug(f"[DISPLAY_FINANCIALS] Columns in latest_entry: {list(latest_entry.index) if hasattr(latest_entry, 'index') else list(latest_entry.keys())}")
-                logger.debug(f"[DISPLAY_FINANCIALS] Has iv_analysis_json: {'iv_analysis_json' in latest_entry}")
+                logger.debug(f"[DISPLAY_FINANCIALS] Has iv_analysis_json: {has_iv_json}")
+                # Always log IV-related columns for troubleshooting
+                iv_cols = [col for col in latest_entry.index if 'iv' in col.lower()] if hasattr(latest_entry, 'index') else [col for col in latest_entry.keys() if 'iv' in col.lower()]
+                logger.debug(f"[DISPLAY_FINANCIALS] IV-related columns found: {iv_cols}")
+                if 'iv_analysis_json' in (latest_entry.index if hasattr(latest_entry, 'index') else latest_entry):
+                    json_val = latest_entry.get('iv_analysis_json') if hasattr(latest_entry, 'get') else latest_entry['iv_analysis_json']
+                    logger.debug(f"[DISPLAY_FINANCIALS] iv_analysis_json value: {json_val}")
+                    logger.debug(f"[DISPLAY_FINANCIALS] iv_analysis_json type: {type(json_val)}")
+                    logger.debug(f"[DISPLAY_FINANCIALS] iv_analysis_json is not None: {json_val is not None}")
+                    logger.debug(f"[DISPLAY_FINANCIALS] iv_analysis_json truthy: {bool(json_val)}")
+                    if json_val:
+                        logger.debug(f"[DISPLAY_FINANCIALS] iv_analysis_json length: {len(str(json_val))} chars")
+                        logger.debug(f"[DISPLAY_FINANCIALS] iv_analysis_json first 200 chars: {str(json_val)[:200]}")
+            
+            # Warn if IV data is missing
+            if not has_iv_json:
+                logger.warning(f"[DISPLAY_FINANCIALS] WARNING: {symbol} - iv_analysis_json not found or empty in latest_entry after get_financial_info")
+                logger.warning(f"[DISPLAY_FINANCIALS] Financial data dict had iv_analysis_json: {'iv_analysis_json' in financial_data_dict if financial_data_dict else False}")
+                if financial_data_dict and 'iv_analysis_json' in financial_data_dict:
+                    logger.warning(f"[DISPLAY_FINANCIALS] Financial data dict iv_analysis_json value: {repr(str(financial_data_dict.get('iv_analysis_json'))[:100]) if financial_data_dict.get('iv_analysis_json') else 'None'}")
                 # Check for ratio fields with both display and DB names
                 ratio_fields = ['price_to_earnings', 'price_to_book', 'price_to_sales', 
                                'current', 'quick', 'cash', 'current_ratio', 'quick_ratio', 'cash_ratio']

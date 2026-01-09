@@ -370,81 +370,8 @@ async def get_financial_info(
     }
     
     try:
-        # Get cache instance if available
-        cache_instance = None
-        if hasattr(db_instance, 'cache') and db_instance.cache:
-            cache_instance = db_instance.cache
-        
-        # Check cache first (if not force_fetch)
-        cached_financial = None
-        last_save_time = None
-        if not force_fetch and cache_instance:
-            try:
-                cache_key = CacheKeyGenerator.financial_info(symbol)
-                cache_check_start = time.time()
-                cached_df = await cache_instance.get(cache_key)
-                cache_check_time = (time.time() - cache_check_start) * 1000
-                
-                if cached_df is not None and not cached_df.empty:
-                    # Convert DataFrame back to dict
-                    cached_financial = cached_df.iloc[0].to_dict()
-                    
-                    # Parse IV analysis JSON if present
-                    if 'iv_analysis_json' in cached_financial and cached_financial.get('iv_analysis_json'):
-                        try:
-                            iv_analysis = json.loads(cached_financial['iv_analysis_json'])
-                            # Merge IV analysis data into financial_data for easy access
-                            if 'metrics' in iv_analysis:
-                                cached_financial['iv_metrics'] = iv_analysis['metrics']
-                            if 'strategy' in iv_analysis:
-                                cached_financial['iv_strategy'] = iv_analysis['strategy']
-                            # Use relative_rank from JSON if database column is None
-                            if cached_financial.get('relative_rank') is None and 'relative_rank' in iv_analysis:
-                                cached_financial['relative_rank'] = iv_analysis['relative_rank']
-                            # Also keep the full JSON for reference
-                            cached_financial['iv_analysis'] = iv_analysis
-                        except (json.JSONDecodeError, TypeError) as e:
-                            logger.debug(f"[FINANCIAL IV PARSE] Could not parse IV analysis JSON from cache for {symbol}: {e}")
-                    
-                    # Get last_save_time
-                    last_save_time = _get_last_save_time_from_cache(cached_df)
-                    fetch_time = (time.time() - fetch_start) * 1000
-                    result["financial_data"] = cached_financial
-                    result["source"] = "cache"
-                    result["fetch_time_ms"] = fetch_time
-                    logger.info(f"[FINANCIAL CACHE HIT] Financial data for {symbol} (cache_check: {cache_check_time:.1f}ms, total: {fetch_time:.1f}ms)")
-                    
-                    # Check if background fetch should be triggered
-                    if _should_trigger_background_fetch(last_save_time, "financial", symbol):
-                        # Trigger background fetch but return cached data immediately
-                        async def _fetch_financial_background():
-                            try:
-                                # Re-fetch financial data - use force_fetch=True to bypass cache
-                                financial_result = await get_financial_info(
-                                    symbol, db_instance, force_fetch=True,
-                                    include_iv_analysis=include_iv_analysis,
-                                    iv_calendar_days=iv_calendar_days,
-                                    iv_server_url=iv_server_url,
-                                    iv_use_polygon=iv_use_polygon,
-                                    iv_data_dir=iv_data_dir
-                                )
-                                return financial_result
-                            except Exception as e:
-                                logger.warning(f"Background financial fetch failed for {symbol}: {e}")
-                                return None
-                        
-                        # Fire-and-forget: create task without awaiting
-                        await _trigger_background_fetch(
-                            symbol, db_instance, "financial", _fetch_financial_background
-                        )
-                    
-                    return result
-                else:
-                    logger.debug(f"[FINANCIAL CACHE MISS] No cached financial data for {symbol} (cache_check: {cache_check_time:.1f}ms)")
-            except Exception as e:
-                logger.debug(f"[FINANCIAL CACHE ERROR] Cache check failed for {symbol}: {e}")
-        
-        # Try DB first if not forcing fetch
+        # Get financial data from database (uses FinancialDataService.get() which has its own cache)
+        # No need for separate cache layer here - let FinancialDataService handle caching
         if not force_fetch:
             try:
                 db_check_start = time.time()
@@ -455,18 +382,104 @@ async def get_financial_info(
                     # Get the most recent entry
                     latest = financial_df.iloc[-1].to_dict()
                     
+                    # Ensure write_timestamp is properly formatted if present
+                    if 'write_timestamp' in latest and latest['write_timestamp'] is not None:
+                        from datetime import datetime
+                        import pandas as pd
+                        ts = latest['write_timestamp']
+                        # Convert pandas Timestamp or datetime to ISO string
+                        if isinstance(ts, pd.Timestamp):
+                            latest['write_timestamp'] = ts.isoformat()
+                        elif isinstance(ts, datetime):
+                            latest['write_timestamp'] = ts.isoformat()
+                        elif not isinstance(ts, str):
+                            # Try to convert to string
+                            latest['write_timestamp'] = str(ts)
+                    
                     # Debug: Log what columns we got from the database
                     iv_related_cols = [k for k in latest.keys() if 'iv' in k.lower()]
                     logger.info(f"[FINANCIAL DB] {symbol}: IV-related columns from DB: {iv_related_cols}")
                     if 'iv_analysis_json' in latest:
                         json_val = latest.get('iv_analysis_json')
                         logger.info(f"[FINANCIAL DB] {symbol}: iv_analysis_json present: {json_val is not None}, type: {type(json_val)}, length: {len(str(json_val)) if json_val else 0}")
+                    if 'write_timestamp' in latest:
+                        logger.debug(f"[FINANCIAL DB] {symbol}: write_timestamp present: {latest.get('write_timestamp')}")
+                    
+                    # Check if database result has valid iv_analysis_json
+                    # If not, query repository directly to bypass service layer cache
+                    db_has_iv_json = (
+                        'iv_analysis_json' in latest and 
+                        latest.get('iv_analysis_json') is not None and
+                        str(latest.get('iv_analysis_json')).strip() != ''
+                    )
+                    
+                    if not db_has_iv_json:
+                        logger.info(f"[FINANCIAL DB] Service layer cache for {symbol} missing iv_analysis_json, querying repository directly...")
+                        try:
+                            repo_check_start = time.time()
+                            # Query repository directly to bypass service layer cache
+                            if hasattr(db_instance, 'financial_service') and hasattr(db_instance.financial_service, 'financial_repo'):
+                                logger.debug(f"[FINANCIAL DB] Querying repository directly for {symbol} to bypass service cache")
+                                repo_df = await db_instance.financial_service.financial_repo.get(symbol)
+                            elif hasattr(db_instance, 'financial_repo'):
+                                logger.debug(f"[FINANCIAL DB] Querying financial_repo directly for {symbol}")
+                                repo_df = await db_instance.financial_repo.get(symbol)
+                            else:
+                                repo_df = None
+                                logger.warning(f"[FINANCIAL DB] Cannot access repository directly for {symbol}")
+                            
+                            repo_check_time = (time.time() - repo_check_start) * 1000
+                            
+                            if repo_df is not None and not repo_df.empty:
+                                latest_repo = repo_df.iloc[-1].to_dict()
+                                # If repository has iv_analysis_json, merge it into latest
+                                if 'iv_analysis_json' in latest_repo and latest_repo.get('iv_analysis_json') and str(latest_repo.get('iv_analysis_json')).strip():
+                                    logger.info(f"[FINANCIAL DB] Repository has iv_analysis_json for {symbol}, merging into result (repo_check: {repo_check_time:.1f}ms)")
+                                    latest['iv_analysis_json'] = latest_repo['iv_analysis_json']
+                                    db_has_iv_json = True
+                                    # Also merge other IV-related fields
+                                    for iv_field in ['iv_30d', 'iv_90d', 'iv_rank', 'iv_90d_rank', 'iv_rank_diff', 'relative_rank']:
+                                        if iv_field in latest_repo and (iv_field not in latest or latest.get(iv_field) is None):
+                                            latest[iv_field] = latest_repo[iv_field]
+                                    
+                                    # Parse the merged JSON
+                                    try:
+                                        iv_analysis_json_str = latest['iv_analysis_json']
+                                        if not isinstance(iv_analysis_json_str, str):
+                                            iv_analysis_json_str = str(iv_analysis_json_str)
+                                        iv_analysis = json.loads(iv_analysis_json_str)
+                                        if 'metrics' in iv_analysis:
+                                            latest['iv_metrics'] = iv_analysis['metrics']
+                                        if 'strategy' in iv_analysis:
+                                            latest['iv_strategy'] = iv_analysis['strategy']
+                                        if latest.get('relative_rank') is None and 'relative_rank' in iv_analysis:
+                                            latest['relative_rank'] = iv_analysis['relative_rank']
+                                        latest['iv_analysis'] = iv_analysis
+                                        logger.info(f"[FINANCIAL DB] Successfully parsed and merged IV data from repository for {symbol}")
+                                    except (json.JSONDecodeError, TypeError) as parse_e:
+                                        logger.warning(f"[FINANCIAL DB] Could not parse merged IV JSON for {symbol}: {parse_e}")
+                                else:
+                                    logger.info(f"[FINANCIAL DB] Repository also missing or empty iv_analysis_json for {symbol}")
+                        except Exception as repo_error:
+                            logger.warning(f"[FINANCIAL DB] Error querying repository for {symbol}: {repo_error}")
                     
                     # Parse IV analysis JSON if present
+                    # IMPORTANT: Keep the original iv_analysis_json string for frontend parsing
+                    # Also add parsed versions for convenience
                     if 'iv_analysis_json' in latest and latest.get('iv_analysis_json'):
                         try:
-                            iv_analysis = json.loads(latest['iv_analysis_json'])
+                            iv_analysis_json_str = latest['iv_analysis_json']
+                            # Ensure it's a string (might be bytes or other type from database)
+                            if not isinstance(iv_analysis_json_str, str):
+                                iv_analysis_json_str = str(iv_analysis_json_str)
+                            
+                            # Keep the original JSON string - DO NOT REMOVE IT
+                            latest['iv_analysis_json'] = iv_analysis_json_str
+                            
+                            # Parse it for convenience
+                            iv_analysis = json.loads(iv_analysis_json_str)
                             logger.info(f"[FINANCIAL DB] {symbol}: Successfully parsed iv_analysis_json, keys: {list(iv_analysis.keys())}")
+                            
                             # Merge IV analysis data into financial_data for easy access
                             if 'metrics' in iv_analysis:
                                 latest['iv_metrics'] = iv_analysis['metrics']
@@ -477,10 +490,15 @@ async def get_financial_info(
                             # Use relative_rank from JSON if database column is None
                             if latest.get('relative_rank') is None and 'relative_rank' in iv_analysis:
                                 latest['relative_rank'] = iv_analysis['relative_rank']
-                            # Also keep the full JSON for reference
+                            # Also keep the full parsed JSON object for reference
                             latest['iv_analysis'] = iv_analysis
+                            
+                            logger.info(f"[FINANCIAL DB] {symbol}: Preserved iv_analysis_json string ({len(iv_analysis_json_str)} chars) and added parsed objects")
                         except (json.JSONDecodeError, TypeError) as e:
                             logger.warning(f"[FINANCIAL IV PARSE] Could not parse IV analysis JSON for {symbol}: {e}")
+                            # Even if parsing fails, keep the original JSON string
+                            if 'iv_analysis_json' not in latest:
+                                logger.warning(f"[FINANCIAL IV PARSE] {symbol}: iv_analysis_json was removed during parsing, this should not happen")
                     else:
                         logger.info(f"[FINANCIAL DB] {symbol}: No iv_analysis_json found in database record")
                     
@@ -490,7 +508,10 @@ async def get_financial_info(
                     result["fetch_time_ms"] = fetch_time
                     logger.info(f"[FINANCIAL DB HIT] Financial data for {symbol} (db_check: {db_check_time:.1f}ms, total: {fetch_time:.1f}ms)")
                     
-                    # Cache the result
+                    # Cache the result (FinancialDataService already caches, but we can also cache here if needed)
+                    cache_instance = None
+                    if hasattr(db_instance, 'cache') and db_instance.cache:
+                        cache_instance = db_instance.cache
                     if cache_instance:
                         try:
                             cache_key = CacheKeyGenerator.financial_info(symbol)
@@ -506,6 +527,10 @@ async def get_financial_info(
                             logger.debug(f"[FINANCIAL CACHE ERROR] Failed to cache financial data for {symbol}: {e}")
                     
                     return result
+                else:
+                    logger.info(f"[FINANCIAL DB] No financial data found in database for {symbol}")
+            except Exception as db_error:
+                logger.warning(f"[FINANCIAL DB] Error fetching financial data from database for {symbol}: {db_error}")
             except Exception as e:
                 logger.debug(f"[FINANCIAL DB ERROR] Error getting financial info from DB for {symbol}: {e}")
         

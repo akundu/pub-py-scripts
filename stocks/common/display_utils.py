@@ -338,12 +338,50 @@ def display_iv_analysis(latest_entry: pd.Series, log_level: str = "INFO") -> Non
         latest_entry: Latest financial data entry
         log_level: Logging level
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     print(f"\n{'IV Analysis:':<30}")
     print(f"{'─'*80}")
+    
+    # Debug: Log what columns we have
+    if log_level == "DEBUG":
+        logger.debug(f"[DISPLAY_IV] Columns in latest_entry: {list(latest_entry.index) if hasattr(latest_entry, 'index') else list(latest_entry.keys())}")
+        logger.debug(f"[DISPLAY_IV] Has iv_analysis_json: {'iv_analysis_json' in latest_entry}")
+        if 'iv_analysis_json' in latest_entry:
+            json_val = latest_entry.get('iv_analysis_json')
+            logger.debug(f"[DISPLAY_IV] iv_analysis_json value type: {type(json_val)}")
+            logger.debug(f"[DISPLAY_IV] iv_analysis_json is not None: {json_val is not None}")
+            logger.debug(f"[DISPLAY_IV] iv_analysis_json is not empty string: {json_val != '' if isinstance(json_val, str) else 'N/A'}")
+            if json_val:
+                logger.debug(f"[DISPLAY_IV] iv_analysis_json length: {len(str(json_val))} chars")
+                logger.debug(f"[DISPLAY_IV] iv_analysis_json first 200 chars: {str(json_val)[:200]}")
+    
     # Check if IV analysis is in the iv_analysis_json column
-    if 'iv_analysis_json' in latest_entry and latest_entry.get('iv_analysis_json'):
+    # Handle both Series (with .get()) and dict access
+    iv_json_val = None
+    if hasattr(latest_entry, 'get'):
+        iv_json_val = latest_entry.get('iv_analysis_json')
+    elif 'iv_analysis_json' in latest_entry:
+        iv_json_val = latest_entry['iv_analysis_json']
+    elif hasattr(latest_entry, '__getitem__'):
         try:
-            iv_analysis = json.loads(latest_entry['iv_analysis_json'])
+            iv_json_val = latest_entry['iv_analysis_json']
+        except (KeyError, IndexError):
+            pass
+    
+    # Also check if it's in the index (for Series)
+    if iv_json_val is None and hasattr(latest_entry, 'index'):
+        if 'iv_analysis_json' in latest_entry.index:
+            iv_json_val = latest_entry.loc['iv_analysis_json'] if hasattr(latest_entry, 'loc') else latest_entry['iv_analysis_json']
+    
+    if iv_json_val and (isinstance(iv_json_val, str) and len(iv_json_val.strip()) > 0):
+        try:
+            # Handle case where it might already be a dict
+            if isinstance(iv_json_val, dict):
+                iv_analysis = iv_json_val
+            else:
+                iv_analysis = json.loads(iv_json_val)
             metrics = iv_analysis.get('metrics', {})
             strategy = iv_analysis.get('strategy', {})
             
@@ -403,14 +441,39 @@ def display_iv_analysis(latest_entry: pd.Series, log_level: str = "INFO") -> Non
                         if note_line.strip():
                             print(f"  {'':<30} {note_line}")
         except (json.JSONDecodeError, TypeError) as e:
-            logger.debug(f"Could not parse IV analysis JSON: {e}")
-            print(f"  {'IV Analysis:':<30} Error parsing IV analysis data")
+            if log_level == "DEBUG":
+                logger.debug(f"Could not parse IV analysis JSON: {e}")
+                logger.debug(f"Raw iv_analysis_json value: {repr(iv_json_val)}")
+                import traceback
+                logger.debug(f"Traceback: {traceback.format_exc()}")
+            print(f"  {'IV Analysis:':<30} Error parsing IV analysis data: {e}")
     # Also check if IV data is in separate columns (for backwards compatibility)
     elif 'iv_30d' in latest_entry and pd.notna(latest_entry['iv_30d']):
         print(f"  {'30-day IV:':<30} {latest_entry['iv_30d']}")
     elif 'iv_90d' in latest_entry and pd.notna(latest_entry['iv_90d']):
         print(f"  {'90-day IV:':<30} {latest_entry['iv_90d']}")
     else:
+        # Debug: Log why IV analysis wasn't found (always log, not just in DEBUG mode)
+        has_iv_json_col = 'iv_analysis_json' in latest_entry
+        if hasattr(latest_entry, 'index'):
+            has_iv_json_col = has_iv_json_col or 'iv_analysis_json' in latest_entry.index
+        iv_json_val_check = None
+        if hasattr(latest_entry, 'get'):
+            iv_json_val_check = latest_entry.get('iv_analysis_json')
+        elif 'iv_analysis_json' in latest_entry:
+            iv_json_val_check = latest_entry['iv_analysis_json']
+        elif hasattr(latest_entry, 'index') and 'iv_analysis_json' in latest_entry.index:
+            iv_json_val_check = latest_entry.loc['iv_analysis_json'] if hasattr(latest_entry, 'loc') else latest_entry['iv_analysis_json']
+        
+        # Always log this as a warning to help diagnose
+        logger.warning(f"[DISPLAY_IV] IV analysis not found for latest_entry - has_iv_json_col: {has_iv_json_col}, iv_json_val: {repr(iv_json_val_check) if iv_json_val_check is not None else 'None'}, type: {type(iv_json_val_check)}")
+        if hasattr(latest_entry, 'index'):
+            available_cols = list(latest_entry.index)
+            iv_cols = [c for c in available_cols if 'iv' in str(c).lower()]
+            logger.warning(f"[DISPLAY_IV] Available columns ({len(available_cols)}): {available_cols[:20]}...")
+            logger.warning(f"[DISPLAY_IV] IV-related columns: {iv_cols}")
+        else:
+            logger.warning(f"[DISPLAY_IV] Available keys: {list(latest_entry.keys())[:20]}...")
         print(f"  {'IV Analysis:':<30} Not available (use --fetch-iv with --fetch-ratios to calculate)")
 
 
