@@ -106,13 +106,13 @@ class HistoricalDataFetcher:
 
         return (seconds_to_open, seconds_to_close)
 
-    def __init__(self, api_key: str, data_dir: str = "data", quiet: bool = False, snapshot_max_concurrent: int = 0):
+    def __init__(self, api_key: str, data_dir: str = "data", verbose: bool = False, snapshot_max_concurrent: int = 0):
         if not api_key:
             raise ValueError("Polygon API key is required.")
         self.client = RESTClient(api_key)
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(exist_ok=True)
-        self.quiet = quiet
+        self.quiet = not verbose  # quiet is inverse of verbose
         # 0 disables per-contract snapshot concurrency; otherwise bounded parallelism
         self.snapshot_max_concurrent = max(0, int(snapshot_max_concurrent))
 
@@ -405,9 +405,13 @@ class HistoricalDataFetcher:
                         filtered_contracts = [c for c in filtered_contracts if (c.get('type') or '').lower() == option_type]
                     # 2) strike range
                     if strike_range_percent is not None and stock_close_price is not None:
+                        contracts_before_strike_filter = len(filtered_contracts)
                         min_strike = stock_close_price * (1 - strike_range_percent / 100)
                         max_strike = stock_close_price * (1 + strike_range_percent / 100)
                         filtered_contracts = [c for c in filtered_contracts if min_strike <= (c.get('strike') or -1) <= max_strike]
+                        contracts_filtered_out = contracts_before_strike_filter - len(filtered_contracts)
+                        if contracts_filtered_out > 0:
+                            print(f"Filtered out {contracts_filtered_out} options that did not meet the {strike_range_percent}% strike range limit (kept {len(filtered_contracts)} out of {contracts_before_strike_filter})")
                     # 3) expiration date window (±max_days_to_expiry around target_date)
                     if max_days_to_expiry is not None:
                         min_date = (target_date_dt - timedelta(days=max_days_to_expiry)).date()
@@ -434,6 +438,8 @@ class HistoricalDataFetcher:
 
                     if filtered_contracts:
                         options_data['contracts'] = filtered_contracts
+                        # When loading from DB, we don't have the original downloaded count, so use filtered count
+                        options_data['total_downloaded'] = len(filtered_contracts)
                         return {"success": True, "data": options_data}
             except Exception as _db_e:
                 # Fall back to CSV/API silently on DB issues
@@ -567,6 +573,8 @@ class HistoricalDataFetcher:
             if not self.quiet:
                 print(f"Found a total of {len(all_contracts)} contracts from API.", flush=True)
 
+            # Store total downloaded count for summary
+            total_downloaded_from_api = len(all_contracts)
 
             # The API has already filtered by date, so all returned contracts are relevant.
             # No further local date filtering is required.
@@ -587,6 +595,7 @@ class HistoricalDataFetcher:
                 ]
 
             # 2. Filter by strike price range
+            contracts_before_strike_filter = len(filtered_contracts)
             if strike_range_percent is not None and stock_close_price is not None:
                 if not self.quiet:
                     print(f"Filtering for strikes within {strike_range_percent}% of close price ${stock_close_price:.2f}...")
@@ -597,13 +606,26 @@ class HistoricalDataFetcher:
                     c for c in filtered_contracts
                     if min_strike <= getattr(c, 'strike_price', -1) <= max_strike
                 ]
+                contracts_filtered_out = contracts_before_strike_filter - len(filtered_contracts)
+                if contracts_filtered_out > 0:
+                    print(f"Filtered out {contracts_filtered_out} options that did not meet the {strike_range_percent}% strike range limit (kept {len(filtered_contracts)} out of {contracts_before_strike_filter})")
+            else:
+                # No strike filtering - show summary
+                if not self.quiet and contracts_before_strike_filter > 0:
+                    print(f"No strike-range-percent constraint: keeping all {contracts_before_strike_filter} contracts (no filtering applied)")
 
             filter_end = time.time()
             if not self.quiet:
                 print(f"  [TIMER] Local filtering took {filter_end - filter_start:.2f} seconds.")
 
+            # Store total downloaded count in options_data for later use
+            options_data["total_downloaded"] = total_downloaded_from_api
+            
             if not self.quiet:
-                print(f"Found {len(filtered_contracts)} contracts after filtering. Fetching snapshot data for all {len(filtered_contracts)} contracts...", flush=True)
+                total_downloaded = len(all_contracts)
+                total_after_filtering = len(filtered_contracts)
+                print(f"Summary: Downloaded {total_downloaded} contracts from API, {total_after_filtering} contracts after filtering ({total_downloaded - total_after_filtering} filtered out).", flush=True)
+                print(f"Fetching snapshot data for all {len(filtered_contracts)} contracts...", flush=True)
 
             # --- Fetch snapshot data only for the contracts we will display ---
             processing_start = time.time()
@@ -850,6 +872,10 @@ class HistoricalDataFetcher:
         if save_to_csv and options_data["contracts"]:
             self._save_options_to_csv(symbol, options_data)
         
+        # Ensure total_downloaded is set (defaults to 0 if not set during processing)
+        if "total_downloaded" not in options_data:
+            options_data["total_downloaded"] = len(options_data.get("contracts", []))
+        
         return {"success": True, "data": options_data}
 
     def format_output(
@@ -978,6 +1004,366 @@ class HistoricalDataFetcher:
         rendered = "\n".join(output)
         return rendered
 
+    def format_straddle_output(
+        self,
+        symbol: str,
+        target_date: str,
+        stock_result: Dict[str, Any],
+        options_result: Dict[str, Any],
+    ):
+        """Formats options data into a straddle view showing matching calls and puts at the same strike."""
+        output = []
+        
+        # --- Stock Price ---
+        output.append(f"\n--- Stock Price for {symbol} ---")
+        stock_close_price = None
+        if stock_result.get('success'):
+            data = stock_result['data']
+            stock_close_price = data.get('close')
+            stock_table = [
+                ['Requested Date', data.get('target_date')],
+                ['Trading Day', data.get('trading_date')],
+                ['Open', f"${data.get('open'):.2f}"],
+                ['High', f"${data.get('high'):.2f}"],
+                ['Low', f"${data.get('low'):.2f}"],
+                ['Close', f"${data.get('close'):.2f}"],
+                ['Volume', f"{data.get('volume'):,}"],
+            ]
+            output.append(tabulate(stock_table, headers=['Metric', 'Value'], tablefmt='grid'))
+        else:
+            output.append(f"Could not fetch stock price: {stock_result.get('error', 'Unknown error')}")
+        
+        # --- Straddle View ---
+        output.append(f"\n--- Straddle View for {symbol} on {target_date} ---")
+        output.append("Straddles show matching Call and Put options at the same strike price and expiration.")
+        output.append("Mid = (Bid + Ask) / 2. Total Cost = Call Mid + Put Mid.")
+        
+        if not options_result.get('success'):
+            output.append(f"Could not fetch options data: {options_result.get('error', 'Unknown error')}")
+            return "\n".join(output)
+        
+        contracts = options_result['data']['contracts']
+        if not contracts:
+            output.append(f"No options contracts found for {symbol}.")
+            return "\n".join(output)
+        
+        # Group by expiration
+        options_by_expiry = {}
+        for c in contracts:
+            exp = c.get('expiration')
+            if exp:
+                if exp not in options_by_expiry:
+                    options_by_expiry[exp] = {'calls': {}, 'puts': {}}
+                option_type = c.get('type', '').lower()
+                strike = c.get('strike')
+                if strike is not None:
+                    strike_key = float(strike)
+                    if option_type == 'call':
+                        options_by_expiry[exp]['calls'][strike_key] = c
+                    elif option_type == 'put':
+                        options_by_expiry[exp]['puts'][strike_key] = c
+        
+        # Find straddles (matching strikes with both call and put)
+        for exp_date in sorted(options_by_expiry.keys())[:20]:  # Show first 20 expirations
+            expiry_data = options_by_expiry[exp_date]
+            calls = expiry_data['calls']
+            puts = expiry_data['puts']
+            
+            # Find common strikes
+            common_strikes = sorted(set(calls.keys()) & set(puts.keys()))
+            
+            if not common_strikes:
+                continue
+            
+            output.append(f"\nExpiration: {exp_date} (ticker: {symbol})")
+            output.append(f"Found {len(common_strikes)} straddles (strikes with both call and put)")
+            
+            straddle_table = []
+            for strike in common_strikes:
+                call = calls[strike]
+                put = puts[strike]
+                
+                # Calculate mid prices
+                call_bid = call.get('bid')
+                call_ask = call.get('ask')
+                call_mid = (call_bid + call_ask) / 2 if (call_bid is not None and call_ask is not None) else None
+                
+                put_bid = put.get('bid')
+                put_ask = put.get('ask')
+                put_mid = (put_bid + put_ask) / 2 if (put_bid is not None and put_ask is not None) else None
+                
+                # Total cost
+                total_cost = (call_mid + put_mid) if (call_mid is not None and put_mid is not None) else None
+                
+                # Helper function to safely extract numeric values (handles None, NaN, etc.)
+                def safe_get_numeric(d, *keys):
+                    for key in keys:
+                        val = d.get(key)
+                        if val is not None:
+                            # Check for NaN (works for both numpy and pandas NaN)
+                            try:
+                                import math
+                                if isinstance(val, float) and math.isnan(val):
+                                    continue
+                            except (TypeError, ImportError):
+                                pass
+                            # Check for pandas NA
+                            try:
+                                import pandas as pd
+                                if pd.isna(val):
+                                    continue
+                            except (TypeError, ImportError, AttributeError):
+                                pass
+                            if isinstance(val, (int, float)):
+                                return val
+                    return None
+                
+                # Extract Greeks for Call - try multiple possible keys
+                call_delta = safe_get_numeric(call, 'delta', 'greek_delta')
+                call_gamma = safe_get_numeric(call, 'gamma', 'greek_gamma')
+                call_theta = safe_get_numeric(call, 'theta', 'greek_theta')
+                call_vega = safe_get_numeric(call, 'vega', 'greek_vega')
+                call_iv = safe_get_numeric(call, 'implied_volatility', 'iv', 'implied_vol')
+                
+                # Extract Greeks for Put - try multiple possible keys
+                put_delta = safe_get_numeric(put, 'delta', 'greek_delta')
+                put_gamma = safe_get_numeric(put, 'gamma', 'greek_gamma')
+                put_theta = safe_get_numeric(put, 'theta', 'greek_theta')
+                put_vega = safe_get_numeric(put, 'vega', 'greek_vega')
+                put_iv = safe_get_numeric(put, 'implied_volatility', 'iv', 'implied_vol')
+                
+                # Distance from stock price
+                distance = None
+                distance_pct = None
+                if stock_close_price is not None:
+                    distance = strike - stock_close_price
+                    distance_pct = (distance / stock_close_price * 100) if stock_close_price > 0 else None
+                
+                # Build row: Strike, Dist, Dist %, then Call data (Bid, Ask, Mid, Delta, Gamma, Theta, Vega, IV), then Put data (Bid, Ask, Mid, Delta, Gamma, Theta, Vega, IV), then Total Cost
+                straddle_table.append([
+                    f"${strike:.2f}",
+                    f"{distance:+.2f}" if distance is not None else 'N/A',
+                    f"{distance_pct:+.2f}%" if distance_pct is not None else 'N/A',
+                    # Call data
+                    f"${call_bid:.2f}" if call_bid is not None else 'N/A',
+                    f"${call_ask:.2f}" if call_ask is not None else 'N/A',
+                    f"${call_mid:.2f}" if call_mid is not None else 'N/A',
+                    f"{call_delta:+.3f}" if call_delta is not None else 'N/A',
+                    f"{call_gamma:.3f}" if call_gamma is not None else 'N/A',
+                    f"{call_theta:.3f}" if call_theta is not None else 'N/A',
+                    f"{call_vega:.3f}" if call_vega is not None else 'N/A',
+                    f"{call_iv:.3f}" if call_iv is not None else 'N/A',
+                    # Put data
+                    f"${put_bid:.2f}" if put_bid is not None else 'N/A',
+                    f"${put_ask:.2f}" if put_ask is not None else 'N/A',
+                    f"${put_mid:.2f}" if put_mid is not None else 'N/A',
+                    f"{put_delta:+.3f}" if put_delta is not None else 'N/A',
+                    f"{put_gamma:.3f}" if put_gamma is not None else 'N/A',
+                    f"{put_theta:.3f}" if put_theta is not None else 'N/A',
+                    f"{put_vega:.3f}" if put_vega is not None else 'N/A',
+                    f"{put_iv:.3f}" if put_iv is not None else 'N/A',
+                    # Total cost
+                    f"${total_cost:.2f}" if total_cost is not None else 'N/A',
+                ])
+            
+            if straddle_table:
+                output.append(tabulate(
+                    straddle_table,
+                    headers=[
+                        'Strike', 'Dist', 'Dist %',
+                        'Call Bid', 'Call Ask', 'Call Mid', 'Call Δ', 'Call Γ', 'Call Θ', 'Call ν', 'Call IV',
+                        'Put Bid', 'Put Ask', 'Put Mid', 'Put Δ', 'Put Γ', 'Put Θ', 'Put ν', 'Put IV',
+                        'Total Cost'
+                    ],
+                    tablefmt='grid'
+                ))
+        
+        rendered = "\n".join(output)
+        return rendered
+
+
+async def display_and_save_saved_options(
+    symbols_list: list[str],
+    args: argparse.Namespace,
+    api_key: str
+) -> None:
+    """Display and/or save saved options from the database after fetching (non-continuous mode only)."""
+    if not getattr(args, 'display_saved', False) and not getattr(args, 'save_saved_to_csv', False):
+        return
+    
+    if not getattr(args, 'use_db', None):
+        if getattr(args, 'verbose', False):
+            print("Warning: --display-saved and --save-saved-to-csv require --use-db to be set.", file=sys.stderr)
+        return
+    
+    db_conn = getattr(args, 'use_db', None)
+    if not db_conn:
+        if getattr(args, 'verbose', False):
+            print("Warning: Database connection not available for retrieving saved options.", file=sys.stderr)
+        return
+    
+    # Determine database type
+    db_type = 'questdb'  # default
+    db_config = db_conn
+    if db_conn.startswith('http://') or db_conn.startswith('https://'):
+        db_type = 'remote'
+        db_config = db_conn.replace('http://', '').replace('https://', '')
+    elif db_conn.startswith('postgresql://'):
+        db_type = 'postgresql'
+    
+    enable_cache = not getattr(args, 'no_cache', False)
+    redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0') if enable_cache else None
+    db_timeout = getattr(args, 'db_timeout', 60.0)
+    
+    fetcher = HistoricalDataFetcher(
+        api_key,
+        getattr(args, 'data_dir', None),
+        getattr(args, 'verbose', False),
+        getattr(args, 'snapshot_max_concurrent', 0)
+    )
+    
+    for symbol in symbols_list:
+        try:
+            # Get the target date(s) - use start_date if provided, otherwise date
+            target_date = getattr(args, 'start_date', None) or args.date
+            end_date = getattr(args, 'end_date', None)
+            
+            # Calculate max_days_to_expiry based on the date range that was actually fetched
+            # This ensures we only show options from the date range that was requested
+            if end_date:
+                start_dt = datetime.strptime(target_date, '%Y-%m-%d')
+                end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+                days_diff = (end_dt - start_dt).days
+                max_days_to_expiry = max(1, days_diff)  # At least 1 day
+            else:
+                # If no end_date, use the original max_days_to_expiry or default to 30
+                max_days_to_expiry = getattr(args, 'max_days_to_expiry', 30)
+            
+            # Retrieve saved options from database
+            # Always show messages when --display-saved or --save-saved-to-csv is used
+            show_messages = getattr(args, 'display_saved', False) or getattr(args, 'save_saved_to_csv', False) or getattr(args, 'verbose', False)
+            if show_messages:
+                date_range_msg = f"{target_date} to {end_date}" if end_date else target_date
+                print(f"\n--- Retrieving saved options for {symbol} from database (date range: {date_range_msg}, max_days_to_expiry: {max_days_to_expiry}) ---")
+            
+            # Use the existing get_active_options_for_date with use_db=True to retrieve from DB
+            # Respect the same date range constraints that were used when fetching
+            options_result = await fetcher.get_active_options_for_date(
+                symbol=symbol,
+                target_date_str=target_date,
+                option_type='all',  # Show all option types when displaying saved options
+                stock_close_price=None,  # Don't filter by stock price for saved options display
+                strike_range_percent=None,  # Don't filter by strike range for saved options display
+                max_days_to_expiry=max_days_to_expiry,  # Respect the date range that was fetched
+                include_expired=getattr(args, 'include_expired', False),
+                use_db=True,
+                db_conn=db_conn,
+                force_fresh=False,
+                enable_cache=enable_cache,
+                redis_url=redis_url,
+                db_timeout=db_timeout
+            )
+            
+            if not options_result.get('success'):
+                if show_messages:
+                    print(f"Could not retrieve saved options for {symbol}: {options_result.get('error', 'Unknown error')}")
+                continue
+            
+            contracts = options_result['data'].get('contracts', [])
+            if not contracts:
+                if show_messages:
+                    print(f"No saved options found for {symbol} in the database.")
+                continue
+            
+            if show_messages:
+                print(f"Found {len(contracts)} saved options for {symbol}")
+            
+            # Get stock price for display
+            stock_result = await fetcher.get_stock_price_for_date(symbol, target_date)
+            
+            # Display options if requested (always show when --display-saved is used, regardless of verbose)
+            if getattr(args, 'display_saved', False):
+                # Check if straddle view is requested
+                if getattr(args, 'straddle_view', False):
+                    # Show straddle view
+                    output = fetcher.format_straddle_output(
+                        symbol=symbol,
+                        target_date=target_date,
+                        stock_result=stock_result,
+                        options_result=options_result
+                    )
+                    print(output)
+                else:
+                    # Use a very large number for options_per_expiry to show all saved options
+                    output = fetcher.format_output(
+                        symbol=symbol,
+                        target_date=target_date,
+                        stock_result=stock_result,
+                        options_result=options_result,
+                        option_type=getattr(args, 'option_type', 'all'),
+                        strike_range_percent=None,  # Don't filter for display
+                        options_per_expiry=999999,  # Show all saved options
+                        max_days_to_expiry=getattr(args, 'max_days_to_expiry', 30)
+                    )
+                    print(output)
+            
+            # Save to CSV if requested
+            if getattr(args, 'save_saved_to_csv', False):
+                csv_filename = getattr(args, 'save_saved_to_csv_file', None)
+                if csv_filename:
+                    # Save to a single specified file
+                    csv_path = Path(csv_filename)
+                    csv_path.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    # Prepare data for CSV
+                    current_time = datetime.now().isoformat()
+                    csv_data = []
+                    for contract in contracts:
+                        csv_data.append({
+                            'timestamp': current_time,
+                            'ticker': contract.get('ticker', ''),
+                            'type': contract.get('type', ''),
+                            'strike': contract.get('strike', ''),
+                            'expiration': contract.get('expiration', ''),
+                            'bid': contract.get('bid', ''),
+                            'ask': contract.get('ask', ''),
+                            'day_close': contract.get('day_close', ''),
+                            'fmv': contract.get('fmv', ''),
+                            'delta': contract.get('delta', ''),
+                            'gamma': contract.get('gamma', ''),
+                            'theta': contract.get('theta', ''),
+                            'vega': contract.get('vega', ''),
+                            'implied_volatility': contract.get('implied_volatility', ''),
+                            'volume': contract.get('volume', ''),
+                        })
+                    
+                    # Write to CSV (append mode)
+                    file_exists = csv_path.exists()
+                    with open(csv_path, 'a', newline='', encoding='utf-8') as csvfile:
+                        fieldnames = ['timestamp', 'ticker', 'type', 'strike', 'expiration', 
+                                     'bid', 'ask', 'day_close', 'fmv', 'delta', 'gamma', 'theta', 'vega', 'implied_volatility', 'volume']
+                        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                        
+                        if not file_exists:
+                            writer.writeheader()
+                        writer.writerows(csv_data)
+                    
+                    if show_messages:
+                        print(f"Saved {len(contracts)} options for {symbol} to {csv_path}")
+                else:
+                    # Use default behavior: save to separate files by expiration date
+                    options_data = {
+                        'contracts': contracts,
+                        'total_downloaded': len(contracts)
+                    }
+                    fetcher._save_options_to_csv(symbol, options_data)
+                    if show_messages:
+                        print(f"Saved {len(contracts)} options for {symbol} to CSV files (organized by expiration date).")
+        
+        except Exception as e:
+            if getattr(args, 'verbose', False):
+                print(f"Error retrieving saved options for {symbol}: {e}", file=sys.stderr)
+
 
 def split_tickers_into_chunks(tickers: list[str], chunk_size: int = 250) -> list[list[str]]:
     """Split ticker list into chunks of maximum chunk_size."""
@@ -987,20 +1373,34 @@ def split_tickers_into_chunks(tickers: list[str], chunk_size: int = 250) -> list
     return chunks
 
 
-def generate_month_ranges(start_date_str: str, num_months: int) -> list[tuple[str, str]]:
+def generate_month_ranges(start_date_str: str, num_months: int, end_date_str: str | None = None) -> list[tuple[str, str]]:
     """Generate 30-day date ranges starting from start_date.
     
     Returns list of (start_date, end_date) tuples in YYYY-MM-DD format.
+    If end_date_str is provided, stops generating ranges once the end date is reached.
     """
     start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
+    end_date = datetime.strptime(end_date_str, '%Y-%m-%d') if end_date_str else None
     ranges = []
     for i in range(num_months):
         month_start = start_date + timedelta(days=i * 30)
         month_end = month_start + timedelta(days=30) - timedelta(days=1)
+        
+        # If end_date is specified, cap the month_end to not exceed it
+        if end_date and month_end > end_date:
+            if month_start > end_date:
+                # This month range starts after the end date, stop generating
+                break
+            month_end = end_date
+        
         ranges.append((
             month_start.strftime('%Y-%m-%d'),
             month_end.strftime('%Y-%m-%d')
         ))
+        
+        # If we've reached the end date, stop generating more ranges
+        if end_date and month_end >= end_date:
+            break
     return ranges
 
 
@@ -1108,7 +1508,7 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
         fetcher = HistoricalDataFetcher(
             api_key,
             args_namespace.data_dir,
-            args_namespace.quiet,
+            getattr(args_namespace, 'verbose', False),
             getattr(args_namespace, 'snapshot_max_concurrent', 0)
         )
         
@@ -1141,6 +1541,7 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
             save_success = False
             if getattr(args_namespace, 'use_db', None) and options_result.get('success'):
                 contracts = options_result['data'].get('contracts') or []
+                total_downloaded = options_result['data'].get('total_downloaded', len(contracts))
                 if contracts:
                     import pandas as _pd
                     # Build DataFrame in expected shape for DB layer
@@ -1179,7 +1580,7 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
                                 break
                         
                         if found_expiration and found_expiration != 'expiration_date':
-                            if not getattr(args_namespace, 'quiet', False) and getattr(args_namespace, 'debug', False):
+                            if getattr(args_namespace, 'verbose', False) and getattr(args_namespace, 'debug', False):
                                 print(f"DEBUG: Found expiration column as '{found_expiration}', mapping to 'expiration_date'")
                             df = df.rename(columns={found_expiration: 'expiration_date'})
                         
@@ -1239,8 +1640,9 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
                                             set_redis_last_write_timestamp(redis_client, symbol, now_utc, ttl_seconds=86400)
                                     
                                     save_success = True
-                                    if not getattr(args_namespace, 'quiet', False):
-                                        print(f"[SAVE] {symbol}: Successfully saved {len(contracts)} contracts (worker PID: {os.getpid()})")
+                                    if getattr(args_namespace, 'verbose', False):
+                                        saved_count = len(contracts)
+                                        print(f"[SAVE] {symbol}: Successfully saved {saved_count} contracts out of {total_downloaded} downloaded (worker PID: {os.getpid()})")
             
             formatted_output = fetcher.format_output(
                 symbol=symbol,
@@ -1291,7 +1693,7 @@ async def save_single_symbol_via_http(db_save_task: dict, http_url: str, session
         
         if total_records <= batch_size:
             # Single request for small datasets
-            if not args.quiet:
+            if getattr(args, 'verbose', False):
                 print(f"[SAVE] {symbol}: Sending {total_records} records to database...")
             
             payload = {
@@ -1309,7 +1711,7 @@ async def save_single_symbol_via_http(db_save_task: dict, http_url: str, session
                 headers={"Content-Type": "application/json"}
             ) as response:
                 if response.status == 200:
-                    if not args.quiet:
+                    if getattr(args, 'verbose', False):
                         print(f"[SAVE] {symbol}: Successfully saved {contracts_count} contracts")
                     
                     # Update Redis cache
@@ -1323,12 +1725,12 @@ async def save_single_symbol_via_http(db_save_task: dict, http_url: str, session
                             set_redis_last_write_timestamp(redis_client, symbol, now_utc, ttl_seconds=86400)
                 else:
                     error_text = await response.text()
-                    if not args.quiet:
+                    if getattr(args, 'verbose', False):
                         print(f"[SAVE] {symbol}: Warning - HTTP {response.status} - {error_text}")
         else:
             # Split into batches
             num_batches = (total_records + batch_size - 1) // batch_size
-            if not args.quiet:
+            if getattr(args, 'verbose', False):
                 print(f"[SAVE] {symbol}: Splitting {total_records} records into {num_batches} batches...")
             
             successful_batches = 0
@@ -1356,7 +1758,7 @@ async def save_single_symbol_via_http(db_save_task: dict, http_url: str, session
                     ) as response:
                         if response.status == 200:
                             successful_batches += 1
-                            if not args.quiet and (batch_num + 1) % 10 == 0:
+                            if getattr(args, 'verbose', False) and (batch_num + 1) % 10 == 0:
                                 print(f"[SAVE] {symbol}: Batch {batch_num + 1}/{num_batches} saved")
                             
                             # Update Redis cache after last batch
@@ -1372,21 +1774,21 @@ async def save_single_symbol_via_http(db_save_task: dict, http_url: str, session
                         else:
                             error_text = await response.text()
                             failed_batches += 1
-                            if not args.quiet:
+                            if getattr(args, 'verbose', False):
                                 print(f"[SAVE] {symbol}: Warning - batch {batch_num + 1} failed: HTTP {response.status}")
                 except Exception as batch_e:
                     failed_batches += 1
-                    if not args.quiet:
+                    if getattr(args, 'verbose', False):
                         print(f"[SAVE] {symbol}: Warning - batch {batch_num + 1} error: {batch_e}")
             
-            if not args.quiet:
+            if getattr(args, 'verbose', False):
                 if failed_batches == 0:
                     print(f"[SAVE] {symbol}: Successfully saved all {num_batches} batches ({contracts_count} total contracts)")
                 else:
                     print(f"[SAVE] {symbol}: Completed - {successful_batches} successful, {failed_batches} failed batches")
                     
     except Exception as e:
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print(f"[SAVE] {symbol}: Error saving to DB: {e}")
 
 async def save_single_symbol_via_direct_db(db_save_task: dict, db_instance, args) -> None:
@@ -1396,12 +1798,12 @@ async def save_single_symbol_via_direct_db(db_save_task: dict, db_instance, args
     contracts_count = db_save_task['contracts_count']
     
     try:
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print(f"[SAVE] {symbol}: Saving {contracts_count} contracts to database...")
         
         await db_instance.save_options_data(df=df, ticker=symbol)
         
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print(f"[SAVE] {symbol}: Successfully saved {contracts_count} contracts")
         
         # Update Redis cache
@@ -1414,7 +1816,7 @@ async def save_single_symbol_via_direct_db(db_save_task: dict, db_instance, args
                 now_utc = datetime.now(timezone.utc)
                 set_redis_last_write_timestamp(redis_client, symbol, now_utc, ttl_seconds=86400)
     except Exception as e:
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print(f"[SAVE] {symbol}: Warning - failed to save: {e}")
 
 async def save_options_to_database(db_save_tasks: list, args) -> None:
@@ -1423,7 +1825,7 @@ async def save_options_to_database(db_save_tasks: list, args) -> None:
         return
     
     db_config = getattr(args, 'use_db', None)
-    if not args.quiet:
+    if getattr(args, 'verbose', False):
         print(f"Connecting to database: {db_config}")
     
     # Check if this is an HTTP server connection
@@ -1462,7 +1864,7 @@ async def save_options_via_http(db_save_tasks: list, http_url: str, args) -> Non
                     
                     if total_records <= batch_size:
                         # Single request for small datasets
-                        if not args.quiet:
+                        if getattr(args, 'verbose', False):
                             print(f"Sending HTTP request to {http_url}/db_command with command: save_options_data ({total_records} records)")
                         
                         # Prepare the HTTP request payload
@@ -1483,7 +1885,7 @@ async def save_options_via_http(db_save_tasks: list, http_url: str, args) -> Non
                         ) as response:
                             if response.status == 200:
                                 result = await response.json()
-                                if not args.quiet:
+                                if getattr(args, 'verbose', False):
                                     print(f"Successfully saved {contracts_count} options contracts to database for {symbol}")
                                 
                                 # Update Redis cache with the current timestamp
@@ -1497,12 +1899,12 @@ async def save_options_via_http(db_save_tasks: list, http_url: str, args) -> Non
                                         set_redis_last_write_timestamp(redis_client, symbol, now_utc, ttl_seconds=86400)
                             else:
                                 error_text = await response.text()
-                                if not args.quiet:
+                                if getattr(args, 'verbose', False):
                                     print(f"Warning: failed to save options to DB for {symbol}: HTTP {response.status} - {error_text}")
                     else:
                         # Split large datasets into batches
                         num_batches = (total_records + batch_size - 1) // batch_size  # Ceiling division
-                        if not args.quiet:
+                        if getattr(args, 'verbose', False):
                             print(f"Splitting {total_records} records for {symbol} into {num_batches} batches of max {batch_size} records each")
                         
                         successful_batches = 0
@@ -1513,7 +1915,7 @@ async def save_options_via_http(db_save_tasks: list, http_url: str, args) -> Non
                             end_idx = min(start_idx + batch_size, total_records)
                             batch_records = data_records[start_idx:end_idx]
                             
-                            if not args.quiet:
+                            if getattr(args, 'verbose', False):
                                 print(f"  Sending batch {batch_num + 1}/{num_batches} for {symbol} ({len(batch_records)} records)")
                             
                             # Prepare the HTTP request payload for this batch
@@ -1536,7 +1938,7 @@ async def save_options_via_http(db_save_tasks: list, http_url: str, args) -> Non
                                     if response.status == 200:
                                         result = await response.json()
                                         successful_batches += 1
-                                        if not args.quiet:
+                                        if getattr(args, 'verbose', False):
                                             print(f"    Batch {batch_num + 1} saved successfully")
                                         # Update Redis cache after last batch
                                         if batch_num == num_batches - 1:
@@ -1551,26 +1953,26 @@ async def save_options_via_http(db_save_tasks: list, http_url: str, args) -> Non
                                     else:
                                         error_text = await response.text()
                                         failed_batches += 1
-                                        if not args.quiet:
+                                        if getattr(args, 'verbose', False):
                                             print(f"    Warning: failed to save batch {batch_num + 1} for {symbol}: HTTP {response.status} - {error_text}")
                             except Exception as batch_e:
                                 failed_batches += 1
-                                if not args.quiet:
+                                if getattr(args, 'verbose', False):
                                     print(f"    Warning: failed to save batch {batch_num + 1} for {symbol}: {batch_e}")
                         
                         # Summary for batched requests
-                        if not args.quiet:
+                        if getattr(args, 'verbose', False):
                             if failed_batches == 0:
                                 print(f"Successfully saved all {num_batches} batches ({contracts_count} total contracts) to database for {symbol}")
                             else:
                                 print(f"Completed batch processing for {symbol}: {successful_batches} successful, {failed_batches} failed batches")
                             
                 except Exception as e:
-                    if not args.quiet:
+                    if getattr(args, 'verbose', False):
                         print(f"Warning: failed to save options to DB for {symbol}: {e}")
                         
     except Exception as e:
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print(f"Error connecting to HTTP database server: {e}")
 
 async def save_options_via_direct_db(db_save_tasks: list, db_config: str, args) -> None:
@@ -1587,19 +1989,19 @@ async def save_options_via_direct_db(db_save_tasks: list, db_config: str, args) 
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                if not args.quiet:
+                if getattr(args, 'verbose', False):
                     print(f"Initializing database connection (attempt {attempt + 1}/{max_retries})...")
                 await db_instance._init_db()
-                if not args.quiet:
+                if getattr(args, 'verbose', False):
                     print("Database connection initialized successfully")
                 break
             except Exception as e:
                 if attempt < max_retries - 1:
-                    if not args.quiet:
+                    if getattr(args, 'verbose', False):
                         print(f"Database initialization attempt {attempt + 1} failed: {e}, retrying...")
                     await asyncio.sleep(2)  # Wait 2 seconds before retry
                 else:
-                    if not args.quiet:
+                    if getattr(args, 'verbose', False):
                         print(f"Database initialization failed after {max_retries} attempts: {e}")
                     raise e
         
@@ -1610,7 +2012,7 @@ async def save_options_via_direct_db(db_save_tasks: list, db_config: str, args) 
             
             try:
                 await db_instance.save_options_data(df=df, ticker=symbol)
-                if not args.quiet:
+                if getattr(args, 'verbose', False):
                     print(f"Successfully saved {contracts_count} options contracts to database for {symbol}")
                 
                 # Update Redis cache with the current timestamp
@@ -1623,11 +2025,11 @@ async def save_options_via_direct_db(db_save_tasks: list, db_config: str, args) 
                         now_utc = datetime.now(timezone.utc)
                         set_redis_last_write_timestamp(redis_client, symbol, now_utc, ttl_seconds=86400)
             except Exception as e:
-                if not args.quiet:
+                if getattr(args, 'verbose', False):
                     print(f"Warning: failed to save options to DB for {symbol}: {e}")
                     
     except Exception as e:
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print(f"Error connecting to database: {e}")
     finally:
         # Properly close database connection
@@ -1635,7 +2037,7 @@ async def save_options_via_direct_db(db_save_tasks: list, db_config: str, args) 
             try:
                 await db_instance.close_session()
             except Exception as close_e:
-                if not args.quiet:
+                if getattr(args, 'verbose', False):
                     print(f"Warning: error closing DB connection: {close_e}")
 
 
@@ -1688,7 +2090,7 @@ async def _execute_month_cluster(
     
     executor_type_name = 'thread' if use_threads else 'process'
     
-    if not args.quiet:
+    if getattr(args, 'verbose', False):
         print(f"[Month {month_index + 1}] Processing {len(ticker_chunks)} ticker chunks "
               f"for date range {month_start_date} to {month_end_date} "
               f"using {executor_type_name} executor with {max_workers} workers")
@@ -1696,7 +2098,7 @@ async def _execute_month_cluster(
     # DRY-RUN MODE: Actually fork processes to show what they would do
     if dry_run:
         total_symbols = sum(len(chunk) for chunk in ticker_chunks)
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print(f"[DRY-RUN Month {month_index + 1}] Creating {executor_type_name} executor with {max_workers} workers")
             print(f"[DRY-RUN Month {month_index + 1}] Will process {len(ticker_chunks)} chunks ({total_symbols} total symbols)")
         
@@ -1709,7 +2111,7 @@ async def _execute_month_cluster(
         use_db_flag = bool(getattr(args, 'use_db', None))
         
         # Submit tasks to actually fork processes
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print(f"[DRY-RUN Month {month_index + 1}] Submitting {len(ticker_chunks)} tasks to executor (will fork processes)...")
         
         futures_map = {}
@@ -1718,7 +2120,7 @@ async def _execute_month_cluster(
             futures_map[future] = chunk
         
         # Give processes a moment to start and show their PIDs
-        if not args.quiet and ExecutorCls == ProcessPoolExecutor:
+        if getattr(args, 'verbose', False) and ExecutorCls == ProcessPoolExecutor:
             import time
             time.sleep(0.3)  # Brief pause to let processes start
             if hasattr(pool, '_processes') and pool._processes:
@@ -1745,7 +2147,7 @@ async def _execute_month_cluster(
             except Exception as e:
                 chunk = futures_map[future]
                 error_msg = f"Chunk {chunk[:3] if chunk else 'unknown'}...: {str(e)}"
-                if not args.quiet:
+                if getattr(args, 'verbose', False):
                     print(f"[DRY-RUN Month {month_index + 1}] ERROR: {error_msg}", file=sys.stderr)
                 cluster_results['errors'].append(error_msg)
         
@@ -1754,7 +2156,7 @@ async def _execute_month_cluster(
             all_pools.remove(pool)
         pool.shutdown(wait=True, cancel_futures=False)
         
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print(f"[DRY-RUN Month {month_index + 1}] All workers completed and exited")
         
         return cluster_results
@@ -1764,7 +2166,7 @@ async def _execute_month_cluster(
     pool = ExecutorCls(max_workers=max_workers)
     all_pools.append(pool)
     
-    if not args.quiet:
+    if getattr(args, 'verbose', False):
         executor_type_display = "ProcessPoolExecutor" if ExecutorCls == ProcessPoolExecutor else "ThreadPoolExecutor"
         print(f"[Month {month_index + 1}] Created {executor_type_display} with max_workers={max_workers} (Main PID: {os.getpid()})")
         if ExecutorCls == ProcessPoolExecutor:
@@ -1778,7 +2180,21 @@ async def _execute_month_cluster(
     month_start_dt = datetime.strptime(month_start_date, '%Y-%m-%d')
     month_end_dt = datetime.strptime(month_end_date, '%Y-%m-%d')
     days_in_month = (month_end_dt - month_start_dt).days
-    month_args.max_days_to_expiry = max(days_in_month, getattr(args, 'max_days_to_expiry', 30))
+    
+    # If end_date is provided, limit max_days_to_expiry to the end_date
+    end_date = getattr(args, 'end_date', None)
+    if end_date:
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+        # Calculate days from month_start_date to end_date
+        days_to_end = (end_dt - month_start_dt).days
+        # Limit max_days_to_expiry to not exceed end_date
+        # This ensures options expiring after end_date are not fetched
+        # max_days_to_expiry creates a +/- window, so we use days_to_end directly
+        month_args.max_days_to_expiry = max(1, days_to_end)
+        if getattr(args, 'verbose', False):
+            print(f"[Month {month_index + 1}] Limiting max_days_to_expiry to {month_args.max_days_to_expiry} (end_date: {end_date}, target_date: {month_start_date}, days_to_end: {days_to_end})", file=sys.stderr)
+    else:
+        month_args.max_days_to_expiry = max(days_in_month, getattr(args, 'max_days_to_expiry', 30))
     
     futures_map = {}
     cluster_results = {
@@ -1790,13 +2206,13 @@ async def _execute_month_cluster(
     
     try:
         # Submit all ticker chunks
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print(f"[Month {month_index + 1}] Submitting {len(ticker_chunks)} ticker chunk tasks to executor...")
         for chunk in ticker_chunks:
             future = pool.submit(_run_for_ticker_chunk, chunk, month_start_date, month_args, api_key)
             futures_map[future] = chunk
         
-        if not args.quiet and ExecutorCls == ProcessPoolExecutor:
+        if getattr(args, 'verbose', False) and ExecutorCls == ProcessPoolExecutor:
             # ProcessPoolExecutor creates workers lazily, so they should be created now
             import time
             time.sleep(1.0)  # Give processes more time to start
@@ -1812,7 +2228,7 @@ async def _execute_month_cluster(
                 print(f"[Month {month_index + 1}] WARNING: ProcessPoolExecutor worker processes not yet visible (they're created lazily)")
         
         # Process results as they complete
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print(f"[Month {month_index + 1}] Processing results as tasks complete...")
         for future in as_completed(futures_map):
             try:
@@ -1825,7 +2241,7 @@ async def _execute_month_cluster(
                 chunk = futures_map[future]
                 cluster_results['errors'].append(f"Chunk {chunk[:3]}...: {str(e)}")
     except KeyboardInterrupt:
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print(f"\n[Month {month_index + 1}] KeyboardInterrupt received, cancelling tasks...", file=sys.stderr)
         for future in futures_map:
             future.cancel()
@@ -1836,7 +2252,7 @@ async def _execute_month_cluster(
             all_pools.remove(pool)
         pool.shutdown(wait=True, cancel_futures=False)
     
-    if not args.quiet:
+    if getattr(args, 'verbose', False):
         print(f"[Month {month_index + 1}] Completed: {cluster_results['symbols_processed']} symbols, "
               f"{cluster_results['save_success_count']} saves successful, "
               f"{cluster_results['save_failure_count']} saves failed")
@@ -1870,7 +2286,20 @@ async def _execute_options_iteration(
     
     # Multi-month mode: split by time and tickers
     start_date = getattr(args, 'start_date', None) or args.date
-    month_ranges = generate_month_ranges(start_date, months_ahead)
+    end_date = getattr(args, 'end_date', None)
+    
+    # If end_date is provided, calculate months_ahead from start_date to end_date
+    if end_date:
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+        days_diff = (end_dt - start_dt).days
+        # Calculate number of 30-day periods needed, rounding up
+        calculated_months_ahead = max(1, (days_diff + 29) // 30)  # +29 to round up
+        if getattr(args, 'verbose', False):
+            print(f"--end-date specified ({end_date}), calculating months_ahead: {calculated_months_ahead} (from {start_date} to {end_date}, {days_diff} days)", file=sys.stderr)
+        months_ahead = calculated_months_ahead
+    
+    month_ranges = generate_month_ranges(start_date, months_ahead, end_date)
     
     # Allocate processes to months first to determine optimal chunk size
     if args.max_concurrent and args.max_concurrent > 0:
@@ -1890,10 +2319,10 @@ async def _execute_options_iteration(
     ticker_chunks = split_tickers_into_chunks(symbols_list, optimal_chunk_size)
     
     # Warn if we had to adjust chunk size
-    if optimal_chunk_size < ticker_chunk_size and not args.quiet:
+    if optimal_chunk_size < ticker_chunk_size and getattr(args, 'verbose', False):
         print(f"  NOTE: Adjusted chunk size from {ticker_chunk_size} to {optimal_chunk_size} to create {len(ticker_chunks)} chunks (needed for {max_processes_per_month} processes in Month 1)")
     
-    if not args.quiet:
+    if getattr(args, 'verbose', False):
         print(f"\n[MULTI-MONTH MODE] Processing {len(symbols_list)} tickers across {months_ahead} months")
         print(f"  Ticker chunks: {len(ticker_chunks)} (max {ticker_chunk_size} per chunk)")
         print(f"  Total processes: {total_processes} (executor type: {args.executor_type})")
@@ -1936,11 +2365,11 @@ async def _execute_options_iteration(
                 all_pools=all_pools
             )
         except KeyboardInterrupt:
-            if not args.quiet:
+            if getattr(args, 'verbose', False):
                 print(f"\n[MULTI-MONTH] KeyboardInterrupt at month {month_index + 1}, stopping...", file=sys.stderr)
             raise
         except Exception as e:
-            if not args.quiet:
+            if getattr(args, 'verbose', False):
                 print(f"\n[MULTI-MONTH] Error in month {month_index + 1}: {e}", file=sys.stderr)
             return {
                 'symbols_processed': 0,
@@ -1950,7 +2379,7 @@ async def _execute_options_iteration(
             }
     
     # Run all month clusters in parallel (truly concurrent)
-    if not args.quiet:
+    if getattr(args, 'verbose', False):
         print(f"  Running all {months_ahead} month clusters in parallel...")
         print(f"  Main process PID: {os.getpid()}")
         print(f"  All month clusters will start simultaneously via asyncio.gather()")
@@ -1961,7 +2390,7 @@ async def _execute_options_iteration(
         for month_index, (month_start, month_end) in enumerate(month_ranges)
     ]
     
-    if not args.quiet:
+    if getattr(args, 'verbose', False):
         print(f"  Created {len(month_tasks)} async tasks - all will execute concurrently")
         print(f"  Expected total worker processes: {sum(process_allocations)} (across all months)")
         print(f"  To verify parallel execution, run: ps aux | grep -E 'Python|python' | grep fetch_options")
@@ -1984,14 +2413,14 @@ async def _execute_options_iteration(
                 overall_results['save_failure_count'] += month_results.get('save_failure_count', 0)
                 overall_results['errors'].extend(month_results.get('errors', []))
     except KeyboardInterrupt:
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print("\n[MULTI-MONTH] KeyboardInterrupt: Cancelling all month clusters...", file=sys.stderr)
         for task in month_tasks:
             task.cancel()
         await asyncio.gather(*month_tasks, return_exceptions=True)
         raise
     
-    if not args.quiet:
+    if getattr(args, 'verbose', False):
         print(f"\n[MULTI-MONTH SUMMARY] Total: {overall_results['symbols_processed']} symbols processed, "
               f"{overall_results['save_success_count']} saves successful, "
               f"{overall_results['save_failure_count']} saves failed")
@@ -2042,7 +2471,7 @@ async def _execute_options_iteration_single_date(
         else:
             # Single run: use market_open cache duration as default (20 minutes)
             refresh_threshold_seconds = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
-    elif not args.quiet:
+    elif getattr(args, 'verbose', False):
         print(f"Using user-specified refresh threshold: {refresh_threshold_seconds}s")
     
     # Check if tickers need refresh (only if using database and not forcing fresh fetch)
@@ -2094,12 +2523,12 @@ async def _execute_options_iteration_single_date(
                     debug=debug_mode
                 )
                 
-                if not args.quiet and len(symbols_to_fetch) < len(symbols_list):
+                if getattr(args, 'verbose', False) and len(symbols_to_fetch) < len(symbols_list):
                     skipped = len(symbols_list) - len(symbols_to_fetch)
                     print(f"Skipping {skipped} ticker(s) with fresh data (threshold: {refresh_threshold_seconds}s)")
         except Exception as e:
             # If checking fails, fetch all tickers
-            if not args.quiet:
+            if getattr(args, 'verbose', False):
                 import traceback
                 print(f"Warning: Could not check ticker freshness ({e}). Fetching all tickers.", file=sys.stderr)
                 if getattr(args, 'debug', False):
@@ -2108,11 +2537,11 @@ async def _execute_options_iteration_single_date(
     elif getattr(args, 'force_fresh', False):
         # Force fresh is enabled, skip refresh check and fetch all symbols
         symbols_to_fetch = symbols_list
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print("--force-fresh enabled: Skipping refresh check, will fetch all symbols from Polygon API")
     
     if not symbols_to_fetch:
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print("All tickers have fresh data. Skipping fetch.")
         return {
             "symbols_processed": 0,
@@ -2127,7 +2556,7 @@ async def _execute_options_iteration_single_date(
 
     # DRY-RUN MODE: Actually fork processes to show what they would do
     if dry_run:
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print(f"\n[DRY-RUN] Creating {exec_type} executor with {max_workers} workers")
             print(f"[DRY-RUN] Will process {len(symbols_to_fetch)} symbols for date: {args.date}")
         
@@ -2167,7 +2596,7 @@ async def _execute_options_iteration_single_date(
                     save_count += 1
             except Exception as e:
                 symbol = futures_map[future]
-                if not args.quiet:
+                if getattr(args, 'verbose', False):
                     print(f"[DRY-RUN] Error for {symbol}: {e}")
         
         # Shutdown pool (processes will exit)
@@ -2175,7 +2604,7 @@ async def _execute_options_iteration_single_date(
         if all_pools is not None and pool in all_pools:
             all_pools.remove(pool)
         
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print(f"[DRY-RUN] All workers completed and exited")
         
         return {
@@ -2183,7 +2612,7 @@ async def _execute_options_iteration_single_date(
             "db_tasks": save_count,
         }
 
-    if not args.quiet:
+    if getattr(args, 'verbose', False):
         print(
             f"Starting concurrent fetch for {len(symbols_to_fetch)} symbols "
             f"using {exec_type} executor with max_workers={max_workers}"
@@ -2206,7 +2635,7 @@ async def _execute_options_iteration_single_date(
         for fut in as_completed(futures_map):
             result = fut.result()
             if isinstance(result, dict) and 'formatted_output' in result:
-                if not args.quiet and result['formatted_output']:
+                if getattr(args, 'verbose', False) and result['formatted_output']:
                     print(result['formatted_output'])
                 
                 # Track save results (saves already happened in worker process)
@@ -2214,10 +2643,10 @@ async def _execute_options_iteration_single_date(
                     save_count += 1
                 elif getattr(args, 'use_db', None) and result.get('save_success') is False:
                     save_failures += 1
-            elif not args.quiet and result:
+            elif getattr(args, 'verbose', False) and result:
                 print(result)
     except KeyboardInterrupt:
-        if not args.quiet:
+        if getattr(args, 'verbose', False):
             print("\nKeyboardInterrupt received. Attempting to cancel outstanding option fetch tasks...", file=sys.stderr)
         _cancel_executor_futures(futures_map)
         pool.shutdown(wait=False, cancel_futures=True)
@@ -2231,7 +2660,7 @@ async def _execute_options_iteration_single_date(
         if all_pools is not None and pool in all_pools:
             all_pools.remove(pool)
     
-    if not args.quiet and getattr(args, 'use_db', None):
+    if getattr(args, 'verbose', False) and getattr(args, 'use_db', None):
         print(f"\n[SUMMARY] Database saves: {save_count} successful, {save_failures} failed (saves performed in worker processes)")
 
     return {
@@ -2326,10 +2755,16 @@ Examples:
         help="Explicit start date in YYYY-MM-DD format. Overrides --date if provided. Primarily used for multi-month mode."
     )
     parser.add_argument(
+        '--end-date',
+        type=str,
+        default=None,
+        help="Stop fetching at this date in YYYY-MM-DD format. When provided, limits the date range regardless of --months-ahead."
+    )
+    parser.add_argument(
         '--months-ahead',
         type=int,
         default=6,
-        help="Number of 30-day periods to fetch ahead from start date (default: 6). Set to 0 for single-date mode."
+        help="Number of 30-day periods to fetch ahead from start date (default: 6). Set to 0 for single-date mode. Ignored if --end-date is provided."
     )
     parser.add_argument(
         '--ticker-chunk-size',
@@ -2378,9 +2813,10 @@ Examples:
         help="Enable CSV cache: read fresh CSV if present and write new snapshots to CSV."
     )
     parser.add_argument(
-        '--quiet',
+        '--verbose',
         action='store_true',
-        help="Suppress output but still save CSV files."
+        default=False,
+        help="Enable verbose output (default: quiet mode)."
     )
     # Remove old CSV flags (backward compatibility shim)
     parser.add_argument(
@@ -2394,9 +2830,36 @@ Examples:
         help=argparse.SUPPRESS
     )
     parser.add_argument(
+        '--display-saved',
+        action='store_true',
+        help="Display all saved options from the database after fetching (non-continuous mode only)."
+    )
+    parser.add_argument(
+        '--straddle-view',
+        action='store_true',
+        help="When used with --display-saved, show options in straddle format (matching calls and puts at same strike)."
+    )
+    parser.add_argument(
+        '--save-saved-to-csv',
+        action='store_true',
+        help="Save all saved options from the database to CSV files after fetching (non-continuous mode only)."
+    )
+    parser.add_argument(
+        '--save-saved-to-csv-file',
+        type=str,
+        default=None,
+        help="When used with --save-saved-to-csv, save all options to a single CSV file with this name. If not specified, saves to separate files by expiration date."
+    )
+    parser.add_argument(
         '--continuous',
         action='store_true',
         help="Continuously fetch in a loop, sleeping based on cache duration."
+    )
+    parser.add_argument(
+        '--continous',
+        action='store_true',
+        dest='continuous',
+        help="Alias for --continuous (common typo)."
     )
     parser.add_argument(
         '--interval-multiplier',
@@ -2564,7 +3027,7 @@ Examples:
         sys.exit(1)
 
     # Get symbols list using common library
-    symbols_list = await fetch_lists_data(args, args.quiet)
+    symbols_list = await fetch_lists_data(args, not getattr(args, 'verbose', False))
     if not symbols_list:
         print("No symbols specified or found. Exiting.", file=sys.stderr)
         sys.exit(1)
@@ -2579,18 +3042,18 @@ Examples:
             # Market is closed - handle based on fetch-once-before-wait flag
             if getattr(args, 'fetch_once_before_wait', False):
                 # Fetch once immediately before waiting
-                if not args.quiet:
+                if getattr(args, 'verbose', False):
                     print(f"Market is closed. Fetching once immediately before waiting for market open...")
                 
                 # Use the same iteration function which now handles incremental saves
-                if not args.quiet:
+                if getattr(args, 'verbose', False):
                     print(f"Fetching data for {len(symbols_list)} symbols (one-time fetch before waiting)...")
                 
                 all_pools = []
                 await _execute_options_iteration(symbols_list, args, api_key, all_pools)
                 
                 # Now wait for market open
-                if not args.quiet:
+                if getattr(args, 'verbose', False):
                     hours_to_wait = seconds_to_open / 3600
                     print(f"One-time fetch completed. Waiting {hours_to_wait:.2f} hours ({seconds_to_open:.0f} seconds) until market opens...")
                 
@@ -2599,14 +3062,14 @@ Examples:
                 # Re-check market status after waiting
                 now_utc = datetime.now(timezone.utc)
                 is_market_open = common_is_market_hours(now_utc, "America/New_York")
-                if not args.quiet:
+                if getattr(args, 'verbose', False):
                     if is_market_open:
                         print("Market is now open. Proceeding with normal operation...")
                     else:
                         print("Warning: Market is still not open after waiting. Proceeding anyway...")
             else:
                 # Wait for market open before starting
-                if not args.quiet:
+                if getattr(args, 'verbose', False):
                     hours_to_wait = seconds_to_open / 3600
                     print(f"Market is closed. Waiting {hours_to_wait:.2f} hours ({seconds_to_open:.0f} seconds) until market opens before starting...")
                 
@@ -2615,7 +3078,7 @@ Examples:
                 # Re-check market status after waiting
                 now_utc = datetime.now(timezone.utc)
                 is_market_open = common_is_market_hours(now_utc, "America/New_York")
-                if not args.quiet:
+                if getattr(args, 'verbose', False):
                     if is_market_open:
                         print("Market is now open. Starting data fetch...")
                     else:
@@ -2630,7 +3093,20 @@ Examples:
         # Multi-month continuous mode
         if months_ahead > 0:
             start_date = getattr(args, 'start_date', None) or args.date
-            month_ranges = generate_month_ranges(start_date, months_ahead)
+            end_date = getattr(args, 'end_date', None)
+            
+            # If end_date is provided, calculate months_ahead from start_date to end_date
+            if end_date:
+                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+                days_diff = (end_dt - start_dt).days
+                # Calculate number of 30-day periods needed, rounding up
+                calculated_months_ahead = max(1, (days_diff + 29) // 30)  # +29 to round up
+                if getattr(args, 'verbose', False):
+                    print(f"--end-date specified ({end_date}), calculating months_ahead: {calculated_months_ahead} (from {start_date} to {end_date}, {days_diff} days)", file=sys.stderr)
+                months_ahead = calculated_months_ahead
+            
+            month_ranges = generate_month_ranges(start_date, months_ahead, end_date)
             
             # Calculate exponential intervals for each month (smaller for near months, larger for far months)
             # Base interval: 20 minutes for month 1, exponentially increasing up to 60 minutes max
@@ -2647,7 +3123,7 @@ Examples:
                     interval = base_interval_minutes * ratio * 60
                 month_intervals.append(interval)
             
-            if not args.quiet:
+            if getattr(args, 'verbose', False):
                 print(f"\n[CONTINUOUS MULTI-MONTH MODE] Starting {months_ahead} month clusters with exponential intervals:")
                 for i, (month_range, interval) in enumerate(zip(month_ranges, month_intervals)):
                     print(f"  Month {i+1} ({month_range[0]} to {month_range[1]}): {interval/60:.1f} min interval")
@@ -2718,7 +3194,7 @@ Examples:
                     if not is_market_open:
                         seconds_until_wake = get_seconds_until_market_open_plus_delay(now_utc)
                         if seconds_until_wake is not None:
-                            if not args.quiet:
+                            if getattr(args, 'verbose', False):
                                 hours_to_wait = seconds_until_wake / 3600
                                 mins_to_wait = seconds_until_wake / 60
                                 if hours_to_wait >= 1:
@@ -2744,7 +3220,7 @@ Examples:
                     seconds_since_open = get_seconds_since_market_opened(now_utc)
                     if seconds_since_open is not None and seconds_since_open < market_open_delay_seconds:
                         wait_time = market_open_delay_seconds - seconds_since_open
-                        if not args.quiet:
+                        if getattr(args, 'verbose', False):
                             print(f"[Month {month_idx + 1}] Market just opened. Waiting {wait_time:.0f} seconds until 2 mins after open...")
                         
                         sleep_chunk = min(10.0, wait_time)
@@ -2760,7 +3236,7 @@ Examples:
                     
                     # Market is open and at least 2 minutes have passed - proceed with fetch
                     run_num += 1
-                    if not args.quiet:
+                    if getattr(args, 'verbose', False):
                         print(f"\n[Month {month_idx + 1}] Continuous run #{run_num} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     
                     try:
@@ -2771,7 +3247,18 @@ Examples:
                         month_start_dt = datetime.strptime(month_start, '%Y-%m-%d')
                         month_end_dt = datetime.strptime(month_end, '%Y-%m-%d')
                         days_in_month = (month_end_dt - month_start_dt).days
-                        month_args.max_days_to_expiry = max(days_in_month, getattr(args, 'max_days_to_expiry', 30))
+                        
+                        # If end_date is provided, limit max_days_to_expiry to the end_date
+                        end_date = getattr(args, 'end_date', None)
+                        if end_date:
+                            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+                            # Calculate days from month_start to end_date
+                            days_to_end = (end_dt - month_start_dt).days
+                            # Limit max_days_to_expiry to not exceed end_date
+                            # max_days_to_expiry creates a +/- window, so we use days_to_end directly
+                            month_args.max_days_to_expiry = max(1, days_to_end)
+                        else:
+                            month_args.max_days_to_expiry = max(days_in_month, getattr(args, 'max_days_to_expiry', 30))
                         
                         # Execute this month's iteration (processes will exit after completion)
                         # Each month cluster uses its own pool list to ensure independence
@@ -2779,21 +3266,21 @@ Examples:
                         # even if other month clusters are still running
                         await _execute_options_iteration(symbols_list, month_args, api_key, month_pools)
                         
-                        if not args.quiet:
+                        if getattr(args, 'verbose', False):
                             print(f"[Month {month_idx + 1}] Iteration #{run_num} completed. Processes have exited. Next iteration will start after sleep interval.")
                     except KeyboardInterrupt:
-                        if not args.quiet:
+                        if getattr(args, 'verbose', False):
                             print(f"[Month {month_idx + 1}] Interrupted", file=sys.stderr)
                         break
                     except Exception as e:
-                        if not args.quiet:
+                        if getattr(args, 'verbose', False):
                             print(f"[Month {month_idx + 1}] Error: {e}", file=sys.stderr)
                     
                     # After fetch, sleep for this month's interval
                     # This sleep is independent - when it expires, this month cluster will start
                     # a new iteration even if other month clusters are still running or sleeping
                     adjusted_sleep = sleep_interval * (args.interval_multiplier if getattr(args, 'interval_multiplier', None) else 1.0)
-                    if not args.quiet:
+                    if getattr(args, 'verbose', False):
                         print(f"[Month {month_idx + 1}] Sleeping for {adjusted_sleep/60:.1f} minutes. Will start iteration #{run_num + 1} independently when sleep expires.")
                     
                     # Sleep in chunks to allow other month clusters to proceed independently
@@ -2808,7 +3295,7 @@ Examples:
                     
                     # Sleep expired - this month cluster will now start a new iteration
                     # This happens independently of other month clusters' status
-                    if not args.quiet:
+                    if getattr(args, 'verbose', False):
                         print(f"[Month {month_idx + 1}] Sleep interval expired. Starting new iteration (independent of other months).")
             
             # Run all month clusters concurrently
@@ -2820,7 +3307,7 @@ Examples:
             try:
                 await asyncio.gather(*tasks)
             except KeyboardInterrupt:
-                if not args.quiet:
+                if getattr(args, 'verbose', False):
                     print("\nKeyboardInterrupt: Cancelling all month clusters...", file=sys.stderr)
                 for task in tasks:
                     task.cancel()
@@ -2837,11 +3324,11 @@ Examples:
                 is_market_open_start = HistoricalDataFetcher._is_market_open(now_utc)
                 
                 if was_market_open is True and not is_market_open_start:
-                    if not args.quiet:
+                    if getattr(args, 'verbose', False):
                         print(f"\n--- MARKET TRANSITION DETECTED: OPEN → CLOSED at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
                         print(f"Performing final fetch after market close to capture EOD data...")
                 
-                if not args.quiet:
+                if getattr(args, 'verbose', False):
                     print(f"\n--- Continuous run #{run_num} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
 
                 iteration_args_dict = vars(args).copy()
@@ -2873,7 +3360,7 @@ Examples:
                     base_sleep = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
                     if seconds_to_close is not None:
                         sleep_seconds = max(min(base_sleep, seconds_to_close), 5)
-                        if not args.quiet:
+                        if getattr(args, 'verbose', False):
                             print(
                                 f"Next run in {sleep_seconds:.0f}s (market open, "
                                 f"{HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']}min interval; "
@@ -2881,34 +3368,34 @@ Examples:
                             )
                     else:
                         sleep_seconds = base_sleep
-                        if not args.quiet:
+                        if getattr(args, 'verbose', False):
                             print(
                                 f"Next run in {sleep_seconds:.0f}s (market open, "
                                 f"{HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']}min interval) [MARKET OPEN]"
                             )
                 else:
                     # Market is closed
-                    if just_closed and not args.quiet:
+                    if just_closed and getattr(args, 'verbose', False):
                         print(f"Post-close fetch completed. Entering extended sleep until next market open.")
                     
                     opening_soon_threshold = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open'] * 60
                     if seconds_to_open is not None:
                         if seconds_to_open <= opening_soon_threshold:
                             sleep_seconds = seconds_to_open
-                            if not args.quiet:
+                            if getattr(args, 'verbose', False):
                                 print(
                                     f"Next run in {sleep_seconds:.0f}s (sleeping until market open in "
                                     f"{seconds_to_open:.0f}s) [MARKET CLOSED→OPEN]"
                                 )
                         else:
                             sleep_seconds = seconds_to_open - opening_soon_threshold
-                            if not args.quiet:
+                            if getattr(args, 'verbose', False):
                                 print(
                                     f"Next run in {sleep_seconds:.0f}s (markets closed, will wake "
                                     f"{opening_soon_threshold/60:.0f}min before market open in {seconds_to_open:.0f}s) [MARKET CLOSED]"
                                 )
                     else:
-                        if not args.quiet:
+                        if getattr(args, 'verbose', False):
                             print(
                                 f"Next run in {sleep_seconds:.0f}s (markets closed, "
                                 f"{HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_closed']}min interval) [MARKET CLOSED]"
@@ -2918,7 +3405,7 @@ Examples:
                 was_market_open = is_market_open
 
                 adjusted_sleep = sleep_seconds * (args.interval_multiplier if getattr(args, 'interval_multiplier', None) else 1.0)
-                if not args.quiet:
+                if getattr(args, 'verbose', False):
                     print(f"Next run in {adjusted_sleep:.0f}s")
                 await asyncio.sleep(adjusted_sleep)
                 
@@ -2928,7 +3415,7 @@ Examples:
                     current_market_state = HistoricalDataFetcher._is_market_open(datetime.now(timezone.utc))
                     if not current_market_state:
                         # Market closed while we were sleeping - fetch once more for EOD data
-                        if not args.quiet:
+                        if getattr(args, 'verbose', False):
                             print(f"\n--- MARKET CLOSED DURING SLEEP - Performing post-close fetch ---")
                         run_num += 1
                         
@@ -2949,12 +3436,12 @@ Examples:
                                     f"Error during post-close fetch (process exit {payload.get('exitcode')}): {error_text}",
                                     file=sys.stderr,
                                 )
-                            elif not args.quiet:
+                            elif getattr(args, 'verbose', False):
                                 print(f"Post-close fetch #{run_num} completed successfully")
                             
                             # Check if we should stop
                             if args.continuous_max_runs and run_num >= args.continuous_max_runs:
-                                if not args.quiet:
+                                if getattr(args, 'verbose', False):
                                     print("Reached maximum runs, stopping continuous mode.")
                                 break
                             
@@ -2962,18 +3449,23 @@ Examples:
                             was_market_open = False
                             
                         except Exception as e:
-                            if not args.quiet:
+                            if getattr(args, 'verbose', False):
                                 print(f"Error during post-close fetch: {e}", file=sys.stderr)
                             was_market_open = False
 
                 if args.continuous_max_runs and run_num >= args.continuous_max_runs:
-                    if not args.quiet:
+                    if getattr(args, 'verbose', False):
                         print("Reached maximum runs, stopping continuous mode.")
                     break
         return
     else:
         # Single run (no sleep)
         await _execute_options_iteration(symbols_list, args, api_key, all_pools)
+        
+        # Display and/or save saved options if requested (non-continuous mode only)
+        if getattr(args, 'display_saved', False) or getattr(args, 'save_saved_to_csv', False):
+            await display_and_save_saved_options(symbols_list, args, api_key)
+        
         return
 
 if __name__ == "__main__":
