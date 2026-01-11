@@ -47,6 +47,14 @@ except ImportError:
     POLYGON_AVAILABLE = False
     print("Warning: polygon-api-client not installed. Polygon.io data source will not be available.", file=sys.stderr)
 
+# Try to import yfinance for index data
+try:
+    import yfinance as yf
+    YFINANCE_AVAILABLE = True
+except ImportError:
+    YFINANCE_AVAILABLE = False
+    print("Warning: yfinance not installed. Index data fetching will not be available.", file=sys.stderr)
+
 # Alpaca Market Data API base URL
 MARKET_DATA_BASE_URL = "https://data.alpaca.markets/v2"
 
@@ -70,6 +78,303 @@ def _get_polygon_timespan(timeframe: str) -> str:
         return "hour"
     else:
         raise ValueError(f"Unsupported timeframe for Polygon: {timeframe}")
+
+async def fetch_yfinance_index_data(
+    yfinance_symbol: str,
+    timeframe: str,
+    start_date: str,
+    end_date: str,
+    log_level: str = "INFO"
+) -> pd.DataFrame:
+    """
+    Fetch historical index data from Yahoo Finance using yfinance.
+    
+    Args:
+        yfinance_symbol: Yahoo Finance symbol (e.g., "^GSPC")
+        timeframe: "daily" or "hourly"
+        start_date: Start date in ISO format or YYYY-MM-DD
+        end_date: End date in ISO format or YYYY-MM-DD
+        log_level: Logging level
+    
+    Returns:
+        DataFrame with OHLCV data, indexed by datetime
+    """
+    if not YFINANCE_AVAILABLE:
+        raise ImportError("yfinance not available. Install with: pip install yfinance")
+    
+    try:
+        # Parse dates
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+        
+        # Validate dates are not in the future
+        now = datetime.now(timezone.utc)
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)  # Normalize to start of today
+        
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+        
+        # Normalize dates to start of day for comparison
+        start_dt_normalized = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_dt_normalized = end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        if start_dt_normalized > today:
+            raise ValueError(
+                f"Start date {start_date} is in the future. "
+                f"Current date is {today.strftime('%Y-%m-%d')}. "
+                f"Cannot fetch data for future dates."
+            )
+        
+        # Always adjust end_date to today if it's in the future (Yahoo Finance can't fetch future data)
+        if end_dt_normalized > today:
+            # Calculate days difference
+            days_diff = (end_dt_normalized - today).days
+            if days_diff > 1:
+                # For dates more than 1 day in the future, log a warning and adjust
+                logging.warning(
+                    f"End date {end_date} is {days_diff} days in the future. "
+                    f"Adjusting to today ({today.strftime('%Y-%m-%d')}) since Yahoo Finance cannot fetch future data."
+                )
+            else:
+                # For dates within 1 day, just log info
+                logging.info(f"End date {end_date} is slightly in the future. Adjusting to today ({today.strftime('%Y-%m-%d')})")
+            # Always adjust to today (use normalized today)
+            end_dt = today
+            end_date = end_dt.strftime('%Y-%m-%d')
+        
+        # For hourly data, Yahoo Finance only allows fetching the last 730 days from TODAY
+        # Automatically adjust the date range if it exceeds this limit
+        if timeframe == "hourly":
+            # Yahoo Finance limit: 730 days for hourly data, calculated from TODAY, not end_date
+            # IMPORTANT: For hourly data, Yahoo Finance's 730-day limit is always calculated from TODAY,
+            # regardless of the end_date specified. So we must use today as the end date.
+            # NOTE: Use 729 days instead of 730 to be safe (Yahoo Finance might use "less than 730" not "730 or less")
+            max_hourly_days = 729
+            
+            # Always use today as the end date for hourly data (Yahoo Finance requirement)
+            if end_dt_normalized != today:
+                original_end = end_dt
+                end_dt = today
+                end_dt_normalized = today  # Update normalized version too
+                end_date = end_dt.strftime('%Y-%m-%d')
+                logging.info(
+                    f"For hourly data, Yahoo Finance requires end_date to be today. "
+                    f"Adjusting end date from {original_end.strftime('%Y-%m-%d')} to {end_date} "
+                    f"(Yahoo Finance's 730-day limit is calculated from today, not the specified end date)."
+                )
+            
+            # Calculate the maximum allowed start date (730 days before today)
+            max_allowed_start = today - timedelta(days=max_hourly_days)
+            
+            # If start_date is before the maximum allowed, adjust it
+            if start_dt_normalized < max_allowed_start:
+                original_start = start_dt
+                start_dt = max_allowed_start
+                # Calculate days requested from the original start to today (since end_date is now today)
+                days_requested = (today - start_dt_normalized).days
+                logging.warning(
+                    f"Yahoo Finance hourly data is limited to the last {max_hourly_days} days from today. "
+                    f"Adjusting start date from {original_start.strftime('%Y-%m-%d')} to {start_dt.strftime('%Y-%m-%d')} "
+                    f"(requested range was {days_requested} days, but only last {max_hourly_days} days from today are available)."
+                )
+        
+        # Convert to YYYY-MM-DD format for yfinance
+        start_str = start_dt.strftime('%Y-%m-%d')
+        end_str = end_dt.strftime('%Y-%m-%d')
+        
+        # Log the actual dates being used (especially important for hourly data with adjustments)
+        if timeframe == "hourly":
+            logging.info(f"Fetching hourly data for {yfinance_symbol}: {start_str} to {end_str}")
+        
+        # Map timeframe to yfinance interval
+        yf_interval_map = {
+            'daily': '1d',
+            'hourly': '1h'
+        }
+        yf_interval = yf_interval_map.get(timeframe, '1d')
+        
+        if log_level == "DEBUG":
+            logging.debug(f"Yahoo Finance request: symbol={yfinance_symbol}, interval={yf_interval}, "
+                        f"start={start_str}, end={end_str}")
+        
+        # Fetch data using yfinance
+        ticker = yf.Ticker(yfinance_symbol)
+        
+        # yfinance history() can be slow, so run it in a thread
+        def _fetch_sync():
+            try:
+                return ticker.history(start=start_str, end=end_str, interval=yf_interval)
+            except Exception as e:
+                error_msg = str(e)
+                # Check if it's a future date error
+                if "doesn't exist" in error_msg.lower() or "future" in error_msg.lower():
+                    raise ValueError(
+                        f"Cannot fetch data for {yfinance_symbol} from {start_str} to {end_str}: "
+                        f"Date range includes future dates. Current date is {now.strftime('%Y-%m-%d')}. "
+                        f"Please use dates up to today."
+                    )
+                raise
+        
+        try:
+            data = await asyncio.to_thread(_fetch_sync)
+        except ValueError as ve:
+            # Re-raise ValueError (future date errors) as-is
+            raise ve
+        except Exception as e:
+            # Wrap other errors
+            error_msg = str(e)
+            
+            # Check for Yahoo Finance 730-day limit error for hourly data
+            if timeframe == "hourly" and ("730 days" in error_msg or "within the last 730 days" in error_msg.lower()):
+                # Try to fetch with the last 729 days from TODAY (not 730, to be safe)
+                max_hourly_days = 729
+                # Use today (not end_dt) for the calculation
+                adjusted_end_dt = today
+                adjusted_end_str = adjusted_end_dt.strftime('%Y-%m-%d')
+                adjusted_start_dt = today - timedelta(days=max_hourly_days)
+                adjusted_start_str = adjusted_start_dt.strftime('%Y-%m-%d')
+                
+                logging.warning(
+                    f"Yahoo Finance hourly data limit encountered. Retrying with adjusted range: "
+                    f"{adjusted_start_str} to {adjusted_end_str} (last {max_hourly_days} days from today)"
+                )
+                
+                # Retry with adjusted date range
+                def _fetch_adjusted():
+                    try:
+                        return ticker.history(start=adjusted_start_str, end=adjusted_end_str, interval=yf_interval)
+                    except Exception as e2:
+                        raise e2
+                
+                try:
+                    data = await asyncio.to_thread(_fetch_adjusted)
+                    logging.info(f"Successfully fetched hourly data with adjusted date range (last {max_hourly_days} days from today)")
+                except Exception as e2:
+                    # If retry also fails, raise the original error
+                    logging.error(f"Failed to fetch hourly data even with adjusted date range: {e2}")
+                    raise e
+            
+            if "doesn't exist" in error_msg.lower() or "future" in error_msg.lower():
+                raise ValueError(
+                    f"Cannot fetch data for {yfinance_symbol} from {start_str} to {end_str}: "
+                    f"Date range includes future dates. Current date is {now.strftime('%Y-%m-%d')}. "
+                    f"Please use dates up to today."
+                )
+            raise
+        
+        if data.empty:
+            # Check if it's because of future dates
+            if start_dt > now or end_dt > now:
+                raise ValueError(
+                    f"No data available for {yfinance_symbol} from {start_str} to {end_str}: "
+                    f"Date range includes future dates. Current date is {now.strftime('%Y-%m-%d')}. "
+                    f"Please use dates up to today."
+                )
+            logging.info(f"No {timeframe} data returned for {yfinance_symbol} in the specified date range.")
+            return pd.DataFrame()
+        
+        # Ensure index is DatetimeIndex
+        if not isinstance(data.index, pd.DatetimeIndex):
+            data.index = pd.to_datetime(data.index)
+        
+        # Rename columns to lowercase to match expected format
+        data.columns = [col.lower() for col in data.columns]
+        
+        # Ensure we have the required columns
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        missing_cols = [col for col in required_cols if col not in data.columns]
+        if missing_cols:
+            logging.warning(f"Missing columns in yfinance data: {missing_cols}")
+        
+        # Set index name based on timeframe
+        if timeframe == "daily":
+            data.index.name = 'date'
+        else:
+            data.index.name = 'datetime'
+        
+        # Ensure timezone is UTC (yfinance returns timezone-aware data)
+        if data.index.tz is None:
+            data.index = data.index.tz_localize('UTC')
+        else:
+            data.index = data.index.tz_convert('UTC')
+        
+        logging.info(f"Successfully fetched {len(data)} {timeframe} records of data for {yfinance_symbol} from Yahoo Finance.")
+        
+        if log_level == "DEBUG" and not data.empty:
+            logging.debug(f"Yahoo Finance DataFrame summary for {yfinance_symbol}:")
+            logging.debug(f"  Shape: {data.shape}")
+            logging.debug(f"  Columns: {list(data.columns)}")
+            if isinstance(data.index, pd.DatetimeIndex):
+                logging.debug(f"  Date range: {data.index.min()} to {data.index.max()}")
+            if len(data) > 0:
+                logging.debug(f"  First row:\n{data.head(1).to_string()}")
+                if len(data) > 1:
+                    logging.debug(f"  Last row:\n{data.tail(1).to_string()}")
+        
+        return data
+        
+    except Exception as e:
+        logging.error(f"Error fetching data from Yahoo Finance for {yfinance_symbol}: {e}")
+        raise e
+
+# Mapping from common index symbols to Yahoo Finance symbols
+INDEX_TO_YFINANCE_MAP = {
+    'SPX': '^GSPC',      # S&P 500
+    'SPY': 'SPY',        # S&P 500 ETF (not an index, but common)
+    'DJI': '^DJI',       # Dow Jones Industrial Average
+    'DIA': 'DIA',        # Dow ETF
+    'IXIC': '^IXIC',     # NASDAQ Composite
+    'QQQ': 'QQQ',        # NASDAQ ETF
+    'RUT': '^RUT',       # Russell 2000
+    'VIX': '^VIX',       # VIX Volatility Index
+    'TNX': '^TNX',       # 10-Year Treasury Yield
+    'FVX': '^FVX',       # 5-Year Treasury Yield
+    'IRX': '^IRX',       # 13-Week Treasury Yield
+    'NYA': '^NYA',       # NYSE Composite
+    'XAX': '^XAX',       # NYSE AMEX Composite
+    'BATSK': '^BATSK',   # NYSE Arca Tech 100
+    'N225': '^N225',     # Nikkei 225
+    'FTSE': '^FTSE',     # FTSE 100
+    'GDAXI': '^GDAXI',   # DAX
+    'FCHI': '^FCHI',     # CAC 40
+    'HSI': '^HSI',       # Hang Seng
+    'STOXX50E': '^STOXX50E',  # STOXX Europe 50
+}
+
+def _get_yfinance_symbol(index_symbol: str) -> str:
+    """
+    Convert index symbol to Yahoo Finance symbol.
+    
+    Args:
+        index_symbol: Index symbol (e.g., "SPX")
+    
+    Returns:
+        Yahoo Finance symbol (e.g., "^GSPC") or the original symbol if not found
+    """
+    return INDEX_TO_YFINANCE_MAP.get(index_symbol.upper(), f"^{index_symbol.upper()}")
+
+def _parse_index_ticker(ticker: str) -> tuple[str, str, bool, str | None]:
+    """
+    Parse ticker input to handle index format (I:SPX).
+    
+    Args:
+        ticker: Input ticker, may be in format "I:SPX" for indices or regular ticker like "AAPL"
+    
+    Returns:
+        tuple: (api_ticker, db_ticker, is_index, yfinance_symbol)
+            - api_ticker: Ticker to use for API calls (e.g., "I:SPX" for indices, but not used for yfinance)
+            - db_ticker: Ticker to use for database storage (e.g., "SPX" for indices)
+            - is_index: True if this is an index ticker, False otherwise
+            - yfinance_symbol: Yahoo Finance symbol (e.g., "^GSPC") if index, None otherwise
+    """
+    if ticker.startswith("I:"):
+        base_ticker = ticker[2:]  # Remove "I:" prefix
+        yfinance_symbol = _get_yfinance_symbol(base_ticker)
+        return (ticker, base_ticker, True, yfinance_symbol)
+    else:
+        return (ticker, ticker, False, None)
 
 def _is_market_hours(dt: datetime = None) -> bool:
     """Deprecated shim: use common.market_hours.is_market_hours"""
@@ -464,11 +769,30 @@ async def fetch_polygon_data(
     end_date: str,
     api_key: str,
     chunk_size: str = "monthly",  # New parameter: "auto", "daily", "weekly", "monthly"
-    log_level: str = "INFO"  # New parameter for controlling debug output
+    log_level: str = "INFO",  # New parameter for controlling debug output
+    api_ticker: str | None = None,  # Optional API ticker (e.g., "I:SPX" for indices)
+    yfinance_symbol: str | None = None  # Yahoo Finance symbol for indices (e.g., "^GSPC")
 ) -> pd.DataFrame:
-    """Fetch data from Polygon.io using their REST API with pagination support."""
+    """Fetch data from Polygon.io using their REST API with pagination support.
+    For indices, uses Yahoo Finance instead of Polygon.
+    
+    Args:
+        symbol: Symbol for logging/display purposes
+        api_ticker: Ticker to use for API calls (defaults to symbol if not provided)
+        yfinance_symbol: Yahoo Finance symbol for indices (if provided, uses yfinance instead of Polygon)
+    """
+    # If yfinance_symbol is provided, use Yahoo Finance for index data
+    if yfinance_symbol:
+        if not YFINANCE_AVAILABLE:
+            raise ImportError("yfinance not available. Install with: pip install yfinance")
+        logging.info(f"Using Yahoo Finance for index data: {yfinance_symbol}")
+        return await fetch_yfinance_index_data(yfinance_symbol, timeframe, start_date, end_date, log_level)
+    
     if not POLYGON_AVAILABLE:
         raise ImportError("Polygon API client not available. Install with: pip install polygon-api-client")
+    
+    # Use api_ticker if provided, otherwise use symbol
+    ticker_for_api = api_ticker if api_ticker is not None else symbol
     
     try:
         # Create Polygon client
@@ -538,7 +862,7 @@ async def fetch_polygon_data(
                 
                 # Fetch data for this chunk
                 chunk_data = await _fetch_polygon_chunk(
-                    client, symbol, timespan, chunk_start_str, chunk_end_str, log_level
+                    client, ticker_for_api, timespan, chunk_start_str, chunk_end_str, log_level
                 )
                 
                 if chunk_data:
@@ -562,7 +886,7 @@ async def fetch_polygon_data(
         else:
             # Original pagination logic for single large request
             all_data = await _fetch_polygon_paginated(
-                client, symbol, timespan, start_date_formatted, end_date_formatted, log_level
+                client, ticker_for_api, timespan, start_date_formatted, end_date_formatted, log_level
             )
         
         if not all_data:
@@ -932,6 +1256,12 @@ async def fetch_and_save_data(
     fetch_hourly: bool = True,  # New parameter to control hourly data fetching
     log_level: str = "INFO"  # New parameter for controlling debug output
 ) -> bool:
+    # Parse ticker to handle index format (I:SPX)
+    api_ticker, db_ticker, is_index, yfinance_symbol = _parse_index_ticker(symbol)
+    
+    if is_index:
+        logging.info(f"Detected index ticker: {symbol} -> DB ticker: {db_ticker}, Yahoo Finance: {yfinance_symbol}")
+    
     if data_source == "polygon":
         API_KEY = os.getenv('POLYGON_API_KEY')
         if not API_KEY:
@@ -992,15 +1322,18 @@ async def fetch_and_save_data(
         if fetch_daily:
             logging.info(f"Fetching daily data for {symbol} from {start_date_daily_api_str} to {end_date_api_str} via {data_source}...")
             if data_source == "polygon":
+                # For indices, use yfinance; for stocks, use Polygon
                 new_daily_bars = await fetch_polygon_data(
-                    symbol, "daily", start_date_daily_api_str, end_date_api_str, API_KEY, chunk_size, log_level
+                    symbol, "daily", start_date_daily_api_str, end_date_api_str, API_KEY, chunk_size, log_level, 
+                    api_ticker=api_ticker if not is_index else None, 
+                    yfinance_symbol=yfinance_symbol if is_index else None
                 )
             else:  # alpaca
                 new_daily_bars = await fetch_bars_single_aiohttp_all_pages(
                     symbol, TimeFrame.Day, start_date_daily_api_str, end_date_api_str, API_KEY, API_SECRET
                 )
 
-            final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, symbol, 'daily', data_dir, save_db_csv)
+            final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, db_ticker, 'daily', data_dir, save_db_csv)
             
             # Log what we got from Polygon
             if log_level == "DEBUG":
@@ -1017,8 +1350,8 @@ async def fetch_and_save_data(
                     current_batch_num = (i // db_save_batch_size) + 1
                     logging.info(f"Saving daily batch {current_batch_num}/{num_daily_batches} ({len(batch_df)} rows) for {symbol}...")
                     try:
-                        await stock_db_instance.save_stock_data(batch_df, symbol, interval='daily')
-                        logging.debug(f"Successfully saved daily batch {current_batch_num} for {symbol} ({len(batch_df)} rows)")
+                        await stock_db_instance.save_stock_data(batch_df, db_ticker, interval='daily')
+                        logging.debug(f"Successfully saved daily batch {current_batch_num} for {db_ticker} ({len(batch_df)} rows)")
                     except Exception as e_save_daily:
                         logging.error(f"Error saving daily batch {current_batch_num} for {symbol}: {e_save_daily}")
                         import traceback
@@ -1046,15 +1379,18 @@ async def fetch_and_save_data(
         if fetch_hourly:
             logging.info(f"Fetching hourly data for {symbol} from {start_date_hourly_api_str} to {end_date_hourly_api_str} via {data_source}...")
             if data_source == "polygon":
+                # For indices, use yfinance; for stocks, use Polygon
                 new_hourly_bars = await fetch_polygon_data(
-                    symbol, "hourly", start_date_hourly_api_str, end_date_hourly_api_str, API_KEY, chunk_size, log_level
+                    symbol, "hourly", start_date_hourly_api_str, end_date_hourly_api_str, API_KEY, chunk_size, log_level,
+                    api_ticker=api_ticker if not is_index else None,
+                    yfinance_symbol=yfinance_symbol if is_index else None
                 )
             else:  # alpaca
                 new_hourly_bars = await fetch_bars_single_aiohttp_all_pages(
                     symbol, TimeFrame.Hour, start_date_hourly_api_str, end_date_hourly_api_str, API_KEY, API_SECRET
                 )
 
-            final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, symbol, 'hourly', data_dir, save_db_csv)
+            final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, db_ticker, 'hourly', data_dir, save_db_csv)
             
             # Log what we got from Polygon
             if log_level == "DEBUG":
@@ -1071,8 +1407,8 @@ async def fetch_and_save_data(
                     current_batch_num = (i // db_save_batch_size) + 1
                     logging.info(f"Saving hourly batch {current_batch_num}/{num_hourly_batches} ({len(batch_df)} rows) for {symbol}...")
                     try:
-                        await stock_db_instance.save_stock_data(batch_df, symbol, interval='hourly')
-                        logging.debug(f"Successfully saved hourly batch {current_batch_num} for {symbol} ({len(batch_df)} rows)")
+                        await stock_db_instance.save_stock_data(batch_df, db_ticker, interval='hourly')
+                        logging.debug(f"Successfully saved hourly batch {current_batch_num} for {db_ticker} ({len(batch_df)} rows)")
                     except Exception as e_save_hourly:
                         logging.error(f"Error saving hourly batch {current_batch_num} for {symbol}: {e_save_hourly}")
                         import traceback
@@ -1123,6 +1459,12 @@ async def process_symbol_data(
     enable_cache: bool = True  # New parameter for cache control
 ) -> pd.DataFrame:
     """Processes symbol data: queries DB, fetches if needed, and returns DataFrame."""
+    
+    # Parse ticker to handle index format (I:SPX)
+    api_ticker, db_ticker, is_index, yfinance_symbol = _parse_index_ticker(symbol)
+    
+    if is_index:
+        logging.info(f"Processing index ticker: {symbol} -> DB ticker: {db_ticker}, Yahoo Finance: {yfinance_symbol}")
 
     current_db_instance = stock_db_instance
     if current_db_instance is None:
@@ -1171,8 +1513,44 @@ async def process_symbol_data(
     if end_date is None:
         end_date = datetime.now().strftime('%Y-%m-%d')
     
+    # Validate dates are not in the future (especially important for indices using Yahoo Finance)
+    now = datetime.now(timezone.utc)
+    today_str = now.strftime('%Y-%m-%d')
+    
+    try:
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+        
+        # Check for future dates
+        if start_dt > now:
+            raise ValueError(
+                f"Start date {start_date} is in the future. "
+                f"Current date is {today_str}. "
+                f"Cannot fetch data for future dates. Please use a date up to today."
+            )
+        if end_dt > now:
+            # Allow end_date to be slightly in the future (up to 1 day) for timezone differences
+            if (end_dt - now).days > 1:
+                raise ValueError(
+                    f"End date {end_date} is too far in the future. "
+                    f"Current date is {today_str}. "
+                    f"Cannot fetch data for future dates. Please use a date up to today."
+                )
+            # If end_date is within 1 day of now, adjust it to today
+            end_date = today_str
+            logging.info(f"Adjusted end_date to today ({end_date}) since requested date was in the future")
+    except ValueError as ve:
+        # Re-raise ValueError (date validation errors) as-is
+        raise ve
+    except Exception as e:
+        # For other date parsing errors, log and continue (might be handled elsewhere)
+        logging.debug(f"Date validation warning: {e}")
+    
     # If end_date is today and we're on a trading day, ensure we fetch today's data
-    today_str = datetime.now().strftime('%Y-%m-%d')
     if end_date == today_str and (_is_market_hours() or (not _is_market_hours() and datetime.now().weekday() < 5)):
         # This is a trading day, so we should try to fetch today's data if it's not available
         pass  # The existing logic will handle this
@@ -1181,12 +1559,12 @@ async def process_symbol_data(
 
     if not force_fetch:
         logging.info(
-            f"Attempting to retrieve {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})..."
+            f"Attempting to retrieve {timeframe} data for {db_ticker} from database ({start_date or 'earliest'} to {end_date})..."
         )
-        data_df = await current_db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval=timeframe)
+        data_df = await current_db_instance.get_stock_data(db_ticker, start_date=start_date, end_date=end_date, interval=timeframe)
 
         if not data_df.empty:
-            action_taken = f"Data for {symbol} ({timeframe}) retrieved from database."
+            action_taken = f"Data for {db_ticker} ({timeframe}) retrieved from database."
             logging.info(action_taken)
 
             # Only format dates if index is a DatetimeIndex
@@ -1222,6 +1600,10 @@ async def process_symbol_data(
         os.makedirs(daily_dir, exist_ok=True)
         os.makedirs(hourly_dir, exist_ok=True)
 
+        # Only fetch the requested timeframe
+        fetch_daily = (timeframe == 'daily')
+        fetch_hourly = (timeframe == 'hourly')
+        
         fetch_success = await fetch_and_save_data(
             symbol, 
             data_dir, 
@@ -1233,6 +1615,8 @@ async def process_symbol_data(
             data_source=data_source,  # Pass the new argument
             chunk_size=chunk_size,  # Pass the new argument
             save_db_csv=save_db_csv,  # Pass the new argument
+            fetch_daily=fetch_daily,  # Only fetch daily if requested
+            fetch_hourly=fetch_hourly,  # Only fetch hourly if requested
             log_level=log_level  # Pass log_level for debug output
         ) 
 
@@ -1240,11 +1624,11 @@ async def process_symbol_data(
             print(
                 f"Retrieving newly fetched/updated {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})...", file=sys.stderr
             )
-            data_df = await current_db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval=timeframe)
+            data_df = await current_db_instance.get_stock_data(db_ticker, start_date=start_date, end_date=end_date, interval=timeframe)
             if data_df.empty:
-                print(f"Warning: Data for {symbol} ({timeframe}) was fetched but not found in DB with current query parameters. Check fetch ranges and query.", file=sys.stderr)
+                print(f"Warning: Data for {db_ticker} ({timeframe}) was fetched but not found in DB with current query parameters. Check fetch ranges and query.", file=sys.stderr)
             else:
-                action_taken = f"Fetched/updated and retrieved data for {symbol} ({timeframe}) from {data_source}/DB."
+                action_taken = f"Fetched/updated and retrieved data for {db_ticker} ({timeframe}) from {data_source}/DB."
                 print(action_taken, file=sys.stderr)
         else:
             print(f"Fetching data failed for {symbol}. Cannot retrieve from DB.", file=sys.stderr)
@@ -1716,10 +2100,60 @@ async def get_current_price(
     return result
 
 async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBase | None = None) -> dict:
-    """Get current price from Polygon.io API."""
+    """Get current price from Polygon.io API or Yahoo Finance for indices."""
     import time
     api_start = time.time()
     
+    # Parse ticker to handle index format (I:SPX)
+    api_ticker, db_ticker, is_index, yfinance_symbol = _parse_index_ticker(symbol)
+    
+    # For indices, use Yahoo Finance
+    if is_index and yfinance_symbol:
+        if not YFINANCE_AVAILABLE:
+            raise ImportError("yfinance not available. Install with: pip install yfinance")
+        
+        try:
+            ticker = yf.Ticker(yfinance_symbol)
+            info = ticker.info
+            
+            # Try to get current price
+            current_price = None
+            if 'regularMarketPrice' in info and info['regularMarketPrice']:
+                current_price = info['regularMarketPrice']
+            elif 'currentPrice' in info and info['currentPrice']:
+                current_price = info['currentPrice']
+            elif 'previousClose' in info and info['previousClose']:
+                current_price = info['previousClose']
+            
+            # Try history as fallback
+            if current_price is None:
+                try:
+                    data = ticker.history(period="1d", interval="1m")
+                    if not data.empty:
+                        current_price = data["Close"].iloc[-1]
+                except Exception:
+                    pass
+            
+            if current_price is None:
+                raise Exception(f"No price data available for {yfinance_symbol} from Yahoo Finance")
+            
+            timestamp = datetime.now(timezone.utc)
+            
+            return {
+                'symbol': db_ticker,
+                'price': current_price,
+                'bid_price': None,
+                'ask_price': None,
+                'timestamp': timestamp.isoformat(),
+                'write_timestamp': timestamp.isoformat(),
+                'source': 'yfinance_index',
+                'data_source': 'yfinance'
+            }
+        except Exception as e:
+            logging.error(f"Error fetching current price for {yfinance_symbol} from Yahoo Finance: {e}")
+            raise
+    
+    # For stocks, use Polygon
     if not POLYGON_AVAILABLE:
         raise ImportError("Polygon API client not available. Install with: pip install polygon-api-client")
     
@@ -1732,7 +2166,7 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
         
         # Get the latest quote
         quote_start = time.time()
-        quote = client.get_last_quote(ticker=symbol)
+        quote = client.get_last_quote(ticker=api_ticker)
         quote_time = (time.time() - quote_start) * 1000
         logging.debug(f"[API] Polygon get_last_quote for {symbol} took {quote_time:.1f}ms")
         if quote:
@@ -1752,15 +2186,15 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
             if current_db_instance:
                 try:
 
-                    await current_db_instance.save_realtime_data(quote_df, symbol, data_type="quote")
-                    logging.debug(f"[DB SAVE] Saved quote data for {symbol} to realtime table")
+                    await current_db_instance.save_realtime_data(quote_df, db_ticker, data_type="quote")
+                    logging.debug(f"[DB SAVE] Saved quote data for {db_ticker} to realtime table")
                     
                 except Exception as e:
                     logging.warning(f"[DB SAVE ERROR] Failed to save quote data for {symbol} to realtime table: {e}")
             
             api_total_time = (time.time() - api_start) * 1000
             return {
-                'symbol': symbol,
+                'symbol': db_ticker,  # Return db_ticker for consistency
                 'price': quote.bid_price,  # Use bid price as primary price
                 'bid_price': quote.bid_price,
                 'ask_price': quote.ask_price,
@@ -1774,7 +2208,7 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
             }
         
         # If no quote, try to get the latest trade
-        trade = client.get_last_trade(ticker=symbol)
+        trade = client.get_last_trade(ticker=api_ticker)
         if trade:
             # Create DataFrame for saving to realtime table
             if hasattr(trade, 'sip_timestamp'):
@@ -1791,13 +2225,13 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
             # Save to realtime table if we have a database instance
             if current_db_instance:
                 try:
-                    await current_db_instance.save_realtime_data(trade_df, symbol, data_type="trade")
-                    print(f"Saved trade data for {symbol} to realtime table", file=sys.stderr)
+                    await current_db_instance.save_realtime_data(trade_df, db_ticker, data_type="trade")
+                    print(f"Saved trade data for {db_ticker} to realtime table", file=sys.stderr)
                 except Exception as e:
-                    print(f"Warning: Failed to save trade data for {symbol} to realtime table: {e}", file=sys.stderr)
+                    print(f"Warning: Failed to save trade data for {db_ticker} to realtime table: {e}", file=sys.stderr)
             
             return {
-                'symbol': symbol,
+                'symbol': db_ticker,  # Return db_ticker for consistency
                 'price': trade.price,
                 'bid_price': None,
                 'ask_price': None,
@@ -1811,7 +2245,7 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
         # If neither quote nor trade available, try to get the latest daily bar
         today = datetime.now().strftime('%Y-%m-%d')
         aggs = client.get_aggs(
-            ticker=symbol,
+            ticker=api_ticker,
             multiplier=1,
             timespan="day",
             from_=today,
@@ -1824,7 +2258,7 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
         if aggs:
             bar = aggs[0]
             return {
-                'symbol': symbol,
+                'symbol': db_ticker,  # Return db_ticker for consistency
                 'price': bar.close,
                 'bid_price': None,
                 'ask_price': None,
@@ -2866,6 +3300,9 @@ async def _handle_latest_mode(args) -> None:
     Args:
         args: Parsed command-line arguments
     """
+    # Parse ticker to handle index format (I:SPX)
+    api_ticker, db_ticker, is_index, yfinance_symbol = _parse_index_ticker(args.symbol)
+    
     db_instance_for_cleanup = None
     try:
         # Create database instance
@@ -2882,8 +3319,9 @@ async def _handle_latest_mode(args) -> None:
         enable_cache = not args.no_cache
         
         # Fetch and display latest price data from all sources (realtime, hourly, daily)
+        display_symbol = f"{db_ticker} ({args.symbol})" if is_index else args.symbol
         print(f"\n{'='*80}")
-        print(f"LATEST PRICE DATA FOR {args.symbol}")
+        print(f"LATEST PRICE DATA FOR {display_symbol}")
         print(f"{'='*80}")
         
         price_data = {}
@@ -2891,7 +3329,7 @@ async def _handle_latest_mode(args) -> None:
         # Get latest from realtime_data
         try:
             if args.only_fetch is None or args.only_fetch == "realtime":
-                realtime_df = await db_instance_for_cleanup.get_realtime_data(args.symbol, data_type="quote")
+                realtime_df = await db_instance_for_cleanup.get_realtime_data(db_ticker, data_type="quote")
                 if isinstance(realtime_df, pd.DataFrame) and not realtime_df.empty:
                     latest_realtime = realtime_df.iloc[0]
                     price_data['realtime'] = {
@@ -2905,7 +3343,7 @@ async def _handle_latest_mode(args) -> None:
         # Get latest from hourly_prices
         try:
             if args.only_fetch is None or args.only_fetch == "hourly":
-                hourly_df = await db_instance_for_cleanup.get_stock_data(args.symbol, interval="hourly")
+                hourly_df = await db_instance_for_cleanup.get_stock_data(db_ticker, interval="hourly")
                 if isinstance(hourly_df, pd.DataFrame) and not hourly_df.empty:
                     latest_hourly = hourly_df.iloc[-1]
                     price_data['hourly'] = {
@@ -2922,7 +3360,7 @@ async def _handle_latest_mode(args) -> None:
         # Get latest from daily_prices
         try:
             if args.only_fetch is None or args.only_fetch == "daily":
-                daily_df = await db_instance_for_cleanup.get_stock_data(args.symbol, interval="daily")
+                daily_df = await db_instance_for_cleanup.get_stock_data(db_ticker, interval="daily")
                 if isinstance(daily_df, pd.DataFrame) and not daily_df.empty:
                     latest_daily = daily_df.iloc[-1]
                     price_data['daily'] = {
