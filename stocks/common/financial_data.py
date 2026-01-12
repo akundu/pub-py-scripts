@@ -369,6 +369,11 @@ async def get_financial_info(
         "fetch_time_ms": None
     }
     
+    # Initialize cache_instance early so it's available in all code paths
+    cache_instance = None
+    if hasattr(db_instance, 'cache') and db_instance.cache:
+        cache_instance = db_instance.cache
+    
     try:
         # Get financial data from database (uses FinancialDataService.get() which has its own cache)
         # No need for separate cache layer here - let FinancialDataService handle caching
@@ -509,9 +514,6 @@ async def get_financial_info(
                     logger.info(f"[FINANCIAL DB HIT] Financial data for {symbol} (db_check: {db_check_time:.1f}ms, total: {fetch_time:.1f}ms)")
                     
                     # Cache the result (FinancialDataService already caches, but we can also cache here if needed)
-                    cache_instance = None
-                    if hasattr(db_instance, 'cache') and db_instance.cache:
-                        cache_instance = db_instance.cache
                     if cache_instance:
                         try:
                             cache_key = CacheKeyGenerator.financial_info(symbol)
