@@ -53,6 +53,31 @@ try:
 except ImportError:
     POLYGON_AVAILABLE = False
 
+def _convert_index_symbol_for_polygon(symbol: str) -> tuple[str, bool]:
+    """
+    Convert index symbol format (I:SPX) to Polygon API format (SPX).
+    
+    For Polygon options API, index symbols need to be in format "SPX" not "I:SPX".
+    This function extracts the base symbol for API calls while preserving the original
+    for display/logging purposes.
+    
+    Args:
+        symbol: Input symbol (e.g., "I:SPX", "SPX", "AAPL")
+        
+    Returns:
+        tuple: (polygon_symbol, is_index)
+            - polygon_symbol: Symbol to use for Polygon API calls (e.g., "SPX" for "I:SPX")
+            - is_index: True if this is an index symbol, False otherwise
+    """
+    # Handle case-insensitive matching for "I:" prefix
+    symbol_upper = symbol.upper()
+    if symbol_upper.startswith("I:"):
+        # Extract base symbol (e.g., "I:SPX" -> "SPX", "i:spx" -> "SPX")
+        polygon_symbol = symbol[2:].upper()
+        return polygon_symbol, True
+    return symbol.upper(), False
+
+
 class HistoricalDataFetcher:
     """Fetches historical stock and options data from Polygon.io."""
     CACHE_DURATION_MINUTES = {
@@ -285,17 +310,23 @@ class HistoricalDataFetcher:
         """
         target_date_dt = datetime.strptime(target_date_str, '%Y-%m-%d')
         
+        # Convert index symbol for Polygon API (I:SPX -> SPX)
+        polygon_symbol, is_index = _convert_index_symbol_for_polygon(symbol)
+        
         # We look at a 7-day window ending on the target date to ensure we find a trading day.
         search_start = (target_date_dt - timedelta(days=7)).strftime('%Y-%m-%d')
         search_end = target_date_str
         
         if not self.quiet:
-            print(f"Fetching historical price for {symbol} on or before {target_date_str}...", flush=True)
+            if is_index:
+                print(f"Fetching historical price for {symbol} (index, using Polygon symbol {polygon_symbol}) on or before {target_date_str}...", flush=True)
+            else:
+                print(f"Fetching historical price for {symbol} on or before {target_date_str}...", flush=True)
 
         try:
             # Sort descending and limit to 1 to get the latest trading day on or before the target date
             aggs = self.client.get_aggs(
-                ticker=symbol,
+                ticker=polygon_symbol,
                 multiplier=1,
                 timespan="day",
                 from_=search_start,
@@ -344,18 +375,25 @@ class HistoricalDataFetcher:
         force_fresh: bool = False,
         enable_cache: bool = True,
         redis_url: str | None = None,
-        db_timeout: float = 60.0
+        db_timeout: float = 60.0,
+        db_only: bool = False
     ) -> Dict[str, Any]:
         """
         Fetches all options contracts that were active on a specific date and gets their
         current snapshot data (including prices and Greeks).
         Applies filters for option type and strike price range.
         """
+        # Convert index symbol for Polygon API (I:SPX -> SPX)
+        polygon_symbol, is_index = _convert_index_symbol_for_polygon(symbol)
+        
         options_data = {"contracts": []}
         target_date_dt = datetime.strptime(target_date_str, '%Y-%m-%d')
         
         if not self.quiet:
-            print(f"Fetching options for {symbol} expiring around {target_date_str}...")
+            if is_index:
+                print(f"Fetching options for {symbol} (index, using Polygon symbol {polygon_symbol}) expiring around {target_date_str}...")
+            else:
+                print(f"Fetching options for {symbol} expiring around {target_date_str}...")
         overall_start_time = time.time()
         
         # 1) Prefer DB when enabled: load latest options from database and return if available (unless force_fresh)
@@ -373,7 +411,8 @@ class HistoricalDataFetcher:
                 
                 # Use db_timeout parameter for remote connections (default 60 seconds)
                 db = get_stock_db(db_type, db_config=db_config, enable_cache=enable_cache, redis_url=redis_url, timeout=db_timeout if db_type == 'remote' else None)
-                latest_df = await db.get_latest_options_data(ticker=symbol)
+                # Use polygon_symbol for database queries (I:SPX -> SPX)
+                latest_df = await db.get_latest_options_data(ticker=polygon_symbol)
                 if latest_df is not None and not latest_df.empty:
                     # Map DB dataframe to contracts list in script format
                     contracts_from_db = []
@@ -479,6 +518,13 @@ class HistoricalDataFetcher:
                     print(f"Using cached data. Cache duration: {self._get_cache_duration_minutes()} minutes")
                 return {"success": True, "data": options_data}
         
+        # If db_only is enabled and we didn't find data in DB or cache, return error
+        if db_only:
+            error_msg = f"No data found in database or cache for {symbol} on {target_date_str}. Use --force-fresh to fetch from API."
+            if not self.quiet:
+                print(f"Error: {error_msg}", file=sys.stderr)
+            return {"success": False, "error": error_msg, "data": options_data}
+        
         try:
             # --- Build API query parameters for efficient filtering ---
             # Default: show options active on or after the target date
@@ -504,7 +550,7 @@ class HistoricalDataFetcher:
                 print("  ...fetching active contracts within date range...", flush=True)
             fetch_active_start = time.time()
             active_contracts_generator = self.client.list_options_contracts(
-                underlying_ticker=symbol,
+                underlying_ticker=polygon_symbol,
                 expiration_date_gte=expiration_date_gte,
                 expiration_date_lte=expiration_date_lte,
                 limit=1000,
@@ -540,7 +586,7 @@ class HistoricalDataFetcher:
                     print("  ...fetching EXPIRED contracts (this may be slow)...", flush=True)
                 fetch_expired_start = time.time()
                 expired_contracts_generator = self.client.list_options_contracts(
-                    underlying_ticker=symbol,
+                    underlying_ticker=polygon_symbol,
                     expiration_date_gte=expiration_date_gte,
                     expiration_date_lte=expiration_date_lte,
                     limit=1000,
@@ -657,7 +703,7 @@ class HistoricalDataFetcher:
                             details['implied_volatility'] = iv_value
                         break
                 try:
-                    snapshot_local = self.client.get_snapshot_option(symbol, contract_ticker_local)
+                    snapshot_local = self.client.get_snapshot_option(polygon_symbol, contract_ticker_local)
                     
                     # Also try to get quote separately using get_last_quote
                     quote_local = None
@@ -1188,6 +1234,10 @@ async def display_and_save_saved_options(
     api_key: str
 ) -> None:
     """Display and/or save saved options from the database after fetching (non-continuous mode only)."""
+    # Auto-enable save_saved_to_csv if save_saved_to_csv_file is specified
+    if getattr(args, 'save_saved_to_csv_file', None) and not getattr(args, 'save_saved_to_csv', False):
+        args.save_saved_to_csv = True
+    
     if not getattr(args, 'display_saved', False) and not getattr(args, 'save_saved_to_csv', False):
         return
     
@@ -1261,7 +1311,8 @@ async def display_and_save_saved_options(
                 force_fresh=False,
                 enable_cache=enable_cache,
                 redis_url=redis_url,
-                db_timeout=db_timeout
+                db_timeout=db_timeout,
+                db_only=getattr(args, 'db_only', False)
             )
             
             if not options_result.get('success'):
@@ -1504,6 +1555,10 @@ def _run_for_ticker_chunk(ticker_chunk: list[str], target_date_str: str, args_na
 
 def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: str) -> str:
     """Worker task: runs fetch for a single symbol, saves to DB in worker process, and returns formatted output string."""
+    # Convert index symbol for database operations (I:SPX -> SPX)
+    # The fetcher functions handle conversion for API calls, but we need it here for DB saves
+    polygon_symbol, _ = _convert_index_symbol_for_polygon(symbol)
+    
     try:
         fetcher = HistoricalDataFetcher(
             api_key,
@@ -1534,7 +1589,8 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
                 force_fresh=getattr(args_namespace, 'force_fresh', False),
                 enable_cache=enable_cache,
                 redis_url=redis_url,
-                db_timeout=getattr(args_namespace, 'db_timeout', 60.0)
+                db_timeout=getattr(args_namespace, 'db_timeout', 60.0),
+                db_only=getattr(args_namespace, 'db_only', False)
             )
             
             # Save to database in worker process (multi-processed saves)
@@ -1604,7 +1660,7 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
                                 import aiohttp
                                 async with aiohttp.ClientSession() as session:
                                     db_save_task = {
-                                        'symbol': symbol,
+                                        'symbol': polygon_symbol,  # Use converted symbol for database
                                         'df': df,
                                         'contracts_count': len(contracts)
                                     }
@@ -1629,7 +1685,7 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
                                 
                                 # Use async context manager to ensure proper cleanup
                                 async with worker_db_instance:
-                                    await worker_db_instance.save_options_data(df=df, ticker=symbol)
+                                    await worker_db_instance.save_options_data(df=df, ticker=polygon_symbol)  # Use converted symbol for database
                                     
                                     # Update Redis cache
                                     if enable_cache:
@@ -2927,6 +2983,11 @@ Examples:
         help="Force fresh fetch from Polygon API, bypassing both database cache and CSV cache. Use with --use-db to save to database."
     )
     parser.add_argument(
+        '--db-only',
+        action='store_true',
+        help="Only serve data from database and/or cache. Do not make external API calls. Returns an error if data is not found in DB/cache."
+    )
+    parser.add_argument(
         '--no-cache',
         action='store_true',
         help="Disable Redis caching for QuestDB operations (default: cache enabled)"
@@ -2973,6 +3034,10 @@ Examples:
     elif getattr(args, 'date', None):
         print(f"--date specified ({args.date}) as start date for multi-month mode", file=sys.stderr)
 
+    # Validate conflicting arguments
+    if getattr(args, 'db_only', False) and getattr(args, 'force_fresh', False):
+        parser.error("--db-only and --force-fresh cannot be used together. --db-only prevents API calls, while --force-fresh forces API calls.")
+    
     # Backward-compatibility: map deprecated flags to new consolidated flags
     if getattr(args, 'use_csv_cache', False) or getattr(args, 'save_to_csv', False):
         args.use_csv = True
@@ -3463,6 +3528,9 @@ Examples:
         await _execute_options_iteration(symbols_list, args, api_key, all_pools)
         
         # Display and/or save saved options if requested (non-continuous mode only)
+        # Auto-enable save_saved_to_csv if save_saved_to_csv_file is specified
+        if getattr(args, 'save_saved_to_csv_file', None) and not getattr(args, 'save_saved_to_csv', False):
+            args.save_saved_to_csv = True
         if getattr(args, 'display_saved', False) or getattr(args, 'save_saved_to_csv', False):
             await display_and_save_saved_options(symbols_list, args, api_key)
         

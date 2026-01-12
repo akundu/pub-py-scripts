@@ -32,6 +32,9 @@ import pytz # Added for market hours checking
 from typing import Any, Optional, Dict
 from common.market_hours import is_market_hours, is_market_preopen, is_market_postclose
 
+# Import new fetcher classes
+from common.fetcher import FetcherFactory
+
 logger = logging.getLogger(__name__)
 try:
     import tzlocal
@@ -86,6 +89,17 @@ async def fetch_yfinance_index_data(
     end_date: str,
     log_level: str = "INFO"
 ) -> pd.DataFrame:
+    """
+    DEPRECATED: Use YahooFinanceFetcher from common.fetcher instead.
+    
+    This function is kept for backward compatibility but will be removed in a future version.
+    """
+    import warnings
+    warnings.warn(
+        "fetch_yfinance_index_data is deprecated. Use YahooFinanceFetcher from common.fetcher instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     """
     Fetch historical index data from Yahoo Finance using yfinance.
     
@@ -773,7 +787,12 @@ async def fetch_polygon_data(
     api_ticker: str | None = None,  # Optional API ticker (e.g., "I:SPX" for indices)
     yfinance_symbol: str | None = None  # Yahoo Finance symbol for indices (e.g., "^GSPC")
 ) -> pd.DataFrame:
-    """Fetch data from Polygon.io using their REST API with pagination support.
+    """
+    DEPRECATED: Use FetcherFactory.create_fetcher() and fetcher.fetch_historical_data() instead.
+    
+    This function is kept for backward compatibility but will be removed in a future version.
+    
+    Fetch data from Polygon.io using their REST API with pagination support.
     For indices, uses Yahoo Finance instead of Polygon.
     
     Args:
@@ -781,6 +800,12 @@ async def fetch_polygon_data(
         api_ticker: Ticker to use for API calls (defaults to symbol if not provided)
         yfinance_symbol: Yahoo Finance symbol for indices (if provided, uses yfinance instead of Polygon)
     """
+    import warnings
+    warnings.warn(
+        "fetch_polygon_data is deprecated. Use FetcherFactory.create_fetcher() and fetcher.fetch_historical_data() instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     # If yfinance_symbol is provided, use Yahoo Finance for index data
     if yfinance_symbol:
         if not YFINANCE_AVAILABLE:
@@ -1191,6 +1216,107 @@ async def fetch_bars_single_aiohttp_all_pages(
             
     return all_bars_df
 
+def _export_data_to_csv(
+    daily_df: pd.DataFrame,
+    hourly_df: pd.DataFrame,
+    symbol: str,
+    output_dir: str
+) -> None:
+    """
+    Export daily and hourly data to CSV files.
+    
+    Daily data: One file with open, close, high, low
+    Hourly data: One file per month with open, close, high, low
+    
+    Args:
+        daily_df: DataFrame with daily data (index: date, columns: open, close, high, low, volume)
+        hourly_df: DataFrame with hourly data (index: datetime, columns: open, close, high, low, volume)
+        symbol: Stock symbol
+        output_dir: Directory to save CSV files
+    """
+    from pathlib import Path
+    
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Parse ticker to get db_ticker (handle I:SPX format)
+    _, db_ticker, _, _ = _parse_index_ticker(symbol)
+    
+    # Export daily data to one file
+    if not daily_df.empty:
+        # Select only OHLC columns (and volume if available)
+        daily_export = daily_df.copy()
+        columns_to_keep = ['open', 'close', 'high', 'low']
+        if 'volume' in daily_export.columns:
+            columns_to_keep.append('volume')
+        
+        # Keep only columns that exist
+        columns_to_keep = [col for col in columns_to_keep if col in daily_export.columns]
+        daily_export = daily_export[columns_to_keep]
+        
+        # Reset index to make date a column
+        daily_export = daily_export.reset_index()
+        # Rename index column to 'date' if it has a different name
+        if daily_export.index.name and daily_export.index.name != 'date':
+            daily_export = daily_export.rename_axis('date').reset_index()
+        elif len(daily_export.columns) > 0 and daily_export.columns[0] != 'date':
+            # First column is the index, rename it to 'date'
+            daily_export = daily_export.rename(columns={daily_export.columns[0]: 'date'})
+        
+        # Save daily CSV
+        daily_csv_path = output_path / f"{db_ticker}_daily.csv"
+        daily_export.to_csv(daily_csv_path, index=False)
+        logging.info(f"Exported {len(daily_export)} daily records to {daily_csv_path}")
+    
+    # Export hourly data split by month
+    if not hourly_df.empty:
+        # Select only OHLC columns (and volume if available)
+        hourly_export = hourly_df.copy()
+        columns_to_keep = ['open', 'close', 'high', 'low']
+        if 'volume' in hourly_export.columns:
+            columns_to_keep.append('volume')
+        
+        # Keep only columns that exist
+        columns_to_keep = [col for col in columns_to_keep if col in hourly_export.columns]
+        hourly_export = hourly_export[columns_to_keep]
+        
+        # Reset index to make datetime a column
+        hourly_export = hourly_export.reset_index()
+        # Rename index column to 'datetime' if it has a different name
+        if len(hourly_export.columns) > 0 and hourly_export.columns[0] != 'datetime':
+            # First column is the index, rename it to 'datetime'
+            hourly_export = hourly_export.rename(columns={hourly_export.columns[0]: 'datetime'})
+        
+        # Ensure datetime column is datetime type
+        if 'datetime' in hourly_export.columns:
+            hourly_export['datetime'] = pd.to_datetime(hourly_export['datetime'])
+        else:
+            # Try to find datetime column
+            for col in hourly_export.columns:
+                if pd.api.types.is_datetime64_any_dtype(hourly_export[col]):
+                    hourly_export = hourly_export.rename(columns={col: 'datetime'})
+                    break
+        
+        # Group by year-month and save separate files
+        if 'datetime' in hourly_export.columns:
+            hourly_export['year_month'] = hourly_export['datetime'].dt.to_period('M')
+            
+            for year_month, group_df in hourly_export.groupby('year_month'):
+                # Remove the year_month column before saving
+                group_df = group_df.drop(columns=['year_month'])
+                
+                # Format filename: SYMBOL_hourly_YYYY-MM.csv
+                month_str = str(year_month)
+                hourly_csv_path = output_path / f"{db_ticker}_hourly_{month_str}.csv"
+                group_df.to_csv(hourly_csv_path, index=False)
+                logging.info(f"Exported {len(group_df)} hourly records for {month_str} to {hourly_csv_path}")
+        else:
+            # Fallback: save all hourly data to one file if datetime column not found
+            hourly_csv_path = output_path / f"{db_ticker}_hourly_all.csv"
+            hourly_export.to_csv(hourly_csv_path, index=False)
+            logging.warning(f"Could not split hourly data by month (datetime column not found). Saved all {len(hourly_export)} records to {hourly_csv_path}")
+
+
 def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: str, data_dir: str, save_db_csv: bool = False) -> pd.DataFrame:
     """Helper function to merge new data with existing CSV data and optionally save."""
     if new_data_df.empty:
@@ -1254,7 +1380,8 @@ async def fetch_and_save_data(
     save_db_csv: bool = False,  # New parameter for CSV usage control
     fetch_daily: bool = True,  # New parameter to control daily data fetching
     fetch_hourly: bool = True,  # New parameter to control hourly data fetching
-    log_level: str = "INFO"  # New parameter for controlling debug output
+    log_level: str = "INFO",  # New parameter for controlling debug output
+    export_csv_dir: str | None = None  # New parameter for CSV export directory
 ) -> bool:
     # Parse ticker to handle index format (I:SPX)
     api_ticker, db_ticker, is_index, yfinance_symbol = _parse_index_ticker(symbol)
@@ -1321,17 +1448,37 @@ async def fetch_and_save_data(
         # Fetch daily data (if requested)
         if fetch_daily:
             logging.info(f"Fetching daily data for {symbol} from {start_date_daily_api_str} to {end_date_api_str} via {data_source}...")
-            if data_source == "polygon":
-                # For indices, use yfinance; for stocks, use Polygon
-                new_daily_bars = await fetch_polygon_data(
-                    symbol, "daily", start_date_daily_api_str, end_date_api_str, API_KEY, chunk_size, log_level, 
-                    api_ticker=api_ticker if not is_index else None, 
-                    yfinance_symbol=yfinance_symbol if is_index else None
+            
+            # Use new fetcher architecture
+            try:
+                fetcher = FetcherFactory.create_fetcher(
+                    data_source=data_source,
+                    symbol=symbol,  # Auto-detects indices and routes to Yahoo Finance
+                    api_key=API_KEY,
+                    api_secret=API_SECRET if data_source == "alpaca" else None,
+                    log_level=log_level
                 )
-            else:  # alpaca
-                new_daily_bars = await fetch_bars_single_aiohttp_all_pages(
-                    symbol, TimeFrame.Day, start_date_daily_api_str, end_date_api_str, API_KEY, API_SECRET
+                
+                # Fetch data using new fetcher
+                fetch_result = await fetcher.fetch_historical_data(
+                    symbol=yfinance_symbol if is_index else (api_ticker if api_ticker else symbol),
+                    timeframe="daily",
+                    start_date=start_date_daily_api_str,
+                    end_date=end_date_api_str,
+                    chunk_size=chunk_size if data_source == "polygon" else None
                 )
+                
+                if not fetch_result.success:
+                    logging.error(f"Failed to fetch daily data for {symbol}: {fetch_result.error}")
+                    new_daily_bars = pd.DataFrame()
+                else:
+                    new_daily_bars = fetch_result.data
+                    logging.info(f"Fetched {fetch_result.records_fetched} daily records from {fetch_result.source}")
+            except Exception as e:
+                logging.error(f"Error creating fetcher or fetching daily data for {symbol}: {e}")
+                import traceback
+                logging.error(traceback.format_exc())
+                new_daily_bars = pd.DataFrame()
 
             final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, db_ticker, 'daily', data_dir, save_db_csv)
             
@@ -1378,17 +1525,37 @@ async def fetch_and_save_data(
         # Fetch hourly data (if requested)
         if fetch_hourly:
             logging.info(f"Fetching hourly data for {symbol} from {start_date_hourly_api_str} to {end_date_hourly_api_str} via {data_source}...")
-            if data_source == "polygon":
-                # For indices, use yfinance; for stocks, use Polygon
-                new_hourly_bars = await fetch_polygon_data(
-                    symbol, "hourly", start_date_hourly_api_str, end_date_hourly_api_str, API_KEY, chunk_size, log_level,
-                    api_ticker=api_ticker if not is_index else None,
-                    yfinance_symbol=yfinance_symbol if is_index else None
+            
+            # Use new fetcher architecture
+            try:
+                fetcher = FetcherFactory.create_fetcher(
+                    data_source=data_source,
+                    symbol=symbol,  # Auto-detects indices and routes to Yahoo Finance
+                    api_key=API_KEY,
+                    api_secret=API_SECRET if data_source == "alpaca" else None,
+                    log_level=log_level
                 )
-            else:  # alpaca
-                new_hourly_bars = await fetch_bars_single_aiohttp_all_pages(
-                    symbol, TimeFrame.Hour, start_date_hourly_api_str, end_date_hourly_api_str, API_KEY, API_SECRET
+                
+                # Fetch data using new fetcher
+                fetch_result = await fetcher.fetch_historical_data(
+                    symbol=yfinance_symbol if is_index else (api_ticker if api_ticker else symbol),
+                    timeframe="hourly",
+                    start_date=start_date_hourly_api_str,
+                    end_date=end_date_hourly_api_str,
+                    chunk_size=chunk_size if data_source == "polygon" else None
                 )
+                
+                if not fetch_result.success:
+                    logging.error(f"Failed to fetch hourly data for {symbol}: {fetch_result.error}")
+                    new_hourly_bars = pd.DataFrame()
+                else:
+                    new_hourly_bars = fetch_result.data
+                    logging.info(f"Fetched {fetch_result.records_fetched} hourly records from {fetch_result.source}")
+            except Exception as e:
+                logging.error(f"Error creating fetcher or fetching hourly data for {symbol}: {e}")
+                import traceback
+                logging.error(traceback.format_exc())
+                new_hourly_bars = pd.DataFrame()
 
             final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, db_ticker, 'hourly', data_dir, save_db_csv)
             
@@ -1409,10 +1576,17 @@ async def fetch_and_save_data(
                     try:
                         await stock_db_instance.save_stock_data(batch_df, db_ticker, interval='hourly')
                         logging.debug(f"Successfully saved hourly batch {current_batch_num} for {db_ticker} ({len(batch_df)} rows)")
+                        # Log sample data that was saved for debugging
+                        if log_level == "DEBUG" and not batch_df.empty:
+                            sample_idx = batch_df.index[0] if isinstance(batch_df.index, pd.DatetimeIndex) else None
+                            logging.debug(f"  Sample saved record: ticker={db_ticker}, datetime={sample_idx}, close={batch_df.iloc[0].get('close', 'N/A')}")
                     except Exception as e_save_hourly:
-                        logging.error(f"Error saving hourly batch {current_batch_num} for {symbol}: {e_save_hourly}")
+                        error_msg = f"Error saving hourly batch {current_batch_num} for {symbol}: {e_save_hourly}"
+                        logging.error(error_msg)
+                        print(error_msg, file=sys.stderr)
                         import traceback
                         logging.error(traceback.format_exc())
+                        print(traceback.format_exc(), file=sys.stderr)
                         raise # Fail the symbol fetch if a batch fails
                 logging.info(f"Hourly data for {symbol} processed for database.")
                 
@@ -1429,6 +1603,8 @@ async def fetch_and_save_data(
                 logging.info(f"No data in final_hourly_bars for {symbol} to save to database (possibly all old data or merge issue).")
         else:
             logging.info(f"Hourly data fetch skipped for {symbol}.")
+
+        # Note: CSV export is now handled in _handle_date_range_mode after data is fetched and saved
 
         return True
     except Exception as e:
@@ -1456,7 +1632,8 @@ async def process_symbol_data(
     save_db_csv: bool = False,  # New parameter for CSV usage control
     no_force_today: bool = False,
     log_level: str = "INFO",  # New parameter for log level
-    enable_cache: bool = True  # New parameter for cache control
+    enable_cache: bool = True,  # New parameter for cache control
+    export_csv_dir: str | None = None  # New parameter for CSV export directory
 ) -> pd.DataFrame:
     """Processes symbol data: queries DB, fetches if needed, and returns DataFrame."""
     
@@ -1574,7 +1751,8 @@ async def process_symbol_data(
                     print(f"Note: Data retrieved from DB starts at {min_date_in_df}, after the requested start date {start_date} (e.g., due to non-trading days).", file=sys.stderr)
                 
                 # Check if we have today's data when end_date is today
-                if end_date == today_str and timeframe == 'daily' and not no_force_today:
+                # Only attempt to fetch if NOT in query_only/db_only mode
+                if end_date == today_str and timeframe == 'daily' and not no_force_today and not query_only:
                     max_date_in_df = data_df.index.max().strftime('%Y-%m-%d')
                     if max_date_in_df < today_str:
                         print(f"Note: Latest data in DB is from {max_date_in_df}, but end date is {today_str}. Today's data may not be available yet.", file=sys.stderr)
@@ -1584,7 +1762,7 @@ async def process_symbol_data(
                             # Set force_fetch to True to ensure we fetch today's data
                             force_fetch = True
         else:
-            print(f"No {timeframe} data found for {symbol} in the database for the specified range.", file=sys.stderr)
+            print(f"No {timeframe} data found for {symbol} in the database for the specified range ({start_date or 'earliest'} to {end_date}).", file=sys.stderr)
             if query_only:
                 action_taken = "Query only mode: No data in DB, and fetching is disabled."
                 print(action_taken, file=sys.stderr)
@@ -1601,6 +1779,7 @@ async def process_symbol_data(
         os.makedirs(hourly_dir, exist_ok=True)
 
         # Only fetch the requested timeframe
+        # But if CSV export is requested, we'll query both from DB for export
         fetch_daily = (timeframe == 'daily')
         fetch_hourly = (timeframe == 'hourly')
         
@@ -1617,16 +1796,39 @@ async def process_symbol_data(
             save_db_csv=save_db_csv,  # Pass the new argument
             fetch_daily=fetch_daily,  # Only fetch daily if requested
             fetch_hourly=fetch_hourly,  # Only fetch hourly if requested
-            log_level=log_level  # Pass log_level for debug output
+            log_level=log_level,  # Pass log_level for debug output
+            export_csv_dir=export_csv_dir  # Pass CSV export directory
         ) 
 
         if fetch_success:
+            # Data has been saved and cached - no artificial delay needed
+            # Cache will serve data immediately, DB will eventually be consistent via WAL
+            pass
+            
             print(
-                f"Retrieving newly fetched/updated {timeframe} data for {symbol} from database ({start_date or 'earliest'} to {end_date})...", file=sys.stderr
+                f"Retrieving newly fetched/updated {timeframe} data for {symbol} (DB ticker: {db_ticker}) from database ({start_date or 'earliest'} to {end_date})...", file=sys.stderr
             )
+            # Query with the requested date range
+            # Note: For hourly data with Yahoo Finance, the actual fetched range might be smaller
+            # due to the 729-day limit, so we query the requested range and if empty, try a broader range
+            if log_level == "DEBUG":
+                print(f"DEBUG: Querying DB for ticker='{db_ticker}', start_date='{start_date}', end_date='{end_date}', interval='{timeframe}'", file=sys.stderr)
             data_df = await current_db_instance.get_stock_data(db_ticker, start_date=start_date, end_date=end_date, interval=timeframe)
+            if log_level == "DEBUG":
+                print(f"DEBUG: Query returned {len(data_df)} rows", file=sys.stderr)
+            
             if data_df.empty:
-                print(f"Warning: Data for {db_ticker} ({timeframe}) was fetched but not found in DB with current query parameters. Check fetch ranges and query.", file=sys.stderr)
+                # Data was fetched but not found in DB with the requested date range
+                # This can happen if:
+                # 1. QuestDB WAL hasn't committed yet (DEDUP UPSERT is async)
+                # 2. Date range mismatch
+                # 3. Data is in cache but not being read from cache
+                if timeframe == 'hourly':
+                    print(f"Warning: Data for {db_ticker} ({timeframe}) was fetched but not found with date range ({start_date} to {end_date}).", file=sys.stderr)
+                    print(f"  This may be due to QuestDB WAL commit delay (DEDUP UPSERT processes asynchronously).", file=sys.stderr)
+                    print(f"  Try running the query again in a few seconds, or check if cache has the data.", file=sys.stderr)
+                else:
+                    print(f"Warning: Data for {db_ticker} ({timeframe}) was fetched but not found in DB with current query parameters.", file=sys.stderr)
             else:
                 action_taken = f"Fetched/updated and retrieved data for {db_ticker} ({timeframe}) from {data_source}/DB."
                 print(action_taken, file=sys.stderr)
@@ -2107,176 +2309,55 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
     # Parse ticker to handle index format (I:SPX)
     api_ticker, db_ticker, is_index, yfinance_symbol = _parse_index_ticker(symbol)
     
-    # For indices, use Yahoo Finance
-    if is_index and yfinance_symbol:
-        if not YFINANCE_AVAILABLE:
-            raise ImportError("yfinance not available. Install with: pip install yfinance")
-        
-        try:
-            ticker = yf.Ticker(yfinance_symbol)
-            info = ticker.info
-            
-            # Try to get current price
-            current_price = None
-            if 'regularMarketPrice' in info and info['regularMarketPrice']:
-                current_price = info['regularMarketPrice']
-            elif 'currentPrice' in info and info['currentPrice']:
-                current_price = info['currentPrice']
-            elif 'previousClose' in info and info['previousClose']:
-                current_price = info['previousClose']
-            
-            # Try history as fallback
-            if current_price is None:
-                try:
-                    data = ticker.history(period="1d", interval="1m")
-                    if not data.empty:
-                        current_price = data["Close"].iloc[-1]
-                except Exception:
-                    pass
-            
-            if current_price is None:
-                raise Exception(f"No price data available for {yfinance_symbol} from Yahoo Finance")
-            
-            timestamp = datetime.now(timezone.utc)
-            
-            return {
-                'symbol': db_ticker,
-                'price': current_price,
-                'bid_price': None,
-                'ask_price': None,
-                'timestamp': timestamp.isoformat(),
-                'write_timestamp': timestamp.isoformat(),
-                'source': 'yfinance_index',
-                'data_source': 'yfinance'
-            }
-        except Exception as e:
-            logging.error(f"Error fetching current price for {yfinance_symbol} from Yahoo Finance: {e}")
-            raise
-    
-    # For stocks, use Polygon
-    if not POLYGON_AVAILABLE:
-        raise ImportError("Polygon API client not available. Install with: pip install polygon-api-client")
-    
-    API_KEY = os.getenv('POLYGON_API_KEY')
-    if not API_KEY:
-        raise ValueError("POLYGON_API_KEY environment variable must be set")
-    
     try:
-        client = PolygonRESTClient(API_KEY)
-        
-        # Get the latest quote
-        quote_start = time.time()
-        quote = client.get_last_quote(ticker=api_ticker)
-        quote_time = (time.time() - quote_start) * 1000
-        logging.debug(f"[API] Polygon get_last_quote for {symbol} took {quote_time:.1f}ms")
-        if quote:
-            # Create DataFrame for saving to realtime table
-            if hasattr(quote, 'sip_timestamp'):
-                # Convert Polygon timestamp to UTC datetime
-                timestamp = datetime.fromtimestamp(quote.sip_timestamp / 1000000000, tz=timezone.utc)
-            else:
-                timestamp = datetime.now(timezone.utc)
-            quote_df = pd.DataFrame({
-                'price': [quote.bid_price],
-                'size': [quote.bid_size]
-            }, index=[timestamp])
-            quote_df.index.name = 'timestamp'  # Ensure index has the correct name
-            
-            # Save to realtime table if we have a database instance
-            if current_db_instance:
-                try:
-
-                    await current_db_instance.save_realtime_data(quote_df, db_ticker, data_type="quote")
-                    logging.debug(f"[DB SAVE] Saved quote data for {db_ticker} to realtime table")
-                    
-                except Exception as e:
-                    logging.warning(f"[DB SAVE ERROR] Failed to save quote data for {symbol} to realtime table: {e}")
-            
-            api_total_time = (time.time() - api_start) * 1000
-            return {
-                'symbol': db_ticker,  # Return db_ticker for consistency
-                'price': quote.bid_price,  # Use bid price as primary price
-                'bid_price': quote.bid_price,
-                'ask_price': quote.ask_price,
-                'bid_size': quote.bid_size,
-                'ask_size': quote.ask_size,
-                'timestamp': timestamp.isoformat(),
-                'write_timestamp': datetime.now(timezone.utc).isoformat(),
-                'source': 'polygon_quote',
-                'data_source': 'polygon',
-                'api_call_time_ms': api_total_time
-            }
-        
-        # If no quote, try to get the latest trade
-        trade = client.get_last_trade(ticker=api_ticker)
-        if trade:
-            # Create DataFrame for saving to realtime table
-            if hasattr(trade, 'sip_timestamp'):
-                # Convert Polygon timestamp to UTC datetime
-                timestamp = datetime.fromtimestamp(trade.sip_timestamp / 1000000000, tz=timezone.utc)
-            else:
-                timestamp = datetime.now(timezone.utc)
-            trade_df = pd.DataFrame({
-                'price': [trade.price],
-                'size': [trade.size]
-            }, index=[timestamp])
-            trade_df.index.name = 'timestamp'  # Ensure index has the correct name
-            
-            # Save to realtime table if we have a database instance
-            if current_db_instance:
-                try:
-                    await current_db_instance.save_realtime_data(trade_df, db_ticker, data_type="trade")
-                    print(f"Saved trade data for {db_ticker} to realtime table", file=sys.stderr)
-                except Exception as e:
-                    print(f"Warning: Failed to save trade data for {db_ticker} to realtime table: {e}", file=sys.stderr)
-            
-            return {
-                'symbol': db_ticker,  # Return db_ticker for consistency
-                'price': trade.price,
-                'bid_price': None,
-                'ask_price': None,
-                'size': trade.size,
-                'timestamp': timestamp.isoformat(),
-                'write_timestamp': datetime.now(timezone.utc).isoformat(),
-                'source': 'polygon_trade',
-                'data_source': 'polygon'
-            }
-        
-        # If neither quote nor trade available, try to get the latest daily bar
-        today = datetime.now().strftime('%Y-%m-%d')
-        aggs = client.get_aggs(
-            ticker=api_ticker,
-            multiplier=1,
-            timespan="day",
-            from_=today,
-            to=today,
-            adjusted=True,
-            sort="desc",
-            limit=1
+        # Use new fetcher architecture
+        fetcher = FetcherFactory.create_fetcher(
+            data_source="polygon",
+            symbol=symbol,  # Auto-detects indices and routes to Yahoo Finance
+            api_key=os.getenv('POLYGON_API_KEY'),
+            log_level="INFO"
         )
         
-        if aggs:
-            bar = aggs[0]
-            return {
-                'symbol': db_ticker,  # Return db_ticker for consistency
-                'price': bar.close,
-                'bid_price': None,
-                'ask_price': None,
-                'open': bar.open,
-                'high': bar.high,
-                'low': bar.low,
-                'close': bar.close,
-                'volume': bar.volume,
-                'timestamp': datetime.fromtimestamp(bar.timestamp / 1000, tz=timezone.utc).isoformat(),
-                'write_timestamp': datetime.now(timezone.utc).isoformat(),
-                'source': 'polygon_daily',
-                'data_source': 'polygon'
-            }
+        # Use the appropriate symbol for fetching
+        fetch_symbol = yfinance_symbol if is_index else (api_ticker if api_ticker else symbol)
         
-        raise Exception(f"No price data available for {symbol} from Polygon.io")
+        # Fetch current price using new fetcher
+        price_data = await fetcher.fetch_current_price(fetch_symbol)
         
+        # Convert to expected format
+        api_total_time = (time.time() - api_start) * 1000
+        
+        result = {
+            'symbol': db_ticker,
+            'price': price_data['price'],
+            'timestamp': price_data['timestamp'],
+            'source': price_data['source'],
+            'bid_price': price_data.get('bid_price'),
+            'ask_price': price_data.get('ask_price'),
+            'volume': price_data.get('volume'),
+            'data_source': 'polygon',
+            'fetch_time_ms': api_total_time
+        }
+        
+        # Save to realtime table if we have a database instance and it's a stock (not index)
+        if current_db_instance and not is_index:
+            try:
+                timestamp = pd.to_datetime(price_data['timestamp'])
+                quote_df = pd.DataFrame({
+                    'price': [price_data['price']],
+                    'size': [price_data.get('volume', 0)]
+                }, index=[timestamp])
+                quote_df.index.name = 'timestamp'
+                await current_db_instance.save_realtime_data(quote_df, db_ticker, data_type="quote")
+                logging.debug(f"[DB SAVE] Saved quote data for {db_ticker} to realtime table")
+            except Exception as e:
+                logging.warning(f"[DB SAVE ERROR] Failed to save quote data for {symbol} to realtime table: {e}")
+        
+        return result
     except Exception as e:
-        print(f"Error fetching current price for {symbol} from Polygon: {e}", file=sys.stderr)
+        logging.error(f"Error fetching current price for {symbol}: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
         raise
 
 async def _get_current_price_alpaca(symbol: str, current_db_instance: StockDBBase | None = None) -> dict:
@@ -3056,6 +3137,11 @@ def parse_args():
         help="Only query the database; do not fetch from network if data is missing."
     )
     parser.add_argument(
+        "--db-only",
+        action="store_true",
+        help="Alias for --query-only: Only query the database; do not fetch from network if data is missing."
+    )
+    parser.add_argument(
         "--days-back",
         type=int,
         default=None,
@@ -3155,6 +3241,12 @@ def parse_args():
         action="store_true",
         help="Disable market-hours logic for price fetching (default: market time enabled, uses latest realtime price when market is open, last close price when market is closed)"
     )
+    parser.add_argument(
+        "--csv-output-dir",
+        type=str,
+        default=None,
+        help="Directory to save exported CSV files. When specified, exports daily and hourly data to CSV. Daily data goes to one file (SYMBOL_daily.csv), hourly data is split by month (SYMBOL_hourly_YYYY-MM.csv)."
+    )
 
     # Use parse_known_args to handle --types with subtraction (e.g., -stocks_to_track)
     # which argparse might interpret as a flag
@@ -3240,12 +3332,20 @@ def _validate_and_normalize_args(args) -> None:
         start_dt = end_dt - timedelta(days=30)
         args.start_date = start_dt.strftime('%Y-%m-%d')
         print(f"End-date specified ({args.end_date}) but no start-date, setting start-date to 30 days before: {args.start_date}", file=sys.stderr)
-    # Case 3: Start-date is set but no end-date -> set end-date to 30 days after start-date
+    # Case 3: Start-date is set but no end-date -> set end-date to 30 days after start-date (or today if that's sooner)
     elif args.start_date is not None and args.end_date == today_str:
         start_dt = datetime.strptime(args.start_date, '%Y-%m-%d')
         end_dt = start_dt + timedelta(days=30)
-        args.end_date = end_dt.strftime('%Y-%m-%d')
-        print(f"Start-date specified ({args.start_date}) but no end-date, setting end-date to 30 days after: {args.end_date}", file=sys.stderr)
+        today_dt = datetime.strptime(today_str, '%Y-%m-%d')
+        
+        # Cap end date at today if calculated end date is in the future
+        if end_dt > today_dt:
+            end_dt = today_dt
+            args.end_date = end_dt.strftime('%Y-%m-%d')
+            print(f"Start-date specified ({args.start_date}) but no end-date, setting end-date to today: {args.end_date}", file=sys.stderr)
+        else:
+            args.end_date = end_dt.strftime('%Y-%m-%d')
+            print(f"Start-date specified ({args.start_date}) but no end-date, setting end-date to 30 days after: {args.end_date}", file=sys.stderr)
     # Case 4: Both start-date and end-date are explicitly set -> use as-is
     # Case 5: Fallback for other cases - default to --latest if no dates specified
     else:
@@ -3340,10 +3440,17 @@ async def _handle_latest_mode(args) -> None:
         except Exception as e:
             logger.debug(f"Error fetching realtime data: {e}")
         
-        # Get latest from hourly_prices
+        # Get latest from hourly_prices (constrain to last 7 days to avoid fetching all history)
         try:
             if args.only_fetch is None or args.only_fetch == "hourly":
-                hourly_df = await db_instance_for_cleanup.get_stock_data(db_ticker, interval="hourly")
+                today = datetime.now().strftime('%Y-%m-%d')
+                week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+                hourly_df = await db_instance_for_cleanup.get_stock_data(
+                    db_ticker, 
+                    start_date=week_ago,
+                    end_date=today,
+                    interval="hourly"
+                )
                 if isinstance(hourly_df, pd.DataFrame) and not hourly_df.empty:
                     latest_hourly = hourly_df.iloc[-1]
                     price_data['hourly'] = {
@@ -3357,10 +3464,17 @@ async def _handle_latest_mode(args) -> None:
         except Exception as e:
             logger.debug(f"Error fetching hourly data: {e}")
         
-        # Get latest from daily_prices
+        # Get latest from daily_prices (constrain to last 7 days to avoid fetching all history)
         try:
             if args.only_fetch is None or args.only_fetch == "daily":
-                daily_df = await db_instance_for_cleanup.get_stock_data(db_ticker, interval="daily")
+                today = datetime.now().strftime('%Y-%m-%d')
+                week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+                daily_df = await db_instance_for_cleanup.get_stock_data(
+                    db_ticker,
+                    start_date=week_ago,
+                    end_date=today,
+                    interval="daily"
+                )
                 if isinstance(daily_df, pd.DataFrame) and not daily_df.empty:
                     latest_daily = daily_df.iloc[-1]
                     price_data['daily'] = {
@@ -3478,6 +3592,10 @@ async def main() -> None:
 
     # Validate and normalize arguments
     _validate_and_normalize_args(args)
+    
+    # Map --db-only to --query-only for convenience
+    if getattr(args, 'db_only', False):
+        args.query_only = True
 
 
     # If --latest is requested, fetch and display latest daily and hourly data
@@ -3590,26 +3708,82 @@ async def _handle_date_range_mode(args) -> None:
         
         final_df = pd.DataFrame()
         if should_fetch_price_data:
-            final_df = await process_symbol_data(
-            symbol=args.symbol, 
-            timeframe=args.timeframe, 
-            start_date=args.start_date, 
-            end_date=args.end_date, 
-            data_dir=args.data_dir,
-            force_fetch=args.force_fetch, 
-            query_only=args.query_only,
-            db_type=args.db_type,      # Pass db_type
-            db_path=args.db_path,       # Pass db_path (can be None)
-            days_back_fetch=args.days_back, # Pass the new argument
-            db_save_batch_size=args.db_batch_size, # Pass the new argument
-            data_source=args.data_source,  # Pass the new argument
-            chunk_size=args.chunk_size,  # Pass the new argument
-            save_db_csv=args.save_db_csv,  # Pass the new argument
-            no_force_today=getattr(args, 'no_force_today', False),
-            log_level=args.log_level,  # Pass log_level
-            enable_cache=enable_cache,  # Pass enable_cache
-            stock_db_instance=db_instance_for_cleanup  # Pass the instance we created
-        )
+            # If CSV export is requested, fetch both daily and hourly data
+            # Otherwise, just fetch the requested timeframe
+            if args.csv_output_dir:
+                # Fetch daily data (always fetch for CSV export)
+                print(f"Fetching daily data for CSV export...", file=sys.stderr)
+                daily_df = await process_symbol_data(
+                    symbol=args.symbol, 
+                    timeframe='daily', 
+                    start_date=args.start_date, 
+                    end_date=args.end_date, 
+                    data_dir=args.data_dir,
+                    force_fetch=args.force_fetch, 
+                    query_only=args.query_only,
+                    db_type=args.db_type,
+                    db_path=args.db_path,
+                    days_back_fetch=args.days_back,
+                    db_save_batch_size=args.db_batch_size,
+                    data_source=args.data_source,
+                    chunk_size=args.chunk_size,
+                    save_db_csv=args.save_db_csv,
+                    no_force_today=getattr(args, 'no_force_today', False),
+                    log_level=args.log_level,
+                    enable_cache=enable_cache,
+                    export_csv_dir=None,  # Don't export yet, we'll do it at the end
+                    stock_db_instance=db_instance_for_cleanup
+                )
+                
+                # Fetch hourly data (always fetch for CSV export)
+                print(f"Fetching hourly data for CSV export...", file=sys.stderr)
+                hourly_df = await process_symbol_data(
+                    symbol=args.symbol, 
+                    timeframe='hourly', 
+                    start_date=args.start_date, 
+                    end_date=args.end_date, 
+                    data_dir=args.data_dir,
+                    force_fetch=args.force_fetch, 
+                    query_only=args.query_only,
+                    db_type=args.db_type,
+                    db_path=args.db_path,
+                    days_back_fetch=args.days_back,
+                    db_save_batch_size=args.db_batch_size,
+                    data_source=args.data_source,
+                    chunk_size=args.chunk_size,
+                    save_db_csv=args.save_db_csv,
+                    no_force_today=getattr(args, 'no_force_today', False),
+                    log_level=args.log_level,
+                    enable_cache=enable_cache,
+                    export_csv_dir=None,  # Don't export yet, we'll do it at the end
+                    stock_db_instance=db_instance_for_cleanup
+                )
+                
+                # Use the requested timeframe for display (or daily if not specified)
+                final_df = daily_df if args.timeframe == 'daily' else (hourly_df if args.timeframe == 'hourly' else daily_df)
+            else:
+                # Normal mode: just fetch the requested timeframe
+                final_df = await process_symbol_data(
+                    symbol=args.symbol, 
+                    timeframe=args.timeframe, 
+                    start_date=args.start_date, 
+                    end_date=args.end_date, 
+                    data_dir=args.data_dir,
+                    force_fetch=args.force_fetch, 
+                    query_only=args.query_only,
+                    db_type=args.db_type,      # Pass db_type
+                    db_path=args.db_path,       # Pass db_path (can be None)
+                    days_back_fetch=args.days_back, # Pass the new argument
+                    db_save_batch_size=args.db_batch_size, # Pass the new argument
+                    data_source=args.data_source,  # Pass the new argument
+                    chunk_size=args.chunk_size,  # Pass the new argument
+                    save_db_csv=args.save_db_csv,  # Pass the new argument
+                    no_force_today=getattr(args, 'no_force_today', False),
+                    log_level=args.log_level,  # Pass log_level
+                    enable_cache=enable_cache,  # Pass enable_cache
+                    export_csv_dir=None,  # Don't export in process_symbol_data when csv_output_dir is set
+                    stock_db_instance=db_instance_for_cleanup  # Pass the instance we created
+                )
 
         if not final_df.empty:
             # Convert timezone for display if this is hourly data
@@ -3832,6 +4006,71 @@ async def _handle_date_range_mode(args) -> None:
                 print(f"[DEBUG] Traceback: {traceback.format_exc()}", flush=True)
             
             print("=" * 80 + "\n", flush=True)
+        
+        # Export to CSV if requested (do this at the very end, after all operations)
+        if args.csv_output_dir:
+            try:
+                # Parse ticker to get db_ticker (handles I:SPX -> SPX)
+                _, db_ticker, _, _ = _parse_index_ticker(args.symbol)
+                
+                # Use the same date range as the query
+                export_start_date = args.start_date
+                export_end_date = args.end_date
+                
+                print(f"\n--- Exporting CSV data for {args.symbol} (DB ticker: {db_ticker}) to {args.csv_output_dir} ---", file=sys.stderr)
+                print(f"Date range: {export_start_date or 'earliest'} to {export_end_date or 'latest'}", file=sys.stderr)
+                
+                # Query both daily and hourly data from database for export
+                daily_export_df = pd.DataFrame()
+                hourly_export_df = pd.DataFrame()
+                
+                try:
+                    print(f"Querying daily data from database for {db_ticker}...", file=sys.stderr)
+                    daily_export_df = await db_instance_for_cleanup.get_stock_data(
+                        db_ticker,
+                        start_date=export_start_date,
+                        end_date=export_end_date,
+                        interval='daily'
+                    )
+                    if not daily_export_df.empty:
+                        print(f"Retrieved {len(daily_export_df)} daily records for CSV export", file=sys.stderr)
+                    else:
+                        print(f"Warning: No daily data found in database for {db_ticker} (start_date={export_start_date}, end_date={export_end_date})", file=sys.stderr)
+                except Exception as e:
+                    print(f"Error retrieving daily data for CSV export: {e}", file=sys.stderr)
+                    import traceback
+                    print(traceback.format_exc(), file=sys.stderr)
+                
+                try:
+                    print(f"Querying hourly data from database for {db_ticker}...", file=sys.stderr)
+                    hourly_export_df = await db_instance_for_cleanup.get_stock_data(
+                        db_ticker,
+                        start_date=export_start_date,
+                        end_date=export_end_date,
+                        interval='hourly'
+                    )
+                    if not hourly_export_df.empty:
+                        print(f"Retrieved {len(hourly_export_df)} hourly records for CSV export", file=sys.stderr)
+                    else:
+                        print(f"Warning: No hourly data found in database for {db_ticker} (start_date={export_start_date}, end_date={export_end_date})", file=sys.stderr)
+                except Exception as e:
+                    print(f"Error retrieving hourly data for CSV export: {e}", file=sys.stderr)
+                    import traceback
+                    print(traceback.format_exc(), file=sys.stderr)
+                
+                # Export to CSV
+                if not daily_export_df.empty or not hourly_export_df.empty:
+                    await asyncio.to_thread(_export_data_to_csv, daily_export_df, hourly_export_df, args.symbol, args.csv_output_dir)
+                    print(f"CSV export completed for {args.symbol}", file=sys.stderr)
+                else:
+                    print(f"Error: No data available to export to CSV for {args.symbol}.", file=sys.stderr)
+                    print(f"  Check if data was fetched and saved to database.", file=sys.stderr)
+                    print(f"  DB ticker: {db_ticker}, Date range: {export_start_date} to {export_end_date}", file=sys.stderr)
+            except Exception as e:
+                print(f"Error exporting CSV for {args.symbol}: {e}", file=sys.stderr)
+                import traceback
+                print(traceback.format_exc(), file=sys.stderr)
+    
     finally:
         # Clean up database session
         # Print cache statistics if available and in DEBUG mode

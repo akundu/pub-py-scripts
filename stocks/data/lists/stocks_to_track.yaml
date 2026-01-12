@@ -635,4 +635,6 @@ symbols:
 - XLI
 - XLK
 - XLV
-- SPX
+#- SPX
+- 'I:SPX'
+#- SPX

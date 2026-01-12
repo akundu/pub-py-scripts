@@ -469,17 +469,22 @@ class DailyPriceRepository(BaseRepository):
             
             if records:
                 await self._bulk_insert(conn, table, records)
-                # QuestDB may need time for data to be visible to SELECT queries
-                # Execute a query to ensure the connection has processed the inserts
-                # and wait for QuestDB to persist the data
+                # QuestDB via asyncpg should auto-commit, but ensure transaction is committed
+                # by executing a simple query that forces a flush
                 try:
-                    # Force a flush by executing a query that touches the table
-                    await conn.fetch(f"SELECT COUNT(*) FROM {table} WHERE ticker = $1", ticker)
-                except Exception:
-                    pass
-                # QuestDB may need more time to make data visible across connections
-                # Increase delay to 500ms to ensure persistence
-                await asyncio.sleep(0.5)  # 500ms delay for QuestDB consistency
+                    # Force a commit/flush by executing COMMIT explicitly
+                    # Note: asyncpg auto-commits by default, but QuestDB might need explicit commit
+                    await conn.execute("COMMIT")
+                except Exception as e:
+                    # COMMIT might not be supported, try alternative
+                    self.logger.debug(f"Explicit COMMIT not supported or failed: {e}")
+                    try:
+                        # Force a flush by executing a query that touches the table
+                        await conn.fetch(f"SELECT COUNT(*) FROM {table} WHERE ticker = $1", ticker)
+                    except Exception:
+                        pass
+                # QuestDB with DEDUP UPSERT processes data asynchronously via WAL
+                # No artificial delay - rely on cache for immediate data access
                 
                 # Verify the data is actually in the DB by querying it back
                 if interval == 'hourly' and len(records) > 0:
@@ -632,12 +637,14 @@ class DailyPriceRepository(BaseRepository):
                         query += f" AND {date_col} <= ${len(params) + 1}"
                         params.append(parsed_end)
                 else:
-                    # For hourly data, if end_date is a date-only string (tomorrow), we want to include all of today's hours
-                    # So use < comparison with tomorrow's midnight to include all of today
+                    # For hourly data, if end_date is a date-only string, we want to include all of that day's hours
+                    # So add 1 day and use < comparison to include all data up to (but not including) the next day's midnight
                     if isinstance(end_date, str) and len(end_date) == 10 and end_date.count('-') == 2:
-                        # It's a date-only string (like '2025-11-22'), parse as UTC midnight
+                        # It's a date-only string (like '2026-01-09'), parse as UTC midnight
                         parsed = datetime.strptime(end_date, '%Y-%m-%d')
-                        # Use < comparison to include all data up to (but not including) tomorrow's midnight
+                        # Add 1 day so that < comparison includes all of the end_date day
+                        parsed = parsed + timedelta(days=1)
+                        # Use < comparison to include all data up to (but not including) the day after end_date's midnight
                         query += f" AND {date_col} < ${len(params) + 1}"
                         params.append(parsed)
                     else:
@@ -1904,9 +1911,13 @@ class StockDataService:
                 cache_key = CacheKeyGenerator.daily_price(ticker, date_str)
             else:
                 if isinstance(idx_utc, (pd.Timestamp, datetime)):
-                    dt_str = idx_utc.strftime('%Y-%m-%dT%H:%M:%S')
+                    # Normalize to hour boundary for consistent cache keys
+                    dt_str = idx_utc.strftime('%Y-%m-%dT%H:00:00')
                 else:
                     dt_str = str(idx_utc).split('.')[0].split('+')[0].split('Z')[0]
+                    # Ensure hour boundary for non-datetime indices
+                    if 'T' in dt_str and len(dt_str) >= 13:
+                        dt_str = dt_str[:13] + ':00:00'
                 cache_key = CacheKeyGenerator.hourly_price(ticker, dt_str)
             
             row_df = pd.DataFrame([row]).set_index(pd.Index([idx]))
@@ -2007,9 +2018,13 @@ class StockDataService:
                         cache_key = CacheKeyGenerator.daily_price(ticker, date_str)
                     else:
                         if isinstance(idx_utc, (pd.Timestamp, datetime)):
-                            dt_str = idx_utc.strftime('%Y-%m-%dT%H:%M:%S')
+                            # Normalize to hour boundary for consistent cache keys
+                            dt_str = idx_utc.strftime('%Y-%m-%dT%H:00:00')
                         else:
                             dt_str = str(idx_utc).split('.')[0].split('+')[0].split('Z')[0]
+                            # Ensure hour boundary for non-datetime indices
+                            if 'T' in dt_str and len(dt_str) >= 13:
+                                dt_str = dt_str[:13] + ':00:00'
                         cache_key = CacheKeyGenerator.hourly_price(ticker, dt_str)
                     
                     row_df = pd.DataFrame([row]).set_index(pd.Index([idx]))
@@ -2132,9 +2147,13 @@ class StockDataService:
                         cache_key = CacheKeyGenerator.daily_price(ticker, date_str)
                     else:
                         if isinstance(idx_utc, (pd.Timestamp, datetime)):
-                            dt_str = idx_utc.strftime('%Y-%m-%dT%H:%M:%S')
+                            # Normalize to hour boundary for consistent cache keys
+                            dt_str = idx_utc.strftime('%Y-%m-%dT%H:00:00')
                         else:
                             dt_str = str(idx_utc).split('.')[0].split('+')[0].split('Z')[0]
+                            # Ensure hour boundary for non-datetime indices
+                            if 'T' in dt_str and len(dt_str) >= 13:
+                                dt_str = dt_str[:13] + ':00:00'
                         cache_key = CacheKeyGenerator.hourly_price(ticker, dt_str)
                     
                     # Only cache rows that match our requested cache_keys (within the requested range)
