@@ -4662,7 +4662,7 @@ async def get_options_info(
                 return result
             
             api_fetch_start = time.time()
-            fetcher = HistoricalDataFetcher(api_key, quiet=True)
+            fetcher = HistoricalDataFetcher(api_key, verbose=False)
             options_result = await fetcher.get_active_options_for_date(
                 symbol=symbol,
                 target_date_str=target_date_str,
@@ -4694,7 +4694,7 @@ async def get_options_info(
                 if db_conn:
                     # Use HistoricalDataFetcher to query DB
                     api_key = os.getenv("POLYGON_API_KEY", "")  # Not used when use_db=True
-                    fetcher = HistoricalDataFetcher(api_key, quiet=True)
+                    fetcher = HistoricalDataFetcher(api_key, verbose=False)
                     
                     db_fetch_start = time.time()
                     options_result = await fetcher.get_active_options_for_date(
@@ -4724,7 +4724,7 @@ async def get_options_info(
                         api_key = os.getenv("POLYGON_API_KEY")
                         if api_key:
                             api_fetch_start = time.time()
-                            fetcher = HistoricalDataFetcher(api_key, quiet=True)
+                            fetcher = HistoricalDataFetcher(api_key, verbose=False)
                             options_result = await fetcher.get_active_options_for_date(
                                 symbol=symbol,
                                 target_date_str=target_date_str,
@@ -4754,7 +4754,7 @@ async def get_options_info(
                     api_key = os.getenv("POLYGON_API_KEY")
                     if api_key:
                         api_fetch_start = time.time()
-                        fetcher = HistoricalDataFetcher(api_key, quiet=True)
+                        fetcher = HistoricalDataFetcher(api_key, verbose=False)
                         options_result = await fetcher.get_active_options_for_date(
                             symbol=symbol,
                             target_date_str=target_date_str,

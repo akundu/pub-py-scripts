@@ -69,7 +69,7 @@ def process_refresh_batch(args_tuple):
         fetcher = HistoricalDataFetcher(
             api_key,
             data_dir,
-            quiet=True,
+            verbose=False,  # quiet=True means verbose=False
             snapshot_max_concurrent=0
         )
         
