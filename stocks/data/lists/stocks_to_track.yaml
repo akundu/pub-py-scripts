@@ -637,4 +637,5 @@ symbols:
 - XLV
 #- SPX
 - 'I:SPX'
+- 'I:NDX'
 #- SPX
