@@ -1455,6 +1455,38 @@ def generate_month_ranges(start_date_str: str, num_months: int, end_date_str: st
     return ranges
 
 
+def generate_day_ranges(start_date_str: str, num_days: int, end_date_str: str | None = None) -> list[tuple[str, str]]:
+    """Generate single-day date ranges starting from start_date.
+    
+    Returns list of (start_date, end_date) tuples in YYYY-MM-DD format.
+    Each range represents a single day.
+    If end_date_str is provided, stops generating ranges once the end date is reached.
+    """
+    start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
+    end_date = datetime.strptime(end_date_str, '%Y-%m-%d') if end_date_str else None
+    ranges = []
+    for i in range(num_days):
+        day_start = start_date + timedelta(days=i)
+        day_end = day_start  # Single day range
+        
+        # If end_date is specified, cap the day_end to not exceed it
+        if end_date and day_end > end_date:
+            if day_start > end_date:
+                # This day range starts after the end date, stop generating
+                break
+            day_end = end_date
+        
+        ranges.append((
+            day_start.strftime('%Y-%m-%d'),
+            day_end.strftime('%Y-%m-%d')
+        ))
+        
+        # If we've reached the end date, stop generating more ranges
+        if end_date and day_end >= end_date:
+            break
+    return ranges
+
+
 def allocate_processes_by_proximity(total_processes: int, num_months: int) -> list[int]:
     """Allocate processes to months using 2.5x exponential decay per month.
     
@@ -2333,29 +2365,53 @@ async def _execute_options_iteration(
         all_pools = []
     
     dry_run = getattr(args, 'dry_run', False)
+    days_ahead = getattr(args, 'days_ahead', None)
     months_ahead = getattr(args, 'months_ahead', 0)
     ticker_chunk_size = getattr(args, 'ticker_chunk_size', 250)
     
-    # If months_ahead is 0 or not set, use single-date mode (backward compatibility)
-    if months_ahead <= 0:
+    # Check if days_ahead is provided (takes precedence over months_ahead)
+    use_days_mode = days_ahead is not None and days_ahead > 0
+    
+    # If neither days_ahead nor months_ahead is set, use single-date mode (backward compatibility)
+    if not use_days_mode and months_ahead <= 0:
         return await _execute_options_iteration_single_date(symbols_list, args, api_key, all_pools)
     
-    # Multi-month mode: split by time and tickers
+    # Multi-period mode: split by time and tickers
     start_date = getattr(args, 'start_date', None) or args.date
     end_date = getattr(args, 'end_date', None)
     
-    # If end_date is provided, calculate months_ahead from start_date to end_date
-    if end_date:
-        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
-        days_diff = (end_dt - start_dt).days
-        # Calculate number of 30-day periods needed, rounding up
-        calculated_months_ahead = max(1, (days_diff + 29) // 30)  # +29 to round up
-        if getattr(args, 'verbose', False):
-            print(f"--end-date specified ({end_date}), calculating months_ahead: {calculated_months_ahead} (from {start_date} to {end_date}, {days_diff} days)", file=sys.stderr)
-        months_ahead = calculated_months_ahead
-    
-    month_ranges = generate_month_ranges(start_date, months_ahead, end_date)
+    if use_days_mode:
+        # Days-ahead mode
+        # If end_date is provided, calculate days_ahead from start_date to end_date
+        if end_date:
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+            days_diff = (end_dt - start_dt).days + 1  # +1 to include both start and end dates
+            if getattr(args, 'verbose', False):
+                print(f"--end-date specified ({end_date}), calculating days_ahead: {days_diff} (from {start_date} to {end_date})", file=sys.stderr)
+            days_ahead = days_diff
+        
+        date_ranges = generate_day_ranges(start_date, days_ahead, end_date)
+        num_periods = days_ahead
+        period_label = "day"
+        period_label_plural = "days"
+    else:
+        # Months-ahead mode (original behavior)
+        # If end_date is provided, calculate months_ahead from start_date to end_date
+        if end_date:
+            start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+            days_diff = (end_dt - start_dt).days
+            # Calculate number of 30-day periods needed, rounding up
+            calculated_months_ahead = max(1, (days_diff + 29) // 30)  # +29 to round up
+            if getattr(args, 'verbose', False):
+                print(f"--end-date specified ({end_date}), calculating months_ahead: {calculated_months_ahead} (from {start_date} to {end_date}, {days_diff} days)", file=sys.stderr)
+            months_ahead = calculated_months_ahead
+        
+        date_ranges = generate_month_ranges(start_date, months_ahead, end_date)
+        num_periods = months_ahead
+        period_label = "month"
+        period_label_plural = "months"
     
     # Allocate processes to months first to determine optimal chunk size
     if args.max_concurrent and args.max_concurrent > 0:
@@ -2363,39 +2419,42 @@ async def _execute_options_iteration(
     else:
         total_processes = (os.cpu_count() or 1) if args.executor_type == 'process' else (os.cpu_count() or 1) * 5
     
-    process_allocations = allocate_processes_by_proximity(total_processes, months_ahead)
+    process_allocations = allocate_processes_by_proximity(total_processes, num_periods)
     
     # Adjust chunk size to ensure we have enough chunks to utilize all allocated processes
-    # Each month needs at least as many chunks as it has allocated processes
-    max_processes_per_month = max(process_allocations) if process_allocations else 1
-    # Ensure we have at least max_processes_per_month chunks, but respect user's max chunk size
-    optimal_chunk_size = min(ticker_chunk_size, max(1, len(symbols_list) // max(max_processes_per_month, 1)))
+    # Each period needs at least as many chunks as it has allocated processes
+    max_processes_per_period = max(process_allocations) if process_allocations else 1
+    # Ensure we have at least max_processes_per_period chunks, but respect user's max chunk size
+    optimal_chunk_size = min(ticker_chunk_size, max(1, len(symbols_list) // max(max_processes_per_period, 1)))
     
     # Split tickers into chunks
     ticker_chunks = split_tickers_into_chunks(symbols_list, optimal_chunk_size)
     
     # Warn if we had to adjust chunk size
     if optimal_chunk_size < ticker_chunk_size and getattr(args, 'verbose', False):
-        print(f"  NOTE: Adjusted chunk size from {ticker_chunk_size} to {optimal_chunk_size} to create {len(ticker_chunks)} chunks (needed for {max_processes_per_month} processes in Month 1)")
+        period_name = period_label.capitalize() if num_periods == 1 else period_label_plural.capitalize()
+        print(f"  NOTE: Adjusted chunk size from {ticker_chunk_size} to {optimal_chunk_size} to create {len(ticker_chunks)} chunks (needed for {max_processes_per_period} processes in {period_name} 1)")
     
     if getattr(args, 'verbose', False):
-        print(f"\n[MULTI-MONTH MODE] Processing {len(symbols_list)} tickers across {months_ahead} months")
+        mode_label = f"MULTI-{period_label_plural.upper()}" if num_periods > 1 else f"SINGLE-{period_label.upper()}"
+        print(f"\n[{mode_label} MODE] Processing {len(symbols_list)} tickers across {num_periods} {period_label_plural if num_periods > 1 else period_label}")
         print(f"  Ticker chunks: {len(ticker_chunks)} (max {ticker_chunk_size} per chunk)")
         print(f"  Total processes: {total_processes} (executor type: {args.executor_type})")
-        print(f"  Process allocation by month (all months run in parallel):")
+        print(f"  Process allocation by {period_label} (all {period_label_plural} run in parallel):")
         total_allocated = 0
         max_actual_workers = 0
-        for i, (month_range, proc_count) in enumerate(zip(month_ranges, process_allocations)):
+        for i, (date_range, proc_count) in enumerate(zip(date_ranges, process_allocations)):
             # ProcessPoolExecutor will only create as many workers as there are tasks
             actual_workers = min(proc_count, len(ticker_chunks))
             max_actual_workers += actual_workers
-            print(f"    Month {i+1} ({month_range[0]} to {month_range[1]}): {proc_count} processes allocated, {actual_workers} actual workers (limited by {len(ticker_chunks)} chunks)")
+            period_name = f"{period_label.capitalize()} {i+1}" if num_periods > 1 else period_label.capitalize()
+            print(f"    {period_name} ({date_range[0]} to {date_range[1]}): {proc_count} processes allocated, {actual_workers} actual workers (limited by {len(ticker_chunks)} chunks)")
             total_allocated += proc_count
         print(f"  Total processes allocated: {total_allocated} (should equal {total_processes})")
-        print(f"  Maximum actual worker processes: {max_actual_workers} (limited by {len(ticker_chunks)} chunks per month)")
+        print(f"  Maximum actual worker processes: {max_actual_workers} (limited by {len(ticker_chunks)} chunks per {period_label})")
         if args.executor_type == 'process':
             print(f"  Note: ProcessPoolExecutor creates worker processes lazily when tasks are submitted.")
-            print(f"  Since there are only {len(ticker_chunks)} chunks per month, each month can use at most {len(ticker_chunks)} workers.")
+            print(f"  Since there are only {len(ticker_chunks)} chunks per {period_label}, each {period_label} can use at most {len(ticker_chunks)} workers.")
             print(f"  To use more processes, increase --ticker-chunk-size to create more chunks, or reduce --max-concurrent.")
             print(f"  You should see up to {max_actual_workers} worker processes in 'ps aux' once tasks start.")
     
@@ -2407,71 +2466,74 @@ async def _execute_options_iteration(
         'errors': []
     }
     
-    async def run_month_cluster(month_index: int, month_start: str, month_end: str) -> dict:
-        """Wrapper to run a month cluster and handle errors."""
+    async def run_period_cluster(period_index: int, period_start: str, period_end: str) -> dict:
+        """Wrapper to run a period cluster and handle errors."""
         try:
             return await _execute_month_cluster(
-                month_index=month_index,
-                month_start_date=month_start,
-                month_end_date=month_end,
+                month_index=period_index,
+                month_start_date=period_start,
+                month_end_date=period_end,
                 ticker_chunks=ticker_chunks,
-                num_processes=process_allocations[month_index],
+                num_processes=process_allocations[period_index],
                 args=args,
                 api_key=api_key,
                 all_pools=all_pools
             )
         except KeyboardInterrupt:
             if getattr(args, 'verbose', False):
-                print(f"\n[MULTI-MONTH] KeyboardInterrupt at month {month_index + 1}, stopping...", file=sys.stderr)
+                period_name = f"{period_label.capitalize()} {period_index + 1}" if num_periods > 1 else period_label.capitalize()
+                print(f"\n[MULTI-{period_label_plural.upper()}] KeyboardInterrupt at {period_name}, stopping...", file=sys.stderr)
             raise
         except Exception as e:
             if getattr(args, 'verbose', False):
-                print(f"\n[MULTI-MONTH] Error in month {month_index + 1}: {e}", file=sys.stderr)
+                period_name = f"{period_label.capitalize()} {period_index + 1}" if num_periods > 1 else period_label.capitalize()
+                print(f"\n[MULTI-{period_label_plural.upper()}] Error in {period_name}: {e}", file=sys.stderr)
+            period_name = f"{period_label.capitalize()} {period_index + 1}" if num_periods > 1 else period_label.capitalize()
             return {
                 'symbols_processed': 0,
                 'save_success_count': 0,
                 'save_failure_count': 0,
-                'errors': [f"Month {month_index + 1}: {str(e)}"]
+                'errors': [f"{period_name}: {str(e)}"]
             }
     
-    # Run all month clusters in parallel (truly concurrent)
+    # Run all period clusters in parallel (truly concurrent)
     if getattr(args, 'verbose', False):
-        print(f"  Running all {months_ahead} month clusters in parallel...")
+        print(f"  Running all {num_periods} {period_label_plural} clusters in parallel...")
         print(f"  Main process PID: {os.getpid()}")
-        print(f"  All month clusters will start simultaneously via asyncio.gather()")
+        print(f"  All {period_label_plural} clusters will start simultaneously via asyncio.gather()")
     
     # Create all tasks first, then await them all together to ensure true parallelism
-    month_tasks = [
-        asyncio.create_task(run_month_cluster(month_index, month_start, month_end))
-        for month_index, (month_start, month_end) in enumerate(month_ranges)
+    period_tasks = [
+        asyncio.create_task(run_period_cluster(period_index, period_start, period_end))
+        for period_index, (period_start, period_end) in enumerate(date_ranges)
     ]
     
     if getattr(args, 'verbose', False):
-        print(f"  Created {len(month_tasks)} async tasks - all will execute concurrently")
-        print(f"  Expected total worker processes: {sum(process_allocations)} (across all months)")
+        print(f"  Created {len(period_tasks)} async tasks - all will execute concurrently")
+        print(f"  Expected total worker processes: {sum(process_allocations)} (across all {period_label_plural})")
         print(f"  To verify parallel execution, run: ps aux | grep -E 'Python|python' | grep fetch_options")
         print(f"  Or check all Python processes: ps aux | grep -E 'Python|python' | grep -v grep")
         print(f"  You should see 1 main process + up to {sum(process_allocations)} worker processes")
         print(f"  Note: ProcessPoolExecutor creates workers lazily when tasks are submitted")
-        print(f"  All months will start simultaneously, but workers may appear gradually")
+        print(f"  All {period_label_plural} will start simultaneously, but workers may appear gradually")
     
-    # Wait for all months to complete
+    # Wait for all periods to complete
     try:
-        month_results_list = await asyncio.gather(*month_tasks, return_exceptions=True)
+        period_results_list = await asyncio.gather(*period_tasks, return_exceptions=True)
         
         # Aggregate results
-        for month_results in month_results_list:
-            if isinstance(month_results, Exception):
-                overall_results['errors'].append(f"Month cluster error: {str(month_results)}")
+        for period_results in period_results_list:
+            if isinstance(period_results, Exception):
+                overall_results['errors'].append(f"{period_label.capitalize()} cluster error: {str(period_results)}")
             else:
-                overall_results['symbols_processed'] += month_results.get('symbols_processed', 0)
-                overall_results['save_success_count'] += month_results.get('save_success_count', 0)
-                overall_results['save_failure_count'] += month_results.get('save_failure_count', 0)
-                overall_results['errors'].extend(month_results.get('errors', []))
+                overall_results['symbols_processed'] += period_results.get('symbols_processed', 0)
+                overall_results['save_success_count'] += period_results.get('save_success_count', 0)
+                overall_results['save_failure_count'] += period_results.get('save_failure_count', 0)
+                overall_results['errors'].extend(period_results.get('errors', []))
     except KeyboardInterrupt:
         if getattr(args, 'verbose', False):
-            print("\n[MULTI-MONTH] KeyboardInterrupt: Cancelling all month clusters...", file=sys.stderr)
-        for task in month_tasks:
+            print(f"\n[MULTI-{period_label_plural.upper()}] KeyboardInterrupt: Cancelling all {period_label_plural} clusters...", file=sys.stderr)
+        for task in period_tasks:
             task.cancel()
         await asyncio.gather(*month_tasks, return_exceptions=True)
         raise
@@ -2820,7 +2882,13 @@ Examples:
         '--months-ahead',
         type=int,
         default=6,
-        help="Number of 30-day periods to fetch ahead from start date (default: 6). Set to 0 for single-date mode. Ignored if --end-date is provided."
+        help="Number of 30-day periods to fetch ahead from start date (default: 6). Set to 0 for single-date mode. Ignored if --end-date is provided. Ignored if --days-ahead is provided."
+    )
+    parser.add_argument(
+        '--days-ahead',
+        type=int,
+        default=None,
+        help="Number of days to fetch ahead from start date. If provided, this takes precedence over --months-ahead. Ignored if --end-date is provided."
     )
     parser.add_argument(
         '--ticker-chunk-size',
@@ -3193,15 +3261,15 @@ Examples:
                 for i, (month_range, interval) in enumerate(zip(month_ranges, month_intervals)):
                     print(f"  Month {i+1} ({month_range[0]} to {month_range[1]}): {interval/60:.1f} min interval")
             
-            # Create async tasks for each month cluster
-            # Each month cluster runs independently - when its sleep expires, it starts a new iteration
-            # regardless of what other month clusters are doing
-            async def month_cluster_loop(month_idx: int, month_start: str, month_end: str, sleep_interval: float):
-                """Continuous loop for a single month cluster with market hours awareness.
+            # Create async tasks for each period cluster
+            # Each period cluster runs independently - when its sleep expires, it starts a new iteration
+            # regardless of what other period clusters are doing
+            async def period_cluster_loop(period_idx: int, period_start: str, period_end: str, sleep_interval: float):
+                """Continuous loop for a single period cluster with market hours awareness.
                 
-                This function runs independently for each month. When its sleep interval expires,
-                it will start a new iteration even if other month clusters are still running.
-                Each iteration creates new process pools that are independent of other months.
+                This function runs independently for each period. When its sleep interval expires,
+                it will start a new iteration even if other period clusters are still running.
+                Each iteration creates new process pools that are independent of other periods.
                 """
                 run_num = 0
                 market_open_delay_seconds = 2 * 60  # 2 minutes after market opens
@@ -3262,10 +3330,11 @@ Examples:
                             if getattr(args, 'verbose', False):
                                 hours_to_wait = seconds_until_wake / 3600
                                 mins_to_wait = seconds_until_wake / 60
+                                period_name = f"{period_label.capitalize()} {period_idx + 1}" if num_periods > 1 else period_label.capitalize()
                                 if hours_to_wait >= 1:
-                                    print(f"[Month {month_idx + 1}] Market closed. Waiting {hours_to_wait:.2f} hours until market opens + 2 mins...")
+                                    print(f"[{period_name}] Market closed. Waiting {hours_to_wait:.2f} hours until market opens + 2 mins...")
                                 else:
-                                    print(f"[Month {month_idx + 1}] Market closed. Waiting {mins_to_wait:.1f} minutes until market opens + 2 mins...")
+                                    print(f"[{period_name}] Market closed. Waiting {mins_to_wait:.1f} minutes until market opens + 2 mins...")
                             
                             # Sleep in chunks to check for shutdown
                             sleep_chunk = min(60.0, seconds_until_wake)
@@ -3302,54 +3371,61 @@ Examples:
                     # Market is open and at least 2 minutes have passed - proceed with fetch
                     run_num += 1
                     if getattr(args, 'verbose', False):
-                        print(f"\n[Month {month_idx + 1}] Continuous run #{run_num} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                        period_name = f"{period_label.capitalize()} {period_idx + 1}" if num_periods > 1 else period_label.capitalize()
+                        print(f"\n[{period_name}] Continuous run #{run_num} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     
                     try:
-                        # Create month-specific args
-                        month_args = argparse.Namespace(**vars(args))
-                        month_args.date = month_start
-                        month_args.months_ahead = 0  # Single month per cluster
-                        month_start_dt = datetime.strptime(month_start, '%Y-%m-%d')
-                        month_end_dt = datetime.strptime(month_end, '%Y-%m-%d')
-                        days_in_month = (month_end_dt - month_start_dt).days
+                        # Create period-specific args
+                        period_args = argparse.Namespace(**vars(args))
+                        period_args.date = period_start
+                        # Set both to 0 to use single-date mode for this period
+                        period_args.months_ahead = 0
+                        period_args.days_ahead = None
+                        period_start_dt = datetime.strptime(period_start, '%Y-%m-%d')
+                        period_end_dt = datetime.strptime(period_end, '%Y-%m-%d')
+                        days_in_period = (period_end_dt - period_start_dt).days + 1  # +1 to include both start and end
                         
                         # If end_date is provided, limit max_days_to_expiry to the end_date
                         end_date = getattr(args, 'end_date', None)
                         if end_date:
                             end_dt = datetime.strptime(end_date, '%Y-%m-%d')
-                            # Calculate days from month_start to end_date
-                            days_to_end = (end_dt - month_start_dt).days
+                            # Calculate days from period_start to end_date
+                            days_to_end = (end_dt - period_start_dt).days + 1  # +1 to include both start and end
                             # Limit max_days_to_expiry to not exceed end_date
                             # max_days_to_expiry creates a +/- window, so we use days_to_end directly
-                            month_args.max_days_to_expiry = max(1, days_to_end)
+                            period_args.max_days_to_expiry = max(1, days_to_end)
                         else:
-                            month_args.max_days_to_expiry = max(days_in_month, getattr(args, 'max_days_to_expiry', 30))
+                            period_args.max_days_to_expiry = max(days_in_period, getattr(args, 'max_days_to_expiry', 30))
                         
-                        # Execute this month's iteration (processes will exit after completion)
-                        # Each month cluster uses its own pool list to ensure independence
+                        # Execute this period's iteration (processes will exit after completion)
+                        # Each period cluster uses its own pool list to ensure independence
                         # When this iteration completes, processes exit, and a new iteration can start
-                        # even if other month clusters are still running
-                        await _execute_options_iteration(symbols_list, month_args, api_key, month_pools)
+                        # even if other period clusters are still running
+                        await _execute_options_iteration(symbols_list, period_args, api_key, period_pools)
                         
                         if getattr(args, 'verbose', False):
-                            print(f"[Month {month_idx + 1}] Iteration #{run_num} completed. Processes have exited. Next iteration will start after sleep interval.")
+                            period_name = f"{period_label.capitalize()} {period_idx + 1}" if num_periods > 1 else period_label.capitalize()
+                            print(f"[{period_name}] Iteration #{run_num} completed. Processes have exited. Next iteration will start after sleep interval.")
                     except KeyboardInterrupt:
                         if getattr(args, 'verbose', False):
-                            print(f"[Month {month_idx + 1}] Interrupted", file=sys.stderr)
+                            period_name = f"{period_label.capitalize()} {period_idx + 1}" if num_periods > 1 else period_label.capitalize()
+                            print(f"[{period_name}] Interrupted", file=sys.stderr)
                         break
                     except Exception as e:
                         if getattr(args, 'verbose', False):
-                            print(f"[Month {month_idx + 1}] Error: {e}", file=sys.stderr)
+                            period_name = f"{period_label.capitalize()} {period_idx + 1}" if num_periods > 1 else period_label.capitalize()
+                            print(f"[{period_name}] Error: {e}", file=sys.stderr)
                     
-                    # After fetch, sleep for this month's interval
-                    # This sleep is independent - when it expires, this month cluster will start
-                    # a new iteration even if other month clusters are still running or sleeping
+                    # After fetch, sleep for this period's interval
+                    # This sleep is independent - when it expires, this period cluster will start
+                    # a new iteration even if other period clusters are still running or sleeping
                     adjusted_sleep = sleep_interval * (args.interval_multiplier if getattr(args, 'interval_multiplier', None) else 1.0)
                     if getattr(args, 'verbose', False):
-                        print(f"[Month {month_idx + 1}] Sleeping for {adjusted_sleep/60:.1f} minutes. Will start iteration #{run_num + 1} independently when sleep expires.")
+                        period_name = f"{period_label.capitalize()} {period_idx + 1}" if num_periods > 1 else period_label.capitalize()
+                        print(f"[{period_name}] Sleeping for {adjusted_sleep/60:.1f} minutes. Will start iteration #{run_num + 1} independently when sleep expires.")
                     
-                    # Sleep in chunks to allow other month clusters to proceed independently
-                    # Each month cluster's sleep timer is independent
+                    # Sleep in chunks to allow other period clusters to proceed independently
+                    # Each period cluster's sleep timer is independent
                     sleep_chunk = min(60.0, adjusted_sleep)
                     elapsed = 0.0
                     while elapsed < adjusted_sleep:
@@ -3358,22 +3434,23 @@ Examples:
                         if elapsed + sleep_chunk > adjusted_sleep:
                             sleep_chunk = adjusted_sleep - elapsed
                     
-                    # Sleep expired - this month cluster will now start a new iteration
-                    # This happens independently of other month clusters' status
+                    # Sleep expired - this period cluster will now start a new iteration
+                    # This happens independently of other period clusters' status
                     if getattr(args, 'verbose', False):
-                        print(f"[Month {month_idx + 1}] Sleep interval expired. Starting new iteration (independent of other months).")
+                        period_name = f"{period_label.capitalize()} {period_idx + 1}" if num_periods > 1 else period_label.capitalize()
+                        print(f"[{period_name}] Sleep interval expired. Starting new iteration (independent of other {period_label_plural}).")
             
-            # Run all month clusters concurrently
+            # Run all period clusters concurrently
             tasks = []
-            for month_idx, (month_start, month_end) in enumerate(month_ranges):
-                task = asyncio.create_task(month_cluster_loop(month_idx, month_start, month_end, month_intervals[month_idx]))
+            for period_idx, (period_start, period_end) in enumerate(date_ranges):
+                task = asyncio.create_task(period_cluster_loop(period_idx, period_start, period_end, period_intervals[period_idx]))
                 tasks.append(task)
             
             try:
                 await asyncio.gather(*tasks)
             except KeyboardInterrupt:
                 if getattr(args, 'verbose', False):
-                    print("\nKeyboardInterrupt: Cancelling all month clusters...", file=sys.stderr)
+                    print(f"\nKeyboardInterrupt: Cancelling all {period_label_plural} clusters...", file=sys.stderr)
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
