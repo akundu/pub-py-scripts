@@ -3221,45 +3221,71 @@ Examples:
     all_pools = []
     
     if args.continuous:
-        months_ahead = getattr(args, 'months_ahead', 0)
+        days_ahead = getattr(args, 'days_ahead', None)
+        months_ahead = getattr(args, 'months_ahead', 6)  # Default is 6 from argument parser
         
-        # Multi-month continuous mode
-        if months_ahead > 0:
+        # Check if days_ahead is provided (takes precedence over months_ahead)
+        use_days_mode = days_ahead is not None and days_ahead > 0
+        
+        # Multi-period continuous mode
+        if use_days_mode or months_ahead > 0:
             start_date = getattr(args, 'start_date', None) or args.date
             end_date = getattr(args, 'end_date', None)
             
-            # If end_date is provided, calculate months_ahead from start_date to end_date
-            if end_date:
-                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-                end_dt = datetime.strptime(end_date, '%Y-%m-%d')
-                days_diff = (end_dt - start_dt).days
-                # Calculate number of 30-day periods needed, rounding up
-                calculated_months_ahead = max(1, (days_diff + 29) // 30)  # +29 to round up
-                if getattr(args, 'verbose', False):
-                    print(f"--end-date specified ({end_date}), calculating months_ahead: {calculated_months_ahead} (from {start_date} to {end_date}, {days_diff} days)", file=sys.stderr)
-                months_ahead = calculated_months_ahead
+            if use_days_mode:
+                # Days-ahead mode
+                # If end_date is provided, calculate days_ahead from start_date to end_date
+                if end_date:
+                    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                    end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+                    days_diff = (end_dt - start_dt).days + 1  # +1 to include both start and end dates
+                    if getattr(args, 'verbose', False):
+                        print(f"--end-date specified ({end_date}), calculating days_ahead: {days_diff} (from {start_date} to {end_date})", file=sys.stderr)
+                    days_ahead = days_diff
+                
+                date_ranges = generate_day_ranges(start_date, days_ahead, end_date)
+                num_periods = days_ahead
+                period_label = "day"
+                period_label_plural = "days"
+            else:
+                # Months-ahead mode (original behavior)
+                # If end_date is provided, calculate months_ahead from start_date to end_date
+                if end_date:
+                    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                    end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+                    days_diff = (end_dt - start_dt).days
+                    # Calculate number of 30-day periods needed, rounding up
+                    calculated_months_ahead = max(1, (days_diff + 29) // 30)  # +29 to round up
+                    if getattr(args, 'verbose', False):
+                        print(f"--end-date specified ({end_date}), calculating months_ahead: {calculated_months_ahead} (from {start_date} to {end_date}, {days_diff} days)", file=sys.stderr)
+                    months_ahead = calculated_months_ahead
+                
+                date_ranges = generate_month_ranges(start_date, months_ahead, end_date)
+                num_periods = months_ahead
+                period_label = "month"
+                period_label_plural = "months"
             
-            month_ranges = generate_month_ranges(start_date, months_ahead, end_date)
-            
-            # Calculate exponential intervals for each month (smaller for near months, larger for far months)
-            # Base interval: 20 minutes for month 1, exponentially increasing up to 60 minutes max
+            # Calculate exponential intervals for each period (smaller for near periods, larger for far periods)
+            # Base interval: 20 minutes for period 1, exponentially increasing up to 60 minutes max
             base_interval_minutes = HistoricalDataFetcher.CACHE_DURATION_MINUTES['market_open']
             max_interval_minutes = 60.0
-            month_intervals = []
-            for i in range(months_ahead):
-                # Exponential growth: month 0 gets base, month n-1 gets max
-                if months_ahead == 1:
+            period_intervals = []
+            for i in range(num_periods):
+                # Exponential growth: period 0 gets base, period n-1 gets max
+                if num_periods == 1:
                     interval = base_interval_minutes * 60
                 else:
                     # Exponential: base * (max/base)^(i/(n-1))
-                    ratio = (max_interval_minutes / base_interval_minutes) ** (i / (months_ahead - 1))
+                    ratio = (max_interval_minutes / base_interval_minutes) ** (i / (num_periods - 1))
                     interval = base_interval_minutes * ratio * 60
-                month_intervals.append(interval)
+                period_intervals.append(interval)
             
             if getattr(args, 'verbose', False):
-                print(f"\n[CONTINUOUS MULTI-MONTH MODE] Starting {months_ahead} month clusters with exponential intervals:")
-                for i, (month_range, interval) in enumerate(zip(month_ranges, month_intervals)):
-                    print(f"  Month {i+1} ({month_range[0]} to {month_range[1]}): {interval/60:.1f} min interval")
+                mode_label = f"CONTINUOUS MULTI-{period_label_plural.upper()}"
+                print(f"\n[{mode_label} MODE] Starting {num_periods} {period_label_plural} clusters with exponential intervals:")
+                for i, (date_range, interval) in enumerate(zip(date_ranges, period_intervals)):
+                    period_name = f"{period_label.capitalize()} {i+1}" if num_periods > 1 else period_label.capitalize()
+                    print(f"  {period_name} ({date_range[0]} to {date_range[1]}): {interval/60:.1f} min interval")
             
             # Create async tasks for each period cluster
             # Each period cluster runs independently - when its sleep expires, it starts a new iteration
@@ -3274,9 +3300,9 @@ Examples:
                 run_num = 0
                 market_open_delay_seconds = 2 * 60  # 2 minutes after market opens
                 
-                # Each month cluster maintains its own pool tracking (local to this async function)
-                # This ensures independence - one month's processes don't affect another
-                month_pools = []
+                # Each period cluster maintains its own pool tracking (local to this async function)
+                # This ensures independence - one period's processes don't affect another
+                period_pools = []
                 
                 def get_seconds_until_market_open_plus_delay(now_utc: datetime) -> float | None:
                     """Calculate seconds until market opens + 2 minutes delay."""
@@ -3355,7 +3381,8 @@ Examples:
                     if seconds_since_open is not None and seconds_since_open < market_open_delay_seconds:
                         wait_time = market_open_delay_seconds - seconds_since_open
                         if getattr(args, 'verbose', False):
-                            print(f"[Month {month_idx + 1}] Market just opened. Waiting {wait_time:.0f} seconds until 2 mins after open...")
+                            period_name = f"{period_label.capitalize()} {period_idx + 1}" if num_periods > 1 else period_label.capitalize()
+                            print(f"[{period_name}] Market just opened. Waiting {wait_time:.0f} seconds until 2 mins after open...")
                         
                         sleep_chunk = min(10.0, wait_time)
                         elapsed = 0.0
