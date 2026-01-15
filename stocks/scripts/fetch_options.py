@@ -2267,7 +2267,11 @@ async def _execute_month_cluster(
     # Adjust max_days_to_expiry to cover the month range
     month_start_dt = datetime.strptime(month_start_date, '%Y-%m-%d')
     month_end_dt = datetime.strptime(month_end_date, '%Y-%m-%d')
-    days_in_month = (month_end_dt - month_start_dt).days
+    days_in_period = (month_end_dt - month_start_dt).days
+    
+    # Check if we're in days_ahead mode - if so, limit max_days_to_expiry to the period length
+    days_ahead = getattr(args, 'days_ahead', None)
+    use_days_mode = days_ahead is not None and days_ahead > 0
     
     # If end_date is provided, limit max_days_to_expiry to the end_date
     end_date = getattr(args, 'end_date', None)
@@ -2281,8 +2285,14 @@ async def _execute_month_cluster(
         month_args.max_days_to_expiry = max(1, days_to_end)
         if getattr(args, 'verbose', False):
             print(f"[Month {month_index + 1}] Limiting max_days_to_expiry to {month_args.max_days_to_expiry} (end_date: {end_date}, target_date: {month_start_date}, days_to_end: {days_to_end})", file=sys.stderr)
+    elif use_days_mode:
+        # In days_ahead mode, limit max_days_to_expiry to the period length (or 1 if single day)
+        # This ensures we only fetch options expiring within the requested day range
+        month_args.max_days_to_expiry = max(1, days_in_period + 1)  # +1 to include the end day
+        if getattr(args, 'verbose', False):
+            print(f"[Day {month_index + 1}] Limiting max_days_to_expiry to {month_args.max_days_to_expiry} (days_ahead mode, period length: {days_in_period + 1} days)", file=sys.stderr)
     else:
-        month_args.max_days_to_expiry = max(days_in_month, getattr(args, 'max_days_to_expiry', 30))
+        month_args.max_days_to_expiry = max(days_in_period + 1, getattr(args, 'max_days_to_expiry', 30))
     
     futures_map = {}
     cluster_results = {
@@ -3421,8 +3431,12 @@ Examples:
                             # Limit max_days_to_expiry to not exceed end_date
                             # max_days_to_expiry creates a +/- window, so we use days_to_end directly
                             period_args.max_days_to_expiry = max(1, days_to_end)
+                        elif use_days_mode:
+                            # In days_ahead mode, limit max_days_to_expiry to the period length (or 1 if single day)
+                            # This ensures we only fetch options expiring within the requested day range
+                            period_args.max_days_to_expiry = max(1, days_in_period + 1)  # +1 to include the end day
                         else:
-                            period_args.max_days_to_expiry = max(days_in_period, getattr(args, 'max_days_to_expiry', 30))
+                            period_args.max_days_to_expiry = max(days_in_period + 1, getattr(args, 'max_days_to_expiry', 30))
                         
                         # Execute this period's iteration (processes will exit after completion)
                         # Each period cluster uses its own pool list to ensure independence
