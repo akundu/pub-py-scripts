@@ -13,6 +13,13 @@ import pandas as pd
 from aiohttp import web
 from common.stock_db import get_stock_db, StockDBBase 
 import traceback
+try:
+    from common.gemini_sql import generate_and_validate_sql, MODEL_ALIASES
+    GEMINI_SQL_AVAILABLE = True
+except ImportError:
+    GEMINI_SQL_AVAILABLE = False
+    generate_and_validate_sql = None
+    MODEL_ALIASES = {}
 import logging
 from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
 import sys
@@ -801,6 +808,13 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     
     # Add stock analysis API endpoint
     app.router.add_get("/api/stock_analysis", handle_stock_analysis)
+    
+    # Add AI query API endpoint
+    app.router.add_get("/api/ai_query", handle_ai_query)
+    
+    # Add SQL execution API endpoint
+    app.router.add_get("/api/execute_sql", handle_execute_sql)
+    app.router.add_get("/api/sql_query", handle_execute_sql)  # Alias for execute_sql
     
     # Add Yahoo Finance news API endpoint
     app.router.add_get("/api/yahoo_news/{symbol}", handle_yahoo_finance_news)
@@ -10796,6 +10810,197 @@ async def handle_wsb_daily_thread(request: web.Request) -> web.Response:
             "note": str(e)[:100]
         })
 
+async def handle_execute_sql(request: web.Request) -> web.Response:
+    """Handle explicit SQL query execution via GET.
+    
+    GET /api/execute_sql
+    
+    Query Parameters:
+        sql (required): SQL query to execute (URL-encoded)
+        query_type (optional): Type of query - "select" (default) or "raw"
+        query_params (optional): JSON-encoded array of query parameters for parameterized queries
+    
+    Returns:
+        JSON response with query results
+    
+    Example:
+        GET /api/execute_sql?sql=SELECT%20*%20FROM%20daily_prices%20WHERE%20ticker%20%3D%20%27AAPL%27%20LIMIT%2010
+    """
+    # Get database instance
+    db_instance = request.app.get('db_instance')
+    if not db_instance:
+        return web.json_response({
+            "error": "Database instance not available"
+        }, status=500)
+    
+    # Get query parameters from URL
+    sql_query = request.query.get('sql') or request.query.get('sql_query')
+    query_type = request.query.get('query_type', 'select').lower()
+    query_params_str = request.query.get('query_params', '[]')
+    
+    if not sql_query:
+        return web.json_response({
+            "error": "Missing required parameter 'sql' or 'sql_query'"
+        }, status=400)
+    
+    if query_type not in ["select", "raw"]:
+        return web.json_response({
+            "error": "Invalid 'query_type'. Must be 'select' or 'raw'."
+        }, status=400)
+    
+    # Parse query_params if provided
+    query_params = []
+    if query_params_str and query_params_str != '[]':
+        try:
+            query_params = json.loads(query_params_str)
+            if not isinstance(query_params, (list, tuple)):
+                return web.json_response({
+                    "error": "'query_params' must be a JSON array"
+                }, status=400)
+        except json.JSONDecodeError:
+            return web.json_response({
+                "error": f"Invalid JSON in 'query_params': {query_params_str}"
+            }, status=400)
+    
+    logger.warning(f"Executing SQL query (type: {query_type}): {sql_query[:200]}... with params: {query_params if query_params else 'None'}. Ensure this is from a trusted source.")
+    
+    try:
+        if query_type == "select":
+            df_result = await db_instance.execute_select_sql(sql_query, tuple(query_params))
+            if df_result.empty:
+                return web.json_response({
+                    "message": "Query executed, no data returned.",
+                    "data": []
+                })
+            
+            # Convert datetime columns to ISO format string
+            df_reset = df_result.reset_index(drop=True)
+            for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
+                df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+            
+            records = df_reset.to_dict(orient='records')
+            return web.json_response({"data": records})
+        
+        elif query_type == "raw":
+            result_data = await db_instance.execute_raw_sql(sql_query, tuple(query_params))
+            return web.json_response({
+                "message": "Raw SQL query executed.",
+                "data": result_data
+            })
+    
+    except Exception as e:
+        logger.error(f"Error executing SQL query: {e}", exc_info=True)
+        return web.json_response({
+            "error": f"Failed to execute SQL query: {str(e)}"
+        }, status=500)
+
+async def handle_ai_query(request: web.Request) -> web.Response:
+    """Handle AI-powered natural language to SQL query requests via GET.
+    
+    GET /api/ai_query
+    
+    Query Parameters:
+        query (required): Natural language query description
+        model (optional): Gemini model to use (flash, pro, flash-lite, gemini-3). Default: flash
+        max_rows (optional): Maximum number of rows to return (1-10000). Default: 1000
+        return_sql (optional): If true, include generated SQL in response. Default: false
+    
+    Returns:
+        JSON response with query results and optionally the generated SQL
+    
+    Example:
+        GET /api/ai_query?query=What%20is%20the%20latest%20price%20for%20AAPL&return_sql=true
+    """
+    if not GEMINI_SQL_AVAILABLE or generate_and_validate_sql is None:
+        return web.json_response({
+            "error": "AI SQL functionality not available. Please ensure common/gemini_sql module is available and GEMINI_API_KEY is set."
+        }, status=503)
+    
+    # Get query parameters from URL
+    natural_query = request.query.get('query') or request.query.get('natural_query')
+    model_alias = request.query.get('model', 'flash')
+    max_rows_str = request.query.get('max_rows', '1000')
+    return_sql = request.query.get('return_sql', 'false').lower() == 'true'
+    
+    if not natural_query:
+        return web.json_response({
+            "error": "Missing required parameter 'query' or 'natural_query'"
+        }, status=400)
+    
+    # Parse max_rows
+    try:
+        max_rows = int(max_rows_str)
+        if max_rows < 1 or max_rows > 10000:
+            return web.json_response({
+                "error": "'max_rows' must be an integer between 1 and 10000"
+            }, status=400)
+    except ValueError:
+        return web.json_response({
+            "error": f"Invalid 'max_rows' value: {max_rows_str}. Must be an integer."
+        }, status=400)
+    
+    if model_alias not in MODEL_ALIASES:
+        return web.json_response({
+            "error": f"Invalid model alias '{model_alias}'. Choose from: {list(MODEL_ALIASES.keys())}"
+        }, status=400)
+    
+    # Get database instance
+    db_instance = request.app.get('db_instance')
+    if not db_instance:
+        return web.json_response({
+            "error": "Database instance not available"
+        }, status=500)
+    
+    try:
+        logger.info(f"Generating SQL from natural language query: {natural_query[:100]}...")
+        
+        # Generate SQL from natural language
+        sql_query = generate_and_validate_sql(
+            natural_query,
+            model_alias=model_alias,
+            max_rows=max_rows
+        )
+        
+        logger.info(f"Generated SQL: {sql_query[:200]}...")
+        
+        # Execute the generated SQL
+        df_result = await db_instance.execute_select_sql(sql_query, ())
+        
+        if df_result.empty:
+            response_data = {
+                "message": "Query executed, no data returned.",
+                "data": []
+            }
+        else:
+            # Convert datetime columns to ISO format string
+            df_reset = df_result.reset_index(drop=True)
+            for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
+                df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+            
+            records = df_reset.to_dict(orient='records')
+            response_data = {"data": records}
+        
+        # Optionally include the generated SQL in the response
+        if return_sql:
+            response_data["generated_sql"] = sql_query
+            response_data["model_used"] = MODEL_ALIASES[model_alias]
+        
+        # Always log the generated SQL for debugging
+        logger.info(f"AI Query SQL: {sql_query}")
+        
+        return web.json_response(response_data)
+        
+    except ValueError as e:
+        logger.error(f"AI SQL generation error: {e}", exc_info=True)
+        return web.json_response({
+            "error": f"Failed to generate valid SQL: {str(e)}"
+        }, status=400)
+    except Exception as e:
+        logger.error(f"Error executing AI query: {e}", exc_info=True)
+        return web.json_response({
+            "error": f"Failed to execute AI query: {str(e)}"
+        }, status=500)
+
 async def handle_catch_all(request: web.Request) -> web.Response:
     """Catch-all handler for unknown routes."""
     # Log the request but don't spam the logs for repeated requests
@@ -11263,6 +11468,81 @@ async def handle_db_command(request: web.Request) -> web.Response:
                 result_data = await db_instance.execute_raw_sql(sql_query, tuple(query_params))
                 return web.json_response({"message": "Raw SQL query executed.", "data": result_data})
 
+        elif command == "ai_query":
+            # AI-powered natural language to SQL query
+            if not GEMINI_SQL_AVAILABLE or generate_and_validate_sql is None:
+                return web.json_response({
+                    "error": "AI SQL functionality not available. Please ensure common/gemini_sql module is available and GEMINI_API_KEY is set."
+                }, status=503)
+            
+            natural_query = params.get("natural_query")
+            model_alias = params.get("model", "flash")
+            max_rows = params.get("max_rows", 1000)
+            return_sql = params.get("return_sql", False)  # Optionally return the generated SQL
+            
+            if not natural_query:
+                return web.json_response({"error": "Missing 'natural_query' parameter for ai_query"}, status=400)
+            
+            if model_alias not in MODEL_ALIASES:
+                return web.json_response({
+                    "error": f"Invalid model alias '{model_alias}'. Choose from: {list(MODEL_ALIASES.keys())}"
+                }, status=400)
+            
+            if not isinstance(max_rows, int) or max_rows < 1 or max_rows > 10000:
+                return web.json_response({
+                    "error": "'max_rows' must be an integer between 1 and 10000"
+                }, status=400)
+            
+            try:
+                logger.info(f"Generating SQL from natural language query: {natural_query[:100]}...")
+                
+                # Generate SQL from natural language
+                sql_query = generate_and_validate_sql(
+                    natural_query,
+                    model_alias=model_alias,
+                    max_rows=max_rows
+                )
+                
+                logger.info(f"Generated SQL: {sql_query[:200]}...")
+                
+                # Execute the generated SQL
+                df_result = await db_instance.execute_select_sql(sql_query, ())
+                
+                if df_result.empty:
+                    response_data = {
+                        "message": "Query executed, no data returned.",
+                        "data": []
+                    }
+                else:
+                    # Convert datetime columns to ISO format string
+                    df_reset = df_result.reset_index(drop=True)
+                    for col_name in df_reset.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]']).columns:
+                        df_reset[col_name] = df_reset[col_name].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+                    
+                    records = df_reset.to_dict(orient='records')
+                    response_data = {"data": records}
+                
+                # Optionally include the generated SQL in the response
+                if return_sql:
+                    response_data["generated_sql"] = sql_query
+                    response_data["model_used"] = MODEL_ALIASES[model_alias]
+                
+                # Always log the generated SQL for debugging
+                logger.info(f"AI Query SQL: {sql_query}")
+                
+                return web.json_response(response_data)
+                
+            except ValueError as e:
+                logger.error(f"AI SQL generation error: {e}", exc_info=True)
+                return web.json_response({
+                    "error": f"Failed to generate valid SQL: {str(e)}"
+                }, status=400)
+            except Exception as e:
+                logger.error(f"Error executing AI query: {e}", exc_info=True)
+                return web.json_response({
+                    "error": f"Failed to execute AI query: {str(e)}"
+                }, status=500)
+
         elif command == "save_financial_info":
             ticker = params.get("ticker")
             financial_data = params.get("financial_data")
@@ -11628,6 +11908,13 @@ def main_server_runner():
         
         # Add stock analysis API endpoint
         app.router.add_get("/api/stock_analysis", handle_stock_analysis)
+        
+        # Add AI query API endpoint
+        app.router.add_get("/api/ai_query", handle_ai_query)
+        
+        # Add SQL execution API endpoint
+        app.router.add_get("/api/execute_sql", handle_execute_sql)
+        app.router.add_get("/api/sql_query", handle_execute_sql)  # Alias for execute_sql
         
         # Add Yahoo Finance news API endpoint
         app.router.add_get("/api/yahoo_news/{symbol}", handle_yahoo_finance_news)

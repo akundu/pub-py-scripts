@@ -14,11 +14,121 @@ from google.genai.errors import APIError
 
 # Model aliases matching perm_application_analyzer.py
 MODEL_ALIASES = {
-    "flash": "gemini-2.5-flash",
-    "pro": "gemini-2.5-pro",
+    "flash": "gemini-flash-latest",
+    "flash-3": "gemini-3-flash-preview",
+    "pro": "gemini-pro-latest",
+    "pro-3": "gemini-3-pro-preview",
     "flash-lite": "gemini-2.5-flash-lite",
     "gemini-3": "gemini-3-pro-preview"
 }
+
+
+def list_available_models() -> Dict[str, Any]:
+    """
+    List all available Gemini models by querying the Gemini API.
+    
+    Returns:
+        Dictionary with model information:
+        - models: List of model objects with name, display_name, description, etc.
+        - model_names: List of model name strings
+        - model_dict: Dictionary mapping model names to model info
+        
+    Raises:
+        Exception: If API call fails or GEMINI_API_KEY is not set
+        
+    Example:
+        >>> models = list_available_models()
+        >>> print([m.name for m in models['models']])
+        ['gemini-3-flash', 'gemini-3-pro', ...]
+    """
+    try:
+        client = genai.Client()
+    except Exception as e:
+        raise Exception(f"Failed to initialize Gemini client. Make sure GEMINI_API_KEY environment variable is set.\nDetails: {e}")
+    
+    try:
+        # Query Gemini API for available models
+        model_list = list(client.models.list())
+        
+        # Extract model information
+        models = []
+        model_names = []
+        model_dict = {}
+        
+        for model in model_list:
+            model_info = {
+                "name": model.name,
+                "display_name": getattr(model, 'display_name', model.name),
+                "description": getattr(model, 'description', ''),
+                "version": getattr(model, 'version', ''),
+                "supported_generation_methods": getattr(model, 'supported_generation_methods', []),
+            }
+            models.append(model_info)
+            model_names.append(model.name)
+            model_dict[model.name] = model_info
+        
+        return {
+            "models": models,
+            "model_names": model_names,
+            "model_dict": model_dict
+        }
+        
+    except APIError as e:
+        raise Exception(f"Gemini API Error while listing models: {e}")
+    except Exception as e:
+        raise Exception(f"Unexpected error listing models: {e}")
+
+
+def get_model_info() -> Dict[str, Any]:
+    """
+    Get detailed information about available models from Gemini API.
+    Also includes alias mappings to known model IDs.
+    
+    Returns:
+        Dictionary with model information including:
+        - models: List of all available models from API
+        - model_names: List of model name strings
+        - aliases: List of known model aliases (from MODEL_ALIASES)
+        - alias_mappings: Dictionary mapping aliases to model IDs
+        - default: The default model alias
+        
+    Example:
+        >>> info = get_model_info()
+        >>> print(info['model_names'])
+        ['gemini-3-flash', 'gemini-3-pro', ...]
+    """
+    # Get models from API
+    api_models = list_available_models()
+    
+    # Build alias mappings (map aliases to actual model names if they exist)
+    alias_mappings = {}
+    available_model_names = set(api_models['model_names'])
+    
+    for alias, model_id in MODEL_ALIASES.items():
+        # Check if the model ID exists in the API results
+        if model_id in available_model_names:
+            alias_mappings[alias] = model_id
+        else:
+            # Try to find a similar model (e.g., if model_id is "gemini-3-flash" but API has "models/gemini-3-flash")
+            for model_name in available_model_names:
+                if model_name.endswith(model_id) or model_id in model_name:
+                    alias_mappings[alias] = model_name
+                    break
+    
+    return {
+        "models": api_models['models'],
+        "model_names": api_models['model_names'],
+        "model_dict": api_models['model_dict'],
+        "aliases": list(MODEL_ALIASES.keys()),
+        "alias_mappings": alias_mappings,
+        "default": "flash",
+        "descriptions": {
+            "flash": "Fast and efficient model, good for most queries (default)",
+            "pro": "More powerful model for complex queries",
+            "flash-lite": "Lightweight version of flash model",
+            "gemini-3": "Preview of Gemini 3 Pro model"
+        }
+    }
 
 # StockQuestDB table schemas (static, from questdb_db.py)
 TABLE_SCHEMAS = """
@@ -326,6 +436,53 @@ def query_gemini_for_sql(natural_query: str, model_alias: str = "flash", max_row
 - "most recent daily prices for AAPL" -> SELECT * FROM daily_prices WHERE ticker = 'AAPL' ORDER BY date DESC LIMIT 10
 - "AAPL hourly prices last 7 days" -> SELECT * FROM hourly_prices WHERE ticker = 'AAPL' AND datetime >= CURRENT_DATE - INTERVAL '7 days' ORDER BY datetime DESC LIMIT 1000
 - "AAPL options expiring in March 2024" -> SELECT * FROM options_data WHERE ticker = 'AAPL' AND expiration_date >= '2024-03-01 00:00:00' AND expiration_date < '2024-04-01 00:00:00' LIMIT {max_rows}
+- "SPY movement % over a day for the last 9 months as a percentage percentile" -> SELECT 
+    -- Volatility as % of Opening Price
+    avg(volatility_pct) as mean_volatility,
+    stddev(volatility_pct) as std_dev_volatility,
+    min(volatility_pct) as min_volatility,
+    max(volatility_pct) as max_volatility,
+    -- Percentile breakdown of the daily % range
+    approx_percentile(volatility_pct, 0.25, 5) as p25,
+    approx_percentile(volatility_pct, 0.50, 5) as p50,
+    approx_percentile(volatility_pct, 0.75, 5) as p75,
+    approx_percentile(volatility_pct, 0.90, 5) as p90,
+    approx_percentile(volatility_pct, 0.95, 5) as p95,
+    approx_percentile(volatility_pct, 0.99, 5) as p99
+FROM (
+    SELECT 
+        ((high - low) / open) * 100 as volatility_pct
+    FROM daily_prices
+    WHERE ticker = 'AAPL' 
+      AND date > dateadd('M', -9, now())
+)
+- "SPY day over day close prices as a percentage percentile" -> SELECT 
+    avg(return_pct) as mean,
+    stddev(return_pct) as std_dev,
+    min(return_pct) as min_val,
+    max(return_pct) as max_val,
+    -- Added 3rd argument '5' for maximum precision (significant digits)
+    approx_percentile(return_pct + 100, 0.25, 5) - 100 as p25,
+    approx_percentile(return_pct + 100, 0.50, 5) - 100 as p50,
+    approx_percentile(return_pct + 100, 0.75, 5) - 100 as p75,
+    approx_percentile(return_pct + 100, 0.90, 5) - 100 as p90,
+    approx_percentile(return_pct + 100, 0.95, 5) - 100 as p95,
+    approx_percentile(return_pct + 100, 0.99, 5) - 100 as p99
+FROM (
+    SELECT 
+        ((close - prev_close) / prev_close) * 100 as return_pct
+    FROM (
+        SELECT 
+            close, 
+            lag(close) OVER (PARTITION BY ticker ORDER BY date) as prev_close
+        FROM daily_prices
+        WHERE ticker = 'SPY' 
+          AND date > dateadd('y', -1, now())
+    )
+    WHERE prev_close IS NOT NULL
+)
+
+
 
 Generate the SQL query now:
 """

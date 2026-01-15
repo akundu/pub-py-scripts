@@ -15,7 +15,7 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
 
-from common.gemini_sql import generate_and_validate_sql, MODEL_ALIASES
+from common.gemini_sql import generate_and_validate_sql, MODEL_ALIASES, list_available_models, get_model_info
 from common.questdb_db import StockQuestDB
 from common.stock_db import get_stock_db
 from common.logging_utils import get_logger
@@ -79,14 +79,21 @@ Examples:
   %(prog)s --natural-query "top 10 most traded tickers today" --model pro
   %(prog)s --natural-query "AAPL options expiring in March 2024" --max-rows 500
   %(prog)s --natural-query "daily prices for MSFT last 30 days" --output-format csv --yes
+  %(prog)s --list-models
         """
     )
     
     parser.add_argument(
         "--natural-query",
         type=str,
-        required=True,
+        required=False,
         help="Natural language query description (e.g., 'latest price for AAPL')"
+    )
+    
+    parser.add_argument(
+        "--list-models",
+        action="store_true",
+        help="List all available Gemini models and exit"
     )
     
     parser.add_argument(
@@ -170,6 +177,86 @@ Examples:
         )
     
     args = parser.parse_args()
+    
+    # Handle --list-models flag
+    if args.list_models:
+        print("Available Gemini Models (from API):", file=sys.stdout)
+        print("=" * 70, file=sys.stdout)
+        print("", file=sys.stdout)
+        
+        try:
+            info = get_model_info()
+            api_models = info['models']
+            model_dict = info['model_dict']
+            alias_mappings = info['alias_mappings']
+            descriptions = info['descriptions']
+            default = info['default']
+            
+            # Show all models from API
+            print("All Available Models:", file=sys.stdout)
+            print("-" * 70, file=sys.stdout)
+            for model in api_models:
+                # Handle both dict and object formats
+                if isinstance(model, dict):
+                    model_name = model.get('name', 'Unknown')
+                    display_name = model.get('display_name', model_name)
+                    description = model.get('description', '')
+                    version = model.get('version', '')
+                else:
+                    model_name = getattr(model, 'name', 'Unknown')
+                    display_name = getattr(model, 'display_name', model_name)
+                    description = getattr(model, 'description', '')
+                    version = getattr(model, 'version', '')
+                
+                print(f"  Model: {model_name}", file=sys.stdout)
+                if display_name and display_name != model_name:
+                    print(f"    Display Name: {display_name}", file=sys.stdout)
+                if description:
+                    print(f"    Description: {description}", file=sys.stdout)
+                if version:
+                    print(f"    Version: {version}", file=sys.stdout)
+                print("", file=sys.stdout)
+            
+            # Show alias mappings
+            if alias_mappings:
+                print("=" * 70, file=sys.stdout)
+                print("Model Aliases (for use with --model flag):", file=sys.stdout)
+                print("-" * 70, file=sys.stdout)
+                for alias in info['aliases']:
+                    if alias in alias_mappings:
+                        model_id = alias_mappings[alias]
+                        desc = descriptions.get(alias, "No description available")
+                        default_marker = " (default)" if alias == default else ""
+                        print(f"  {alias:15} -> {model_id:30} {default_marker}", file=sys.stdout)
+                        print(f"    {desc}", file=sys.stdout)
+                        print("", file=sys.stdout)
+                    else:
+                        # Alias not found in API models
+                        print(f"  {alias:15} -> (not available in API)", file=sys.stdout)
+                        print("", file=sys.stdout)
+            
+            print("=" * 70, file=sys.stdout)
+            print(f"Default model alias: {default}", file=sys.stdout)
+            if default in alias_mappings:
+                print(f"Default model ID: {alias_mappings[default]}", file=sys.stdout)
+            print("", file=sys.stdout)
+            print("Usage: Use --model <alias> to select a specific model", file=sys.stdout)
+            
+        except Exception as e:
+            print(f"Error fetching models from Gemini API: {e}", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("Falling back to hardcoded model list:", file=sys.stderr)
+            print("-" * 70, file=sys.stderr)
+            for alias, model_id in MODEL_ALIASES.items():
+                default_marker = " (default)" if alias == default else ""
+                print(f"  {alias:15} -> {model_id:30} {default_marker}", file=sys.stderr)
+            sys.exit(1)
+        
+        sys.exit(0)
+    
+    # Validate that natural-query is provided if not listing models
+    if not args.natural_query:
+        parser.error("--natural-query is required (or use --list-models to see available models)")
     
     # Setup logging
     logger = get_logger("ai_sql_query", level=args.log_level)
