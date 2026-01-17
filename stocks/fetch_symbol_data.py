@@ -1867,7 +1867,7 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
                     return {
                         'price': latest_row['price'],
                         'timestamp': _normalize_index_timestamp(latest_row.name),  # Normalize index value
-                        'write_timestamp': latest_row.get('write_timestamp'),  # When it was written to DB
+                        'write_timestamp': _normalize_index_timestamp(latest_row.get('write_timestamp')),  # Normalize write timestamp
                         'latest_data': latest_data  # Cache the full result for reuse
                     }
                 # If realtime_df is not a valid DataFrame, fall through to try other sources
@@ -1942,7 +1942,7 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
             return {
                 'price': latest_row['price'],
                 'timestamp': _normalize_index_timestamp(latest_row.name),
-                'write_timestamp': latest_row.get('write_timestamp'),  # When it was written to DB
+                'write_timestamp': _normalize_index_timestamp(latest_row.get('write_timestamp')),  # Normalize write timestamp
                 'source': 'realtime'
             }
         
@@ -3435,7 +3435,7 @@ async def _handle_latest_mode(args) -> None:
                     price_data['realtime'] = {
                         'price': latest_realtime.get('price'),
                         'timestamp': _normalize_index_timestamp(latest_realtime.name),
-                        'write_timestamp': latest_realtime.get('write_timestamp')
+                        'write_timestamp': _normalize_index_timestamp(latest_realtime.get('write_timestamp'))
                     }
         except Exception as e:
             logger.debug(f"Error fetching realtime data: {e}")
