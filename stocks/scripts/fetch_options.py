@@ -2271,7 +2271,7 @@ async def _execute_month_cluster(
     
     # Check if we're in days_ahead mode - if so, limit max_days_to_expiry to the period length
     days_ahead = getattr(args, 'days_ahead', None)
-    use_days_mode = days_ahead is not None and days_ahead > 0
+    use_days_mode = days_ahead is not None  # 0 is a valid value meaning "1 day"
     
     # If end_date is provided, limit max_days_to_expiry to the end_date
     end_date = getattr(args, 'end_date', None)
@@ -2380,9 +2380,10 @@ async def _execute_options_iteration(
     ticker_chunk_size = getattr(args, 'ticker_chunk_size', 250)
     
     # Check if days_ahead is provided (takes precedence over months_ahead)
-    use_days_mode = days_ahead is not None and days_ahead > 0
+    # days_ahead=0 means "only the start date" (1 day), days_ahead=None means "not specified"
+    use_days_mode = days_ahead is not None  # 0 is a valid value meaning "1 day"
     
-    # If neither days_ahead nor months_ahead is set, use single-date mode (backward compatibility)
+    # If days_ahead is not specified and months_ahead is 0 or not set, use single-date mode (backward compatibility)
     if not use_days_mode and months_ahead <= 0:
         return await _execute_options_iteration_single_date(symbols_list, args, api_key, all_pools)
     
@@ -2391,6 +2392,9 @@ async def _execute_options_iteration(
     end_date = getattr(args, 'end_date', None)
     
     if use_days_mode:
+        # If days_ahead is 0, treat it as 1 (only the start date)
+        if days_ahead == 0:
+            days_ahead = 1
         # Days-ahead mode
         # If end_date is provided, calculate days_ahead from start_date to end_date
         if end_date:
@@ -3235,7 +3239,12 @@ Examples:
         months_ahead = getattr(args, 'months_ahead', 6)  # Default is 6 from argument parser
         
         # Check if days_ahead is provided (takes precedence over months_ahead)
-        use_days_mode = days_ahead is not None and days_ahead > 0
+        # days_ahead=0 means "only the start date" (1 day), days_ahead=None means "not specified"
+        use_days_mode = days_ahead is not None  # 0 is a valid value meaning "1 day"
+        
+        # If days_ahead is 0, treat it as 1 (only the start date)
+        if use_days_mode and days_ahead == 0:
+            days_ahead = 1
         
         # Multi-period continuous mode
         if use_days_mode or months_ahead > 0:
