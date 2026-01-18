@@ -25,8 +25,12 @@ _warmup_tickers_timestamps: dict[str, float] = {}
 
 
 def _warmup_cache_for_ticker(ticker: str, host: str = "mm.kundu.dev", port: int = 9100) -> None:
-    """Fire-and-forget cache warmup for a single ticker."""
-    url = f"http://{host}:{port}/api/stock_info/{ticker}?show_iv=true&show_news=true"
+    """Fire-and-forget cache warmup for a single ticker.
+    
+    This function explicitly sets allow_source_fetch=true to ensure cache warmup
+    actually fetches fresh data from the source, not just serves from cache.
+    """
+    url = f"http://{host}:{port}/api/stock_info/{ticker}?show_iv=true&show_news=true&allow_source_fetch=true"
     
     logger.debug(f"[CACHE WARMUP] Sending HTTP request for {ticker} to {url}")
     

@@ -2053,7 +2053,8 @@ async def get_current_price(
     stock_db_instance: StockDBBase | None = None,
     db_type: str = "sqlite",
     db_path: str | None = None,
-    max_age_seconds: int = 600  # Default 10 minutes (600 seconds)
+    max_age_seconds: int = 600,  # Default 10 minutes (600 seconds)
+    cache_only: bool = False  # If True, only serve from cache, never fetch from API
 ) -> dict:
     """
     Get the current price of a stock using the specified data source.
@@ -2246,7 +2247,27 @@ async def get_current_price(
                 db_check_time = (time.time() - db_check_start) * 1000
                 
                 # Only fetch from API if market is open or if data is really old (> 30 days)
-                if market_is_open or max_age_check_seconds > (30 * 24 * 3600):
+                # BUT: Check cache_only first - if cache_only=True, don't fetch from API
+                if cache_only:
+                    # Cache-only mode: return stale data from database instead of fetching from API
+                    logging.debug(f"[DB STALE] Price for {symbol} too old ({age_info} > {effective_max_age}s), but cache_only=True - returning stale data from DB (db_check: {db_check_time:.1f}ms)")
+                    fetch_time = (time.time() - fetch_start) * 1000
+                    result = {
+                        'symbol': symbol,
+                        'price': db_price_data['price'],
+                        'bid_price': None,
+                        'ask_price': None,
+                        'timestamp': price_timestamp.isoformat() if hasattr(price_timestamp, 'isoformat') else str(price_timestamp),
+                        'write_timestamp': write_timestamp.isoformat() if write_timestamp and hasattr(write_timestamp, 'isoformat') else str(write_timestamp) if write_timestamp else None,
+                        'source': f'database_{source}',
+                        'data_source': data_source,
+                        'cache_hit': False,
+                        'fetch_time_ms': fetch_time,
+                        'db_check_time_ms': db_check_time,
+                        'stale': True  # Mark as stale
+                    }
+                    return result
+                elif market_is_open or max_age_check_seconds > (30 * 24 * 3600):
                     logging.info(f"[DB STALE] Price for {symbol} too old ({age_info} > {effective_max_age}s), fetching from API (db_check: {db_check_time:.1f}ms)")
                 else:
                     # Market closed and data is reasonable age - use it anyway
@@ -2274,7 +2295,21 @@ async def get_current_price(
         db_check_time = (time.time() - db_check_start) * 1000
         logging.error(f"[DB ERROR] Error getting price from database for {symbol}: {e} (db_check: {db_check_time:.1f}ms)")
     
-    # If no database price, fetch from API
+    # If no database price, fetch from API (unless cache_only mode)
+    if cache_only:
+        # Cache-only mode: return None if no cached data available
+        logging.debug(f"[CACHE ONLY] No cached price found for {symbol}, returning None (cache_only=True)")
+        return {
+            'symbol': symbol,
+            'price': None,
+            'timestamp': None,
+            'source': 'cache_only',
+            'data_source': data_source,
+            'cache_hit': False,
+            'fetch_time_ms': (time.time() - fetch_start) * 1000,
+            'error': 'No cached data available (cache_only mode)'
+        }
+    
     logging.info(f"[API] Fetching price for {symbol} from {data_source} API (DB check completed)")
     api_fetch_start = time.time()
     if data_source == "polygon":
@@ -2504,7 +2539,8 @@ async def get_latest_news(
     api_key: str,
     max_items: int = 10,
     cache_instance=None,
-    cache_ttl: Optional[int] = None  # No TTL (infinite cache)
+    cache_ttl: Optional[int] = None,  # No TTL (infinite cache)
+    force_fetch: bool = False  # If True, bypass cache and fetch fresh data
 ) -> Optional[Dict[str, Any]]:
     """Fetch latest news for a ticker from Polygon.io and optionally cache it.
     
@@ -2523,10 +2559,13 @@ async def get_latest_news(
         return None
     
     try:
-        # Check cache first if available
+        # Check cache first if available (unless force_fetch is True)
+        if force_fetch:
+            logger.debug(f"[NEWS FETCH] force_fetch=True for {ticker}, skipping cache check and fetching fresh from API")
         cached_data = None
         last_save_time = None
-        if cache_instance:
+        if cache_instance and not force_fetch:
+            logger.debug(f"[NEWS FETCH] Checking cache for {ticker} (force_fetch=False)")
             try:
                 from common.redis_cache import CacheKeyGenerator
                 cache_key = CacheKeyGenerator.latest_news(ticker)
@@ -2560,24 +2599,21 @@ async def get_latest_news(
                     
                     logger.info(f"Found cached news for {ticker} (count: {cached_data.get('count', 0)})")
                     
-                    # Check if background fetch should be triggered
-                    if _should_trigger_background_fetch(last_save_time, "news", ticker):
-                        # Trigger background fetch but return cached data immediately
-                        async def _fetch_news_background():
-                            try:
-                                # Re-fetch news - bypass cache to prevent infinite loop
-                                news_result = await get_latest_news(
-                                    ticker, api_key, max_items, cache_instance=None, cache_ttl=None
-                                )
-                                return news_result
-                            except Exception as e:
-                                logger.warning(f"Background news fetch failed for {ticker}: {e}")
-                                return None
-                        
-                        # Fire-and-forget: create task without awaiting
-                        asyncio.create_task(_trigger_background_fetch(
-                            ticker, None, "news", _fetch_news_background
-                        ))
+                    # Log cache age for debugging
+                    if last_save_time:
+                        now_utc = datetime.now(timezone.utc)
+                        if isinstance(last_save_time, str):
+                            last_save_dt = datetime.fromisoformat(last_save_time.replace('Z', '+00:00'))
+                        else:
+                            last_save_dt = last_save_time
+                        if last_save_dt.tzinfo is None:
+                            last_save_dt = last_save_dt.replace(tzinfo=timezone.utc)
+                        age_seconds = (now_utc - last_save_dt).total_seconds()
+                        logger.debug(f"[NEWS CACHE] {ticker}: cache age={age_seconds:.1f}s, last_save_time={last_save_dt.isoformat()}")
+                    else:
+                        logger.debug(f"[NEWS CACHE] {ticker}: no last_save_time in cache")
+                    
+                    # Background fetches disabled - no longer triggering background fetches from /stock_info
                     
                     return cached_data
                 else:
@@ -2586,6 +2622,8 @@ async def get_latest_news(
                 logger.debug(f"Cache check failed for news {ticker}: {e}")
         
         # Fetch from Polygon API
+        if force_fetch:
+            logger.debug(f"[NEWS FETCH] Force fetching fresh news for {ticker} from API (bypassing cache)")
         client = PolygonRESTClient(api_key)
         
         # Get news from last 7 days
@@ -2654,12 +2692,13 @@ async def get_latest_news(
                 if 'date_range' in cache_dict:
                     cache_dict['date_range'] = json.dumps(cache_dict['date_range'])
                 # Add last_save_time
-                cache_dict['last_save_time'] = datetime.now(timezone.utc).isoformat()
+                now_utc = datetime.now(timezone.utc)
+                cache_dict['last_save_time'] = now_utc.isoformat()
                 cache_df = pd.DataFrame([cache_dict])
                 await cache_instance.set(cache_key, cache_df, ttl=None)  # No TTL (infinite cache)
-                logger.info(f"Cached news for {ticker} (no TTL, count: {result['count']})")
+                logger.info(f"[CACHE SAVE] Cached news for {ticker} (no TTL, count: {result['count']}, last_save_time: {now_utc.isoformat()})")
             except Exception as e:
-                logger.debug(f"Failed to cache news for {ticker}: {e}")
+                logger.warning(f"[CACHE SAVE] Failed to cache news for {ticker}: {e}", exc_info=True)
         
         return result if result['count'] > 0 else None
         
@@ -2671,7 +2710,9 @@ async def get_latest_iv(
     ticker: str,
     db_instance: Optional[StockDBBase] = None,
     cache_instance=None,
-    cache_ttl: Optional[int] = None  # No TTL (infinite cache)
+    cache_ttl: Optional[int] = None,  # No TTL (infinite cache)
+    force_fetch: bool = False,  # If True, bypass cache and fetch fresh data
+    cache_only: bool = False  # If True, only serve from cache, never fetch from database
 ) -> Optional[Dict[str, Any]]:
     """Get latest implied volatility data for a ticker from options data.
     
@@ -2693,10 +2734,10 @@ async def get_latest_iv(
     fetch_start = time.time()
     
     try:
-        # Check cache first if available
+        # Check cache first if available (unless force_fetch is True)
         cached_data = None
         last_save_time = None
-        if cache_instance:
+        if cache_instance and not force_fetch:
             try:
                 from common.redis_cache import CacheKeyGenerator
                 cache_key = CacheKeyGenerator.latest_iv(ticker)
@@ -2722,30 +2763,18 @@ async def get_latest_iv(
                     logger.info(f"[IV CACHE HIT] Found cached IV for {ticker}")
                     cached_data['source'] = 'cache'
                     
-                    # Check if background fetch should be triggered
-                    if _should_trigger_background_fetch(last_save_time, "iv", ticker) and db_instance:
-                        # Trigger background fetch but return cached data immediately
-                        async def _fetch_iv_background():
-                            try:
-                                # Re-fetch IV - bypass cache to prevent infinite loop
-                                iv_result = await get_latest_iv(
-                                    ticker, db_instance, cache_instance=None, cache_ttl=None
-                                )
-                                return iv_result
-                            except Exception as e:
-                                logger.warning(f"Background IV fetch failed for {ticker}: {e}")
-                                return None
-                        
-                        # Fire-and-forget: create task without awaiting
-                        asyncio.create_task(_trigger_background_fetch(
-                            ticker, db_instance, "iv", _fetch_iv_background
-                        ))
+                    # Background fetches disabled - no longer triggering background fetches from /stock_info
                     
                     return cached_data
                 else:
                     logger.debug(f"[IV CACHE MISS] Cache miss for IV {ticker} (cached_df is None or empty)")
             except Exception as e:
                 logger.debug(f"[IV CACHE ERROR] Cache check failed for IV {ticker}: {e}")
+        
+        if cache_only:
+            # Cache-only mode: if cache miss, return None (don't fetch from database)
+            logger.debug(f"[IV CACHE ONLY] No cached IV data for {ticker}, returning None (cache_only=True)")
+            return None
         
         if not db_instance:
             logger.warning(f"[IV ERROR] No database instance provided for IV lookup for {ticker}")
@@ -4169,10 +4198,13 @@ def _jitter_threshold(base_threshold: int | float) -> float:
     factor = random.uniform(0.9, 1.1)
     return base_threshold * factor
 
-MARKET_DEFAULT_THRESHOLD = 12 * 60 * 60
+# Background fetch thresholds based on market hours
+# Market open: refresh every 10 minutes (600 seconds)
+MARKET_OPEN_THRESHOLD = 10 * 60  # 10 minutes
+# Market closed: refresh no more than once per hour (3600 seconds)
+MARKET_DEFAULT_THRESHOLD = 60 * 60  # 1 hour (for market closed)
 MARKET_CLOSE_THRESHOLD = MARKET_DEFAULT_THRESHOLD
-MARKET_OPEN_THRESHOLD = 30 * 60
-MARKET_PREOPEN_THRESHOLD = 2 * 60 * 60
+MARKET_PREOPEN_THRESHOLD = 60 * 60  # 1 hour (same as closed)
 MARKET_POSTCLOSE_THRESHOLD = MARKET_PREOPEN_THRESHOLD
 def _should_trigger_background_fetch(last_save_time: Optional[datetime], data_type: str = "price", symbol: str = "") -> bool:
     """Check if background fetch should be triggered based on last save time and market hours.
@@ -4194,7 +4226,9 @@ def _should_trigger_background_fetch(last_save_time: Optional[datetime], data_ty
                 return False
     
     if last_save_time is None:
-        return True  # No data cached, should fetch
+        # No last_save_time means cache might be stale or missing - trigger fetch
+        logger.debug(f"[BACKGROUND FETCH] No last_save_time for {symbol} {data_type}, will trigger fetch")
+        return True
     
     # Ensure last_save_time is timezone-aware UTC
     if isinstance(last_save_time, str):
@@ -4207,15 +4241,34 @@ def _should_trigger_background_fetch(last_save_time: Optional[datetime], data_ty
     now_utc = datetime.now(timezone.utc)
     age_seconds = (now_utc - last_save_time).total_seconds()
 
-    effective_threshold = _jitter_threshold(MARKET_DEFAULT_THRESHOLD)
-    if is_market_hours():  # Check if market is open
+    # Determine threshold based on market hours
+    if is_market_hours():  # Market is open
         effective_threshold = _jitter_threshold(MARKET_OPEN_THRESHOLD)
+        market_status = "OPEN"
     elif is_market_preopen():
         effective_threshold = _jitter_threshold(MARKET_PREOPEN_THRESHOLD)
+        market_status = "PREOPEN"
     elif is_market_postclose():
         effective_threshold = _jitter_threshold(MARKET_POSTCLOSE_THRESHOLD)
+        market_status = "POSTCLOSE"
+    else:
+        effective_threshold = _jitter_threshold(MARKET_DEFAULT_THRESHOLD)
+        market_status = "CLOSED"
 
-    return age_seconds > effective_threshold
+    should_trigger = age_seconds > effective_threshold
+    
+    if should_trigger:
+        logger.debug(
+            f"[BACKGROUND FETCH] Will trigger for {symbol} {data_type}: "
+            f"age={age_seconds:.1f}s > threshold={effective_threshold:.1f}s (market={market_status})"
+        )
+    else:
+        logger.debug(
+            f"[BACKGROUND FETCH] Skipping {symbol} {data_type}: "
+            f"age={age_seconds:.1f}s <= threshold={effective_threshold:.1f}s (market={market_status})"
+        )
+
+    return should_trigger
 
 
 def _get_last_save_time_from_cache(cached_df: Optional[pd.DataFrame]) -> Optional[datetime]:
@@ -4448,6 +4501,7 @@ async def get_price_info(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     force_fetch: bool = False,
+    cache_only: bool = False,  # If True, only serve from cache, never fetch from API
     data_source: str = "polygon",
     timezone_str: Optional[str] = None,
     latest_only: bool = False
@@ -4456,6 +4510,7 @@ async def get_price_info(
     
     Args:
         latest_only: If True, only fetch latest price and skip historical data
+        cache_only: If True, only check cache/database, never fetch from API
     """
     import time
     price_info_start = time.time()
@@ -4470,7 +4525,16 @@ async def get_price_info(
     try:
         # Get current/latest price
         current_price_start = time.time()
-        if force_fetch:
+        if cache_only:
+            # Cache-only mode: only check cache/database, never fetch from API
+            price_info = await get_current_price(
+                symbol,
+                data_source=data_source,
+                stock_db_instance=db_instance,
+                max_age_seconds=999999999,  # Very large age - only use cached data
+                cache_only=True
+            )
+        elif force_fetch:
             # Force fetch from API
             price_info = await get_current_price(
                 symbol,
@@ -4607,6 +4671,7 @@ async def get_options_info(
     db_instance: StockDBBase,
     options_days: int = 180,
     force_fetch: bool = False,
+    cache_only: bool = False,  # If True, only serve from cache, never fetch from API
     data_source: str = "polygon",
     option_type: str = "all",
     strike_range_percent: Optional[int] = None,
@@ -4637,7 +4702,8 @@ async def get_options_info(
                 symbol,
                 data_source=data_source,
                 stock_db_instance=db_instance,
-                max_age_seconds=3600  # 1 hour is fine for options
+                max_age_seconds=3600,  # 1 hour is fine for options
+                cache_only=cache_only
             )
             if price_info and price_info.get("price"):
                 stock_price = price_info["price"]
@@ -4650,7 +4716,11 @@ async def get_options_info(
         target_date_str = today.strftime("%Y-%m-%d")
         
         # Check if we should fetch from API or use DB
-        if force_fetch:
+        if cache_only:
+            # Cache-only mode: only check database, never fetch from API
+            logger.debug(f"[OPTIONS CACHE ONLY] Only checking database for {symbol}, not fetching from API")
+            force_fetch = False  # Override force_fetch in cache-only mode
+        elif force_fetch:
             # Force fetch from Polygon API
             if not POLYGON_AVAILABLE:
                 result["error"] = "Polygon API client not available"
@@ -4682,7 +4752,7 @@ async def get_options_info(
             result["fetch_time_ms"] = fetch_time
             logger.info(f"[OPTIONS API FETCH] Options for {symbol} (api_fetch: {api_fetch_time:.1f}ms, total: {fetch_time:.1f}ms)")
         else:
-            # Try DB first
+            # Try DB first (or cache-only mode)
             try:
                 # Get options from database
                 db_conn = None
@@ -4719,8 +4789,13 @@ async def get_options_info(
                     result["fetch_time_ms"] = fetch_time
                     logger.info(f"[OPTIONS DB HIT] Options for {symbol} (db_fetch: {db_fetch_time:.1f}ms, total: {fetch_time:.1f}ms)")
                 else:
-                    # Fallback to API if no DB connection
-                    if POLYGON_AVAILABLE:
+                    # Fallback to API if no DB connection (unless cache_only mode)
+                    if cache_only:
+                        logger.debug(f"[OPTIONS CACHE ONLY] No database connection for {symbol}, returning None (cache_only=True)")
+                        result["error"] = "No database connection available (cache_only mode)"
+                        result["fetch_time_ms"] = (time.time() - fetch_start) * 1000
+                        return result
+                    elif POLYGON_AVAILABLE:
                         api_key = os.getenv("POLYGON_API_KEY")
                         if api_key:
                             api_fetch_start = time.time()
@@ -4748,6 +4823,11 @@ async def get_options_info(
                     else:
                         result["error"] = "No database connection and Polygon API not available"
             except Exception as e:
+                if cache_only:
+                    logger.debug(f"[OPTIONS CACHE ONLY] Error getting options from DB for {symbol}: {e}, returning None (cache_only=True)")
+                    result["error"] = f"Database error: {e} (cache_only mode)"
+                    result["fetch_time_ms"] = (time.time() - fetch_start) * 1000
+                    return result
                 logger.warning(f"[OPTIONS DB ERROR] Error getting options from DB for {symbol}: {e}, trying API...")
                 # Fallback to API
                 if POLYGON_AVAILABLE:
@@ -4797,6 +4877,7 @@ async def get_news_info(
     symbol: str,
     db_instance: StockDBBase,
     force_fetch: bool = False,
+    cache_only: bool = False,  # If True, only serve from cache, never fetch from API
     enable_cache: bool = True
 ) -> Dict[str, Any]:
     """Get latest news for a symbol."""
@@ -4811,23 +4892,40 @@ async def get_news_info(
     }
     
     try:
-        api_key = os.getenv("POLYGON_API_KEY")
-        if not api_key:
-            result["error"] = "POLYGON_API_KEY environment variable not set"
-            return result
-        
         # Get cache instance if available
         cache_instance = None
         if enable_cache and hasattr(db_instance, 'cache') and db_instance.cache:
             cache_instance = db_instance.cache
         
-        news_data = await get_latest_news(
-            symbol,
-            api_key,
-            max_items=10,
-            cache_instance=cache_instance if not force_fetch else None,
-            cache_ttl=3600  # 1 hour TTL
-        )
+        if cache_only:
+            # Cache-only mode: only check cache, never fetch from API
+            logger.debug(f"[NEWS CACHE ONLY] Only checking cache for {symbol}, not fetching from API")
+            api_key = os.getenv("POLYGON_API_KEY", "")  # Not used in cache-only mode
+            news_data = await get_latest_news(
+                symbol,
+                api_key,
+                max_items=10,
+                cache_instance=cache_instance,
+                cache_ttl=3600,  # 1 hour TTL
+                force_fetch=False  # Never force fetch in cache-only mode
+            )
+            if not news_data:
+                result["error"] = "No cached news data available (cache_only mode)"
+                return result
+        else:
+            api_key = os.getenv("POLYGON_API_KEY")
+            if not api_key:
+                result["error"] = "POLYGON_API_KEY environment variable not set"
+                return result
+            
+            news_data = await get_latest_news(
+                symbol,
+                api_key,
+                max_items=10,
+                cache_instance=cache_instance if not force_fetch else None,
+                cache_ttl=3600,  # 1 hour TTL
+                force_fetch=force_fetch
+            )
         
         fetch_time = (time.time() - fetch_start) * 1000
         
@@ -4866,6 +4964,7 @@ async def get_iv_info(
     symbol: str,
     db_instance: StockDBBase,
     force_fetch: bool = False,
+    cache_only: bool = False,  # If True, only serve from cache, never fetch from database
     enable_cache: bool = True
 ) -> Dict[str, Any]:
     """Get latest IV information for a symbol."""
@@ -4887,13 +4986,33 @@ async def get_iv_info(
         
         import time
         iv_fetch_start = time.time()
-        iv_data = await get_latest_iv(
-            symbol,
-            db_instance=db_instance,
-            cache_instance=cache_instance if not force_fetch else None,
-            cache_ttl=300  # 5 minutes TTL
-        )
-        iv_fetch_time = (time.time() - iv_fetch_start) * 1000
+        
+        if cache_only:
+            # Cache-only mode: only check cache, never fetch from database
+            logger.debug(f"[IV CACHE ONLY] Only checking cache for {symbol}, not fetching from database")
+            iv_data = await get_latest_iv(
+                symbol,
+                db_instance=db_instance,
+                cache_instance=cache_instance,
+                cache_ttl=300,  # 5 minutes TTL
+                force_fetch=False,  # Never force fetch in cache-only mode
+                cache_only=True  # Only check cache, never fetch from database
+            )
+            iv_fetch_time = (time.time() - iv_fetch_start) * 1000
+            if not iv_data:
+                result["error"] = "No cached IV data available (cache_only mode)"
+                result["fetch_time_ms"] = iv_fetch_time
+                return result
+        else:
+            iv_data = await get_latest_iv(
+                symbol,
+                db_instance=db_instance,
+                cache_instance=cache_instance if not force_fetch else None,
+                cache_ttl=300,  # 5 minutes TTL
+                force_fetch=force_fetch,
+                cache_only=False  # Allow database fetch
+            )
+            iv_fetch_time = (time.time() - iv_fetch_start) * 1000
         
         if iv_data:
             iv_source = iv_data.get('source', 'unknown')
@@ -4937,6 +5056,7 @@ async def get_stock_info_parallel(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     force_fetch: bool = False,
+    cache_only: bool = False,  # If True, only serve from cache, never fetch from source
     data_source: str = "polygon",
     timezone_str: Optional[str] = None,
     latest_only: bool = False,
@@ -4989,7 +5109,8 @@ async def get_stock_info_parallel(
         timeframe=price_timeframe,
         start_date=start_date,
         end_date=end_date,
-        force_fetch=force_fetch,
+        force_fetch=force_fetch if not cache_only else False,
+        cache_only=cache_only,
         data_source=data_source,
         timezone_str=timezone_str,
         latest_only=latest_only
@@ -5002,7 +5123,8 @@ async def get_stock_info_parallel(
             symbol,
             db_instance,
             options_days=options_days,
-            force_fetch=force_fetch,
+            force_fetch=force_fetch if not cache_only else False,
+            cache_only=cache_only,
             data_source=data_source,
             option_type=option_type,
             strike_range_percent=strike_range_percent,
@@ -5021,7 +5143,8 @@ async def get_stock_info_parallel(
     tasks.append(get_financial_info(
         symbol,
         db_instance,
-        force_fetch=force_fetch
+        force_fetch=force_fetch if not cache_only else False,
+        cache_only=cache_only
     ))
     task_keys.append('financial')
     
@@ -5030,7 +5153,8 @@ async def get_stock_info_parallel(
         tasks.append(get_news_info(
             symbol,
             db_instance,
-            force_fetch=force_fetch,
+            force_fetch=force_fetch if not cache_only else False,
+            cache_only=cache_only,
             enable_cache=enable_cache
         ))
         task_keys.append('news')
@@ -5045,7 +5169,8 @@ async def get_stock_info_parallel(
         tasks.append(get_iv_info(
             symbol,
             db_instance,
-            force_fetch=force_fetch,
+            force_fetch=force_fetch if not cache_only else False,
+            cache_only=cache_only,
             enable_cache=enable_cache
         ))
         task_keys.append('iv')

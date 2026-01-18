@@ -70,6 +70,7 @@ try:
     from fetch_lists_data import FULL_AVAILABLE_TYPES, load_symbols_from_disk, fetch_types
     from common.stock_db import get_stock_db
     from common.symbol_loader import apply_symbol_exclusions
+    from common.cache_warmup import warmup_stock_info_cache
 except ImportError as e:
     print(f"Error importing required modules: {e}", file=sys.stderr)
     sys.exit(1)
@@ -183,7 +184,7 @@ class RedisPublisher:
         
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if self.redis_client:
-            await self.redis_client.close()
+            await self.redis_client.aclose()
             
     async def publish_realtime_data(self, symbol: str, data_type: str, records: List[Dict]) -> bool:
         """Publish realtime data to Redis channel."""
@@ -343,7 +344,9 @@ class PolygonStreamManager:
     def __init__(self, api_key: str, db_client: Optional[DatabaseClient], 
                  redis_publisher: Optional[RedisPublisher], feed_types: List[str],
                  market: str = "stocks", symbols_per_connection: int = 10, max_retries: int = 3, 
-                 retry_delay: float = 5.0, batch_interval: float = 5.0):
+                 retry_delay: float = 5.0, batch_interval: float = 5.0,
+                 fetch_interval: float = 600.0, db_server_host: str = "localhost", 
+                 db_server_port: int = 9100):
         self.api_key = api_key
         self.db_client = db_client
         self.redis_publisher = redis_publisher
@@ -353,6 +356,9 @@ class PolygonStreamManager:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.batch_interval = batch_interval
+        self.fetch_interval = fetch_interval  # Interval for triggering fetches (default: 10 minutes)
+        self.db_server_host = db_server_host
+        self.db_server_port = db_server_port
         
         # Determine which method to use (Redis preferred if available)
         self.use_redis = redis_publisher is not None and redis_publisher.available
@@ -371,6 +377,11 @@ class PolygonStreamManager:
         self.pending_updates: Dict[str, Dict] = {}  # symbol -> latest data
         self.last_batch_time = time.time()
         self.batch_task: Optional[asyncio.Task] = None
+        
+        # Periodic fetch system
+        self.updated_symbols: Set[str] = set()  # Symbols that have been updated in current interval
+        self.last_fetch_cycle = time.time()
+        self.fetch_task: Optional[asyncio.Task] = None
         
         # Data processing stats
         self.total_messages = 0
@@ -410,6 +421,9 @@ class PolygonStreamManager:
         
         # Start batch processing task
         self.batch_task = asyncio.create_task(self._batch_processor())
+        
+        # Start periodic fetch task
+        self.fetch_task = asyncio.create_task(self._periodic_fetch_processor())
         
         # Start connections
         for i, symbols_chunk in enumerate(symbol_chunks):
@@ -741,6 +755,9 @@ class PolygonStreamManager:
             self.symbol_stats[symbol]['trades_received'] += 1
             self.symbol_stats[symbol]['last_update'] = current_time
             
+            # Mark symbol as updated for periodic fetch
+            self.updated_symbols.add(symbol)
+            
             # Try different possible attribute names for price and size
             price = getattr(trade_msg, 'price', getattr(trade_msg, 'p', None))
             size = getattr(trade_msg, 'size', getattr(trade_msg, 's', None))
@@ -808,6 +825,9 @@ class PolygonStreamManager:
             # Update stats
             self.symbol_stats[symbol]['quotes_received'] += 1
             self.symbol_stats[symbol]['last_update'] = current_time
+            
+            # Mark symbol as updated for periodic fetch
+            self.updated_symbols.add(symbol)
             
             # Try different possible attribute names for price and size
             bid_price = getattr(quote_msg, 'bid_price', getattr(quote_msg, 'bp', None))
@@ -878,6 +898,14 @@ class PolygonStreamManager:
                 await self.batch_task
             except asyncio.CancelledError:
                 pass
+        
+        # Cancel the periodic fetch task if it's still running
+        if self.fetch_task and not self.fetch_task.done():
+            self.fetch_task.cancel()
+            try:
+                await self.fetch_task
+            except asyncio.CancelledError:
+                pass
                 
     def print_stats(self):
         """Print streaming statistics."""
@@ -920,6 +948,74 @@ class PolygonStreamManager:
                 print(f"  {symbol}: {total_msg:,} messages (Q:{stats['quotes_received']:,}, T:{stats['trades_received']:,})")
                 
         print("="*60)
+    
+    async def _periodic_fetch_processor(self):
+        """Periodically trigger fetches for updated symbols, evenly spaced across the interval."""
+        while not shutdown_flag:
+            try:
+                await asyncio.sleep(self.fetch_interval)
+                
+                if shutdown_flag:
+                    break
+                
+                # Get symbols that were updated in this interval
+                symbols_to_fetch = list(self.updated_symbols)
+                
+                if not symbols_to_fetch:
+                    logger.debug(f"[PERIODIC FETCH] No symbols updated in last {self.fetch_interval}s interval")
+                    self.last_fetch_cycle = time.time()
+                    continue
+                
+                logger.info(f"[PERIODIC FETCH] Triggering fetches for {len(symbols_to_fetch)} updated symbols")
+                
+                # Clear the updated symbols set for next interval
+                self.updated_symbols.clear()
+                
+                # Schedule fetches evenly spaced across the next interval
+                # This prevents overwhelming the server
+                if len(symbols_to_fetch) > 0:
+                    spacing = self.fetch_interval / len(symbols_to_fetch)
+                    logger.info(f"[PERIODIC FETCH] Spacing {len(symbols_to_fetch)} fetches over {self.fetch_interval}s (spacing: {spacing:.2f}s)")
+                    
+                    for i, symbol in enumerate(symbols_to_fetch):
+                        delay = i * spacing
+                        asyncio.create_task(self._trigger_fetch_with_delay(symbol, delay))
+                
+                self.last_fetch_cycle = time.time()
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in periodic fetch processor: {e}")
+    
+    async def _trigger_fetch_with_delay(self, symbol: str, delay: float):
+        """Trigger a fetch for a symbol after a delay."""
+        try:
+            await asyncio.sleep(delay)
+            
+            if shutdown_flag:
+                return
+            
+            # Trigger fetch using warmup_stock_info_cache mechanism
+            # Create a minimal DataFrame with the symbol
+            df = pd.DataFrame({'ticker': [symbol]})
+            
+            # Calculate TTL as 1/2 of fetch interval
+            ttl_seconds = self.fetch_interval / 2.0
+            
+            logger.debug(f"[PERIODIC FETCH] Triggering fetch for {symbol} (delay: {delay:.2f}s, TTL: {ttl_seconds:.0f}s)")
+            
+            # Fire-and-forget warmup (wait_timeout=None)
+            warmup_stock_info_cache(
+                df,
+                host=self.db_server_host,
+                port=self.db_server_port,
+                ttl_seconds=ttl_seconds,
+                wait_timeout=None  # Fire-and-forget
+            )
+            
+        except Exception as e:
+            logger.warning(f"Error triggering fetch for {symbol}: {e}")
 
 async def load_symbols_from_types(args: argparse.Namespace) -> List[str]:
     """Load symbols from types (like in fetch_all_data.py)."""
@@ -1161,6 +1257,28 @@ def parse_args():
         help='Interval for printing statistics in seconds (default: 60)'
     )
     
+    # Periodic fetch configuration
+    parser.add_argument(
+        '--fetch-interval',
+        type=float,
+        default=600.0,
+        help='Interval for triggering fetches for updated symbols in seconds (default: 600 = 10 minutes)'
+    )
+    
+    parser.add_argument(
+        '--db-server-host',
+        type=str,
+        default='localhost',
+        help='Database server hostname for periodic fetches (default: localhost)'
+    )
+    
+    parser.add_argument(
+        '--db-server-port',
+        type=int,
+        default=9100,
+        help='Database server port for periodic fetches (default: 9100)'
+    )
+    
     # Test mode
     parser.add_argument(
         '--test-mode',
@@ -1203,7 +1321,10 @@ async def _run_streaming(api_key: str, redis_publisher: Optional[RedisPublisher]
         symbols_per_connection=args.symbols_per_connection,
         max_retries=args.max_retries,
         retry_delay=args.retry_delay,
-        batch_interval=args.batch_interval
+        batch_interval=args.batch_interval,
+        fetch_interval=args.fetch_interval,
+        db_server_host=args.db_server_host,
+        db_server_port=args.db_server_port
     )
     
     # Start statistics task
