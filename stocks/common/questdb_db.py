@@ -4100,30 +4100,7 @@ class OptionsDataService:
                                         last_save_time = None
                                 self.logger.debug(f"[CACHE HIT] Options query result for {ticker} (days={days}, start={start_datetime}, end={end_datetime}) from HistoricalDataFetcher format")
                                 
-                                # Check if background fetch should be triggered
-                                from fetch_symbol_data import _should_trigger_background_fetch, _trigger_background_fetch
-                                if _should_trigger_background_fetch(last_save_time, "options", ticker):
-                                    # Trigger background fetch but return cached data immediately
-                                    async def _fetch_options_background():
-                                        try:
-                                            # Re-fetch options data
-                                            options_result = await self.get_latest(
-                                                ticker=ticker,
-                                                expiration_date=expiration_date,
-                                                start_datetime=start_datetime,
-                                                end_datetime=end_datetime,
-                                                option_tickers=option_tickers,
-                                                timestamp_lookback_days=timestamp_lookback_days,
-                                                min_write_timestamp=min_write_timestamp
-                                            )
-                                            return options_result
-                                        except Exception as e:
-                                            self.logger.warning(f"Background options fetch failed for {ticker}: {e}")
-                                            return None
-                                    
-                                    asyncio.create_task(_trigger_background_fetch(
-                                        ticker, self, "options", _fetch_options_background
-                                    ))
+                                # Background fetches disabled - no longer triggering background fetches from /stock_info
                                 
                                 return cached_options_df
                     else:
@@ -4147,30 +4124,7 @@ class OptionsDataService:
                         
                         self.logger.debug(f"[CACHE HIT] Options query result for {ticker} (days={days}, start={start_datetime}, end={end_datetime})")
                         
-                        # Check if background fetch should be triggered
-                        from fetch_symbol_data import _should_trigger_background_fetch, _trigger_background_fetch
-                        if _should_trigger_background_fetch(last_save_time, "options", ticker):
-                            # Trigger background fetch but return cached data immediately
-                            async def _fetch_options_background():
-                                try:
-                                    # Re-fetch options data
-                                    options_result = await self.get_latest(
-                                        ticker=ticker,
-                                        expiration_date=expiration_date,
-                                        start_datetime=start_datetime,
-                                        end_datetime=end_datetime,
-                                        option_tickers=option_tickers,
-                                        timestamp_lookback_days=timestamp_lookback_days,
-                                        min_write_timestamp=min_write_timestamp
-                                    )
-                                    return options_result
-                                except Exception as e:
-                                    self.logger.warning(f"Background options fetch failed for {ticker}: {e}")
-                                    return None
-                            
-                            asyncio.create_task(_trigger_background_fetch(
-                                ticker, self, "options", _fetch_options_background
-                            ))
+                        # Background fetches disabled - no longer triggering background fetches from /stock_info
                         
                         return cached_options_df
             except Exception as e:
@@ -4266,22 +4220,7 @@ class FinancialDataService:
             
             self.logger.debug(f"[DB] Returning cached financial info for {ticker}")
             
-            # Check if background fetch should be triggered
-            from fetch_symbol_data import _should_trigger_background_fetch, _trigger_background_fetch
-            if _should_trigger_background_fetch(last_save_time, "financial", ticker):
-                # Trigger background fetch but return cached data immediately
-                async def _fetch_financial_background():
-                    try:
-                        # Re-fetch financial data
-                        financial_result = await self.get(ticker, start_date, end_date)
-                        return financial_result
-                    except Exception as e:
-                        self.logger.warning(f"Background financial fetch failed for {ticker}: {e}")
-                        return None
-                
-                asyncio.create_task(_trigger_background_fetch(
-                    ticker, self, "financial", _fetch_financial_background
-                ))
+            # Background fetches disabled - no longer triggering background fetches from /stock_info
             
             return cached_df
         
@@ -4450,22 +4389,7 @@ class PriceService:
                     if use_cached:
                         self.logger.debug(f"[CACHE HIT] Latest price for {ticker}: ${cached_data.get('price', 'N/A'):.2f}")
                         
-                        # Check if background fetch should be triggered
-                        from fetch_symbol_data import _should_trigger_background_fetch, _trigger_background_fetch
-                        if _should_trigger_background_fetch(last_save_time, "price", ticker):
-                            # Trigger background fetch but return cached data immediately
-                            async def _fetch_price_background():
-                                try:
-                                    # Re-fetch price data
-                                    price_result = await self.get_latest_price_with_data(ticker, use_market_time)
-                                    return price_result
-                                except Exception as e:
-                                    self.logger.warning(f"Background price fetch failed for {ticker}: {e}")
-                                    return None
-                            
-                            asyncio.create_task(_trigger_background_fetch(
-                                ticker, self, "price", _fetch_price_background
-                            ))
+                        # Background fetches disabled - no longer triggering background fetches from /stock_info
                         
                         return cached_data
             except Exception as e:
