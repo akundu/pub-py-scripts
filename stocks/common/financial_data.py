@@ -334,6 +334,7 @@ async def get_financial_info(
     symbol: str,
     db_instance: StockDBBase,
     force_fetch: bool = False,
+    cache_only: bool = False,  # If True, only serve from cache, never fetch from API
     include_iv_analysis: bool = False,
     iv_calendar_days: int = 90,
     iv_server_url: Optional[str] = None,
@@ -377,6 +378,11 @@ async def get_financial_info(
     try:
         # Get financial data from database (uses FinancialDataService.get() which has its own cache)
         # No need for separate cache layer here - let FinancialDataService handle caching
+        if cache_only:
+            # Cache-only mode: only check database/cache, never fetch from API
+            logger.debug(f"[FINANCIAL CACHE ONLY] Only checking database/cache for {symbol}, not fetching from API")
+            force_fetch = False  # Override force_fetch in cache-only mode
+            # Fall through to the existing database check logic below
         if not force_fetch:
             try:
                 db_check_start = time.time()
@@ -536,7 +542,14 @@ async def get_financial_info(
             except Exception as e:
                 logger.debug(f"[FINANCIAL DB ERROR] Error getting financial info from DB for {symbol}: {e}")
         
-        # Fetch from API
+        # Fetch from API (unless cache_only mode)
+        if cache_only:
+            # In cache_only mode, if we reach here, it means no cached data was found
+            result["error"] = "No cached financial data available (cache_only mode)"
+            result["fetch_time_ms"] = (time.time() - fetch_start) * 1000
+            logger.debug(f"[FINANCIAL CACHE ONLY] No cached data for {symbol}, returning error (cache_only=True)")
+            return result
+        
         api_key = os.getenv("POLYGON_API_KEY")
         if not api_key:
             result["error"] = "POLYGON_API_KEY environment variable not set"
