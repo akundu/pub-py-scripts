@@ -106,7 +106,7 @@ async def listen_to_channels(redis_url: str, channels: List[str], pattern: Optio
                 print(f"[INFO] Subscribed to channel: {channel}")
         else:
             print("[ERROR] Must specify either --channels or --pattern", file=sys.stderr)
-            await redis_client.close()
+            await redis_client.aclose()
             return
         
         # Open output file if specified
@@ -213,8 +213,8 @@ async def listen_to_channels(redis_url: str, channels: List[str], pattern: Optio
             await pubsub.unsubscribe()
             if pattern:
                 await pubsub.punsubscribe()
-            await pubsub.close()
-            await redis_client.close()
+            await pubsub.aclose()
+            await redis_client.aclose()
             print("[INFO] Disconnected from Redis")
             
     except Exception as e:
