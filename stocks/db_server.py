@@ -668,13 +668,13 @@ class WebSocketManager:
         if self.redis_pubsub:
             try:
                 await self.redis_pubsub.unsubscribe()
-                await self.redis_pubsub.close()
+                await self.redis_pubsub.aclose()
             except Exception as e:
                 logger.warning(f"Error closing Redis pubsub: {e}")
         
         if self.redis_client:
             try:
-                await self.redis_client.close()
+                await self.redis_client.aclose()
             except Exception as e:
                 logger.warning(f"Error closing Redis client: {e}")
         
@@ -699,6 +699,9 @@ def setup_worker_logging(worker_id: int, log_file: str = None, log_level_str: st
     # Create worker-specific logger
     worker_logger = logging.getLogger("db_server_logger")
     worker_logger.setLevel(log_level)
+    
+    # Prevent propagation to root logger to avoid duplicate messages
+    worker_logger.propagate = False
     
     # Clear any existing handlers
     worker_logger.handlers.clear()
@@ -1319,6 +1322,9 @@ def setup_logging(log_file: str | None = None, log_level_str: str = "INFO"):
     # Also set level on the module logger
     logger.setLevel(log_level)
     
+    # Prevent propagation to root logger to avoid duplicate messages
+    logger.propagate = False
+    
     # Use the custom formatter
     custom_formatter = RequestFormatter()
 
@@ -1326,14 +1332,18 @@ def setup_logging(log_file: str | None = None, log_level_str: str = "INFO"):
     console_handler = logging.StreamHandler()
     console_handler.setLevel(log_level)
     console_handler.setFormatter(custom_formatter) 
-    root_logger.addHandler(console_handler)
-    # Also add to module logger if it doesn't have handlers
-    if not logger.handlers:
-        logger.addHandler(console_handler)
+    
+    # Clear any existing handlers first
+    logger.handlers.clear()
+    root_logger.handlers.clear()
+    
+    # Add handler only to the module logger (not root) to avoid duplicates
+    logger.addHandler(console_handler)
 
     if log_file:
         # File Handler - Rotate logs, 5MB per file, keep 5 backups
         file_handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5)
+        file_handler.setLevel(log_level)
         file_handler.setFormatter(custom_formatter)
         logger.addHandler(file_handler)
         logger.info(f"Logging to file: {log_file} with level {log_level_str.upper()}")
@@ -1349,17 +1359,22 @@ def setup_parent_logging_with_queue(log_file: str | None = None, log_level_str: 
 
     log_level = getattr(logging, log_level_str.upper(), logging.INFO)
     logger.setLevel(log_level)
+    
+    # Prevent propagation to root logger to avoid duplicate messages
+    logger.propagate = False
 
     # Handlers used by the listener
     handlers = []
     formatter = RequestFormatter()
 
     console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
     console_handler.setFormatter(formatter)
     handlers.append(console_handler)
 
     if log_file:
         file_handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=5)
+        file_handler.setLevel(log_level)
         file_handler.setFormatter(formatter)
         handlers.append(file_handler)
 
@@ -1382,12 +1397,17 @@ def setup_child_process_logging(worker_id: int, log_level_str: str = "INFO"):
     log_level = getattr(logging, log_level_str.upper(), logging.INFO)
     child_logger = logging.getLogger("db_server_logger")
     child_logger.setLevel(log_level)
+    
+    # Prevent propagation to root logger to avoid duplicate messages
+    child_logger.propagate = False
+    
     child_logger.handlers.clear()
     if log_queue is not None:
         child_logger.addHandler(QueueHandler(log_queue))
     else:
         # Fallback to console if queue not available
         fallback = logging.StreamHandler()
+        fallback.setLevel(log_level)
         fallback.setFormatter(RequestFormatter())
         child_logger.addHandler(fallback)
     child_logger.info(f"Child logger configured for worker {worker_id}")
@@ -3558,8 +3578,11 @@ async def handle_stock_info(request: web.Request) -> web.Response:
         # Get options for next 90 days with ±20% strike range
         GET /api/stock_info/AAPL?options_days=90&strike_range_percent=20
         
-        # Force fetch from API (bypass cache/DB)
-        GET /api/stock_info/AAPL?force_fetch=true
+        # Allow fetching from source (bypasses cache-only mode)
+        GET /api/stock_info/AAPL?allow_source_fetch=true
+        
+        # Force fetch from API (bypass cache/DB, requires allow_source_fetch=true)
+        GET /api/stock_info/AAPL?allow_source_fetch=true&force_fetch=true
         
         # Get historical price data
         GET /api/stock_info/AAPL?start_date=2024-01-01&end_date=2024-12-31&show_price_history=true
@@ -3597,7 +3620,9 @@ async def handle_stock_info(request: web.Request) -> web.Response:
         start_date = request.query.get('start_date')
         end_date = request.query.get('end_date')
         options_days = int(request.query.get('options_days', '180'))
-        force_fetch = request.query.get('force_fetch', 'false').lower() == 'true'
+        # By default, only serve from cache. Set allow_source_fetch=true to permit fetching from API/database
+        allow_source_fetch = request.query.get('allow_source_fetch', 'false').lower() == 'true'
+        force_fetch = request.query.get('force_fetch', 'false').lower() == 'true' and allow_source_fetch
         data_source = request.query.get('data_source', 'polygon')
         timezone_str = request.query.get('timezone', 'America/New_York')
         show_price_history = request.query.get('show_price_history', 'false').lower() == 'true'
@@ -3634,6 +3659,8 @@ async def handle_stock_info(request: web.Request) -> web.Response:
         logger.info(f"[TIMING] {symbol}: Parameter parsing took {parse_time:.2f}ms")
         
         # Call the parallel helper function
+        # By default, use cache_only=True unless allow_source_fetch=true is explicitly set
+        cache_only = not allow_source_fetch
         parallel_start = time.time()
         result = await get_stock_info_parallel(
             symbol,
@@ -3641,6 +3668,7 @@ async def handle_stock_info(request: web.Request) -> web.Response:
             start_date=start_date if not latest else None,
             end_date=end_date if not latest else None,
             force_fetch=force_fetch,
+            cache_only=cache_only,
             data_source=data_source,
             timezone_str=timezone_str,
             latest_only=latest,
@@ -7043,8 +7071,11 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         # Request without news or IV
         GET /stock_info/AAPL?show_news=false&show_iv=false
         
-        # Force fetch from API
-        GET /stock_info/AAPL?force_fetch=true
+        # Allow fetching from source (bypasses cache-only mode)
+        GET /stock_info/AAPL?allow_source_fetch=true
+        
+        # Force fetch from API (requires allow_source_fetch=true)
+        GET /stock_info/AAPL?allow_source_fetch=true&force_fetch=true
     """
     # Get symbol from path
     symbol = request.match_info.get('symbol', '').upper().strip()
@@ -7090,7 +7121,9 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         start_date = request.query.get('start_date')
         end_date = request.query.get('end_date')
         options_days = int(request.query.get('options_days', '450'))  # Default 450 days (15 months) for HTML view
-        force_fetch = request.query.get('force_fetch', 'false').lower() == 'true'
+        # By default, only serve from cache. Set allow_source_fetch=true to permit fetching from API/database
+        allow_source_fetch = request.query.get('allow_source_fetch', 'false').lower() == 'true'
+        force_fetch = request.query.get('force_fetch', 'false').lower() == 'true' and allow_source_fetch
         data_source = request.query.get('data_source', 'polygon')
         timezone_str = request.query.get('timezone', 'America/New_York')
         show_price_history = True  # Always show price history for chart
@@ -7150,6 +7183,8 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         # Start both operations in parallel
         # If lazy_load is enabled, skip options, news, and historical data in initial load for faster page render
         try:
+            # By default, use cache_only=True unless allow_source_fetch=true is explicitly set
+            cache_only = not allow_source_fetch
             results = await asyncio.gather(
                 get_stock_info_parallel(
                     symbol,
@@ -7157,6 +7192,7 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                     start_date=None if skip_historical else (start_date if not latest else None),
                     end_date=None if skip_historical else (end_date if not latest else None),
                     force_fetch=force_fetch,
+                    cache_only=cache_only,
                     data_source=data_source,
                     timezone_str=timezone_str,
                     latest_only=latest or skip_historical,  # Skip historical if lazy loading
@@ -9517,6 +9553,10 @@ async def handle_lazy_load_strategies(request: web.Request) -> web.Response:
     GET /stock_info/api/lazy/strategies/{symbol}
     
     Returns strategy analysis data that can be loaded after initial page render.
+    
+    NOTE: This endpoint calls analyze_stocks which triggers fetch_latest_market_data
+    to query the database for all tickers. This is a database-only operation (no external API calls).
+    Results are cached in Redis for 1 hour to avoid repeated expensive analysis.
     """
     symbol = request.match_info.get('symbol', '').upper().strip()
     if not symbol:
@@ -9525,6 +9565,27 @@ async def handle_lazy_load_strategies(request: web.Request) -> web.Response:
     db_instance = request.app.get('db_instance')
     if not db_instance:
         return web.json_response({"error": "Database instance not available"}, status=500)
+    
+    # Check cache first
+    cache_key = f"stocks:strategy:{symbol}"
+    cached_result = None
+    if REDIS_PUBSUB_AVAILABLE:
+        try:
+            redis_client = await _get_earnings_redis_client()
+            if redis_client:
+                import json as json_lib
+                cached_data = await redis_client.get(cache_key)
+                if cached_data:
+                    cached_result = json_lib.loads(cached_data)
+                    logger.info(f"[STRATEGY CACHE HIT] Found cached strategy analysis for {symbol}")
+        except Exception as e:
+            logger.debug(f"Error checking strategy cache: {e}")
+    
+    if cached_result:
+        return web.json_response({
+            **cached_result,
+            "cached": True
+        })
     
     try:
         import multiprocessing
@@ -9553,6 +9614,9 @@ async def handle_lazy_load_strategies(request: web.Request) -> web.Response:
         workers = max(1, int(multiprocessing.cpu_count() * 0.9))
         
         # Perform analysis for this specific ticker
+        # Note: analyze_stocks calls fetch_latest_market_data which queries the database
+        # for all tickers, but this is a database-only operation (no external API calls)
+        logger.info(f"[STRATEGY] Performing analysis for {symbol} (this may take a moment on first request)")
         final_df, strategy_details_map = await analyze_stocks(
             db_instance=db_instance,
             symbols_dir=symbols_dir,
@@ -9610,8 +9674,25 @@ async def handle_lazy_load_strategies(request: web.Request) -> web.Response:
         response_data = {
             "symbol": symbol,
             "analysis": clean_for_json(result),
-            "strategy_details": clean_for_json(ticker_strategy_details)
+            "strategy_details": clean_for_json(ticker_strategy_details),
+            "cache_ttl": 3600,  # 1 hour
+            "cached": False
         }
+        
+        # Cache the result in Redis (1 hour TTL)
+        if REDIS_PUBSUB_AVAILABLE:
+            try:
+                redis_client = await _get_earnings_redis_client()
+                if redis_client:
+                    import json as json_lib
+                    await redis_client.setex(
+                        cache_key,
+                        3600,  # 1 hour TTL
+                        json_lib.dumps(response_data, default=str, allow_nan=False)
+                    )
+                    logger.info(f"[STRATEGY CACHE SET] Cached strategy analysis for {symbol}")
+            except Exception as e:
+                logger.debug(f"Error caching strategy results: {e}")
         
         return web.json_response(response_data)
         
