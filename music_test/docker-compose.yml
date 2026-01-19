@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  web-server:
+    image: python:3.13-slim
+    container_name: music-test-web-server
+    working_dir: /app
+    ports:
+      - "9103:9103"
+    restart: unless-stopped
+    environment:
+      - CHORD_DETECTOR_LOG_LEVEL=INFO
+    volumes:
+      - .:/app
+    entrypoint: ["/bin/bash", "/app/docker-entrypoint.sh"]
