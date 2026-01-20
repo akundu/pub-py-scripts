@@ -7556,8 +7556,54 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                         logger.info(f"[CHART DATA] {symbol}: Extracted {len(merged_series)} data points for chart")
                         if len(merged_series) > 0:
                             logger.debug(f"[CHART DATA] {symbol}: Sample data point: {merged_series[0]}")
+                    else:
+                        logger.warning(f"[CHART DATA] {symbol}: Merged data exists but no valid close/price column or timestamps found")
                 else:
-                    logger.warning(f"[CHART DATA] {symbol}: No valid chart data extracted - chart_df is None or empty")
+                    # Fallback to daily data if merged data is not available
+                    logger.info(f"[CHART DATA] {symbol}: Merged data not available, falling back to daily data")
+                    try:
+                        # Calculate a reasonable date range for initial chart (last 365 days)
+                        from datetime import datetime, timedelta
+                        end_date_fallback = datetime.now().strftime('%Y-%m-%d')
+                        start_date_fallback = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+                        
+                        daily_df = await db_instance.get_stock_data(symbol, start_date=start_date_fallback, end_date=end_date_fallback, interval='daily')
+                        if daily_df is not None and not daily_df.empty:
+                            close_col = daily_df.get('close') if 'close' in daily_df.columns else daily_df.get('price')
+                            if close_col is not None:
+                                valid_mask = pd.notna(close_col)
+                                timestamps = daily_df.index[valid_mask] if isinstance(daily_df.index, pd.DatetimeIndex) else pd.to_datetime(daily_df.index[valid_mask], errors='coerce')
+                                
+                                # Convert timestamps to local timezone
+                                from zoneinfo import ZoneInfo
+                                local_tz = ZoneInfo('America/New_York')
+                                timestamps_local = []
+                                for ts in timestamps:
+                                    if pd.notna(ts):
+                                        if ts.tzinfo is None:
+                                            ts = ts.replace(tzinfo=timezone.utc)
+                                        ts_local = ts.astimezone(local_tz)
+                                        timestamps_local.append(ts_local)
+                                    else:
+                                        timestamps_local.append(ts)
+                                
+                                chart_data = close_col[valid_mask].tolist()
+                                chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in timestamps_local]
+                                merged_series = [
+                                    {
+                                        'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
+                                        'close': float(close),
+                                        'source': 'daily'
+                                    }
+                                    for ts, close in zip(timestamps_local, close_col[valid_mask])
+                                ]
+                                logger.info(f"[CHART DATA] {symbol}: Fallback to daily data successful, {len(merged_series)} data points")
+                            else:
+                                logger.warning(f"[CHART DATA] {symbol}: Daily data exists but no valid close/price column found")
+                        else:
+                            logger.warning(f"[CHART DATA] {symbol}: No merged or daily data available for chart")
+                    except Exception as e:
+                        logger.warning(f"[CHART DATA] {symbol}: Error fetching daily data fallback: {e}")
                 chart_data_time = (time.time() - chart_data_start) * 1000
                 logger.info(f"[TIMING] {symbol}: Chart data extraction took {chart_data_time:.2f}ms")
                 
@@ -9080,6 +9126,7 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
         
         start_date = (now - timedelta(days=period_days)).strftime('%Y-%m-%d')
         end_date = now.strftime('%Y-%m-%d')
+        logger.debug(f"[LAZY LOAD CHART] {symbol}: Date range: {start_date} to {end_date} (period={period}, period_days={period_days})")
         
         # Fetch chart data based on data_type
         chart_data = []
@@ -9089,18 +9136,25 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
         if data_type == 'merged':
             # Use merged price series (combines daily, hourly, realtime)
             merged_df = await db_instance.get_merged_price_series(symbol)
+            logger.debug(f"[LAZY LOAD CHART] {symbol}: get_merged_price_series returned: type={type(merged_df)}, empty={merged_df.empty if isinstance(merged_df, pd.DataFrame) else 'N/A'}, shape={merged_df.shape if isinstance(merged_df, pd.DataFrame) else 'N/A'}")
             if merged_df is not None and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
                 # Filter to requested period
                 if isinstance(merged_df.index, pd.DatetimeIndex):
-                    start_ts = pd.Timestamp(start_date)
-                    end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+                    # Convert date strings to timezone-naive UTC timestamps (merged_df index is timezone-naive UTC)
+                    start_ts = pd.Timestamp(start_date, tz=None)
+                    end_ts = pd.Timestamp(end_date, tz=None) + pd.Timedelta(days=1)
+                    logger.debug(f"[LAZY LOAD CHART] {symbol}: Filtering merged_df: {len(merged_df)} rows, date range {start_ts} to {end_ts}")
                     filtered_df = merged_df[(merged_df.index >= start_ts) & (merged_df.index <= end_ts)]
+                    logger.debug(f"[LAZY LOAD CHART] {symbol}: After filtering: {len(filtered_df)} rows")
                 else:
                     filtered_df = merged_df
+                    logger.debug(f"[LAZY LOAD CHART] {symbol}: Index is not DatetimeIndex, using full merged_df: {len(filtered_df)} rows")
                 
                 # Extract data efficiently
-                close_col = filtered_df.get('close') if 'close' in filtered_df.columns else filtered_df.get('price')
-                if close_col is not None:
+                logger.debug(f"[LAZY LOAD CHART] {symbol}: filtered_df columns: {list(filtered_df.columns)}, shape: {filtered_df.shape}")
+                close_col = filtered_df.get('close') if 'close' in filtered_df.columns else (filtered_df.get('price') if 'price' in filtered_df.columns else None)
+                logger.debug(f"[LAZY LOAD CHART] {symbol}: close_col type: {type(close_col)}, length: {len(close_col) if close_col is not None else 'None'}")
+                if close_col is not None and len(close_col) > 0:
                     valid_mask = pd.notna(close_col)
                     if isinstance(filtered_df.index, pd.DatetimeIndex):
                         timestamps = filtered_df.index[valid_mask]
@@ -9114,6 +9168,7 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                     for ts in timestamps:
                         if pd.notna(ts):
                             if ts.tzinfo is None:
+                                # Assume UTC if timezone-naive (as per get_merged_price_series implementation)
                                 ts = ts.replace(tzinfo=timezone.utc)
                             ts_local = ts.astimezone(local_tz)
                             timestamps_local.append(ts_local)
@@ -9145,6 +9200,65 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                             }
                             for ts, close in zip(timestamps_local, valid_closes)
                         ]
+                    # Check if we actually got valid data
+                    if len(merged_series) == 0:
+                        logger.warning(f"[LAZY LOAD CHART] {symbol}: Built merged_series but it's empty (all NaN values?)")
+                else:
+                    # No valid data after filtering - fall back to daily data
+                    logger.warning(f"[LAZY LOAD CHART] {symbol}: Merged data exists but no valid close/price column or empty after filtering. Columns: {list(filtered_df.columns) if not filtered_df.empty else 'empty'}, rows: {len(filtered_df)}, close_col: {type(close_col)}")
+                    # merged_series stays as [] to trigger fallback below
+            else:
+                # Fallback to daily data if merged data is not available
+                logger.info(f"[LAZY LOAD CHART] {symbol}: Merged data not available, falling back to daily data")
+            
+            # If we still don't have data, try daily fallback
+            if not merged_series:
+                logger.info(f"[LAZY LOAD CHART] {symbol}: No data from merged series, falling back to daily data")
+                # For very short periods (1d), expand the range slightly to ensure we get data
+                fallback_start = start_date
+                fallback_end = end_date
+                if period == '1d':
+                    # Look back 7 days to ensure we have some data
+                    from datetime import datetime, timedelta
+                    fallback_start = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+                    logger.debug(f"[LAZY LOAD CHART] {symbol}: Expanded fallback range for 1d: {fallback_start} to {fallback_end}")
+                daily_df = await db_instance.get_stock_data(symbol, start_date=fallback_start, end_date=fallback_end, interval='daily')
+                if daily_df is not None and not daily_df.empty:
+                    close_col = daily_df.get('close') if 'close' in daily_df.columns else daily_df.get('price')
+                    if close_col is not None:
+                        valid_mask = pd.notna(close_col)
+                        timestamps = daily_df.index[valid_mask] if isinstance(daily_df.index, pd.DatetimeIndex) else pd.to_datetime(daily_df.index[valid_mask], errors='coerce')
+                        
+                        # Convert timestamps to local timezone
+                        from zoneinfo import ZoneInfo
+                        local_tz = ZoneInfo('America/New_York')
+                        timestamps_local = []
+                        for ts in timestamps:
+                            if pd.notna(ts):
+                                if ts.tzinfo is None:
+                                    ts = ts.replace(tzinfo=timezone.utc)
+                                ts_local = ts.astimezone(local_tz)
+                                timestamps_local.append(ts_local)
+                            else:
+                                timestamps_local.append(ts)
+                        
+                        chart_data = close_col[valid_mask].tolist()
+                        chart_labels = [ts.isoformat() if hasattr(ts, 'isoformat') else str(ts) for ts in timestamps_local]
+                        merged_series = [
+                            {
+                                'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
+                                'close': float(close),
+                                'source': 'daily'
+                            }
+                            for ts, close in zip(timestamps_local, close_col[valid_mask])
+                        ]
+                        logger.info(f"[LAZY LOAD CHART] {symbol}: Fallback to daily data successful, {len(merged_series)} data points")
+                    else:
+                        logger.warning(f"[LAZY LOAD CHART] {symbol}: Daily data exists but no valid close/price column found")
+                        merged_series = []
+                else:
+                    logger.warning(f"[LAZY LOAD CHART] {symbol}: No merged or daily data available")
+                    merged_series = []
         elif data_type == 'daily':
             # Fetch daily data only
             daily_df = await db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval='daily')
