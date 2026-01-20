@@ -638,4 +638,5 @@ symbols:
 #- SPX
 - 'I:SPX'
 - 'I:NDX'
+- 'I:VIX1D'
 #- SPX

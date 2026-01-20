@@ -3250,6 +3250,11 @@ def parse_args():
         help="Fetch latest implied volatility data from options for the symbol. Implies --latest mode."
     )
     parser.add_argument(
+        "--fetch-all",
+        action="store_true",
+        help="Automatically enable --force-fetch, --fetch-ratios, --fetch-news, and --fetch-iv. Convenience flag to fetch all available data."
+    )
+    parser.add_argument(
         "--show-financials",
         action="store_true",
         help="Display all stored financial information for the symbol from the database (ratios, fundamentals, IV analysis, etc.). Shows after date range data if dates are specified, or after latest data if --latest is used."
@@ -3295,6 +3300,14 @@ def _validate_and_normalize_args(args) -> None:
     Args:
         args: Parsed command-line arguments (modified in place)
     """
+    # Handle --fetch-all: automatically enable all fetch flags
+    if args.fetch_all:
+        args.force_fetch = True
+        args.fetch_ratios = True
+        args.fetch_news = True
+        args.fetch_iv = True
+        print("--fetch-all specified: enabling --force-fetch, --fetch-ratios, --fetch-news, and --fetch-iv", file=sys.stderr)
+    
     # Check if Polygon is available when selected
     if args.data_source == "polygon" and not POLYGON_AVAILABLE:
         print("Error: Polygon.io data source selected but polygon-api-client is not installed.", file=sys.stderr)
@@ -3517,6 +3530,99 @@ async def _handle_latest_mode(args) -> None:
         except Exception as e:
             logger.debug(f"Error fetching daily data: {e}")
         
+        # If force_fetch is enabled and no price data found, fetch from API
+        if not price_data and args.force_fetch:
+            print(f"\nNo price data found in database. Fetching latest data from {args.data_source}...", file=sys.stderr)
+            try:
+                # First, try to get current/realtime price
+                try:
+                    current_price_info = await get_current_price(
+                        symbol=args.symbol,
+                        data_source=args.data_source,
+                        stock_db_instance=db_instance_for_cleanup,
+                        max_age_seconds=0  # Force fresh fetch
+                    )
+                    if current_price_info and current_price_info.get('price'):
+                        price_data['realtime'] = {
+                            'price': current_price_info.get('price'),
+                            'timestamp': current_price_info.get('timestamp'),
+                            'bid_price': current_price_info.get('bid_price'),
+                            'ask_price': current_price_info.get('ask_price'),
+                            'volume': current_price_info.get('volume')
+                        }
+                        print(f"Fetched current price: ${current_price_info.get('price'):.2f}", file=sys.stderr)
+                except Exception as current_price_error:
+                    logger.debug(f"Error fetching current price: {current_price_error}")
+                
+                # Fetch recent data (last 30 days) to get latest daily and hourly bars
+                today = datetime.now().strftime('%Y-%m-%d')
+                thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+                
+                # Fetch daily and hourly data
+                fetch_success = await fetch_and_save_data(
+                    symbol=args.symbol,
+                    data_dir=args.data_dir,
+                    stock_db_instance=db_instance_for_cleanup,
+                    start_date=thirty_days_ago,
+                    end_date=today,
+                    db_save_batch_size=args.db_batch_size,
+                    data_source=args.data_source,
+                    chunk_size=args.chunk_size,
+                    save_db_csv=args.save_db_csv,
+                    fetch_daily=True,
+                    fetch_hourly=True,
+                    log_level=args.log_level,
+                    export_csv_dir=None
+                )
+                
+                if fetch_success:
+                    print("Successfully fetched price data. Re-querying database...", file=sys.stderr)
+                    # Re-query the database to get the freshly fetched data
+                    try:
+                        # Get latest daily
+                        daily_df = await db_instance_for_cleanup.get_stock_data(
+                            db_ticker,
+                            start_date=thirty_days_ago,
+                            end_date=today,
+                            interval="daily"
+                        )
+                        if isinstance(daily_df, pd.DataFrame) and not daily_df.empty:
+                            latest_daily = daily_df.iloc[-1]
+                            price_data['daily'] = {
+                                'price': latest_daily.get('close'),
+                                'open': latest_daily.get('open'),
+                                'high': latest_daily.get('high'),
+                                'low': latest_daily.get('low'),
+                                'volume': latest_daily.get('volume'),
+                                'timestamp': _normalize_index_timestamp(latest_daily.name)
+                            }
+                        
+                        # Get latest hourly
+                        hourly_df = await db_instance_for_cleanup.get_stock_data(
+                            db_ticker,
+                            start_date=thirty_days_ago,
+                            end_date=today,
+                            interval="hourly"
+                        )
+                        if isinstance(hourly_df, pd.DataFrame) and not hourly_df.empty:
+                            latest_hourly = hourly_df.iloc[-1]
+                            price_data['hourly'] = {
+                                'price': latest_hourly.get('close'),
+                                'open': latest_hourly.get('open'),
+                                'high': latest_hourly.get('high'),
+                                'low': latest_hourly.get('low'),
+                                'volume': latest_hourly.get('volume'),
+                                'timestamp': _normalize_index_timestamp(latest_hourly.name)
+                            }
+                    except Exception as requery_error:
+                        logger.warning(f"Error re-querying database after fetch: {requery_error}")
+                else:
+                    print("Failed to fetch price data from API.", file=sys.stderr)
+            except Exception as fetch_error:
+                logger.error(f"Error fetching price data: {fetch_error}")
+                import traceback
+                logger.debug(traceback.format_exc())
+        
         # Display the price data
         if price_data:
             for source in ['realtime', 'hourly', 'daily']:
@@ -3541,7 +3647,8 @@ async def _handle_latest_mode(args) -> None:
                     print(f"\n{source.upper()}: No data available")
         else:
             print("\nNo price data found in any source (realtime, hourly, daily)")
-            print("Try using --force-fetch to fetch fresh data from the API")
+            if not args.force_fetch:
+                print("Try using --force-fetch to fetch fresh data from the API")
         
         print(f"\n{'='*80}")
         

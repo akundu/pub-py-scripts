@@ -550,6 +550,14 @@ async def get_financial_info(
             logger.debug(f"[FINANCIAL CACHE ONLY] No cached data for {symbol}, returning error (cache_only=True)")
             return result
         
+        # Check if this is an index symbol (I: prefix) - Polygon doesn't support indexes
+        is_index = symbol.startswith("I:") or symbol.startswith("^")
+        if is_index:
+            logger.info(f"[FINANCIAL API] Skipping Polygon API call for index symbol {symbol} (Polygon doesn't support indexes)")
+            result["error"] = f"Financial ratios not available for index symbols (Polygon API doesn't support indexes)"
+            result["fetch_time_ms"] = (time.time() - fetch_start) * 1000
+            return result
+        
         api_key = os.getenv("POLYGON_API_KEY")
         if not api_key:
             result["error"] = "POLYGON_API_KEY environment variable not set"
@@ -569,28 +577,32 @@ async def get_financial_info(
         iv_analysis_result = None
         iv_fetch_time = None
         if force_fetch and include_iv_analysis:
-            logger.info(f"[FINANCIAL IV] Starting IV analysis calculation for {symbol}")
-            iv_fetch_start = time.time()
-            try:
-                iv_analysis_result = await _calculate_iv_analysis(
-                    symbol=symbol,
-                    db_instance=db_instance,  # Pass database instance for direct access
-                    calendar_days=iv_calendar_days,
-                    polygon_api_key=api_key,
-                    redis_url=os.getenv("REDIS_URL"),
-                    server_url=iv_server_url,
-                    data_dir=iv_data_dir
-                )
-                iv_fetch_time = (time.time() - iv_fetch_start) * 1000
-                if iv_analysis_result:
-                    logger.info(f"[FINANCIAL IV] Calculated IV analysis for {symbol} (iv_fetch: {iv_fetch_time:.1f}ms)")
-                else:
-                    logger.warning(f"[FINANCIAL IV] IV analysis calculation returned None for {symbol}")
-            except Exception as iv_error:
-                iv_fetch_time = (time.time() - iv_fetch_start) * 1000
-                logger.error(f"[FINANCIAL IV] Error calculating IV analysis for {symbol}: {iv_error}")
-                import traceback
-                logger.debug(f"[FINANCIAL IV] IV analysis error traceback: {traceback.format_exc()}")
+            # Check if this is an index symbol - IV analysis doesn't work for indexes
+            if is_index:
+                logger.info(f"[FINANCIAL IV] Skipping IV analysis for index symbol {symbol} (IV analysis not available for indexes)")
+            else:
+                logger.info(f"[FINANCIAL IV] Starting IV analysis calculation for {symbol}")
+                iv_fetch_start = time.time()
+                try:
+                    iv_analysis_result = await _calculate_iv_analysis(
+                        symbol=symbol,
+                        db_instance=db_instance,  # Pass database instance for direct access
+                        calendar_days=iv_calendar_days,
+                        polygon_api_key=api_key,
+                        redis_url=os.getenv("REDIS_URL"),
+                        server_url=iv_server_url,
+                        data_dir=iv_data_dir
+                    )
+                    iv_fetch_time = (time.time() - iv_fetch_start) * 1000
+                    if iv_analysis_result:
+                        logger.info(f"[FINANCIAL IV] Calculated IV analysis for {symbol} (iv_fetch: {iv_fetch_time:.1f}ms)")
+                    else:
+                        logger.warning(f"[FINANCIAL IV] IV analysis calculation returned None for {symbol}")
+                except Exception as iv_error:
+                    iv_fetch_time = (time.time() - iv_fetch_start) * 1000
+                    logger.error(f"[FINANCIAL IV] Error calculating IV analysis for {symbol}: {iv_error}")
+                    import traceback
+                    logger.debug(f"[FINANCIAL IV] IV analysis error traceback: {traceback.format_exc()}")
         elif include_iv_analysis and not force_fetch:
             logger.debug(f"[FINANCIAL IV] IV analysis requested for {symbol} but force_fetch=False, skipping calculation")
         
