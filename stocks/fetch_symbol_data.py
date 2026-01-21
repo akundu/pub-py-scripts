@@ -336,6 +336,7 @@ async def fetch_yfinance_index_data(
 # Mapping from common index symbols to Yahoo Finance symbols
 INDEX_TO_YFINANCE_MAP = {
     'SPX': '^GSPC',      # S&P 500
+    'NDX': '^NDX',       # NASDAQ 100
     'SPY': 'SPY',        # S&P 500 ETF (not an index, but common)
     'DJI': '^DJI',       # Dow Jones Industrial Average
     'DIA': 'DIA',        # Dow ETF
@@ -383,12 +384,21 @@ def _parse_index_ticker(ticker: str) -> tuple[str, str, bool, str | None]:
             - is_index: True if this is an index ticker, False otherwise
             - yfinance_symbol: Yahoo Finance symbol (e.g., "^GSPC") if index, None otherwise
     """
+    if ticker.startswith("^"):
+        base_ticker = ticker[1:]
+        return (ticker, base_ticker, True, ticker)
     if ticker.startswith("I:"):
         base_ticker = ticker[2:]  # Remove "I:" prefix
         yfinance_symbol = _get_yfinance_symbol(base_ticker)
         return (ticker, base_ticker, True, yfinance_symbol)
-    else:
-        return (ticker, ticker, False, None)
+    
+    # Check if ticker (without prefix) is a known index symbol
+    ticker_upper = ticker.upper()
+    if ticker_upper in INDEX_TO_YFINANCE_MAP:
+        yfinance_symbol = INDEX_TO_YFINANCE_MAP[ticker_upper]
+        return (ticker, ticker, True, yfinance_symbol)
+    
+    return (ticker, ticker, False, None)
 
 def _is_market_hours(dt: datetime = None) -> bool:
     """Deprecated shim: use common.market_hours.is_market_hours"""
@@ -1447,66 +1457,174 @@ async def fetch_and_save_data(
 
         # Fetch daily data (if requested)
         if fetch_daily:
-            logging.info(f"Fetching daily data for {symbol} from {start_date_daily_api_str} to {end_date_api_str} via {data_source}...")
+            # For indices with polygon data source, use Polygon directly (skip Yahoo Finance)
+            use_polygon_for_index = is_index and data_source == "polygon"
+            
+            # Determine actual data source for logging
+            if use_polygon_for_index:
+                actual_source = "Polygon"
+            else:
+                actual_source = "Yahoo Finance" if is_index else data_source
+            
+            logging.info(f"Fetching daily data for {symbol} from {start_date_daily_api_str} to {end_date_api_str} via {actual_source}...")
             
             # Use new fetcher architecture
             try:
-                fetcher = FetcherFactory.create_fetcher(
-                    data_source=data_source,
-                    symbol=symbol,  # Auto-detects indices and routes to Yahoo Finance
-                    api_key=API_KEY,
-                    api_secret=API_SECRET if data_source == "alpaca" else None,
-                    log_level=log_level
-                )
+                if use_polygon_for_index:
+                    # Use Polygon directly for indices, bypassing Yahoo Finance routing
+                    from common.fetcher.polygon import PolygonFetcher
+                    fetcher = PolygonFetcher(api_key=API_KEY, log_level=log_level)
+                    # Polygon requires I: prefix for indices (e.g., "I:NDX" not "NDX")
+                    fetch_symbol = f"I:{db_ticker}" if not symbol.startswith("I:") else symbol
+                else:
+                    fetcher = FetcherFactory.create_fetcher(
+                        data_source=data_source,
+                        symbol=symbol,  # Auto-detects indices and routes to Yahoo Finance
+                        api_key=API_KEY,
+                        api_secret=API_SECRET if data_source == "alpaca" else None,
+                        log_level=log_level
+                    )
+                    # Determine the symbol to use for fetching
+                    fetch_symbol = yfinance_symbol if is_index else (api_ticker if api_ticker else symbol)
+                
+                print(f"[INFO] Attempting to fetch daily data for {symbol} using symbol: {fetch_symbol} from {actual_source}", file=sys.stderr)
                 
                 # Fetch data using new fetcher
-                fetch_result = await fetcher.fetch_historical_data(
-                    symbol=yfinance_symbol if is_index else (api_ticker if api_ticker else symbol),
-                    timeframe="daily",
-                    start_date=start_date_daily_api_str,
-                    end_date=end_date_api_str,
-                    chunk_size=chunk_size if data_source == "polygon" else None
-                )
+                fetch_kwargs = {
+                    "symbol": fetch_symbol,
+                    "timeframe": "daily",
+                    "start_date": start_date_daily_api_str,
+                    "end_date": end_date_api_str
+                }
+                if use_polygon_for_index or data_source == "polygon":
+                    fetch_kwargs["chunk_size"] = chunk_size
+                
+                fetch_result = await fetcher.fetch_historical_data(**fetch_kwargs)
                 
                 if not fetch_result.success:
-                    logging.error(f"Failed to fetch daily data for {symbol}: {fetch_result.error}")
-                    new_daily_bars = pd.DataFrame()
+                    logging.error(f"Failed to fetch daily data for {symbol} from {actual_source}: {fetch_result.error}")
+                    print(f"[ERROR] Failed to fetch daily data for {symbol} from {actual_source}: {fetch_result.error}", file=sys.stderr)
+                    
+                    # Check if symbol exists but just has no data
+                    symbol_exists = fetch_result.metadata and fetch_result.metadata.get('symbol_exists', False)
+                    symbol_name = fetch_result.metadata and fetch_result.metadata.get('symbol_name', fetch_symbol)
+                    
+                    # If Yahoo Finance failed and we have Polygon available, try Polygon as fallback for indices
+                    if is_index and actual_source == "Yahoo Finance" and data_source == "polygon":
+                        print(f"[INFO] Yahoo Finance failed for index {symbol}, trying Polygon as fallback...", file=sys.stderr)
+                        try:
+                            # For Polygon, use I: prefix (e.g., "I:NDX" not "NDX")
+                            polygon_symbol = f"I:{db_ticker}" if not symbol.startswith("I:") else symbol
+                            print(f"[INFO] Attempting to fetch {symbol} from Polygon using symbol: {polygon_symbol}", file=sys.stderr)
+                            
+                            polygon_fetcher = FetcherFactory.create_fetcher(
+                                data_source="polygon",
+                                symbol=polygon_symbol,  # Use base symbol, not index format
+                                api_key=API_KEY,
+                                log_level=log_level
+                            )
+                            
+                            # Override the auto-routing by creating Polygon fetcher directly
+                            from common.fetcher.polygon import PolygonFetcher
+                            polygon_fetcher = PolygonFetcher(api_key=API_KEY, log_level=log_level)
+                            
+                            polygon_result = await polygon_fetcher.fetch_historical_data(
+                                symbol=polygon_symbol,
+                                timeframe="daily",
+                                start_date=start_date_daily_api_str,
+                                end_date=end_date_api_str,
+                                chunk_size=chunk_size
+                            )
+                            
+                            if polygon_result.success and not polygon_result.data.empty:
+                                print(f"[SUCCESS] Successfully fetched {len(polygon_result.data)} records from Polygon for {symbol}", file=sys.stderr)
+                                new_daily_bars = polygon_result.data
+                                fetch_result = polygon_result  # Update fetch_result for logging
+                            else:
+                                print(f"[WARNING] Polygon also returned no data for {symbol} (symbol: {polygon_symbol})", file=sys.stderr)
+                                new_daily_bars = pd.DataFrame()
+                        except Exception as polygon_e:
+                            logging.warning(f"Polygon fallback also failed for {symbol}: {polygon_e}")
+                            print(f"[WARNING] Polygon fallback failed: {polygon_e}", file=sys.stderr)
+                            new_daily_bars = pd.DataFrame()
+                    else:
+                        if is_index:
+                            if symbol_exists:
+                                print(f"[INFO] Symbol '{fetch_symbol}' exists on Yahoo Finance: {symbol_name}", file=sys.stderr)
+                                print(f"[WARNING] However, no historical data is available for the requested date range.", file=sys.stderr)
+                                print(f"  Original symbol: {symbol}, Yahoo Finance symbol: {fetch_symbol}", file=sys.stderr)
+                                print(f"  Date range requested: {start_date_daily_api_str} to {end_date_api_str}", file=sys.stderr)
+                                print(f"  Possible reasons:", file=sys.stderr)
+                                print(f"    1. Limited historical data availability for this index", file=sys.stderr)
+                                print(f"    2. Date range is too recent or too old", file=sys.stderr)
+                                print(f"    3. yfinance library has issues fetching data for this symbol", file=sys.stderr)
+                                print(f"  Suggestions:", file=sys.stderr)
+                                print(f"    - Try a wider date range (e.g., --start-date $(date -v-30d +%Y-%m-%d))", file=sys.stderr)
+                                print(f"    - Check {fetch_symbol} directly on finance.yahoo.com to see available data", file=sys.stderr)
+                            else:
+                                print(f"[WARNING] The Yahoo Finance symbol '{fetch_symbol}' may not exist or returned no data.", file=sys.stderr)
+                                print(f"  Original symbol: {symbol}, Converted to: {fetch_symbol}", file=sys.stderr)
+                                print(f"  Tip: Verify the symbol exists on Yahoo Finance (e.g., search for '{fetch_symbol}' on finance.yahoo.com)", file=sys.stderr)
+                        new_daily_bars = pd.DataFrame()
                 else:
                     new_daily_bars = fetch_result.data
                     logging.info(f"Fetched {fetch_result.records_fetched} daily records from {fetch_result.source}")
+                    if not new_daily_bars.empty:
+                        print(f"[INFO] Downloaded {len(new_daily_bars)} daily records for {symbol} from {actual_source}", file=sys.stderr)
+                        print(f"  Date range: {new_daily_bars.index.min()} to {new_daily_bars.index.max()}", file=sys.stderr)
+                        print(f"  Sample data (first 3 rows):", file=sys.stderr)
+                        print(new_daily_bars.head(3).to_string(), file=sys.stderr)
+                    else:
+                        print(f"[WARNING] Fetcher returned success but no data for {symbol} (empty DataFrame)", file=sys.stderr)
             except Exception as e:
-                logging.error(f"Error creating fetcher or fetching daily data for {symbol}: {e}")
+                error_msg = str(e)
+                logging.error(f"Error creating fetcher or fetching daily data for {symbol}: {error_msg}")
+                print(f"[ERROR] Exception while fetching daily data for {symbol}: {error_msg}", file=sys.stderr)
                 import traceback
-                logging.error(traceback.format_exc())
+                traceback_str = traceback.format_exc()
+                logging.error(traceback_str)
+                if log_level == "DEBUG":
+                    print(f"[DEBUG] Full traceback:\n{traceback_str}", file=sys.stderr)
                 new_daily_bars = pd.DataFrame()
 
             final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, db_ticker, 'daily', data_dir, save_db_csv)
             
-            # Log what we got from Polygon
+            # Log what we got after merge
+            print(f"[INFO] After merge: new_daily_bars={len(new_daily_bars)} rows, final_daily_bars={len(final_daily_bars)} rows", file=sys.stderr)
             if log_level == "DEBUG":
                 logging.debug(f"After merge: new_daily_bars rows={len(new_daily_bars)}, final_daily_bars rows={len(final_daily_bars)}")
                 if not final_daily_bars.empty:
                     logging.debug(f"  final_daily_bars date range: {final_daily_bars.index.min()} to {final_daily_bars.index.max()}")
+            if not final_daily_bars.empty:
+                print(f"  Final data to save: {len(final_daily_bars)} rows, date range: {final_daily_bars.index.min()} to {final_daily_bars.index.max()}", file=sys.stderr)
 
             # Use the passed db_save_batch_size parameter
             if not final_daily_bars.empty:
                 num_daily_batches = (len(final_daily_bars) - 1) // db_save_batch_size + 1
                 logging.info(f"Saving daily data for {symbol} to database in {num_daily_batches} batch(es) of up to {db_save_batch_size} rows each...")
+                print(f"[INFO] Saving {len(final_daily_bars)} daily records to database in {num_daily_batches} batch(es)...", file=sys.stderr)
+                total_saved = 0
                 for i in range(0, len(final_daily_bars), db_save_batch_size):
                     batch_df = final_daily_bars.iloc[i:i + db_save_batch_size]
                     current_batch_num = (i // db_save_batch_size) + 1
                     logging.info(f"Saving daily batch {current_batch_num}/{num_daily_batches} ({len(batch_df)} rows) for {symbol}...")
+                    print(f"  Saving batch {current_batch_num}/{num_daily_batches}: {len(batch_df)} rows (dates: {batch_df.index.min()} to {batch_df.index.max()})", file=sys.stderr)
                     try:
                         await stock_db_instance.save_stock_data(batch_df, db_ticker, interval='daily')
+                        total_saved += len(batch_df)
                         logging.debug(f"Successfully saved daily batch {current_batch_num} for {db_ticker} ({len(batch_df)} rows)")
+                        print(f"  ✓ Successfully saved batch {current_batch_num}: {len(batch_df)} rows", file=sys.stderr)
                     except Exception as e_save_daily:
                         logging.error(f"Error saving daily batch {current_batch_num} for {symbol}: {e_save_daily}")
+                        print(f"[ERROR] Failed to save batch {current_batch_num}: {e_save_daily}", file=sys.stderr)
                         import traceback
                         logging.error(traceback.format_exc())
+                        print(traceback.format_exc(), file=sys.stderr)
                         # Optionally, re-raise, or log and continue to hourly, or skip remaining daily batches
                         # For now, we'll let it fail the symbol fetch if a batch fails.
                         raise
                 logging.info(f"Daily data for {symbol} processed for database.")
+                print(f"[INFO] Successfully saved {total_saved} daily records to database for {symbol} (DB ticker: {db_ticker})", file=sys.stderr)
                 
                 # Wait for cache writes to complete after saving
                 if hasattr(stock_db_instance, 'cache') and hasattr(stock_db_instance.cache, 'wait_for_pending_writes'):
@@ -1517,33 +1635,55 @@ async def fetch_and_save_data(
                         logging.warning(f"Error waiting for cache writes for {symbol} daily data: {e}")
             elif new_daily_bars.empty: # Check if new data was fetched before merging
                 logging.info(f"No new daily data for {symbol} to process for database.")
+                print(f"[WARNING] No new daily data fetched for {symbol} - nothing to save", file=sys.stderr)
             else: # new_daily_bars was not empty, but final_daily_bars is (e.g. all old data)
                 logging.info(f"No data in final_daily_bars for {symbol} to save to database (possibly all old data or merge issue).")
+                print(f"[WARNING] Fetched {len(new_daily_bars)} rows but final_daily_bars is empty for {symbol} (possibly all old data or merge issue)", file=sys.stderr)
         else:
             logging.info(f"Daily data fetch skipped for {symbol}.")
 
         # Fetch hourly data (if requested)
         if fetch_hourly:
-            logging.info(f"Fetching hourly data for {symbol} from {start_date_hourly_api_str} to {end_date_hourly_api_str} via {data_source}...")
+            # For indices with polygon data source, use Polygon directly (skip Yahoo Finance)
+            use_polygon_for_index = is_index and data_source == "polygon"
+            
+            # Determine actual data source for logging
+            if use_polygon_for_index:
+                actual_source = "Polygon"
+            else:
+                actual_source = "Yahoo Finance" if is_index else data_source
+            
+            logging.info(f"Fetching hourly data for {symbol} from {start_date_hourly_api_str} to {end_date_hourly_api_str} via {actual_source}...")
             
             # Use new fetcher architecture
             try:
-                fetcher = FetcherFactory.create_fetcher(
-                    data_source=data_source,
-                    symbol=symbol,  # Auto-detects indices and routes to Yahoo Finance
-                    api_key=API_KEY,
-                    api_secret=API_SECRET if data_source == "alpaca" else None,
-                    log_level=log_level
-                )
+                if use_polygon_for_index:
+                    # Use Polygon directly for indices, bypassing Yahoo Finance routing
+                    from common.fetcher.polygon import PolygonFetcher
+                    fetcher = PolygonFetcher(api_key=API_KEY, log_level=log_level)
+                    # Polygon requires I: prefix for indices (e.g., "I:NDX" not "NDX")
+                    fetch_symbol = f"I:{db_ticker}" if not symbol.startswith("I:") else symbol
+                else:
+                    fetcher = FetcherFactory.create_fetcher(
+                        data_source=data_source,
+                        symbol=symbol,  # Auto-detects indices and routes to Yahoo Finance
+                        api_key=API_KEY,
+                        api_secret=API_SECRET if data_source == "alpaca" else None,
+                        log_level=log_level
+                    )
+                    fetch_symbol = yfinance_symbol if is_index else (api_ticker if api_ticker else symbol)
                 
                 # Fetch data using new fetcher
-                fetch_result = await fetcher.fetch_historical_data(
-                    symbol=yfinance_symbol if is_index else (api_ticker if api_ticker else symbol),
-                    timeframe="hourly",
-                    start_date=start_date_hourly_api_str,
-                    end_date=end_date_hourly_api_str,
-                    chunk_size=chunk_size if data_source == "polygon" else None
-                )
+                fetch_kwargs = {
+                    "symbol": fetch_symbol,
+                    "timeframe": "hourly",
+                    "start_date": start_date_hourly_api_str,
+                    "end_date": end_date_hourly_api_str
+                }
+                if use_polygon_for_index or data_source == "polygon":
+                    fetch_kwargs["chunk_size"] = chunk_size
+                
+                fetch_result = await fetcher.fetch_historical_data(**fetch_kwargs)
                 
                 if not fetch_result.success:
                     logging.error(f"Failed to fetch hourly data for {symbol}: {fetch_result.error}")
@@ -1642,6 +1782,11 @@ async def process_symbol_data(
     
     if is_index:
         logging.info(f"Processing index ticker: {symbol} -> DB ticker: {db_ticker}, Yahoo Finance: {yfinance_symbol}")
+        # Only show Yahoo Finance symbol if not using Polygon (which bypasses Yahoo Finance)
+        if data_source != "polygon":
+            print(f"[INFO] Index symbol conversion: {symbol} -> DB ticker: {db_ticker}, Yahoo Finance symbol: {yfinance_symbol}", file=sys.stderr)
+        else:
+            print(f"[INFO] Index symbol conversion: {symbol} -> DB ticker: {db_ticker}, Polygon symbol: I:{db_ticker}", file=sys.stderr)
 
     current_db_instance = stock_db_instance
     if current_db_instance is None:
@@ -1768,10 +1913,16 @@ async def process_symbol_data(
                 print(action_taken, file=sys.stderr)
 
     if force_fetch or (data_df.empty and not query_only):
+        # Determine actual data source (indices with polygon use Polygon directly, others use Yahoo Finance)
+        if is_index and data_source == "polygon":
+            actual_data_source = "Polygon"
+        else:
+            actual_data_source = "Yahoo Finance" if is_index else data_source
+        
         if force_fetch:
-            print(f"Force-fetching {timeframe} data for {symbol} from {data_source}...", file=sys.stderr)
+            print(f"Force-fetching {timeframe} data for {symbol} from {actual_data_source}...", file=sys.stderr)
         elif data_df.empty and not query_only : 
-            print(f"No data in DB for {symbol} ({timeframe}). Fetching from {data_source}...", file=sys.stderr)
+            print(f"No data in DB for {symbol} ({timeframe}). Fetching from {actual_data_source}...", file=sys.stderr)
 
         daily_dir = os.path.join(data_dir, "daily")
         hourly_dir = os.path.join(data_dir, "hourly")
@@ -1830,7 +1981,12 @@ async def process_symbol_data(
                 else:
                     print(f"Warning: Data for {db_ticker} ({timeframe}) was fetched but not found in DB with current query parameters.", file=sys.stderr)
             else:
-                action_taken = f"Fetched/updated and retrieved data for {db_ticker} ({timeframe}) from {data_source}/DB."
+                # Determine actual data source (indices with polygon use Polygon directly, others use Yahoo Finance)
+                if is_index and data_source == "polygon":
+                    actual_data_source = "Polygon"
+                else:
+                    actual_data_source = "Yahoo Finance" if is_index else data_source
+                action_taken = f"Fetched/updated and retrieved data for {db_ticker} ({timeframe}) from {actual_data_source}/DB."
                 print(action_taken, file=sys.stderr)
         else:
             print(f"Fetching data failed for {symbol}. Cannot retrieve from DB.", file=sys.stderr)
@@ -2135,10 +2291,19 @@ async def get_current_price(
     else:
         logging.debug(f"[DB] Market OPEN: Using max_age of {max_age_seconds}s for {symbol}")
     
-    logging.debug(f"[DB] Checking database for latest price for {symbol} (max_age: {effective_max_age}s)")
+    # Parse index symbols to get db_ticker for database lookups
+    # Database stores index data without ^ prefix (e.g., "VIX" not "^VIX")
+    api_ticker, db_ticker, is_index, yfinance_symbol = _parse_index_ticker(symbol)
+    # Use db_ticker for database lookups (stored without I: or ^ prefix)
+    db_lookup_symbol = db_ticker if is_index else symbol
+    
+    logging.debug(
+        f"[DB] Checking database for latest price for {db_lookup_symbol} "
+        f"(original: {symbol}, max_age: {effective_max_age}s)"
+    )
     db_check_start = time.time()
     try:
-        db_price_data = await _get_latest_price_with_timestamp(current_db_instance, symbol)
+        db_price_data = await _get_latest_price_with_timestamp(current_db_instance, db_lookup_symbol)
         if db_price_data and db_price_data['price'] is not None:
             # Check if the price is recent enough using both timestamp and write_timestamp
             price_timestamp = db_price_data['timestamp']
@@ -2219,7 +2384,7 @@ async def get_current_price(
                 logging.info(f"[DB HIT] Price for {symbol}: ${db_price_data['price']:.2f} (age: {age_info}, db_check: {db_check_time:.1f}ms, total: {fetch_time:.1f}ms)")
                 
                 result = {
-                    'symbol': symbol,
+                    'symbol': symbol,  # Return original symbol (may have ^ prefix for display)
                     'price': db_price_data['price'],
                     'bid_price': None,
                     'ask_price': None,
@@ -2253,7 +2418,7 @@ async def get_current_price(
                     logging.debug(f"[DB STALE] Price for {symbol} too old ({age_info} > {effective_max_age}s), but cache_only=True - returning stale data from DB (db_check: {db_check_time:.1f}ms)")
                     fetch_time = (time.time() - fetch_start) * 1000
                     result = {
-                        'symbol': symbol,
+                        'symbol': symbol,  # Return original symbol (may have ^ prefix for display)
                         'price': db_price_data['price'],
                         'bid_price': None,
                         'ask_price': None,
@@ -2310,10 +2475,12 @@ async def get_current_price(
             'error': 'No cached data available (cache_only mode)'
         }
     
-    logging.info(f"[API] Fetching price for {symbol} from {data_source} API (DB check completed)")
+    # For API fetch, use yfinance_symbol if it's an index, otherwise use original symbol
+    api_fetch_symbol = yfinance_symbol if is_index and yfinance_symbol else symbol
+    logging.info(f"[API] Fetching price for {api_fetch_symbol} from {data_source} API (original: {symbol}, DB check completed)")
     api_fetch_start = time.time()
     if data_source == "polygon":
-        result = await _get_current_price_polygon(symbol, current_db_instance)
+        result = await _get_current_price_polygon(api_fetch_symbol, current_db_instance)
     elif data_source == "alpaca":
         result = await _get_current_price_alpaca(symbol, current_db_instance)
     else:

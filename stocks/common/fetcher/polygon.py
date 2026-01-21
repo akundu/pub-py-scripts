@@ -172,13 +172,13 @@ class PolygonFetcher(AbstractDataFetcher):
                 # Convert to DataFrame
                 df = pd.DataFrame([{
                     'timestamp': pd.to_datetime(a.timestamp, unit='ms', utc=True),
-                    'open': a.open,
-                    'high': a.high,
-                    'low': a.low,
-                    'close': a.close,
-                    'volume': a.volume,
-                    'vwap': getattr(a, 'vwap', None),
-                    'transactions': getattr(a, 'transactions', None)
+                    'open': a.open if a.open is not None else 0.0,
+                    'high': a.high if a.high is not None else 0.0,
+                    'low': a.low if a.low is not None else 0.0,
+                    'close': a.close if a.close is not None else 0.0,
+                    'volume': a.volume if a.volume is not None else 0,
+                    'vwap': getattr(a, 'vwap', None) if getattr(a, 'vwap', None) is not None else None,
+                    'transactions': getattr(a, 'transactions', None) if getattr(a, 'transactions', None) is not None else None
                 } for a in aggs])
                 
                 df.set_index('timestamp', inplace=True)
@@ -291,6 +291,10 @@ class PolygonFetcher(AbstractDataFetcher):
                 timeframe,
                 ensure_columns=['open', 'high', 'low', 'close', 'volume']
             )
+            
+            # Ensure volume is integer and handle None values
+            if 'volume' in data.columns:
+                data['volume'] = data['volume'].fillna(0).astype(int)
             
             logger.info(
                 f"Successfully fetched {len(data)} {timeframe} records for {symbol} "

@@ -447,11 +447,11 @@ class DailyPriceRepository(BaseRepository):
                 record = {
                     'ticker': row['ticker'],
                     date_col: row[date_col],
-                    'open': row.get('open', 0.0),
-                    'high': row.get('high', 0.0),
-                    'low': row.get('low', 0.0),
-                    'close': row.get('close', 0.0),
-                    'volume': int(row.get('volume', 0)),
+                    'open': row.get('open', 0.0) or 0.0,
+                    'high': row.get('high', 0.0) or 0.0,
+                    'low': row.get('low', 0.0) or 0.0,
+                    'close': row.get('close', 0.0) or 0.0,
+                    'volume': int(row.get('volume') or 0),
                     'write_timestamp': row.get('write_timestamp')
                 }
                 
@@ -2611,16 +2611,20 @@ class RealtimeDataService:
             if client is None:
                 return None
             
-            # If no date specified, use today's UTC date
+            # If no date specified, use today's UTC date (or last trading day if weekend)
             if date_str is None:
                 now_utc = datetime.now(timezone.utc)
                 if now_utc.tzinfo is None:
                     now_utc = now_utc.replace(tzinfo=timezone.utc)
-                date_str = now_utc.date().strftime('%Y-%m-%d')
+                # Use _get_last_trading_day to handle weekends
+                date_str = self._get_last_trading_day(now_utc)
             
             # Try to get data for the specified UTC date
             redis_key = f"{ticker.upper()}-{date_str}"
             data = await client.get(redis_key)
+            
+            # If no data found and we're on a weekend, the date_str is already the last trading day
+            # So no need for additional fallback - the date_str is already correct
             
             range_high = None
             range_low = None

@@ -639,4 +639,8 @@ symbols:
 - 'I:SPX'
 - 'I:NDX'
 - 'I:VIX1D'
+- NDX
+- QQQ
+- SPY
+- SPX
 #- SPX

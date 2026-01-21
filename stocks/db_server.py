@@ -756,7 +756,11 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
                               redis_url: str | None = None,
                               stale_data_timeout: float = 120.0):
     """Server runner for individual worker processes."""
-    global ws_manager
+    global ws_manager, current_worker_id
+    
+    # Set worker ID immediately for diagnostics
+    current_worker_id = worker_id
+    logger.info(f"Worker {worker_id}: Starting initialization")
     
     try:
         logger.info(f"Worker {worker_id}: Initializing database from file: {db_file}")
@@ -769,18 +773,54 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
         return
 
     # Initialize WebSocket manager with heartbeat interval and stale data timeout
+    logger.info(f"Worker {worker_id}: Initializing WebSocket manager")
     enable_redis = redis_url is not None
-    ws_manager = WebSocketManager(
-        heartbeat_interval=heartbeat_interval, 
-        stale_data_timeout=stale_data_timeout,
-        redis_url=redis_url,
-        enable_redis=enable_redis
-    )
-    ws_manager.set_db_instance(app_db_instance)
-    await ws_manager.start_monitoring()
-    logger.info(f"Worker {worker_id}: WebSocket manager initialized with heartbeat interval: {heartbeat_interval}s, stale data timeout: {stale_data_timeout}s, Redis: {'enabled' if enable_redis else 'disabled'}")
+    try:
+        # ws_manager is already declared as global at function level, assign directly
+        ws_manager = WebSocketManager(
+            heartbeat_interval=heartbeat_interval, 
+            stale_data_timeout=stale_data_timeout,
+            redis_url=redis_url,
+            enable_redis=enable_redis
+        )
+        ws_manager.set_db_instance(app_db_instance)
+        await ws_manager.start_monitoring()
+        logger.info(f"Worker {worker_id}: WebSocket manager initialized (Redis: {'enabled' if enable_redis else 'disabled'})")
+        
+        # Verify ws_manager is set (sanity check)
+        if ws_manager is None:
+            logger.critical(f"Worker {worker_id}: CRITICAL: ws_manager is None after initialization! This should never happen.")
+            return
 
-    app = web.Application(middlewares=[logging_middleware])
+        # Ensure ws_manager is set in both __main__ and db_server modules
+        import sys
+        for module_name in ("__main__", "db_server"):
+            module_obj = sys.modules.get(module_name)
+            if module_obj is None:
+                continue
+            if getattr(module_obj, "ws_manager", None) is not ws_manager:
+                setattr(module_obj, "ws_manager", ws_manager)
+            if getattr(module_obj, "current_worker_id", None) is None:
+                setattr(module_obj, "current_worker_id", worker_id)
+            
+    except Exception as e:
+        logger.error(f"Worker {worker_id}: Failed to initialize WebSocket manager: {e}", exc_info=True)
+        # Set to None explicitly so we know it failed
+        # ws_manager is already declared as global at function level
+        ws_manager = None
+        # Don't continue if WebSocket manager failed to initialize
+        logger.critical(f"Worker {worker_id}: Cannot continue without WebSocket manager. Exiting worker.")
+        return
+
+    # Import middleware
+    try:
+        from common.web.middleware import error_handling_middleware
+        middlewares = [logging_middleware, error_handling_middleware]
+    except ImportError:
+        # Fallback if middleware not available
+        middlewares = [logging_middleware]
+    
+    app = web.Application(middlewares=middlewares)
     app['db_instance'] = app_db_instance
     app['enable_access_log'] = enable_access_log
     
@@ -789,68 +829,75 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     max_size_bytes = max_body_mb * 1024 * 1024
     app['client_max_size'] = max_size_bytes
 
-    # Add specific endpoints
-    app.router.add_post("/db_command", handle_db_command)
-    app.router.add_get("/ws", handle_websocket)
-    app.router.add_get("/", handle_health_check)
-    app.router.add_get("/health", handle_health_check)
-    
-    # Add stats endpoints
-    app.router.add_get("/stats/database", handle_stats_database)
-    app.router.add_get("/stats/tables", handle_stats_tables)
-    app.router.add_get("/stats/performance", handle_stats_performance)
-    app.router.add_get("/stats/pool", handle_stats_pool)
-    app.router.add_get("/stats/redis", handle_stats_redis)
-    
-    # Add ticker analysis endpoint
-    app.router.add_get("/analyze_ticker", handle_analyze_ticker)
-    app.router.add_post("/analyze_ticker", handle_analyze_ticker)
-    
-    # Add stock info API endpoint
-    app.router.add_get("/api/stock_info/{symbol}", handle_stock_info)
-    
-    # Add stock analysis API endpoint
-    app.router.add_get("/api/stock_analysis", handle_stock_analysis)
-    
-    # Add AI query API endpoint
-    app.router.add_get("/api/ai_query", handle_ai_query)
-    
-    # Add SQL execution API endpoint
-    app.router.add_get("/api/execute_sql", handle_execute_sql)
-    app.router.add_get("/api/sql_query", handle_execute_sql)  # Alias for execute_sql
-    
-    # Add Yahoo Finance news API endpoint
-    app.router.add_get("/api/yahoo_news/{symbol}", handle_yahoo_finance_news)
-    
-    # Add Twitter/X tweets API endpoint
-    app.router.add_get("/api/tweets/{symbol}", handle_twitter_tweets)
-    
-    # Add Reddit news API endpoint
-    app.router.add_get("/api/reddit_news/{symbol}", handle_reddit_news)
-    
-    # Add WSB daily thread API endpoint
-    app.router.add_get("/api/wsb_daily_thread", handle_wsb_daily_thread)
-    
-    # Add stock info API subroutes BEFORE the parameterized route
-    # (must be registered before /stock_info/{symbol} to avoid {symbol} capturing "ws" or "api")
-    app.router.add_get("/stock_info/ws", handle_websocket)
-    app.router.add_get("/stock_info/api/covered_calls/data", handle_covered_calls_data)
-    app.router.add_get("/stock_info/api/covered_calls/analysis", handle_covered_calls_analysis)
-    app.router.add_get("/stock_info/api/covered_calls/view", handle_covered_calls_view)
-    app.router.add_get("/stock_info/api/covered_calls/{filename}", handle_covered_calls_static)
-    app.router.add_get("/stock_info/api/stock_analysis/data", handle_stock_analysis_data)
-    app.router.add_get("/stock_info/api/lazy/options/{symbol}", handle_lazy_load_options)
-    app.router.add_get("/stock_info/api/lazy/news/{symbol}", handle_lazy_load_news)
-    app.router.add_get("/stock_info/api/lazy/chart/{symbol}", handle_lazy_load_chart)
-    app.router.add_get("/stock_info/api/lazy/strategies/{symbol}", handle_lazy_load_strategies)
-    app.router.add_get("/static/stock_info/{filename}", handle_stock_info_static)
-    
-    # Add stock info HTML page endpoint (parameterized route must be after specific routes)
-    app.router.add_get("/stock_info/{symbol}", handle_stock_info_html)
-    
-    # Add catch-all handler for unknown routes (must be last)
-    app.router.add_get("/{path:.*}", handle_catch_all)
-    app.router.add_post("/{path:.*}", handle_catch_all)
+    # Register all routes using centralized route registration
+    try:
+        from routes import register_routes
+        register_routes(app)
+    except ImportError:
+        # Fallback to inline registration if routes module not available
+        logger.warning("routes module not available, using inline route registration")
+        # Add specific endpoints
+        app.router.add_post("/db_command", handle_db_command)
+        app.router.add_get("/ws", handle_websocket)
+        app.router.add_get("/", handle_health_check)
+        app.router.add_get("/health", handle_health_check)
+        
+        # Add stats endpoints
+        app.router.add_get("/stats/database", handle_stats_database)
+        app.router.add_get("/stats/tables", handle_stats_tables)
+        app.router.add_get("/stats/performance", handle_stats_performance)
+        app.router.add_get("/stats/pool", handle_stats_pool)
+        app.router.add_get("/stats/redis", handle_stats_redis)
+        
+        # Add ticker analysis endpoint
+        app.router.add_get("/analyze_ticker", handle_analyze_ticker)
+        app.router.add_post("/analyze_ticker", handle_analyze_ticker)
+        
+        # Add stock info API endpoint
+        app.router.add_get("/api/stock_info/{symbol}", handle_stock_info)
+        
+        # Add stock analysis API endpoint
+        app.router.add_get("/api/stock_analysis", handle_stock_analysis)
+        
+        # Add AI query API endpoint
+        app.router.add_get("/api/ai_query", handle_ai_query)
+        
+        # Add SQL execution API endpoint
+        app.router.add_get("/api/execute_sql", handle_execute_sql)
+        app.router.add_get("/api/sql_query", handle_execute_sql)  # Alias for execute_sql
+        
+        # Add Yahoo Finance news API endpoint
+        app.router.add_get("/api/yahoo_news/{symbol}", handle_yahoo_finance_news)
+        
+        # Add Twitter/X tweets API endpoint
+        app.router.add_get("/api/tweets/{symbol}", handle_twitter_tweets)
+        
+        # Add Reddit news API endpoint
+        app.router.add_get("/api/reddit_news/{symbol}", handle_reddit_news)
+        
+        # Add WSB daily thread API endpoint
+        app.router.add_get("/api/wsb_daily_thread", handle_wsb_daily_thread)
+        
+        # Add stock info API subroutes BEFORE the parameterized route
+        # (must be registered before /stock_info/{symbol} to avoid {symbol} capturing "ws" or "api")
+        app.router.add_get("/stock_info/ws", handle_websocket)
+        app.router.add_get("/stock_info/api/covered_calls/data", handle_covered_calls_data)
+        app.router.add_get("/stock_info/api/covered_calls/analysis", handle_covered_calls_analysis)
+        app.router.add_get("/stock_info/api/covered_calls/view", handle_covered_calls_view)
+        app.router.add_get("/stock_info/api/covered_calls/{filename}", handle_covered_calls_static)
+        app.router.add_get("/stock_info/api/stock_analysis/data", handle_stock_analysis_data)
+        app.router.add_get("/stock_info/api/lazy/options/{symbol}", handle_lazy_load_options)
+        app.router.add_get("/stock_info/api/lazy/news/{symbol}", handle_lazy_load_news)
+        app.router.add_get("/stock_info/api/lazy/chart/{symbol}", handle_lazy_load_chart)
+        app.router.add_get("/stock_info/api/lazy/strategies/{symbol}", handle_lazy_load_strategies)
+        app.router.add_get("/static/stock_info/{filename}", handle_stock_info_static)
+        
+        # Add stock info HTML page endpoint (parameterized route must be after specific routes)
+        app.router.add_get("/stock_info/{symbol}", handle_stock_info_html)
+        
+        # Add catch-all handler for unknown routes (must be last)
+        app.router.add_get("/{path:.*}", handle_catch_all)
+        app.router.add_post("/{path:.*}", handle_catch_all)
 
     # Use pre-bound socket if provided (forked model). Otherwise create a new one (single-process mode)
     if prebound_sock is None:
@@ -871,6 +918,12 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     logger.info(f"Worker {worker_id}: Server starting on http://localhost:{port}")
     logger.info(f"Worker {worker_id}: Maximum request body size set to: {max_body_mb}MB ({max_size_bytes} bytes)")
     logger.info(f"Worker {worker_id}: WebSocket heartbeat interval: {heartbeat_interval}s")
+    
+    # Final check: ensure ws_manager is ready before accepting connections
+    if ws_manager is None:
+        logger.critical(f"Worker {worker_id}: CRITICAL: ws_manager is None before starting server! Cannot accept WebSocket connections.")
+    else:
+        logger.info(f"Worker {worker_id}: WebSocket manager is ready. Server can accept WebSocket connections.")
     
     await site.start()
     
@@ -1092,21 +1145,25 @@ class ForkingServer:
                 setup_child_process_logging(index, self.log_level)
 
                 # Run the async server with pre-bound socket
-                asyncio.run(worker_server_runner(
-                    worker_id=index,
-                    port=self.port,
-                    db_file=self.db_file,
-                    heartbeat_interval=self.heartbeat_interval,
-                    max_body_mb=self.max_body_mb,
-                    shutdown_event=None,
-                    log_level=self.log_level,
-                    prebound_sock=self.bound_socket,
-                    questdb_connection_timeout=self.questdb_connection_timeout,
-                    enable_access_log=self.enable_access_log,
-                    enable_cache=self.enable_cache,
-                    redis_url=self.redis_url,
-                    stale_data_timeout=self.stale_data_timeout,
-                ))
+                try:
+                    asyncio.run(worker_server_runner(
+                        worker_id=index,
+                        port=self.port,
+                        db_file=self.db_file,
+                        heartbeat_interval=self.heartbeat_interval,
+                        max_body_mb=self.max_body_mb,
+                        shutdown_event=None,
+                        log_level=self.log_level,
+                        prebound_sock=self.bound_socket,
+                        questdb_connection_timeout=self.questdb_connection_timeout,
+                        enable_access_log=self.enable_access_log,
+                        enable_cache=self.enable_cache,
+                        redis_url=self.redis_url,
+                        stale_data_timeout=self.stale_data_timeout,
+                    ))
+                except Exception as async_error:
+                    logger.error(f"Worker {index}: Exception in asyncio.run: {async_error}", exc_info=True)
+                    raise
             except Exception as e:
                 logger.error(f"Child {index} crashed: {e}", exc_info=True)
             finally:
@@ -1554,6 +1611,33 @@ async def logging_middleware(request: web.Request, handler):
 
 async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
     """Handle WebSocket connections for real-time data streaming."""
+    global ws_manager, current_worker_id
+    
+    # If the WebSocket manager isn't ready yet, fail fast before upgrading
+    if ws_manager is None:
+        # Attempt to recover ws_manager from module globals
+        import sys
+        recovered_ws_manager = None
+        for module_name in ("db_server", "__main__"):
+            module_obj = sys.modules.get(module_name)
+            if module_obj is None:
+                continue
+            candidate = getattr(module_obj, "ws_manager", None)
+            if candidate is not None:
+                recovered_ws_manager = candidate
+                break
+        if recovered_ws_manager is not None:
+            ws_manager = recovered_ws_manager
+        else:
+            # Get worker ID for diagnostics
+            worker_id = current_worker_id if current_worker_id is not None else 'unknown'
+            logger.warning(
+                f"[WS ERROR] Worker {worker_id}: WebSocket manager is not initialized yet. Rejecting WebSocket connection. "
+                f"Local ws_manager: {type(ws_manager)}, value: {ws_manager}. "
+                f"This should NOT happen after server startup - initialization may have failed."
+            )
+            return web.Response(text="WebSocket service unavailable", status=503)
+
     ws = web.WebSocketResponse()
     await ws.prepare(request)
 
@@ -1604,7 +1688,8 @@ async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
                 try:
                     data = json.loads(msg.data)
                     if data.get('action') == 'unsubscribe':
-                        await ws_manager.remove_subscriber(symbol, ws)
+                        if ws_manager:
+                            await ws_manager.remove_subscriber(symbol, ws)
                         await ws.close()
                         return ws
                 except json.JSONDecodeError:
@@ -1616,8 +1701,11 @@ async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
         logger.error(f"WebSocket error: {e}")
     finally:
         # Clean up the connection
-        if symbol:
-            await ws_manager.remove_subscriber(symbol, ws)
+        if symbol and ws_manager:
+            try:
+                await ws_manager.remove_subscriber(symbol, ws)
+            except Exception as e:
+                logger.warning(f"Error removing subscriber for {symbol}: {e}")
         if not ws.closed:
             await ws.close()
     
@@ -3593,19 +3681,21 @@ async def handle_stock_info(request: web.Request) -> web.Response:
         # Disable caching
         GET /api/stock_info/AAPL?no_cache=true
     """
-    # Get symbol from path
-    symbol = request.match_info.get('symbol', '').upper().strip()
-    if not symbol:
-        return web.json_response({
-            "error": "Missing required parameter 'symbol' in path"
-        }, status=400)
-    
-    # Get database instance from app context
-    db_instance = request.app.get('db_instance')
-    if not db_instance:
-        return web.json_response({
-            "error": "Database instance not available"
-        }, status=500)
+    # Use new utilities for parameter parsing and error handling
+    try:
+        from common.web.request_parsers import StockInfoParams
+        from common.web.request_utils import get_db_instance
+        from common.web.response_builder import json_response, error_response
+        from common.errors import ValidationError
+        
+        # Parse parameters using new utility
+        params = StockInfoParams.parse(request)
+        db_instance = get_db_instance(request)
+    except ValueError as e:
+        return error_response(str(e), status=400)
+    except Exception as e:
+        logger.error(f"Error in handle_stock_info: {e}", exc_info=True)
+        return error_response("Internal server error", status=500)
     
     try:
         # Start overall timing
@@ -3614,89 +3704,59 @@ async def handle_stock_info(request: web.Request) -> web.Response:
         # Import functions from fetch_symbol_data
         from fetch_symbol_data import get_stock_info_parallel
         
-        # Parse query parameters
-        parse_start = time.time()
-        latest = request.query.get('latest', 'false').lower() == 'true'
-        start_date = request.query.get('start_date')
-        end_date = request.query.get('end_date')
-        options_days = int(request.query.get('options_days', '180'))
-        # By default, only serve from cache. Set allow_source_fetch=true to permit fetching from API/database
-        allow_source_fetch = request.query.get('allow_source_fetch', 'false').lower() == 'true'
-        force_fetch = request.query.get('force_fetch', 'false').lower() == 'true' and allow_source_fetch
-        data_source = request.query.get('data_source', 'polygon')
-        timezone_str = request.query.get('timezone', 'America/New_York')
-        show_price_history = request.query.get('show_price_history', 'false').lower() == 'true'
-        # New: timeframe for historical price data (daily or hourly) – currently kept for
-        # backward compatibility, but merged series is preferred for charts.
-        timeframe = request.query.get('timeframe', 'daily').lower()
-        if timeframe not in ('daily', 'hourly'):
-            timeframe = 'daily'
-        option_type = request.query.get('options_type', 'all')
-        strike_range_percent = request.query.get('strike_range_percent')
-        if strike_range_percent:
-            strike_range_percent = int(strike_range_percent)
-        max_options_per_expiry = int(request.query.get('max_options_per_expiry', '10'))
-        show_news = request.query.get('show_news', 'false').lower() == 'true'
-        show_iv = request.query.get('show_iv', 'false').lower() == 'true'
-        no_cache = request.query.get('no_cache', 'false').lower() == 'true'
-        
-        # Get cache settings
-        enable_cache = not no_cache
-        redis_url = None
-        if enable_cache:
-            redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
-        
         # Set default date range if show_price_history is true but no dates provided
         # This ensures historical data is fetched for the chart
-        if show_price_history and not start_date and not end_date and not latest:
+        if params.show_price_history and not params.start_date and not params.end_date and not params.latest:
             from datetime import datetime, timedelta
+            end_date = params.end_date
+            start_date = params.start_date
             if not end_date:
                 # Set end_date to tomorrow to ensure we cover all of today
                 end_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
             if not start_date:
                 start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')  # 1 year default
-        parse_time = (time.time() - parse_start) * 1000
-        logger.info(f"[TIMING] {symbol}: Parameter parsing took {parse_time:.2f}ms")
-        
+            # Update params with calculated dates
+            params.start_date = start_date
+            params.end_date = end_date
         # Call the parallel helper function
         # By default, use cache_only=True unless allow_source_fetch=true is explicitly set
-        cache_only = not allow_source_fetch
+        cache_only = not params.allow_source_fetch
         parallel_start = time.time()
         result = await get_stock_info_parallel(
-            symbol,
+            params.symbol,
             db_instance,
-            start_date=start_date if not latest else None,
-            end_date=end_date if not latest else None,
-            force_fetch=force_fetch,
+            start_date=params.start_date if not params.latest else None,
+            end_date=params.end_date if not params.latest else None,
+            force_fetch=params.force_fetch,
             cache_only=cache_only,
-            data_source=data_source,
-            timezone_str=timezone_str,
-            latest_only=latest,
-            options_days=options_days,
-            option_type=option_type,
-            strike_range_percent=strike_range_percent,
-            max_options_per_expiry=max_options_per_expiry,
-            show_news=show_news,
-            show_iv=show_iv,
-            enable_cache=enable_cache,
-            redis_url=redis_url,
-            price_timeframe=timeframe,
+            data_source=params.data_source,
+            timezone_str=params.timezone_str,
+            latest_only=params.latest,
+            options_days=params.options_days,
+            option_type=params.option_type,
+            strike_range_percent=params.strike_range_percent,
+            max_options_per_expiry=params.max_options_per_expiry,
+            show_news=params.show_news,
+            show_iv=params.show_iv,
+            enable_cache=params.enable_cache,
+            redis_url=params.redis_url,
+            price_timeframe=params.timeframe,
         )
         parallel_time = (time.time() - parallel_start) * 1000
-        logger.info(f"[TIMING] {symbol}: get_stock_info_parallel took {parallel_time:.2f}ms")
+        logger.info(f"[TIMING] {params.symbol}: get_stock_info_parallel took {parallel_time:.2f}ms")
 
         # Attach merged price series (realtime + hourly + daily) for consumers that
         # want a single time-ordered series (e.g. the HTML chart/frontend).
         merged_start = time.time()
         try:
-            merged_df = await db_instance.get_merged_price_series(symbol)
+            merged_df = await db_instance.get_merged_price_series(params.symbol)
         except NotImplementedError:
             merged_df = None
         except Exception as e:
-            logger.warning(f"Error fetching merged price series for {symbol}: {e}")
+            logger.warning(f"Error fetching merged price series for {params.symbol}: {e}")
             merged_df = None
         merged_fetch_time = (time.time() - merged_start) * 1000
-        logger.info(f"[TIMING] {symbol}: get_merged_price_series took {merged_fetch_time:.2f}ms")
+        logger.info(f"[TIMING] {params.symbol}: get_merged_price_series took {merged_fetch_time:.2f}ms")
 
         merged_serialize_start = time.time()
         if merged_df is not None and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
@@ -3708,14 +3768,15 @@ async def handle_stock_info(request: web.Request) -> web.Response:
                 mdf = mdf[mdf.index.notna()]
                 mdf = mdf.reset_index().rename(columns={mdf.index.name or 'index': 'timestamp'})
                 # Convert to JSON records
+                from common.web.serializers import dataframe_to_json_records
                 merged_records = dataframe_to_json_records(mdf)
                 price_info = result.setdefault('price_info', {})
                 price_info['merged_price_series'] = merged_records
             except Exception as e:
-                logger.warning(f"Error serializing merged price series for {symbol}: {e}")
+                logger.warning(f"Error serializing merged price series for {params.symbol}: {e}")
         merged_serialize_time = (time.time() - merged_serialize_start) * 1000
         if merged_serialize_time > 0.1:  # Only log if it took meaningful time
-            logger.info(f"[TIMING] {symbol}: Merged price series serialization took {merged_serialize_time:.2f}ms")
+                logger.info(f"[TIMING] {params.symbol}: Merged price series serialization took {merged_serialize_time:.2f}ms")
         
         # Convert DataFrames to JSON-serializable format
         price_df_convert_start = time.time()
@@ -3764,59 +3825,44 @@ async def handle_stock_info(request: web.Request) -> web.Response:
                                 break
                 
                 # Convert DataFrame to records format
+                from common.web.serializers import dataframe_to_json_records
                 result['price_info']['price_data'] = dataframe_to_json_records(df)
         price_df_convert_time = (time.time() - price_df_convert_start) * 1000
         if price_df_convert_time > 0.1:  # Only log if it took meaningful time
-            logger.info(f"[TIMING] {symbol}: Price DataFrame conversion took {price_df_convert_time:.2f}ms")
+            logger.info(f"[TIMING] {params.symbol}: Price DataFrame conversion took {price_df_convert_time:.2f}ms")
         
         # Convert all Timestamp objects in the result to ISO strings for JSON serialization
-        timestamp_convert_start = time.time()
-        def convert_timestamps_recursive(obj: Any) -> Any:
-            """Recursively convert Timestamp/datetime objects to ISO strings."""
-            import pandas as pd
-            from datetime import datetime
-            if isinstance(obj, pd.Timestamp):
-                return obj.isoformat()
-            elif isinstance(obj, datetime):
-                return obj.isoformat()
-            elif isinstance(obj, dict):
-                return {key: convert_timestamps_recursive(value) for key, value in obj.items()}
-            elif isinstance(obj, (list, tuple)):
-                return [convert_timestamps_recursive(item) for item in obj]
-            elif hasattr(obj, 'isoformat') and not isinstance(obj, (str, int, float, bool, type(None))):  # Handle other datetime-like objects
-                try:
-                    return obj.isoformat()
-                except:
-                    return str(obj)
-            else:
-                return obj
+        # Use centralized utility function
+        from common.web.serializers import convert_timestamps_recursive, clean_for_json
         
-        # Apply conversion to entire result
+        timestamp_convert_start = time.time()
         result = convert_timestamps_recursive(result)
         timestamp_convert_time = (time.time() - timestamp_convert_start) * 1000
         if timestamp_convert_time > 0.1:  # Only log if it took meaningful time
-            logger.info(f"[TIMING] {symbol}: Timestamp conversion took {timestamp_convert_time:.2f}ms")
+            logger.info(f"[TIMING] {params.symbol}: Timestamp conversion took {timestamp_convert_time:.2f}ms")
         
-        # Return JSON response
+        # Clean the result for JSON serialization
+        clean_start = time.time()
+        result = clean_for_json(result)
+        clean_time = (time.time() - clean_start) * 1000
+        if clean_time > 0.1:
+            logger.info(f"[TIMING] {params.symbol}: JSON cleaning took {clean_time:.2f}ms")
+        
+        # Return JSON response using new utility
         json_response_start = time.time()
-        response = web.json_response(result)
+        response = json_response(result)
         json_response_time = (time.time() - json_response_start) * 1000
         if json_response_time > 0.1:  # Only log if it took meaningful time
-            logger.info(f"[TIMING] {symbol}: JSON response creation took {json_response_time:.2f}ms")
+            logger.info(f"[TIMING] {params.symbol}: JSON response creation took {json_response_time:.2f}ms")
         
         overall_time = (time.time() - overall_start) * 1000
-        logger.info(f"[TIMING] {symbol}: Total /stock_info/ endpoint time: {overall_time:.2f}ms")
+        logger.info(f"[TIMING] {params.symbol}: Total /api/stock_info/ endpoint time: {overall_time:.2f}ms")
         
         return response
         
     except Exception as e:
-        logger.error(f"Error handling stock info request for {symbol}: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return web.json_response({
-            "error": "An internal server error occurred",
-            "details": str(e)
-        }, status=500)
+        logger.error(f"Error handling stock info request: {e}", exc_info=True)
+        return error_response("An internal server error occurred", status=500, details={"error": str(e)})
 
 
 def _format_options_html(options_data: Dict[str, Any], current_price: float = None) -> str:
@@ -3915,7 +3961,8 @@ def _format_options_html(options_data: Dict[str, Any], current_price: float = No
             strike = contract.get('strike', 0)
             if not isinstance(strike, (int, float)):
                 continue
-            option_type = str(contract.get('type', '')).lower()
+            # Support both 'type' and 'option_type' keys
+            option_type = str(contract.get('option_type', contract.get('type', ''))).lower()
             if strike not in by_strike:
                 by_strike[strike] = {'call': None, 'put': None}
             by_strike[strike][option_type] = contract
@@ -4014,7 +4061,12 @@ def _format_options_html(options_data: Dict[str, Any], current_price: float = No
                     table_html += f'<td style="{cell_style(call_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
                 
                 table_html += f'<td style="{cell_style(call_bg, "right", True, True)}">{volume:,}</td>' if isinstance(volume, int) else f'<td style="{cell_style(call_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
-                table_html += f'<td style="{cell_style(call_bg, "right", True, True)}"><strong style="color: #1a1a1a;">{iv:.1%}</strong></td>' if isinstance(iv, (int, float)) else f'<td style="{cell_style(call_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
+                # Format IV as percentage (e.g., 0.25 -> 25.00%)
+                if isinstance(iv, (int, float)) and iv is not None:
+                    iv_pct = iv * 100
+                    table_html += f'<td style="{cell_style(call_bg, "right", True, True)}"><strong style="color: #1a1a1a;">{iv_pct:.2f}%</strong></td>'
+                else:
+                    table_html += f'<td style="{cell_style(call_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
                 
                 # Delta (separate column)
                 table_html += f'<td style="{cell_style(call_bg, "center", True, True)}"><strong style="color: #004d40; font-size: 15px;">{delta:.3f}</strong></td>' if isinstance(delta, (int, float)) else f'<td style="{cell_style(call_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
@@ -4063,7 +4115,12 @@ def _format_options_html(options_data: Dict[str, Any], current_price: float = No
                     table_html += f'<td style="{cell_style(put_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
                 
                 table_html += f'<td style="{cell_style(put_bg, "right", True, True)}">{volume:,}</td>' if isinstance(volume, int) else f'<td style="{cell_style(put_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
-                table_html += f'<td style="{cell_style(put_bg, "right", True, True)}"><strong style="color: #1a1a1a;">{iv:.1%}</strong></td>' if isinstance(iv, (int, float)) else f'<td style="{cell_style(put_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
+                # Format IV as percentage (e.g., 0.25 -> 25.00%)
+                if isinstance(iv, (int, float)) and iv is not None:
+                    iv_pct = iv * 100
+                    table_html += f'<td style="{cell_style(put_bg, "right", True, True)}"><strong style="color: #1a1a1a;">{iv_pct:.2f}%</strong></td>'
+                else:
+                    table_html += f'<td style="{cell_style(put_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
                 
                 # Delta (separate column)
                 table_html += f'<td style="{cell_style(put_bg, "center", True, True)}"><strong style="color: #004d40; font-size: 15px;">{delta:.3f}</strong></td>' if isinstance(delta, (int, float)) else f'<td style="{cell_style(put_bg, "center", False, True)}"><span style="color: #666;">-</span></td>'
@@ -7057,6 +7114,8 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 If true, include latest news articles in response
             - show_iv: bool (default: true)
                 If true, include implied volatility statistics in response
+            - no_ws: bool (default: false) or disable_ws: bool (default: false)
+                If true, disable WebSocket connection for real-time updates (reduces logging noise)
     
     Example Requests:
         # Basic request with defaults
@@ -7078,13 +7137,27 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         GET /stock_info/AAPL?allow_source_fetch=true&force_fetch=true
     """
     # Get symbol from path
-    symbol = request.match_info.get('symbol', '').upper().strip()
+    symbol = request.match_info.get('symbol', '').strip()
     if not symbol:
         return web.Response(
             text="<html><body><h1>Error: Missing symbol</h1></body></html>",
             content_type='text/html',
             status=400
         )
+    
+    # Normalize case, but keep index prefixes (I: or ^) intact.
+    # Database/API routing is handled downstream in fetch_symbol_data.get_current_price.
+    original_symbol = symbol
+    symbol = symbol.upper()
+    try:
+        from common.fetcher.factory import FetcherFactory
+        _, db_ticker, is_index, yfinance_symbol = FetcherFactory.parse_index_ticker(symbol)
+        if is_index:
+            logger.info(
+                f"Index symbol detected: {original_symbol} -> DB ticker: {db_ticker}, Yahoo Finance: {yfinance_symbol}"
+            )
+    except ImportError:
+        pass
     
     # Get database instance from app context
     db_instance = request.app.get('db_instance')
@@ -7781,6 +7854,10 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                     '<script id="stockData" type="application/json"></script>',
                     f'<script id="stockData" type="application/json">{json_str}</script>'
                 )
+                # Check if WebSocket should be disabled via query parameter
+                disable_ws = request.query.get('no_ws', '').lower() in ('true', '1', 'yes') or \
+                            request.query.get('disable_ws', '').lower() in ('true', '1', 'yes')
+                
                 # Inject WebSocket initialization code
                 ws_init_code = f'''
         <script>
@@ -7790,6 +7867,9 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
             const urlParams = new URLSearchParams(window.location.search);
             window.debugMode = urlParams.get('debug') === 'true';
         }}
+        
+        // Check if WebSocket should be disabled
+        const disableWebSocket = {str(disable_ws).lower()};
         
         // Debug logging function - only logs when debug=true in URL
         // Reuse if already defined, otherwise define it
@@ -7807,6 +7887,9 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
         const maxReconnectAttempts = 5;
         
         function connectWebSocket() {{
+            if (disableWebSocket) {{
+                return; // Don't connect if disabled
+            }}
             try {{
                 // Close existing connection if any
                 if (ws && ws.readyState !== WebSocket.CLOSED) {{
@@ -8925,6 +9008,17 @@ async def handle_lazy_load_options(request: web.Request) -> web.Response:
     symbol = request.match_info.get('symbol', '').upper().strip()
     if not symbol:
         return web.json_response({"error": "Missing symbol"}, status=400)
+
+    # Normalize index symbols for DB queries (e.g., I:SPX, ^SPX -> SPX)
+    original_symbol = symbol
+    db_symbol = symbol
+    try:
+        from common.fetcher.factory import FetcherFactory
+        _, db_ticker, is_index, _ = FetcherFactory.parse_index_ticker(symbol)
+        if is_index and db_ticker:
+            db_symbol = db_ticker
+    except ImportError:
+        pass
     
     db_instance = request.app.get('db_instance')
     if not db_instance:
@@ -9097,6 +9191,20 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
     if not symbol:
         return web.json_response({"error": "Missing symbol"}, status=400)
     
+    # Normalize index symbols for DB queries (e.g., I:SPX, ^SPX -> SPX)
+    original_symbol = symbol
+    db_symbol = symbol
+    try:
+        from common.fetcher.factory import FetcherFactory
+        _, db_ticker, is_index, _ = FetcherFactory.parse_index_ticker(symbol)
+        if is_index and db_ticker:
+            db_symbol = db_ticker
+            logger.debug(f"[LAZY LOAD CHART] Index symbol detected: {original_symbol} -> db_symbol: {db_symbol}")
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.debug(f"[LAZY LOAD CHART] Error parsing index ticker for {symbol}: {e}")
+    
     db_instance = request.app.get('db_instance')
     if not db_instance:
         return web.json_response({"error": "Database instance not available"}, status=500)
@@ -9106,9 +9214,10 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
         lazy_load_start = time.time()
         period = request.query.get('period', '1d')
         data_type = request.query.get('data_type', 'merged')
-        logger.info(f"[LAZY LOAD CHART] {symbol}: Fetching chart data - period={period}, data_type={data_type}")
-        period = request.query.get('period', '1d')
-        data_type = request.query.get('data_type', 'merged')  # 'daily', 'hourly', 'realtime', or 'merged'
+        logger.info(
+            f"[LAZY LOAD CHART] {original_symbol}: Fetching chart data - period={period}, "
+            f"data_type={data_type}, db_symbol={db_symbol}"
+        )
         
         # Calculate date range based on period
         from datetime import datetime, timedelta
@@ -9126,7 +9235,7 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
         
         start_date = (now - timedelta(days=period_days)).strftime('%Y-%m-%d')
         end_date = now.strftime('%Y-%m-%d')
-        logger.debug(f"[LAZY LOAD CHART] {symbol}: Date range: {start_date} to {end_date} (period={period}, period_days={period_days})")
+        logger.debug(f"[LAZY LOAD CHART] {original_symbol}: Date range: {start_date} to {end_date} (period={period}, period_days={period_days})")
         
         # Fetch chart data based on data_type
         chart_data = []
@@ -9135,25 +9244,41 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
         
         if data_type == 'merged':
             # Use merged price series (combines daily, hourly, realtime)
-            merged_df = await db_instance.get_merged_price_series(symbol)
-            logger.debug(f"[LAZY LOAD CHART] {symbol}: get_merged_price_series returned: type={type(merged_df)}, empty={merged_df.empty if isinstance(merged_df, pd.DataFrame) else 'N/A'}, shape={merged_df.shape if isinstance(merged_df, pd.DataFrame) else 'N/A'}")
+            # Get merged price series with appropriate lookback based on period
+            lookback_days = max(period_days, 365)  # Ensure we get enough data
+            merged_df = await db_instance.get_merged_price_series(
+                db_symbol,
+                lookback_days=lookback_days,
+                hourly_days=7,
+                realtime_hours=24
+            )
+            if merged_df is not None and isinstance(merged_df, pd.DataFrame):
+                logger.info(f"[LAZY LOAD CHART] {original_symbol}: get_merged_price_series returned DataFrame: empty={merged_df.empty}, shape={merged_df.shape}, db_symbol={db_symbol}, columns={list(merged_df.columns) if not merged_df.empty else 'N/A'}")
+            else:
+                logger.warning(f"[LAZY LOAD CHART] {original_symbol}: get_merged_price_series returned: {type(merged_df)}, db_symbol={db_symbol}")
+            
             if merged_df is not None and isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
                 # Filter to requested period
                 if isinstance(merged_df.index, pd.DatetimeIndex):
                     # Convert date strings to timezone-naive UTC timestamps (merged_df index is timezone-naive UTC)
-                    start_ts = pd.Timestamp(start_date, tz=None)
-                    end_ts = pd.Timestamp(end_date, tz=None) + pd.Timedelta(days=1)
-                    logger.debug(f"[LAZY LOAD CHART] {symbol}: Filtering merged_df: {len(merged_df)} rows, date range {start_ts} to {end_ts}")
-                    filtered_df = merged_df[(merged_df.index >= start_ts) & (merged_df.index <= end_ts)]
-                    logger.debug(f"[LAZY LOAD CHART] {symbol}: After filtering: {len(filtered_df)} rows")
+                    # Use start of day for start_ts and end of day for end_ts to ensure we capture all data
+                    start_ts = pd.Timestamp(start_date, tz=None).normalize()
+                    end_ts = (pd.Timestamp(end_date, tz=None) + pd.Timedelta(days=1)).normalize()
+                    logger.info(f"[LAZY LOAD CHART] {original_symbol}: Filtering merged_df: {len(merged_df)} rows, date range {start_ts} to {end_ts}")
+                    filtered_df = merged_df[(merged_df.index >= start_ts) & (merged_df.index < end_ts)]
+                    logger.info(f"[LAZY LOAD CHART] {original_symbol}: After filtering: {len(filtered_df)} rows")
+                    # If filtering resulted in empty data, use all available data (might be outside requested range)
+                    if filtered_df.empty and len(merged_df) > 0:
+                        logger.warning(f"[LAZY LOAD CHART] {original_symbol}: Filtered data is empty, using all available data ({len(merged_df)} rows)")
+                        filtered_df = merged_df
                 else:
                     filtered_df = merged_df
-                    logger.debug(f"[LAZY LOAD CHART] {symbol}: Index is not DatetimeIndex, using full merged_df: {len(filtered_df)} rows")
+                    logger.debug(f"[LAZY LOAD CHART] {original_symbol}: Index is not DatetimeIndex, using full merged_df: {len(filtered_df)} rows")
                 
                 # Extract data efficiently
-                logger.debug(f"[LAZY LOAD CHART] {symbol}: filtered_df columns: {list(filtered_df.columns)}, shape: {filtered_df.shape}")
+                logger.info(f"[LAZY LOAD CHART] {original_symbol}: filtered_df columns: {list(filtered_df.columns)}, shape: {filtered_df.shape}")
                 close_col = filtered_df.get('close') if 'close' in filtered_df.columns else (filtered_df.get('price') if 'price' in filtered_df.columns else None)
-                logger.debug(f"[LAZY LOAD CHART] {symbol}: close_col type: {type(close_col)}, length: {len(close_col) if close_col is not None else 'None'}")
+                logger.info(f"[LAZY LOAD CHART] {original_symbol}: close_col type: {type(close_col)}, length: {len(close_col) if close_col is not None else 'None'}, has_close: {'close' in filtered_df.columns}, has_price: {'price' in filtered_df.columns}")
                 if close_col is not None and len(close_col) > 0:
                     valid_mask = pd.notna(close_col)
                     if isinstance(filtered_df.index, pd.DatetimeIndex):
@@ -9163,13 +9288,14 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                     
                     # Convert timestamps to local timezone
                     from zoneinfo import ZoneInfo
+                    from datetime import timezone as tz
                     local_tz = ZoneInfo('America/New_York')  # Market timezone
                     timestamps_local = []
                     for ts in timestamps:
                         if pd.notna(ts):
                             if ts.tzinfo is None:
                                 # Assume UTC if timezone-naive (as per get_merged_price_series implementation)
-                                ts = ts.replace(tzinfo=timezone.utc)
+                                ts = ts.replace(tzinfo=tz.utc)
                             ts_local = ts.astimezone(local_tz)
                             timestamps_local.append(ts_local)
                         else:
@@ -9202,18 +9328,18 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                         ]
                     # Check if we actually got valid data
                     if len(merged_series) == 0:
-                        logger.warning(f"[LAZY LOAD CHART] {symbol}: Built merged_series but it's empty (all NaN values?)")
+                        logger.warning(f"[LAZY LOAD CHART] {original_symbol}: Built merged_series but it's empty (all NaN values?)")
                 else:
                     # No valid data after filtering - fall back to daily data
-                    logger.warning(f"[LAZY LOAD CHART] {symbol}: Merged data exists but no valid close/price column or empty after filtering. Columns: {list(filtered_df.columns) if not filtered_df.empty else 'empty'}, rows: {len(filtered_df)}, close_col: {type(close_col)}")
+                    logger.warning(f"[LAZY LOAD CHART] {original_symbol}: Merged data exists but no valid close/price column or empty after filtering. Columns: {list(filtered_df.columns) if not filtered_df.empty else 'empty'}, rows: {len(filtered_df)}, close_col: {type(close_col)}")
                     # merged_series stays as [] to trigger fallback below
             else:
                 # Fallback to daily data if merged data is not available
-                logger.info(f"[LAZY LOAD CHART] {symbol}: Merged data not available, falling back to daily data")
+                logger.warning(f"[LAZY LOAD CHART] {original_symbol}: Merged data not available (None or empty), falling back to daily data. db_symbol={db_symbol}")
             
             # If we still don't have data, try daily fallback
             if not merged_series:
-                logger.info(f"[LAZY LOAD CHART] {symbol}: No data from merged series, falling back to daily data")
+                logger.info(f"[LAZY LOAD CHART] {original_symbol}: No data from merged series, falling back to daily data")
                 # For very short periods (1d), expand the range slightly to ensure we get data
                 fallback_start = start_date
                 fallback_end = end_date
@@ -9221,8 +9347,8 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                     # Look back 7 days to ensure we have some data
                     from datetime import datetime, timedelta
                     fallback_start = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-                    logger.debug(f"[LAZY LOAD CHART] {symbol}: Expanded fallback range for 1d: {fallback_start} to {fallback_end}")
-                daily_df = await db_instance.get_stock_data(symbol, start_date=fallback_start, end_date=fallback_end, interval='daily')
+                    logger.debug(f"[LAZY LOAD CHART] {original_symbol}: Expanded fallback range for 1d: {fallback_start} to {fallback_end}")
+                daily_df = await db_instance.get_stock_data(db_symbol, start_date=fallback_start, end_date=fallback_end, interval='daily')
                 if daily_df is not None and not daily_df.empty:
                     close_col = daily_df.get('close') if 'close' in daily_df.columns else daily_df.get('price')
                     if close_col is not None:
@@ -9252,16 +9378,16 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                             }
                             for ts, close in zip(timestamps_local, close_col[valid_mask])
                         ]
-                        logger.info(f"[LAZY LOAD CHART] {symbol}: Fallback to daily data successful, {len(merged_series)} data points")
+                        logger.info(f"[LAZY LOAD CHART] {original_symbol}: Fallback to daily data successful, {len(merged_series)} data points")
                     else:
-                        logger.warning(f"[LAZY LOAD CHART] {symbol}: Daily data exists but no valid close/price column found")
+                        logger.warning(f"[LAZY LOAD CHART] {original_symbol}: Daily data exists but no valid close/price column found")
                         merged_series = []
                 else:
-                    logger.warning(f"[LAZY LOAD CHART] {symbol}: No merged or daily data available")
+                    logger.warning(f"[LAZY LOAD CHART] {original_symbol}: No merged or daily data available")
                     merged_series = []
         elif data_type == 'daily':
             # Fetch daily data only
-            daily_df = await db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval='daily')
+            daily_df = await db_instance.get_stock_data(db_symbol, start_date=start_date, end_date=end_date, interval='daily')
             if daily_df is not None and not daily_df.empty:
                 close_col = daily_df.get('close') if 'close' in daily_df.columns else daily_df.get('price')
                 if close_col is not None:
@@ -9293,7 +9419,7 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                     ]
         elif data_type == 'hourly':
             # Fetch hourly data only
-            hourly_df = await db_instance.get_stock_data(symbol, start_date=start_date, end_date=end_date, interval='hourly')
+            hourly_df = await db_instance.get_stock_data(db_symbol, start_date=start_date, end_date=end_date, interval='hourly')
             if hourly_df is not None and not hourly_df.empty:
                 close_col = hourly_df.get('close') if 'close' in hourly_df.columns else hourly_df.get('price')
                 if close_col is not None:
@@ -9325,7 +9451,7 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                     ]
         elif data_type == 'realtime':
             # Fetch realtime data only
-            realtime_df = await db_instance.get_realtime_data(symbol, start_date=start_date, end_date=end_date, data_type='trade')
+            realtime_df = await db_instance.get_realtime_data(db_symbol, start_date=start_date, end_date=end_date, data_type='trade')
             if realtime_df is not None and not realtime_df.empty:
                 price_col = realtime_df.get('price') if 'price' in realtime_df.columns else realtime_df.get('last_price')
                 if price_col is not None:
@@ -9408,7 +9534,7 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
             tz_name = "America/New_York (ET)"
         
         cleaned_data = clean_for_json({
-            'symbol': symbol,
+            'symbol': original_symbol,  # Return original symbol (e.g., I:SPX) for display
             'period': period,
             'data_type': data_type,
             'chart_data': chart_data,
@@ -9417,10 +9543,18 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
             'timezone': tz_name
         })
         
+        # Log data summary before serialization
+        logger.info(
+            f"[LAZY LOAD CHART] {original_symbol}: Prepared response - "
+            f"merged_series: {len(merged_series)} points, "
+            f"chart_data: {len(chart_data)} points, "
+            f"chart_labels: {len(chart_labels)} labels"
+        )
+        
         json_str = json.dumps(cleaned_data, default=str, allow_nan=False)
         lazy_load_time = (time.time() - lazy_load_start) * 1000
         data_size_kb = len(json_str) / 1024
-        logger.info(f"[LAZY LOAD CHART] {symbol}: Served {len(merged_series)} data points ({data_size_kb:.1f}KB) in {lazy_load_time:.1f}ms")
+        logger.info(f"[LAZY LOAD CHART] {original_symbol}: Served {len(merged_series)} data points ({data_size_kb:.1f}KB) in {lazy_load_time:.1f}ms")
         
         # Add cache headers for 60 seconds browser caching
         CHART_CACHE_TIME = 60
@@ -9434,8 +9568,19 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
         )
         return response
     except Exception as e:
-        logger.error(f"Error lazy-loading chart data for {symbol}: {e}", exc_info=True)
-        return web.json_response({"error": str(e)}, status=500)
+        error_symbol = original_symbol if 'original_symbol' in locals() else (symbol if 'symbol' in locals() else 'UNKNOWN')
+        logger.error(f"Error lazy-loading chart data for {error_symbol}: {e}", exc_info=True)
+        # Return empty data structure instead of error, so frontend can handle gracefully
+        return web.json_response({
+            'symbol': error_symbol,
+            'period': period if 'period' in locals() else '1d',
+            'data_type': data_type if 'data_type' in locals() else 'merged',
+            'chart_data': [],
+            'chart_labels': [],
+            'merged_series': [],
+            'timezone': 'America/New_York (ET)',
+            'error': str(e)
+        }, status=200)  # Return 200 so frontend can handle empty data
 
 
 async def handle_stock_analysis(request: web.Request) -> web.Response:
@@ -9675,6 +9820,20 @@ async def handle_lazy_load_strategies(request: web.Request) -> web.Response:
     symbol = request.match_info.get('symbol', '').upper().strip()
     if not symbol:
         return web.json_response({"error": "Missing symbol"}, status=400)
+    
+    # Skip strategy analysis for index symbols (VIX, SPX, etc.) - they don't have options/strategies
+    try:
+        from common.fetcher.factory import FetcherFactory
+        _, db_ticker, is_index, _ = FetcherFactory.parse_index_ticker(symbol)
+        if is_index:
+            logger.info(f"[STRATEGY] Skipping strategy analysis for index symbol: {symbol}")
+            return web.json_response({
+                "symbol": symbol,
+                "error": "Strategy analysis not available for index symbols",
+                "is_index": True
+            }, status=404)
+    except ImportError:
+        pass  # If factory not available, continue
     
     db_instance = request.app.get('db_instance')
     if not db_instance:
@@ -11400,8 +11559,9 @@ async def handle_db_command(request: web.Request) -> web.Response:
                         "event_type": f"{data_type}_update", # More generic: e.g., quote_update, trade_update
                         "payload": transformed_payload_for_broadcast
                     }
-                    await ws_manager.broadcast(ticker, data_to_broadcast)
-                logger.info(f"Broadcasted realtime {data_type} data for {ticker} with data = {data_to_broadcast}")
+                    if ws_manager:
+                        await ws_manager.broadcast(ticker, data_to_broadcast)
+                        logger.info(f"Broadcasted realtime {data_type} data for {ticker} with data = {data_to_broadcast}")
             return web.json_response({"message": f"Realtime data ({data_type}) for {ticker} saved successfully."})
 
         elif command == "get_realtime_data":
@@ -12057,17 +12217,36 @@ def main_server_runner():
         # Initialize WebSocket manager with heartbeat interval and stale data timeout
         global ws_manager
         enable_redis = redis_url is not None
-        ws_manager = WebSocketManager(
-            heartbeat_interval=args.heartbeat_interval, 
-            stale_data_timeout=args.stale_data_timeout,
-            redis_url=redis_url,
-            enable_redis=enable_redis
-        )
-        ws_manager.set_db_instance(app_db_instance)
-        await ws_manager.start_monitoring()
-        logger.info(f"WebSocket manager initialized with heartbeat interval: {args.heartbeat_interval}s, stale data timeout: {args.stale_data_timeout}s, Redis: {'enabled' if enable_redis else 'disabled'}")
+        try:
+            ws_manager = WebSocketManager(
+                heartbeat_interval=args.heartbeat_interval, 
+                stale_data_timeout=args.stale_data_timeout,
+                redis_url=redis_url,
+                enable_redis=enable_redis
+            )
+            ws_manager.set_db_instance(app_db_instance)
+            await ws_manager.start_monitoring()
+            logger.warning(f"[WS INIT] WebSocket manager initialized with heartbeat interval: {args.heartbeat_interval}s, stale data timeout: {args.stale_data_timeout}s, Redis: {'enabled' if enable_redis else 'disabled'}")
+            logger.info(f"WebSocket manager initialized with heartbeat interval: {args.heartbeat_interval}s, stale data timeout: {args.stale_data_timeout}s, Redis: {'enabled' if enable_redis else 'disabled'}")
+            # Verify ws_manager is set (sanity check)
+            if ws_manager is None:
+                logger.critical("CRITICAL: ws_manager is None after initialization! This should never happen.")
+                return
+            logger.warning(f"[WS INIT] ws_manager verification: {type(ws_manager).__name__} object is set (not None)")
+        except Exception as e:
+            logger.error(f"Failed to initialize WebSocket manager: {e}", exc_info=True)
+            # Set to None explicitly so we know it failed
+            ws_manager = None
 
-        app = web.Application(middlewares=[logging_middleware])
+        # Import middleware
+        try:
+            from common.web.middleware import error_handling_middleware
+            middlewares = [logging_middleware, error_handling_middleware]
+        except ImportError:
+            # Fallback if middleware not available
+            middlewares = [logging_middleware]
+        
+        app = web.Application(middlewares=middlewares)
         app['db_instance'] = app_db_instance
         app['enable_access_log'] = args.enable_access_log
         
@@ -12080,69 +12259,76 @@ def main_server_runner():
         if not isinstance(app['client_max_size'], int):
             app['client_max_size'] = int(app['client_max_size'])
 
-        # Add specific endpoints
-        app.router.add_post("/db_command", handle_db_command)
-        app.router.add_get("/ws", handle_websocket)  # Add WebSocket endpoint
-        app.router.add_get("/", handle_health_check)  # Add health check endpoint
-        app.router.add_get("/health", handle_health_check)  # Alternative health check endpoint
-        
-        # Add stats endpoints
-        app.router.add_get("/stats/database", handle_stats_database)  # Comprehensive database statistics
-        app.router.add_get("/stats/tables", handle_stats_tables)      # Fast table counts
-        app.router.add_get("/stats/performance", handle_stats_performance)  # Performance test results
-        app.router.add_get("/stats/pool", handle_stats_pool)          # Connection pool and cache status
-        app.router.add_get("/stats/redis", handle_stats_redis)        # Redis Pub/Sub statistics
-        
-        # Add ticker analysis endpoint
-        app.router.add_get("/analyze_ticker", handle_analyze_ticker)
-        app.router.add_post("/analyze_ticker", handle_analyze_ticker)
-        
-        # Add stock info API endpoint
-        app.router.add_get("/api/stock_info/{symbol}", handle_stock_info)
-        app.router.add_get("/stock_info/api/{symbol}", handle_stock_info)
-        
-        # Add stock analysis API endpoint
-        app.router.add_get("/api/stock_analysis", handle_stock_analysis)
-        
-        # Add AI query API endpoint
-        app.router.add_get("/api/ai_query", handle_ai_query)
-        
-        # Add SQL execution API endpoint
-        app.router.add_get("/api/execute_sql", handle_execute_sql)
-        app.router.add_get("/api/sql_query", handle_execute_sql)  # Alias for execute_sql
-        
-        # Add Yahoo Finance news API endpoint
-        app.router.add_get("/api/yahoo_news/{symbol}", handle_yahoo_finance_news)
-        
-        # Add Twitter/X tweets API endpoint
-        app.router.add_get("/api/tweets/{symbol}", handle_twitter_tweets)
-        
-        # Add Reddit news API endpoint
-        app.router.add_get("/api/reddit_news/{symbol}", handle_reddit_news)
-        
-        # Add WSB daily thread API endpoint
-        app.router.add_get("/api/wsb_daily_thread", handle_wsb_daily_thread)
-        
-        # Add stock info API subroutes BEFORE the parameterized route
-        # (must be registered before /stock_info/{symbol} to avoid {symbol} capturing "ws" or "api")
-        app.router.add_get("/stock_info/ws", handle_websocket)
-        app.router.add_get("/stock_info/api/covered_calls/data", handle_covered_calls_data)
-        app.router.add_get("/stock_info/api/covered_calls/analysis", handle_covered_calls_analysis)
-        app.router.add_get("/stock_info/api/covered_calls/view", handle_covered_calls_view)
-        app.router.add_get("/stock_info/api/covered_calls/{filename}", handle_covered_calls_static)
-        app.router.add_get("/stock_info/api/stock_analysis/data", handle_stock_analysis_data)
-        app.router.add_get("/stock_info/api/lazy/options/{symbol}", handle_lazy_load_options)
-        app.router.add_get("/stock_info/api/lazy/news/{symbol}", handle_lazy_load_news)
-        app.router.add_get("/stock_info/api/lazy/chart/{symbol}", handle_lazy_load_chart)
-        app.router.add_get("/stock_info/api/lazy/strategies/{symbol}", handle_lazy_load_strategies)
-        app.router.add_get("/static/stock_info/{filename}", handle_stock_info_static)
-        
-        # Add stock info HTML page endpoint (parameterized route must be after specific routes)
-        app.router.add_get("/stock_info/{symbol}", handle_stock_info_html)
-        
-        # Add catch-all handler for unknown routes (must be last)
-        app.router.add_get("/{path:.*}", handle_catch_all)
-        app.router.add_post("/{path:.*}", handle_catch_all)
+        # Register all routes using centralized route registration
+        try:
+            from routes import register_routes
+            register_routes(app)
+        except ImportError:
+            # Fallback to inline registration if routes module not available
+            logger.warning("routes module not available, using inline route registration")
+            # Add specific endpoints
+            app.router.add_post("/db_command", handle_db_command)
+            app.router.add_get("/ws", handle_websocket)  # Add WebSocket endpoint
+            app.router.add_get("/", handle_health_check)  # Add health check endpoint
+            app.router.add_get("/health", handle_health_check)  # Alternative health check endpoint
+            
+            # Add stats endpoints
+            app.router.add_get("/stats/database", handle_stats_database)  # Comprehensive database statistics
+            app.router.add_get("/stats/tables", handle_stats_tables)      # Fast table counts
+            app.router.add_get("/stats/performance", handle_stats_performance)  # Performance test results
+            app.router.add_get("/stats/pool", handle_stats_pool)          # Connection pool and cache status
+            app.router.add_get("/stats/redis", handle_stats_redis)        # Redis Pub/Sub statistics
+            
+            # Add ticker analysis endpoint
+            app.router.add_get("/analyze_ticker", handle_analyze_ticker)
+            app.router.add_post("/analyze_ticker", handle_analyze_ticker)
+            
+            # Add stock info API endpoint
+            app.router.add_get("/api/stock_info/{symbol}", handle_stock_info)
+            app.router.add_get("/stock_info/api/{symbol}", handle_stock_info)
+            
+            # Add stock analysis API endpoint
+            app.router.add_get("/api/stock_analysis", handle_stock_analysis)
+            
+            # Add AI query API endpoint
+            app.router.add_get("/api/ai_query", handle_ai_query)
+            
+            # Add SQL execution API endpoint
+            app.router.add_get("/api/execute_sql", handle_execute_sql)
+            app.router.add_get("/api/sql_query", handle_execute_sql)  # Alias for execute_sql
+            
+            # Add Yahoo Finance news API endpoint
+            app.router.add_get("/api/yahoo_news/{symbol}", handle_yahoo_finance_news)
+            
+            # Add Twitter/X tweets API endpoint
+            app.router.add_get("/api/tweets/{symbol}", handle_twitter_tweets)
+            
+            # Add Reddit news API endpoint
+            app.router.add_get("/api/reddit_news/{symbol}", handle_reddit_news)
+            
+            # Add WSB daily thread API endpoint
+            app.router.add_get("/api/wsb_daily_thread", handle_wsb_daily_thread)
+            
+            # Add stock info API subroutes BEFORE the parameterized route
+            # (must be registered before /stock_info/{symbol} to avoid {symbol} capturing "ws" or "api")
+            app.router.add_get("/stock_info/ws", handle_websocket)
+            app.router.add_get("/stock_info/api/covered_calls/data", handle_covered_calls_data)
+            app.router.add_get("/stock_info/api/covered_calls/analysis", handle_covered_calls_analysis)
+            app.router.add_get("/stock_info/api/covered_calls/view", handle_covered_calls_view)
+            app.router.add_get("/stock_info/api/covered_calls/{filename}", handle_covered_calls_static)
+            app.router.add_get("/stock_info/api/stock_analysis/data", handle_stock_analysis_data)
+            app.router.add_get("/stock_info/api/lazy/options/{symbol}", handle_lazy_load_options)
+            app.router.add_get("/stock_info/api/lazy/news/{symbol}", handle_lazy_load_news)
+            app.router.add_get("/stock_info/api/lazy/chart/{symbol}", handle_lazy_load_chart)
+            app.router.add_get("/stock_info/api/lazy/strategies/{symbol}", handle_lazy_load_strategies)
+            app.router.add_get("/static/stock_info/{filename}", handle_stock_info_static)
+            
+            # Add stock info HTML page endpoint (parameterized route must be after specific routes)
+            app.router.add_get("/stock_info/{symbol}", handle_stock_info_html)
+            
+            # Add catch-all handler for unknown routes (must be last)
+            app.router.add_get("/{path:.*}", handle_catch_all)
+            app.router.add_post("/{path:.*}", handle_catch_all)
         
         # Remove handler_kwargs from AppRunner if app['client_max_size'] is the preferred method
         # The handler_args approach might not be effective for client_max_size directly.
@@ -12152,6 +12338,14 @@ def main_server_runner():
         site = web.TCPSite(runner, "0.0.0.0", args.port)
         
         logger.info(f"Server starting on http://localhost:{args.port}")
+        
+        # Final check: ensure ws_manager is ready before accepting connections
+        if ws_manager is None:
+            logger.critical("CRITICAL: ws_manager is None before starting server! Cannot accept WebSocket connections.")
+        else:
+            logger.warning("[WS INIT] WebSocket manager is ready. Server can accept WebSocket connections.")
+            logger.info("WebSocket manager is ready. Server can accept WebSocket connections.")
+        
         # Show database info appropriately based on type
         if args.db_file.startswith(('postgresql://', 'http://', 'https://')) or '://' in args.db_file:
             logger.info(f"Using database connection: {args.db_file}")

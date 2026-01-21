@@ -55,7 +55,53 @@ def dataframe_to_json_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
     # Convert to records first
     records = df_serializable.to_dict(orient='records')
     
-    # Recursively convert any remaining Timestamp/datetime objects in the records
+    # First, convert NaN values to None (must happen before convert_timestamps_recursive)
+    import math
+    for record in records:
+        for key, value in list(record.items()):  # Use list() to avoid modification during iteration
+            # Check for numpy NaN first (pandas to_dict can return numpy types)
+            if NUMPY_AVAILABLE and np is not None:
+                try:
+                    if np.isnan(value):
+                        record[key] = None
+                        continue
+                except (TypeError, ValueError):
+                    pass
+                if isinstance(value, np.floating):
+                    try:
+                        if np.isnan(value) or np.isinf(value):
+                            record[key] = None
+                            continue
+                        else:
+                            record[key] = float(value)
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+                elif isinstance(value, np.integer):
+                    try:
+                        record[key] = int(value)
+                        continue
+                    except (TypeError, ValueError):
+                        pass
+            
+            # Check for float NaN (pandas to_dict('records') converts NaN to float('nan'))
+            if isinstance(value, float):
+                try:
+                    if math.isnan(value):
+                        record[key] = None
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            
+            # Use pd.isna() as a final check - it handles both numpy and float NaN, and pandas NaT
+            try:
+                if pd.isna(value):
+                    record[key] = None
+                    continue
+            except (TypeError, ValueError):
+                pass
+    
+    # Then recursively convert any remaining Timestamp/datetime objects in the records
     records = [convert_timestamps_recursive(record) for record in records]
     
     return records
@@ -113,32 +159,50 @@ def convert_timestamps_recursive(obj: Any) -> Any:
         >>> isinstance(result['nested']['time'], str)  # True
         >>> isinstance(result['nested']['list'][0], str)  # True
     """
-    if isinstance(obj, (pd.Timestamp, datetime)):
+    import math
+    
+    # Handle None first
+    if obj is None:
+        return None
+    
+    # Handle datetime objects - check this BEFORE dict/list so we catch them at any level
+    # This must come before dict/list checks to catch datetime objects directly
+    if isinstance(obj, datetime):
         return obj.isoformat()
-    elif isinstance(obj, dict):
+    if pd is not None and isinstance(obj, pd.Timestamp):
+        return obj.isoformat()
+    
+    # Handle nested structures - recurse into them to find datetime objects
+    if isinstance(obj, dict):
         return {key: convert_timestamps_recursive(value) for key, value in obj.items()}
     elif isinstance(obj, (list, tuple)):
         return [convert_timestamps_recursive(item) for item in obj]
-    elif NUMPY_AVAILABLE and np is not None:
-        # Handle numpy types
+    
+    # Handle other datetime-like objects (after checking for dict/list)
+    if hasattr(obj, 'isoformat') and not isinstance(obj, (str, int, float, bool, type(None), dict, list, tuple)):
+        try:
+            return obj.isoformat()
+        except (AttributeError, TypeError):
+            pass
+    
+    # Handle numpy types
+    if NUMPY_AVAILABLE and np is not None:
         if isinstance(obj, np.integer):
             return int(obj)
         elif isinstance(obj, np.floating):
-            if np.isnan(obj):
+            if np.isnan(obj) or np.isinf(obj):
                 return None
             return float(obj)
         elif isinstance(obj, np.ndarray):
             return [convert_timestamps_recursive(item) for item in obj.tolist()]
     
-    # Check for None
-    if obj is None:
-        return None
-    
     # Check for regular Python float NaN (from pandas DataFrame.to_dict())
+    # This must come AFTER numpy checks since numpy types might be converted to float
     if isinstance(obj, float):
         try:
-            import math
             if math.isnan(obj):
+                return None
+            if math.isinf(obj):
                 return None
         except (ValueError, TypeError):
             pass
@@ -152,5 +216,70 @@ def convert_timestamps_recursive(obj: Any) -> Any:
         except (TypeError, ValueError):
             pass
     
+    return obj
+
+
+def clean_for_json(obj: Any) -> Any:
+    """
+    Recursively clean data structure to make it JSON-serializable.
+    
+    Converts NaN, Infinity, datetime objects, and other non-JSON types
+    to JSON-serializable equivalents.
+    
+    Args:
+        obj: Object to clean (can be any type)
+        
+    Returns:
+        JSON-serializable version of the object
+    """
+    import math
+    
+    if obj is None:
+        return None
+    if isinstance(obj, (int, str, bool)):
+        return obj
+    if isinstance(obj, float):
+        if math.isnan(obj):
+            return None
+        if math.isinf(obj):
+            return None
+        return obj
+    # Check for pandas types BEFORE pd.isna() to avoid ambiguous truth value errors
+    if pd is not None and isinstance(obj, pd.DataFrame):
+        return clean_for_json(obj.to_dict('records'))
+    if pd is not None and isinstance(obj, pd.Series):
+        return clean_for_json(obj.to_dict())
+    if pd is not None and isinstance(obj, (pd.Timestamp, pd.DatetimeIndex)):
+        return obj.isoformat() if hasattr(obj, 'isoformat') else str(obj)
+    if isinstance(obj, dict):
+        return {k: clean_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [clean_for_json(item) for item in obj]
+    # Handle datetime objects
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    # Handle numpy types
+    if NUMPY_AVAILABLE and np is not None:
+        try:
+            if np.isnan(obj):
+                return None
+        except (TypeError, ValueError):
+            pass
+        if isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8)):
+            return int(obj)
+        if isinstance(obj, (np.floating, np.float64, np.float32, np.float16)):
+            try:
+                if np.isnan(obj) or np.isinf(obj):
+                    return None
+            except (TypeError, ValueError):
+                pass
+            return float(obj)
+    # Final check using pd.isna
+    if pd is not None:
+        try:
+            if pd.isna(obj):
+                return None
+        except (TypeError, ValueError):
+            pass
     return obj
 

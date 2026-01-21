@@ -103,7 +103,57 @@ class YahooFinanceFetcher(AbstractDataFetcher):
             
             def _fetch_sync():
                 try:
-                    return ticker.history(start=start_str, end=end_str, interval=yf_interval)
+                    # Try to get info first to check if symbol exists
+                    info = None
+                    try:
+                        info = ticker.info
+                        if info and len(info) > 0:
+                            symbol_name = info.get('longName') or info.get('shortName') or symbol
+                            logger.info(f"Symbol {symbol} exists: {symbol_name}")
+                        else:
+                            logger.warning(f"Symbol {symbol} returned empty info - may not exist or be delisted")
+                    except Exception as info_e:
+                        logger.debug(f"Could not fetch info for {symbol}: {info_e}")
+                    
+                    # Fetch historical data using start/end dates
+                    data = ticker.history(start=start_str, end=end_str, interval=yf_interval)
+                    
+                    # If empty and symbol exists, try alternative methods
+                    if data.empty and info:
+                        logger.info(f"Initial fetch returned empty data for {symbol}, trying alternative methods...")
+                        
+                        # Try with period parameter instead (last 5 days)
+                        try:
+                            logger.debug(f"Trying period='5d' for {symbol}")
+                            data_period = ticker.history(period='5d', interval=yf_interval)
+                            if not data_period.empty:
+                                logger.info(f"Successfully fetched data using period='5d' for {symbol}")
+                                # Filter to requested date range
+                                if start_str and end_str:
+                                    start_dt = pd.to_datetime(start_str)
+                                    end_dt = pd.to_datetime(end_str)
+                                    data_period = data_period[(data_period.index >= start_dt) & (data_period.index <= end_dt)]
+                                data = data_period
+                        except Exception as period_e:
+                            logger.debug(f"Period method also failed for {symbol}: {period_e}")
+                        
+                        # If still empty, try max period
+                        if data.empty:
+                            try:
+                                logger.debug(f"Trying period='max' for {symbol}")
+                                data_max = ticker.history(period='max', interval=yf_interval)
+                                if not data_max.empty:
+                                    logger.info(f"Successfully fetched data using period='max' for {symbol}")
+                                    # Filter to requested date range
+                                    if start_str and end_str:
+                                        start_dt = pd.to_datetime(start_str)
+                                        end_dt = pd.to_datetime(end_str)
+                                        data_max = data_max[(data_max.index >= start_dt) & (data_max.index <= end_dt)]
+                                    data = data_max
+                            except Exception as max_e:
+                                logger.debug(f"Max period method also failed for {symbol}: {max_e}")
+                    
+                    return data
                 except Exception as e:
                     error_msg = str(e)
                     # Check if it's a future date error
@@ -154,7 +204,31 @@ class YahooFinanceFetcher(AbstractDataFetcher):
                     raise
             
             if data.empty:
-                logger.info(f"No {timeframe} data returned for {symbol} in the specified date range")
+                # Try to get more info about why data is empty
+                symbol_exists = False
+                symbol_name = symbol
+                try:
+                    info = ticker.info
+                    if info and len(info) > 0:
+                        symbol_exists = True
+                        symbol_name = info.get('longName') or info.get('shortName') or symbol
+                        logger.info(f"Symbol {symbol} exists on Yahoo Finance: {symbol_name}")
+                        logger.warning(f"However, no historical data is available for date range {start_str} to {end_str}")
+                        logger.warning(f"  This may be because:")
+                        logger.warning(f"    1. The symbol has limited historical data availability")
+                        logger.warning(f"    2. The date range is too recent or too old")
+                        logger.warning(f"    3. yfinance has issues fetching data for this particular symbol")
+                        logger.warning(f"  Tip: Try a different date range or check {symbol} directly on finance.yahoo.com")
+                except Exception as info_e:
+                    logger.debug(f"Could not fetch info for {symbol}: {info_e}")
+                
+                if symbol_exists:
+                    error_msg = f"{symbol}: symbol exists but no historical data available for date range ({yf_interval} {start_str} -> {end_str})"
+                else:
+                    error_msg = f"{symbol}: possibly delisted; no price data found  ({yf_interval} {start_str} -> {end_str})"
+                
+                logger.warning(f"No {timeframe} data returned for {symbol} in the specified date range")
+                logger.warning(error_msg)
                 return FetchResult(
                     data=pd.DataFrame(),
                     source=self.name,
@@ -163,8 +237,14 @@ class YahooFinanceFetcher(AbstractDataFetcher):
                     start_date=start_str,
                     end_date=end_str,
                     records_fetched=0,
-                    success=True,
-                    metadata={'message': 'No data available for date range'}
+                    success=False,
+                    error=error_msg,
+                    metadata={
+                        'message': 'No data available for date range',
+                        'symbol_attempted': symbol,
+                        'symbol_exists': symbol_exists,
+                        'symbol_name': symbol_name
+                    }
                 )
             
             # Format the DataFrame
@@ -191,8 +271,12 @@ class YahooFinanceFetcher(AbstractDataFetcher):
             )
             
         except Exception as e:
-            logger.error(f"Error fetching data from Yahoo Finance for {symbol}: {e}")
-            return self.create_error_result(symbol, timeframe, start_date, end_date, str(e))
+            error_msg = str(e)
+            # Format error message in the expected format
+            yf_interval = interval_map.get(timeframe, '1d')
+            formatted_error = f"${symbol}: {error_msg}  ({yf_interval} {start_date} -> {end_date})"
+            logger.error(f"Error fetching data from Yahoo Finance for {symbol}: {error_msg}")
+            return self.create_error_result(symbol, timeframe, start_date, end_date, formatted_error)
     
     async def fetch_current_price(
         self,

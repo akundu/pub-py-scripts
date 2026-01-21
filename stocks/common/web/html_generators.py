@@ -73,7 +73,8 @@ def format_options_html(options_data: Dict[str, Any], current_price: float = Non
             strike = contract.get('strike', 0)
             if not isinstance(strike, (int, float)):
                 continue
-            option_type = str(contract.get('type', '')).lower()
+            # Support both 'type' and 'option_type' keys
+            option_type = str(contract.get('option_type', contract.get('type', ''))).lower()
             if strike not in by_strike:
                 by_strike[strike] = {'call': None, 'put': None}
             by_strike[strike][option_type] = contract
@@ -87,22 +88,20 @@ def format_options_html(options_data: Dict[str, Any], current_price: float = Non
         # Header with calls on left, puts on right
         html_parts.append('''
         <tr>
-            <th colspan="7" style="background-color: #4CAF50; color: white; padding: 8px; font-weight: bold; font-size: 14px;">CALLS</th>
+            <th colspan="6" style="background-color: #4CAF50; color: white; padding: 8px; font-weight: bold; font-size: 14px;">CALLS</th>
             <th rowspan="2" style="background-color: #667eea; color: white; padding: 8px; font-weight: bold; font-size: 14px;">Strike</th>
-            <th colspan="7" style="background-color: #f44336; color: white; padding: 8px; font-weight: bold; font-size: 14px;">PUTS</th>
+            <th colspan="6" style="background-color: #f44336; color: white; padding: 8px; font-weight: bold; font-size: 14px;">PUTS</th>
         </tr>
         <tr>
             <th style="padding: 6px; background-color: #2e7d32; color: white; font-weight: bold; font-size: 12px;">Bid/Ask<br>Spread</th>
             <th style="padding: 6px; background-color: #2e7d32; color: white; font-weight: bold; font-size: 12px;">Mid</th>
             <th style="padding: 6px; background-color: #2e7d32; color: white; font-weight: bold; font-size: 12px;">Vol</th>
-            <th style="padding: 6px; background-color: #2e7d32; color: white; font-weight: bold; font-size: 12px;">OI</th>
             <th style="padding: 6px; background-color: #2e7d32; color: white; font-weight: bold; font-size: 12px;">IV</th>
             <th style="padding: 6px; background-color: #2e7d32; color: white; font-weight: bold; font-size: 12px;">Delta<br>(Δ)</th>
             <th style="padding: 6px; background-color: #2e7d32; color: white; font-weight: bold; font-size: 12px;">Theta<br>(Θ)</th>
             <th style="padding: 6px; background-color: #c62828; color: white; font-weight: bold; font-size: 12px;">Bid/Ask<br>Spread</th>
             <th style="padding: 6px; background-color: #c62828; color: white; font-weight: bold; font-size: 12px;">Mid</th>
             <th style="padding: 6px; background-color: #c62828; color: white; font-weight: bold; font-size: 12px;">Vol</th>
-            <th style="padding: 6px; background-color: #c62828; color: white; font-weight: bold; font-size: 12px;">OI</th>
             <th style="padding: 6px; background-color: #c62828; color: white; font-weight: bold; font-size: 12px;">IV</th>
             <th style="padding: 6px; background-color: #c62828; color: white; font-weight: bold; font-size: 12px;">Delta<br>(Δ)</th>
             <th style="padding: 6px; background-color: #c62828; color: white; font-weight: bold; font-size: 12px;">Theta<br>(Θ)</th>
@@ -131,14 +130,14 @@ def format_options_html(options_data: Dict[str, Any], current_price: float = Non
                 delta = call.get('delta')
                 theta = call.get('theta')
                 
-                # Bid/Ask/Spread column
+                # Bid/Ask/Spread column - bid and ask on same line, spread below
                 if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and bid > 0 and ask > 0:
                     spread = ask - bid
-                    html_parts.append(f'<td style="padding: 4px; {call_bg}">${bid:.2f}<br>${ask:.2f}<br><strong>${spread:.2f}</strong></td>')
+                    html_parts.append(f'<td style="padding: 4px; {call_bg}">${bid:.2f} / ${ask:.2f}<br><strong>${spread:.2f}</strong></td>')
                 elif isinstance(bid, (int, float)):
-                    html_parts.append(f'<td style="padding: 4px; {call_bg}">${bid:.2f}<br>-<br>-</td>')
+                    html_parts.append(f'<td style="padding: 4px; {call_bg}">${bid:.2f} / -<br>-</td>')
                 elif isinstance(ask, (int, float)):
-                    html_parts.append(f'<td style="padding: 4px; {call_bg}">-<br>${ask:.2f}<br>-</td>')
+                    html_parts.append(f'<td style="padding: 4px; {call_bg}">- / ${ask:.2f}<br>-</td>')
                 else:
                     html_parts.append(f'<td style="padding: 4px; {call_bg}">-</td>')
                 
@@ -150,8 +149,12 @@ def format_options_html(options_data: Dict[str, Any], current_price: float = Non
                     html_parts.append(f'<td style="padding: 4px; {call_bg}">-</td>')
                 
                 html_parts.append(f'<td style="padding: 4px; {call_bg}">{volume}</td>')
-                html_parts.append(f'<td style="padding: 4px; {call_bg}">{oi}</td>')
-                html_parts.append(f'<td style="padding: 4px; {call_bg}">{iv:.1%}</td>' if isinstance(iv, (int, float)) else f'<td style="padding: 4px; {call_bg}">-</td>')
+                # Format IV as percentage (e.g., 0.25 -> 25.00%)
+                if isinstance(iv, (int, float)) and iv is not None:
+                    iv_pct = iv * 100
+                    html_parts.append(f'<td style="padding: 4px; {call_bg}">{iv_pct:.2f}%</td>')
+                else:
+                    html_parts.append(f'<td style="padding: 4px; {call_bg}">-</td>')
                 
                 # Delta (separate column)
                 html_parts.append(f'<td style="padding: 4px; {call_bg}"><strong>{delta:.3f}</strong></td>' if isinstance(delta, (int, float)) else f'<td style="padding: 4px; {call_bg}">-</td>')
@@ -159,7 +162,7 @@ def format_options_html(options_data: Dict[str, Any], current_price: float = Non
                 # Theta (separate column)
                 html_parts.append(f'<td style="padding: 4px; {call_bg}">{theta:.3f}</td>' if isinstance(theta, (int, float)) else f'<td style="padding: 4px; {call_bg}">-</td>')
             else:
-                html_parts.append('<td style="padding: 4px;">-</td>' * 7)
+                html_parts.append('<td style="padding: 4px;">-</td>' * 6)
             
             # Strike price (center) - highlight if near current price
             strike_style = 'background-color: #667eea; color: white; font-weight: bold; padding: 6px;'
@@ -178,14 +181,14 @@ def format_options_html(options_data: Dict[str, Any], current_price: float = Non
                 delta = put.get('delta')
                 theta = put.get('theta')
                 
-                # Bid/Ask/Spread column
+                # Bid/Ask/Spread column - bid and ask on same line, spread below
                 if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and bid > 0 and ask > 0:
                     spread = ask - bid
-                    html_parts.append(f'<td style="padding: 4px; {put_bg}">${bid:.2f}<br>${ask:.2f}<br><strong>${spread:.2f}</strong></td>')
+                    html_parts.append(f'<td style="padding: 4px; {put_bg}">${bid:.2f} / ${ask:.2f}<br><strong>${spread:.2f}</strong></td>')
                 elif isinstance(bid, (int, float)):
-                    html_parts.append(f'<td style="padding: 4px; {put_bg}">${bid:.2f}<br>-<br>-</td>')
+                    html_parts.append(f'<td style="padding: 4px; {put_bg}">${bid:.2f} / -<br>-</td>')
                 elif isinstance(ask, (int, float)):
-                    html_parts.append(f'<td style="padding: 4px; {put_bg}">-<br>${ask:.2f}<br>-</td>')
+                    html_parts.append(f'<td style="padding: 4px; {put_bg}">- / ${ask:.2f}<br>-</td>')
                 else:
                     html_parts.append(f'<td style="padding: 4px; {put_bg}">-</td>')
                 
@@ -197,8 +200,12 @@ def format_options_html(options_data: Dict[str, Any], current_price: float = Non
                     html_parts.append(f'<td style="padding: 4px; {put_bg}">-</td>')
                 
                 html_parts.append(f'<td style="padding: 4px; {put_bg}">{volume}</td>')
-                html_parts.append(f'<td style="padding: 4px; {put_bg}">{oi}</td>')
-                html_parts.append(f'<td style="padding: 4px; {put_bg}">{iv:.1%}</td>' if isinstance(iv, (int, float)) else f'<td style="padding: 4px; {put_bg}">-</td>')
+                # Format IV as percentage (e.g., 0.25 -> 25.00%)
+                if isinstance(iv, (int, float)) and iv is not None:
+                    iv_pct = iv * 100
+                    html_parts.append(f'<td style="padding: 4px; {put_bg}">{iv_pct:.2f}%</td>')
+                else:
+                    html_parts.append(f'<td style="padding: 4px; {put_bg}">-</td>')
                 
                 # Delta (separate column)
                 html_parts.append(f'<td style="padding: 4px; {put_bg}"><strong>{delta:.3f}</strong></td>' if isinstance(delta, (int, float)) else f'<td style="padding: 4px; {put_bg}">-</td>')
@@ -206,7 +213,7 @@ def format_options_html(options_data: Dict[str, Any], current_price: float = Non
                 # Theta (separate column)
                 html_parts.append(f'<td style="padding: 4px; {put_bg}">{theta:.3f}</td>' if isinstance(theta, (int, float)) else f'<td style="padding: 4px; {put_bg}">-</td>')
             else:
-                html_parts.append('<td style="padding: 4px;">-</td>' * 7)
+                html_parts.append('<td style="padding: 4px;">-</td>' * 6)
             
             html_parts.append('</tr>')
         
@@ -215,7 +222,7 @@ def format_options_html(options_data: Dict[str, Any], current_price: float = Non
     return ''.join(html_parts)
 
 
-def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
+def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: str = None) -> str:
     """Generate Yahoo Finance-like HTML page for stock information."""
     import json
     from datetime import datetime, timedelta
@@ -250,12 +257,23 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
         price_change = current_price_data.get('change', 0) or current_price_data.get('change_amount', 0)
         price_change_pct = current_price_data.get('change_percent', 0) or current_price_data.get('change_pct', 0)
         volume = current_price_data.get('volume') or current_price_data.get('size')
+        
+        # Get daily range (high/low for today)
+        daily_range = current_price_data.get('daily_range')
+        if daily_range and isinstance(daily_range, dict):
+            daily_high = daily_range.get('high')
+            daily_low = daily_range.get('low')
+        else:
+            daily_high = None
+            daily_low = None
     else:
         # If current_price is a number directly
         current_price = current_price_data if isinstance(current_price_data, (int, float)) else 'N/A'
         price_change = 0
         price_change_pct = 0
         volume = None
+        daily_high = None
+        daily_low = None
     
     # Format price
     if isinstance(current_price, (int, float)):
@@ -334,6 +352,15 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
             if prices:
                 week_52_high = max(prices)
                 week_52_low = min(prices)
+    
+    # Process earnings date - filter out dividend/yield information
+    earnings_date_display = None
+    if earnings_date:
+        # Filter out dividend/yield data - if it contains dividend or yield, it's not an earnings date
+        if 'dividend' in earnings_date.lower() or 'yield' in earnings_date.lower():
+            earnings_date_display = 'N/A'
+        else:
+            earnings_date_display = earnings_date.strip()
     
     # Format price change
     change_color = 'positive' if price_change >= 0 else 'negative'
@@ -676,21 +703,22 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
 <body>
     <div class="container">
         <div class="header">
-            <h1>{symbol}</h1>
-            <div class="price-section">
-                <div class="price">${current_price_str}</div>
-                <div class="change {change_color}">
-                    {change_sign}${abs(price_change):.2f} ({change_sign}{price_change_pct:.2f}%)
+            <div class="header-content-wrapper" style="display: flex; align-items: flex-start; gap: 30px;">
+                <div>
+                    <h1>{symbol}</h1>
+                    <div class="price-section">
+                        <div class="price">${current_price_str}</div>
+                        <div class="change {change_color}">
+                            {change_sign}${abs(price_change):.2f} ({change_sign}{price_change_pct:.2f}%)
+                        </div>
+                    </div>
+                    <div class="realtime-section">
+                        <span class="status-indicator disconnected" id="wsStatus"></span>
+                        <span id="wsStatusText">Connecting to real-time data...</span>
+                        <span id="realtimePrice" style="margin-left: 20px; font-weight: 600;"></span>
+                    </div>
                 </div>
-            </div>
-            <div class="realtime-section">
-                <span class="status-indicator disconnected" id="wsStatus"></span>
-                <span id="wsStatusText">Connecting to real-time data...</span>
-                <span id="realtimePrice" style="margin-left: 20px; font-weight: 600;"></span>
-            </div>
-        </div>
-        
-        <div class="metrics-grid">
+                <div class="metrics-grid">
             <div class="metric-card">
                 <div class="metric-label">Market Cap</div>
                 <div class="metric-value">{format_value(financial_data.get('market_cap'))}</div>
@@ -698,6 +726,10 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
             <div class="metric-card">
                 <div class="metric-label">P/E Ratio</div>
                 <div class="metric-value">{format_value(financial_data.get('price_to_earnings') or financial_data.get('pe_ratio'))}</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Day's Range</div>
+                <div class="metric-value">{f"{format_value(daily_low)} - {format_value(daily_high)}" if daily_low is not None and daily_high is not None else 'N/A'}</div>
             </div>
             <div class="metric-card">
                 <div class="metric-label">52 Week High</div>
@@ -714,6 +746,14 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
             <div class="metric-card">
                 <div class="metric-label">Implied Volatility</div>
                 <div class="metric-value">{format_value((iv_data.get('statistics', {}).get('mean') or iv_data.get('atm_iv', {}).get('mean')) if iv_data else None)}</div>
+            </div>
+            {f'''
+            <div class="metric-card">
+                <div class="metric-label">Earnings Date</div>
+                <div class="metric-value">{earnings_date_display if earnings_date_display and earnings_date_display != 'N/A' and 'Dividend' not in earnings_date_display and 'Yield' not in earnings_date_display else 'N/A'}</div>
+            </div>
+            ''' if earnings_date else ''}
+                </div>
             </div>
         </div>
         
@@ -738,39 +778,41 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any]) -> str:
             </div>
         </div>
         
-        <div class="data-section">
-            <h2>Financial Data</h2>
-            <table class="data-table">
-                <tr>
-                    <th>Metric</th>
-                    <th>Value</th>
-                </tr>
-                <tr><td>Market Cap</td><td>{format_value(financial_data.get('market_cap'))}</td></tr>
-                <tr><td>P/E Ratio</td><td>{format_value(financial_data.get('price_to_earnings') or financial_data.get('pe_ratio'))}</td></tr>
-                <tr><td>EPS</td><td>{format_value(financial_data.get('earnings_per_share') or financial_data.get('eps'))}</td></tr>
-                <tr><td>Dividend Yield</td><td>{format_value(financial_data.get('dividend_yield'))}</td></tr>
-                <tr><td>52 Week High</td><td>{format_value(week_52_high)}</td></tr>
-                <tr><td>52 Week Low</td><td>{format_value(week_52_low)}</td></tr>
-                <tr><td>Volume</td><td>{format_value(volume)}</td></tr>
-            </table>
-        </div>
         
         {f'''
         <div class="data-section">
-            <h2>Implied Volatility</h2>
-            <table class="data-table">
-                <tr>
-                    <th>Metric</th>
-                    <th>Value</th>
-                </tr>
-                <tr><td>Mean IV</td><td>{format_value(iv_data.get('statistics', {}).get('mean'))}</td></tr>
-                <tr><td>Median IV</td><td>{format_value(iv_data.get('statistics', {}).get('median'))}</td></tr>
-                <tr><td>ATM IV</td><td>{format_value(iv_data.get('atm_iv', {}).get('mean'))}</td></tr>
-                <tr><td>Call IV</td><td>{format_value(iv_data.get('call_iv', {}).get('mean'))}</td></tr>
-                <tr><td>Put IV</td><td>{format_value(iv_data.get('put_iv', {}).get('mean'))}</td></tr>
-                <tr><td>IV Count</td><td>{format_value(iv_data.get('statistics', {}).get('count'))}</td></tr>
-            </table>
+            <h2 style="cursor: pointer; user-select: none;" onclick="toggleIVSection()">
+                Implied Volatility
+                <span id="ivCaret" style="display: inline-block; margin-left: 8px; transition: transform 0.2s;">▶</span>
+            </h2>
+            <div id="ivContent" style="display: none;">
+                <table class="data-table">
+                    <tr>
+                        <th>Metric</th>
+                        <th>Value</th>
+                    </tr>
+                    <tr><td>Mean IV</td><td>{format_value(iv_data.get('statistics', {}).get('mean'))}</td></tr>
+                    <tr><td>Median IV</td><td>{format_value(iv_data.get('statistics', {}).get('median'))}</td></tr>
+                    <tr><td>ATM IV</td><td>{format_value(iv_data.get('atm_iv', {}).get('mean'))}</td></tr>
+                    <tr><td>Call IV</td><td>{format_value(iv_data.get('call_iv', {}).get('mean'))}</td></tr>
+                    <tr><td>Put IV</td><td>{format_value(iv_data.get('put_iv', {}).get('mean'))}</td></tr>
+                    <tr><td>IV Count</td><td>{format_value(iv_data.get('statistics', {}).get('count'))}</td></tr>
+                </table>
+            </div>
         </div>
+        <script>
+            function toggleIVSection() {{
+                const content = document.getElementById('ivContent');
+                const caret = document.getElementById('ivCaret');
+                if (content.style.display === 'none') {{
+                    content.style.display = 'block';
+                    caret.style.transform = 'rotate(90deg)';
+                }} else {{
+                    content.style.display = 'none';
+                    caret.style.transform = 'rotate(0deg)';
+                }}
+            }}
+        </script>
         ''' if iv_data else ''}
         
         {f'''

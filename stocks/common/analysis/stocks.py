@@ -224,16 +224,44 @@ async def fetch_latest_market_data(db_instance: StockDBBase, symbols_dir: str) -
     logger.debug(f"Financial data: {len(df_f)} rows, Realtime: {len(df_rt)} rows, Hourly: {len(df_hr)} rows, Trend: {len(df_t)} rows, Whale: {len(df_w)} rows")
 
     # Combine Prices (realtime has priority over hourly)
-    df_p = pd.concat([df_rt.assign(s=1), df_hr.assign(s=2)]).sort_values('s').drop_duplicates('ticker').drop(columns='s')
+    # Ensure both DataFrames have 'ticker' column before concatenating
+    if df_rt.empty and df_hr.empty:
+        df_p = pd.DataFrame(columns=['ticker', 'current_price'])
+    elif df_rt.empty:
+        df_p = df_hr.copy()
+    elif df_hr.empty:
+        df_p = df_rt.copy()
+    else:
+        df_p = pd.concat([df_rt.assign(s=1), df_hr.assign(s=2)]).sort_values('s').drop_duplicates('ticker').drop(columns='s')
     logger.debug(f"Combined price data: {len(df_p)} rows")
     
-    # Log price source for debugging
-    if logger.isEnabledFor(logging.DEBUG):
+    # Log price source for debugging (only if we have data)
+    if logger.isEnabledFor(logging.DEBUG) and not df_p.empty and 'ticker' in df_p.columns:
         for ticker in df_p['ticker'].head(10):  # Log first 10 for debugging
-            rt_price = df_rt[df_rt['ticker'] == ticker]['current_price'].values[0] if not df_rt[df_rt['ticker'] == ticker].empty else None
-            hr_price = df_hr[df_hr['ticker'] == ticker]['current_price'].values[0] if not df_hr[df_hr['ticker'] == ticker].empty else None
-            fin_price = df_f[df_f['ticker'] == ticker]['price'].values[0] if not df_f[df_f['ticker'] == ticker].empty else None
-            final_price = df_p[df_p['ticker'] == ticker]['current_price'].values[0] if not df_p[df_p['ticker'] == ticker].empty else None
+            rt_price = None
+            hr_price = None
+            fin_price = None
+            final_price = None
+            
+            # Safely check df_rt
+            if not df_rt.empty and 'ticker' in df_rt.columns:
+                rt_match = df_rt[df_rt['ticker'] == ticker]
+                rt_price = rt_match['current_price'].values[0] if not rt_match.empty else None
+            
+            # Safely check df_hr
+            if not df_hr.empty and 'ticker' in df_hr.columns:
+                hr_match = df_hr[df_hr['ticker'] == ticker]
+                hr_price = hr_match['current_price'].values[0] if not hr_match.empty else None
+            
+            # Safely check df_f
+            if not df_f.empty and 'ticker' in df_f.columns:
+                fin_match = df_f[df_f['ticker'] == ticker]
+                fin_price = fin_match['price'].values[0] if not fin_match.empty else None
+            
+            # Get final price
+            final_match = df_p[df_p['ticker'] == ticker]
+            final_price = final_match['current_price'].values[0] if not final_match.empty else None
+            
             logger.debug(f"Price sources for {ticker}: realtime={rt_price}, hourly={hr_price}, financial={fin_price}, final={final_price}")
     
     # Process Whale Metrics

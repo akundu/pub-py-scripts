@@ -5,7 +5,8 @@ Web utilities package for serialization, filtering, and HTML generation.
 from .serializers import (
     dataframe_to_json_records,
     serialize_mapping_datetime,
-    convert_timestamps_recursive
+    convert_timestamps_recursive,
+    clean_for_json
 )
 from .filters import (
     parse_filter_strings,
@@ -20,6 +21,7 @@ __all__ = [
     'dataframe_to_json_records',
     'serialize_mapping_datetime',
     'convert_timestamps_recursive',
+    'clean_for_json',
     'parse_filter_strings',
     'apply_filters',
     'format_options_html',

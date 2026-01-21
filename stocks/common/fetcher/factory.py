@@ -36,6 +36,11 @@ class FetcherFactory:
         'I:DJI': '^DJI',       # Dow Jones
         'I:RUT': '^RUT',       # Russell 2000
         'I:VIX': '^VIX',       # VIX
+        'SPX': '^GSPC',        # S&P 500 (without I: prefix)
+        'NDX': '^NDX',         # NASDAQ 100
+        'DJI': '^DJI',         # Dow Jones
+        'RUT': '^RUT',         # Russell 2000
+        'VIX': '^VIX',         # VIX
     }
     
     @classmethod
@@ -48,7 +53,20 @@ class FetcherFactory:
         """Get Yahoo Finance symbol for an index."""
         if symbol.startswith('^'):
             return symbol
-        return cls.INDEX_MAPPINGS.get(symbol.upper())
+        # Check if symbol has I: prefix
+        if symbol.startswith('I:'):
+            mapped = cls.INDEX_MAPPINGS.get(symbol.upper())
+            if mapped:
+                return mapped
+            # If not in mapping, extract base symbol and add ^ prefix
+            base_symbol = symbol[2:].upper()
+            return f'^{base_symbol}'
+        # Check if base symbol (without I:) is in mapping
+        mapped = cls.INDEX_MAPPINGS.get(symbol.upper())
+        if mapped:
+            return mapped
+        # If not found, assume it's an index and add ^ prefix
+        return f'^{symbol.upper()}'
     
     @classmethod
     def parse_index_ticker(cls, symbol: str) -> tuple[Optional[str], str, bool, Optional[str]]:
@@ -95,6 +113,7 @@ class FetcherFactory:
         api_key: Optional[str] = None,
         api_secret: Optional[str] = None,
         log_level: str = "INFO",
+        force_data_source: bool = False,
         **kwargs
     ) -> AbstractDataFetcher:
         """
@@ -106,6 +125,7 @@ class FetcherFactory:
             api_key: API key (required for polygon/alpaca)
             api_secret: API secret (required for alpaca)
             log_level: Logging level
+            force_data_source: If True, use the specified data_source even for indices (bypass auto-routing)
             **kwargs: Additional fetcher-specific parameters
             
         Returns:
@@ -116,8 +136,8 @@ class FetcherFactory:
         """
         data_source = data_source.lower()
         
-        # Check if symbol is an index - if so, use Yahoo Finance
-        if symbol:
+        # Check if symbol is an index - if so, use Yahoo Finance (unless forced)
+        if symbol and not force_data_source:
             _, _, is_index, yfinance_symbol = FetcherFactory.parse_index_ticker(symbol)
             if is_index and data_source in ['polygon', 'alpaca']:
                 logger.info(
