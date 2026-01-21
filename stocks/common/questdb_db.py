@@ -2071,6 +2071,13 @@ class StockDataService:
             else:  # hourly
                 start_dt = start if isinstance(start, datetime) else datetime.combine(start, datetime.min.time())
                 end_dt = end if isinstance(end, datetime) else datetime.combine(end, datetime.min.time())
+                
+                # For hourly queries, if end_date is a date-only string (midnight), extend to end of day
+                # This ensures we include all hours of that day in cache key generation
+                if isinstance(end, date) or (isinstance(end_dt, datetime) and end_dt.time() == datetime.min.time()):
+                    # end_date is date-only or midnight - extend to end of day for hourly queries
+                    end_dt = datetime.combine(end_dt.date(), datetime.max.time()).replace(microsecond=0)
+                
                 cache_keys = self._generate_hourly_cache_keys_for_range(
                     ticker,
                     start_dt,
@@ -2101,11 +2108,50 @@ class StockDataService:
         # Batch fetch from cache
         cached_data = {}
         if cache_keys:
+            self.logger.debug(f"[CACHE] Checking {len(cache_keys)} cache keys for {ticker} {interval} (start={start_date}, end={end_date})")
+            if len(cache_keys) <= 10:  # Only log if reasonable number of keys
+                self.logger.debug(f"[CACHE] Cache keys: {cache_keys}")
             cached_results = await self.cache.get_batch(cache_keys, batch_size=500)
             cached_data = {k: v for k, v in cached_results.items() if v is not None and not v.empty}
+            self.logger.debug(f"[CACHE] Found {len(cached_data)}/{len(cache_keys)} cached entries for {ticker} {interval}")
+            
+            # If we have all data from cache, return it immediately (no DB query needed)
+            if cached_data and len(cached_data) == len(cache_keys):
+                self.logger.info(f"[CACHE] All {len(cached_data)} {interval} records for {ticker} found in cache, returning from cache")
+                non_empty_data = {k: v for k, v in cached_data.items() if not v.empty}
+                if non_empty_data:
+                    dfs = list(non_empty_data.values())
+                    # Normalize indices and concatenate
+                    normalized_dfs = []
+                    for df in dfs:
+                        if not df.empty:
+                            if df.index.tz is not None:
+                                df_normalized = df.copy()
+                                df_normalized.index = df_normalized.index.tz_localize(None)
+                                normalized_dfs.append(df_normalized)
+                            else:
+                                normalized_dfs.append(df)
+                    if normalized_dfs:
+                        result_df = pd.concat(normalized_dfs)
+                        result_df = result_df.sort_index()
+                        # Filter by date range if needed (cache might have more data)
+                        if start_date or end_date:
+                            if isinstance(result_df.index, pd.DatetimeIndex):
+                                if start_date:
+                                    start_dt = pd.to_datetime(start_date)
+                                    result_df = result_df[result_df.index >= start_dt]
+                                if end_date:
+                                    end_dt = pd.to_datetime(end_date)
+                                    # For hourly, include all of end_date (up to 23:59:59)
+                                    if interval == 'hourly':
+                                        end_dt = end_dt + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+                                    result_df = result_df[result_df.index <= end_dt]
+                        return result_df
         
         # Determine which time points need DB fetch
         missing_keys = [k for k in cache_keys if k not in cached_data]
+        if missing_keys:
+            self.logger.debug(f"[CACHE] {len(missing_keys)} cache keys missing, will query DB")
         
         # Fetch missing time points from DB (only if we have actual missing keys)
         if missing_keys:
@@ -2231,7 +2277,11 @@ class StockDataService:
         keys: List[str] = []
         current = start_utc
         while current < end_utc:
-            if self._is_trading_session_hour(current):
+            # For indices, include all hours, not just trading hours
+            # Check if ticker is an index (starts with I: or is a known index)
+            is_index = ticker.startswith('I:') or ticker in ['NDX', 'SPX', 'DJI', 'RUT', 'VIX']
+            
+            if is_index or self._is_trading_session_hour(current):
                 dt_str = current.strftime('%Y-%m-%dT%H:00:00')
                 keys.append(CacheKeyGenerator.hourly_price(ticker, dt_str))
             current += timedelta(hours=1)

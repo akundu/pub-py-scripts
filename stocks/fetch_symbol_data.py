@@ -1687,10 +1687,18 @@ async def fetch_and_save_data(
                 
                 if not fetch_result.success:
                     logging.error(f"Failed to fetch hourly data for {symbol}: {fetch_result.error}")
+                    print(f"[ERROR] Failed to fetch hourly data for {symbol} from {actual_source}: {fetch_result.error}", file=sys.stderr)
                     new_hourly_bars = pd.DataFrame()
                 else:
                     new_hourly_bars = fetch_result.data
                     logging.info(f"Fetched {fetch_result.records_fetched} hourly records from {fetch_result.source}")
+                    if not new_hourly_bars.empty:
+                        print(f"[INFO] Downloaded {len(new_hourly_bars)} hourly records for {symbol} from {actual_source}", file=sys.stderr)
+                        print(f"  Date range: {new_hourly_bars.index.min()} to {new_hourly_bars.index.max()}", file=sys.stderr)
+                        print(f"  Sample data (first 3 rows):", file=sys.stderr)
+                        print(new_hourly_bars.head(3).to_string(), file=sys.stderr)
+                    else:
+                        print(f"[WARNING] Fetcher returned success but no hourly data for {symbol} (empty DataFrame)", file=sys.stderr)
             except Exception as e:
                 logging.error(f"Error creating fetcher or fetching hourly data for {symbol}: {e}")
                 import traceback
@@ -1699,23 +1707,31 @@ async def fetch_and_save_data(
 
             final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, db_ticker, 'hourly', data_dir, save_db_csv)
             
-            # Log what we got from Polygon
+            # Log what we got after merge
+            print(f"[INFO] After merge: new_hourly_bars={len(new_hourly_bars)} rows, final_hourly_bars={len(final_hourly_bars)} rows", file=sys.stderr)
             if log_level == "DEBUG":
                 logging.debug(f"After merge: new_hourly_bars rows={len(new_hourly_bars)}, final_hourly_bars rows={len(final_hourly_bars)}")
                 if not final_hourly_bars.empty:
                     logging.debug(f"  final_hourly_bars date range: {final_hourly_bars.index.min()} to {final_hourly_bars.index.max()}")
+            if not final_hourly_bars.empty:
+                print(f"  Final hourly data to save: {len(final_hourly_bars)} rows, date range: {final_hourly_bars.index.min()} to {final_hourly_bars.index.max()}", file=sys.stderr)
 
             # Use the passed db_save_batch_size parameter
             if not final_hourly_bars.empty:
                 num_hourly_batches = (len(final_hourly_bars) - 1) // db_save_batch_size + 1
                 logging.info(f"Saving hourly data for {symbol} to database in {num_hourly_batches} batch(es) of up to {db_save_batch_size} rows each...")
+                print(f"[INFO] Saving {len(final_hourly_bars)} hourly records to database in {num_hourly_batches} batch(es)...", file=sys.stderr)
+                total_saved = 0
                 for i in range(0, len(final_hourly_bars), db_save_batch_size):
                     batch_df = final_hourly_bars.iloc[i:i + db_save_batch_size]
                     current_batch_num = (i // db_save_batch_size) + 1
                     logging.info(f"Saving hourly batch {current_batch_num}/{num_hourly_batches} ({len(batch_df)} rows) for {symbol}...")
+                    print(f"  Saving hourly batch {current_batch_num}/{num_hourly_batches}: {len(batch_df)} rows (dates: {batch_df.index.min()} to {batch_df.index.max()})", file=sys.stderr)
                     try:
                         await stock_db_instance.save_stock_data(batch_df, db_ticker, interval='hourly')
+                        total_saved += len(batch_df)
                         logging.debug(f"Successfully saved hourly batch {current_batch_num} for {db_ticker} ({len(batch_df)} rows)")
+                        print(f"  ✓ Successfully saved hourly batch {current_batch_num}: {len(batch_df)} rows", file=sys.stderr)
                         # Log sample data that was saved for debugging
                         if log_level == "DEBUG" and not batch_df.empty:
                             sample_idx = batch_df.index[0] if isinstance(batch_df.index, pd.DatetimeIndex) else None
@@ -1729,6 +1745,7 @@ async def fetch_and_save_data(
                         print(traceback.format_exc(), file=sys.stderr)
                         raise # Fail the symbol fetch if a batch fails
                 logging.info(f"Hourly data for {symbol} processed for database.")
+                print(f"[INFO] Successfully saved {total_saved} hourly records to database for {symbol} (DB ticker: {db_ticker})", file=sys.stderr)
                 
                 # Wait for cache writes to complete after saving
                 if hasattr(stock_db_instance, 'cache') and hasattr(stock_db_instance.cache, 'wait_for_pending_writes'):
@@ -3652,12 +3669,19 @@ async def _handle_latest_mode(args) -> None:
         # Get latest from hourly_prices (constrain to last 7 days to avoid fetching all history)
         try:
             if args.only_fetch is None or args.only_fetch == "hourly":
-                today = datetime.now().strftime('%Y-%m-%d')
-                week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+                # For hourly data, use datetime string to include all hours of today
+                now = datetime.now(timezone.utc)
+                today_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
+                week_ago = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+                
+                # Use datetime strings for hourly to ensure we get all hours of today
+                start_date_str = week_ago.strftime('%Y-%m-%dT%H:%M:%S')
+                end_date_str = today_end.strftime('%Y-%m-%dT%H:%M:%S')
+                
                 hourly_df = await db_instance_for_cleanup.get_stock_data(
                     db_ticker, 
-                    start_date=week_ago,
-                    end_date=today,
+                    start_date=start_date_str,
+                    end_date=end_date_str,
                     interval="hourly"
                 )
                 if isinstance(hourly_df, pd.DataFrame) and not hourly_df.empty:
