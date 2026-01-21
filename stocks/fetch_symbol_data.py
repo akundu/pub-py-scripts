@@ -1327,7 +1327,7 @@ def _export_data_to_csv(
             logging.warning(f"Could not split hourly data by month (datetime column not found). Saved all {len(hourly_export)} records to {hourly_csv_path}")
 
 
-def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: str, data_dir: str, save_db_csv: bool = False) -> pd.DataFrame:
+def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: str, data_dir: str, save_db_csv: bool = False, log_level: str = "INFO") -> pd.DataFrame:
     """Helper function to merge new data with existing CSV data and optionally save."""
     if new_data_df.empty:
         # Do not read or merge from CSV unless explicitly enabled
@@ -1369,9 +1369,11 @@ def _merge_and_save_csv(new_data_df: pd.DataFrame, symbol: str, interval_type: s
     
     if save_db_csv:
         final_df.to_csv(csv_path)
-        print(f"{interval_type.capitalize()} data for {symbol} merged/saved to CSV. Total rows: {len(final_df)}", file=sys.stderr)
+        if log_level == "DEBUG":
+            print(f"[DEBUG] {interval_type.capitalize()} data for {symbol} merged/saved to CSV. Total rows: {len(final_df)}", file=sys.stderr)
     else:
-        print(f"{interval_type.capitalize()} data for {symbol} merged (CSV disabled). Total rows: {len(final_df)}", file=sys.stderr)
+        if log_level == "DEBUG":
+            print(f"[DEBUG] {interval_type.capitalize()} data for {symbol} merged (CSV disabled). Total rows: {len(final_df)}", file=sys.stderr)
     
     return final_df
 
@@ -1487,7 +1489,8 @@ async def fetch_and_save_data(
                     # Determine the symbol to use for fetching
                     fetch_symbol = yfinance_symbol if is_index else (api_ticker if api_ticker else symbol)
                 
-                print(f"[INFO] Attempting to fetch daily data for {symbol} using symbol: {fetch_symbol} from {actual_source}", file=sys.stderr)
+                if log_level == "DEBUG":
+                    print(f"[DEBUG] Attempting to fetch daily data for {symbol} using symbol: {fetch_symbol} from {actual_source}", file=sys.stderr)
                 
                 # Fetch data using new fetcher
                 fetch_kwargs = {
@@ -1515,7 +1518,8 @@ async def fetch_and_save_data(
                         try:
                             # For Polygon, use I: prefix (e.g., "I:NDX" not "NDX")
                             polygon_symbol = f"I:{db_ticker}" if not symbol.startswith("I:") else symbol
-                            print(f"[INFO] Attempting to fetch {symbol} from Polygon using symbol: {polygon_symbol}", file=sys.stderr)
+                            if log_level == "DEBUG":
+                                print(f"[DEBUG] Attempting to fetch {symbol} from Polygon using symbol: {polygon_symbol}", file=sys.stderr)
                             
                             polygon_fetcher = FetcherFactory.create_fetcher(
                                 data_source="polygon",
@@ -1570,12 +1574,14 @@ async def fetch_and_save_data(
                     new_daily_bars = fetch_result.data
                     logging.info(f"Fetched {fetch_result.records_fetched} daily records from {fetch_result.source}")
                     if not new_daily_bars.empty:
-                        print(f"[INFO] Downloaded {len(new_daily_bars)} daily records for {symbol} from {actual_source}", file=sys.stderr)
-                        print(f"  Date range: {new_daily_bars.index.min()} to {new_daily_bars.index.max()}", file=sys.stderr)
-                        print(f"  Sample data (first 3 rows):", file=sys.stderr)
-                        print(new_daily_bars.head(3).to_string(), file=sys.stderr)
+                        if log_level == "DEBUG":
+                            print(f"[DEBUG] Downloaded {len(new_daily_bars)} daily records for {symbol} from {actual_source}", file=sys.stderr)
+                            print(f"  Date range: {new_daily_bars.index.min()} to {new_daily_bars.index.max()}", file=sys.stderr)
+                            print(f"  Sample data (first 3 rows):", file=sys.stderr)
+                            print(new_daily_bars.head(3).to_string(), file=sys.stderr)
                     else:
-                        print(f"[WARNING] Fetcher returned success but no data for {symbol} (empty DataFrame)", file=sys.stderr)
+                        if log_level == "DEBUG":
+                            print(f"[DEBUG] Fetcher returned success but no data for {symbol} (empty DataFrame)", file=sys.stderr)
             except Exception as e:
                 error_msg = str(e)
                 logging.error(f"Error creating fetcher or fetching daily data for {symbol}: {error_msg}")
@@ -1587,33 +1593,35 @@ async def fetch_and_save_data(
                     print(f"[DEBUG] Full traceback:\n{traceback_str}", file=sys.stderr)
                 new_daily_bars = pd.DataFrame()
 
-            final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, db_ticker, 'daily', data_dir, save_db_csv)
+            final_daily_bars = await asyncio.to_thread(_merge_and_save_csv, new_daily_bars, db_ticker, 'daily', data_dir, save_db_csv, log_level)
             
-            # Log what we got after merge
-            print(f"[INFO] After merge: new_daily_bars={len(new_daily_bars)} rows, final_daily_bars={len(final_daily_bars)} rows", file=sys.stderr)
+            # Log what we got after merge (debug only)
             if log_level == "DEBUG":
+                print(f"[DEBUG] After merge: new_daily_bars={len(new_daily_bars)} rows, final_daily_bars={len(final_daily_bars)} rows", file=sys.stderr)
                 logging.debug(f"After merge: new_daily_bars rows={len(new_daily_bars)}, final_daily_bars rows={len(final_daily_bars)}")
                 if not final_daily_bars.empty:
                     logging.debug(f"  final_daily_bars date range: {final_daily_bars.index.min()} to {final_daily_bars.index.max()}")
-            if not final_daily_bars.empty:
-                print(f"  Final data to save: {len(final_daily_bars)} rows, date range: {final_daily_bars.index.min()} to {final_daily_bars.index.max()}", file=sys.stderr)
+                    print(f"  Final data to save: {len(final_daily_bars)} rows, date range: {final_daily_bars.index.min()} to {final_daily_bars.index.max()}", file=sys.stderr)
 
             # Use the passed db_save_batch_size parameter
             if not final_daily_bars.empty:
                 num_daily_batches = (len(final_daily_bars) - 1) // db_save_batch_size + 1
                 logging.info(f"Saving daily data for {symbol} to database in {num_daily_batches} batch(es) of up to {db_save_batch_size} rows each...")
-                print(f"[INFO] Saving {len(final_daily_bars)} daily records to database in {num_daily_batches} batch(es)...", file=sys.stderr)
+                if log_level == "DEBUG":
+                    print(f"[DEBUG] Saving {len(final_daily_bars)} daily records to database in {num_daily_batches} batch(es)...", file=sys.stderr)
                 total_saved = 0
                 for i in range(0, len(final_daily_bars), db_save_batch_size):
                     batch_df = final_daily_bars.iloc[i:i + db_save_batch_size]
                     current_batch_num = (i // db_save_batch_size) + 1
                     logging.info(f"Saving daily batch {current_batch_num}/{num_daily_batches} ({len(batch_df)} rows) for {symbol}...")
-                    print(f"  Saving batch {current_batch_num}/{num_daily_batches}: {len(batch_df)} rows (dates: {batch_df.index.min()} to {batch_df.index.max()})", file=sys.stderr)
+                    if log_level == "DEBUG":
+                        print(f"  Saving batch {current_batch_num}/{num_daily_batches}: {len(batch_df)} rows (dates: {batch_df.index.min()} to {batch_df.index.max()})", file=sys.stderr)
                     try:
                         await stock_db_instance.save_stock_data(batch_df, db_ticker, interval='daily')
                         total_saved += len(batch_df)
                         logging.debug(f"Successfully saved daily batch {current_batch_num} for {db_ticker} ({len(batch_df)} rows)")
-                        print(f"  ✓ Successfully saved batch {current_batch_num}: {len(batch_df)} rows", file=sys.stderr)
+                        if log_level == "DEBUG":
+                            print(f"  ✓ Successfully saved batch {current_batch_num}: {len(batch_df)} rows", file=sys.stderr)
                     except Exception as e_save_daily:
                         logging.error(f"Error saving daily batch {current_batch_num} for {symbol}: {e_save_daily}")
                         print(f"[ERROR] Failed to save batch {current_batch_num}: {e_save_daily}", file=sys.stderr)
@@ -1624,7 +1632,8 @@ async def fetch_and_save_data(
                         # For now, we'll let it fail the symbol fetch if a batch fails.
                         raise
                 logging.info(f"Daily data for {symbol} processed for database.")
-                print(f"[INFO] Successfully saved {total_saved} daily records to database for {symbol} (DB ticker: {db_ticker})", file=sys.stderr)
+                if log_level == "DEBUG":
+                    print(f"[DEBUG] Successfully saved {total_saved} daily records to database for {symbol} (DB ticker: {db_ticker})", file=sys.stderr)
                 
                 # Wait for cache writes to complete after saving
                 if hasattr(stock_db_instance, 'cache') and hasattr(stock_db_instance.cache, 'wait_for_pending_writes'):
@@ -1693,45 +1702,49 @@ async def fetch_and_save_data(
                     new_hourly_bars = fetch_result.data
                     logging.info(f"Fetched {fetch_result.records_fetched} hourly records from {fetch_result.source}")
                     if not new_hourly_bars.empty:
-                        print(f"[INFO] Downloaded {len(new_hourly_bars)} hourly records for {symbol} from {actual_source}", file=sys.stderr)
-                        print(f"  Date range: {new_hourly_bars.index.min()} to {new_hourly_bars.index.max()}", file=sys.stderr)
-                        print(f"  Sample data (first 3 rows):", file=sys.stderr)
-                        print(new_hourly_bars.head(3).to_string(), file=sys.stderr)
+                        if log_level == "DEBUG":
+                            print(f"[DEBUG] Downloaded {len(new_hourly_bars)} hourly records for {symbol} from {actual_source}", file=sys.stderr)
+                            print(f"  Date range: {new_hourly_bars.index.min()} to {new_hourly_bars.index.max()}", file=sys.stderr)
+                            print(f"  Sample data (first 3 rows):", file=sys.stderr)
+                            print(new_hourly_bars.head(3).to_string(), file=sys.stderr)
                     else:
-                        print(f"[WARNING] Fetcher returned success but no hourly data for {symbol} (empty DataFrame)", file=sys.stderr)
+                        if log_level == "DEBUG":
+                            print(f"[DEBUG] Fetcher returned success but no hourly data for {symbol} (empty DataFrame)", file=sys.stderr)
             except Exception as e:
                 logging.error(f"Error creating fetcher or fetching hourly data for {symbol}: {e}")
                 import traceback
                 logging.error(traceback.format_exc())
                 new_hourly_bars = pd.DataFrame()
 
-            final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, db_ticker, 'hourly', data_dir, save_db_csv)
+            final_hourly_bars = await asyncio.to_thread(_merge_and_save_csv, new_hourly_bars, db_ticker, 'hourly', data_dir, save_db_csv, log_level)
             
-            # Log what we got after merge
-            print(f"[INFO] After merge: new_hourly_bars={len(new_hourly_bars)} rows, final_hourly_bars={len(final_hourly_bars)} rows", file=sys.stderr)
+            # Log what we got after merge (debug only)
             if log_level == "DEBUG":
+                print(f"[DEBUG] After merge: new_hourly_bars={len(new_hourly_bars)} rows, final_hourly_bars={len(final_hourly_bars)} rows", file=sys.stderr)
                 logging.debug(f"After merge: new_hourly_bars rows={len(new_hourly_bars)}, final_hourly_bars rows={len(final_hourly_bars)}")
                 if not final_hourly_bars.empty:
                     logging.debug(f"  final_hourly_bars date range: {final_hourly_bars.index.min()} to {final_hourly_bars.index.max()}")
-            if not final_hourly_bars.empty:
-                print(f"  Final hourly data to save: {len(final_hourly_bars)} rows, date range: {final_hourly_bars.index.min()} to {final_hourly_bars.index.max()}", file=sys.stderr)
+                    print(f"  Final hourly data to save: {len(final_hourly_bars)} rows, date range: {final_hourly_bars.index.min()} to {final_hourly_bars.index.max()}", file=sys.stderr)
 
             # Use the passed db_save_batch_size parameter
             if not final_hourly_bars.empty:
                 num_hourly_batches = (len(final_hourly_bars) - 1) // db_save_batch_size + 1
                 logging.info(f"Saving hourly data for {symbol} to database in {num_hourly_batches} batch(es) of up to {db_save_batch_size} rows each...")
-                print(f"[INFO] Saving {len(final_hourly_bars)} hourly records to database in {num_hourly_batches} batch(es)...", file=sys.stderr)
+                if log_level == "DEBUG":
+                    print(f"[DEBUG] Saving {len(final_hourly_bars)} hourly records to database in {num_hourly_batches} batch(es)...", file=sys.stderr)
                 total_saved = 0
                 for i in range(0, len(final_hourly_bars), db_save_batch_size):
                     batch_df = final_hourly_bars.iloc[i:i + db_save_batch_size]
                     current_batch_num = (i // db_save_batch_size) + 1
                     logging.info(f"Saving hourly batch {current_batch_num}/{num_hourly_batches} ({len(batch_df)} rows) for {symbol}...")
-                    print(f"  Saving hourly batch {current_batch_num}/{num_hourly_batches}: {len(batch_df)} rows (dates: {batch_df.index.min()} to {batch_df.index.max()})", file=sys.stderr)
+                    if log_level == "DEBUG":
+                        print(f"  Saving hourly batch {current_batch_num}/{num_hourly_batches}: {len(batch_df)} rows (dates: {batch_df.index.min()} to {batch_df.index.max()})", file=sys.stderr)
                     try:
                         await stock_db_instance.save_stock_data(batch_df, db_ticker, interval='hourly')
                         total_saved += len(batch_df)
                         logging.debug(f"Successfully saved hourly batch {current_batch_num} for {db_ticker} ({len(batch_df)} rows)")
-                        print(f"  ✓ Successfully saved hourly batch {current_batch_num}: {len(batch_df)} rows", file=sys.stderr)
+                        if log_level == "DEBUG":
+                            print(f"  ✓ Successfully saved hourly batch {current_batch_num}: {len(batch_df)} rows", file=sys.stderr)
                         # Log sample data that was saved for debugging
                         if log_level == "DEBUG" and not batch_df.empty:
                             sample_idx = batch_df.index[0] if isinstance(batch_df.index, pd.DatetimeIndex) else None
@@ -1745,7 +1758,8 @@ async def fetch_and_save_data(
                         print(traceback.format_exc(), file=sys.stderr)
                         raise # Fail the symbol fetch if a batch fails
                 logging.info(f"Hourly data for {symbol} processed for database.")
-                print(f"[INFO] Successfully saved {total_saved} hourly records to database for {symbol} (DB ticker: {db_ticker})", file=sys.stderr)
+                if log_level == "DEBUG":
+                    print(f"[DEBUG] Successfully saved {total_saved} hourly records to database for {symbol} (DB ticker: {db_ticker})", file=sys.stderr)
                 
                 # Wait for cache writes to complete after saving
                 if hasattr(stock_db_instance, 'cache') and hasattr(stock_db_instance.cache, 'wait_for_pending_writes'):
@@ -1799,11 +1813,12 @@ async def process_symbol_data(
     
     if is_index:
         logging.info(f"Processing index ticker: {symbol} -> DB ticker: {db_ticker}, Yahoo Finance: {yfinance_symbol}")
-        # Only show Yahoo Finance symbol if not using Polygon (which bypasses Yahoo Finance)
-        if data_source != "polygon":
-            print(f"[INFO] Index symbol conversion: {symbol} -> DB ticker: {db_ticker}, Yahoo Finance symbol: {yfinance_symbol}", file=sys.stderr)
-        else:
-            print(f"[INFO] Index symbol conversion: {symbol} -> DB ticker: {db_ticker}, Polygon symbol: I:{db_ticker}", file=sys.stderr)
+        # Only show symbol conversion in debug mode
+        if log_level == "DEBUG":
+            if data_source != "polygon":
+                print(f"[DEBUG] Index symbol conversion: {symbol} -> DB ticker: {db_ticker}, Yahoo Finance symbol: {yfinance_symbol}", file=sys.stderr)
+            else:
+                print(f"[DEBUG] Index symbol conversion: {symbol} -> DB ticker: {db_ticker}, Polygon symbol: I:{db_ticker}", file=sys.stderr)
 
     current_db_instance = stock_db_instance
     if current_db_instance is None:
