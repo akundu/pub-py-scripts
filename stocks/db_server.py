@@ -213,8 +213,8 @@ class WebSocketManager:
             # Test connection
             await self.redis_client.ping()
             self.redis_pubsub = self.redis_client.pubsub()
-            logger.info(f"[REDIS] Pub/Sub initialized successfully: {self.redis_url}")
-            logger.info(f"[REDIS] Ready to receive messages from Redis channels")
+            logger.debug(f"[REDIS] Pub/Sub initialized successfully: {self.redis_url}")
+            logger.debug(f"[REDIS] Ready to receive messages from Redis channels")
             return True
         except Exception as e:
             logger.warning(f"Failed to initialize Redis Pub/Sub: {e}")
@@ -231,15 +231,22 @@ class WebSocketManager:
             quote_channel = f"realtime:quote:{symbol}"
             trade_channel = f"realtime:trade:{symbol}"
             
+            # Check if this is a new symbol being tracked (neither channel exists yet)
+            is_new_symbol = quote_channel not in self.subscribed_channels and trade_channel not in self.subscribed_channels
+            
             if quote_channel not in self.subscribed_channels:
                 await self.redis_pubsub.subscribe(quote_channel)
                 self.subscribed_channels.add(quote_channel)
-                logger.info(f"[REDIS] Subscribed to channel: {quote_channel}")
+                logger.debug(f"[REDIS] Subscribed to channel: {quote_channel}")
                 
             if trade_channel not in self.subscribed_channels:
                 await self.redis_pubsub.subscribe(trade_channel)
                 self.subscribed_channels.add(trade_channel)
-                logger.info(f"[REDIS] Subscribed to channel: {trade_channel}")
+                logger.debug(f"[REDIS] Subscribed to channel: {trade_channel}")
+            
+            # Log at INFO level when tracking a new symbol for the first time
+            if is_new_symbol:
+                logger.info(f"[REDIS] Tracking symbol from Redis: {symbol}")
                 
         except Exception as e:
             logger.error(f"Error subscribing to Redis channels for {symbol}: {e}")
@@ -271,7 +278,7 @@ class WebSocketManager:
         if not self.enable_redis or not self.redis_pubsub:
             return
             
-        logger.info("Starting Redis Pub/Sub subscriber loop")
+        logger.debug("Starting Redis Pub/Sub subscriber loop")
         
         while self.running:
             try:
@@ -615,14 +622,14 @@ class WebSocketManager:
         if self.monitoring_task is None or self.monitoring_task.done():
             self.monitoring_task = asyncio.create_task(self._monitoring_loop())
             fetch_status = "enabled" if FETCH_AVAILABLE else "disabled (fetch_symbol_data module not available)"
-            logger.info(f"Started stale data monitoring (timeout: {self.stale_data_timeout}s, fetch: {fetch_status})")
+            logger.debug(f"Started stale data monitoring (timeout: {self.stale_data_timeout}s, fetch: {fetch_status})")
         
         # Start Redis subscriber if enabled
         if self.enable_redis:
             if await self._init_redis():
                 if self.redis_subscriber_task is None or self.redis_subscriber_task.done():
                     self.redis_subscriber_task = asyncio.create_task(self._redis_subscriber_loop())
-                    logger.info("[REDIS] Started Pub/Sub subscriber loop - ready to receive messages")
+                    logger.debug("[REDIS] Started Pub/Sub subscriber loop - ready to receive messages")
             else:
                 logger.warning("[REDIS] Pub/Sub not available, continuing without it")
         else:
@@ -767,13 +774,13 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
         app_db_instance = initialize_database(db_file, log_level, 
                                                questdb_connection_timeout=questdb_connection_timeout,
                                                enable_cache=enable_cache, redis_url=redis_url)
-        logger.info(f"Worker {worker_id}: Database initialized successfully: {db_file}")
+        logger.debug(f"Worker {worker_id}: Database initialized successfully: {db_file}")
     except Exception as e:
         logger.critical(f"Worker {worker_id}: Fatal Error: Could not initialize database from file '{db_file}': {e}", exc_info=True)
         return
 
     # Initialize WebSocket manager with heartbeat interval and stale data timeout
-    logger.info(f"Worker {worker_id}: Initializing WebSocket manager")
+    logger.debug(f"Worker {worker_id}: Initializing WebSocket manager")
     enable_redis = redis_url is not None
     try:
         # ws_manager is already declared as global at function level, assign directly
@@ -785,7 +792,7 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
         )
         ws_manager.set_db_instance(app_db_instance)
         await ws_manager.start_monitoring()
-        logger.info(f"Worker {worker_id}: WebSocket manager initialized (Redis: {'enabled' if enable_redis else 'disabled'})")
+        logger.debug(f"Worker {worker_id}: WebSocket manager initialized (Redis: {'enabled' if enable_redis else 'disabled'})")
         
         # Verify ws_manager is set (sanity check)
         if ws_manager is None:
@@ -915,15 +922,15 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
     await runner.setup()
     site = web.SockSite(runner, sock)
     
-    logger.info(f"Worker {worker_id}: Server starting on http://localhost:{port}")
-    logger.info(f"Worker {worker_id}: Maximum request body size set to: {max_body_mb}MB ({max_size_bytes} bytes)")
-    logger.info(f"Worker {worker_id}: WebSocket heartbeat interval: {heartbeat_interval}s")
+    logger.debug(f"Worker {worker_id}: Server starting on http://localhost:{port}")
+    logger.debug(f"Worker {worker_id}: Maximum request body size set to: {max_body_mb}MB ({max_size_bytes} bytes)")
+    logger.debug(f"Worker {worker_id}: WebSocket heartbeat interval: {heartbeat_interval}s")
     
     # Final check: ensure ws_manager is ready before accepting connections
     if ws_manager is None:
         logger.critical(f"Worker {worker_id}: CRITICAL: ws_manager is None before starting server! Cannot accept WebSocket connections.")
     else:
-        logger.info(f"Worker {worker_id}: WebSocket manager is ready. Server can accept WebSocket connections.")
+        logger.debug(f"Worker {worker_id}: WebSocket manager is ready. Server can accept WebSocket connections.")
     
     await site.start()
     
@@ -1364,7 +1371,7 @@ def initialize_database(db_file_path: str, log_level: str = "INFO", questdb_conn
     instance = get_stock_db(db_type=db_type_arg, db_config=db_config, logger=logger, log_level=log_level,
                            questdb_connection_timeout_seconds=questdb_connection_timeout,
                            enable_cache=enable_cache, redis_url=redis_url)
-    logger.info(f"Database '{db_file_path}' initialized successfully as {db_type_arg}.")
+    logger.debug(f"Database '{db_file_path}' initialized successfully as {db_type_arg}.")
     return instance
 
 # New logging setup function
@@ -7633,7 +7640,7 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                         logger.warning(f"[CHART DATA] {symbol}: Merged data exists but no valid close/price column or timestamps found")
                 else:
                     # Fallback to daily data if merged data is not available
-                    logger.info(f"[CHART DATA] {symbol}: Merged data not available, falling back to daily data")
+                    logger.debug(f"[CHART DATA] {symbol}: Merged data not available, falling back to daily data")
                     try:
                         # Calculate a reasonable date range for initial chart (last 365 days)
                         from datetime import datetime, timedelta
@@ -7670,7 +7677,7 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                                     }
                                     for ts, close in zip(timestamps_local, close_col[valid_mask])
                                 ]
-                                logger.info(f"[CHART DATA] {symbol}: Fallback to daily data successful, {len(merged_series)} data points")
+                                logger.debug(f"[CHART DATA] {symbol}: Fallback to daily data successful, {len(merged_series)} data points")
                             else:
                                 logger.warning(f"[CHART DATA] {symbol}: Daily data exists but no valid close/price column found")
                         else:
@@ -7678,7 +7685,7 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                     except Exception as e:
                         logger.warning(f"[CHART DATA] {symbol}: Error fetching daily data fallback: {e}")
                 chart_data_time = (time.time() - chart_data_start) * 1000
-                logger.info(f"[TIMING] {symbol}: Chart data extraction took {chart_data_time:.2f}ms")
+                logger.debug(f"[TIMING] {symbol}: Chart data extraction took {chart_data_time:.2f}ms")
                 
                 # Prepare JSON payload
                 json_prep_start = time.time()
@@ -7687,8 +7694,8 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 financial_info_dict = result.get('financial_info', {}).copy()
                 
                 # Debug: Log what's in financial_info_dict
-                logger.info(f"[IV DEBUG] {symbol}: financial_info_dict keys: {list(financial_info_dict.keys())}")
-                logger.info(f"[IV DEBUG] {symbol}: financial_info_dict.get('financial_data') type: {type(financial_info_dict.get('financial_data'))}")
+                logger.debug(f"[IV DEBUG] {symbol}: financial_info_dict keys: {list(financial_info_dict.keys())}")
+                logger.debug(f"[IV DEBUG] {symbol}: financial_info_dict.get('financial_data') type: {type(financial_info_dict.get('financial_data'))}")
                 
                 financial_data = financial_info_dict.get('financial_data', {})
                 if financial_data is None:
@@ -7702,23 +7709,23 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                     try:
                         import json
                         financial_data['iv_analysis_json'] = json.dumps(financial_data['iv_analysis'])
-                        logger.info(f"[IV DEBUG] {symbol}: Reconstructed iv_analysis_json from parsed iv_analysis object")
+                        logger.debug(f"[IV DEBUG] {symbol}: Reconstructed iv_analysis_json from parsed iv_analysis object")
                     except Exception as e:
                         logger.warning(f"[IV DEBUG] {symbol}: Could not reconstruct iv_analysis_json: {e}")
                 
                 # Debug: Log IV-related fields in financial_data
                 iv_fields = {k: v for k, v in financial_data.items() if 'iv' in k.lower() or 'IV' in k}
                 if iv_fields:
-                    logger.info(f"[IV DEBUG] {symbol}: IV fields in financial_data: {list(iv_fields.keys())}")
+                    logger.debug(f"[IV DEBUG] {symbol}: IV fields in financial_data: {list(iv_fields.keys())}")
                     if 'iv_analysis_json' in iv_fields:
                         json_val = iv_fields['iv_analysis_json']
-                        logger.info(f"[IV DEBUG] {symbol}: iv_analysis_json present, type: {type(json_val)}, length: {len(str(json_val)) if json_val else 0} chars")
+                        logger.debug(f"[IV DEBUG] {symbol}: iv_analysis_json present, type: {type(json_val)}, length: {len(str(json_val)) if json_val else 0} chars")
                     if 'iv_metrics' in iv_fields:
-                        logger.info(f"[IV DEBUG] {symbol}: iv_metrics present, type: {type(iv_fields['iv_metrics'])}, keys: {list(iv_fields['iv_metrics'].keys()) if isinstance(iv_fields['iv_metrics'], dict) else 'N/A'}")
+                        logger.debug(f"[IV DEBUG] {symbol}: iv_metrics present, type: {type(iv_fields['iv_metrics'])}, keys: {list(iv_fields['iv_metrics'].keys()) if isinstance(iv_fields['iv_metrics'], dict) else 'N/A'}")
                     if 'iv_strategy' in iv_fields:
-                        logger.info(f"[IV DEBUG] {symbol}: iv_strategy present, type: {type(iv_fields['iv_strategy'])}, keys: {list(iv_fields['iv_strategy'].keys()) if isinstance(iv_fields['iv_strategy'], dict) else 'N/A'}")
+                        logger.debug(f"[IV DEBUG] {symbol}: iv_strategy present, type: {type(iv_fields['iv_strategy'])}, keys: {list(iv_fields['iv_strategy'].keys()) if isinstance(iv_fields['iv_strategy'], dict) else 'N/A'}")
                     if 'iv_analysis' in iv_fields:
-                        logger.info(f"[IV DEBUG] {symbol}: iv_analysis present, type: {type(iv_fields['iv_analysis'])}, keys: {list(iv_fields['iv_analysis'].keys()) if isinstance(iv_fields['iv_analysis'], dict) else 'N/A'}")
+                        logger.debug(f"[IV DEBUG] {symbol}: iv_analysis present, type: {type(iv_fields['iv_analysis'])}, keys: {list(iv_fields['iv_analysis'].keys()) if isinstance(iv_fields['iv_analysis'], dict) else 'N/A'}")
                 else:
                     logger.warning(f"[IV DEBUG] {symbol}: No IV fields found in financial_data. Available keys: {list(financial_data.keys())[:30]}")
                     logger.warning(f"[IV DEBUG] {symbol}: financial_data is empty: {len(financial_data) == 0}")
@@ -7794,7 +7801,7 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 if chart_data_len > 0 or merged_series_len > 0:
                     logger.warning(f"[CHART DATA] {symbol}: WARNING - Chart data still in initial payload! chart_data={chart_data_len}, merged_series={merged_series_len}")
                 else:
-                    logger.info(f"[CHART DATA] {symbol}: Chart data excluded from initial payload (will be lazy-loaded) ✓")
+                    logger.debug(f"[CHART DATA] {symbol}: Chart data excluded from initial payload (will be lazy-loaded) ✓")
                 
                 # Recursively clean NaN, Infinity, and other non-JSON values from data structure
                 def clean_for_json(obj):
@@ -7842,13 +7849,13 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                 clean_start = time.time()
                 cleaned_json_data = clean_for_json(json_data)
                 clean_time = (time.time() - clean_start) * 1000
-                logger.info(f"[TIMING] {symbol}: JSON data cleaning took {clean_time:.2f}ms")
+                logger.debug(f"[TIMING] {symbol}: JSON data cleaning took {clean_time:.2f}ms")
                 
                 # Embed JSON in template - use allow_nan=False to catch any remaining NaN values
                 json_serialize_start = time.time()
                 json_str = json.dumps(cleaned_json_data, default=str, allow_nan=False)
                 json_serialize_time = (time.time() - json_serialize_start) * 1000
-                logger.info(f"[TIMING] {symbol}: JSON serialization took {json_serialize_time:.2f}ms")
+                logger.debug(f"[TIMING] {symbol}: JSON serialization took {json_serialize_time:.2f}ms")
                 template_replace_start = time.time()
                 html_content = template.replace(
                     '<script id="stockData" type="application/json"></script>',
@@ -8938,10 +8945,10 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
                     logger.info(f"[TIMING] {symbol}: Template replacement took {template_replace_time:.2f}ms")
                 
                 template_total_time = (time.time() - template_start) * 1000
-                logger.info(f"[TIMING] {symbol}: Static template processing total took {template_total_time:.2f}ms")
+                logger.debug(f"[TIMING] {symbol}: Static template processing total took {template_total_time:.2f}ms")
                 
                 overall_time = (time.time() - overall_start) * 1000
-                logger.info(f"[TIMING] {symbol}: Total /stock_info/ HTML endpoint time: {overall_time:.2f}ms")
+                logger.debug(f"[TIMING] {symbol}: Total /stock_info/ HTML endpoint time: {overall_time:.2f}ms")
                 
                 return web.Response(
                     text=html_content,
@@ -8966,7 +8973,7 @@ async def handle_stock_info_html(request: web.Request) -> web.Response:
             logger.info(f"[TIMING] {symbol}: Dynamic HTML generation took {dynamic_time:.2f}ms")
             
             overall_time = (time.time() - overall_start) * 1000
-            logger.info(f"[TIMING] {symbol}: Total /stock_info/ HTML endpoint time: {overall_time:.2f}ms")
+            logger.debug(f"[TIMING] {symbol}: Total /stock_info/ HTML endpoint time: {overall_time:.2f}ms")
             
             return web.Response(
                 text=html_content,
@@ -9253,7 +9260,7 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                 realtime_hours=24
             )
             if merged_df is not None and isinstance(merged_df, pd.DataFrame):
-                logger.info(f"[LAZY LOAD CHART] {original_symbol}: get_merged_price_series returned DataFrame: empty={merged_df.empty}, shape={merged_df.shape}, db_symbol={db_symbol}, columns={list(merged_df.columns) if not merged_df.empty else 'N/A'}")
+                logger.debug(f"[LAZY LOAD CHART] {original_symbol}: get_merged_price_series returned DataFrame: empty={merged_df.empty}, shape={merged_df.shape}, db_symbol={db_symbol}, columns={list(merged_df.columns) if not merged_df.empty else 'N/A'}")
             else:
                 logger.warning(f"[LAZY LOAD CHART] {original_symbol}: get_merged_price_series returned: {type(merged_df)}, db_symbol={db_symbol}")
             
@@ -9264,9 +9271,9 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                     # Use start of day for start_ts and end of day for end_ts to ensure we capture all data
                     start_ts = pd.Timestamp(start_date, tz=None).normalize()
                     end_ts = (pd.Timestamp(end_date, tz=None) + pd.Timedelta(days=1)).normalize()
-                    logger.info(f"[LAZY LOAD CHART] {original_symbol}: Filtering merged_df: {len(merged_df)} rows, date range {start_ts} to {end_ts}")
+                    logger.debug(f"[LAZY LOAD CHART] {original_symbol}: Filtering merged_df: {len(merged_df)} rows, date range {start_ts} to {end_ts}")
                     filtered_df = merged_df[(merged_df.index >= start_ts) & (merged_df.index < end_ts)]
-                    logger.info(f"[LAZY LOAD CHART] {original_symbol}: After filtering: {len(filtered_df)} rows")
+                    logger.debug(f"[LAZY LOAD CHART] {original_symbol}: After filtering: {len(filtered_df)} rows")
                     # If filtering resulted in empty data, use all available data (might be outside requested range)
                     if filtered_df.empty and len(merged_df) > 0:
                         logger.warning(f"[LAZY LOAD CHART] {original_symbol}: Filtered data is empty, using all available data ({len(merged_df)} rows)")
@@ -9276,9 +9283,9 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
                     logger.debug(f"[LAZY LOAD CHART] {original_symbol}: Index is not DatetimeIndex, using full merged_df: {len(filtered_df)} rows")
                 
                 # Extract data efficiently
-                logger.info(f"[LAZY LOAD CHART] {original_symbol}: filtered_df columns: {list(filtered_df.columns)}, shape: {filtered_df.shape}")
+                logger.debug(f"[LAZY LOAD CHART] {original_symbol}: filtered_df columns: {list(filtered_df.columns)}, shape: {filtered_df.shape}")
                 close_col = filtered_df.get('close') if 'close' in filtered_df.columns else (filtered_df.get('price') if 'price' in filtered_df.columns else None)
-                logger.info(f"[LAZY LOAD CHART] {original_symbol}: close_col type: {type(close_col)}, length: {len(close_col) if close_col is not None else 'None'}, has_close: {'close' in filtered_df.columns}, has_price: {'price' in filtered_df.columns}")
+                logger.debug(f"[LAZY LOAD CHART] {original_symbol}: close_col type: {type(close_col)}, length: {len(close_col) if close_col is not None else 'None'}, has_close: {'close' in filtered_df.columns}, has_price: {'price' in filtered_df.columns}")
                 if close_col is not None and len(close_col) > 0:
                     valid_mask = pd.notna(close_col)
                     if isinstance(filtered_df.index, pd.DatetimeIndex):
@@ -9544,7 +9551,7 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
         })
         
         # Log data summary before serialization
-        logger.info(
+        logger.debug(
             f"[LAZY LOAD CHART] {original_symbol}: Prepared response - "
             f"merged_series: {len(merged_series)} points, "
             f"chart_data: {len(chart_data)} points, "
@@ -9554,7 +9561,7 @@ async def handle_lazy_load_chart(request: web.Request) -> web.Response:
         json_str = json.dumps(cleaned_data, default=str, allow_nan=False)
         lazy_load_time = (time.time() - lazy_load_start) * 1000
         data_size_kb = len(json_str) / 1024
-        logger.info(f"[LAZY LOAD CHART] {original_symbol}: Served {len(merged_series)} data points ({data_size_kb:.1f}KB) in {lazy_load_time:.1f}ms")
+        logger.debug(f"[LAZY LOAD CHART] {original_symbol}: Served {len(merged_series)} data points ({data_size_kb:.1f}KB) in {lazy_load_time:.1f}ms")
         
         # Add cache headers for 60 seconds browser caching
         CHART_CACHE_TIME = 60

@@ -132,18 +132,24 @@ async def fetch_lists_data(
     """
     Fetch symbols using the same logic as fetch_all_data.py
     
+    Symbols are normalized for database storage (I:SPX -> SPX).
+    
     Args:
         args: Parsed command line arguments
         quiet: If True, suppress most output messages
+        apply_exclusions: If True, apply exclusion filters
         
     Returns:
-        List of symbols to process
+        List of symbols to process (normalized for database storage)
     """
+    from common.symbol_utils import normalize_symbol_for_db
+    
     all_symbols_list = []
     
     # Handle explicit symbols provided via command line
     if args.symbols:
-        all_symbols_list = args.symbols
+        # Normalize symbols for database storage
+        all_symbols_list = [normalize_symbol_for_db(symbol) for symbol in args.symbols]
         if not quiet:
             print(f"Using {len(all_symbols_list)} symbols provided via --symbols: {', '.join(all_symbols_list)}")
     
@@ -259,6 +265,12 @@ async def fetch_lists_data(
         if not quiet:
             print(f"Limited to {len(all_symbols_list)} symbols for processing (from {original_count})")
     
+    # Normalize all symbols for database storage (I:SPX -> SPX)
+    # This ensures symbols from YAML files, types, etc. are all normalized
+    if all_symbols_list:
+        from common.symbol_utils import normalize_symbol_for_db
+        all_symbols_list = [normalize_symbol_for_db(symbol) for symbol in all_symbols_list]
+    
     return all_symbols_list
 
 
@@ -328,19 +340,26 @@ async def get_symbols_from_args(args: argparse.Namespace, quiet: bool = False) -
     """
     Get symbols from command line arguments.
     
+    Symbols are normalized for database storage (I:SPX -> SPX).
+    
     Args:
         args: Parsed command line arguments
         quiet: If True, suppress most output messages
         
     Returns:
-        List of symbols to process
+        List of symbols to process (normalized for database storage)
     """
+    from common.symbol_utils import normalize_symbol_for_db
+    
     # Handle single symbol provided as positional argument
     if hasattr(args, 'symbol') and args.symbol:
-        return [args.symbol.upper()]
+        return [normalize_symbol_for_db(args.symbol)]
     
     # Use the symbol loading methods
-    return await fetch_lists_data(args, quiet)
+    symbols = await fetch_lists_data(args, quiet)
+    
+    # Normalize all symbols for database storage
+    return [normalize_symbol_for_db(symbol) for symbol in symbols]
 
 
 # For backward compatibility, provide the old function name

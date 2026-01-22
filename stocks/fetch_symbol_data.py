@@ -35,6 +35,17 @@ from common.market_hours import is_market_hours, is_market_preopen, is_market_po
 # Import new fetcher classes
 from common.fetcher import FetcherFactory
 
+# Import common symbol utilities
+from common.symbol_utils import (
+    normalize_symbol_for_db,
+    is_index_symbol,
+    get_polygon_symbol,
+    get_yfinance_symbol,
+    get_data_source,
+    parse_symbol,
+    INDEX_TO_YFINANCE_MAP
+)
+
 logger = logging.getLogger(__name__)
 try:
     import tzlocal
@@ -333,72 +344,30 @@ async def fetch_yfinance_index_data(
         logging.error(f"Error fetching data from Yahoo Finance for {yfinance_symbol}: {e}")
         raise e
 
-# Mapping from common index symbols to Yahoo Finance symbols
-INDEX_TO_YFINANCE_MAP = {
-    'SPX': '^GSPC',      # S&P 500
-    'NDX': '^NDX',       # NASDAQ 100
-    'SPY': 'SPY',        # S&P 500 ETF (not an index, but common)
-    'DJI': '^DJI',       # Dow Jones Industrial Average
-    'DIA': 'DIA',        # Dow ETF
-    'IXIC': '^IXIC',     # NASDAQ Composite
-    'QQQ': 'QQQ',        # NASDAQ ETF
-    'RUT': '^RUT',       # Russell 2000
-    'VIX': '^VIX',       # VIX Volatility Index
-    'TNX': '^TNX',       # 10-Year Treasury Yield
-    'FVX': '^FVX',       # 5-Year Treasury Yield
-    'IRX': '^IRX',       # 13-Week Treasury Yield
-    'NYA': '^NYA',       # NYSE Composite
-    'XAX': '^XAX',       # NYSE AMEX Composite
-    'BATSK': '^BATSK',   # NYSE Arca Tech 100
-    'N225': '^N225',     # Nikkei 225
-    'FTSE': '^FTSE',     # FTSE 100
-    'GDAXI': '^GDAXI',   # DAX
-    'FCHI': '^FCHI',     # CAC 40
-    'HSI': '^HSI',       # Hang Seng
-    'STOXX50E': '^STOXX50E',  # STOXX Europe 50
-}
-
+# Symbol utilities are now imported from common.symbol_utils
+# Legacy function aliases for backward compatibility
 def _get_yfinance_symbol(index_symbol: str) -> str:
     """
-    Convert index symbol to Yahoo Finance symbol.
+    Legacy function: Convert index symbol to Yahoo Finance symbol.
     
-    Args:
-        index_symbol: Index symbol (e.g., "SPX")
-    
-    Returns:
-        Yahoo Finance symbol (e.g., "^GSPC") or the original symbol if not found
+    Use get_yfinance_symbol from common.symbol_utils instead.
     """
-    return INDEX_TO_YFINANCE_MAP.get(index_symbol.upper(), f"^{index_symbol.upper()}")
+    result = get_yfinance_symbol(index_symbol)
+    return result if result else f"^{index_symbol.upper()}"
 
 def _parse_index_ticker(ticker: str) -> tuple[str, str, bool, str | None]:
     """
-    Parse ticker input to handle index format (I:SPX).
+    Legacy function: Parse ticker input to handle index format (I:SPX).
     
-    Args:
-        ticker: Input ticker, may be in format "I:SPX" for indices or regular ticker like "AAPL"
-    
-    Returns:
-        tuple: (api_ticker, db_ticker, is_index, yfinance_symbol)
-            - api_ticker: Ticker to use for API calls (e.g., "I:SPX" for indices, but not used for yfinance)
-            - db_ticker: Ticker to use for database storage (e.g., "SPX" for indices)
-            - is_index: True if this is an index ticker, False otherwise
-            - yfinance_symbol: Yahoo Finance symbol (e.g., "^GSPC") if index, None otherwise
+    Use parse_symbol from common.symbol_utils instead.
+    Returns tuple in old format: (api_ticker, db_ticker, is_index, yfinance_symbol)
     """
-    if ticker.startswith("^"):
-        base_ticker = ticker[1:]
-        return (ticker, base_ticker, True, ticker)
-    if ticker.startswith("I:"):
-        base_ticker = ticker[2:]  # Remove "I:" prefix
-        yfinance_symbol = _get_yfinance_symbol(base_ticker)
-        return (ticker, base_ticker, True, yfinance_symbol)
+    db_symbol, polygon_symbol, is_index, yfinance_symbol = parse_symbol(ticker)
     
-    # Check if ticker (without prefix) is a known index symbol
-    ticker_upper = ticker.upper()
-    if ticker_upper in INDEX_TO_YFINANCE_MAP:
-        yfinance_symbol = INDEX_TO_YFINANCE_MAP[ticker_upper]
-        return (ticker, ticker, True, yfinance_symbol)
+    # For backward compatibility, return api_ticker (polygon format for indices)
+    api_ticker = polygon_symbol if is_index else ticker
     
-    return (ticker, ticker, False, None)
+    return (api_ticker, db_symbol, is_index, yfinance_symbol)
 
 def _is_market_hours(dt: datetime = None) -> bool:
     """Deprecated shim: use common.market_hours.is_market_hours"""

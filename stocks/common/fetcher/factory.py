@@ -3,7 +3,7 @@ Factory for creating data fetchers based on configuration.
 
 Handles:
 - Creating appropriate fetcher based on data source
-- Routing index symbols to Yahoo Finance
+- Routing symbols to appropriate data sources (Polygon supports indices)
 - Managing API credentials
 """
 
@@ -15,6 +15,14 @@ from .base import AbstractDataFetcher
 from .yahoo import YahooFinanceFetcher
 from .polygon import PolygonFetcher
 from .alpaca import AlpacaFetcher
+
+# Import common symbol utilities
+from common.symbol_utils import (
+    is_index_symbol,
+    get_yfinance_symbol,
+    get_data_source,
+    parse_symbol
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,82 +37,38 @@ class FetcherFactory:
         result = await fetcher.fetch_historical_data(...)
     """
     
-    # Index ticker patterns and their Yahoo Finance symbols
-    INDEX_MAPPINGS = {
-        'I:SPX': '^GSPC',      # S&P 500
-        'I:NDX': '^NDX',       # NASDAQ 100
-        'I:DJI': '^DJI',       # Dow Jones
-        'I:RUT': '^RUT',       # Russell 2000
-        'I:VIX': '^VIX',       # VIX
-        'SPX': '^GSPC',        # S&P 500 (without I: prefix)
-        'NDX': '^NDX',         # NASDAQ 100
-        'DJI': '^DJI',         # Dow Jones
-        'RUT': '^RUT',         # Russell 2000
-        'VIX': '^VIX',         # VIX
-    }
-    
     @classmethod
     def is_index_symbol(cls, symbol: str) -> bool:
-        """Check if symbol is an index."""
-        return symbol.startswith('I:') or symbol.startswith('^')
+        """Check if symbol is an index. Uses common.symbol_utils."""
+        return is_index_symbol(symbol)
     
     @classmethod
     def get_yahoo_symbol(cls, symbol: str) -> Optional[str]:
-        """Get Yahoo Finance symbol for an index."""
-        if symbol.startswith('^'):
-            return symbol
-        # Check if symbol has I: prefix
-        if symbol.startswith('I:'):
-            mapped = cls.INDEX_MAPPINGS.get(symbol.upper())
-            if mapped:
-                return mapped
-            # If not in mapping, extract base symbol and add ^ prefix
-            base_symbol = symbol[2:].upper()
-            return f'^{base_symbol}'
-        # Check if base symbol (without I:) is in mapping
-        mapped = cls.INDEX_MAPPINGS.get(symbol.upper())
-        if mapped:
-            return mapped
-        # If not found, assume it's an index and add ^ prefix
-        return f'^{symbol.upper()}'
+        """Get Yahoo Finance symbol for an index. Uses common.symbol_utils."""
+        return get_yfinance_symbol(symbol)
     
     @classmethod
     def parse_index_ticker(cls, symbol: str) -> tuple[Optional[str], str, bool, Optional[str]]:
         """
-        Parse ticker to handle index format.
+        Parse ticker to handle index format. Uses common.symbol_utils.
         
         Args:
             symbol: Input symbol (e.g., 'AAPL', 'I:SPX', '^GSPC')
             
         Returns:
             Tuple of (api_ticker, db_ticker, is_index, yfinance_symbol)
-            - api_ticker: Ticker for API calls (None if using Yahoo Finance)
+            - api_ticker: Ticker for API calls (None if using Yahoo Finance, or Polygon format for indices)
             - db_ticker: Ticker for database storage (without I: prefix)
             - is_index: Whether this is an index
             - yfinance_symbol: Yahoo Finance symbol if index, else None
         """
-        is_index = cls.is_index_symbol(symbol)
+        db_symbol, polygon_symbol, is_index, yfinance_symbol = parse_symbol(symbol)
         
-        if not is_index:
-            # Regular stock ticker
-            return symbol, symbol, False, None
+        # For backward compatibility, return api_ticker
+        # For indices with Polygon, use Polygon format; otherwise None (Yahoo Finance)
+        api_ticker = polygon_symbol if is_index else symbol
         
-        # Index ticker
-        if symbol.startswith('^'):
-            # Already a Yahoo Finance symbol
-            db_ticker = symbol.replace('^', '').upper()
-            return None, db_ticker, True, symbol
-        
-        # I:XXX format - convert to Yahoo Finance symbol
-        yfinance_symbol = cls.get_yahoo_symbol(symbol)
-        if not yfinance_symbol:
-            # Unknown index, try to construct Yahoo symbol
-            index_code = symbol.split(':', 1)[1] if ':' in symbol else symbol
-            yfinance_symbol = f'^{index_code}'
-        
-        db_ticker = symbol.split(':', 1)[1] if ':' in symbol else symbol
-        
-        return None, db_ticker, True, yfinance_symbol
+        return api_ticker, db_symbol, is_index, yfinance_symbol
     
     @staticmethod
     def create_fetcher(
@@ -136,15 +100,26 @@ class FetcherFactory:
         """
         data_source = data_source.lower()
         
-        # Check if symbol is an index - if so, use Yahoo Finance (unless forced)
+        # Determine appropriate data source for the symbol
+        # Polygon supports indices (with I: prefix), so prefer Polygon for indices
         if symbol and not force_data_source:
-            _, _, is_index, yfinance_symbol = FetcherFactory.parse_index_ticker(symbol)
-            if is_index and data_source in ['polygon', 'alpaca']:
-                logger.info(
-                    f"Index symbol {symbol} detected, using Yahoo Finance "
-                    f"instead of {data_source}"
-                )
-                return YahooFinanceFetcher(log_level=log_level)
+            actual_data_source = get_data_source(symbol, preferred_source=data_source)
+            
+            # If the determined source differs from requested, log it
+            if actual_data_source != data_source:
+                if is_index_symbol(symbol):
+                    logger.info(
+                        f"Index symbol {symbol} detected, using {actual_data_source} "
+                        f"(Polygon supports indices with I: prefix)"
+                    )
+                else:
+                    logger.info(
+                        f"Using {actual_data_source} for symbol {symbol} "
+                        f"(requested {data_source})"
+                    )
+            
+            # Use the determined data source
+            data_source = actual_data_source
         
         # Create fetcher based on data source
         if data_source == 'yahoo':

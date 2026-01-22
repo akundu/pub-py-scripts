@@ -768,6 +768,10 @@ async def main():
     global args
     args = parse_args()
     
+    # Normalize symbols for database storage (I:SPX -> SPX)
+    from common.symbol_utils import normalize_symbol_for_db
+    args.symbols = [normalize_symbol_for_db(symbol) for symbol in args.symbols]
+    
     # Setup logging
     logging.basicConfig(
         level=getattr(logging, args.log_level),

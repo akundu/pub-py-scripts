@@ -24,12 +24,39 @@ import json
 import signal
 import sys
 import time
+import os
+from pathlib import Path
 import aiohttp
 import websockets
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 from collections import defaultdict
 from zoneinfo import ZoneInfo
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Import common symbol utilities
+from common.symbol_utils import normalize_symbol_for_db
+
+# Import market hours checking
+try:
+    from common.market_hours import is_market_hours
+except ImportError:
+    # Fallback if market_hours module doesn't exist
+    def is_market_hours(dt=None, tz_name="America/New_York") -> bool:
+        """Simple fallback market hours check."""
+        if dt is None:
+            dt = datetime.now()
+        try:
+            now_et = dt.astimezone(ZoneInfo(tz_name)) if dt.tzinfo else datetime.now(ZoneInfo(tz_name))
+        except Exception:
+            now_et = datetime.now()
+        if now_et.weekday() >= 5:
+            return False
+        market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        return market_open <= now_et <= market_close
 
 # Rich library for display
 try:
@@ -181,11 +208,12 @@ class StockData:
         return f"${price:.2f}"
     
     def format_change(self) -> str:
-        """Format change for display."""
+        """Format change for display based on market status."""
+        change, change_percent = self.get_display_change()
         if self.prev_close is None:
             return "N/A"
-        sign = "+" if self.change >= 0 else ""
-        return f"{sign}{self.change:.2f} ({sign}{self.change_percent:.2f}%)"
+        sign = "+" if change >= 0 else ""
+        return f"{sign}{change:.2f} ({sign}{change_percent:.2f}%)"
     
     def format_volume(self) -> str:
         """Format volume for display."""
@@ -206,10 +234,11 @@ class StockData:
         return self.last_update.strftime("%H:%M:%S")
     
     def get_change_color(self) -> str:
-        """Get color for change display."""
-        if self.change > 0:
+        """Get color for change display based on market status."""
+        change, _ = self.get_display_change()
+        if change > 0:
             return "green"
-        elif self.change < 0:
+        elif change < 0:
             return "red"
         else:
             return "white"
@@ -217,9 +246,10 @@ class StockData:
     def get_session_color(self) -> str:
         """Get color for session status."""
         if self.session_status == "LIVE":
-            if self.change > 0:
+            change, _ = self.get_display_change()
+            if change > 0:
                 return "green"
-            elif self.change < 0:
+            elif change < 0:
                 return "red"
             else:
                 return "white"
@@ -229,6 +259,52 @@ class StockData:
     def update_session_status(self):
         """Update session status based on current time."""
         self.session_status = get_session_status()
+    
+    def get_display_price(self) -> float:
+        """Get the price to display based on market status.
+        
+        Priority order:
+        - During regular hours: use current real-time price
+        - During pre-market: use pre-market price (current_price from WebSocket) if available, else previous close
+        - During after-hours: use after-hours price (current_price from WebSocket) if available, else previous close
+        - When closed: use previous close
+        """
+        # Update session status to get current market state
+        self.update_session_status()
+        
+        # Check if market is open (regular trading hours)
+        market_open = is_market_hours()
+        
+        if market_open:
+            # Market is open: use real-time price
+            return self.current_price if self.current_price > 0 else (self.prev_close or 0.0)
+        elif self.session_status == "PRE-OPEN":
+            # Pre-market: prefer pre-market price from WebSocket, fall back to previous close
+            if self.current_price > 0:
+                return self.current_price
+            else:
+                return self.prev_close if self.prev_close is not None and self.prev_close > 0 else 0.0
+        elif self.session_status == "AFTER-HOURS":
+            # After-hours: prefer after-hours price from WebSocket, fall back to previous close
+            if self.current_price > 0:
+                return self.current_price
+            else:
+                return self.prev_close if self.prev_close is not None and self.prev_close > 0 else 0.0
+        else:
+            # Market is closed: use previous close
+            return self.prev_close if self.prev_close is not None and self.prev_close > 0 else (self.current_price if self.current_price > 0 else 0.0)
+    
+    def get_display_change(self) -> tuple[float, float]:
+        """Get the change values to display based on market status.
+        
+        Returns (change_amount, change_percent) calculated from display_price vs prev_close
+        """
+        display_price = self.get_display_price()
+        if self.prev_close is None or self.prev_close == 0:
+            return (0.0, 0.0)
+        change = display_price - self.prev_close
+        change_percent = (change / self.prev_close) * 100 if self.prev_close > 0 else 0.0
+        return (change, change_percent)
     
     def reset_daily_data(self):
         """Reset all daily metrics (volume, change calculations, etc.)."""
@@ -405,9 +481,16 @@ class DisplayManager:
         self.current_trading_day = now_et.date()
         self.last_day_reset_check = time.time()
         
+        # Track previous session status for each symbol to detect state changes
+        self.previous_session_status: Dict[str, str] = {}
+        self.last_session_check = time.time()
+        
         # Initialize stock data
         for symbol in symbols:
             self.stock_data[symbol] = StockData(symbol)
+            # Initialize previous session status
+            self.stock_data[symbol].update_session_status()
+            self.previous_session_status[symbol] = self.stock_data[symbol].session_status
     
     def add_debug_log(self, message: str):
         """Add a debug message to the log buffer."""
@@ -515,8 +598,113 @@ class DisplayManager:
             if open_val is not None and float(open_val) > 0:
                 self.stock_data[symbol].set_open(float(open_val))
         
+        # Update previous session status after reset
+        for symbol in self.symbols:
+            self.stock_data[symbol].update_session_status()
+            self.previous_session_status[symbol] = self.stock_data[symbol].session_status
+        
         if self.debug_mode:
             self.add_debug_log("Daily data reset completed")
+    
+    def _check_session_state_changes(self) -> Dict[str, tuple[str, str]]:
+        """Check if session status has changed for any symbol.
+        
+        Returns a dict mapping symbol to (old_status, new_status) tuple for symbols that changed.
+        """
+        changed_symbols = {}
+        
+        for symbol in self.symbols:
+            stock = self.stock_data[symbol]
+            old_status = self.previous_session_status.get(symbol, "UNKNOWN")
+            
+            # Update current session status
+            stock.update_session_status()
+            new_status = stock.session_status
+            
+            if old_status != new_status:
+                changed_symbols[symbol] = (old_status, new_status)
+                self.previous_session_status[symbol] = new_status
+        
+        return changed_symbols
+    
+    async def _refresh_data_on_session_change(self, db_client: DatabaseClient, changed_symbols: Dict[str, tuple[str, str]]):
+        """Refresh data when session state changes.
+        
+        When transitioning to CLOSED or from LIVE to AFTER-HOURS, we need to refetch
+        the previous close prices as the market may have closed and we now have a new close.
+        """
+        if not changed_symbols:
+            return
+        
+        # Determine which symbols need refresh
+        symbols_to_refresh = []
+        refresh_reasons = []
+        
+        for symbol, (old_status, new_status) in changed_symbols.items():
+            
+            # Refresh when:
+            # 1. Market closes (LIVE -> AFTER-HOURS or AFTER-HOURS -> CLOSED)
+            # 2. New day starts (any -> PRE-OPEN on new day)
+            # 3. Market opens (PRE-OPEN -> LIVE)
+            # 4. Any transition that might affect previous close (e.g., end of trading day)
+            needs_refresh = False
+            reason = None
+            
+            if new_status == "CLOSED" and old_status in ["LIVE", "AFTER-HOURS"]:
+                # Market just closed - need latest close price
+                needs_refresh = True
+                reason = f"Market closed ({old_status} -> {new_status})"
+            elif new_status == "AFTER-HOURS" and old_status == "LIVE":
+                # Regular hours ended - market closed, need latest close price
+                needs_refresh = True
+                reason = f"Regular hours ended ({old_status} -> {new_status})"
+            elif new_status == "LIVE" and old_status == "PRE-OPEN":
+                # Market just opened - refresh to get today's open and latest prev close
+                needs_refresh = True
+                reason = f"Market opened ({old_status} -> {new_status})"
+            elif new_status == "PRE-OPEN":
+                # Check if it's a new day
+                try:
+                    now_et = datetime.now(ZoneInfo("America/New_York"))
+                except Exception:
+                    now_et = datetime.now()
+                if now_et.date() != self.current_trading_day:
+                    needs_refresh = True
+                    reason = f"New trading day started ({old_status} -> {new_status})"
+            
+            if needs_refresh:
+                symbols_to_refresh.append(symbol)
+                refresh_reasons.append(f"{symbol}: {reason}")
+        
+        if not symbols_to_refresh:
+            return
+        
+        if self.debug_mode:
+            for reason in refresh_reasons:
+                self.add_debug_log(reason)
+            self.add_debug_log(f"Refreshing data for {len(symbols_to_refresh)} symbol(s)...")
+        
+        # Refetch previous close prices for changed symbols
+        prev_close_map = await db_client.fetch_previous_close_batch(symbols_to_refresh)
+        for symbol, prev_close_val in prev_close_map.items():
+            if prev_close_val is not None and float(prev_close_val) > 0:
+                old_prev_close = self.stock_data[symbol].prev_close
+                self.stock_data[symbol].set_prev_close(float(prev_close_val))
+                
+                if self.debug_mode and old_prev_close != prev_close_val:
+                    self.add_debug_log(f"{symbol}: Prev close updated ${old_prev_close:.2f} -> ${prev_close_val:.2f}")
+        
+        # Refetch opening prices if market just opened
+        if any(self.stock_data[s].session_status == "LIVE" for s in symbols_to_refresh):
+            open_map = await db_client.fetch_today_open_batch(symbols_to_refresh)
+            for symbol, open_val in open_map.items():
+                if open_val is not None and float(open_val) > 0:
+                    self.stock_data[symbol].set_open(float(open_val))
+                    if self.debug_mode:
+                        self.add_debug_log(f"{symbol}: Open price set to ${open_val:.2f}")
+        
+        if self.debug_mode:
+            self.add_debug_log("Session change refresh completed")
     
     def build_ws_url(self, symbol: str) -> str:
         """Build WebSocket URL for a symbol."""
@@ -665,11 +853,13 @@ class DisplayManager:
             
             # Format columns with color coding
             symbol_col = f"[cyan]{symbol}[/cyan]"
-            current_col = f"[white]{stock.format_price(stock.current_price)}[/white]"
+            # Use display_price which respects market status (prev_close when closed, current_price when open)
+            display_price = stock.get_display_price()
+            current_col = f"[white]{stock.format_price(display_price)}[/white]"
             open_col = f"[white]{stock.format_price(stock.open_price)}[/white]"
             prev_close_col = f"[white]{stock.format_price(stock.prev_close)}[/white]"
             
-            # Color-coded change
+            # Color-coded change (calculated from display_price vs prev_close)
             change_color = stock.get_change_color()
             change_col = f"[{change_color}]{stock.format_change()}[/{change_color}]"
             
@@ -748,13 +938,14 @@ class DisplayManager:
             if self.sort_column == "Symbol":
                 return symbol
             elif self.sort_column == "Current":
-                return stock.current_price or 0
+                return stock.get_display_price() or 0
             elif self.sort_column == "Open":
                 return stock.open_price if stock.open_price is not None else 0
             elif self.sort_column == "Prev Close":
                 return stock.prev_close if stock.prev_close is not None else 0
             elif self.sort_column == "Change":
-                return stock.change
+                change, _ = stock.get_display_change()
+                return change
             elif self.sort_column == "Volume":
                 return stock.volume if stock.volume is not None else 0
             elif self.sort_column == "Bid/Ask":
@@ -844,12 +1035,21 @@ class DisplayManager:
             with Live(console=console, refresh_per_second=refresh_rate, screen=True) as live:
                 while not shutdown_flag:
                     try:
-                        # Check for day transition (check every 60 seconds to avoid excessive checks)
                         current_time = time.time()
+                        
+                        # Check for day transition (check every 60 seconds to avoid excessive checks)
                         if current_time - self.last_day_reset_check >= 60.0:
                             self.last_day_reset_check = current_time
                             if self._check_day_transition():
                                 await self._reset_daily_data(db_client)
+                        
+                        # Check for session state changes (check every 10 seconds)
+                        # This detects transitions like PRE-OPEN -> LIVE -> AFTER-HOURS -> CLOSED
+                        if current_time - self.last_session_check >= 10.0:
+                            self.last_session_check = current_time
+                            changed_symbols = self._check_session_state_changes()
+                            if changed_symbols:
+                                await self._refresh_data_on_session_change(db_client, changed_symbols)
                         
                         # Check for keyboard input (non-blocking, Unix only)
                         if keyboard_enabled:
@@ -955,7 +1155,10 @@ async def main():
     
     setup_signal_handlers()
     
-    display_manager = DisplayManager(args.symbols, args.db_server, debug_mode=args.debug)
+    # Normalize symbols for database storage (I:SPX -> SPX)
+    normalized_symbols = [normalize_symbol_for_db(symbol) for symbol in args.symbols]
+    
+    display_manager = DisplayManager(normalized_symbols, args.db_server, debug_mode=args.debug)
     
     try:
         async with DatabaseClient(args.db_server) as db_client:
@@ -965,7 +1168,7 @@ async def main():
     finally:
         print("\nFinal Statistics:")
         print(f"Total messages: {display_manager.total_messages}")
-        for symbol in args.symbols:
+        for symbol in normalized_symbols:
             print(f"  {symbol}: {display_manager.message_counts[symbol]} messages")
 
 if __name__ == "__main__":
