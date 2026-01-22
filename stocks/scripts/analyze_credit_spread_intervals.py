@@ -140,6 +140,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="When used with --most-recent, show only the single best spread (call or put) from the latest data. Use this to get the one actionable investment opportunity right now. Requires --most-recent."
     )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Live mode: Show a clear 'BEST CURRENT OPTION' line with actionable details. Use with --most-recent --best-only for current investment opportunities."
+    )
     
     return parser.parse_args()
 
@@ -892,6 +897,9 @@ async def main():
     logger.info("Parsing timestamps...")
     df['timestamp'] = df['timestamp'].apply(parse_pst_timestamp)
     
+    # Store most recent timestamp from original data (before filtering) for error messages
+    most_recent_timestamp_original = df['timestamp'].max() if len(df) > 0 else None
+    
     # Filter for 0DTE only: keep rows where timestamp date matches expiration date
     # This ensures we only analyze options on their expiration day
     logger.info("Filtering for 0DTE options (timestamp date == expiration date)...")
@@ -907,7 +915,11 @@ async def main():
     
     filtered_count = len(df)
     if filtered_count == 0:
-        logger.error("No 0DTE options found (no rows where timestamp date matches expiration date)")
+        if most_recent_timestamp_original:
+            most_recent_str = format_timestamp(most_recent_timestamp_original, output_tz)
+            logger.error(f"No 0DTE options found (no rows where timestamp date matches expiration date). Most recent timestamp in CSV: {most_recent_str}")
+        else:
+            logger.error("No 0DTE options found (no rows where timestamp date matches expiration date)")
         return 1
     
     logger.info(f"Filtered to {filtered_count}/{original_count} 0DTE rows")
@@ -1001,6 +1013,40 @@ async def main():
                     most_recent_results.append(best_put)
             
             results = most_recent_results
+            
+            # If using --most-recent --best-only --live, show the best option or a clear message
+            if args.most_recent and args.best_only and args.live:
+                if results:
+                    # Show the best option from most recent timestamp
+                    best_result = results[0]
+                    timestamp_str = format_timestamp(best_result['timestamp'], output_tz)
+                    max_credit = best_result['best_spread'].get('total_credit')
+                    if max_credit is None:
+                        max_credit = best_result['best_spread'].get('net_credit_per_contract', 0)
+                    num_contracts = best_result['best_spread'].get('num_contracts', 0)
+                    if num_contracts is None:
+                        num_contracts = 0
+                    opt_type_upper = best_result.get('option_type', 'UNKNOWN').upper()
+                    short_strike = best_result['best_spread']['short_strike']
+                    long_strike = best_result['best_spread']['long_strike']
+                    short_premium = best_result['best_spread']['short_price']
+                    long_premium = best_result['best_spread']['long_price']
+                    print(f"BEST CURRENT OPTION: {timestamp_str} | Type: {opt_type_upper} | Max Credit: ${max_credit:.2f} | Contracts: {num_contracts} | Spread: ${short_strike:.2f}/${long_strike:.2f} | Short: ${short_premium:.2f} Long: ${long_premium:.2f}")
+                else:
+                    # No results found
+                    max_timestamp_str = format_timestamp(max_timestamp, output_tz)
+                    print(f"NO RESULTS: No valid spreads found at most recent timestamp {max_timestamp_str} that meet the criteria.")
+                    return 0
+            elif args.most_recent and args.best_only and not args.live:
+                # --most-recent --best-only without --live: just show no results message if needed
+                if not results:
+                    max_timestamp_str = format_timestamp(max_timestamp, output_tz)
+                    print(f"NO RESULTS: No valid spreads found at most recent timestamp {max_timestamp_str} that meet the criteria.")
+                    return 0
+        elif args.most_recent and not results:
+            # No results at all - show message
+            print("NO RESULTS: No valid spreads found.")
+            return 0
         
         # Print results
         if args.summary or args.summary_only:
@@ -1032,7 +1078,8 @@ async def main():
                             overall_best_put = result
                     
                     # Only print individual lines if --summary is used (not --summary-only)
-                    if args.summary and not args.summary_only:
+                    # Skip if --best-only --live was used (we already printed it above)
+                    if args.summary and not args.summary_only and not (args.best_only and args.live):
                         timestamp_str = format_timestamp(result['timestamp'], output_tz)
                         
                         # Get number of contracts
