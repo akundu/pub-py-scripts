@@ -4,16 +4,18 @@ Analyze credit spreads from CSV options data at 15-minute intervals.
 
 This program:
 1. Reads a CSV file with options data (timestamps in PST)
-2. Groups data by 15-minute intervals
-3. Finds the maximum credit spread for call/put options
-4. Filters based on % beyond previous trading day's closing price
-5. Caps risk at a specified amount
-6. Uses QuestDB to get previous trading day's closing and opening prices
+2. Filters for 0DTE options only (timestamp date == expiration date)
+3. Groups data by 15-minute intervals
+4. Finds the maximum credit spread for call/put options
+5. Filters based on % beyond previous trading day's closing price
+6. Caps risk at a specified amount
+7. Uses QuestDB to get previous trading day's closing and opening prices
 
 Price Data:
-- Uses bid/ask prices if available for real-time pricing
-- Falls back to day_close (option's daily closing price) when bid/ask are missing
-- This is useful for historical data where real-time quotes may not be available
+- Requires bid/ask prices for option pricing (no day_close fallback)
+- For selling: uses bid price (what you receive)
+- For buying: uses ask price (what you pay)
+- Options without valid bid/ask are skipped
 """
 
 import argparse
@@ -231,7 +233,8 @@ def get_previous_trading_day(date: datetime) -> datetime:
 async def get_current_day_close_price(
     db: StockQuestDB,
     ticker: str,
-    reference_date: datetime
+    reference_date: datetime,
+    logger: Optional[logging.Logger] = None
 ) -> Optional[Tuple[float, datetime.date]]:
     """Get the closing price for the trading day of reference_date.
     
@@ -267,12 +270,18 @@ async def get_current_day_close_price(
         day_start_utc = day_start_et.astimezone(timezone.utc).replace(tzinfo=None)
         day_end_utc = day_start_utc + timedelta(days=1)
         
+        if logger:
+            logger.debug(f"DEBUG get_current_day_close_price: ticker={ticker}, trading_day={trading_day}, day_start_utc={day_start_utc}, day_end_utc={day_end_utc}")
+        
         async with db.connection.get_connection() as conn:
             # Get close price for the trading day
             rows = await conn.fetch(
                 "SELECT date, close FROM daily_prices WHERE ticker = $1 AND date >= $2 AND date < $3 ORDER BY date DESC LIMIT 1",
                 ticker, day_start_utc, day_end_utc
             )
+            
+            if logger:
+                logger.debug(f"DEBUG get_current_day_close_price: Found {len(rows)} rows")
             
             if rows:
                 close_price = float(rows[0]['close'])
@@ -281,18 +290,27 @@ async def get_current_day_close_price(
                     trading_date = row_date.date()
                 else:
                     trading_date = trading_day
+                if logger:
+                    logger.debug(f"DEBUG get_current_day_close_price: Returning close=${close_price:.2f} for date={trading_date}")
                 return (close_price, trading_date)
         
+        if logger:
+            logger.debug(f"DEBUG get_current_day_close_price: No data found for {ticker} on {trading_day}")
         return None
     except Exception as e:
-        logging.error(f"Error getting current day close for {ticker}: {e}")
+        error_msg = f"Error getting current day close for {ticker}: {e}"
+        if logger:
+            logger.error(error_msg)
+        else:
+            logging.error(error_msg)
         return None
 
 
 async def get_previous_close_price(
     db: StockQuestDB,
     ticker: str,
-    reference_date: datetime
+    reference_date: datetime,
+    logger: Optional[logging.Logger] = None
 ) -> Optional[Tuple[float, datetime.date]]:
     """Get the closing price for the previous trading day relative to reference_date.
     
@@ -323,12 +341,18 @@ async def get_previous_close_price(
         prev_day_start_utc = prev_day_start_et.astimezone(timezone.utc).replace(tzinfo=None)
         prev_day_end_utc = prev_day_start_utc + timedelta(days=1)
         
+        if logger:
+            logger.debug(f"DEBUG get_previous_close_price: ticker={ticker}, prev_trading_day={prev_trading_day}, prev_day_start_utc={prev_day_start_utc}, prev_day_end_utc={prev_day_end_utc}")
+        
         async with db.connection.get_connection() as conn:
             # First try to get exact match for previous trading day
             rows = await conn.fetch(
                 "SELECT date, close FROM daily_prices WHERE ticker = $1 AND date >= $2 AND date < $3 ORDER BY date DESC LIMIT 1",
                 ticker, prev_day_start_utc, prev_day_end_utc
             )
+            
+            if logger:
+                logger.debug(f"DEBUG get_previous_close_price: First query found {len(rows)} rows")
             
             if rows:
                 close_price = float(rows[0]['close'])
@@ -338,22 +362,42 @@ async def get_previous_close_price(
                     prev_date = row_date.date()
                 else:
                     prev_date = prev_trading_day
+                if logger:
+                    logger.debug(f"DEBUG get_previous_close_price: Returning close=${close_price:.2f} for date={prev_date}")
                 return (close_price, prev_date)
             
-            # If not found, get the most recent close before the reference date
-            # This handles cases where there might be holidays
-            if reference_date.tzinfo:
-                ref_date_utc = reference_date.astimezone(timezone.utc).replace(tzinfo=None)
-            else:
+            # If not found, get the most recent close before the current trading day
+            # Calculate the start of the current trading day to exclude it
+            ref_date_for_cutoff = reference_date
+            if ref_date_for_cutoff.tzinfo is None:
                 # Assume PST if timezone-naive
                 pst = timezone(timedelta(hours=-8))
-                ref_date_with_tz = reference_date.replace(tzinfo=pst)
-                ref_date_utc = ref_date_with_tz.astimezone(timezone.utc).replace(tzinfo=None)
+                ref_date_for_cutoff = ref_date_for_cutoff.replace(tzinfo=pst)
             
+            # Convert to ET to get the trading day
+            date_et = ref_date_for_cutoff.astimezone(et_tz)
+            trading_day = date_et.date()
+            
+            # Calculate start of current trading day in UTC
+            if use_zoneinfo:
+                day_start_et = datetime(trading_day.year, trading_day.month, trading_day.day, tzinfo=et_tz)
+            else:
+                day_start_et = et_tz.localize(datetime(trading_day.year, trading_day.month, trading_day.day))
+            day_start_utc = day_start_et.astimezone(timezone.utc).replace(tzinfo=None)
+            
+            if logger:
+                logger.debug(f"DEBUG get_previous_close_price: Fallback query - trading_day={trading_day}, day_start_utc={day_start_utc}")
+            
+            # Get most recent close before the start of current trading day
+            # This ensures we never get the current day's close
             rows = await conn.fetch(
                 "SELECT date, close FROM daily_prices WHERE ticker = $1 AND date < $2 ORDER BY date DESC LIMIT 1",
-                ticker, ref_date_utc
+                ticker, day_start_utc
             )
+            
+            if logger:
+                logger.debug(f"DEBUG get_previous_close_price: Fallback query found {len(rows)} rows")
+            
             if rows:
                 close_price = float(rows[0]['close'])
                 row_date = rows[0]['date']
@@ -361,22 +405,126 @@ async def get_previous_close_price(
                     prev_date = row_date.date()
                 else:
                     prev_date = prev_trading_day
+                if logger:
+                    logger.debug(f"DEBUG get_previous_close_price: Fallback returning close=${close_price:.2f} for date={prev_date}")
                 return (close_price, prev_date)
+        
+        if logger:
+            logger.debug(f"DEBUG get_previous_close_price: No data found for {ticker}")
+        return None
+    except Exception as e:
+        error_msg = f"Error getting previous close for {ticker}: {e}"
+        if logger:
+            logger.error(error_msg)
+        else:
+            logging.error(error_msg)
+        return None
+
+
+async def get_previous_open_price(
+    db: StockQuestDB,
+    ticker: str,
+    reference_date: datetime,
+    logger: Optional[logging.Logger] = None
+) -> Optional[float]:
+    """Get the opening price for the previous trading day relative to reference_date."""
+    try:
+        prev_close_result = await get_previous_close_price(db, ticker, reference_date, logger)
+        if prev_close_result is None:
+            return None
+        
+        prev_close, prev_date = prev_close_result
+        
+        # Get the open price for the same date
+        try:
+            from zoneinfo import ZoneInfo
+            et_tz = ZoneInfo("America/New_York")
+            use_zoneinfo = True
+        except Exception:
+            import pytz
+            et_tz = pytz.timezone("America/New_York")
+            use_zoneinfo = False
+        
+        if use_zoneinfo:
+            day_start_et = datetime(prev_date.year, prev_date.month, prev_date.day, tzinfo=et_tz)
+        else:
+            day_start_et = et_tz.localize(datetime(prev_date.year, prev_date.month, prev_date.day))
+        
+        day_start_utc = day_start_et.astimezone(timezone.utc).replace(tzinfo=None)
+        day_end_utc = day_start_utc + timedelta(days=1)
+        
+        async with db.connection.get_connection() as conn:
+            rows = await conn.fetch(
+                "SELECT open FROM daily_prices WHERE ticker = $1 AND date >= $2 AND date < $3 ORDER BY date DESC LIMIT 1",
+                ticker, day_start_utc, day_end_utc
+            )
+            
+            if rows and rows[0]['open'] is not None:
+                return float(rows[0]['open'])
         
         return None
     except Exception as e:
-        logging.error(f"Error getting previous close for {ticker}: {e}")
+        if logger:
+            logger.debug(f"DEBUG get_previous_open_price: Error - {e}")
+        return None
+
+
+async def get_current_day_open_price(
+    db: StockQuestDB,
+    ticker: str,
+    reference_date: datetime,
+    logger: Optional[logging.Logger] = None
+) -> Optional[float]:
+    """Get the opening price for the trading day of reference_date."""
+    try:
+        current_close_result = await get_current_day_close_price(db, ticker, reference_date, logger)
+        if current_close_result is None:
+            return None
+        
+        current_close, current_date = current_close_result
+        
+        # Get the open price for the same date
+        try:
+            from zoneinfo import ZoneInfo
+            et_tz = ZoneInfo("America/New_York")
+            use_zoneinfo = True
+        except Exception:
+            import pytz
+            et_tz = pytz.timezone("America/New_York")
+            use_zoneinfo = False
+        
+        if use_zoneinfo:
+            day_start_et = datetime(current_date.year, current_date.month, current_date.day, tzinfo=et_tz)
+        else:
+            day_start_et = et_tz.localize(datetime(current_date.year, current_date.month, current_date.day))
+        
+        day_start_utc = day_start_et.astimezone(timezone.utc).replace(tzinfo=None)
+        day_end_utc = day_start_utc + timedelta(days=1)
+        
+        async with db.connection.get_connection() as conn:
+            rows = await conn.fetch(
+                "SELECT open FROM daily_prices WHERE ticker = $1 AND date >= $2 AND date < $3 ORDER BY date DESC LIMIT 1",
+                ticker, day_start_utc, day_end_utc
+            )
+            
+            if rows and rows[0]['open'] is not None:
+                return float(rows[0]['open'])
+        
+        return None
+    except Exception as e:
+        if logger:
+            logger.debug(f"DEBUG get_current_day_open_price: Error - {e}")
         return None
 
 
 def calculate_option_price(row: pd.Series, side: str, use_mid: bool) -> Optional[float]:
     """Calculate option price for buy/sell side.
     
-    Uses bid/ask if available. Falls back to day_close if bid/ask are missing.
+    Uses bid/ask only. Returns None if bid/ask are missing.
+    No fallback to day_close - we require actual bid/ask for accurate spread pricing.
     """
     bid = row.get('bid')
     ask = row.get('ask')
-    day_close = row.get('day_close')
     
     if use_mid:
         if pd.notna(bid) and pd.notna(ask):
@@ -385,24 +533,15 @@ def calculate_option_price(row: pd.Series, side: str, use_mid: bool) -> Optional
             return float(ask)
         elif pd.notna(bid):
             return float(bid)
-        elif pd.notna(day_close):
-            # Fallback to day_close for mid-price calculation
-            return float(day_close)
     else:
         if side == "sell":
             # For selling, use bid price
             if pd.notna(bid):
                 return float(bid)
-            elif pd.notna(day_close):
-                # Fallback to day_close when bid is missing
-                return float(day_close)
         else:
             # For buying, use ask price
             if pd.notna(ask):
                 return float(ask)
-            elif pd.notna(day_close):
-                # Fallback to day_close when ask is missing
-                return float(day_close)
     
     return None
 
@@ -584,7 +723,7 @@ async def analyze_interval(
             return None
     
     # Get previous trading day's closing price
-    prev_close_result = await get_previous_close_price(db, underlying, timestamp)
+    prev_close_result = await get_previous_close_price(db, underlying, timestamp, logger)
     
     if prev_close_result is None:
         logger.warning(f"Could not get previous close for {underlying} at {timestamp}")
@@ -593,16 +732,30 @@ async def analyze_interval(
     prev_close, prev_close_date = prev_close_result
     
     # Get current day's closing price
-    current_close_result = await get_current_day_close_price(db, underlying, timestamp)
+    current_close_result = await get_current_day_close_price(db, underlying, timestamp, logger)
     current_close = None
     current_close_date = None
+    current_open = None
     price_diff_pct = None
     
     if current_close_result:
         current_close, current_close_date = current_close_result
+        # Get current day's open price for debugging
+        current_open = await get_current_day_open_price(db, underlying, timestamp, logger)
         # Calculate percentage difference between current day's close and previous day's close
         if prev_close > 0:
             price_diff_pct = ((current_close - prev_close) / prev_close) * 100
+    
+    # Get previous day's open price for debugging
+    prev_open = await get_previous_open_price(db, underlying, timestamp, logger)
+    
+    # Debug output - only when log level is DEBUG or lower
+    logger.debug(f"[{underlying}] Timestamp: {timestamp}")
+    logger.debug(f"[{underlying}] Previous Day ({prev_close_date}): Open=${prev_open:.2f} Close=${prev_close:.2f}" if prev_open is not None else f"[{underlying}] Previous Day ({prev_close_date}): Open=N/A Close=${prev_close:.2f}")
+    if current_close is not None:
+        logger.debug(f"[{underlying}] Current Day ({current_close_date}): Open=${current_open:.2f} Close=${current_close:.2f}" if current_open is not None else f"[{underlying}] Current Day ({current_close_date}): Open=N/A Close=${current_close:.2f}")
+    else:
+        logger.debug(f"[{underlying}] Current Day: No data found")
     
     # Build credit spreads
     spreads = build_credit_spreads(
@@ -702,23 +855,43 @@ async def main():
         logger.error(f"Missing required columns: {missing_columns}")
         return 1
     
-    # Check for price columns (bid/ask or day_close)
-    has_bid_ask = 'bid' in df.columns or 'ask' in df.columns
-    has_day_close = 'day_close' in df.columns
-    if not has_bid_ask and not has_day_close:
-        logger.error("CSV must have either 'bid'/'ask' columns or 'day_close' column for option pricing")
+    # Check for price columns - require bid/ask (no day_close fallback)
+    has_bid_ask = 'bid' in df.columns and 'ask' in df.columns
+    if not has_bid_ask:
+        logger.error("CSV must have 'bid' and 'ask' columns for option pricing")
         return 1
     
-    # Warn if bid/ask are mostly empty and day_close is available
-    if has_bid_ask and has_day_close:
-        bid_ask_count = df[['bid', 'ask']].notna().any(axis=1).sum()
-        day_close_count = df['day_close'].notna().sum()
-        if bid_ask_count < len(df) * 0.1:  # Less than 10% have bid/ask
-            logger.warning(f"Only {bid_ask_count}/{len(df)} rows have bid/ask. Will use day_close as fallback for {day_close_count} rows.")
+    # Check how many rows have valid bid/ask
+    bid_ask_count = df[['bid', 'ask']].notna().all(axis=1).sum()
+    if bid_ask_count < len(df) * 0.1:  # Less than 10% have bid/ask
+        logger.warning(f"Only {bid_ask_count}/{len(df)} rows have valid bid/ask prices")
     
     # Parse timestamps (assumed to be in PST)
     logger.info("Parsing timestamps...")
     df['timestamp'] = df['timestamp'].apply(parse_pst_timestamp)
+    
+    # Filter for 0DTE only: keep rows where timestamp date matches expiration date
+    # This ensures we only analyze options on their expiration day
+    logger.info("Filtering for 0DTE options (timestamp date == expiration date)...")
+    original_count = len(df)
+    
+    # Parse expiration column to date
+    df['expiration_date'] = pd.to_datetime(df['expiration']).dt.date
+    # Extract date from timestamp
+    df['timestamp_date'] = df['timestamp'].apply(lambda x: x.date() if hasattr(x, 'date') else pd.to_datetime(x).date())
+    
+    # Keep only 0DTE rows
+    df = df[df['timestamp_date'] == df['expiration_date']].copy()
+    
+    filtered_count = len(df)
+    if filtered_count == 0:
+        logger.error("No 0DTE options found (no rows where timestamp date matches expiration date)")
+        return 1
+    
+    logger.info(f"Filtered to {filtered_count}/{original_count} 0DTE rows")
+    
+    # Clean up temporary columns
+    df = df.drop(columns=['expiration_date', 'timestamp_date'])
     
     # Round to 15-minute intervals
     df['interval'] = df['timestamp'].apply(round_to_15_minutes)
