@@ -131,7 +131,7 @@ class HistoricalDataFetcher:
 
         return (seconds_to_open, seconds_to_close)
 
-    def __init__(self, api_key: str, data_dir: str = "data", verbose: bool = False, snapshot_max_concurrent: int = 0):
+    def __init__(self, api_key: str, data_dir: str = "data", verbose: bool = False, snapshot_max_concurrent: int = 0, refresh_threshold_seconds: int | None = None):
         if not api_key:
             raise ValueError("Polygon API key is required.")
         self.client = RESTClient(api_key)
@@ -140,6 +140,7 @@ class HistoricalDataFetcher:
         self.quiet = not verbose  # quiet is inverse of verbose
         # 0 disables per-contract snapshot concurrency; otherwise bounded parallelism
         self.snapshot_max_concurrent = max(0, int(snapshot_max_concurrent))
+        self.refresh_threshold_seconds = refresh_threshold_seconds
 
     @staticmethod
     def _is_market_open(dt: datetime | None = None) -> bool:
@@ -176,14 +177,19 @@ class HistoricalDataFetcher:
         return symbol_dir / f"{expiration_date}.csv"
 
     def _should_fetch_fresh_data(self, csv_path: Path) -> bool:
-        """Check if we should fetch fresh data based on cache duration."""
+        """Check if we should fetch fresh data based on cache duration or refresh threshold."""
         if not csv_path.exists():
             return True
         
         file_mtime = datetime.fromtimestamp(csv_path.stat().st_mtime)
-        cache_duration = self._get_cache_duration_minutes()
+        age_seconds = (datetime.now() - file_mtime).total_seconds()
         
-        return datetime.now() - file_mtime > timedelta(minutes=cache_duration)
+        # If refresh_threshold_seconds is set, use it; otherwise use cache duration
+        if self.refresh_threshold_seconds is not None:
+            return age_seconds > self.refresh_threshold_seconds
+        
+        cache_duration = self._get_cache_duration_minutes()
+        return age_seconds > (cache_duration * 60)
 
     def _save_options_to_csv(self, symbol: str, options_data: Dict[str, Any]) -> None:
         """Save options data to CSV files organized by expiration date."""
@@ -1269,7 +1275,8 @@ async def display_and_save_saved_options(
         api_key,
         getattr(args, 'data_dir', None),
         getattr(args, 'verbose', False),
-        getattr(args, 'snapshot_max_concurrent', 0)
+        getattr(args, 'snapshot_max_concurrent', 0),
+        getattr(args, 'refresh_threshold_seconds', None)
     )
     
     for symbol in symbols_list:
@@ -1596,7 +1603,8 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
             api_key,
             args_namespace.data_dir,
             getattr(args_namespace, 'verbose', False),
-            getattr(args_namespace, 'snapshot_max_concurrent', 0)
+            getattr(args_namespace, 'snapshot_max_concurrent', 0),
+            getattr(args_namespace, 'refresh_threshold_seconds', None)
         )
         
         async def _inner():

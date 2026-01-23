@@ -26,8 +26,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import date
+from collections import defaultdict
 
 import pandas as pd
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib
+    matplotlib.use('Agg')  # Use non-interactive backend
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
 
 # Project Path Setup
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -47,7 +55,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--csv-path",
         required=True,
-        help="Path to CSV file with options data (timestamps in PST)"
+        nargs='+',
+        help="Path(s) to CSV file(s) with options data (timestamps in PST). Can provide multiple files for aggregate analysis."
     )
     parser.add_argument(
         "--option-type",
@@ -144,6 +153,34 @@ def parse_args() -> argparse.Namespace:
         "--live",
         action="store_true",
         help="Live mode: Show a clear 'BEST CURRENT OPTION' line with actionable details. Use with --most-recent --best-only for current investment opportunities."
+    )
+    parser.add_argument(
+        "--histogram",
+        action="store_true",
+        help="Generate histogram of hourly performance when multiple CSV files are provided. Shows success/failure rates and total counts by hour."
+    )
+    parser.add_argument(
+        "--histogram-output",
+        default="credit_spread_hourly_analysis.png",
+        help="Output filename for histogram (default: credit_spread_hourly_analysis.png)"
+    )
+    parser.add_argument(
+        "--top-n",
+        type=int,
+        default=None,
+        help="Only show top N spreads per day (ranked by max credit). Useful for realistic backtest scenarios where you only take the best opportunities. Example: --top-n 3 shows only the 3 best spreads each day."
+    )
+    parser.add_argument(
+        "--max-credit-width-ratio",
+        type=float,
+        default=0.60,
+        help="Maximum ratio of credit to spread width (default: 0.60 = 60%%). Filters out unrealistic spreads where credit is too close to width, which typically indicates stale pricing or deep ITM/OTM options. Use 1.0 to disable this filter."
+    )
+    parser.add_argument(
+        "--max-strike-distance-pct",
+        type=float,
+        default=None,
+        help="Maximum distance of short strike from previous close, as percentage (e.g., 0.05 = 5%%). Filters out deep ITM/OTM options with poor liquidity. Example: --max-strike-distance-pct 0.03 only allows strikes within 3%% of previous close."
     )
     
     return parser.parse_args()
@@ -576,9 +613,18 @@ def build_credit_spreads(
     min_width: float,
     max_width: float,
     use_mid: bool,
-    min_contract_price: float = 0.0
+    min_contract_price: float = 0.0,
+    max_credit_width_ratio: float = 0.80,
+    max_strike_distance_pct: Optional[float] = None
 ) -> List[Dict[str, Any]]:
-    """Build credit spreads from options DataFrame."""
+    """Build credit spreads from options DataFrame.
+    
+    Args:
+        max_credit_width_ratio: Maximum ratio of credit to spread width (default 0.80).
+                               Filters out unrealistic spreads with credit too close to width.
+        max_strike_distance_pct: Maximum distance of short strike from previous close (as percentage).
+                                Filters out deep ITM/OTM options. None = no filtering.
+    """
     results = []
     
     # Filter by option type
@@ -626,6 +672,13 @@ def build_credit_spreads(
             if width < min_width or width > max_width:
                 continue
             
+            # Filter by strike distance from previous close (if enabled)
+            if max_strike_distance_pct is not None:
+                short_strike = short_leg['strike']
+                distance_from_close = abs(short_strike - prev_close) / prev_close
+                if distance_from_close > max_strike_distance_pct:
+                    continue
+            
             short_price = calculate_option_price(short_leg, "sell", use_mid)
             long_price = calculate_option_price(long_leg, "buy", use_mid)
             
@@ -638,6 +691,12 @@ def build_credit_spreads(
             
             net_credit = short_price - long_price
             if net_credit <= 0:
+                continue
+            
+            # Filter out unrealistic spreads where credit is too close to width
+            # This typically indicates stale pricing or deep ITM/OTM options
+            credit_width_ratio = net_credit / width if width > 0 else 1.0
+            if credit_width_ratio > max_credit_width_ratio:
                 continue
             
             # Calculate max loss per contract (accounting for 100 shares per contract)
@@ -689,7 +748,9 @@ async def analyze_interval(
     use_mid: bool,
     min_contract_price: float,
     underlying_ticker: Optional[str],
-    logger: logging.Logger
+    logger: logging.Logger,
+    max_credit_width_ratio: float = 0.80,
+    max_strike_distance_pct: Optional[float] = None
 ) -> Optional[Dict[str, Any]]:
     """Analyze a single 15-minute interval."""
     if interval_df.empty:
@@ -788,7 +849,9 @@ async def analyze_interval(
         min_width,
         max_width,
         use_mid,
-        min_contract_price
+        min_contract_price,
+        max_credit_width_ratio,
+        max_strike_distance_pct
     )
     
     if not spreads:
@@ -831,6 +894,22 @@ async def analyze_interval(
     best_spread['total_max_loss'] = total_max_loss
     best_spread['net_delta'] = net_delta
     
+    # Backtest: Check if spread would have been successful by EOD
+    # Only if we have current_close (meaning the day has ended)
+    backtest_successful = None
+    if current_close is not None:
+        # For PUT credit spread: successful if close stayed above short strike
+        # For CALL credit spread: successful if close stayed below short strike
+        if option_type.lower() == "put":
+            backtest_successful = current_close > best_spread['short_strike']
+        else:  # call
+            backtest_successful = current_close < best_spread['short_strike']
+    
+    # Extract source_file if available (for multi-file tracking)
+    source_file = None
+    if 'source_file' in interval_df.columns and len(interval_df) > 0:
+        source_file = interval_df['source_file'].iloc[0]
+    
     return {
         "timestamp": timestamp,
         "underlying": underlying,
@@ -843,7 +922,373 @@ async def analyze_interval(
         "target_price": prev_close * (1 + percent_beyond) if option_type.lower() == "call" else prev_close * (1 - percent_beyond),
         "best_spread": best_spread,
         "total_spreads": len(valid_spreads),
+        "backtest_successful": backtest_successful,
+        "source_file": source_file,
     }
+
+
+def filter_top_n_per_day(results: List[Dict], top_n: int) -> List[Dict]:
+    """Filter results to keep only top N spreads per day (by max credit).
+    
+    Args:
+        results: List of result dictionaries
+        top_n: Number of top spreads to keep per day
+    
+    Returns:
+        Filtered list containing only top N spreads per day
+    """
+    if not results or top_n is None:
+        return results
+    
+    # Group results by day
+    from collections import defaultdict
+    by_day = defaultdict(list)
+    
+    for result in results:
+        timestamp = result['timestamp']
+        # Get date (without time)
+        if hasattr(timestamp, 'date'):
+            day = timestamp.date()
+        else:
+            day = pd.to_datetime(timestamp).date()
+        by_day[day].append(result)
+    
+    # For each day, keep only top N by max credit
+    filtered_results = []
+    for day, day_results in sorted(by_day.items()):
+        # Sort by max credit (descending)
+        sorted_day_results = sorted(
+            day_results,
+            key=lambda x: x['best_spread'].get('total_credit') or x['best_spread'].get('net_credit_per_contract', 0),
+            reverse=True
+        )
+        # Keep top N
+        filtered_results.extend(sorted_day_results[:top_n])
+    
+    return filtered_results
+
+
+def print_trading_statistics(results: List[Dict], output_tz, total_files_processed: int = 0):
+    """Print comprehensive trading statistics for multi-file analysis."""
+    if not results:
+        print("No results to analyze.")
+        return
+    
+    # Collect statistics
+    total_trades = len(results)
+    unique_dates = set()
+    unique_source_files = set()
+    
+    successful_trades = []
+    failed_trades = []
+    pending_trades = []
+    
+    for result in results:
+        timestamp = result['timestamp']
+        if hasattr(timestamp, 'astimezone'):
+            timestamp = timestamp.astimezone(output_tz)
+        unique_dates.add(timestamp.date())
+        
+        # Track source file if available
+        source_file = result.get('source_file')
+        if source_file:
+            unique_source_files.add(source_file)
+        
+        backtest_result = result.get('backtest_successful')
+        credit = result['best_spread'].get('total_credit') or (result['best_spread'].get('net_credit_per_contract', 0))
+        max_loss = result['best_spread'].get('total_max_loss') or (result['best_spread'].get('max_loss_per_contract', 0))
+        
+        trade_info = {
+            'timestamp': timestamp,
+            'credit': credit,
+            'max_loss': max_loss,
+            'option_type': result.get('option_type', 'UNKNOWN'),
+            'spread': f"${result['best_spread']['short_strike']:.2f}/${result['best_spread']['long_strike']:.2f}",
+            'contracts': result['best_spread'].get('num_contracts', 1)
+        }
+        
+        if backtest_result is True:
+            successful_trades.append(trade_info)
+        elif backtest_result is False:
+            failed_trades.append(trade_info)
+        else:
+            pending_trades.append(trade_info)
+    
+    # Calculate statistics
+    num_unique_days = len(unique_dates)
+    num_successful = len(successful_trades)
+    num_failed = len(failed_trades)
+    num_pending = len(pending_trades)
+    
+    # Calculate financial metrics
+    total_credits = sum(t['credit'] for t in successful_trades + failed_trades + pending_trades)
+    total_losses = sum(t['max_loss'] for t in failed_trades)
+    total_gains = sum(t['credit'] for t in successful_trades)
+    net_pnl = total_gains - total_losses
+    
+    # Win rate (excluding pending)
+    testable_trades = num_successful + num_failed
+    win_rate = (num_successful / testable_trades * 100) if testable_trades > 0 else 0
+    
+    # Averages
+    avg_credit_per_trade = total_credits / total_trades if total_trades > 0 else 0
+    avg_gain_per_win = sum(t['credit'] for t in successful_trades) / num_successful if num_successful > 0 else 0
+    avg_loss_per_loss = sum(t['max_loss'] for t in failed_trades) / num_failed if num_failed > 0 else 0
+    
+    # Best/worst trades
+    all_completed = successful_trades + failed_trades
+    if all_completed:
+        best_trade = max(all_completed, key=lambda x: x['credit'] if x in successful_trades else -x['max_loss'])
+        worst_trade = min(all_completed, key=lambda x: x['credit'] if x in successful_trades else -x['max_loss'])
+    
+    # Total risk deployed (sum of max losses for all trades)
+    total_risk_deployed = sum(t['max_loss'] for t in successful_trades + failed_trades + pending_trades)
+    
+    # ROI
+    roi = (net_pnl / total_risk_deployed * 100) if total_risk_deployed > 0 else 0
+    
+    # Print statistics
+    print("\n" + "="*100)
+    print("MULTI-FILE TRADING STATISTICS")
+    print("="*100)
+    
+    # File processing statistics
+    num_files_with_results = len(unique_source_files)
+    if total_files_processed > 0:
+        print(f"\n📁 FILE PROCESSING:")
+        print(f"  Total Files Processed: {total_files_processed}")
+        print(f"  Files with Valid Results: {num_files_with_results} ({num_files_with_results/total_files_processed*100:.1f}%)")
+        if total_files_processed > num_files_with_results:
+            files_no_results = total_files_processed - num_files_with_results
+            print(f"  Files with No Valid Spreads: {files_no_results} ({files_no_results/total_files_processed*100:.1f}%)")
+            print(f"    (likely filtered out by: credit-width ratio, strike distance, or min price)")
+    
+    print(f"\n📊 TRADING ACTIVITY:")
+    print(f"  Total Trades: {total_trades}")
+    print(f"  Unique Trading Days: {num_unique_days}")
+    print(f"  Average Trades per Day: {total_trades/num_unique_days:.1f}")
+    
+    print(f"\n✅ TRADE OUTCOMES:")
+    print(f"  Successful: {num_successful} ({num_successful/total_trades*100:.1f}%)")
+    print(f"  Failed: {num_failed} ({num_failed/total_trades*100:.1f}%)")
+    print(f"  Pending: {num_pending} ({num_pending/total_trades*100:.1f}%)")
+    if testable_trades > 0:
+        print(f"  Win Rate (excl. pending): {win_rate:.1f}% ({num_successful}/{testable_trades})")
+    
+    print(f"\n💰 FINANCIAL PERFORMANCE:")
+    print(f"  Total Credits Collected: ${total_credits:,.2f}")
+    print(f"  Total Gains (wins only): ${total_gains:,.2f}")
+    print(f"  Total Losses (failures): ${total_losses:,.2f}")
+    print(f"  Net P&L: ${net_pnl:,.2f}", end="")
+    if net_pnl >= 0:
+        print(" ✓")
+    else:
+        print(" ✗")
+    
+    print(f"\n📈 AVERAGES:")
+    print(f"  Average Credit per Trade: ${avg_credit_per_trade:,.2f}")
+    if num_successful > 0:
+        print(f"  Average Gain per Win: ${avg_gain_per_win:,.2f}")
+    if num_failed > 0:
+        print(f"  Average Loss per Loss: ${avg_loss_per_loss:,.2f}")
+    
+    print(f"\n🎯 RISK METRICS:")
+    print(f"  Total Risk Deployed: ${total_risk_deployed:,.2f}")
+    print(f"  Return on Risk (ROI): {roi:+.2f}%")
+    if testable_trades > 0:
+        expectancy = (avg_gain_per_win * win_rate/100) - (avg_loss_per_loss * (100-win_rate)/100)
+        print(f"  Expectancy per Trade: ${expectancy:,.2f}")
+    
+    if all_completed:
+        print(f"\n🏆 BEST/WORST TRADES:")
+        if best_trade in successful_trades:
+            print(f"  Best Trade: ${best_trade['credit']:,.2f} credit on {best_trade['timestamp'].strftime('%Y-%m-%d %H:%M')} ({best_trade['option_type']} {best_trade['spread']})")
+        if worst_trade in failed_trades:
+            print(f"  Worst Trade: -${worst_trade['max_loss']:,.2f} loss on {worst_trade['timestamp'].strftime('%Y-%m-%d %H:%M')} ({worst_trade['option_type']} {worst_trade['spread']})")
+    
+    # Analyze 10-minute blocks for best performing hours
+    if results:
+        print_10min_block_breakdown(results, output_tz)
+    
+    print("\n" + "="*100)
+
+
+def print_10min_block_breakdown(results: List[Dict], output_tz):
+    """Print 10-minute block breakdown for the best performing hours."""
+    if not results:
+        return
+    
+    # Group by hour and 10-minute block
+    block_data = defaultdict(lambda: {'success': 0, 'failure': 0, 'pending': 0, 'total': 0, 'total_credit': 0, 'total_loss': 0})
+    
+    for result in results:
+        timestamp = result['timestamp']
+        if hasattr(timestamp, 'astimezone'):
+            timestamp = timestamp.astimezone(output_tz)
+        
+        hour = timestamp.hour
+        minute = timestamp.minute
+        # Round down to nearest 10-minute block (0, 10, 20, 30, 40, 50)
+        block_minute = (minute // 10) * 10
+        block_key = (hour, block_minute)
+        
+        backtest_result = result.get('backtest_successful')
+        credit = result['best_spread'].get('total_credit') or (result['best_spread'].get('net_credit_per_contract', 0))
+        max_loss = result['best_spread'].get('total_max_loss') or (result['best_spread'].get('max_loss_per_contract', 0))
+        
+        block_data[block_key]['total'] += 1
+        block_data[block_key]['total_credit'] += credit
+        if backtest_result is True:
+            block_data[block_key]['success'] += 1
+        elif backtest_result is False:
+            block_data[block_key]['failure'] += 1
+            block_data[block_key]['total_loss'] += max_loss
+        else:
+            block_data[block_key]['pending'] += 1
+    
+    # Calculate hourly aggregates to find best hours
+    hourly_aggregates = defaultdict(lambda: {'total': 0, 'success': 0, 'failure': 0, 'total_credit': 0, 'total_loss': 0})
+    
+    for (hour, block_min), data in block_data.items():
+        hourly_aggregates[hour]['total'] += data['total']
+        hourly_aggregates[hour]['success'] += data['success']
+        hourly_aggregates[hour]['failure'] += data['failure']
+        hourly_aggregates[hour]['total_credit'] += data['total_credit']
+        hourly_aggregates[hour]['total_loss'] += data['total_loss']
+    
+    # Find top 3 hours by total trades (or by success rate if tied)
+    top_hours = sorted(
+        hourly_aggregates.items(),
+        key=lambda x: (x[1]['total'], x[1]['success'] / max(x[1]['success'] + x[1]['failure'], 1)),
+        reverse=True
+    )[:3]
+    
+    if not top_hours:
+        return
+    
+    print(f"\n⏰ 10-MINUTE BLOCK BREAKDOWN (Top {len(top_hours)} Hours):")
+    print("-" * 100)
+    
+    for hour, hour_stats in top_hours:
+        testable = hour_stats['success'] + hour_stats['failure']
+        win_rate = (hour_stats['success'] / testable * 100) if testable > 0 else 0
+        net_pnl = hour_stats['total_credit'] - hour_stats['total_loss']
+        
+        print(f"\n  Hour {hour:02d}:00 - {hour_stats['total']} trades | {hour_stats['success']}✓ / {hour_stats['failure']}✗ ({win_rate:.1f}% win rate) | Net P&L: ${net_pnl:+,.2f}")
+        
+        # Get all 10-minute blocks for this hour
+        hour_blocks = [(h, bm, data) for (h, bm), data in block_data.items() if h == hour]
+        hour_blocks.sort(key=lambda x: x[1])  # Sort by block minute
+        
+        if hour_blocks:
+            print(f"    {'Block':<12} {'Trades':<8} {'Success':<10} {'Failure':<10} {'Win Rate':<12} {'Net P&L':<15}")
+            print(f"    {'-'*12} {'-'*8} {'-'*10} {'-'*10} {'-'*12} {'-'*15}")
+            
+            for h, block_min, data in hour_blocks:
+                block_testable = data['success'] + data['failure']
+                block_win_rate = (data['success'] / block_testable * 100) if block_testable > 0 else 0
+                block_net_pnl = data['total_credit'] - data['total_loss']
+                block_label = f"{h:02d}:{block_min:02d}-{block_min+9:02d}"
+                
+                print(f"    {block_label:<12} {data['total']:<8} {data['success']:<10} {data['failure']:<10} {block_win_rate:>6.1f}%{'':<5} ${block_net_pnl:>12,.2f}")
+
+
+def generate_hourly_histogram(results: List[Dict], output_path: str, output_tz):
+    """Generate histogram showing hourly performance of credit spreads."""
+    if not MATPLOTLIB_AVAILABLE:
+        print("Warning: matplotlib not available. Cannot generate histogram.")
+        return
+    
+    if not results:
+        print("No results to generate histogram.")
+        return
+    
+    # Group results by hour
+    hourly_data = defaultdict(lambda: {'success': 0, 'failure': 0, 'pending': 0, 'total': 0})
+    
+    for result in results:
+        timestamp = result['timestamp']
+        # Convert to output timezone for display
+        if hasattr(timestamp, 'astimezone'):
+            timestamp = timestamp.astimezone(output_tz)
+        hour = timestamp.hour
+        
+        backtest_result = result.get('backtest_successful')
+        hourly_data[hour]['total'] += 1
+        
+        if backtest_result is True:
+            hourly_data[hour]['success'] += 1
+        elif backtest_result is False:
+            hourly_data[hour]['failure'] += 1
+        else:
+            hourly_data[hour]['pending'] += 1
+    
+    # Prepare data for plotting
+    hours = sorted(hourly_data.keys())
+    successes = [hourly_data[h]['success'] for h in hours]
+    failures = [hourly_data[h]['failure'] for h in hours]
+    totals = [hourly_data[h]['total'] for h in hours]
+    
+    # Create figure with subplots
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
+    
+    # Plot 1: Stacked bar chart of successes/failures
+    x = range(len(hours))
+    ax1.bar(x, successes, label='Success ✓', color='green', alpha=0.7)
+    ax1.bar(x, failures, bottom=successes, label='Failure ✗', color='red', alpha=0.7)
+    ax1.set_xlabel('Hour of Day')
+    ax1.set_ylabel('Count')
+    ax1.set_title('Credit Spread Performance by Hour')
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([f"{h:02d}:00" for h in hours], rotation=45)
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Success rate percentage
+    success_rates = []
+    for h in hours:
+        testable = hourly_data[h]['success'] + hourly_data[h]['failure']
+        if testable > 0:
+            success_rates.append((hourly_data[h]['success'] / testable) * 100)
+        else:
+            success_rates.append(0)
+    
+    ax2.bar(x, success_rates, color='blue', alpha=0.7)
+    ax2.axhline(y=50, color='gray', linestyle='--', label='50% baseline')
+    ax2.set_xlabel('Hour of Day')
+    ax2.set_ylabel('Success Rate (%)')
+    ax2.set_title('Success Rate by Hour')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([f"{h:02d}:00" for h in hours], rotation=45)
+    ax2.set_ylim(0, 100)
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # Add annotations showing counts
+    for i, (h, s, f) in enumerate(zip(hours, successes, failures)):
+        ax1.text(i, s + f + 0.5, f"{s+f}", ha='center', va='bottom', fontsize=8)
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"\nHistogram saved to: {output_path}")
+    
+    # Print hourly summary table
+    print("\n" + "="*80)
+    print("HOURLY PERFORMANCE SUMMARY")
+    print("="*80)
+    print(f"{'Hour':<8} {'Total':<8} {'Success':<10} {'Failure':<10} {'Success Rate':<15}")
+    print("-"*80)
+    
+    for h in hours:
+        total = hourly_data[h]['total']
+        success = hourly_data[h]['success']
+        failure = hourly_data[h]['failure']
+        testable = success + failure
+        success_rate = (success / testable * 100) if testable > 0 else 0
+        
+        print(f"{h:02d}:00    {total:<8} {success:<10} {failure:<10} {success_rate:>6.1f}%")
+    
+    print("="*80)
 
 
 async def main():
@@ -867,13 +1312,24 @@ async def main():
     
     logger = get_logger("analyze_credit_spread_intervals", level=args.log_level)
     
-    # Read CSV file
-    logger.info(f"Reading CSV file: {args.csv_path}")
-    try:
-        df = pd.read_csv(args.csv_path)
-    except Exception as e:
-        logger.error(f"Failed to read CSV file: {e}")
-        return 1
+    # Read CSV file(s)
+    csv_paths = args.csv_path if isinstance(args.csv_path, list) else [args.csv_path]
+    logger.info(f"Reading {len(csv_paths)} CSV file(s)")
+    
+    dfs = []
+    for csv_path in csv_paths:
+        try:
+            logger.info(f"Reading: {csv_path}")
+            temp_df = pd.read_csv(csv_path)
+            temp_df['source_file'] = csv_path
+            dfs.append(temp_df)
+        except Exception as e:
+            logger.error(f"Failed to read CSV file {csv_path}: {e}")
+            return 1
+    
+    # Combine all dataframes
+    df = pd.concat(dfs, ignore_index=True)
+    logger.info(f"Combined {len(dfs)} file(s) into {len(df)} total rows")
     
     # Validate required columns
     required_columns = ['timestamp', 'ticker', 'type', 'strike', 'expiration']
@@ -940,9 +1396,19 @@ async def main():
     
     try:
         # Group by 15-minute intervals
-        intervals = df.groupby('interval')
+        intervals_grouped = df.groupby('interval')
+        total_intervals_count = len(intervals_grouped)
         
-        logger.info(f"Analyzing {len(intervals)} intervals...")
+        # If --most-recent is used, only analyze the most recent interval
+        if args.most_recent:
+            # Find the most recent interval
+            max_interval = df['interval'].max()
+            max_interval_df = df[df['interval'] == max_interval]
+            intervals_to_process = [(max_interval, max_interval_df)]
+            logger.info(f"Analyzing most recent interval only: {max_interval}")
+        else:
+            intervals_to_process = intervals_grouped
+            logger.info(f"Analyzing {total_intervals_count} intervals...")
         
         # Determine which option types to analyze
         option_types_to_analyze = []
@@ -952,7 +1418,7 @@ async def main():
             option_types_to_analyze = [args.option_type]
         
         results = []
-        for interval_time, interval_df in intervals:
+        for interval_time, interval_df in intervals_to_process:
             for opt_type in option_types_to_analyze:
                 result = await analyze_interval(
                     db,
@@ -965,88 +1431,103 @@ async def main():
                     args.use_mid_price,
                     args.min_contract_price,
                     args.underlying_ticker,
-                    logger
+                    logger,
+                    args.max_credit_width_ratio,
+                    args.max_strike_distance_pct
                 )
                 if result:
                     results.append(result)
         
-        # Filter to most recent timestamp(s) if requested
-        if args.most_recent and results:
-            # Find the most recent timestamp
-            max_timestamp = max(result['timestamp'] for result in results)
-            # Filter to only results from the most recent timestamp
-            # For each option type, keep only the best one
-            most_recent_results = []
-            call_results = [r for r in results if r['timestamp'] == max_timestamp and r.get('option_type', '').lower() == 'call']
-            put_results = [r for r in results if r['timestamp'] == max_timestamp and r.get('option_type', '').lower() == 'put']
-            
-            best_call = None
-            best_put = None
-            
-            if call_results:
-                # Get best call by max credit
-                best_call = max(call_results, key=lambda x: x['best_spread'].get('total_credit') or x['best_spread'].get('net_credit_per_contract', 0))
-            
-            if put_results:
-                # Get best put by max credit
-                best_put = max(put_results, key=lambda x: x['best_spread'].get('total_credit') or x['best_spread'].get('net_credit_per_contract', 0))
-            
-            # If --best-only is enabled, keep only the single best spread (call or put)
-            if args.best_only:
-                if best_call and best_put:
-                    # Compare credits and keep only the best one
-                    call_credit = best_call['best_spread'].get('total_credit') or best_call['best_spread'].get('net_credit_per_contract', 0)
-                    put_credit = best_put['best_spread'].get('total_credit') or best_put['best_spread'].get('net_credit_per_contract', 0)
-                    if call_credit > put_credit:
+        # Apply top-N filtering if requested (before most-recent mode)
+        original_results_count = len(results)
+        if args.top_n and results:
+            results = filter_top_n_per_day(results, args.top_n)
+            logger.info(f"Applied top-{args.top_n} per day filter: {original_results_count} -> {len(results)} results")
+        
+        # Handle --most-recent mode
+        if args.most_recent:
+            if results:
+                # Find the most recent timestamp from results
+                max_timestamp = max(result['timestamp'] for result in results)
+                # Filter to only results from the most recent timestamp
+                # For each option type, keep only the best one
+                most_recent_results = []
+                call_results = [r for r in results if r['timestamp'] == max_timestamp and r.get('option_type', '').lower() == 'call']
+                put_results = [r for r in results if r['timestamp'] == max_timestamp and r.get('option_type', '').lower() == 'put']
+                
+                best_call = None
+                best_put = None
+                
+                if call_results:
+                    # Get best call by max credit
+                    best_call = max(call_results, key=lambda x: x['best_spread'].get('total_credit') or x['best_spread'].get('net_credit_per_contract', 0))
+                
+                if put_results:
+                    # Get best put by max credit
+                    best_put = max(put_results, key=lambda x: x['best_spread'].get('total_credit') or x['best_spread'].get('net_credit_per_contract', 0))
+                
+                # If --best-only is enabled, keep only the single best spread (call or put)
+                if args.best_only:
+                    if best_call and best_put:
+                        # Compare credits and keep only the best one
+                        call_credit = best_call['best_spread'].get('total_credit') or best_call['best_spread'].get('net_credit_per_contract', 0)
+                        put_credit = best_put['best_spread'].get('total_credit') or best_put['best_spread'].get('net_credit_per_contract', 0)
+                        if call_credit > put_credit:
+                            most_recent_results = [best_call]
+                        else:
+                            most_recent_results = [best_put]
+                    elif best_call:
                         most_recent_results = [best_call]
-                    else:
+                    elif best_put:
                         most_recent_results = [best_put]
-                elif best_call:
-                    most_recent_results = [best_call]
-                elif best_put:
-                    most_recent_results = [best_put]
-            else:
-                # Keep both best call and best put
-                if best_call:
-                    most_recent_results.append(best_call)
-                if best_put:
-                    most_recent_results.append(best_put)
-            
-            results = most_recent_results
-            
-            # If using --most-recent --best-only --live, show the best option or a clear message
-            if args.most_recent and args.best_only and args.live:
-                if results:
-                    # Show the best option from most recent timestamp
-                    best_result = results[0]
-                    timestamp_str = format_timestamp(best_result['timestamp'], output_tz)
-                    max_credit = best_result['best_spread'].get('total_credit')
-                    if max_credit is None:
-                        max_credit = best_result['best_spread'].get('net_credit_per_contract', 0)
-                    num_contracts = best_result['best_spread'].get('num_contracts', 0)
-                    if num_contracts is None:
-                        num_contracts = 0
-                    opt_type_upper = best_result.get('option_type', 'UNKNOWN').upper()
-                    short_strike = best_result['best_spread']['short_strike']
-                    long_strike = best_result['best_spread']['long_strike']
-                    short_premium = best_result['best_spread']['short_price']
-                    long_premium = best_result['best_spread']['long_price']
-                    print(f"BEST CURRENT OPTION: {timestamp_str} | Type: {opt_type_upper} | Max Credit: ${max_credit:.2f} | Contracts: {num_contracts} | Spread: ${short_strike:.2f}/${long_strike:.2f} | Short: ${short_premium:.2f} Long: ${long_premium:.2f}")
                 else:
-                    # No results found
-                    max_timestamp_str = format_timestamp(max_timestamp, output_tz)
-                    print(f"NO RESULTS: No valid spreads found at most recent timestamp {max_timestamp_str} that meet the criteria.")
-                    return 0
-            elif args.most_recent and args.best_only and not args.live:
-                # --most-recent --best-only without --live: just show no results message if needed
-                if not results:
-                    max_timestamp_str = format_timestamp(max_timestamp, output_tz)
-                    print(f"NO RESULTS: No valid spreads found at most recent timestamp {max_timestamp_str} that meet the criteria.")
-                    return 0
-        elif args.most_recent and not results:
-            # No results at all - show message
-            print("NO RESULTS: No valid spreads found.")
-            return 0
+                    # Keep both best call and best put
+                    if best_call:
+                        most_recent_results.append(best_call)
+                    if best_put:
+                        most_recent_results.append(best_put)
+                
+                results = most_recent_results
+                
+                # If using --most-recent --best-only --live, show the best option or a clear message
+                if args.best_only and args.live:
+                    if results:
+                        # Show the best option from most recent timestamp
+                        best_result = results[0]
+                        timestamp_str = format_timestamp(best_result['timestamp'], output_tz)
+                        max_credit = best_result['best_spread'].get('total_credit')
+                        if max_credit is None:
+                            max_credit = best_result['best_spread'].get('net_credit_per_contract', 0)
+                        num_contracts = best_result['best_spread'].get('num_contracts', 0)
+                        if num_contracts is None:
+                            num_contracts = 0
+                        opt_type_upper = best_result.get('option_type', 'UNKNOWN').upper()
+                        short_strike = best_result['best_spread']['short_strike']
+                        long_strike = best_result['best_spread']['long_strike']
+                        short_premium = best_result['best_spread']['short_price']
+                        long_premium = best_result['best_spread']['long_price']
+                        print(f"BEST CURRENT OPTION: {timestamp_str} | Type: {opt_type_upper} | Max Credit: ${max_credit:.2f} | Contracts: {num_contracts} | Spread: ${short_strike:.2f}/${long_strike:.2f} | Short: ${short_premium:.2f} Long: ${long_premium:.2f}")
+                    else:
+                        # No results found - use most recent timestamp from dataframe
+                        most_recent_ts = df['timestamp'].max() if len(df) > 0 else None
+                        if most_recent_ts:
+                            max_timestamp_str = format_timestamp(most_recent_ts, output_tz)
+                            print(f"NO RESULTS: No valid spreads found at most recent timestamp {max_timestamp_str} that meet the criteria.")
+                        else:
+                            print("NO RESULTS: No valid spreads found.")
+                        return 0
+            else:
+                # No results at all - show message with most recent timestamp from dataframe
+                most_recent_ts = df['timestamp'].max() if len(df) > 0 else None
+                if most_recent_ts:
+                    most_recent_str = format_timestamp(most_recent_ts, output_tz)
+                    if args.best_only and args.live:
+                        print(f"NO RESULTS: No valid spreads found at most recent timestamp {most_recent_str} that meet the criteria.")
+                    else:
+                        print(f"NO RESULTS: No valid spreads found. Most recent data timestamp: {most_recent_str}")
+                else:
+                    print("NO RESULTS: No valid spreads found.")
+                return 0
         
         # Print results
         if args.summary or args.summary_only:
@@ -1060,11 +1541,25 @@ async def main():
                 max_credit_put = 0
                 total_options = len(results)
                 
+                # Track backtest results
+                backtest_success_count = 0
+                backtest_failure_count = 0
+                backtest_pending_count = 0
+                
                 for result in sorted_results:
                     # Get max credit (total_credit if available, otherwise per-contract credit)
                     max_credit = result['best_spread'].get('total_credit')
                     if max_credit is None:
                         max_credit = result['best_spread'].get('net_credit_per_contract', 0)
+                    
+                    # Track backtest results
+                    backtest_result = result.get('backtest_successful')
+                    if backtest_result is True:
+                        backtest_success_count += 1
+                    elif backtest_result is False:
+                        backtest_failure_count += 1
+                    else:
+                        backtest_pending_count += 1
                     
                     # Track overall best for calls and puts separately
                     opt_type = result.get('option_type', 'UNKNOWN').lower()
@@ -1094,11 +1589,27 @@ async def main():
                         short_strike = result['best_spread']['short_strike']
                         long_strike = result['best_spread']['long_strike']
                         
-                        print(f"{timestamp_str} | Type: {opt_type_upper} | Max Credit: ${max_credit:.2f} | Contracts: {num_contracts} | Spread: ${short_strike:.2f}/${long_strike:.2f}")
+                        # Add backtest indicator
+                        backtest_indicator = ""
+                        if backtest_result is True:
+                            backtest_indicator = " ✓"
+                        elif backtest_result is False:
+                            backtest_indicator = " ✗"
+                        
+                        print(f"{timestamp_str} | Type: {opt_type_upper} | Max Credit: ${max_credit:.2f} | Contracts: {num_contracts} | Spread: ${short_strike:.2f}/${long_strike:.2f}{backtest_indicator}")
                 
                 # Print final one-line summary
                 summary_parts = []
-                summary_parts.append(f"Total Options: {total_options}")
+                if args.top_n:
+                    summary_parts.append(f"Total Options: {total_options} (Top-{args.top_n} per day)")
+                else:
+                    summary_parts.append(f"Total Options: {total_options}")
+                
+                # Add backtest summary if we have backtest data
+                if backtest_success_count > 0 or backtest_failure_count > 0:
+                    backtest_total = backtest_success_count + backtest_failure_count
+                    success_pct = (backtest_success_count / backtest_total * 100) if backtest_total > 0 else 0
+                    summary_parts.append(f"Backtest: {backtest_success_count}✓ / {backtest_failure_count}✗ ({success_pct:.1f}% success)")
                 
                 if overall_best_call:
                     call_price_diff = overall_best_call.get('price_diff_pct')
@@ -1180,8 +1691,11 @@ async def main():
                 print(f"Risk Cap: ${args.risk_cap:.2f}")
             print(f"Max Spread Width: ${args.max_spread_width:.2f}")
             print(f"Min Contract Price: ${args.min_contract_price:.2f}")
-            print(f"Total Intervals Analyzed: {len(intervals)}")
-            print(f"Intervals with Valid Spreads: {len(results)}")
+            print(f"Total Intervals Analyzed: {total_intervals_count}")
+            if args.top_n:
+                print(f"Intervals with Valid Spreads: {len(results)} (Top-{args.top_n} per day from {original_results_count} total)")
+            else:
+                print(f"Intervals with Valid Spreads: {len(results)}")
             print("="*100)
             
             if results:
@@ -1223,6 +1737,13 @@ async def main():
                     print(f"  Total Credit: ${overall_best['best_spread']['total_credit']:.2f}")
                     print(f"  Total Max Loss: ${overall_best['best_spread']['total_max_loss']:.2f}")
                 
+                # Show backtest result
+                backtest_result = overall_best.get('backtest_successful')
+                if backtest_result is True:
+                    print(f"  Backtest: ✓ SUCCESS (EOD close did not breach spread)")
+                elif backtest_result is False:
+                    print(f"  Backtest: ✗ FAILURE (EOD close breached spread)")
+                
                 print(f"\nALL INTERVALS WITH VALID SPREADS:")
                 print("-"*100)
                 # Sort by total credit if available (when risk_cap provided), otherwise by per-contract credit
@@ -1254,12 +1775,32 @@ async def main():
                     if result['best_spread']['num_contracts'] is not None:
                         print(f"   Contracts: {result['best_spread']['num_contracts']}, Total Credit: ${result['best_spread']['total_credit']:.2f}, Total Max Loss: ${result['best_spread']['total_max_loss']:.2f}")
                     
+                    # Show backtest result
+                    backtest_result = result.get('backtest_successful')
+                    if backtest_result is True:
+                        print(f"   Backtest: ✓ SUCCESS (EOD close did not breach spread)")
+                    elif backtest_result is False:
+                        print(f"   Backtest: ✗ FAILURE (EOD close breached spread)")
+                    
                     print(f"   Total Valid Spreads: {result['total_spreads']}")
             else:
                 print("\nNo valid credit spreads found matching the criteria.")
             
             print("\n" + "="*100)
         
+        # Print trading statistics for multi-file analysis
+        if results and len(csv_paths) > 1:
+            print_trading_statistics(results, output_tz, len(csv_paths))
+        
+        # Generate histogram if requested and we have multiple files
+        if args.histogram and results and len(csv_paths) > 1:
+            print("\nGenerating hourly analysis histogram...")
+            generate_hourly_histogram(results, args.histogram_output, output_tz)
+        elif args.histogram and len(csv_paths) == 1:
+            print("\nNote: Histogram generation is most useful with multiple input files.")
+            if results:
+                generate_hourly_histogram(results, args.histogram_output, output_tz)
+    
     finally:
         await db.close()
     
