@@ -54,9 +54,27 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--csv-path",
-        required=True,
+        required=False,
         nargs='+',
-        help="Path(s) to CSV file(s) with options data (timestamps in PST). Can provide multiple files for aggregate analysis."
+        help="Path(s) to CSV file(s) with options data (timestamps in PST). Can provide multiple files for aggregate analysis. Not required if --csv-dir is provided."
+    )
+    parser.add_argument(
+        "--csv-dir",
+        type=str,
+        default=None,
+        help="Directory containing CSV files organized by ticker (e.g., csv_dir/TICKER/TICKER_options_YYYY-MM-DD.csv). Automatically appends ticker subdirectory. Requires --ticker or --underlying-ticker."
+    )
+    parser.add_argument(
+        "--start-date",
+        type=str,
+        default=None,
+        help="Start date for filtering CSV files (YYYY-MM-DD). Only processes files with dates >= start-date. If --end-date is not provided, processes all files from start-date to today."
+    )
+    parser.add_argument(
+        "--end-date",
+        type=str,
+        default=None,
+        help="End date for filtering CSV files (YYYY-MM-DD). Only processes files with dates <= end-date. Requires --start-date or --csv-dir."
     )
     parser.add_argument(
         "--option-type",
@@ -66,9 +84,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--percent-beyond",
-        type=float,
+        type=str,
         required=True,
-        help="Percentage beyond previous day's closing price (e.g., 0.05 for 5%%)"
+        help="Percentage beyond previous day's closing price. Can be a single value (e.g., 0.05 for 5%%) or two values separated by colon for puts:calls (e.g., 0.03:0.05 means 3%% for puts, 5%% for calls)"
     )
     parser.add_argument(
         "--risk-cap",
@@ -184,6 +202,159 @@ def parse_args() -> argparse.Namespace:
     )
     
     return parser.parse_args()
+
+
+def find_csv_files_in_dir(
+    csv_dir: str,
+    ticker: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    logger: Optional[logging.Logger] = None
+) -> List[Path]:
+    """
+    Find CSV files in csv_dir/ticker/ directory matching the date range.
+    
+    CSV files are expected to be named: {TICKER}_options_{YYYY-MM-DD}.csv
+    
+    Args:
+        csv_dir: Base directory containing ticker subdirectories
+        ticker: Ticker symbol (will be used as subdirectory name)
+        start_date: Start date in YYYY-MM-DD format (inclusive). If None, no start filter.
+        end_date: End date in YYYY-MM-DD format (inclusive). If None and start_date provided, uses today.
+        logger: Optional logger for messages
+    
+    Returns:
+        List of Path objects for matching CSV files, sorted by date
+    """
+    from datetime import date as date_type
+    
+    csv_dir_path = Path(csv_dir)
+    ticker_dir = csv_dir_path / ticker.upper()
+    
+    if not ticker_dir.exists():
+        error_msg = f"Ticker directory not found: {ticker_dir}"
+        if logger:
+            logger.error(error_msg)
+        else:
+            print(f"ERROR: {error_msg}", file=sys.stderr)
+        return []
+    
+    if not ticker_dir.is_dir():
+        error_msg = f"Path exists but is not a directory: {ticker_dir}"
+        if logger:
+            logger.error(error_msg)
+        else:
+            print(f"ERROR: {error_msg}", file=sys.stderr)
+        return []
+    
+    # Parse date range
+    start_date_obj = None
+    end_date_obj = None
+    
+    if start_date:
+        try:
+            start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+        except ValueError:
+            error_msg = f"Invalid start-date format: {start_date}. Expected YYYY-MM-DD"
+            if logger:
+                logger.error(error_msg)
+            else:
+                print(f"ERROR: {error_msg}", file=sys.stderr)
+            return []
+    
+    if end_date:
+        try:
+            end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+        except ValueError:
+            error_msg = f"Invalid end-date format: {end_date}. Expected YYYY-MM-DD"
+            if logger:
+                logger.error(error_msg)
+            else:
+                print(f"ERROR: {error_msg}", file=sys.stderr)
+            return []
+    elif start_date:
+        # If only start_date provided, use today as end_date
+        end_date_obj = date_type.today()
+    
+    # Find all CSV files matching the pattern
+    pattern = f"{ticker.upper()}_options_*.csv"
+    csv_files = list(ticker_dir.glob(pattern))
+    
+    if not csv_files:
+        error_msg = f"No CSV files found matching pattern {pattern} in {ticker_dir}"
+        if logger:
+            logger.warning(error_msg)
+        else:
+            print(f"WARNING: {error_msg}", file=sys.stderr)
+        return []
+    
+    # Parse dates from filenames and filter
+    matching_files = []
+    for csv_file in csv_files:
+        # Extract date from filename: {TICKER}_options_{YYYY-MM-DD}.csv
+        filename = csv_file.stem  # Gets filename without extension
+        parts = filename.split('_')
+        
+        if len(parts) < 3 or parts[-2] != 'options':
+            if logger:
+                logger.debug(f"Skipping file with unexpected name format: {csv_file.name}")
+            continue
+        
+        # Date should be the last part
+        date_str = parts[-1]
+        try:
+            file_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            if logger:
+                logger.debug(f"Skipping file with invalid date format: {csv_file.name}")
+            continue
+        
+        # Filter by date range
+        if start_date_obj and file_date < start_date_obj:
+            continue
+        if end_date_obj and file_date > end_date_obj:
+            continue
+        
+        matching_files.append((file_date, csv_file))
+    
+    # Sort by date and return just the paths
+    matching_files.sort(key=lambda x: x[0])
+    result = [path for _, path in matching_files]
+    
+    if logger:
+        logger.info(f"Found {len(result)} CSV file(s) matching date range in {ticker_dir}")
+        if start_date_obj or end_date_obj:
+            date_range_str = f"{start_date_obj or 'beginning'} to {end_date_obj or 'end'}"
+            logger.info(f"Date range filter: {date_range_str}")
+    
+    return result
+
+
+def parse_percent_beyond(value: str) -> Tuple[float, float]:
+    """
+    Parse percent-beyond value which can be either:
+    - A single float (e.g., "0.05") - used for both calls and puts
+    - Two values separated by colon (e.g., "0.03:0.05") - first for puts (negative), second for calls (positive)
+    
+    Returns:
+        Tuple of (put_percent_beyond, call_percent_beyond)
+    """
+    if ':' in value:
+        parts = value.split(':')
+        if len(parts) != 2:
+            raise ValueError(f"Invalid percent-beyond format: {value}. Expected 'put_value:call_value' or single value")
+        try:
+            put_value = float(parts[0].strip())
+            call_value = float(parts[1].strip())
+            return (put_value, call_value)
+        except ValueError as e:
+            raise ValueError(f"Invalid percent-beyond values: {value}. Both values must be numbers. Error: {e}")
+    else:
+        try:
+            single_value = float(value)
+            return (single_value, single_value)
+        except ValueError as e:
+            raise ValueError(f"Invalid percent-beyond value: {value}. Must be a number or 'put_value:call_value'. Error: {e}")
 
 
 def round_to_15_minutes(dt: datetime) -> datetime:
@@ -609,7 +780,7 @@ def build_credit_spreads(
     options_df: pd.DataFrame,
     option_type: str,
     prev_close: float,
-    percent_beyond: float,
+    percent_beyond: Tuple[float, float],
     min_width: float,
     max_width: float,
     use_mid: bool,
@@ -634,7 +805,12 @@ def build_credit_spreads(
         return results
     
     # Calculate target price based on % beyond previous close
-    target_price = prev_close * (1 + percent_beyond) if option_type.lower() == "call" else prev_close * (1 - percent_beyond)
+    # percent_beyond is a tuple: (put_percent, call_percent)
+    put_percent, call_percent = percent_beyond
+    if option_type.lower() == "call":
+        target_price = prev_close * (1 + call_percent)
+    else:  # put
+        target_price = prev_close * (1 - put_percent)
     
     # Filter options based on strike price relative to target
     if option_type.lower() == "call":
@@ -741,7 +917,7 @@ async def analyze_interval(
     db: StockQuestDB,
     interval_df: pd.DataFrame,
     option_type: str,
-    percent_beyond: float,
+    percent_beyond: Tuple[float, float],
     risk_cap: Optional[float],
     min_width: float,
     max_width: float,
@@ -919,7 +1095,7 @@ async def analyze_interval(
         "current_close": current_close,
         "current_close_date": current_close_date,
         "price_diff_pct": price_diff_pct,
-        "target_price": prev_close * (1 + percent_beyond) if option_type.lower() == "call" else prev_close * (1 - percent_beyond),
+        "target_price": prev_close * (1 + percent_beyond[1]) if option_type.lower() == "call" else prev_close * (1 - percent_beyond[0]),
         "best_spread": best_spread,
         "total_spreads": len(valid_spreads),
         "backtest_successful": backtest_successful,
@@ -966,6 +1142,57 @@ def filter_top_n_per_day(results: List[Dict], top_n: int) -> List[Dict]:
         filtered_results.extend(sorted_day_results[:top_n])
     
     return filtered_results
+
+
+def print_hourly_summary(results: List[Dict], output_tz):
+    """Print hourly summary table showing all hours with their performance stats."""
+    if not results:
+        return
+    
+    # Group by hour
+    hourly_data = defaultdict(lambda: {'success': 0, 'failure': 0, 'pending': 0, 'total': 0, 'total_credit': 0, 'total_loss': 0})
+    
+    for result in results:
+        timestamp = result['timestamp']
+        if hasattr(timestamp, 'astimezone'):
+            timestamp = timestamp.astimezone(output_tz)
+        
+        hour = timestamp.hour
+        
+        backtest_result = result.get('backtest_successful')
+        credit = result['best_spread'].get('total_credit') or (result['best_spread'].get('net_credit_per_contract', 0))
+        max_loss = result['best_spread'].get('total_max_loss') or (result['best_spread'].get('max_loss_per_contract', 0))
+        
+        hourly_data[hour]['total'] += 1
+        hourly_data[hour]['total_credit'] += credit
+        if backtest_result is True:
+            hourly_data[hour]['success'] += 1
+        elif backtest_result is False:
+            hourly_data[hour]['failure'] += 1
+            hourly_data[hour]['total_loss'] += max_loss
+        else:
+            hourly_data[hour]['pending'] += 1
+    
+    # Sort hours and print summary table
+    sorted_hours = sorted(hourly_data.keys())
+    
+    if not sorted_hours:
+        return
+    
+    print(f"\n⏰ HOURLY PERFORMANCE SUMMARY:")
+    print("-" * 100)
+    print(f"{'Hour':<8} {'Trades':<10} {'Success':<12} {'Failure':<12} {'Pending':<12} {'Win Rate':<12} {'Net P&L':<15}")
+    print("-" * 100)
+    
+    for hour in sorted_hours:
+        data = hourly_data[hour]
+        testable = data['success'] + data['failure']
+        win_rate = (data['success'] / testable * 100) if testable > 0 else 0
+        net_pnl = data['total_credit'] - data['total_loss']
+        
+        print(f"{hour:02d}:00    {data['total']:<10} {data['success']:<12} {data['failure']:<12} {data['pending']:<12} {win_rate:>6.1f}%{'':<5} ${net_pnl:>12,.2f}")
+    
+    print("-" * 100)
 
 
 def print_trading_statistics(results: List[Dict], output_tz, total_files_processed: int = 0):
@@ -1106,8 +1333,9 @@ def print_trading_statistics(results: List[Dict], output_tz, total_files_process
         if worst_trade in failed_trades:
             print(f"  Worst Trade: -${worst_trade['max_loss']:,.2f} loss on {worst_trade['timestamp'].strftime('%Y-%m-%d %H:%M')} ({worst_trade['option_type']} {worst_trade['spread']})")
     
-    # Analyze 10-minute blocks for best performing hours
+    # Analyze hourly performance and 10-minute blocks
     if results:
+        print_hourly_summary(results, output_tz)
         print_10min_block_breakdown(results, output_tz)
     
     print("\n" + "="*100)
@@ -1294,6 +1522,25 @@ def generate_hourly_histogram(results: List[Dict], output_path: str, output_tz):
 async def main():
     args = parse_args()
     
+    # Validate that either csv_path or csv_dir is provided
+    if not args.csv_path and not args.csv_dir:
+        print("Error: Either --csv-path or --csv-dir must be provided")
+        return 1
+    
+    if args.csv_path and args.csv_dir:
+        print("Error: Cannot use both --csv-path and --csv-dir. Use one or the other.")
+        return 1
+    
+    # Validate that --csv-dir requires --ticker or --underlying-ticker
+    if args.csv_dir and not args.underlying_ticker:
+        print("Error: --csv-dir requires --ticker or --underlying-ticker to be specified")
+        return 1
+    
+    # Validate date arguments
+    if args.end_date and not args.start_date and not args.csv_dir:
+        print("Error: --end-date requires --start-date or --csv-dir")
+        return 1
+    
     # Validate that either risk_cap or max_spread_width is provided
     if args.risk_cap is None and args.max_spread_width is None:
         print("Error: Either --risk-cap or --max-spread-width must be provided")
@@ -1312,9 +1559,42 @@ async def main():
     
     logger = get_logger("analyze_credit_spread_intervals", level=args.log_level)
     
+    # Parse percent-beyond value
+    try:
+        percent_beyond = parse_percent_beyond(args.percent_beyond)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+    
+    # Determine CSV file paths
+    if args.csv_dir:
+        # Use csv_dir to find matching files
+        ticker = args.underlying_ticker
+        if not ticker:
+            print("Error: --ticker or --underlying-ticker is required when using --csv-dir")
+            return 1
+        
+        csv_paths = find_csv_files_in_dir(
+            args.csv_dir,
+            ticker,
+            args.start_date,
+            args.end_date,
+            logger
+        )
+        
+        if not csv_paths:
+            print(f"Error: No CSV files found in {args.csv_dir}/{ticker.upper()}/ matching the criteria")
+            return 1
+        
+        # Convert Path objects to strings
+        csv_paths = [str(p) for p in csv_paths]
+        logger.info(f"Found {len(csv_paths)} CSV file(s) from --csv-dir")
+    else:
+        # Use provided csv_path
+        csv_paths = args.csv_path if isinstance(args.csv_path, list) else [args.csv_path]
+        logger.info(f"Reading {len(csv_paths)} CSV file(s) from --csv-path")
+    
     # Read CSV file(s)
-    csv_paths = args.csv_path if isinstance(args.csv_path, list) else [args.csv_path]
-    logger.info(f"Reading {len(csv_paths)} CSV file(s)")
     
     dfs = []
     for csv_path in csv_paths:
@@ -1424,7 +1704,7 @@ async def main():
                     db,
                     interval_df,
                     opt_type,
-                    args.percent_beyond,
+                    percent_beyond,
                     args.risk_cap,
                     args.min_spread_width,
                     args.max_spread_width,
@@ -1682,10 +1962,21 @@ async def main():
             print("\n" + "="*100)
             print(f"CREDIT SPREAD ANALYSIS - {option_type_display} OPTIONS")
             print("="*100)
-            print(f"CSV File: {args.csv_path}")
+            if args.csv_dir:
+                print(f"CSV Directory: {args.csv_dir}")
+                print(f"CSV Files: {len(csv_paths)} file(s)")
+                if args.start_date or args.end_date:
+                    date_range = f"{args.start_date or 'beginning'} to {args.end_date or 'today'}"
+                    print(f"Date Range: {date_range}")
+            else:
+                print(f"CSV File(s): {args.csv_path if isinstance(args.csv_path, list) else args.csv_path}")
             print(f"Option Type: {args.option_type}")
             print(f"Underlying Ticker: {args.underlying_ticker or 'Auto-detected from CSV'}")
-            print(f"Percent Beyond Previous Close: {args.percent_beyond * 100:.2f}%")
+            put_pct, call_pct = percent_beyond
+            if put_pct == call_pct:
+                print(f"Percent Beyond Previous Close: {put_pct * 100:.2f}%")
+            else:
+                print(f"Percent Beyond Previous Close: PUT {put_pct * 100:.2f}% / CALL {call_pct * 100:.2f}%")
             print(f"Output Timezone: {args.output_timezone}")
             if args.risk_cap is not None:
                 print(f"Risk Cap: ${args.risk_cap:.2f}")
