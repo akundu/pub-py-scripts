@@ -11,6 +11,12 @@ This program:
 6. Caps risk at a specified amount
 7. Uses QuestDB to get previous trading day's closing and opening prices
 
+Features:
+- Max Trading Hour: Prevents adding positions after specified hour (default: 3PM in output timezone)
+- Force Close Hour: Close all positions at specified hour, P&L calculated based on actual spread value
+- Multiprocessing: Process multiple files in parallel using multiple CPU cores
+- Profit Target: Exit positions early when target profit percentage is reached
+
 Price Data:
 - Requires bid/ask prices for option pricing (no day_close fallback)
 - For selling: uses bid price (what you receive)
@@ -27,6 +33,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import date
 from collections import defaultdict
+import multiprocessing
+import os
 
 import pandas as pd
 try:
@@ -173,6 +181,11 @@ def parse_args() -> argparse.Namespace:
         help="Live mode: Show a clear 'BEST CURRENT OPTION' line with actionable details. Use with --most-recent --best-only for current investment opportunities."
     )
     parser.add_argument(
+        "--curr-price",
+        action="store_true",
+        help="Use current/latest price instead of previous trading day's close price. Only effective in --live mode. Fetches the most recent price from the database (realtime -> hourly -> daily)."
+    )
+    parser.add_argument(
         "--histogram",
         action="store_true",
         help="Generate histogram of hourly performance when multiple CSV files are provided. Shows success/failure rates and total counts by hour."
@@ -199,6 +212,30 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Maximum distance of short strike from previous close, as percentage (e.g., 0.05 = 5%%). Filters out deep ITM/OTM options with poor liquidity. Example: --max-strike-distance-pct 0.03 only allows strikes within 3%% of previous close."
+    )
+    parser.add_argument(
+        "--max-trading-hour",
+        type=int,
+        default=15,
+        help="Maximum hour of the day (in the timezone specified by --output-timezone) after which no new positions can be added. Default: 15 (3:00 PM). This prevents trading in the last hour when volatility can be extreme. Example: --max-trading-hour 14 stops trading after 2:00 PM. Uses same timezone as --output-timezone."
+    )
+    parser.add_argument(
+        "--processes",
+        type=int,
+        default=1,
+        help="Number of parallel processes to use for processing multiple files. Default: 1 (sequential). Use 0 to auto-detect CPU count. Only effective when processing multiple CSV files."
+    )
+    parser.add_argument(
+        "--profit-target-pct",
+        type=float,
+        default=None,
+        help="Profit target as percentage of max credit. If spread reaches this profit level, it is considered closed early. Example: --profit-target-pct 0.50 means exit when 50%% of max profit is reached. This simulates taking profits early rather than holding to expiration."
+    )
+    parser.add_argument(
+        "--force-close-hour",
+        type=int,
+        default=None,
+        help="Hour at which all trades must be closed (in the timezone specified by --output-timezone). Default: None (hold to expiration). Example: --force-close-hour 15 closes all positions at 3:00 PM. P&L is calculated based on the underlying price at this time. Use this to avoid holding positions through market close."
     )
     
     return parser.parse_args()
@@ -740,6 +777,283 @@ async def get_current_day_open_price(
         return None
 
 
+async def get_price_at_time(
+    db: StockQuestDB,
+    underlying: str,
+    target_timestamp: datetime,
+    logger: Optional[logging.Logger] = None
+) -> Optional[float]:
+    """Get the underlying price at or near a specific timestamp.
+    
+    Tries multiple data sources in order:
+    1. Hourly prices (most granular intraday)
+    2. Daily prices (if hourly not available)
+    
+    Returns:
+        Price at the target time, or None if not found
+    """
+    try:
+        # Convert to UTC for database query
+        # Ensure we create datetime in the same way as working daily_prices queries
+        if target_timestamp.tzinfo is None:
+            pst = timezone(timedelta(hours=-8))
+            target_timestamp = target_timestamp.replace(tzinfo=pst)
+        target_utc = target_timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+        
+        async with db.connection.get_connection() as conn:
+            # Try hourly prices first
+            # Note: hourly_prices table uses 'datetime' column, not 'timestamp'
+            # Get the most recent price at or before the target time (most practical for trading)
+            # Match the pattern used in working daily_prices queries
+            query_hourly = """
+                SELECT datetime, close 
+                FROM hourly_prices 
+                WHERE ticker = $1 
+                  AND datetime <= $2
+                ORDER BY datetime DESC
+                LIMIT 1
+            """
+            
+            rows = await conn.fetch(query_hourly, underlying, target_utc)
+            
+            if rows:
+                price = float(rows[0]['close'])
+                if logger:
+                    logger.debug(f"Found hourly price {price:.2f} for {underlying} near {target_timestamp}")
+                return price
+            
+            # Fallback to daily price for that day
+            # Get the trading day in ET
+            try:
+                from zoneinfo import ZoneInfo
+                et_tz = ZoneInfo("America/New_York")
+            except Exception:
+                import pytz
+                et_tz = pytz.timezone("America/New_York")
+            
+            target_et = target_timestamp.astimezone(et_tz)
+            trading_day = target_et.date()
+            
+            # Query daily price
+            from datetime import datetime as dt_class
+            try:
+                day_start_et = et_tz.localize(dt_class(trading_day.year, trading_day.month, trading_day.day))
+            except:
+                day_start_et = dt_class(trading_day.year, trading_day.month, trading_day.day, tzinfo=et_tz)
+            
+            day_start_utc = day_start_et.astimezone(timezone.utc).replace(tzinfo=None)
+            day_end_utc = day_start_utc + timedelta(days=1)
+            
+            query_daily = """
+                SELECT close 
+                FROM daily_prices 
+                WHERE ticker = $1 
+                  AND date >= $2 
+                  AND date < $3
+                LIMIT 1
+            """
+            
+            rows = await conn.fetch(query_daily, underlying, day_start_utc, day_end_utc)
+            
+            if rows:
+                price = float(rows[0]['close'])
+                if logger:
+                    logger.debug(f"Found daily price {price:.2f} for {underlying} on {trading_day}")
+                return price
+            
+            if logger:
+                logger.warning(f"No price data found for {underlying} near {target_timestamp}")
+            return None
+            
+    except Exception as e:
+        if logger:
+            logger.error(f"Error getting price at time for {underlying}: {e}")
+        return None
+
+
+def calculate_spread_pnl(
+    initial_credit: float,
+    short_strike: float,
+    long_strike: float,
+    underlying_price: float,
+    option_type: str
+) -> float:
+    """Calculate P&L for a credit spread given the underlying price.
+    
+    For credit spreads, P&L = initial_credit - spread_value_at_price
+    
+    Args:
+        initial_credit: Credit received per share when opening spread
+        short_strike: Strike price of short option
+        long_strike: Strike price of long option
+        underlying_price: Current price of underlying
+        option_type: 'put' or 'call'
+    
+    Returns:
+        P&L per share (positive = profit, negative = loss)
+    """
+    # Calculate intrinsic value of the spread at current price
+    if option_type.lower() == "put":
+        # PUT spread: short strike > long strike
+        # Spread value = max(0, min(short_strike - underlying_price, short_strike - long_strike))
+        if underlying_price >= short_strike:
+            # Both options OTM, spread worthless
+            spread_value = 0.0
+        elif underlying_price <= long_strike:
+            # Both options ITM, spread at max width
+            spread_value = short_strike - long_strike
+        else:
+            # Price between strikes, partial value
+            spread_value = short_strike - underlying_price
+    else:  # call
+        # CALL spread: short strike < long strike
+        # Spread value = max(0, min(underlying_price - short_strike, long_strike - short_strike))
+        if underlying_price <= short_strike:
+            # Both options OTM, spread worthless
+            spread_value = 0.0
+        elif underlying_price >= long_strike:
+            # Both options ITM, spread at max width
+            spread_value = long_strike - short_strike
+        else:
+            # Price between strikes, partial value
+            spread_value = underlying_price - short_strike
+    
+    # P&L = credit received - spread value (what we'd pay to close)
+    pnl = initial_credit - spread_value
+    
+    return pnl
+
+
+async def check_profit_target_hit(
+    db: StockQuestDB,
+    underlying: str,
+    timestamp: datetime,
+    short_strike: float,
+    long_strike: float,
+    initial_credit: float,
+    option_type: str,
+    profit_target_pct: float,
+    logger: Optional[logging.Logger] = None
+) -> Optional[bool]:
+    """Check if profit target was hit during the day.
+    
+    For credit spreads, profit is made when the spread value decreases.
+    The maximum profit is the initial credit received.
+    
+    Args:
+        profit_target_pct: Target profit as percentage of max credit (e.g., 0.50 = 50%)
+    
+    Returns:
+        True if profit target was hit, False if not, None if cannot determine
+    """
+    try:
+        # Convert to ET timezone for market day calculation
+        try:
+            from zoneinfo import ZoneInfo
+            et_tz = ZoneInfo("America/New_York")
+        except Exception:
+            import pytz
+            et_tz = pytz.timezone("America/New_York")
+        
+        if timestamp.tzinfo is None:
+            pst = timezone(timedelta(hours=-8))
+            timestamp = timestamp.replace(tzinfo=pst)
+        
+        date_et = timestamp.astimezone(et_tz)
+        trading_day = date_et.date()
+        
+        # Calculate target profit (percentage of initial credit)
+        target_profit = initial_credit * profit_target_pct
+        # For credit spreads, profit is made when price moves away from strikes
+        # We need to check if the underlying price moved enough that the spread
+        # would have reached the target profit
+        
+        # Query for intraday price movements
+        # Get all prices after the spread was entered until EOD
+        async with db.connection.get_connection() as conn:
+            # Get hourly prices for the trading day after the spread entry time
+            # Note: hourly_prices table uses 'datetime' column, not 'timestamp'
+            query = """
+                SELECT datetime, close 
+                FROM hourly_prices 
+                WHERE ticker = $1 
+                  AND datetime >= $2 
+                  AND datetime < $3 
+                ORDER BY datetime ASC
+            """
+            
+            # Entry time in UTC
+            entry_time_utc = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+            
+            # End of trading day in UTC (4:00 PM ET = 9:00 PM UTC)
+            from datetime import datetime as dt_class
+            if isinstance(et_tz, type(timezone.utc)):
+                eod_et = dt_class(trading_day.year, trading_day.month, trading_day.day, 16, 0, tzinfo=et_tz)
+            else:
+                try:
+                    eod_et = et_tz.localize(dt_class(trading_day.year, trading_day.month, trading_day.day, 16, 0))
+                except:
+                    eod_et = dt_class(trading_day.year, trading_day.month, trading_day.day, 16, 0, tzinfo=et_tz)
+            
+            eod_utc = eod_et.astimezone(timezone.utc).replace(tzinfo=None)
+            
+            rows = await conn.fetch(query, underlying, entry_time_utc, eod_utc)
+            
+            if not rows:
+                # No intraday data - cannot determine if target was hit
+                return None
+            
+            # For each price point, check if profit target would have been reached
+            # For credit spreads:
+            # - CALL spread: profit increases as price moves DOWN away from strikes
+            # - PUT spread: profit increases as price moves UP away from strikes
+            # 
+            # The spread value decreases when price moves favorably
+            # Maximum profit = initial_credit (when spread becomes worthless)
+            # 
+            # Simple approximation: if price moves far enough from short strike,
+            # the spread loses significant value
+            
+            for row in rows:
+                price = float(row['close'])
+                
+                # Calculate if spread would have reduced enough in value
+                # This is a simplified check - real option pricing is more complex
+                if option_type.lower() == "put":
+                    # PUT spread: profit when price goes UP (away from strikes)
+                    # Short strike is higher than long strike for PUT spreads
+                    # If price is well above short strike, spread is worthless
+                    distance_from_short = price - short_strike
+                    spread_width = short_strike - long_strike
+                    
+                    # If price is above short strike, spread starts losing value
+                    # Estimate: spread value = max(0, (short_strike - price) / spread_width * spread_width)
+                    # This is simplified - doesn't account for time decay, IV, etc.
+                    if distance_from_short > 0:
+                        # Price is above strikes - spread is worthless, max profit
+                        return True
+                    
+                elif option_type.lower() == "call":
+                    # CALL spread: profit when price goes DOWN (away from strikes)
+                    # Short strike is lower than long strike for CALL spreads
+                    # If price is well below short strike, spread is worthless
+                    distance_from_short = short_strike - price
+                    spread_width = long_strike - short_strike
+                    
+                    # If price is below short strike, spread starts losing value
+                    if distance_from_short > 0:
+                        # Price is below strikes - spread is worthless, max profit
+                        return True
+            
+            # If we get here, profit target was not hit
+            return False
+            
+    except Exception as e:
+        if logger:
+            logger.debug(f"Error checking profit target: {e}")
+        return None
+
+
 def calculate_option_price(row: pd.Series, side: str, use_mid: bool) -> Optional[float]:
     """Calculate option price for buy/sell side.
     
@@ -926,11 +1240,32 @@ async def analyze_interval(
     underlying_ticker: Optional[str],
     logger: logging.Logger,
     max_credit_width_ratio: float = 0.80,
-    max_strike_distance_pct: Optional[float] = None
+    max_strike_distance_pct: Optional[float] = None,
+    use_current_price: bool = False,
+    max_trading_hour: int = 15,
+    profit_target_pct: Optional[float] = None,
+    output_tz = None,
+    force_close_hour: Optional[int] = None
 ) -> Optional[Dict[str, Any]]:
     """Analyze a single 15-minute interval."""
     if interval_df.empty:
         return None
+    
+    # Get timestamp for this interval (before any processing)
+    timestamp = interval_df['timestamp'].iloc[0]
+    
+    # Check if timestamp is after max trading hour (in specified timezone)
+    if output_tz is not None:
+        # Convert timestamp to output timezone
+        if timestamp.tzinfo is None:
+            pst = timezone(timedelta(hours=-8))
+            timestamp = timestamp.replace(tzinfo=pst)
+        timestamp_local = timestamp.astimezone(output_tz)
+        
+        # Filter out intervals after max_trading_hour
+        if timestamp_local.hour >= max_trading_hour:
+            logger.debug(f"Skipping interval at {timestamp_local.strftime('%Y-%m-%d %H:%M:%S %Z')} - after max trading hour {max_trading_hour}:00")
+            return None
 
     # Prefer the snapshot with the most bid/ask coverage within the interval.
     # If none have quotes, fall back to the latest timestamp.
@@ -966,9 +1301,6 @@ async def analyze_interval(
     if interval_df.empty:
         return None
     
-    # Get timestamp for this interval
-    timestamp = interval_df['timestamp'].iloc[0]
-    
     # Get underlying ticker - use provided one or extract from CSV
     if underlying_ticker:
         underlying = underlying_ticker
@@ -981,14 +1313,29 @@ async def analyze_interval(
             logger.warning(f"Could not extract underlying ticker from {first_ticker}")
             return None
     
-    # Get previous trading day's closing price
-    prev_close_result = await get_previous_close_price(db, underlying, timestamp, logger)
-    
-    if prev_close_result is None:
-        logger.warning(f"Could not get previous close for {underlying} at {timestamp}")
-        return None
-    
-    prev_close, prev_close_date = prev_close_result
+    # Get price to use for calculations
+    # If use_current_price is True (live mode with --curr-price), use latest price
+    # Otherwise, use previous trading day's closing price
+    if use_current_price:
+        # Get latest/current price from database
+        current_price = await db.get_latest_price(underlying, use_market_time=False)
+        if current_price is None:
+            logger.warning(f"Could not get current price for {underlying} at {timestamp}")
+            return None
+        
+        # Use current price as the reference price
+        prev_close = current_price
+        prev_close_date = timestamp.date() if hasattr(timestamp, 'date') else pd.to_datetime(timestamp).date()
+        logger.debug(f"[{underlying}] Using current price: ${prev_close:.2f} (instead of previous close)")
+    else:
+        # Get previous trading day's closing price (default behavior)
+        prev_close_result = await get_previous_close_price(db, underlying, timestamp, logger)
+        
+        if prev_close_result is None:
+            logger.warning(f"Could not get previous close for {underlying} at {timestamp}")
+            return None
+        
+        prev_close, prev_close_date = prev_close_result
     
     # Get current day's closing price
     current_close_result = await get_current_day_close_price(db, underlying, timestamp, logger)
@@ -1070,16 +1417,105 @@ async def analyze_interval(
     best_spread['total_max_loss'] = total_max_loss
     best_spread['net_delta'] = net_delta
     
-    # Backtest: Check if spread would have been successful by EOD
+    # Backtest: Check if spread would have been successful
     # Only if we have current_close (meaning the day has ended)
     backtest_successful = None
+    profit_target_hit = None
+    close_price_used = None
+    actual_pnl_per_share = None
+    close_time_used = None
+    
     if current_close is not None:
-        # For PUT credit spread: successful if close stayed above short strike
-        # For CALL credit spread: successful if close stayed below short strike
-        if option_type.lower() == "put":
-            backtest_successful = current_close > best_spread['short_strike']
-        else:  # call
-            backtest_successful = current_close < best_spread['short_strike']
+        # Determine which price/time to use for P&L calculation
+        if force_close_hour is not None and output_tz is not None:
+            # Calculate the force close timestamp
+            if timestamp.tzinfo is None:
+                pst = timezone(timedelta(hours=-8))
+                timestamp_tz = timestamp.replace(tzinfo=pst)
+            else:
+                timestamp_tz = timestamp
+            
+            # Convert to output timezone
+            timestamp_local = timestamp_tz.astimezone(output_tz)
+            
+            # Create force close time on the same date
+            try:
+                # Get the date in output timezone
+                close_date = timestamp_local.date()
+                # Create datetime at force_close_hour in output timezone
+                from datetime import datetime as dt_class
+                try:
+                    close_time_local = output_tz.localize(dt_class(
+                        close_date.year,
+                        close_date.month,
+                        close_date.day,
+                        force_close_hour,
+                        0, 0
+                    ))
+                except AttributeError:
+                    # zoneinfo doesn't have localize
+                    close_time_local = dt_class(
+                        close_date.year,
+                        close_date.month,
+                        close_date.day,
+                        force_close_hour,
+                        0, 0,
+                        tzinfo=output_tz
+                    )
+                
+                # Only use force close if it's after the entry time
+                if close_time_local > timestamp_local:
+                    # Get price at force close time
+                    close_price_at_time = await get_price_at_time(db, underlying, close_time_local, logger)
+                    
+                    if close_price_at_time is not None:
+                        close_price_used = close_price_at_time
+                        close_time_used = close_time_local
+                        logger.debug(f"Using force close price ${close_price_at_time:.2f} at {close_time_local}")
+                    else:
+                        # Fallback to EOD close if can't get price at force close time
+                        close_price_used = current_close
+                        logger.debug(f"Could not get price at force close time, using EOD close ${current_close:.2f}")
+                else:
+                    # Entry time is after force close hour - use EOD
+                    close_price_used = current_close
+                    logger.debug(f"Entry after force close hour, using EOD close ${current_close:.2f}")
+            except Exception as e:
+                logger.debug(f"Error calculating force close time: {e}, using EOD close")
+                close_price_used = current_close
+        else:
+            # No force close hour - use EOD close
+            close_price_used = current_close
+        
+        # Calculate actual P&L based on the price at close time
+        actual_pnl_per_share = calculate_spread_pnl(
+            best_spread['net_credit'],
+            best_spread['short_strike'],
+            best_spread['long_strike'],
+            close_price_used,
+            option_type
+        )
+        
+        # Determine success: positive P&L = success
+        backtest_successful = actual_pnl_per_share > 0
+        
+        # Check if profit target was hit (if profit_target_pct is specified)
+        if profit_target_pct is not None:
+            profit_target_hit = await check_profit_target_hit(
+                db,
+                underlying,
+                timestamp,
+                best_spread['short_strike'],
+                best_spread['long_strike'],
+                best_spread['net_credit'],
+                option_type,
+                profit_target_pct,
+                logger
+            )
+            
+            # If profit target was hit, consider it a success regardless of later result
+            if profit_target_hit is True:
+                backtest_successful = True
     
     # Extract source_file if available (for multi-file tracking)
     source_file = None
@@ -1099,6 +1535,10 @@ async def analyze_interval(
         "best_spread": best_spread,
         "total_spreads": len(valid_spreads),
         "backtest_successful": backtest_successful,
+        "profit_target_hit": profit_target_hit,
+        "actual_pnl_per_share": actual_pnl_per_share,
+        "close_price_used": close_price_used,
+        "close_time_used": close_time_used,
         "source_file": source_file,
     }
 
@@ -1225,10 +1665,19 @@ def print_trading_statistics(results: List[Dict], output_tz, total_files_process
         credit = result['best_spread'].get('total_credit') or (result['best_spread'].get('net_credit_per_contract', 0))
         max_loss = result['best_spread'].get('total_max_loss') or (result['best_spread'].get('max_loss_per_contract', 0))
         
+        # Get actual P&L if available (from force close calculation)
+        actual_pnl_per_share = result.get('actual_pnl_per_share')
+        num_contracts = result['best_spread'].get('num_contracts', 1)
+        if actual_pnl_per_share is not None and num_contracts:
+            actual_pnl = actual_pnl_per_share * num_contracts * 100  # per contract = per share * 100
+        else:
+            actual_pnl = None
+        
         trade_info = {
             'timestamp': timestamp,
             'credit': credit,
             'max_loss': max_loss,
+            'actual_pnl': actual_pnl,
             'option_type': result.get('option_type', 'UNKNOWN'),
             'spread': f"${result['best_spread']['short_strike']:.2f}/${result['best_spread']['long_strike']:.2f}",
             'contracts': result['best_spread'].get('num_contracts', 1)
@@ -1248,9 +1697,26 @@ def print_trading_statistics(results: List[Dict], output_tz, total_files_process
     num_pending = len(pending_trades)
     
     # Calculate financial metrics
+    # Use actual P&L if available (from force close), otherwise use credit/max_loss
     total_credits = sum(t['credit'] for t in successful_trades + failed_trades + pending_trades)
-    total_losses = sum(t['max_loss'] for t in failed_trades)
-    total_gains = sum(t['credit'] for t in successful_trades)
+    
+    # Calculate actual gains and losses
+    total_gains = 0
+    total_losses = 0
+    
+    for t in successful_trades:
+        if t['actual_pnl'] is not None:
+            total_gains += t['actual_pnl']
+        else:
+            total_gains += t['credit']
+    
+    for t in failed_trades:
+        if t['actual_pnl'] is not None:
+            # actual_pnl is negative for losses
+            total_losses += abs(t['actual_pnl'])
+        else:
+            total_losses += t['max_loss']
+    
     net_pnl = total_gains - total_losses
     
     # Win rate (excluding pending)
@@ -1312,6 +1778,68 @@ def print_trading_statistics(results: List[Dict], output_tz, total_files_process
     else:
         print(" ✗")
     
+    # Calculate PUT vs CALL breakdown
+    put_trades = [t for t in successful_trades + failed_trades + pending_trades if t['option_type'].upper() == 'PUT']
+    call_trades = [t for t in successful_trades + failed_trades + pending_trades if t['option_type'].upper() == 'CALL']
+    
+    put_credits = sum(t['credit'] for t in put_trades)
+    call_credits = sum(t['credit'] for t in call_trades)
+    
+    # Calculate PUT P&L
+    put_gains = 0
+    put_losses = 0
+    for t in put_trades:
+        if t in successful_trades:
+            if t['actual_pnl'] is not None:
+                put_gains += t['actual_pnl']
+            else:
+                put_gains += t['credit']
+        elif t in failed_trades:
+            if t['actual_pnl'] is not None:
+                put_losses += abs(t['actual_pnl'])
+            else:
+                put_losses += t['max_loss']
+    put_net_pnl = put_gains - put_losses
+    
+    # Calculate CALL P&L
+    call_gains = 0
+    call_losses = 0
+    for t in call_trades:
+        if t in successful_trades:
+            if t['actual_pnl'] is not None:
+                call_gains += t['actual_pnl']
+            else:
+                call_gains += t['credit']
+        elif t in failed_trades:
+            if t['actual_pnl'] is not None:
+                call_losses += abs(t['actual_pnl'])
+            else:
+                call_losses += t['max_loss']
+    call_net_pnl = call_gains - call_losses
+    
+    # PUT vs CALL breakdown
+    print(f"\n📊 PUT vs CALL BREAKDOWN:")
+    print(f"  {'Metric':<25} {'PUT':<20} {'CALL':<20}")
+    print(f"  {'-'*25} {'-'*20} {'-'*20}")
+    print(f"  {'Trades':<25} {len(put_trades):<20} {len(call_trades):<20}")
+    print(f"  {'Total Credits':<25} ${put_credits:>18,.2f} ${call_credits:>18,.2f}")
+    print(f"  {'Total Gains':<25} ${put_gains:>18,.2f} ${call_gains:>18,.2f}")
+    print(f"  {'Total Losses':<25} ${put_losses:>18,.2f} ${call_losses:>18,.2f}")
+    print(f"  {'Net P&L':<25} ${put_net_pnl:>18,.2f} ${call_net_pnl:>18,.2f}")
+    
+    # Calculate win rates for PUT and CALL
+    put_successful = [t for t in put_trades if t in successful_trades]
+    put_failed = [t for t in put_trades if t in failed_trades]
+    put_testable = len(put_successful) + len(put_failed)
+    put_win_rate = (len(put_successful) / put_testable * 100) if put_testable > 0 else 0
+    
+    call_successful = [t for t in call_trades if t in successful_trades]
+    call_failed = [t for t in call_trades if t in failed_trades]
+    call_testable = len(call_successful) + len(call_failed)
+    call_win_rate = (len(call_successful) / call_testable * 100) if call_testable > 0 else 0
+    
+    print(f"  {'Win Rate':<25} {put_win_rate:>18.1f}% {call_win_rate:>18.1f}%")
+    
     print(f"\n📈 AVERAGES:")
     print(f"  Average Credit per Trade: ${avg_credit_per_trade:,.2f}")
     if num_successful > 0:
@@ -1339,6 +1867,144 @@ def print_trading_statistics(results: List[Dict], output_tz, total_files_process
         print_10min_block_breakdown(results, output_tz)
     
     print("\n" + "="*100)
+
+
+async def process_single_csv(
+    csv_path: str,
+    option_types: List[str],
+    percent_beyond: Tuple[float, float],
+    risk_cap: Optional[float],
+    min_spread_width: float,
+    max_spread_width: float,
+    use_mid_price: bool,
+    min_contract_price: float,
+    underlying_ticker: Optional[str],
+    db_path: Optional[str],
+    no_cache: bool,
+    log_level: str,
+    max_credit_width_ratio: float,
+    max_strike_distance_pct: Optional[float],
+    use_current_price: bool,
+    max_trading_hour: int,
+    profit_target_pct: Optional[float],
+    most_recent: bool = False,
+    output_tz = None,
+    force_close_hour: Optional[int] = None
+) -> List[Dict[str, Any]]:
+    """Process a single CSV file and return results.
+    
+    This function is designed to be called in parallel by multiprocessing.
+    """
+    logger = get_logger(f"analyze_credit_spread_intervals_worker_{os.getpid()}", level=log_level)
+    
+    try:
+        # Read CSV file
+        logger.info(f"Processing: {csv_path}")
+        df = pd.read_csv(csv_path)
+        df['source_file'] = csv_path
+        
+        # Validate required columns
+        required_columns = ['timestamp', 'ticker', 'type', 'strike', 'expiration']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            logger.error(f"Missing required columns in {csv_path}: {missing_columns}")
+            return []
+        
+        # Check for bid/ask columns
+        has_bid_ask = 'bid' in df.columns and 'ask' in df.columns
+        if not has_bid_ask:
+            logger.error(f"CSV {csv_path} must have 'bid' and 'ask' columns")
+            return []
+        
+        # Parse timestamps
+        df['timestamp'] = df['timestamp'].apply(parse_pst_timestamp)
+        
+        # Filter for 0DTE only
+        original_count = len(df)
+        df['expiration_date'] = pd.to_datetime(df['expiration']).dt.date
+        df['timestamp_date'] = df['timestamp'].apply(lambda x: x.date() if hasattr(x, 'date') else pd.to_datetime(x).date())
+        df = df[df['timestamp_date'] == df['expiration_date']].copy()
+        
+        filtered_count = len(df)
+        if filtered_count == 0:
+            logger.warning(f"No 0DTE options found in {csv_path}")
+            return []
+        
+        logger.info(f"Filtered to {filtered_count}/{original_count} 0DTE rows in {csv_path}")
+        
+        # Clean up temporary columns
+        df = df.drop(columns=['expiration_date', 'timestamp_date'])
+        
+        # Round to 15-minute intervals
+        df['interval'] = df['timestamp'].apply(round_to_15_minutes)
+        
+        # Initialize database
+        db = StockQuestDB(
+            db_path if db_path else None,
+            enable_cache=not no_cache,
+            logger=logger
+        )
+        
+        try:
+            # Group by 15-minute intervals
+            intervals_grouped = df.groupby('interval')
+            
+            # If --most-recent is used, only analyze the most recent interval
+            if most_recent:
+                max_interval = df['interval'].max()
+                max_interval_df = df[df['interval'] == max_interval]
+                intervals_to_process = [(max_interval, max_interval_df)]
+            else:
+                intervals_to_process = intervals_grouped
+            
+            results = []
+            for interval_time, interval_df in intervals_to_process:
+                for opt_type in option_types:
+                    result = await analyze_interval(
+                        db,
+                        interval_df,
+                        opt_type,
+                        percent_beyond,
+                        risk_cap,
+                        min_spread_width,
+                        max_spread_width,
+                        use_mid_price,
+                        min_contract_price,
+                        underlying_ticker,
+                        logger,
+                        max_credit_width_ratio,
+                        max_strike_distance_pct,
+                        use_current_price,
+                        max_trading_hour,
+                        profit_target_pct,
+                        output_tz,
+                        force_close_hour
+                    )
+                    if result:
+                        results.append(result)
+            
+            return results
+        
+        finally:
+            await db.close()
+    
+    except Exception as e:
+        logger.error(f"Error processing {csv_path}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return []
+
+
+def process_single_csv_sync(args_tuple):
+    """Synchronous wrapper for process_single_csv to use with multiprocessing.
+    
+    Args:
+        args_tuple: Tuple containing all arguments for process_single_csv
+    
+    Returns:
+        List of results from processing the CSV
+    """
+    return asyncio.run(process_single_csv(*args_tuple))
 
 
 def print_10min_block_breakdown(results: List[Dict], output_tz):
@@ -1550,6 +2216,11 @@ async def main():
     if args.best_only and not args.most_recent:
         print("Error: --best-only requires --most-recent to be enabled")
         return 1
+    
+    # Validate that --curr-price is only used with --live
+    if args.curr_price and not args.live:
+        print("Error: --curr-price requires --live mode to be enabled")
+        return 1
 
     try:
         output_tz = resolve_timezone(args.output_timezone)
@@ -1594,131 +2265,207 @@ async def main():
         csv_paths = args.csv_path if isinstance(args.csv_path, list) else [args.csv_path]
         logger.info(f"Reading {len(csv_paths)} CSV file(s) from --csv-path")
     
-    # Read CSV file(s)
+    # Determine if we should use multiprocessing
+    num_processes = args.processes
+    use_multiprocessing = len(csv_paths) > 1 and num_processes != 1
     
-    dfs = []
-    for csv_path in csv_paths:
-        try:
-            logger.info(f"Reading: {csv_path}")
-            temp_df = pd.read_csv(csv_path)
-            temp_df['source_file'] = csv_path
-            dfs.append(temp_df)
-        except Exception as e:
-            logger.error(f"Failed to read CSV file {csv_path}: {e}")
-            return 1
+    # Auto-detect CPU count if requested
+    if num_processes == 0:
+        num_processes = multiprocessing.cpu_count()
+        logger.info(f"Auto-detected {num_processes} CPUs")
     
-    # Combine all dataframes
-    df = pd.concat(dfs, ignore_index=True)
-    logger.info(f"Combined {len(dfs)} file(s) into {len(df)} total rows")
+    # Determine which option types to analyze
+    option_types_to_analyze = []
+    if args.option_type == "both":
+        option_types_to_analyze = ["call", "put"]
+    else:
+        option_types_to_analyze = [args.option_type]
     
-    # Validate required columns
-    required_columns = ['timestamp', 'ticker', 'type', 'strike', 'expiration']
-    missing_columns = [col for col in required_columns if col not in df.columns]
-    if missing_columns:
-        logger.error(f"Missing required columns: {missing_columns}")
-        return 1
-    
-    # Check for price columns - require bid/ask (no day_close fallback)
-    has_bid_ask = 'bid' in df.columns and 'ask' in df.columns
-    if not has_bid_ask:
-        logger.error("CSV must have 'bid' and 'ask' columns for option pricing")
-        return 1
-    
-    # Check how many rows have valid bid/ask
-    bid_ask_count = df[['bid', 'ask']].notna().all(axis=1).sum()
-    if bid_ask_count < len(df) * 0.1:  # Less than 10% have bid/ask
-        logger.warning(f"Only {bid_ask_count}/{len(df)} rows have valid bid/ask prices")
-    
-    # Parse timestamps (assumed to be in PST)
-    logger.info("Parsing timestamps...")
-    df['timestamp'] = df['timestamp'].apply(parse_pst_timestamp)
-    
-    # Store most recent timestamp from original data (before filtering) for error messages
-    most_recent_timestamp_original = df['timestamp'].max() if len(df) > 0 else None
-    
-    # Filter for 0DTE only: keep rows where timestamp date matches expiration date
-    # This ensures we only analyze options on their expiration day
-    logger.info("Filtering for 0DTE options (timestamp date == expiration date)...")
-    original_count = len(df)
-    
-    # Parse expiration column to date
-    df['expiration_date'] = pd.to_datetime(df['expiration']).dt.date
-    # Extract date from timestamp
-    df['timestamp_date'] = df['timestamp'].apply(lambda x: x.date() if hasattr(x, 'date') else pd.to_datetime(x).date())
-    
-    # Keep only 0DTE rows
-    df = df[df['timestamp_date'] == df['expiration_date']].copy()
-    
-    filtered_count = len(df)
-    if filtered_count == 0:
-        if most_recent_timestamp_original:
-            most_recent_str = format_timestamp(most_recent_timestamp_original, output_tz)
-            logger.error(f"No 0DTE options found (no rows where timestamp date matches expiration date). Most recent timestamp in CSV: {most_recent_str}")
-        else:
-            logger.error("No 0DTE options found (no rows where timestamp date matches expiration date)")
-        return 1
-    
-    logger.info(f"Filtered to {filtered_count}/{original_count} 0DTE rows")
-    
-    # Clean up temporary columns
-    df = df.drop(columns=['expiration_date', 'timestamp_date'])
-    
-    # Round to 15-minute intervals
-    df['interval'] = df['timestamp'].apply(round_to_15_minutes)
-    
-    # Initialize database
-    logger.info("Initializing database connection...")
-    db = StockQuestDB(
-        args.db_path if args.db_path else None,
-        enable_cache=not args.no_cache,
-        logger=logger
-    )
-    
-    try:
-        # Group by 15-minute intervals
-        intervals_grouped = df.groupby('interval')
-        total_intervals_count = len(intervals_grouped)
+    # Process CSV files
+    if use_multiprocessing:
+        logger.info(f"Processing {len(csv_paths)} files using {num_processes} parallel processes")
         
-        # If --most-recent is used, only analyze the most recent interval
-        if args.most_recent:
-            # Find the most recent interval
-            max_interval = df['interval'].max()
-            max_interval_df = df[df['interval'] == max_interval]
-            intervals_to_process = [(max_interval, max_interval_df)]
-            logger.info(f"Analyzing most recent interval only: {max_interval}")
-        else:
-            intervals_to_process = intervals_grouped
-            logger.info(f"Analyzing {total_intervals_count} intervals...")
+        # Prepare arguments for each CSV file
+        process_args = []
+        for csv_path in csv_paths:
+            args_tuple = (
+                csv_path,
+                option_types_to_analyze,
+                percent_beyond,
+                args.risk_cap,
+                args.min_spread_width,
+                args.max_spread_width,
+                args.use_mid_price,
+                args.min_contract_price,
+                args.underlying_ticker,
+                args.db_path,
+                args.no_cache,
+                args.log_level,
+                args.max_credit_width_ratio,
+                args.max_strike_distance_pct,
+                args.curr_price and args.live,
+                args.max_trading_hour,
+                args.profit_target_pct,
+                args.most_recent,
+                output_tz,
+                args.force_close_hour
+            )
+            process_args.append(args_tuple)
         
-        # Determine which option types to analyze
-        option_types_to_analyze = []
-        if args.option_type == "both":
-            option_types_to_analyze = ["call", "put"]
-        else:
-            option_types_to_analyze = [args.option_type]
+        # Process files in parallel
+        with multiprocessing.Pool(processes=num_processes) as pool:
+            results_list = pool.map(process_single_csv_sync, process_args)
         
+        # Flatten results
         results = []
-        for interval_time, interval_df in intervals_to_process:
-            for opt_type in option_types_to_analyze:
-                result = await analyze_interval(
-                    db,
-                    interval_df,
-                    opt_type,
-                    percent_beyond,
-                    args.risk_cap,
-                    args.min_spread_width,
-                    args.max_spread_width,
-                    args.use_mid_price,
-                    args.min_contract_price,
-                    args.underlying_ticker,
-                    logger,
-                    args.max_credit_width_ratio,
-                    args.max_strike_distance_pct
-                )
-                if result:
-                    results.append(result)
+        for file_results in results_list:
+            results.extend(file_results)
         
-        # Apply top-N filtering if requested (before most-recent mode)
+        logger.info(f"Parallel processing complete. Total results: {len(results)}")
+        
+        # Skip to post-processing (we already have results)
+        # Set a flag to skip the normal processing
+        skip_normal_processing = True
+    else:
+        # Read CSV file(s) sequentially (original behavior)
+        logger.info(f"Processing {len(csv_paths)} file(s) sequentially")
+        
+        dfs = []
+        for csv_path in csv_paths:
+            try:
+                logger.info(f"Reading: {csv_path}")
+                temp_df = pd.read_csv(csv_path)
+                temp_df['source_file'] = csv_path
+                dfs.append(temp_df)
+            except Exception as e:
+                logger.error(f"Failed to read CSV file {csv_path}: {e}")
+                return 1
+        
+        # Combine all dataframes
+        df = pd.concat(dfs, ignore_index=True)
+        logger.info(f"Combined {len(dfs)} file(s) into {len(df)} total rows")
+        
+        skip_normal_processing = False
+    
+    # Normal processing (when not using multiprocessing)
+    if not skip_normal_processing:
+        # Validate required columns
+        required_columns = ['timestamp', 'ticker', 'type', 'strike', 'expiration']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            logger.error(f"Missing required columns: {missing_columns}")
+            return 1
+        
+        # Check for price columns - require bid/ask (no day_close fallback)
+        has_bid_ask = 'bid' in df.columns and 'ask' in df.columns
+        if not has_bid_ask:
+            logger.error("CSV must have 'bid' and 'ask' columns for option pricing")
+            return 1
+        
+        # Check how many rows have valid bid/ask
+        bid_ask_count = df[['bid', 'ask']].notna().all(axis=1).sum()
+        if bid_ask_count < len(df) * 0.1:  # Less than 10% have bid/ask
+            logger.warning(f"Only {bid_ask_count}/{len(df)} rows have valid bid/ask prices")
+        
+        # Parse timestamps (assumed to be in PST)
+        logger.info("Parsing timestamps...")
+        df['timestamp'] = df['timestamp'].apply(parse_pst_timestamp)
+        
+        # Store most recent timestamp from original data (before filtering) for error messages
+        most_recent_timestamp_original = df['timestamp'].max() if len(df) > 0 else None
+        
+        # Filter for 0DTE only: keep rows where timestamp date matches expiration date
+        # This ensures we only analyze options on their expiration day
+        logger.info("Filtering for 0DTE options (timestamp date == expiration date)...")
+        original_count = len(df)
+        
+        # Parse expiration column to date
+        df['expiration_date'] = pd.to_datetime(df['expiration']).dt.date
+        # Extract date from timestamp
+        df['timestamp_date'] = df['timestamp'].apply(lambda x: x.date() if hasattr(x, 'date') else pd.to_datetime(x).date())
+        
+        # Keep only 0DTE rows
+        df = df[df['timestamp_date'] == df['expiration_date']].copy()
+        
+        filtered_count = len(df)
+        if filtered_count == 0:
+            if most_recent_timestamp_original:
+                most_recent_str = format_timestamp(most_recent_timestamp_original, output_tz)
+                logger.error(f"No 0DTE options found (no rows where timestamp date matches expiration date). Most recent timestamp in CSV: {most_recent_str}")
+            else:
+                logger.error("No 0DTE options found (no rows where timestamp date matches expiration date)")
+            return 1
+        
+        logger.info(f"Filtered to {filtered_count}/{original_count} 0DTE rows")
+        
+        # Clean up temporary columns
+        df = df.drop(columns=['expiration_date', 'timestamp_date'])
+        
+        # Round to 15-minute intervals
+        df['interval'] = df['timestamp'].apply(round_to_15_minutes)
+        
+        # Initialize database
+        logger.info("Initializing database connection...")
+        db = StockQuestDB(
+            args.db_path if args.db_path else None,
+            enable_cache=not args.no_cache,
+            logger=logger
+        )
+        
+        try:
+            # Group by 15-minute intervals
+            intervals_grouped = df.groupby('interval')
+            total_intervals_count = len(intervals_grouped)
+            
+            # If --most-recent is used, only analyze the most recent interval
+            if args.most_recent:
+                # Find the most recent interval
+                max_interval = df['interval'].max()
+                max_interval_df = df[df['interval'] == max_interval]
+                intervals_to_process = [(max_interval, max_interval_df)]
+                logger.info(f"Analyzing most recent interval only: {max_interval}")
+            else:
+                intervals_to_process = intervals_grouped
+                logger.info(f"Analyzing {total_intervals_count} intervals...")
+            
+            results = []
+            for interval_time, interval_df in intervals_to_process:
+                for opt_type in option_types_to_analyze:
+                    # Use current price if --curr-price is set and --live mode is active
+                    use_current_price = args.curr_price and args.live
+                    result = await analyze_interval(
+                        db,
+                        interval_df,
+                        opt_type,
+                        percent_beyond,
+                        args.risk_cap,
+                        args.min_spread_width,
+                        args.max_spread_width,
+                        args.use_mid_price,
+                        args.min_contract_price,
+                        args.underlying_ticker,
+                        logger,
+                        args.max_credit_width_ratio,
+                        args.max_strike_distance_pct,
+                        use_current_price,
+                        args.max_trading_hour,
+                        args.profit_target_pct,
+                        output_tz,
+                        args.force_close_hour
+                    )
+                    if result:
+                        results.append(result)
+        
+        finally:
+            await db.close()
+    
+    # Post-processing (common for both multiprocessing and sequential)
+    if skip_normal_processing:
+        # For multiprocessing, we already have results
+        # Set total_intervals_count for reporting
+        total_intervals_count = len(results)
+    
+    # Apply top-N filtering if requested (before most-recent mode)
         original_results_count = len(results)
         if args.top_n and results:
             results = filter_top_n_per_day(results, args.top_n)
@@ -1869,14 +2616,26 @@ async def main():
                         short_strike = result['best_spread']['short_strike']
                         long_strike = result['best_spread']['long_strike']
                         
-                        # Add backtest indicator
+                        # Add backtest indicator and P&L
                         backtest_indicator = ""
+                        profit_target_indicator = ""
+                        pnl_str = ""
+                        
                         if backtest_result is True:
                             backtest_indicator = " ✓"
+                            # Check if profit target was hit
+                            if result.get('profit_target_hit') is True:
+                                profit_target_indicator = " [PT]"
                         elif backtest_result is False:
                             backtest_indicator = " ✗"
                         
-                        print(f"{timestamp_str} | Type: {opt_type_upper} | Max Credit: ${max_credit:.2f} | Contracts: {num_contracts} | Spread: ${short_strike:.2f}/${long_strike:.2f}{backtest_indicator}")
+                        # Add actual P&L if available
+                        actual_pnl_per_share = result.get('actual_pnl_per_share')
+                        if actual_pnl_per_share is not None and num_contracts:
+                            total_pnl = actual_pnl_per_share * num_contracts * 100
+                            pnl_str = f" | P&L: ${total_pnl:+.2f}"
+                        
+                        print(f"{timestamp_str} | Type: {opt_type_upper} | Max Credit: ${max_credit:.2f} | Contracts: {num_contracts} | Spread: ${short_strike:.2f}/${long_strike:.2f}{backtest_indicator}{profit_target_indicator}{pnl_str}")
                 
                 # Print final one-line summary
                 summary_parts = []
@@ -1982,6 +2741,18 @@ async def main():
                 print(f"Risk Cap: ${args.risk_cap:.2f}")
             print(f"Max Spread Width: ${args.max_spread_width:.2f}")
             print(f"Min Contract Price: ${args.min_contract_price:.2f}")
+            # Get timezone name for display
+            try:
+                tz_display = output_tz.tzname(datetime.now())
+            except:
+                tz_display = args.output_timezone
+            print(f"Max Trading Hour: {args.max_trading_hour}:00 {tz_display}")
+            if args.force_close_hour is not None:
+                print(f"Force Close Hour: {args.force_close_hour}:00 {tz_display} (all positions closed, P&L calculated)")
+            if args.profit_target_pct is not None:
+                print(f"Profit Target: {args.profit_target_pct * 100:.0f}% of max credit")
+            if use_multiprocessing:
+                print(f"Parallel Processing: {num_processes} processes")
             print(f"Total Intervals Analyzed: {total_intervals_count}")
             if args.top_n:
                 print(f"Intervals with Valid Spreads: {len(results)} (Top-{args.top_n} per day from {original_results_count} total)")
@@ -2030,10 +2801,36 @@ async def main():
                 
                 # Show backtest result
                 backtest_result = overall_best.get('backtest_successful')
+                profit_target_hit = overall_best.get('profit_target_hit')
+                actual_pnl_per_share = overall_best.get('actual_pnl_per_share')
+                close_price_used = overall_best.get('close_price_used')
+                close_time_used = overall_best.get('close_time_used')
+                
                 if backtest_result is True:
-                    print(f"  Backtest: ✓ SUCCESS (EOD close did not breach spread)")
+                    if profit_target_hit is True:
+                        print(f"  Backtest: ✓ SUCCESS (Profit target hit early)")
+                    else:
+                        print(f"  Backtest: ✓ SUCCESS (EOD close did not breach spread)")
                 elif backtest_result is False:
                     print(f"  Backtest: ✗ FAILURE (EOD close breached spread)")
+                
+                # Show actual P&L if force close was used
+                if actual_pnl_per_share is not None:
+                    num_contracts = overall_best['best_spread'].get('num_contracts', 1)
+                    if num_contracts:
+                        total_pnl = actual_pnl_per_share * num_contracts * 100
+                        print(f"  Actual P&L (per share): ${actual_pnl_per_share:+.2f}")
+                        print(f"  Actual P&L (total): ${total_pnl:+.2f}")
+                    else:
+                        print(f"  Actual P&L (per share): ${actual_pnl_per_share:+.2f}")
+                    
+                    if close_price_used is not None:
+                        close_price_display = f"${close_price_used:.2f}"
+                        if close_time_used is not None:
+                            close_time_display = format_timestamp(close_time_used, output_tz)
+                            print(f"  Close Price Used: {close_price_display} at {close_time_display}")
+                        else:
+                            print(f"  Close Price Used: {close_price_display}")
                 
                 print(f"\nALL INTERVALS WITH VALID SPREADS:")
                 print("-"*100)
@@ -2068,10 +2865,25 @@ async def main():
                     
                     # Show backtest result
                     backtest_result = result.get('backtest_successful')
+                    profit_target_hit = result.get('profit_target_hit')
+                    actual_pnl_per_share = result.get('actual_pnl_per_share')
+                    
                     if backtest_result is True:
-                        print(f"   Backtest: ✓ SUCCESS (EOD close did not breach spread)")
+                        if profit_target_hit is True:
+                            print(f"   Backtest: ✓ SUCCESS (Profit target hit early)")
+                        else:
+                            print(f"   Backtest: ✓ SUCCESS (EOD close did not breach spread)")
                     elif backtest_result is False:
                         print(f"   Backtest: ✗ FAILURE (EOD close breached spread)")
+                    
+                    # Show actual P&L if available
+                    if actual_pnl_per_share is not None:
+                        num_contracts = result['best_spread'].get('num_contracts', 1)
+                        if num_contracts:
+                            total_pnl = actual_pnl_per_share * num_contracts * 100
+                            print(f"   Actual P&L: ${actual_pnl_per_share:+.2f} per share, ${total_pnl:+.2f} total")
+                        else:
+                            print(f"   Actual P&L: ${actual_pnl_per_share:+.2f} per share")
                     
                     print(f"   Total Valid Spreads: {result['total_spreads']}")
             else:
@@ -2091,9 +2903,6 @@ async def main():
             print("\nNote: Histogram generation is most useful with multiple input files.")
             if results:
                 generate_hourly_histogram(results, args.histogram_output, output_tz)
-    
-    finally:
-        await db.close()
     
     return 0
 

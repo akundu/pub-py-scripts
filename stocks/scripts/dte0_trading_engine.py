@@ -507,30 +507,43 @@ class ZeroDTEEngine:
             )
             df = pd.read_parquet(self.cache_file)
 
-            # If a specific date is required, check if it's in the cache
-            if required_date:
-                # Ensure date column exists
-                if "date" not in df.columns:
-                    df["date"] = df.index.date
+            # Ensure date column exists
+            if "date" not in df.columns:
+                df["date"] = df.index.date
 
-                req_date_obj = pd.to_datetime(required_date).date()
+            # Check if we need to fetch fresh data
+            need_fresh_fetch = False
+            target_date = None
+            
+            if required_date:
+                # Specific date was requested
+                target_date = required_date
+            else:
+                # For live mode, check if today's date is in cache
+                target_date = datetime.now().strftime("%Y-%m-%d")
+            
+            if target_date:
+                req_date_obj = pd.to_datetime(target_date).date()
                 available_dates = set(df["date"].unique())
 
                 if req_date_obj not in available_dates:
+                    need_fresh_fetch = True
                     self.logger.info(
-                        f"Required date {required_date} not in cache, fetching fresh data..."
+                        f"Date {target_date} not in cache, fetching fresh data..."
                     )
-                    # Fetch fresh data that includes the required date
-                    end_date = max(required_date, datetime.now().strftime("%Y-%m-%d"))
-                    start_date = (datetime.now() - timedelta(days=730)).strftime(
-                        "%Y-%m-%d"
+
+            if need_fresh_fetch:
+                # Fetch fresh data that includes the required date
+                end_date = max(target_date, datetime.now().strftime("%Y-%m-%d"))
+                start_date = (datetime.now() - timedelta(days=730)).strftime(
+                    "%Y-%m-%d"
+                )
+                df = await self.fetch_and_prepare(start_date, end_date)
+                if not df.empty:
+                    df.to_parquet(self.cache_file)
+                    self.logger.info(
+                        f"Model updated and saved to {self.cache_file}"
                     )
-                    df = await self.fetch_and_prepare(start_date, end_date)
-                    if not df.empty:
-                        df.to_parquet(self.cache_file)
-                        self.logger.info(
-                            f"Model updated and saved to {self.cache_file}"
-                        )
 
             return df
 
@@ -569,7 +582,37 @@ class ZeroDTEEngine:
 
         # 1a. For live mode, fetch latest price from realtime system (prioritizes realtime > hourly > daily)
         if mode == "live":
+            self.logger.info(f"Live mode: Attempting to fetch latest data for {self.ticker}")
             try:
+                # First, explicitly fetch realtime data from the realtime_data table for today
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                today_start = f"{today_str}T00:00:00"
+                today_end = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+                
+                realtime_data_today = None
+                if hasattr(self.db, "get_realtime_data"):
+                    try:
+                        self.logger.info(
+                            f"Fetching realtime data from realtime_data table for {self.ticker} "
+                            f"from {today_start} to {today_end}"
+                        )
+                        realtime_data_today = await self.db.get_realtime_data(
+                            self.ticker,
+                            start_datetime=today_start,
+                            end_datetime=today_end,
+                            data_type="quote"
+                        )
+                        if not realtime_data_today.empty:
+                            self.logger.info(
+                                f"Found {len(realtime_data_today)} realtime data points for today"
+                            )
+                        else:
+                            self.logger.info("No realtime data found in realtime_data table for today")
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Failed to fetch realtime data directly from table: {e}"
+                        )
+                
                 # Check if database has price_service (QuestDB has it)
                 if hasattr(self.db, "price_service"):
                     latest_price_data = (
@@ -588,16 +631,45 @@ class ZeroDTEEngine:
                         self.logger.info(
                             f"Live mode: Got latest price from {source}: ${price:.2f} at {timestamp}"
                         )
+                        self.logger.debug(
+                            f"Data availability - realtime_df: {realtime_df is not None and not realtime_df.empty if realtime_df is not None else False}, "
+                            f"hourly_df: {hourly_df is not None and not hourly_df.empty if hourly_df is not None else False}, "
+                            f"daily_df: {daily_df is not None and not daily_df.empty if daily_df is not None else False}"
+                        )
+                        if hourly_df is not None and not hourly_df.empty:
+                            self.logger.debug(
+                                f"hourly_df details - shape: {hourly_df.shape}, "
+                                f"index type: {type(hourly_df.index)}, "
+                                f"columns: {list(hourly_df.columns)}, "
+                                f"index values (last 3): {list(hourly_df.index[-3:]) if len(hourly_df) >= 3 else list(hourly_df.index)}"
+                            )
 
                         # If we have realtime data, add it to the dataframe
-                        if realtime_df is not None and not realtime_df.empty:
-                            # Convert realtime data to match hourly format
-                            latest_realtime = realtime_df.iloc[0]
-                            rt_timestamp = (
-                                realtime_df.index[0]
-                                if isinstance(realtime_df.index, pd.DatetimeIndex)
-                                else latest_realtime.get("timestamp")
+                        # Prefer explicitly fetched realtime_data_today if available, otherwise use price_service data
+                        use_realtime_df = None
+                        if realtime_data_today is not None and not realtime_data_today.empty:
+                            # Use explicitly fetched realtime data from the table
+                            use_realtime_df = realtime_data_today
+                            self.logger.info(
+                                f"Using realtime data directly from realtime_data table "
+                                f"({len(use_realtime_df)} points)"
                             )
+                        elif realtime_df is not None and not realtime_df.empty:
+                            # Fallback to price_service realtime data
+                            use_realtime_df = realtime_df
+                            self.logger.info("Using realtime data from price_service")
+                        
+                        if use_realtime_df is not None and not use_realtime_df.empty:
+                            # Convert realtime data to match hourly format
+                            # Get the latest point (first row if sorted DESC, last row if sorted ASC)
+                            if isinstance(use_realtime_df.index, pd.DatetimeIndex):
+                                # Sort by index to get latest
+                                use_realtime_df_sorted = use_realtime_df.sort_index(ascending=False)
+                                latest_realtime = use_realtime_df_sorted.iloc[0]
+                                rt_timestamp = use_realtime_df_sorted.index[0]
+                            else:
+                                latest_realtime = use_realtime_df.iloc[0]
+                                rt_timestamp = latest_realtime.get("timestamp") or latest_realtime.name
 
                             # Check if timestamp is valid
                             if rt_timestamp is None:
@@ -605,13 +677,16 @@ class ZeroDTEEngine:
                                     "Realtime data timestamp is None, skipping"
                                 )
                             else:
+                                # Get price from realtime data
+                                rt_price = float(latest_realtime.get("price", price))
+                                
                                 # Create a row compatible with hourly data format
                                 new_row = pd.DataFrame(
                                     {
-                                        "open": price,
-                                        "high": price,
-                                        "low": price,
-                                        "close": price,
+                                        "open": rt_price,
+                                        "high": rt_price,
+                                        "low": rt_price,
+                                        "close": rt_price,
                                         "volume": latest_realtime.get("volume", 0),
                                         "date": pd.to_datetime(rt_timestamp).date(),
                                     },
@@ -625,24 +700,74 @@ class ZeroDTEEngine:
                                 # Append or update the dataframe
                                 df = pd.concat([df, new_row]).sort_index()
                                 self.logger.info(
-                                    f"Added realtime data point at {rt_timestamp}"
+                                    f"Added realtime data point at {rt_timestamp} with price ${rt_price:.2f}"
                                 )
 
                         # If we have hourly data that's more recent than what's in df, update it
                         elif hourly_df is not None and not hourly_df.empty:
-                            latest_hourly = hourly_df.iloc[-1]
-                            hr_timestamp = (
-                                hourly_df.index[-1]
-                                if isinstance(hourly_df.index, pd.DatetimeIndex)
-                                else latest_hourly.get("datetime")
-                            )
+                            # Always try to use timestamp from price_service first if available
+                            hr_timestamp = timestamp if timestamp is not None else None
+                            
+                            # If timestamp is None, try to extract from DataFrame
+                            if hr_timestamp is None:
+                                latest_hourly = hourly_df.iloc[-1]
+                                
+                                # First try: DatetimeIndex (most common case)
+                                if isinstance(hourly_df.index, pd.DatetimeIndex) and len(hourly_df.index) > 0:
+                                    hr_timestamp = hourly_df.index[-1]
+                                # Second try: Try to convert index to datetime
+                                elif len(hourly_df.index) > 0:
+                                    try:
+                                        hr_timestamp = pd.to_datetime(hourly_df.index[-1])
+                                    except:
+                                        pass
+                                
+                                # Third try: Check for datetime/timestamp columns
+                                if hr_timestamp is None and hasattr(hourly_df, 'columns'):
+                                    if 'datetime' in hourly_df.columns:
+                                        try:
+                                            hr_timestamp = pd.to_datetime(hourly_df['datetime'].iloc[-1])
+                                        except:
+                                            pass
+                                    elif 'timestamp' in hourly_df.columns:
+                                        try:
+                                            hr_timestamp = pd.to_datetime(hourly_df['timestamp'].iloc[-1])
+                                        except:
+                                            pass
+                                
+                                # Fourth try: Check latest_hourly row attributes
+                                if hr_timestamp is None:
+                                    if hasattr(latest_hourly, 'name') and latest_hourly.name is not None:
+                                        try:
+                                            hr_timestamp = pd.to_datetime(latest_hourly.name)
+                                        except:
+                                            pass
+                                    # Try accessing as Series
+                                    if hr_timestamp is None and isinstance(latest_hourly, pd.Series):
+                                        for col in ['datetime', 'timestamp', 'date']:
+                                            if col in latest_hourly.index:
+                                                try:
+                                                    hr_timestamp = pd.to_datetime(latest_hourly[col])
+                                                    break
+                                                except:
+                                                    pass
 
                             # Check if timestamp is valid before comparing
                             if hr_timestamp is None:
-                                self.logger.warning(
-                                    "Hourly data timestamp is None, skipping"
-                                )
-                            else:
+                                if price is not None:
+                                    # Use current time as fallback - this handles cached data that lost its index
+                                    hr_timestamp = datetime.now()
+                                    print(f"[FALLBACK] Using current time as timestamp for hourly data: {hr_timestamp}")
+                                    self.logger.info(
+                                        f"Using current time as fallback timestamp for hourly data: {hr_timestamp}"
+                                    )
+                                else:
+                                    print(f"[SKIP] Cannot process hourly data: hr_timestamp is None and price is None")
+                                    self.logger.warning(
+                                        f"Cannot process hourly data: no timestamp and no price available"
+                                    )
+                            
+                            if hr_timestamp is not None:
                                 # Check if this hourly bar is more recent than what we have
                                 should_add = len(df) == 0
                                 if not should_add and len(df) > 0:
@@ -651,18 +776,30 @@ class ZeroDTEEngine:
                                         should_add = hr_ts > df.index[-1]
                                     except (TypeError, ValueError) as e:
                                         self.logger.warning(
-                                            f"Error comparing hourly timestamp: {e}"
+                                            f"Error comparing hourly timestamp: {e}, hr_timestamp={hr_timestamp}"
                                         )
                                         should_add = False
 
                                 if should_add:
+                                    latest_hourly = hourly_df.iloc[-1]
+                                    # Safely extract values from Series/DataFrame row
+                                    def safe_get(data, key, default):
+                                        if hasattr(data, 'get'):
+                                            return data.get(key, default)
+                                        elif hasattr(data, '__getitem__'):
+                                            try:
+                                                return data[key]
+                                            except (KeyError, IndexError):
+                                                return default
+                                        return default
+                                    
                                     new_row = pd.DataFrame(
                                         {
-                                            "open": latest_hourly.get("open", price),
-                                            "high": latest_hourly.get("high", price),
-                                            "low": latest_hourly.get("low", price),
+                                            "open": safe_get(latest_hourly, "open", price),
+                                            "high": safe_get(latest_hourly, "high", price),
+                                            "low": safe_get(latest_hourly, "low", price),
                                             "close": price,
-                                            "volume": latest_hourly.get("volume", 0),
+                                            "volume": safe_get(latest_hourly, "volume", 0),
                                             "date": pd.to_datetime(hr_timestamp).date(),
                                         },
                                         index=[pd.to_datetime(hr_timestamp)],
@@ -674,7 +811,7 @@ class ZeroDTEEngine:
 
                                     df = pd.concat([df, new_row]).sort_index()
                                     self.logger.info(
-                                        f"Added/updated hourly data at {hr_timestamp}"
+                                        f"Added/updated hourly data at {hr_timestamp} with price ${price:.2f}"
                                     )
 
                         # If we have daily data that's more recent, update it
@@ -735,6 +872,18 @@ class ZeroDTEEngine:
                         if len(df) > 0:
                             # Recalculate date column
                             df["date"] = df.index.date
+                            
+                            # Log what dates we have after adding live data
+                            unique_dates = sorted(df["date"].unique())
+                            self.logger.info(
+                                f"After adding live data: {len(unique_dates)} unique dates, "
+                                f"latest: {unique_dates[-1] if unique_dates else 'N/A'}"
+                            )
+                        else:
+                            self.logger.warning(
+                                "No data in dataframe after live mode processing. "
+                                "This means no realtime, hourly, or daily data was successfully added."
+                            )
 
                             # Recalculate VWAP if we have volume data
                             if "volume" in df.columns:
@@ -767,18 +916,125 @@ class ZeroDTEEngine:
                                 )
                                 rs = gain / loss
                                 df["rsi_7"] = 100 - (100 / (1 + rs))
+                    else:
+                        self.logger.warning(
+                            f"Live mode: No latest price data returned from price_service for {self.ticker}"
+                        )
+                        # If price_service didn't return data but we have realtime_data_today, use it
+                        if realtime_data_today is not None and not realtime_data_today.empty:
+                            self.logger.info(
+                                "Using realtime data from realtime_data table as fallback"
+                            )
+                            # Get the latest point
+                            if isinstance(realtime_data_today.index, pd.DatetimeIndex):
+                                realtime_data_today_sorted = realtime_data_today.sort_index(ascending=False)
+                                latest_realtime = realtime_data_today_sorted.iloc[0]
+                                rt_timestamp = realtime_data_today_sorted.index[0]
+                            else:
+                                latest_realtime = realtime_data_today.iloc[0]
+                                rt_timestamp = latest_realtime.get("timestamp") or latest_realtime.name
+                            
+                            if rt_timestamp is not None:
+                                rt_price = float(latest_realtime.get("price", 0))
+                                new_row = pd.DataFrame(
+                                    {
+                                        "open": rt_price,
+                                        "high": rt_price,
+                                        "low": rt_price,
+                                        "close": rt_price,
+                                        "volume": latest_realtime.get("volume", 0),
+                                        "date": pd.to_datetime(rt_timestamp).date(),
+                                    },
+                                    index=[pd.to_datetime(rt_timestamp)],
+                                )
+                                
+                                # Add VIX1D if available
+                                if "vix1d" in df.columns and len(df) > 0:
+                                    new_row["vix1d"] = df["vix1d"].iloc[-1]
+                                
+                                df = pd.concat([df, new_row]).sort_index()
+                                self.logger.info(
+                                    f"Added realtime data point (fallback) at {rt_timestamp} with price ${rt_price:.2f}"
+                                )
+                else:
+                    self.logger.warning(
+                        f"Live mode: Database does not have price_service attribute"
+                    )
+                    # If no price_service but we have realtime_data_today, use it
+                    if realtime_data_today is not None and not realtime_data_today.empty:
+                        self.logger.info(
+                            "Using realtime data from realtime_data table (no price_service available)"
+                        )
+                        if isinstance(realtime_data_today.index, pd.DatetimeIndex):
+                            realtime_data_today_sorted = realtime_data_today.sort_index(ascending=False)
+                            latest_realtime = realtime_data_today_sorted.iloc[0]
+                            rt_timestamp = realtime_data_today_sorted.index[0]
+                        else:
+                            latest_realtime = realtime_data_today.iloc[0]
+                            rt_timestamp = latest_realtime.get("timestamp") or latest_realtime.name
+                        
+                        if rt_timestamp is not None:
+                            rt_price = float(latest_realtime.get("price", 0))
+                            new_row = pd.DataFrame(
+                                {
+                                    "open": rt_price,
+                                    "high": rt_price,
+                                    "low": rt_price,
+                                    "close": rt_price,
+                                    "volume": latest_realtime.get("volume", 0),
+                                    "date": pd.to_datetime(rt_timestamp).date(),
+                                },
+                                index=[pd.to_datetime(rt_timestamp)],
+                            )
+                            
+                            # Add VIX1D if available
+                            if "vix1d" in df.columns and len(df) > 0:
+                                new_row["vix1d"] = df["vix1d"].iloc[-1]
+                            
+                            df = pd.concat([df, new_row]).sort_index()
+                            self.logger.info(
+                                f"Added realtime data point at {rt_timestamp} with price ${rt_price:.2f}"
+                            )
 
             except Exception as e:
                 self.logger.warning(
                     f"Failed to fetch latest price data for live mode: {e}"
                 )
+                import traceback
+                self.logger.debug(traceback.format_exc())
                 # Continue with cached data if realtime fetch fails
+            
+            # Summary of live mode data addition
+            if mode == "live":
+                unique_dates_after = sorted(df["date"].unique()) if len(df) > 0 and "date" in df.columns else []
+                target_date_obj = pd.to_datetime(date_str).date() if date_str else datetime.now().date()
+                has_today_data = target_date_obj in unique_dates_after if unique_dates_after else False
+                
+                if has_today_data:
+                    self.logger.info(
+                        f"✓ Successfully added data for {target_date_obj}. "
+                        f"Total dates in dataset: {len(unique_dates_after)}"
+                    )
+                else:
+                    self.logger.warning(
+                        f"✗ No data added for target date {target_date_obj}. "
+                        f"Available dates: {unique_dates_after[-5:] if len(unique_dates_after) > 0 else 'None'}. "
+                        f"This may cause the analysis to fail."
+                    )
 
         # 2. Determine the dates to process
         all_dates = sorted(df["date"].unique())
         if len(all_dates) == 0:
             print("No dates found in dataset.")
             return
+
+        if mode != "backtest":
+            self.logger.info(
+                f"Loaded data with {len(df)} rows covering {len(all_dates)} unique dates"
+            )
+            self.logger.info(
+                f"Date range: {all_dates[0]} to {all_dates[-1]}"
+            )
 
         split_idx = int(len(all_dates) * (1 - test_split))
         if mode == "backtest":
@@ -789,6 +1045,10 @@ class ZeroDTEEngine:
                 date_str if date_str else datetime.now().strftime("%Y-%m-%d")
             )
             test_dates = [pd.to_datetime(target_date_str).date()]
+            if mode != "backtest":
+                self.logger.info(
+                    f"Processing date: {test_dates[0]} (requested: {target_date_str})"
+                )
 
         results = []
         skipped_no_anchor = 0
@@ -796,9 +1056,38 @@ class ZeroDTEEngine:
 
         # 3. Process each date
         for target_date in test_dates:
+            # Ensure date column exists and is the right type
+            if "date" not in df.columns:
+                df["date"] = df.index.date
+            
+            # Try filtering by date - handle type mismatches
             day_data = df[df["date"] == target_date]
             if day_data.empty:
+                # Try alternative filtering methods
+                day_data = df[df.index.date == target_date]
+            
+            if day_data.empty:
                 skipped_no_anchor += 1
+                if mode != "backtest":
+                    print(
+                        f"\n{'='*80}\n ANALYSIS - {self.ticker} - {target_date}\n{'='*80}"
+                    )
+                    print(f"ERROR: No data found for date {target_date} (type: {type(target_date)})")
+                    print(f"Available dates in dataset: {len(all_dates)} unique dates")
+                    if len(all_dates) > 0:
+                        print(f"Date range: {all_dates[0]} to {all_dates[-1]}")
+                        # Show closest dates
+                        try:
+                            target_dt = pd.to_datetime(target_date)
+                            closest_dates = sorted(all_dates, key=lambda x: abs((pd.to_datetime(x) - target_dt).days))[:5]
+                            print(f"Closest available dates: {closest_dates}")
+                        except:
+                            print(f"Sample available dates: {all_dates[:5]}")
+                        # Debug: show date column types
+                        if len(df) > 0:
+                            print(f"Date column type: {type(df['date'].iloc[0])}")
+                            print(f"Target date type: {type(target_date)}")
+                            print(f"Sample dates in column: {df['date'].iloc[:5].tolist()}")
                 continue
 
             # Convert anchor hour to UTC to match database timestamps
@@ -830,6 +1119,12 @@ class ZeroDTEEngine:
                     historical_data = df.loc[df.index <= actual_anchor_time]
                     if historical_data.empty:
                         skipped_no_anchor += 1
+                        if mode != "backtest":
+                            print(
+                                f"\n{'='*80}\n ANALYSIS - {self.ticker} - {target_date}\n{'='*80}"
+                            )
+                            print(f"ERROR: No historical data available at or before {actual_anchor_time}")
+                            print(f"Available data range: {df.index.min()} to {df.index.max()}")
                         continue
                     current = historical_data.iloc[-1]
             else:
@@ -839,6 +1134,12 @@ class ZeroDTEEngine:
                 historical_data = df.loc[df.index <= actual_anchor_time]
                 if historical_data.empty:
                     skipped_no_anchor += 1
+                    if mode != "backtest":
+                        print(
+                            f"\n{'='*80}\n ANALYSIS - {self.ticker} - {target_date}\n{'='*80}"
+                        )
+                        print(f"ERROR: No historical data available at or before {actual_anchor_time}")
+                        print(f"Available data range: {df.index.min()} to {df.index.max()}")
                     continue
                 current = historical_data.iloc[-1]
 
@@ -1238,17 +1539,24 @@ async def main():
 
     args = parser.parse_args()
     engine = ZeroDTEEngine(args.ticker, args.db_config, cache_dir=args.cache_dir)
-    await engine.initialize()
-    target_date = args.date if args.date else datetime.now().strftime("%Y-%m-%d")
-    await engine.run_analysis(
-        args.mode,
-        args.bias,
-        target_date,
-        args.hour,
-        args.test_split,
-        input_timezone=args.timezone,
-    )
-    await engine.close()
+    try:
+        await engine.initialize()
+        target_date = args.date if args.date else datetime.now().strftime("%Y-%m-%d")
+        await engine.run_analysis(
+            args.mode,
+            args.bias,
+            target_date,
+            args.hour,
+            args.test_split,
+            input_timezone=args.timezone,
+        )
+    except Exception as e:
+        print(f"\nERROR: Exception occurred during analysis: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        await engine.close()
 
 
 if __name__ == "__main__":
