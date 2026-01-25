@@ -175,8 +175,8 @@ active_connections: dict[str, ConnectionState] = {}
 def parse_config_from_query(query_params: dict) -> dict:
     """Parse configuration from query parameters - match CLI defaults exactly."""
     config = {
-        'sensitivity': float(query_params.get('sensitivity', 1.0)),
-        'silence_threshold': float(query_params.get('silence_threshold', 0.015)),  # Default: 0.015
+        'sensitivity': float(query_params.get('sensitivity', 0.8)),  # Default: 0.8
+        'silence_threshold': float(query_params.get('silence_threshold', 0.005)),  # Default: 0.005
         'low_freq': None,
         'high_freq': None,
         'instrument_name': None,
@@ -190,13 +190,14 @@ def parse_config_from_query(query_params: dict) -> dict:
         'show_chroma': query_params.get('show_chroma', 'false').lower() == 'true',
         'single_pitch': query_params.get('single_pitch', 'false').lower() == 'true',
         'multi_pitch': query_params.get('multi_pitch', 'true').lower() == 'true',  # Match CLI default
-        'confidence_threshold': float(query_params.get('confidence_threshold', 0.3)),  # Default: 0.3
+        'confidence_threshold': float(query_params.get('confidence_threshold', 0.2)),  # Default: 0.2
         'progression': query_params.get('progression', 'true').lower() == 'true',  # Match CLI default
         'debug': query_params.get('debug', 'false').lower() == 'true',
         'log': query_params.get('log', 'false').lower() == 'true',
         'log_interval': float(query_params.get('log_interval', 0.5)),  # Match CLI default
         'amplitude_threshold': float(query_params.get('amplitude_threshold', 0.005)),  # Match CLI default (though not used in processing)
-        'chord_window': float(query_params.get('chord_window', 0.75)),  # Default: 0.75 seconds
+        'chord_window': float(query_params.get('chord_window', 0.25)),  # Default: 0.25 seconds
+        'chord_window_confidence': float(query_params.get('chord_window_confidence', 0.485)),  # Default: 0.485
     }
     
     # Handle single-pitch override
@@ -291,7 +292,10 @@ async def websocket_endpoint(websocket: WebSocket):
             print(f"  Log: {config.get('log', False)}")
             print(f"  Log Interval: {config.get('log_interval', 0.5)}s")
             chord_window = config.get('chord_window', 0.0)
+            chord_window_confidence = config.get('chord_window_confidence', 0.485)
             print(f"  Chord Window: {chord_window}s {'(smoothing enabled)' if chord_window > 0 else '(instant)'}")
+            if chord_window > 0:
+                print(f"  Chord Window Confidence: {chord_window_confidence:.3f} (minimum for window results)")
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📊 Full Config JSON: {json.dumps(config, indent=2)}")
         
         # Send initial acknowledgment (include server log level for client awareness)
@@ -365,8 +369,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         if state.is_window_complete(chord_window):
                             # Get the best chord from accumulated predictions
                             best = state.get_best_chord()
-                            # Only output if confidence is at least 55%
-                            if best and best['confidence'] >= 0.55:
+                            # Only output if confidence meets threshold
+                            chord_window_confidence = config.get('chord_window_confidence', 0.485)
+                            if best and best['confidence'] >= chord_window_confidence:
                                 # Build the result to send
                                 smoothed_result = {
                                     "type": "chord",

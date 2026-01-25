@@ -26,8 +26,13 @@ Price Data:
 
 import argparse
 import asyncio
+import csv
+import hashlib
+import itertools
+import json
 import logging
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -93,8 +98,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--percent-beyond",
         type=str,
-        required=True,
-        help="Percentage beyond previous day's closing price. Can be a single value (e.g., 0.05 for 5%%) or two values separated by colon for puts:calls (e.g., 0.03:0.05 means 3%% for puts, 5%% for calls)"
+        required=False,
+        help="Percentage beyond previous day's closing price. Can be a single value (e.g., 0.05 for 5%%) or two values separated by colon for puts:calls (e.g., 0.03:0.05 means 3%% for puts, 5%% for calls). Required unless --grid-config is used."
     )
     parser.add_argument(
         "--risk-cap",
@@ -237,7 +242,62 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Hour at which all trades must be closed (in the timezone specified by --output-timezone). Default: None (hold to expiration). Example: --force-close-hour 15 closes all positions at 3:00 PM. P&L is calculated based on the underlying price at this time. Use this to avoid holding positions through market close."
     )
-    
+
+    # Data cache arguments
+    parser.add_argument(
+        "--no-data-cache",
+        action="store_true",
+        help="Disable binary data cache (always load from CSVs)"
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=str,
+        default=".options_cache",
+        help="Directory for binary data cache (default: .options_cache)"
+    )
+    parser.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="Delete all cached data files and exit"
+    )
+
+    # Grid search arguments
+    parser.add_argument(
+        "--grid-config",
+        type=str,
+        default=None,
+        help="Path to JSON config file for grid search mode. When provided, runs parameter optimization instead of normal analysis."
+    )
+    parser.add_argument(
+        "--grid-output",
+        type=str,
+        default="optimizer_results.csv",
+        help="Output CSV path for grid search results (default: optimizer_results.csv)"
+    )
+    parser.add_argument(
+        "--grid-sort",
+        type=str,
+        default="net_pnl",
+        choices=["net_pnl", "profit_factor", "win_rate", "roi"],
+        help="Sort metric for grid search results (default: net_pnl)"
+    )
+    parser.add_argument(
+        "--grid-top-n",
+        type=int,
+        default=10,
+        help="Number of top results to display from grid search (default: 10)"
+    )
+    parser.add_argument(
+        "--grid-dry-run",
+        action="store_true",
+        help="Show total grid search combinations without executing"
+    )
+    parser.add_argument(
+        "--grid-resume",
+        action="store_true",
+        help="Resume grid search from existing output CSV, skipping completed combinations"
+    )
+
     return parser.parse_args()
 
 
@@ -490,6 +550,10 @@ def get_previous_trading_day(date: datetime) -> datetime:
     return prev_trading_day
 
 
+# Module-level cache for DB price queries (avoids repeated DB hits in grid search)
+_db_price_cache: Dict[str, Any] = {}
+
+
 async def get_current_day_close_price(
     db: StockQuestDB,
     ticker: str,
@@ -497,10 +561,15 @@ async def get_current_day_close_price(
     logger: Optional[logging.Logger] = None
 ) -> Optional[Tuple[float, datetime.date]]:
     """Get the closing price for the trading day of reference_date.
-    
+
     Returns:
         Tuple of (close_price, trading_day_date) or None if not found
     """
+    # Check memo cache
+    cache_key = f"current:{ticker}:{reference_date.date()}"
+    if cache_key in _db_price_cache:
+        return _db_price_cache[cache_key]
+
     try:
         # Convert reference_date to ET timezone for market day calculation
         try:
@@ -552,10 +621,13 @@ async def get_current_day_close_price(
                     trading_date = trading_day
                 if logger:
                     logger.debug(f"DEBUG get_current_day_close_price: Returning close=${close_price:.2f} for date={trading_date}")
-                return (close_price, trading_date)
-        
+                result = (close_price, trading_date)
+                _db_price_cache[cache_key] = result
+                return result
+
         if logger:
             logger.debug(f"DEBUG get_current_day_close_price: No data found for {ticker} on {trading_day}")
+        _db_price_cache[cache_key] = None
         return None
     except Exception as e:
         error_msg = f"Error getting current day close for {ticker}: {e}"
@@ -573,10 +645,15 @@ async def get_previous_close_price(
     logger: Optional[logging.Logger] = None
 ) -> Optional[Tuple[float, datetime.date]]:
     """Get the closing price for the previous trading day relative to reference_date.
-    
+
     Returns:
         Tuple of (close_price, prev_trading_day_date) or None if not found
     """
+    # Check memo cache
+    cache_key = f"prev:{ticker}:{reference_date.date()}"
+    if cache_key in _db_price_cache:
+        return _db_price_cache[cache_key]
+
     try:
         # Get previous trading day
         prev_trading_day = get_previous_trading_day(reference_date)
@@ -624,8 +701,10 @@ async def get_previous_close_price(
                     prev_date = prev_trading_day
                 if logger:
                     logger.debug(f"DEBUG get_previous_close_price: Returning close=${close_price:.2f} for date={prev_date}")
-                return (close_price, prev_date)
-            
+                result = (close_price, prev_date)
+                _db_price_cache[cache_key] = result
+                return result
+
             # If not found, get the most recent close before the current trading day
             # Calculate the start of the current trading day to exclude it
             ref_date_for_cutoff = reference_date
@@ -667,10 +746,13 @@ async def get_previous_close_price(
                     prev_date = prev_trading_day
                 if logger:
                     logger.debug(f"DEBUG get_previous_close_price: Fallback returning close=${close_price:.2f} for date={prev_date}")
-                return (close_price, prev_date)
-        
+                result = (close_price, prev_date)
+                _db_price_cache[cache_key] = result
+                return result
+
         if logger:
             logger.debug(f"DEBUG get_previous_close_price: No data found for {ticker}")
+        _db_price_cache[cache_key] = None
         return None
     except Exception as e:
         error_msg = f"Error getting previous close for {ticker}: {e}"
@@ -784,14 +866,19 @@ async def get_price_at_time(
     logger: Optional[logging.Logger] = None
 ) -> Optional[float]:
     """Get the underlying price at or near a specific timestamp.
-    
+
     Tries multiple data sources in order:
     1. Hourly prices (most granular intraday)
     2. Daily prices (if hourly not available)
-    
+
     Returns:
         Price at the target time, or None if not found
     """
+    # Check memo cache (key includes hour for hourly resolution)
+    cache_key = f"price_at:{underlying}:{target_timestamp.strftime('%Y%m%d%H')}"
+    if cache_key in _db_price_cache:
+        return _db_price_cache[cache_key]
+
     try:
         # Convert to UTC for database query
         # Ensure we create datetime in the same way as working daily_prices queries
@@ -820,8 +907,9 @@ async def get_price_at_time(
                 price = float(rows[0]['close'])
                 if logger:
                     logger.debug(f"Found hourly price {price:.2f} for {underlying} near {target_timestamp}")
+                _db_price_cache[cache_key] = price
                 return price
-            
+
             # Fallback to daily price for that day
             # Get the trading day in ET
             try:
@@ -859,12 +947,14 @@ async def get_price_at_time(
                 price = float(rows[0]['close'])
                 if logger:
                     logger.debug(f"Found daily price {price:.2f} for {underlying} on {trading_day}")
+                _db_price_cache[cache_key] = price
                 return price
-            
+
             if logger:
                 logger.warning(f"No price data found for {underlying} near {target_timestamp}")
+            _db_price_cache[cache_key] = None
             return None
-            
+
     except Exception as e:
         if logger:
             logger.error(f"Error getting price at time for {underlying}: {e}")
@@ -1889,58 +1979,38 @@ async def process_single_csv(
     profit_target_pct: Optional[float],
     most_recent: bool = False,
     output_tz = None,
-    force_close_hour: Optional[int] = None
+    force_close_hour: Optional[int] = None,
+    cache_dir: str = ".options_cache",
+    no_data_cache: bool = False
 ) -> List[Dict[str, Any]]:
     """Process a single CSV file and return results.
-    
+
     This function is designed to be called in parallel by multiprocessing.
+    Uses binary cache for faster subsequent loads.
     """
     logger = get_logger(f"analyze_credit_spread_intervals_worker_{os.getpid()}", level=log_level)
-    
+
     try:
-        # Read CSV file
+        # Load CSV with caching support
         logger.info(f"Processing: {csv_path}")
-        df = pd.read_csv(csv_path)
-        df['source_file'] = csv_path
-        
-        # Validate required columns
-        required_columns = ['timestamp', 'ticker', 'type', 'strike', 'expiration']
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        if missing_columns:
-            logger.error(f"Missing required columns in {csv_path}: {missing_columns}")
+        try:
+            df = load_data_cached([csv_path], cache_dir=cache_dir, no_cache=no_data_cache, logger=logger)
+        except ValueError as e:
+            logger.error(f"Error loading {csv_path}: {e}")
             return []
-        
-        # Check for bid/ask columns
-        has_bid_ask = 'bid' in df.columns and 'ask' in df.columns
-        if not has_bid_ask:
-            logger.error(f"CSV {csv_path} must have 'bid' and 'ask' columns")
-            return []
-        
-        # Parse timestamps
-        df['timestamp'] = df['timestamp'].apply(parse_pst_timestamp)
-        
-        # Filter for 0DTE only
-        original_count = len(df)
-        df['expiration_date'] = pd.to_datetime(df['expiration']).dt.date
-        df['timestamp_date'] = df['timestamp'].apply(lambda x: x.date() if hasattr(x, 'date') else pd.to_datetime(x).date())
-        df = df[df['timestamp_date'] == df['expiration_date']].copy()
-        
-        filtered_count = len(df)
-        if filtered_count == 0:
-            logger.warning(f"No 0DTE options found in {csv_path}")
-            return []
-        
-        logger.info(f"Filtered to {filtered_count}/{original_count} 0DTE rows in {csv_path}")
-        
-        # Clean up temporary columns
-        df = df.drop(columns=['expiration_date', 'timestamp_date'])
-        
-        # Round to 15-minute intervals
-        df['interval'] = df['timestamp'].apply(round_to_15_minutes)
-        
+
         # Initialize database
+        # If db_path is None, check environment variable or use empty string
+        # QuestDBConnection doesn't handle None properly (calls .startswith() on None)
+        # Note: os is already imported at module level
+        if db_path is None:
+            # Check environment variable for default connection string
+            db_config = os.getenv('QUESTDB_CONNECTION_STRING', '') or os.getenv('QUESTDB_URL', '')
+        else:
+            db_config = db_path
+        
         db = StockQuestDB(
-            db_path if db_path else None,
+            db_config,
             enable_cache=not no_cache,
             logger=logger
         )
@@ -2185,9 +2255,562 @@ def generate_hourly_histogram(results: List[Dict], output_path: str, output_tz):
     print("="*80)
 
 
+# ============================================================================
+# DATA CACHE FUNCTIONS
+# ============================================================================
+
+def compute_cache_key(csv_paths: List[str]) -> str:
+    """Hash file paths + sizes + mtimes to create a cache key."""
+    items = []
+    for p in sorted(csv_paths):
+        abs_p = os.path.abspath(p)
+        stat = os.stat(abs_p)
+        items.append(f"{abs_p}:{stat.st_size}:{stat.st_mtime}")
+    return hashlib.sha256("\n".join(items).encode()).hexdigest()[:16]
+
+
+def _load_and_preprocess_csvs(csv_paths: List[str], logger=None) -> pd.DataFrame:
+    """Load CSVs, validate, parse timestamps, filter 0DTE, round to intervals."""
+    dfs = []
+    for csv_path in csv_paths:
+        if logger:
+            logger.info(f"Reading: {csv_path}")
+        temp_df = pd.read_csv(csv_path)
+        temp_df['source_file'] = csv_path
+        dfs.append(temp_df)
+
+    df = pd.concat(dfs, ignore_index=True)
+    if logger:
+        logger.info(f"Combined {len(dfs)} file(s) into {len(df)} total rows")
+
+    # Validate required columns
+    required_columns = ['timestamp', 'ticker', 'type', 'strike', 'expiration']
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Missing required columns: {missing_columns}")
+
+    has_bid_ask = 'bid' in df.columns and 'ask' in df.columns
+    if not has_bid_ask:
+        raise ValueError("CSV must have 'bid' and 'ask' columns for option pricing")
+
+    # Parse timestamps
+    if logger:
+        logger.info("Parsing timestamps...")
+    df['timestamp'] = df['timestamp'].apply(parse_pst_timestamp)
+
+    # Filter for 0DTE
+    if logger:
+        logger.info("Filtering for 0DTE options...")
+    original_count = len(df)
+    df['expiration_date'] = pd.to_datetime(df['expiration']).dt.date
+    df['timestamp_date'] = df['timestamp'].apply(lambda x: x.date() if hasattr(x, 'date') else pd.to_datetime(x).date())
+    df = df[df['timestamp_date'] == df['expiration_date']].copy()
+
+    if len(df) == 0:
+        raise ValueError("No 0DTE options found")
+
+    if logger:
+        logger.info(f"Filtered to {len(df)}/{original_count} 0DTE rows")
+
+    df = df.drop(columns=['expiration_date', 'timestamp_date'])
+
+    # Round to 15-minute intervals
+    df['interval'] = df['timestamp'].apply(round_to_15_minutes)
+
+    return df
+
+
+def load_data_cached(csv_paths: List[str], cache_dir: str = ".options_cache",
+                     no_cache: bool = False, logger=None) -> pd.DataFrame:
+    """Load preprocessed data from cache or CSVs."""
+    if not no_cache:
+        cache_key = compute_cache_key(csv_paths)
+        cache_file = os.path.join(cache_dir, f"{cache_key}.pkl")
+        if os.path.exists(cache_file):
+            if logger:
+                logger.info(f"Loading from binary cache: {cache_file}")
+            return pd.read_pickle(cache_file)
+
+    df = _load_and_preprocess_csvs(csv_paths, logger=logger)
+
+    if not no_cache:
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_file = os.path.join(cache_dir, f"{compute_cache_key(csv_paths)}.pkl")
+        df.to_pickle(cache_file)
+        if logger:
+            logger.info(f"Saved binary cache: {cache_file} ({os.path.getsize(cache_file) / 1024 / 1024:.1f} MB)")
+
+    return df
+
+
+def clear_cache(cache_dir: str = ".options_cache"):
+    """Delete all cached files."""
+    if not os.path.exists(cache_dir):
+        print(f"Cache directory does not exist: {cache_dir}")
+        return
+    count = 0
+    for f in os.listdir(cache_dir):
+        if f.endswith('.pkl'):
+            os.remove(os.path.join(cache_dir, f))
+            count += 1
+    print(f"Cleared {count} cached file(s) from {cache_dir}")
+
+
+# ============================================================================
+# GRID SEARCH FUNCTIONS
+# ============================================================================
+
+def _float_range(start, stop, step):
+    """Generate float values from start to stop (inclusive) with given step."""
+    values = []
+    current = start
+    while current <= stop + step * 0.01:
+        values.append(round(current, 6))
+        current += step
+    return values
+
+
+def _expand_grid_param(name, spec):
+    """Expand a grid parameter specification into a list of values."""
+    if isinstance(spec, list):
+        return spec
+    if isinstance(spec, dict):
+        if 'min' in spec and 'max' in spec and 'step' in spec:
+            return _float_range(spec['min'], spec['max'], spec['step'])
+        raise ValueError(f"Dict spec for '{name}' must have min, max, step keys")
+    return [spec]
+
+
+def _generate_combinations(grid_params: dict) -> List[dict]:
+    """Generate all parameter combinations from the grid specification."""
+    param_names = []
+    param_values = []
+    for name, spec in grid_params.items():
+        param_names.append(name)
+        param_values.append(_expand_grid_param(name, spec))
+
+    combinations = []
+    for values in itertools.product(*param_values):
+        combinations.append(dict(zip(param_names, values)))
+    return combinations
+
+
+def _combo_to_key(combo: dict) -> tuple:
+    """Create a hashable key from a parameter combination."""
+    return tuple(sorted(combo.items()))
+
+
+def _load_existing_grid_results(csv_path: str) -> set:
+    """Load existing grid results to support resume."""
+    existing_keys = set()
+    if not os.path.exists(csv_path):
+        return existing_keys
+    with open(csv_path, 'r') as f:
+        reader = csv.DictReader(f)
+        param_cols = [
+            'option_type', 'percent_beyond_put', 'percent_beyond_call',
+            'max_spread_width', 'min_contract_price', 'max_credit_width_ratio',
+            'max_strike_distance_pct', 'max_trading_hour', 'profit_target_pct',
+        ]
+        for row in reader:
+            combo = {}
+            for col in param_cols:
+                if col in row and row[col]:
+                    try:
+                        val = float(row[col])
+                        if val == int(val) and '.' not in row[col]:
+                            val = int(val)
+                        combo[col] = val
+                    except (ValueError, TypeError):
+                        combo[col] = row[col]
+            existing_keys.add(_combo_to_key(combo))
+    return existing_keys
+
+
+def compute_metrics(results: List[Dict]) -> dict:
+    """Compute aggregate trading metrics from a list of interval results."""
+    if not results:
+        return {
+            'total_trades': 0, 'win_rate': 0.0, 'total_credits': 0.0,
+            'total_gains': 0.0, 'total_losses': 0.0, 'net_pnl': 0.0,
+            'roi': 0.0, 'profit_factor': 0.0,
+        }
+
+    successful_trades = []
+    failed_trades = []
+    pending_trades = []
+
+    for result in results:
+        backtest_result = result.get('backtest_successful')
+        credit = result['best_spread'].get('total_credit') or result['best_spread'].get('net_credit_per_contract', 0)
+        max_loss = result['best_spread'].get('total_max_loss') or result['best_spread'].get('max_loss_per_contract', 0)
+
+        actual_pnl_per_share = result.get('actual_pnl_per_share')
+        num_contracts = result['best_spread'].get('num_contracts', 1)
+        if actual_pnl_per_share is not None and num_contracts:
+            actual_pnl = actual_pnl_per_share * num_contracts * 100
+        else:
+            actual_pnl = None
+
+        trade_info = {'credit': credit, 'max_loss': max_loss, 'actual_pnl': actual_pnl}
+
+        if backtest_result is True:
+            successful_trades.append(trade_info)
+        elif backtest_result is False:
+            failed_trades.append(trade_info)
+        else:
+            pending_trades.append(trade_info)
+
+    total_trades = len(results)
+    num_successful = len(successful_trades)
+    num_failed = len(failed_trades)
+    testable_trades = num_successful + num_failed
+    win_rate = (num_successful / testable_trades * 100) if testable_trades > 0 else 0
+
+    total_credits = sum(t['credit'] for t in successful_trades + failed_trades + pending_trades)
+
+    total_gains = 0.0
+    for t in successful_trades:
+        if t['actual_pnl'] is not None:
+            total_gains += t['actual_pnl']
+        else:
+            total_gains += t['credit']
+
+    total_losses = 0.0
+    for t in failed_trades:
+        if t['actual_pnl'] is not None:
+            total_losses += abs(t['actual_pnl'])
+        else:
+            total_losses += t['max_loss']
+
+    net_pnl = total_gains - total_losses
+
+    total_risk_deployed = sum(t['max_loss'] for t in successful_trades + failed_trades + pending_trades)
+    roi = (net_pnl / total_risk_deployed * 100) if total_risk_deployed > 0 else 0
+
+    if total_losses > 0:
+        profit_factor = total_gains / total_losses
+    elif total_gains > 0:
+        profit_factor = float('inf')
+    else:
+        profit_factor = 0.0
+
+    return {
+        'total_trades': total_trades,
+        'win_rate': round(win_rate, 2),
+        'total_credits': round(total_credits, 2),
+        'total_gains': round(total_gains, 2),
+        'total_losses': round(total_losses, 2),
+        'net_pnl': round(net_pnl, 2),
+        'roi': round(roi, 2),
+        'profit_factor': round(profit_factor, 4),
+    }
+
+
+async def run_backtest_with_params(
+    interval_groups,
+    db,
+    params: dict,
+    logger
+) -> dict:
+    """Run a full backtest with given params, return metrics dict."""
+    results = []
+    option_types = ['call', 'put'] if params.get('option_type', 'both') == 'both' else [params['option_type']]
+
+    percent_beyond = (params.get('percent_beyond_put', 0.02), params.get('percent_beyond_call', 0.02))
+
+    for interval_time, interval_df in interval_groups:
+        for opt_type in option_types:
+            result = await analyze_interval(
+                db,
+                interval_df,
+                opt_type,
+                percent_beyond,
+                params.get('risk_cap'),
+                params.get('min_spread_width', 5),
+                params.get('max_spread_width', 200),
+                params.get('use_mid_price', False),
+                params.get('min_contract_price', 0),
+                params.get('underlying_ticker'),
+                logger,
+                params.get('max_credit_width_ratio', 0.60),
+                params.get('max_strike_distance_pct'),
+                False,  # use_current_price
+                params.get('max_trading_hour', 15),
+                params.get('profit_target_pct'),
+                params.get('output_tz'),
+                params.get('force_close_hour'),
+            )
+            if result:
+                results.append(result)
+
+    # Apply top_n filter if specified
+    if params.get('top_n') and results:
+        results = filter_top_n_per_day(results, params['top_n'])
+
+    return compute_metrics(results)
+
+
+def _format_grid_top_results(results: List[dict], sort_by: str, top_n: int) -> str:
+    """Format top grid search results for terminal display."""
+    lines = []
+    lines.append(f"\n{'='*80}")
+    lines.append(f" TOP {min(top_n, len(results))} RESULTS (sorted by {sort_by})")
+    lines.append(f"{'='*80}")
+
+    for i, r in enumerate(results[:top_n], 1):
+        combo = r['combo']
+        m = r['metrics']
+
+        pf_str = f"{m['profit_factor']:.1f}" if m['profit_factor'] != float('inf') else 'inf'
+        pb_put = combo.get('percent_beyond_put', '-')
+        pb_call = combo.get('percent_beyond_call', '-')
+
+        param_str = (
+            f"type={combo.get('option_type', '-')} "
+            f"pb={pb_put}:{pb_call} "
+            f"msw={combo.get('max_spread_width', '-')} "
+            f"mcp={combo.get('min_contract_price', '-')} "
+            f"mcr={combo.get('max_credit_width_ratio', '-')} "
+            f"msd={combo.get('max_strike_distance_pct', '-')} "
+            f"mth={combo.get('max_trading_hour', '-')} "
+            f"ptp={combo.get('profit_target_pct', '-')}"
+        )
+
+        lines.append(
+            f"#{i:<3} Net P&L: ${m['net_pnl']:>10,.2f}  "
+            f"PF: {pf_str:<5}  "
+            f"WR: {m['win_rate']:.0f}%  "
+            f"Trades: {m['total_trades']:<4}  "
+            f"| {param_str}"
+        )
+    return '\n'.join(lines)
+
+
+def _write_grid_results_csv(results: List[dict], output_path: str):
+    """Write grid search results to CSV."""
+    if not results:
+        return
+
+    all_param_keys = set()
+    for r in results:
+        all_param_keys.update(r['combo'].keys())
+    param_cols = sorted(all_param_keys)
+    metric_cols = ['total_trades', 'win_rate', 'total_credits', 'total_gains',
+                   'total_losses', 'net_pnl', 'profit_factor', 'roi']
+    fieldnames = ['rank'] + param_cols + metric_cols
+
+    with open(output_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for i, r in enumerate(results, 1):
+            row = {'rank': i}
+            row.update(r['combo'])
+            row.update(r['metrics'])
+            writer.writerow(row)
+
+    print(f"\nResults written to: {output_path} ({len(results)} rows)")
+
+
+async def run_grid_search(args):
+    """Run the grid search optimization mode."""
+    logger = get_logger("grid_search", level=getattr(args, 'log_level', 'INFO'))
+
+    # Load grid config
+    with open(args.grid_config, 'r') as f:
+        config = json.load(f)
+
+    fixed_params = config.get('fixed_params', {})
+    grid_params = config.get('grid_params', {})
+
+    if not grid_params:
+        print("Error: grid_params section is empty in config")
+        return 1
+
+    # Generate combinations
+    combinations = _generate_combinations(grid_params)
+    total_combos = len(combinations)
+
+    # Show grid info
+    print(f"Grid Search Configuration:")
+    print(f"  Config file: {args.grid_config}")
+    print(f"  Parameters: {len(grid_params)}")
+    for name, spec in grid_params.items():
+        values = _expand_grid_param(name, spec)
+        if len(values) <= 5:
+            print(f"    {name}: {len(values)} values {values}")
+        else:
+            print(f"    {name}: {len(values)} values [{values[0]} ... {values[-1]}]")
+    print(f"  Total combinations: {total_combos:,}")
+    print(f"  Sort by: {args.grid_sort}")
+    print(f"  Output: {args.grid_output}")
+
+    if args.grid_dry_run:
+        print(f"\n--grid-dry-run: Would run {total_combos:,} backtests. Exiting.")
+        return 0
+
+    # Resolve CSV paths from fixed_params
+    csv_paths = []
+    if 'csv_path' in fixed_params:
+        import glob as glob_module
+        raw_paths = fixed_params['csv_path']
+        if isinstance(raw_paths, str):
+            raw_paths = [raw_paths]
+        for p in raw_paths:
+            p = os.path.expandvars(p)
+            expanded = glob_module.glob(p)
+            if expanded:
+                csv_paths.extend(sorted(expanded))
+            else:
+                csv_paths.append(p)
+    elif 'csv_dir' in fixed_params and fixed_params.get('underlying_ticker'):
+        ticker = fixed_params['underlying_ticker']
+        found = find_csv_files_in_dir(
+            fixed_params['csv_dir'], ticker,
+            fixed_params.get('start_date'), fixed_params.get('end_date'),
+            logger
+        )
+        csv_paths = [str(p) for p in found]
+
+    if not csv_paths:
+        print("Error: No CSV files resolved from fixed_params")
+        return 1
+
+    print(f"  CSV files: {len(csv_paths)}")
+
+    # Load data (ONCE) using cache
+    cache_dir = getattr(args, 'cache_dir', '.options_cache')
+    no_cache = getattr(args, 'no_data_cache', False)
+    try:
+        df = load_data_cached(csv_paths, cache_dir=cache_dir, no_cache=no_cache, logger=logger)
+    except (ValueError, Exception) as e:
+        print(f"Error loading data: {e}")
+        return 1
+
+    print(f"  Loaded {len(df):,} rows, {df['interval'].nunique()} intervals")
+
+    # Initialize DB (ONCE)
+    db_path = fixed_params.get('db_path')
+    if isinstance(db_path, str) and db_path.startswith('$'):
+        db_path = os.environ.get(db_path[1:], None)
+    db = StockQuestDB(
+        db_path,
+        enable_cache=not fixed_params.get('no_cache', False),
+        logger=logger
+    )
+
+    # Pre-group intervals (ONCE)
+    interval_groups = list(df.groupby('interval'))
+    print(f"  Interval groups: {len(interval_groups)}")
+
+    # Resolve output timezone
+    output_tz = None
+    if fixed_params.get('output_timezone'):
+        try:
+            output_tz = resolve_timezone(fixed_params['output_timezone'])
+        except Exception:
+            pass
+
+    # Resume support
+    existing_keys = set()
+    if args.grid_resume:
+        existing_keys = _load_existing_grid_results(args.grid_output)
+        if existing_keys:
+            print(f"  Resuming: {len(existing_keys)} existing results found, skipping those.")
+
+    # Filter pending combos
+    pending_combos = []
+    for combo in combinations:
+        if _combo_to_key(combo) not in existing_keys:
+            pending_combos.append(combo)
+
+    if not pending_combos:
+        print("\nAll combinations already completed. Nothing to run.")
+        await db.close()
+        return 0
+
+    print(f"  Combinations to run: {len(pending_combos):,}")
+    print(f"\nStarting grid search...")
+    print("-" * 80)
+
+    # Run grid search
+    successful_results = []
+    failed_count = 0
+    start_time = time.time()
+
+    try:
+        for idx, combo in enumerate(pending_combos, 1):
+            # Build params from combo + fixed_params
+            params = dict(fixed_params)
+            params.update(combo)
+            params['output_tz'] = output_tz
+
+            try:
+                metrics = await run_backtest_with_params(interval_groups, db, params, logger)
+                if metrics['total_trades'] > 0:
+                    successful_results.append({'combo': combo, 'metrics': metrics})
+                    print(
+                        f"  [{idx}/{len(pending_combos)}] OK  "
+                        f"Net P&L: ${metrics['net_pnl']:>10,.2f}  "
+                        f"PF: {metrics['profit_factor']:.2f}  "
+                        f"WR: {metrics['win_rate']:.0f}%  "
+                        f"Trades: {metrics['total_trades']}"
+                    )
+                else:
+                    failed_count += 1
+                    if idx <= 5 or idx % 100 == 0:
+                        print(f"  [{idx}/{len(pending_combos)}] SKIP: No trades")
+            except Exception as e:
+                failed_count += 1
+                if idx <= 5 or idx % 100 == 0:
+                    print(f"  [{idx}/{len(pending_combos)}] FAIL: {str(e)[:80]}")
+
+    finally:
+        await db.close()
+
+    elapsed = time.time() - start_time
+    print("-" * 80)
+    print(f"Completed in {elapsed:.1f}s | Successful: {len(successful_results)} | Failed/Skipped: {failed_count}")
+
+    if not successful_results:
+        print("\nNo successful results to report.")
+        return 0
+
+    # Sort results
+    def sort_key(r):
+        val = r['metrics'].get(args.grid_sort, 0)
+        if val == float('inf'):
+            return float('inf')
+        return val
+
+    successful_results.sort(key=sort_key, reverse=True)
+
+    # Display top results
+    print(_format_grid_top_results(successful_results, args.grid_sort, args.grid_top_n))
+
+    # Write CSV
+    _write_grid_results_csv(successful_results, args.grid_output)
+
+    return 0
+
+
 async def main():
     args = parse_args()
-    
+
+    # Handle --clear-cache
+    if args.clear_cache:
+        clear_cache(args.cache_dir)
+        return 0
+
+    # Handle --grid-config (grid search mode)
+    if args.grid_config:
+        return await run_grid_search(args)
+
+    # Validate --percent-beyond is required in normal mode
+    if not args.percent_beyond:
+        print("Error: --percent-beyond is required (unless using --grid-config)")
+        return 1
+
     # Validate that either csv_path or csv_dir is provided
     if not args.csv_path and not args.csv_dir:
         print("Error: Either --csv-path or --csv-dir must be provided")
@@ -2308,7 +2931,9 @@ async def main():
                 args.profit_target_pct,
                 args.most_recent,
                 output_tz,
-                args.force_close_hour
+                args.force_close_hour,
+                args.cache_dir,
+                args.no_data_cache
             )
             process_args.append(args_tuple)
         
@@ -2327,82 +2952,27 @@ async def main():
         # Set a flag to skip the normal processing
         skip_normal_processing = True
     else:
-        # Read CSV file(s) sequentially (original behavior)
+        # Read CSV file(s) sequentially with binary cache support
         logger.info(f"Processing {len(csv_paths)} file(s) sequentially")
-        
-        dfs = []
-        for csv_path in csv_paths:
-            try:
-                logger.info(f"Reading: {csv_path}")
-                temp_df = pd.read_csv(csv_path)
-                temp_df['source_file'] = csv_path
-                dfs.append(temp_df)
-            except Exception as e:
-                logger.error(f"Failed to read CSV file {csv_path}: {e}")
-                return 1
-        
-        # Combine all dataframes
-        df = pd.concat(dfs, ignore_index=True)
-        logger.info(f"Combined {len(dfs)} file(s) into {len(df)} total rows")
-        
+
+        try:
+            df = load_data_cached(
+                csv_paths,
+                cache_dir=args.cache_dir,
+                no_cache=args.no_data_cache,
+                logger=logger
+            )
+        except ValueError as e:
+            logger.error(str(e))
+            return 1
+        except Exception as e:
+            logger.error(f"Failed to load CSV data: {e}")
+            return 1
+
         skip_normal_processing = False
-    
+
     # Normal processing (when not using multiprocessing)
     if not skip_normal_processing:
-        # Validate required columns
-        required_columns = ['timestamp', 'ticker', 'type', 'strike', 'expiration']
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        if missing_columns:
-            logger.error(f"Missing required columns: {missing_columns}")
-            return 1
-        
-        # Check for price columns - require bid/ask (no day_close fallback)
-        has_bid_ask = 'bid' in df.columns and 'ask' in df.columns
-        if not has_bid_ask:
-            logger.error("CSV must have 'bid' and 'ask' columns for option pricing")
-            return 1
-        
-        # Check how many rows have valid bid/ask
-        bid_ask_count = df[['bid', 'ask']].notna().all(axis=1).sum()
-        if bid_ask_count < len(df) * 0.1:  # Less than 10% have bid/ask
-            logger.warning(f"Only {bid_ask_count}/{len(df)} rows have valid bid/ask prices")
-        
-        # Parse timestamps (assumed to be in PST)
-        logger.info("Parsing timestamps...")
-        df['timestamp'] = df['timestamp'].apply(parse_pst_timestamp)
-        
-        # Store most recent timestamp from original data (before filtering) for error messages
-        most_recent_timestamp_original = df['timestamp'].max() if len(df) > 0 else None
-        
-        # Filter for 0DTE only: keep rows where timestamp date matches expiration date
-        # This ensures we only analyze options on their expiration day
-        logger.info("Filtering for 0DTE options (timestamp date == expiration date)...")
-        original_count = len(df)
-        
-        # Parse expiration column to date
-        df['expiration_date'] = pd.to_datetime(df['expiration']).dt.date
-        # Extract date from timestamp
-        df['timestamp_date'] = df['timestamp'].apply(lambda x: x.date() if hasattr(x, 'date') else pd.to_datetime(x).date())
-        
-        # Keep only 0DTE rows
-        df = df[df['timestamp_date'] == df['expiration_date']].copy()
-        
-        filtered_count = len(df)
-        if filtered_count == 0:
-            if most_recent_timestamp_original:
-                most_recent_str = format_timestamp(most_recent_timestamp_original, output_tz)
-                logger.error(f"No 0DTE options found (no rows where timestamp date matches expiration date). Most recent timestamp in CSV: {most_recent_str}")
-            else:
-                logger.error("No 0DTE options found (no rows where timestamp date matches expiration date)")
-            return 1
-        
-        logger.info(f"Filtered to {filtered_count}/{original_count} 0DTE rows")
-        
-        # Clean up temporary columns
-        df = df.drop(columns=['expiration_date', 'timestamp_date'])
-        
-        # Round to 15-minute intervals
-        df['interval'] = df['timestamp'].apply(round_to_15_minutes)
         
         # Initialize database
         logger.info("Initializing database connection...")

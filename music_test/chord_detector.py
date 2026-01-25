@@ -14,8 +14,8 @@ def parse_args():
     parser.add_argument('--log', action='store_true', help='Enable logging mode with timestamps')
     parser.add_argument('--log-interval', type=float, default=0.5, help='Logging interval in seconds (default: 0.5)')
     parser.add_argument('--progression', action='store_true', default=True, help='Enable chord progression analysis (default: enabled)')
-    parser.add_argument('--sensitivity', type=float, default=1.0, help='Detection sensitivity (0.1-2.0, default: 1.0)')
-    parser.add_argument('--silence-threshold', type=float, default=0.015, help='Silence threshold (0-1, default: 0.015)')
+    parser.add_argument('--sensitivity', type=float, default=0.8, help='Detection sensitivity (0.1-2.0, default: 0.8)')
+    parser.add_argument('--silence-threshold', type=float, default=0.005, help='Silence threshold (0-1, default: 0.005)')
     parser.add_argument('--debug', action='store_true', help='Show audio levels for threshold tuning')
     parser.add_argument('--instrument', choices=list(INSTRUMENT_PRESETS.keys()), default='guitar', 
                        help='Instrument preset for frequency filtering (default: guitar)')
@@ -32,8 +32,9 @@ def parse_args():
     parser.add_argument('--show-chroma', action='store_true', help='Show chroma vector along with frequencies')
     parser.add_argument('--single-pitch', action='store_true', help='Use single-pitch detection (autocorrelation only)')
     parser.add_argument('--multi-pitch', action='store_true', default=True, help='Enable multi-pitch detection using FFT (default, better for chords)')
-    parser.add_argument('--confidence-threshold', type=float, default=0.3, help='Minimum confidence score to show chords (default: 0.3)')
-    parser.add_argument('--chord-window', type=float, default=0.75, help='Chord smoothing window in seconds (0=disabled, default: 0.75)')
+    parser.add_argument('--confidence-threshold', type=float, default=0.2, help='Minimum confidence score to show chords (default: 0.2)')
+    parser.add_argument('--chord-window', type=float, default=0.25, help='Chord smoothing window in seconds (0=disabled, default: 0.25)')
+    parser.add_argument('--chord-window-confidence', type=float, default=0.485, help='Minimum confidence for chord-window results (default: 0.485)')
     parser.add_argument('--list-devices', action='store_true', help='List available audio input devices and exit')
     parser.add_argument('--device', type=int, help='Audio input device ID (use --list-devices to see available devices)')
     args = parser.parse_args()
@@ -143,7 +144,10 @@ def main():
     print(f"  Log Interval: {args.log_interval}s")
     print(f"  Wait Time: {args.wait_time}s")
     chord_window = getattr(args, 'chord_window', 0.0)
+    chord_window_confidence = getattr(args, 'chord_window_confidence', 0.485)
     print(f"  Chord Window: {chord_window}s {'(smoothing enabled)' if chord_window > 0 else '(instant)'}")
+    if chord_window > 0:
+        print(f"  Chord Window Confidence: {chord_window_confidence:.3f} (minimum for window results)")
     
     # Show mode information
     if args.frequencies_only:
@@ -187,6 +191,7 @@ def main():
         'log': args.log,
         'log_interval': args.log_interval,
         'chord_window': chord_window,
+        'chord_window_confidence': getattr(args, 'chord_window_confidence', 0.485),
         'low_freq': low_freq,
         'high_freq': high_freq,
         'instrument_name': instrument_name,
@@ -226,8 +231,8 @@ def main():
                         # Check if window is complete
                         if state.is_window_complete(chord_window):
                             best = state.get_best_chord()
-                            # Only output if confidence is at least 55%
-                            if best and best['confidence'] >= 0.55:
+                            # Only output if confidence meets threshold
+                            if best and best['confidence'] >= config.get('chord_window_confidence', 0.485):
                                 # Format and print the result
                                 timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
                                 stability = state.update_chord_stability(best['chord'])

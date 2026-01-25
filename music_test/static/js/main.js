@@ -39,9 +39,9 @@ function getConfigFromURL() {
   const params = new URLSearchParams(window.location.search);
   const defaultConfig = {
     instrument: 'guitar',
-    sensitivity: 1.0,
-    confidence_threshold: 0.3,  // Default
-    silence_threshold: 0.015,  // Default
+    sensitivity: 0.8,  // Default
+    confidence_threshold: 0.2,  // Default
+    silence_threshold: 0.005,  // Default
     amplitude_threshold: 0.005,  // Match CLI default
     overlap: 0.8,  // Default
     progression: true,
@@ -56,7 +56,8 @@ function getConfigFromURL() {
     debug: false,
     log: false,
     log_interval: 0.5,
-    chord_window: 0.75  // Default: chord smoothing window in seconds
+    chord_window: 0.25,  // Default: chord smoothing window in seconds
+    chord_window_confidence: 0.485  // Default: minimum confidence for chord-window results
   };
 
   const config = { ...defaultConfig };
@@ -89,12 +90,12 @@ function initializeSettings() {
 
   // Update UI with config values
   document.getElementById('instrument').value = config.instrument || 'guitar';
-  document.getElementById('sensitivity').value = config.sensitivity || 1.0;
-  document.getElementById('sensitivityValue').textContent = config.sensitivity || 1.0;
-  document.getElementById('confidenceThreshold').value = config.confidence_threshold || 0.3;
-  document.getElementById('confidenceValue').textContent = config.confidence_threshold || 0.3;
-  document.getElementById('silenceThreshold').value = config.silence_threshold || 0.015;
-  document.getElementById('silenceValue').textContent = config.silence_threshold || 0.015;
+  document.getElementById('sensitivity').value = config.sensitivity || 0.8;
+  document.getElementById('sensitivityValue').textContent = config.sensitivity || 0.8;
+  document.getElementById('confidenceThreshold').value = config.confidence_threshold || 0.2;
+  document.getElementById('confidenceValue').textContent = config.confidence_threshold || 0.2;
+  document.getElementById('silenceThreshold').value = config.silence_threshold || 0.005;
+  document.getElementById('silenceValue').textContent = config.silence_threshold || 0.005;
   document.getElementById('overlap').value = config.overlap || 0.8;
   document.getElementById('overlapValue').textContent = config.overlap || 0.8;
   document.getElementById('progression').checked = config.progression !== false;
@@ -108,8 +109,16 @@ function initializeSettings() {
   const chordWindowEl = document.getElementById('chordWindow');
   const chordWindowValueEl = document.getElementById('chordWindowValue');
   if (chordWindowEl && chordWindowValueEl) {
-    chordWindowEl.value = config.chord_window || 0.75;
-    chordWindowValueEl.textContent = config.chord_window || 0.75;
+    chordWindowEl.value = config.chord_window || 0.25;
+    chordWindowValueEl.textContent = config.chord_window || 0.25;
+  }
+  
+  // Chord window confidence setting
+  const chordWindowConfidenceEl = document.getElementById('chordWindowConfidence');
+  const chordWindowConfidenceValueEl = document.getElementById('chordWindowConfidenceValue');
+  if (chordWindowConfidenceEl && chordWindowConfidenceValueEl) {
+    chordWindowConfidenceEl.value = config.chord_window_confidence || 0.485;
+    chordWindowConfidenceValueEl.textContent = config.chord_window_confidence || 0.485;
   }
 }
 
@@ -249,6 +258,9 @@ function handleWebSocketMessage(data) {
       logWithTimestamp('  Log:', config.log);
       logWithTimestamp('  Log Interval:', config.log_interval);
       logWithTimestamp('  Chord Window:', config.chord_window, config.chord_window > 0 ? '(smoothing enabled)' : '(instant)');
+      if (config.chord_window > 0) {
+        logWithTimestamp('  Chord Window Confidence:', config.chord_window_confidence || 0.485);
+      }
       if (serverDebug) {
         logWithTimestamp('  Server Log Level: DEBUG (server-side debug enabled)');
       }
@@ -545,6 +557,14 @@ if (chordWindowSlider) {
   });
 }
 
+// Chord window confidence slider (if it exists)
+const chordWindowConfidenceSlider = document.getElementById('chordWindowConfidence');
+if (chordWindowConfidenceSlider) {
+  chordWindowConfidenceSlider.addEventListener('input', (e) => {
+    document.getElementById('chordWindowConfidenceValue').textContent = e.target.value;
+  });
+}
+
 // Handle settings form submission
 settingsForm.addEventListener('submit', (e) => {
   e.preventDefault();
@@ -572,7 +592,15 @@ settingsForm.addEventListener('submit', (e) => {
   // Get chord_window value from the form
   const chordWindowEl = document.getElementById('chordWindow');
   if (chordWindowEl) {
-    config.chord_window = parseFloat(chordWindowEl.value) || 0.75;
+    config.chord_window = parseFloat(chordWindowEl.value) || 0.25;
+  }
+  
+  // Get chord_window_confidence value from the form
+  const chordWindowConfidenceEl = document.getElementById('chordWindowConfidence');
+  if (chordWindowConfidenceEl) {
+    config.chord_window_confidence = parseFloat(chordWindowConfidenceEl.value) || 0.485;
+  } else {
+    config.chord_window_confidence = parseFloat(config.chord_window_confidence) || 0.485;
   }
 
   // Set amplitude_threshold to match silence_threshold (CLI behavior)
@@ -586,9 +614,9 @@ settingsForm.addEventListener('submit', (e) => {
   // Ensure all other defaults are set if missing
   const defaultConfig = {
     instrument: 'guitar',
-    sensitivity: 1.0,
-    confidence_threshold: 0.3,  // Default
-    silence_threshold: 0.015,  // Default
+    sensitivity: 0.8,  // Default
+    confidence_threshold: 0.2,  // Default
+    silence_threshold: 0.005,  // Default
     amplitude_threshold: 0.005,
     overlap: 0.8,  // Default
     progression: true,
@@ -603,7 +631,8 @@ settingsForm.addEventListener('submit', (e) => {
     debug: false,
     log: false,
     log_interval: 0.5,
-    chord_window: 0.75  // Default
+    chord_window: 0.25,  // Default
+    chord_window_confidence: 0.485  // Default
   };
 
   // Merge with defaults to ensure all values are set
