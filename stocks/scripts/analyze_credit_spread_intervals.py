@@ -12,6 +12,7 @@ This program:
 7. Uses QuestDB to get previous trading day's closing and opening prices
 
 Features:
+- Min Trading Hour: Starts counting transactions only after specified hour (optional, uses output timezone)
 - Max Trading Hour: Prevents adding positions after specified hour (default: 3PM in output timezone)
 - Force Close Hour: Close all positions at specified hour, P&L calculated based on actual spread value
 - Multiprocessing: Process multiple files in parallel using multiple CPU cores
@@ -225,6 +226,12 @@ def parse_args() -> argparse.Namespace:
         help="Maximum hour of the day (in the timezone specified by --output-timezone) after which no new positions can be added. Default: 15 (3:00 PM). This prevents trading in the last hour when volatility can be extreme. Example: --max-trading-hour 14 stops trading after 2:00 PM. Uses same timezone as --output-timezone."
     )
     parser.add_argument(
+        "--min-trading-hour",
+        type=int,
+        default=None,
+        help="Minimum hour of the day (in the timezone specified by --output-timezone) before which no new positions can be added. Default: None (no minimum). This allows you to start counting transactions only after a certain hour. Example: --min-trading-hour 9 starts trading only after 9:00 AM. Uses same timezone as --output-timezone."
+    )
+    parser.add_argument(
         "--processes",
         type=int,
         default=1,
@@ -235,6 +242,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Profit target as percentage of max credit. If spread reaches this profit level, it is considered closed early. Example: --profit-target-pct 0.50 means exit when 50%% of max profit is reached. This simulates taking profits early rather than holding to expiration."
+    )
+    parser.add_argument(
+        "--max-live-capital",
+        type=float,
+        default=None,
+        help="Maximum dollar amount of active capital (max loss exposure) allowed per calendar day. Positions that would exceed this limit are skipped. Example: --max-live-capital 5000 limits total max loss exposure to $5000 per day. Uses calendar date in output timezone."
     )
     parser.add_argument(
         "--force-close-hour",
@@ -1057,7 +1070,7 @@ async def check_profit_target_hit(
     option_type: str,
     profit_target_pct: float,
     logger: Optional[logging.Logger] = None
-) -> Optional[bool]:
+) -> Optional[Tuple[bool, Optional[datetime]]]:
     """Check if profit target was hit during the day.
     
     For credit spreads, profit is made when the spread value decreases.
@@ -1067,7 +1080,9 @@ async def check_profit_target_hit(
         profit_target_pct: Target profit as percentage of max credit (e.g., 0.50 = 50%)
     
     Returns:
-        True if profit target was hit, False if not, None if cannot determine
+        Tuple of (hit_status, exit_timestamp) where:
+        - hit_status: True if profit target was hit, False if not, None if cannot determine
+        - exit_timestamp: datetime when target was hit (or None if not hit)
     """
     try:
         # Convert to ET timezone for market day calculation
@@ -1124,7 +1139,13 @@ async def check_profit_target_hit(
             
             if not rows:
                 # No intraday data - cannot determine if target was hit
-                return None
+                return (None, None)
+            
+            # Calculate target profit (percentage of initial credit)
+            target_profit = initial_credit * profit_target_pct
+            # Maximum profit is the initial credit (when spread becomes worthless)
+            # Target spread value = initial_credit - target_profit
+            target_spread_value = initial_credit - target_profit
             
             # For each price point, check if profit target would have been reached
             # For credit spreads:
@@ -1133,48 +1154,120 @@ async def check_profit_target_hit(
             # 
             # The spread value decreases when price moves favorably
             # Maximum profit = initial_credit (when spread becomes worthless)
-            # 
-            # Simple approximation: if price moves far enough from short strike,
-            # the spread loses significant value
             
             for row in rows:
                 price = float(row['close'])
+                price_timestamp = row['datetime']
                 
-                # Calculate if spread would have reduced enough in value
-                # This is a simplified check - real option pricing is more complex
+                # Calculate spread value at this price using intrinsic value
                 if option_type.lower() == "put":
-                    # PUT spread: profit when price goes UP (away from strikes)
-                    # Short strike is higher than long strike for PUT spreads
-                    # If price is well above short strike, spread is worthless
-                    distance_from_short = price - short_strike
-                    spread_width = short_strike - long_strike
-                    
-                    # If price is above short strike, spread starts losing value
-                    # Estimate: spread value = max(0, (short_strike - price) / spread_width * spread_width)
-                    # This is simplified - doesn't account for time decay, IV, etc.
-                    if distance_from_short > 0:
-                        # Price is above strikes - spread is worthless, max profit
-                        return True
+                    # PUT spread: short strike > long strike
+                    if price >= short_strike:
+                        # Both options OTM, spread worthless
+                        spread_value = 0.0
+                    elif price <= long_strike:
+                        # Both options ITM, spread at max width
+                        spread_value = short_strike - long_strike
+                    else:
+                        # Price between strikes, partial value
+                        spread_value = short_strike - price
                     
                 elif option_type.lower() == "call":
-                    # CALL spread: profit when price goes DOWN (away from strikes)
-                    # Short strike is lower than long strike for CALL spreads
-                    # If price is well below short strike, spread is worthless
-                    distance_from_short = short_strike - price
-                    spread_width = long_strike - short_strike
-                    
-                    # If price is below short strike, spread starts losing value
-                    if distance_from_short > 0:
-                        # Price is below strikes - spread is worthless, max profit
-                        return True
+                    # CALL spread: short strike < long strike
+                    if price <= short_strike:
+                        # Both options OTM, spread worthless
+                        spread_value = 0.0
+                    elif price >= long_strike:
+                        # Both options ITM, spread at max width
+                        spread_value = long_strike - short_strike
+                    else:
+                        # Price between strikes, partial value
+                        spread_value = price - short_strike
+                
+                # Check if spread value has decreased enough to hit profit target
+                # Profit = initial_credit - spread_value
+                # We want: profit >= target_profit
+                # Which means: spread_value <= target_spread_value
+                if spread_value <= target_spread_value:
+                    # Profit target hit at this timestamp
+                    # Convert price_timestamp (which is timezone-naive UTC) to timezone-aware
+                    if isinstance(price_timestamp, datetime):
+                        if price_timestamp.tzinfo is None:
+                            # Assume UTC
+                            exit_timestamp = price_timestamp.replace(tzinfo=timezone.utc)
+                        else:
+                            exit_timestamp = price_timestamp
+                    else:
+                        # If it's not a datetime, use the row's datetime as-is
+                        exit_timestamp = price_timestamp
+                    return (True, exit_timestamp)
             
             # If we get here, profit target was not hit
-            return False
+            return (False, None)
             
     except Exception as e:
         if logger:
             logger.debug(f"Error checking profit target: {e}")
+        return (None, None)
+
+
+def find_option_at_timestamp(
+    interval_df: pd.DataFrame,
+    strike: float,
+    option_type: str,
+    exit_timestamp: datetime,
+    logger: Optional[logging.Logger] = None
+) -> Optional[pd.Series]:
+    """Find option data at or near the exit timestamp.
+    
+    Args:
+        interval_df: DataFrame with option data for the interval
+        strike: Strike price to find
+        option_type: 'call' or 'put'
+        exit_timestamp: Timestamp when exit occurred
+        logger: Optional logger
+    
+    Returns:
+        Series with option data, or None if not found
+    """
+    # Filter for matching strike and option type
+    filtered = interval_df[
+        (interval_df['strike'] == strike) & 
+        (interval_df['option_type'].str.lower() == option_type.lower())
+    ]
+    
+    if filtered.empty:
+        if logger:
+            logger.debug(f"No option found for strike {strike} type {option_type} at exit time")
         return None
+    
+    # Convert exit_timestamp to timezone-naive if needed for comparison
+    if exit_timestamp.tzinfo is not None:
+        exit_timestamp_naive = exit_timestamp.replace(tzinfo=None)
+    else:
+        exit_timestamp_naive = exit_timestamp
+    
+    # Find the closest timestamp to exit_timestamp
+    filtered = filtered.copy()
+    filtered['timestamp_naive'] = filtered['timestamp'].apply(
+        lambda x: x.replace(tzinfo=None) if hasattr(x, 'tzinfo') and x.tzinfo is not None else x
+    )
+    
+    # Calculate time differences
+    filtered['time_diff'] = (filtered['timestamp_naive'] - exit_timestamp_naive).abs()
+    
+    # Get the row with the smallest time difference
+    closest_idx = filtered['time_diff'].idxmin()
+    closest_row = filtered.loc[closest_idx]
+    
+    # Check if the time difference is reasonable (within 1 hour)
+    max_time_diff = timedelta(hours=1)
+    if closest_row['time_diff'] > max_time_diff:
+        if logger:
+            logger.debug(f"Closest option data is {closest_row['time_diff']} away from exit time, too far")
+        return None
+    
+    return closest_row
 
 
 def calculate_option_price(row: pd.Series, side: str, use_mid: bool) -> Optional[float]:
@@ -1369,6 +1462,7 @@ async def analyze_interval(
     max_strike_distance_pct: Optional[float] = None,
     use_current_price: bool = False,
     max_trading_hour: int = 15,
+    min_trading_hour: Optional[int] = None,
     profit_target_pct: Optional[float] = None,
     output_tz = None,
     force_close_hour: Optional[int] = None
@@ -1380,13 +1474,18 @@ async def analyze_interval(
     # Get timestamp for this interval (before any processing)
     timestamp = interval_df['timestamp'].iloc[0]
     
-    # Check if timestamp is after max trading hour (in specified timezone)
+    # Check if timestamp is within trading hours (in specified timezone)
     if output_tz is not None:
         # Convert timestamp to output timezone
         if timestamp.tzinfo is None:
             pst = timezone(timedelta(hours=-8))
             timestamp = timestamp.replace(tzinfo=pst)
         timestamp_local = timestamp.astimezone(output_tz)
+        
+        # Filter out intervals before min_trading_hour
+        if min_trading_hour is not None and timestamp_local.hour < min_trading_hour:
+            logger.debug(f"Skipping interval at {timestamp_local.strftime('%Y-%m-%d %H:%M:%S %Z')} - before min trading hour {min_trading_hour}:00")
+            return None
         
         # Filter out intervals after max_trading_hour
         if timestamp_local.hour >= max_trading_hour:
@@ -1613,21 +1712,14 @@ async def analyze_interval(
             # No force close hour - use EOD close
             close_price_used = current_close
         
-        # Calculate actual P&L based on the price at close time
-        actual_pnl_per_share = calculate_spread_pnl(
-            best_spread['net_credit'],
-            best_spread['short_strike'],
-            best_spread['long_strike'],
-            close_price_used,
-            option_type
-        )
-        
-        # Determine success: positive P&L = success
-        backtest_successful = actual_pnl_per_share > 0
+        # Initialize P&L variables
+        actual_pnl_per_share = None
+        profit_target_hit = None
+        exit_timestamp = None
         
         # Check if profit target was hit (if profit_target_pct is specified)
         if profit_target_pct is not None:
-            profit_target_hit = await check_profit_target_hit(
+            result = await check_profit_target_hit(
                 db,
                 underlying,
                 timestamp,
@@ -1639,9 +1731,71 @@ async def analyze_interval(
                 logger
             )
             
-            # If profit target was hit, consider it a success regardless of later result
-            if profit_target_hit is True:
-                backtest_successful = True
+            if result is not None:
+                profit_target_hit, exit_timestamp = result
+                
+                # If profit target was hit, calculate P&L using actual bid/ask prices at exit
+                if profit_target_hit is True and exit_timestamp is not None:
+                    # Find option prices at exit timestamp
+                    short_option = find_option_at_timestamp(
+                        interval_df,
+                        best_spread['short_strike'],
+                        option_type,
+                        exit_timestamp,
+                        logger
+                    )
+                    long_option = find_option_at_timestamp(
+                        interval_df,
+                        best_spread['long_strike'],
+                        option_type,
+                        exit_timestamp,
+                        logger
+                    )
+                    
+                    if short_option is not None and long_option is not None:
+                        # Calculate closing prices using bid/ask
+                        # To close: buy back short (pay ask), sell long (receive bid)
+                        close_short_price = calculate_option_price(short_option, "buy", use_mid)
+                        close_long_price = calculate_option_price(long_option, "sell", use_mid)
+                        
+                        if close_short_price is not None and close_long_price is not None:
+                            # Closing cost: what we pay to buy back short minus what we receive for selling long
+                            closing_cost_per_share = close_short_price - close_long_price
+                            
+                            # P&L = initial credit received - closing cost
+                            actual_pnl_per_share = best_spread['net_credit'] - closing_cost_per_share
+                            
+                            # Update close_time_used to reflect early exit
+                            close_time_used = exit_timestamp
+                            
+                            logger.debug(
+                                f"Early exit at {exit_timestamp}: "
+                                f"Short close=${close_short_price:.2f}, Long close=${close_long_price:.2f}, "
+                                f"Closing cost=${closing_cost_per_share:.2f}, P&L=${actual_pnl_per_share:.2f}"
+                            )
+                        else:
+                            # Fallback to intrinsic value if bid/ask not available
+                            logger.debug(f"Bid/ask not available at exit time, using intrinsic value")
+                    else:
+                        # Fallback to intrinsic value if option data not found
+                        logger.debug(f"Option data not found at exit time, using intrinsic value")
+        
+        # If profit target was not hit or we couldn't get bid/ask prices, use intrinsic value calculation
+        if actual_pnl_per_share is None:
+            actual_pnl_per_share = calculate_spread_pnl(
+                best_spread['net_credit'],
+                best_spread['short_strike'],
+                best_spread['long_strike'],
+                close_price_used,
+                option_type
+            )
+        
+        # Determine success: positive P&L = success
+        backtest_successful = actual_pnl_per_share > 0
+        
+        # If profit target was hit, consider it a success regardless of later result
+        if profit_target_hit is True:
+            backtest_successful = True
     
     # Extract source_file if available (for multi-file tracking)
     source_file = None
@@ -1667,6 +1821,229 @@ async def analyze_interval(
         "close_time_used": close_time_used,
         "source_file": source_file,
     }
+
+
+def calculate_position_capital(result: Dict, output_tz=None) -> Tuple[float, date]:
+    """Calculate position capital (max loss exposure) and get calendar date.
+    
+    Args:
+        result: Result dictionary from analyze_interval
+        output_tz: Output timezone for date calculation
+    
+    Returns:
+        Tuple of (position_capital, calendar_date)
+    """
+    best_spread = result['best_spread']
+    num_contracts = best_spread.get('num_contracts', 0)
+    if num_contracts is None:
+        num_contracts = 0
+    
+    # Get max loss per contract
+    max_loss_per_contract = best_spread.get('max_loss_per_contract')
+    if max_loss_per_contract is None:
+        # Calculate from max_loss_per_share if available
+        max_loss_per_share = best_spread.get('max_loss', 0)
+        if max_loss_per_share is None:
+            # Calculate from width and credit
+            width = best_spread.get('width', 0)
+            net_credit = best_spread.get('net_credit', 0)
+            max_loss_per_share = width - net_credit
+        max_loss_per_contract = max_loss_per_share * 100
+    
+    position_capital = max_loss_per_contract * num_contracts
+    
+    # Get calendar date in output timezone
+    timestamp = result['timestamp']
+    if hasattr(timestamp, 'astimezone') and output_tz is not None:
+        if timestamp.tzinfo is None:
+            # Assume PST if timezone-naive
+            pst = timezone(timedelta(hours=-8))
+            timestamp = timestamp.replace(tzinfo=pst)
+        timestamp_local = timestamp.astimezone(output_tz)
+        calendar_date = timestamp_local.date()
+    else:
+        # Fallback to timestamp date if no timezone
+        calendar_date = timestamp.date() if hasattr(timestamp, 'date') else pd.to_datetime(timestamp).date()
+    
+    return position_capital, calendar_date
+
+
+def get_position_close_time(result: Dict, output_tz=None) -> Optional[datetime]:
+    """Get the time when position closes (early exit or EOD).
+    
+    Args:
+        result: Result dictionary from analyze_interval
+        output_tz: Output timezone
+    
+    Returns:
+        Close timestamp or None if position never closes
+    """
+    # Check for early exit (profit target hit)
+    if result.get('profit_target_hit') is True:
+        # Use exit_timestamp if available (from check_profit_target_hit)
+        # For now, we'll use close_time_used which should be set
+        close_time = result.get('close_time_used')
+        if close_time is not None:
+            return close_time
+    
+    # Check for force close hour
+    close_time = result.get('close_time_used')
+    if close_time is not None:
+        return close_time
+    
+    # Otherwise, use EOD (end of trading day)
+    # Get the date and set to 4:00 PM ET (market close)
+    timestamp = result['timestamp']
+    if hasattr(timestamp, 'astimezone') and output_tz is not None:
+        if timestamp.tzinfo is None:
+            pst = timezone(timedelta(hours=-8))
+            timestamp = timestamp.replace(tzinfo=pst)
+        timestamp_local = timestamp.astimezone(output_tz)
+        trading_date = timestamp_local.date()
+        
+        # Create EOD time (4:00 PM ET = market close)
+        try:
+            from zoneinfo import ZoneInfo
+            et_tz = ZoneInfo("America/New_York")
+        except Exception:
+            import pytz
+            et_tz = pytz.timezone("America/New_York")
+        
+        from datetime import datetime as dt_class
+        try:
+            eod_et = et_tz.localize(dt_class(trading_date.year, trading_date.month, trading_date.day, 16, 0))
+        except AttributeError:
+            eod_et = dt_class(trading_date.year, trading_date.month, trading_date.day, 16, 0, tzinfo=et_tz)
+        
+        # Convert to output timezone
+        if output_tz:
+            eod_local = eod_et.astimezone(output_tz)
+            return eod_local
+    
+    return None
+
+
+def filter_results_by_capital_limit(
+    results: List[Dict],
+    max_live_capital: float,
+    output_tz=None,
+    logger: Optional[logging.Logger] = None
+) -> List[Dict]:
+    """Filter results based on daily capital limit, accounting for position lifecycle.
+    
+    Positions that close early free up capital for later positions.
+    
+    Args:
+        results: List of result dictionaries
+        max_live_capital: Maximum capital allowed per day
+        output_tz: Output timezone
+        logger: Optional logger
+    
+    Returns:
+        Filtered list of results that fit within capital limits
+    """
+    if not results or max_live_capital is None:
+        return results
+    
+    # Build timeline of events: position opens and closes
+    events = []  # List of (timestamp, event_type, result, capital)
+    
+    for result in results:
+        position_capital, calendar_date = calculate_position_capital(result, output_tz)
+        open_time = result['timestamp']
+        
+        # Normalize open_time
+        if hasattr(open_time, 'astimezone') and output_tz is not None:
+            if open_time.tzinfo is None:
+                pst = timezone(timedelta(hours=-8))
+                open_time = open_time.replace(tzinfo=pst)
+            open_time = open_time.astimezone(output_tz)
+        
+        # Get close time
+        close_time = get_position_close_time(result, output_tz)
+        if close_time is None:
+            # If we can't determine close time, assume EOD
+            if hasattr(open_time, 'date'):
+                trading_date = open_time.date()
+            else:
+                trading_date = pd.to_datetime(open_time).date()
+            
+            # Set to 4:00 PM ET
+            try:
+                from zoneinfo import ZoneInfo
+                et_tz = ZoneInfo("America/New_York")
+            except Exception:
+                import pytz
+                et_tz = pytz.timezone("America/New_York")
+            
+            from datetime import datetime as dt_class
+            try:
+                eod_et = et_tz.localize(dt_class(trading_date.year, trading_date.month, trading_date.day, 16, 0))
+            except AttributeError:
+                eod_et = dt_class(trading_date.year, trading_date.month, trading_date.day, 16, 0, tzinfo=et_tz)
+            
+            if output_tz:
+                close_time = eod_et.astimezone(output_tz)
+            else:
+                close_time = eod_et
+        
+        # Normalize close_time
+        if hasattr(close_time, 'astimezone') and output_tz is not None:
+            if close_time.tzinfo is None:
+                pst = timezone(timedelta(hours=-8))
+                close_time = close_time.replace(tzinfo=pst)
+            close_time = close_time.astimezone(output_tz)
+        
+        events.append((open_time, 'open', result, position_capital, calendar_date))
+        events.append((close_time, 'close', result, position_capital, calendar_date))
+    
+    # Sort events chronologically
+    events.sort(key=lambda x: x[0])
+    
+    # Process events chronologically, tracking available capital per day
+    daily_available_capital = {}  # {date: available_capital}
+    filtered_results = []
+    opened_positions = set()  # Track which positions were actually opened (by result id)
+    
+    for event_time, event_type, result, position_capital, calendar_date in events:
+        # Initialize available capital for this date if needed
+        if calendar_date not in daily_available_capital:
+            daily_available_capital[calendar_date] = max_live_capital
+        
+        if event_type == 'open':
+            # Check if we have enough capital
+            available = daily_available_capital[calendar_date]
+            if position_capital <= available:
+                # Open position
+                daily_available_capital[calendar_date] -= position_capital
+                filtered_results.append(result)
+                opened_positions.add(id(result))
+                
+                if logger:
+                    logger.debug(
+                        f"Opened position at {event_time}: {position_capital:.2f} capital, "
+                        f"Available for {calendar_date}: {daily_available_capital[calendar_date]:.2f}"
+                    )
+            else:
+                if logger:
+                    logger.debug(
+                        f"Skipping position at {event_time}: "
+                        f"Insufficient capital ({available:.2f} < {position_capital:.2f})"
+                    )
+        
+        elif event_type == 'close':
+            # Check if this position was actually opened
+            if id(result) in opened_positions:
+                # Close position - free up capital
+                daily_available_capital[calendar_date] += position_capital
+                
+                if logger:
+                    logger.debug(
+                        f"Closed position at {event_time}: Freed {position_capital:.2f} capital, "
+                        f"Available for {calendar_date}: {daily_available_capital[calendar_date]:.2f}"
+                    )
+    
+    return filtered_results
 
 
 def filter_top_n_per_day(results: List[Dict], top_n: int) -> List[Dict]:
@@ -2012,6 +2389,7 @@ async def process_single_csv(
     max_strike_distance_pct: Optional[float],
     use_current_price: bool,
     max_trading_hour: int,
+    min_trading_hour: Optional[int],
     profit_target_pct: Optional[float],
     most_recent: bool = False,
     output_tz = None,
@@ -2082,6 +2460,7 @@ async def process_single_csv(
                         max_strike_distance_pct,
                         use_current_price,
                         max_trading_hour,
+                        min_trading_hour,
                         profit_target_pct,
                         output_tz,
                         force_close_hour
@@ -2447,7 +2826,8 @@ def _load_existing_grid_results(csv_path: str) -> set:
             'option_type', 'percent_beyond_put', 'percent_beyond_call',
             'max_spread_width', 'max_spread_width_put', 'max_spread_width_call',
             'min_contract_price', 'max_credit_width_ratio',
-            'max_strike_distance_pct', 'max_trading_hour', 'profit_target_pct',
+            'max_strike_distance_pct', 'min_trading_hour', 'max_trading_hour',
+            'profit_target_pct',
         ]
         for row in reader:
             combo = {}
@@ -2581,6 +2961,7 @@ async def run_backtest_with_params(
                 params.get('max_strike_distance_pct'),
                 False,  # use_current_price
                 params.get('max_trading_hour', 15),
+                params.get('min_trading_hour'),
                 params.get('profit_target_pct'),
                 params.get('output_tz'),
                 params.get('force_close_hour'),
@@ -2625,6 +3006,7 @@ def _format_grid_top_results(results: List[dict], sort_by: str, top_n: int) -> s
             f"mcp={combo.get('min_contract_price', '-')} "
             f"mcr={combo.get('max_credit_width_ratio', '-')} "
             f"msd={combo.get('max_strike_distance_pct', '-')} "
+            f"mih={combo.get('min_trading_hour', '-')} "
             f"mth={combo.get('max_trading_hour', '-')} "
             f"ptp={combo.get('profit_target_pct', '-')}"
         )
@@ -3082,6 +3464,7 @@ async def main():
                 args.max_strike_distance_pct,
                 args.curr_price and args.live,
                 args.max_trading_hour,
+                args.min_trading_hour,
                 args.profit_target_pct,
                 args.most_recent,
                 output_tz,
@@ -3101,6 +3484,31 @@ async def main():
             results.extend(file_results)
         
         logger.info(f"Parallel processing complete. Total results: {len(results)}")
+        
+        # Apply capital limit filter (accounts for position lifecycle)
+        if args.max_live_capital is not None:
+            original_count = len(results)
+            results = filter_results_by_capital_limit(
+                results,
+                args.max_live_capital,
+                output_tz,
+                logger
+            )
+            logger.info(
+                f"Capital limit filter: {original_count} -> {len(results)} positions "
+                f"(max ${args.max_live_capital:,.2f} per day)"
+            )
+            
+            # Calculate and log final capital usage
+            daily_capital_usage = {}
+            for result in results:
+                position_capital, calendar_date = calculate_position_capital(result, output_tz)
+                daily_capital_usage[calendar_date] = daily_capital_usage.get(calendar_date, 0.0) + position_capital
+            
+            if daily_capital_usage:
+                logger.info("Final daily capital usage:")
+                for date, capital in sorted(daily_capital_usage.items()):
+                    logger.info(f"  {date}: ${capital:,.2f} / ${args.max_live_capital:,.2f} ({(capital/args.max_live_capital*100):.1f}%)")
         
         # Skip to post-processing (we already have results)
         # Set a flag to skip the normal processing
@@ -3153,6 +3561,8 @@ async def main():
                 logger.info(f"Analyzing {total_intervals_count} intervals...")
             
             results = []
+            
+            # Collect all results first (without capital filtering)
             for interval_time, interval_df in intervals_to_process:
                 for opt_type in option_types_to_analyze:
                     # Use current price if --curr-price is set and --live mode is active
@@ -3173,12 +3583,38 @@ async def main():
                         args.max_strike_distance_pct,
                         use_current_price,
                         args.max_trading_hour,
+                        args.min_trading_hour,
                         args.profit_target_pct,
                         output_tz,
                         args.force_close_hour
                     )
                     if result:
                         results.append(result)
+            
+            # Apply capital limit filter (accounts for position lifecycle)
+            if args.max_live_capital is not None:
+                original_count = len(results)
+                results = filter_results_by_capital_limit(
+                    results,
+                    args.max_live_capital,
+                    output_tz,
+                    logger
+                )
+                logger.info(
+                    f"Capital limit filter: {original_count} -> {len(results)} positions "
+                    f"(max ${args.max_live_capital:,.2f} per day)"
+                )
+                
+                # Calculate and log final capital usage
+                daily_capital_usage = {}
+                for result in results:
+                    position_capital, calendar_date = calculate_position_capital(result, output_tz)
+                    daily_capital_usage[calendar_date] = daily_capital_usage.get(calendar_date, 0.0) + position_capital
+                
+                if daily_capital_usage:
+                    logger.info("Final daily capital usage:")
+                    for date, capital in sorted(daily_capital_usage.items()):
+                        logger.info(f"  {date}: ${capital:,.2f} / ${args.max_live_capital:,.2f} ({(capital/args.max_live_capital*100):.1f}%)")
         
         finally:
             await db.close()
@@ -3474,7 +3910,11 @@ async def main():
             tz_display = output_tz.tzname(datetime.now())
         except:
             tz_display = args.output_timezone
+        if args.min_trading_hour is not None:
+            print(f"Min Trading Hour: {args.min_trading_hour}:00 {tz_display}")
         print(f"Max Trading Hour: {args.max_trading_hour}:00 {tz_display}")
+        if args.max_live_capital is not None:
+            print(f"Max Live Capital: ${args.max_live_capital:,.2f} per day (max loss exposure)")
         if args.force_close_hour is not None:
             print(f"Force Close Hour: {args.force_close_hour}:00 {tz_display} (all positions closed, P&L calculated)")
         if args.profit_target_pct is not None:
