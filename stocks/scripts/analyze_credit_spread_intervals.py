@@ -1842,8 +1842,8 @@ def calculate_position_capital(result: Dict, output_tz=None) -> Tuple[float, dat
     max_loss_per_contract = best_spread.get('max_loss_per_contract')
     if max_loss_per_contract is None:
         # Calculate from max_loss_per_share if available
-        max_loss_per_share = best_spread.get('max_loss', 0)
-        if max_loss_per_share is None:
+        max_loss_per_share = best_spread.get('max_loss')
+        if max_loss_per_share is None or max_loss_per_share == 0:
             # Calculate from width and credit
             width = best_spread.get('width', 0)
             net_credit = best_spread.get('net_credit', 0)
