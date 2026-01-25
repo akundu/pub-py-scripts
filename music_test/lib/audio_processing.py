@@ -50,14 +50,18 @@ def process_audio_chunk(new_samples, state, config, output_handler=None, debug_l
     debug = get_config('debug', False)
     silence_threshold = get_config('silence_threshold', 0.005)
     
+    # Always calculate RMS for diagnostics
+    rms_energy = np.sqrt(np.mean(new_samples.astype(np.float64)**2))
+    max_amplitude = np.max(np.abs(new_samples))
+    
     if debug:
-        rms_energy = np.sqrt(np.mean(new_samples.astype(np.float64)**2))
         if debug_log_level == 'DEBUG':
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            print(f"[{timestamp}] Audio Level: {rms_energy:.4f} (threshold: {silence_threshold})", 
+            print(f"[{timestamp}] Audio Level: RMS={rms_energy:.6f}, Max={max_amplitude:.6f}, Threshold={silence_threshold:.6f}", 
                   end='\r', file=sys.stderr)
         if rms_energy < silence_threshold:
-            raise ValueError("Too low audio level")
+            # Include actual values in error message
+            raise ValueError(f"Too low audio level: RMS={rms_energy:.6f} < threshold={silence_threshold:.6f}")
     
     # Update circular buffer
     chunk_size = get_chunk()

@@ -41,11 +41,15 @@ class ConnectionState:
         self.chord_stability = 0
         self.last_log_time = time.time()
         self.config = config
-        
+
+        # Chord accumulation window for smoothing (reduces rapid chord changes)
+        self.chord_accumulator = []  # List of chord detection dicts
+        self.chord_window_start = time.time()
+
         # Get instrument preset if low_freq/high_freq not explicitly set
         instrument = config.get('instrument', 'guitar')
         preset = INSTRUMENT_PRESETS.get(instrument, INSTRUMENT_PRESETS['guitar'])
-        
+
         self.low_freq = config.get('low_freq') or preset['low_freq']
         self.high_freq = config.get('high_freq') or preset['high_freq']
         self.instrument_name = config.get('instrument_name') or preset['name']
@@ -102,6 +106,69 @@ class ConnectionState:
         """Check if we have enough history for progression analysis."""
         return len(self.notes_history) >= min_samples
 
+    def accumulate_chord(self, chord_name, confidence, notes=None, frequencies=None, chroma=None):
+        """Add a chord detection to the accumulator for smoothing."""
+        self.chord_accumulator.append({
+            'chord': chord_name,
+            'confidence': confidence,
+            'timestamp': time.time(),
+            'notes': notes,
+            'frequencies': frequencies,
+            'chroma': chroma
+        })
+
+    def is_window_complete(self, window_duration):
+        """Check if the chord accumulation window is complete."""
+        elapsed = time.time() - self.chord_window_start
+        return elapsed >= window_duration and len(self.chord_accumulator) > 0
+
+    def get_best_chord(self):
+        """Get the best chord from accumulated predictions using weighted voting."""
+        if not self.chord_accumulator:
+            return None
+
+        from collections import defaultdict
+        chord_scores = defaultdict(lambda: {'total_confidence': 0.0, 'count': 0, 'best_detection': None})
+
+        for detection in self.chord_accumulator:
+            chord = detection['chord']
+            conf = detection['confidence']
+            chord_scores[chord]['total_confidence'] += conf
+            chord_scores[chord]['count'] += 1
+
+            if (chord_scores[chord]['best_detection'] is None or
+                    conf > chord_scores[chord]['best_detection']['confidence']):
+                chord_scores[chord]['best_detection'] = detection
+
+        best_chord = None
+        best_score = 0.0
+
+        for chord, data in chord_scores.items():
+            if data['total_confidence'] > best_score:
+                best_score = data['total_confidence']
+                best_chord = chord
+
+        if best_chord is None:
+            return None
+
+        best_data = chord_scores[best_chord]
+        best_detection = best_data['best_detection']
+
+        return {
+            'chord': best_chord,
+            'confidence': best_data['total_confidence'] / best_data['count'],
+            'votes': best_data['count'],
+            'total_votes': len(self.chord_accumulator),
+            'notes': best_detection.get('notes'),
+            'frequencies': best_detection.get('frequencies'),
+            'chroma': best_detection.get('chroma')
+        }
+
+    def reset_accumulator(self):
+        """Clear the chord accumulator and start a new window."""
+        self.chord_accumulator = []
+        self.chord_window_start = time.time()
+
 # Store active connections
 active_connections: dict[str, ConnectionState] = {}
 
@@ -109,12 +176,12 @@ def parse_config_from_query(query_params: dict) -> dict:
     """Parse configuration from query parameters - match CLI defaults exactly."""
     config = {
         'sensitivity': float(query_params.get('sensitivity', 1.0)),
-        'silence_threshold': float(query_params.get('silence_threshold', 0.005)),  # Match CLI default
+        'silence_threshold': float(query_params.get('silence_threshold', 0.015)),  # Default: 0.015
         'low_freq': None,
         'high_freq': None,
         'instrument_name': None,
         'instrument': query_params.get('instrument', 'guitar'),
-        'overlap': float(query_params.get('overlap', 0.75)),  # Match CLI default
+        'overlap': float(query_params.get('overlap', 0.8)),  # Default: 0.8
         'show_frequencies': query_params.get('show_frequencies', 'false').lower() == 'true',
         'show_fft': query_params.get('show_fft', 'false').lower() == 'true',
         'raw_frequencies': query_params.get('raw_frequencies', 'false').lower() == 'true',
@@ -123,12 +190,13 @@ def parse_config_from_query(query_params: dict) -> dict:
         'show_chroma': query_params.get('show_chroma', 'false').lower() == 'true',
         'single_pitch': query_params.get('single_pitch', 'false').lower() == 'true',
         'multi_pitch': query_params.get('multi_pitch', 'true').lower() == 'true',  # Match CLI default
-        'confidence_threshold': float(query_params.get('confidence_threshold', 0.6)),  # Match CLI default
+        'confidence_threshold': float(query_params.get('confidence_threshold', 0.3)),  # Default: 0.3
         'progression': query_params.get('progression', 'true').lower() == 'true',  # Match CLI default
         'debug': query_params.get('debug', 'false').lower() == 'true',
         'log': query_params.get('log', 'false').lower() == 'true',
         'log_interval': float(query_params.get('log_interval', 0.5)),  # Match CLI default
         'amplitude_threshold': float(query_params.get('amplitude_threshold', 0.005)),  # Match CLI default (though not used in processing)
+        'chord_window': float(query_params.get('chord_window', 0.75)),  # Default: 0.75 seconds
     }
     
     # Handle single-pitch override
@@ -222,6 +290,8 @@ async def websocket_endpoint(websocket: WebSocket):
             print(f"  Debug: {config.get('debug', False)}")
             print(f"  Log: {config.get('log', False)}")
             print(f"  Log Interval: {config.get('log_interval', 0.5)}s")
+            chord_window = config.get('chord_window', 0.0)
+            print(f"  Chord Window: {chord_window}s {'(smoothing enabled)' if chord_window > 0 else '(instant)'}")
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📊 Full Config JSON: {json.dumps(config, indent=2)}")
         
         # Send initial acknowledgment (include server log level for client awareness)
@@ -276,21 +346,66 @@ async def websocket_endpoint(websocket: WebSocket):
                         state=state,
                         config=config
                     )
-                    
-                    # Send results back to client (send all results, not just chords)
-                    if result:
-                        await websocket.send_json(result)
-                        
-                        # Log to server console if enabled
-                        if config.get('log') or config.get('debug'):
-                            log_result(result, config, connection_id)
-                    # Even if result is None, send periodic "listening" updates
-                    elif audio_chunk_count % 20 == 0:  # Every ~20 chunks (~0.5 seconds at 44.1kHz)
-                        await websocket.send_json({
-                            "type": "listening",
-                            "timestamp": time.time(),
-                            "audio_level": float(np.sqrt(np.mean(audio_chunk.astype(np.float64)**2)))
-                        })
+
+                    # Get chord window duration (0 = disabled, send immediately)
+                    chord_window = config.get('chord_window', 0.0)
+
+                    # Handle chord smoothing window if enabled
+                    if chord_window > 0 and result and result.get('type') == 'chord':
+                        # Accumulate the chord detection
+                        state.accumulate_chord(
+                            chord_name=result.get('chord'),
+                            confidence=result.get('confidence', 0.0),
+                            notes=result.get('notes'),
+                            frequencies=result.get('frequencies'),
+                            chroma=result.get('chroma')
+                        )
+
+                        # Check if window is complete
+                        if state.is_window_complete(chord_window):
+                            # Get the best chord from accumulated predictions
+                            best = state.get_best_chord()
+                            # Only output if confidence is at least 55%
+                            if best and best['confidence'] >= 0.55:
+                                # Build the result to send
+                                smoothed_result = {
+                                    "type": "chord",
+                                    "chord": best['chord'],
+                                    "confidence": best['confidence'],
+                                    "votes": best['votes'],
+                                    "total_votes": best['total_votes'],
+                                    "stability": state.update_chord_stability(best['chord']),
+                                    "timestamp": time.time()
+                                }
+                                if config.get('show_frequencies') and best.get('notes'):
+                                    smoothed_result["notes"] = best['notes']
+                                if config.get('show_chroma') and best.get('chroma') is not None:
+                                    chroma = best['chroma']
+                                    smoothed_result["chroma"] = chroma.tolist() if hasattr(chroma, 'tolist') else chroma
+
+                                await websocket.send_json(smoothed_result)
+
+                                if config.get('log') or config.get('debug'):
+                                    log_result(smoothed_result, config, connection_id)
+
+                            # Reset accumulator for next window
+                            state.reset_accumulator()
+                        # Don't send individual results when accumulating
+                    else:
+                        # Send results immediately (chord_window disabled or non-chord result)
+                        if result:
+                            await websocket.send_json(result)
+
+                            # Log to server console if enabled
+                            if config.get('log') or config.get('debug'):
+                                log_result(result, config, connection_id)
+                        # Even if result is None, send periodic "listening" updates
+                        elif audio_chunk_count % 20 == 0:  # Every ~20 chunks (~0.5 seconds at 44.1kHz)
+                            await websocket.send_json({
+                                "type": "listening",
+                                "timestamp": time.time(),
+                                "audio_level": float(np.sqrt(np.mean(audio_chunk.astype(np.float64)**2)))
+                            })
                             
                 except ValueError as e:
                     # Silently handle low audio level (only log in DEBUG mode, not ERROR/WARNING/INFO)

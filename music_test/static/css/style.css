@@ -297,6 +297,13 @@ header h1 {
     cursor: pointer;
 }
 
+.help-text {
+    font-size: 0.85em;
+    color: rgba(255, 255, 255, 0.7);
+    margin-top: 5px;
+    font-style: italic;
+}
+
 .form-actions {
     display: flex;
     gap: 10px;

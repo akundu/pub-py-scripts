@@ -12,11 +12,42 @@ import time
 import sys
 
 
-def grab_audio_chunk(chunk, rate, channels):
+def grab_audio_chunk(chunk, rate, channels, device=None):
     """Grab a chunk of audio from the microphone"""
-    myrecording = sd.rec(chunk, samplerate=rate, channels=channels, dtype='float32')
-    sd.wait()  # Wait until recording is finished
-    return myrecording
+    try:
+        # Try to explicitly use the default input device if not specified
+        if device is None:
+            # Get the default input device ID
+            default_input = sd.default.device[0]
+            if default_input is not None:
+                device = default_input
+        
+        # Record with explicit device selection
+        myrecording = sd.rec(chunk, samplerate=rate, channels=channels, dtype='float32', device=device)
+        sd.wait()  # Wait until recording is finished
+        
+        # Check if we got actual audio data
+        if np.all(myrecording == 0):
+            import sys
+            print("⚠️  WARNING: Recording returned all zeros", file=sys.stderr)
+            print("   Possible causes:", file=sys.stderr)
+            print("   1. macOS: Check System Settings → Privacy & Security → Microphone", file=sys.stderr)
+            print("   2. Grant microphone access to Terminal or your Python interpreter", file=sys.stderr)
+            print("   3. Verify the microphone is working in another app", file=sys.stderr)
+            print("   4. Try selecting a different input device", file=sys.stderr)
+        
+        return myrecording
+    except PermissionError as e:
+        import sys
+        print(f"❌ PERMISSION ERROR: {e}", file=sys.stderr)
+        print("   On macOS: System Settings → Privacy & Security → Microphone", file=sys.stderr)
+        print("   Grant access to Terminal or your Python interpreter", file=sys.stderr)
+        raise
+    except Exception as e:
+        import sys
+        print(f"❌ ERROR capturing audio: {e}", file=sys.stderr)
+        print("   Check microphone permissions and that a microphone is connected", file=sys.stderr)
+        raise
 
 
 def recognize_audio(args, audio_buffer, buffer_index, low_freq, high_freq, notes_history, 
@@ -171,8 +202,48 @@ def recognize_audio(args, audio_buffer, buffer_index, low_freq, high_freq, notes
     # Since Python passes mutable objects by reference, audio_buffer and notes_history
     # are already updated. However, the caller's buffer_index, last_chord, chord_stability,
     # and last_log_time need to be returned or the caller needs to be modified.
-    # 
+    #
     # For backward compatibility, we return nothing here and the caller must track
     # buffer_index separately using buffer_index = (buffer_index + get_chunk()) % get_buffer_size()
     #
     # TODO: Consider returning state changes to the caller in a future refactor.
+
+
+def recognize_audio_with_result(state, config):
+    """
+    CLI audio recognition function that returns the result instead of printing.
+
+    Used for chord_window accumulation mode where we need to collect results
+    before deciding what to output.
+
+    Args:
+        state: AudioProcessingState object
+        config: dict with configuration
+
+    Returns:
+        dict with detection result or None
+    """
+    # Capture audio from microphone
+    myrecording = grab_audio_chunk(get_chunk(), get_rate(), get_channels())
+    new_samples = myrecording.flatten()
+
+    debug = config.get('debug', False)
+
+    try:
+        # Use core processing function without output handler to get result
+        result = process_audio_chunk(
+            new_samples, state, config,
+            output_handler=None,  # Return dict instead of printing
+            debug_log_level='DEBUG' if debug else 'INFO'
+        )
+        return result
+    except ValueError as e:
+        # Handle "Too low audio level" error
+        if debug:
+            print(f"Audio level error: {e}", file=sys.stderr)
+        raise
+    except Exception as e:
+        import traceback
+        print(f"ERROR in recognize_audio_with_result: {type(e).__name__}: {str(e)}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        raise

@@ -3,7 +3,7 @@ Unified state management for audio processing.
 """
 import numpy as np
 import time
-from collections import deque
+from collections import deque, defaultdict
 from lib.common import get_buffer_size
 from lib.music_understanding import INSTRUMENT_PRESETS
 
@@ -13,33 +13,38 @@ class AudioProcessingState:
     Unified state container for audio processing.
     Used by both CLI and web interfaces.
     """
-    
+
     def __init__(self, config):
         """
         Initialize processing state from config.
-        
+
         Args:
             config: AudioConfig or dict-like object with configuration
         """
         # Audio buffer (circular)
         self.audio_buffer = np.zeros(get_buffer_size(), dtype=np.float32)
         self.buffer_index = 0
-        
+
         # Detection history
         self.notes_history = deque(maxlen=5)
         self.frequencies_history = deque(maxlen=5)
         self.chroma_history = deque(maxlen=5)
-        
+
         # Chord stability tracking
         self.last_chord = None
         self.chord_stability = 0
-        
+
         # Timing
         self.last_log_time = time.time()
-        
+
         # Store config reference
         self.config = config
-        
+
+        # Chord accumulation window for smoothing (reduces rapid chord changes)
+        # Collects chord predictions over a time window and picks the best one
+        self.chord_accumulator = []  # List of (chord_name, confidence, timestamp) tuples
+        self.chord_window_start = time.time()
+
         # Get frequency range from config or instrument preset
         if hasattr(config, 'get'):
             # Dict-like config
@@ -66,6 +71,8 @@ class AudioProcessingState:
         self.last_chord = None
         self.chord_stability = 0
         self.last_log_time = time.time()
+        self.chord_accumulator = []
+        self.chord_window_start = time.time()
     
     def update_buffer(self, new_samples, chunk_size):
         """
@@ -151,12 +158,111 @@ class AudioProcessingState:
     def has_enough_history(self, min_samples=3):
         """
         Check if we have enough history for progression analysis.
-        
+
         Args:
             min_samples: minimum number of samples needed
-        
+
         Returns:
             True if enough history
         """
         return len(self.notes_history) >= min_samples
+
+    def accumulate_chord(self, chord_name, confidence, notes=None, frequencies=None, chroma=None):
+        """
+        Add a chord detection to the accumulator for smoothing.
+
+        Args:
+            chord_name: detected chord name
+            confidence: detection confidence (0.0 to 1.0)
+            notes: optional list of detected notes
+            frequencies: optional list of (frequency, amplitude) tuples
+            chroma: optional chroma vector
+        """
+        self.chord_accumulator.append({
+            'chord': chord_name,
+            'confidence': confidence,
+            'timestamp': time.time(),
+            'notes': notes,
+            'frequencies': frequencies,
+            'chroma': chroma
+        })
+
+    def is_window_complete(self, window_duration):
+        """
+        Check if the chord accumulation window is complete.
+
+        Args:
+            window_duration: window duration in seconds
+
+        Returns:
+            True if window is complete and has accumulated chords
+        """
+        elapsed = time.time() - self.chord_window_start
+        return elapsed >= window_duration and len(self.chord_accumulator) > 0
+
+    def get_best_chord(self):
+        """
+        Get the best chord from the accumulated predictions using weighted voting.
+
+        Uses confidence-weighted voting to select the most likely chord.
+        Returns the chord with the highest total confidence score.
+
+        Returns:
+            dict with best chord info or None if no chords accumulated:
+            {
+                'chord': best chord name,
+                'confidence': average confidence for this chord,
+                'votes': number of times this chord was detected,
+                'total_votes': total detections in window,
+                'notes': notes from highest-confidence detection,
+                'frequencies': frequencies from highest-confidence detection,
+                'chroma': chroma from highest-confidence detection
+            }
+        """
+        if not self.chord_accumulator:
+            return None
+
+        # Aggregate votes by chord, weighted by confidence
+        chord_scores = defaultdict(lambda: {'total_confidence': 0.0, 'count': 0, 'best_detection': None})
+
+        for detection in self.chord_accumulator:
+            chord = detection['chord']
+            conf = detection['confidence']
+            chord_scores[chord]['total_confidence'] += conf
+            chord_scores[chord]['count'] += 1
+
+            # Track the highest-confidence detection for this chord
+            if (chord_scores[chord]['best_detection'] is None or
+                    conf > chord_scores[chord]['best_detection']['confidence']):
+                chord_scores[chord]['best_detection'] = detection
+
+        # Find the chord with highest total confidence score
+        best_chord = None
+        best_score = 0.0
+
+        for chord, data in chord_scores.items():
+            if data['total_confidence'] > best_score:
+                best_score = data['total_confidence']
+                best_chord = chord
+
+        if best_chord is None:
+            return None
+
+        best_data = chord_scores[best_chord]
+        best_detection = best_data['best_detection']
+
+        return {
+            'chord': best_chord,
+            'confidence': best_data['total_confidence'] / best_data['count'],
+            'votes': best_data['count'],
+            'total_votes': len(self.chord_accumulator),
+            'notes': best_detection.get('notes'),
+            'frequencies': best_detection.get('frequencies'),
+            'chroma': best_detection.get('chroma')
+        }
+
+    def reset_accumulator(self):
+        """Clear the chord accumulator and start a new window."""
+        self.chord_accumulator = []
+        self.chord_window_start = time.time()
 

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Chord Detector</title>
-    <link rel="stylesheet" href="static/css/style.css?v=2">
+    <link rel="stylesheet" href="static/css/style.css?v=3">
 </head>
 <body>
     <div class="container">
@@ -86,20 +86,27 @@
 
                         <div class="form-group">
                             <label for="confidenceThreshold">Confidence Threshold:</label>
-                            <input type="range" id="confidenceThreshold" name="confidence_threshold" min="0.1" max="1.0" step="0.1" value="0.6">
-                            <span id="confidenceValue">0.6</span>
+                            <input type="range" id="confidenceThreshold" name="confidence_threshold" min="0.1" max="1.0" step="0.05" value="0.3">
+                            <span id="confidenceValue">0.3</span>
                         </div>
 
                         <div class="form-group">
                             <label for="silenceThreshold">Silence Threshold:</label>
-                            <input type="range" id="silenceThreshold" name="silence_threshold" min="0.001" max="0.1" step="0.001" value="0.005">
-                            <span id="silenceValue">0.005</span>
+                            <input type="range" id="silenceThreshold" name="silence_threshold" min="0.001" max="0.1" step="0.001" value="0.015">
+                            <span id="silenceValue">0.015</span>
                         </div>
 
                         <div class="form-group">
                             <label for="overlap">Overlap Ratio:</label>
-                            <input type="range" id="overlap" name="overlap" min="0.0" max="0.9" step="0.05" value="0.75">
-                            <span id="overlapValue">0.75</span>
+                            <input type="range" id="overlap" name="overlap" min="0.0" max="0.9" step="0.05" value="0.8">
+                            <span id="overlapValue">0.8</span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="chordWindow">Chord Smoothing Window (seconds):</label>
+                            <input type="range" id="chordWindow" name="chord_window" min="0.0" max="3.0" step="0.05" value="0.75">
+                            <span id="chordWindowValue">0.75</span>
+                            <div class="help-text">Set to 0 for instant updates, or higher values (e.g., 1.0-2.0s) for smoother, more stable chord detection</div>
                         </div>
 
                         <div class="form-group checkbox-group">
@@ -156,7 +163,7 @@
 
     <script src="static/js/audio_handler.js?v=2"></script>
     <script src="static/js/visualizations.js?v=2"></script>
-    <script src="static/js/main.js?v=4"></script>
+    <script src="static/js/main.js?v=5"></script>
 </body>
 </html>
 

@@ -4,9 +4,10 @@ import time
 import argparse
 from collections import deque
 import sys
-from lib.sound_capture import recognize_audio
+from lib.sound_capture import recognize_audio, recognize_audio_with_result
 from lib.common import get_hop_size, get_overlap_ratio, set_overlap_ratio, get_buffer_size
 from lib.music_understanding import INSTRUMENT_PRESETS
+from lib.state import AudioProcessingState
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Sounddevice-based chord detector')
@@ -14,13 +15,13 @@ def parse_args():
     parser.add_argument('--log-interval', type=float, default=0.5, help='Logging interval in seconds (default: 0.5)')
     parser.add_argument('--progression', action='store_true', default=True, help='Enable chord progression analysis (default: enabled)')
     parser.add_argument('--sensitivity', type=float, default=1.0, help='Detection sensitivity (0.1-2.0, default: 1.0)')
-    parser.add_argument('--silence-threshold', type=float, default=0.005, help='Silence threshold (0-1, default: 0.005)')
+    parser.add_argument('--silence-threshold', type=float, default=0.015, help='Silence threshold (0-1, default: 0.015)')
     parser.add_argument('--debug', action='store_true', help='Show audio levels for threshold tuning')
     parser.add_argument('--instrument', choices=list(INSTRUMENT_PRESETS.keys()), default='guitar', 
                        help='Instrument preset for frequency filtering (default: guitar)')
     parser.add_argument('--low-freq', type=int, help='Custom low frequency cutoff (Hz)')
     parser.add_argument('--high-freq', type=int, help='Custom high frequency cutoff (Hz)')
-    parser.add_argument('--overlap', type=float, default=0.75, help='Overlap ratio (0.0-0.9, default: 0.75)')
+    parser.add_argument('--overlap', type=float, default=0.8, help='Overlap ratio (0.0-0.9, default: 0.8)')
     parser.add_argument('--show-frequencies', action='store_true', help='Show detected frequencies')
     parser.add_argument('--show-fft', action='store_true', help='Show autocorrelation analysis data')
     parser.add_argument('--raw-frequencies', action='store_true', help='Use raw frequencies without filtering or processing')
@@ -31,13 +32,16 @@ def parse_args():
     parser.add_argument('--show-chroma', action='store_true', help='Show chroma vector along with frequencies')
     parser.add_argument('--single-pitch', action='store_true', help='Use single-pitch detection (autocorrelation only)')
     parser.add_argument('--multi-pitch', action='store_true', default=True, help='Enable multi-pitch detection using FFT (default, better for chords)')
-    parser.add_argument('--confidence-threshold', type=float, default=0.6, help='Minimum confidence score to show chords (default: 0.6)')
+    parser.add_argument('--confidence-threshold', type=float, default=0.3, help='Minimum confidence score to show chords (default: 0.3)')
+    parser.add_argument('--chord-window', type=float, default=0.75, help='Chord smoothing window in seconds (0=disabled, default: 0.75)')
+    parser.add_argument('--list-devices', action='store_true', help='List available audio input devices and exit')
+    parser.add_argument('--device', type=int, help='Audio input device ID (use --list-devices to see available devices)')
     args = parser.parse_args()
-    
+
     # Handle single-pitch override
     if args.single_pitch:
         args.multi_pitch = False
-    
+
     return args
 
 # --- 3. Main Application Logic ---
@@ -62,6 +66,56 @@ def main():
         instrument_name = preset['name']
 
     print(f"🎸 Chord detector listening for {instrument_name}... Press Ctrl+C to stop.")
+    
+    # Check audio device availability
+    try:
+        import sounddevice as sd
+        
+        # List devices if requested
+        if args.list_devices:
+            print("Available audio input devices:")
+            devices = sd.query_devices()
+            for i, device in enumerate(devices):
+                if device['max_input_channels'] > 0:
+                    default_marker = " (DEFAULT)" if i == sd.default.device[0] else ""
+                    print(f"  [{i}] {device['name']} - {device['max_input_channels']} channel(s){default_marker}")
+            sys.exit(0)
+        
+        # Use specified device or default
+        if args.device is not None:
+            sd.default.device = args.device
+            print(f"🎤 Using specified device ID: {args.device}")
+        
+        devices = sd.query_devices()
+        default_input = sd.default.device[0]
+        if default_input is not None:
+            input_device = devices[default_input]
+            print(f"🎤 Using input device: {input_device['name']} (ID: {default_input}, channels: {input_device['max_input_channels']})")
+            
+            # Test audio capture
+            print("🔍 Testing audio capture...", end='', flush=True)
+            try:
+                test_recording = sd.rec(1024, samplerate=44100, channels=1, dtype='float32')
+                sd.wait()
+                test_rms = np.sqrt(np.mean(test_recording.astype(np.float64)**2))
+                if test_rms > 0.0001:
+                    print(f" ✓ Audio detected (RMS: {test_rms:.6f})")
+                else:
+                    print(f" ⚠️  No audio detected (RMS: {test_rms:.6f})")
+                    print("   This usually means microphone permissions are not granted.")
+                    print("   On macOS: System Settings → Privacy & Security → Microphone")
+                    print("   Grant access to Terminal or your Python interpreter")
+            except PermissionError:
+                print(" ❌ Permission denied!")
+                print("   On macOS: System Settings → Privacy & Security → Microphone")
+                print("   Grant access to Terminal or your Python interpreter")
+                sys.exit(1)
+            except Exception as e:
+                print(f" ⚠️  Could not test: {e}")
+        else:
+            print("⚠️  WARNING: No default input device found!")
+    except Exception as e:
+        print(f"⚠️  Could not query audio devices: {e}")
     
     # Always print all configuration parameters
     print("📊 Configuration Parameters:")
@@ -88,6 +142,8 @@ def main():
     print(f"  Log: {args.log}")
     print(f"  Log Interval: {args.log_interval}s")
     print(f"  Wait Time: {args.wait_time}s")
+    chord_window = getattr(args, 'chord_window', 0.0)
+    print(f"  Chord Window: {chord_window}s {'(smoothing enabled)' if chord_window > 0 else '(instant)'}")
     
     # Show mode information
     if args.frequencies_only:
@@ -110,31 +166,140 @@ def main():
         if args.progression and not args.frequencies_only and not args.notes_only:
             print("📈 Chord progression analysis enabled")
 
-    # Audio buffer for overlapping windows
-    audio_buffer = np.zeros(get_buffer_size(), dtype=np.float32)
-    buffer_index = 0
-    
-    notes_history = deque(maxlen=5)
-    frequencies_history = deque(maxlen=5)  # For enhanced chord analysis
-    chroma_history = deque(maxlen=5)       # For enhanced chord analysis
-    last_chord = None
-    chord_stability = 0
-    last_log_time = time.time()
+    # Build config dict for the new API
+    config = {
+        'instrument': args.instrument,
+        'sensitivity': args.sensitivity,
+        'silence_threshold': args.silence_threshold,
+        'amplitude_threshold': args.amplitude_threshold,
+        'confidence_threshold': args.confidence_threshold,
+        'overlap': args.overlap,
+        'progression': args.progression,
+        'multi_pitch': getattr(args, 'multi_pitch', True),
+        'single_pitch': args.single_pitch,
+        'show_frequencies': args.show_frequencies,
+        'show_chroma': getattr(args, 'show_chroma', False),
+        'show_fft': args.show_fft,
+        'raw_frequencies': args.raw_frequencies,
+        'frequencies_only': args.frequencies_only,
+        'notes_only': args.notes_only,
+        'debug': args.debug,
+        'log': args.log,
+        'log_interval': args.log_interval,
+        'chord_window': chord_window,
+        'low_freq': low_freq,
+        'high_freq': high_freq,
+        'instrument_name': instrument_name,
+    }
+
+    # Create state using proper AudioProcessingState class
+    state = AudioProcessingState(config)
+
+    # Legacy variables for backward compatibility with recognize_audio
+    audio_buffer = state.audio_buffer
+    buffer_index = state.buffer_index
+    notes_history = state.notes_history
+    frequencies_history = state.frequencies_history
+    chroma_history = state.chroma_history
+    last_chord = state.last_chord
+    chord_stability = state.chord_stability
+    last_log_time = state.last_log_time
 
     try:
-        while True:
-            try:
-                recognize_audio(args, audio_buffer, buffer_index, low_freq, high_freq, notes_history, last_chord, chord_stability, last_log_time, frequencies_history, chroma_history, debug=args.debug, frequencies_only=args.frequencies_only, notes_only=args.notes_only, log=args.log)
-            except ValueError as e:
-                pass
-                # print(f"Caught exception: {e}", file=sys.stderr)
-            except Exception as e:
-                print(f"Caught exception: {e}", file=sys.stderr)
-            finally:
-                # Wait between iterations if specified
-                if args.wait_time > 0:
-                    time.sleep(args.wait_time)
+        if chord_window > 0:
+            # Use new chord_window accumulation mode
+            print(f"🔄 Chord smoothing enabled: collecting predictions over {chord_window}s windows")
+            while True:
+                try:
+                    result = recognize_audio_with_result(state, config)
 
+                    # If we got a chord result, accumulate it
+                    if result and result.get('type') == 'chord':
+                        state.accumulate_chord(
+                            chord_name=result.get('chord'),
+                            confidence=result.get('confidence', 0.0),
+                            notes=result.get('notes'),
+                            frequencies=result.get('frequencies'),
+                            chroma=result.get('chroma')
+                        )
+
+                        # Check if window is complete
+                        if state.is_window_complete(chord_window):
+                            best = state.get_best_chord()
+                            # Only output if confidence is at least 55%
+                            if best and best['confidence'] >= 0.55:
+                                # Format and print the result
+                                timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                                stability = state.update_chord_stability(best['chord'])
+                                stability_str = "" if stability >= 2 else " [unstable]"
+                                votes_str = f" ({best['votes']}/{best['total_votes']} votes)"
+
+                                if args.log:
+                                    print(f"[{timestamp}] {best['chord']} (conf: {best['confidence']:.1%}){votes_str}{stability_str}")
+                                else:
+                                    print(f"\r{best['chord']} (conf: {best['confidence']:.1%}){votes_str}{stability_str}    ", end='', flush=True)
+
+                            # Reset for next window
+                            state.reset_accumulator()
+
+                    elif result and result.get('type') in ('notes', 'frequencies'):
+                        # Pass through non-chord results immediately
+                        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                        if result.get('type') == 'notes' and result.get('notes'):
+                            notes_str = ", ".join([f"{n[0]}({n[1]:.0f}Hz)" if isinstance(n, (list, tuple)) else str(n) for n in result['notes']])
+                            if args.log:
+                                print(f"[{timestamp}] Notes: {notes_str}")
+                            else:
+                                print(f"\rNotes: {notes_str}    ", end='', flush=True)
+                        elif result.get('type') == 'frequencies' and result.get('frequencies'):
+                            freq_str = ", ".join([f"{f[0]:.0f}Hz" if isinstance(f, (list, tuple)) else str(f) for f in result['frequencies']])
+                            if args.log:
+                                print(f"[{timestamp}] Frequencies: {freq_str}")
+                            else:
+                                print(f"\rFrequencies: {freq_str}    ", end='', flush=True)
+
+                except ValueError as e:
+                    # Audio level too low - show periodic status
+                    current_time = time.time()
+                    if not hasattr(state, '_last_status_time'):
+                        state._last_status_time = current_time
+                    if current_time - state._last_status_time >= 2.0:  # Every 2 seconds
+                        if args.debug:
+                            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔇 Audio level too low (threshold: {args.silence_threshold}) - try lowering --silence-threshold", file=sys.stderr)
+                        elif args.log:
+                            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔇 Listening... (audio below threshold)")
+                        state._last_status_time = current_time
+                except Exception as e:
+                    print(f"Caught exception: {e}", file=sys.stderr)
+                finally:
+                    if args.wait_time > 0:
+                        time.sleep(args.wait_time)
+        else:
+            # Use legacy immediate output mode
+            iteration_count = 0
+            last_status_time = time.time()
+            status_interval = 2.0  # Show status every 2 seconds if nothing detected
+            
+            while True:
+                try:
+                    recognize_audio(args, audio_buffer, buffer_index, low_freq, high_freq, notes_history, last_chord, chord_stability, last_log_time, frequencies_history, chroma_history, debug=args.debug, frequencies_only=args.frequencies_only, notes_only=args.notes_only, log=args.log)
+                    iteration_count += 1
+                except ValueError as e:
+                    # Audio level too low - show periodic status
+                    iteration_count += 1
+                    current_time = time.time()
+                    if current_time - last_status_time >= status_interval:
+                        if args.debug:
+                            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔇 Audio level too low (threshold: {args.silence_threshold}) - try lowering --silence-threshold", file=sys.stderr)
+                        elif args.log:
+                            # In log mode, show periodic listening status
+                            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔇 Listening... (audio below threshold)")
+                        last_status_time = current_time
+                except Exception as e:
+                    print(f"Caught exception: {e}", file=sys.stderr)
+                finally:
+                    if args.wait_time > 0:
+                        time.sleep(args.wait_time)
 
     except KeyboardInterrupt:
         print("\n🛑 Stopping sounddevice-based chord detector.")
