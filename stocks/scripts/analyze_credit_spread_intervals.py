@@ -130,9 +130,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--max-spread-width",
-        type=float,
-        default=200.0,
-        help="Maximum spread width (strike difference)"
+        type=str,
+        default="200.0",
+        help="Maximum spread width (strike difference). Can be a single value (e.g., 100) or two values for puts:calls (e.g., 50:100)"
     )
     parser.add_argument(
         "--use-mid-price",
@@ -458,6 +458,33 @@ def parse_percent_beyond(value: str) -> Tuple[float, float]:
             return (single_value, single_value)
         except ValueError as e:
             raise ValueError(f"Invalid percent-beyond value: {value}. Must be a number or 'put_value:call_value'. Error: {e}")
+
+
+def parse_max_spread_width(value: str) -> Tuple[float, float]:
+    """Parse max-spread-width argument which can be a single value or put:call format.
+
+    Args:
+        value: Either a single value (e.g., "100") or two values separated by colon (e.g., "50:100")
+
+    Returns:
+        Tuple of (put_max_spread_width, call_max_spread_width)
+    """
+    if ':' in value:
+        parts = value.split(':')
+        if len(parts) != 2:
+            raise ValueError(f"Invalid max-spread-width format: {value}. Expected 'put_value:call_value' or single value")
+        try:
+            put_value = float(parts[0].strip())
+            call_value = float(parts[1].strip())
+            return (put_value, call_value)
+        except ValueError as e:
+            raise ValueError(f"Invalid max-spread-width values: {value}. Both values must be numbers. Error: {e}")
+    else:
+        try:
+            single_value = float(value)
+            return (single_value, single_value)
+        except ValueError as e:
+            raise ValueError(f"Invalid max-spread-width value: {value}. Must be a number or 'put_value:call_value'. Error: {e}")
 
 
 def round_to_15_minutes(dt: datetime) -> datetime:
@@ -1192,7 +1219,7 @@ def build_credit_spreads(
     prev_close: float,
     percent_beyond: Tuple[float, float],
     min_width: float,
-    max_width: float,
+    max_width: Tuple[float, float],
     use_mid: bool,
     min_contract_price: float = 0.0,
     max_credit_width_ratio: float = 0.80,
@@ -1255,7 +1282,10 @@ def build_credit_spreads(
                 long_leg = long_candidate
             
             width = abs(long_leg['strike'] - short_leg['strike'])
-            if width < min_width or width > max_width:
+            # Unpack max_width tuple: (put_max_width, call_max_width)
+            put_max_width, call_max_width = max_width
+            current_max_width = call_max_width if option_type.lower() == "call" else put_max_width
+            if width < min_width or width > current_max_width:
                 continue
             
             # Filter by strike distance from previous close (if enabled)
@@ -1330,7 +1360,7 @@ async def analyze_interval(
     percent_beyond: Tuple[float, float],
     risk_cap: Optional[float],
     min_width: float,
-    max_width: float,
+    max_width: Tuple[float, float],
     use_mid: bool,
     min_contract_price: float,
     underlying_ticker: Optional[str],
@@ -1971,7 +2001,7 @@ async def process_single_csv(
     percent_beyond: Tuple[float, float],
     risk_cap: Optional[float],
     min_spread_width: float,
-    max_spread_width: float,
+    max_spread_width: Tuple[float, float],
     use_mid_price: bool,
     min_contract_price: float,
     underlying_ticker: Optional[str],
@@ -2415,7 +2445,8 @@ def _load_existing_grid_results(csv_path: str) -> set:
         reader = csv.DictReader(f)
         param_cols = [
             'option_type', 'percent_beyond_put', 'percent_beyond_call',
-            'max_spread_width', 'min_contract_price', 'max_credit_width_ratio',
+            'max_spread_width', 'max_spread_width_put', 'max_spread_width_call',
+            'min_contract_price', 'max_credit_width_ratio',
             'max_strike_distance_pct', 'max_trading_hour', 'profit_target_pct',
         ]
         for row in reader:
@@ -2525,6 +2556,13 @@ async def run_backtest_with_params(
 
     percent_beyond = (params.get('percent_beyond_put', 0.02), params.get('percent_beyond_call', 0.02))
 
+    # Construct max_spread_width tuple from separate put/call keys or fallback to single value
+    max_spread_width_default = params.get('max_spread_width', 200)
+    max_spread_width = (
+        params.get('max_spread_width_put', max_spread_width_default),
+        params.get('max_spread_width_call', max_spread_width_default)
+    )
+
     for interval_time, interval_df in interval_groups:
         for opt_type in option_types:
             result = await analyze_interval(
@@ -2534,7 +2572,7 @@ async def run_backtest_with_params(
                 percent_beyond,
                 params.get('risk_cap'),
                 params.get('min_spread_width', 5),
-                params.get('max_spread_width', 200),
+                max_spread_width,
                 params.get('use_mid_price', False),
                 params.get('min_contract_price', 0),
                 params.get('underlying_ticker'),
@@ -2572,10 +2610,18 @@ def _format_grid_top_results(results: List[dict], sort_by: str, top_n: int) -> s
         pb_put = combo.get('percent_beyond_put', '-')
         pb_call = combo.get('percent_beyond_call', '-')
 
+        # Format max_spread_width - show put:call if separate values, else single value
+        msw_put = combo.get('max_spread_width_put', combo.get('max_spread_width', '-'))
+        msw_call = combo.get('max_spread_width_call', combo.get('max_spread_width', '-'))
+        if msw_put == msw_call:
+            msw_str = str(msw_put)
+        else:
+            msw_str = f"{msw_put}:{msw_call}"
+
         param_str = (
             f"type={combo.get('option_type', '-')} "
             f"pb={pb_put}:{pb_call} "
-            f"msw={combo.get('max_spread_width', '-')} "
+            f"msw={msw_str} "
             f"mcp={combo.get('min_contract_price', '-')} "
             f"mcr={combo.get('max_credit_width_ratio', '-')} "
             f"msd={combo.get('max_strike_distance_pct', '-')} "
@@ -2960,7 +3006,14 @@ async def main():
     except ValueError as e:
         print(f"Error: {e}")
         return 1
-    
+
+    # Parse max-spread-width value
+    try:
+        max_spread_width = parse_max_spread_width(args.max_spread_width)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+
     # Determine CSV file paths
     if args.csv_dir:
         # Use csv_dir to find matching files
@@ -3018,7 +3071,7 @@ async def main():
                 percent_beyond,
                 args.risk_cap,
                 args.min_spread_width,
-                args.max_spread_width,
+                max_spread_width,
                 args.use_mid_price,
                 args.min_contract_price,
                 args.underlying_ticker,
@@ -3111,7 +3164,7 @@ async def main():
                         percent_beyond,
                         args.risk_cap,
                         args.min_spread_width,
-                        args.max_spread_width,
+                        max_spread_width,
                         args.use_mid_price,
                         args.min_contract_price,
                         args.underlying_ticker,
@@ -3137,100 +3190,100 @@ async def main():
         total_intervals_count = len(results)
     
     # Apply top-N filtering if requested (before most-recent mode)
-        original_results_count = len(results)
-        if args.top_n and results:
-            results = filter_top_n_per_day(results, args.top_n)
-            logger.info(f"Applied top-{args.top_n} per day filter: {original_results_count} -> {len(results)} results")
-        
-        # Handle --most-recent mode
-        if args.most_recent:
-            if results:
-                # Find the most recent timestamp from results
-                max_timestamp = max(result['timestamp'] for result in results)
-                # Filter to only results from the most recent timestamp
-                # For each option type, keep only the best one
-                most_recent_results = []
-                call_results = [r for r in results if r['timestamp'] == max_timestamp and r.get('option_type', '').lower() == 'call']
-                put_results = [r for r in results if r['timestamp'] == max_timestamp and r.get('option_type', '').lower() == 'put']
-                
-                best_call = None
-                best_put = None
-                
-                if call_results:
-                    # Get best call by max credit
-                    best_call = max(call_results, key=lambda x: x['best_spread'].get('total_credit') or x['best_spread'].get('net_credit_per_contract', 0))
-                
-                if put_results:
-                    # Get best put by max credit
-                    best_put = max(put_results, key=lambda x: x['best_spread'].get('total_credit') or x['best_spread'].get('net_credit_per_contract', 0))
-                
-                # If --best-only is enabled, keep only the single best spread (call or put)
-                if args.best_only:
-                    if best_call and best_put:
-                        # Compare credits and keep only the best one
-                        call_credit = best_call['best_spread'].get('total_credit') or best_call['best_spread'].get('net_credit_per_contract', 0)
-                        put_credit = best_put['best_spread'].get('total_credit') or best_put['best_spread'].get('net_credit_per_contract', 0)
-                        if call_credit > put_credit:
-                            most_recent_results = [best_call]
-                        else:
-                            most_recent_results = [best_put]
-                    elif best_call:
+    original_results_count = len(results)
+    if args.top_n and results:
+        results = filter_top_n_per_day(results, args.top_n)
+        logger.info(f"Applied top-{args.top_n} per day filter: {original_results_count} -> {len(results)} results")
+    
+    # Handle --most-recent mode
+    if args.most_recent:
+        if results:
+            # Find the most recent timestamp from results
+            max_timestamp = max(result['timestamp'] for result in results)
+            # Filter to only results from the most recent timestamp
+            # For each option type, keep only the best one
+            most_recent_results = []
+            call_results = [r for r in results if r['timestamp'] == max_timestamp and r.get('option_type', '').lower() == 'call']
+            put_results = [r for r in results if r['timestamp'] == max_timestamp and r.get('option_type', '').lower() == 'put']
+            
+            best_call = None
+            best_put = None
+            
+            if call_results:
+                # Get best call by max credit
+                best_call = max(call_results, key=lambda x: x['best_spread'].get('total_credit') or x['best_spread'].get('net_credit_per_contract', 0))
+            
+            if put_results:
+                # Get best put by max credit
+                best_put = max(put_results, key=lambda x: x['best_spread'].get('total_credit') or x['best_spread'].get('net_credit_per_contract', 0))
+            
+            # If --best-only is enabled, keep only the single best spread (call or put)
+            if args.best_only:
+                if best_call and best_put:
+                    # Compare credits and keep only the best one
+                    call_credit = best_call['best_spread'].get('total_credit') or best_call['best_spread'].get('net_credit_per_contract', 0)
+                    put_credit = best_put['best_spread'].get('total_credit') or best_put['best_spread'].get('net_credit_per_contract', 0)
+                    if call_credit > put_credit:
                         most_recent_results = [best_call]
-                    elif best_put:
+                    else:
                         most_recent_results = [best_put]
-                else:
-                    # Keep both best call and best put
-                    if best_call:
-                        most_recent_results.append(best_call)
-                    if best_put:
-                        most_recent_results.append(best_put)
-                
-                results = most_recent_results
-                
-                # If using --most-recent --best-only --live, show the best option or a clear message
-                if args.best_only and args.live:
-                    if results:
-                        # Show the best option from most recent timestamp
-                        best_result = results[0]
-                        timestamp_str = format_timestamp(best_result['timestamp'], output_tz)
-                        max_credit = best_result['best_spread'].get('total_credit')
-                        if max_credit is None:
-                            max_credit = best_result['best_spread'].get('net_credit_per_contract', 0)
-                        num_contracts = best_result['best_spread'].get('num_contracts', 0)
-                        if num_contracts is None:
-                            num_contracts = 0
-                        opt_type_upper = best_result.get('option_type', 'UNKNOWN').upper()
-                        short_strike = best_result['best_spread']['short_strike']
-                        long_strike = best_result['best_spread']['long_strike']
-                        short_premium = best_result['best_spread']['short_price']
-                        long_premium = best_result['best_spread']['long_price']
-                        print(f"BEST CURRENT OPTION: {timestamp_str} | Type: {opt_type_upper} | Max Credit: ${max_credit:.2f} | Contracts: {num_contracts} | Spread: ${short_strike:.2f}/${long_strike:.2f} | Short: ${short_premium:.2f} Long: ${long_premium:.2f}")
-                    else:
-                        # No results found - use most recent timestamp from dataframe
-                        most_recent_ts = df['timestamp'].max() if len(df) > 0 else None
-                        if most_recent_ts:
-                            max_timestamp_str = format_timestamp(most_recent_ts, output_tz)
-                            print(f"NO RESULTS: No valid spreads found at most recent timestamp {max_timestamp_str} that meet the criteria.")
-                        else:
-                            print("NO RESULTS: No valid spreads found.")
-                        return 0
+                elif best_call:
+                    most_recent_results = [best_call]
+                elif best_put:
+                    most_recent_results = [best_put]
             else:
-                # No results at all - show message with most recent timestamp from dataframe
-                most_recent_ts = df['timestamp'].max() if len(df) > 0 else None
-                if most_recent_ts:
-                    most_recent_str = format_timestamp(most_recent_ts, output_tz)
-                    if args.best_only and args.live:
-                        print(f"NO RESULTS: No valid spreads found at most recent timestamp {most_recent_str} that meet the criteria.")
-                    else:
-                        print(f"NO RESULTS: No valid spreads found. Most recent data timestamp: {most_recent_str}")
+                # Keep both best call and best put
+                if best_call:
+                    most_recent_results.append(best_call)
+                if best_put:
+                    most_recent_results.append(best_put)
+            
+            results = most_recent_results
+            
+            # If using --most-recent --best-only --live, show the best option or a clear message
+            if args.best_only and args.live:
+                if results:
+                    # Show the best option from most recent timestamp
+                    best_result = results[0]
+                    timestamp_str = format_timestamp(best_result['timestamp'], output_tz)
+                    max_credit = best_result['best_spread'].get('total_credit')
+                    if max_credit is None:
+                        max_credit = best_result['best_spread'].get('net_credit_per_contract', 0)
+                    num_contracts = best_result['best_spread'].get('num_contracts', 0)
+                    if num_contracts is None:
+                        num_contracts = 0
+                    opt_type_upper = best_result.get('option_type', 'UNKNOWN').upper()
+                    short_strike = best_result['best_spread']['short_strike']
+                    long_strike = best_result['best_spread']['long_strike']
+                    short_premium = best_result['best_spread']['short_price']
+                    long_premium = best_result['best_spread']['long_price']
+                    print(f"BEST CURRENT OPTION: {timestamp_str} | Type: {opt_type_upper} | Max Credit: ${max_credit:.2f} | Contracts: {num_contracts} | Spread: ${short_strike:.2f}/${long_strike:.2f} | Short: ${short_premium:.2f} Long: ${long_premium:.2f}")
                 else:
-                    print("NO RESULTS: No valid spreads found.")
-                return 0
-        
-        # Print results
-        if args.summary or args.summary_only:
-            # Summarized view
-            if results:
+                    # No results found - use most recent timestamp from dataframe
+                    most_recent_ts = df['timestamp'].max() if len(df) > 0 else None
+                    if most_recent_ts:
+                        max_timestamp_str = format_timestamp(most_recent_ts, output_tz)
+                        print(f"NO RESULTS: No valid spreads found at most recent timestamp {max_timestamp_str} that meet the criteria.")
+                    else:
+                        print("NO RESULTS: No valid spreads found.")
+                    return 0
+        else:
+            # No results at all - show message with most recent timestamp from dataframe
+            most_recent_ts = df['timestamp'].max() if len(df) > 0 else None
+            if most_recent_ts:
+                most_recent_str = format_timestamp(most_recent_ts, output_tz)
+                if args.best_only and args.live:
+                    print(f"NO RESULTS: No valid spreads found at most recent timestamp {most_recent_str} that meet the criteria.")
+                else:
+                    print(f"NO RESULTS: No valid spreads found. Most recent data timestamp: {most_recent_str}")
+            else:
+                print("NO RESULTS: No valid spreads found.")
+            return 0
+    
+    # Print results
+    if args.summary or args.summary_only:
+        # Summarized view
+        if results:
                 # Sort by date (timestamp)
                 sorted_results = sorted(results, key=lambda x: x['timestamp'])
                 overall_best_call = None
@@ -3384,54 +3437,58 @@ async def main():
                 
                 if summary_parts:
                     print(f"SUMMARY: {' | '.join(summary_parts)}")
-            else:
-                print("No valid credit spreads found matching the criteria.")
         else:
-            # Detailed view
-            option_type_display = args.option_type.upper() if args.option_type != "both" else "CALL & PUT"
-            print("\n" + "="*100)
-            print(f"CREDIT SPREAD ANALYSIS - {option_type_display} OPTIONS")
-            print("="*100)
-            if args.csv_dir:
-                print(f"CSV Directory: {args.csv_dir}")
-                print(f"CSV Files: {len(csv_paths)} file(s)")
-                if args.start_date or args.end_date:
-                    date_range = f"{args.start_date or 'beginning'} to {args.end_date or 'today'}"
-                    print(f"Date Range: {date_range}")
-            else:
-                print(f"CSV File(s): {args.csv_path if isinstance(args.csv_path, list) else args.csv_path}")
-            print(f"Option Type: {args.option_type}")
-            print(f"Underlying Ticker: {args.underlying_ticker or 'Auto-detected from CSV'}")
-            put_pct, call_pct = percent_beyond
-            if put_pct == call_pct:
-                print(f"Percent Beyond Previous Close: {put_pct * 100:.2f}%")
-            else:
-                print(f"Percent Beyond Previous Close: PUT {put_pct * 100:.2f}% / CALL {call_pct * 100:.2f}%")
-            print(f"Output Timezone: {args.output_timezone}")
-            if args.risk_cap is not None:
-                print(f"Risk Cap: ${args.risk_cap:.2f}")
-            print(f"Max Spread Width: ${args.max_spread_width:.2f}")
-            print(f"Min Contract Price: ${args.min_contract_price:.2f}")
-            # Get timezone name for display
-            try:
-                tz_display = output_tz.tzname(datetime.now())
-            except:
-                tz_display = args.output_timezone
-            print(f"Max Trading Hour: {args.max_trading_hour}:00 {tz_display}")
-            if args.force_close_hour is not None:
-                print(f"Force Close Hour: {args.force_close_hour}:00 {tz_display} (all positions closed, P&L calculated)")
-            if args.profit_target_pct is not None:
-                print(f"Profit Target: {args.profit_target_pct * 100:.0f}% of max credit")
-            if use_multiprocessing:
-                print(f"Parallel Processing: {num_processes} processes")
-            print(f"Total Intervals Analyzed: {total_intervals_count}")
-            if args.top_n:
-                print(f"Intervals with Valid Spreads: {len(results)} (Top-{args.top_n} per day from {original_results_count} total)")
-            else:
-                print(f"Intervals with Valid Spreads: {len(results)}")
-            print("="*100)
-            
-            if results:
+            print("No valid credit spreads found matching the criteria.")
+    else:
+        # Detailed view
+        option_type_display = args.option_type.upper() if args.option_type != "both" else "CALL & PUT"
+        print("\n" + "="*100)
+        print(f"CREDIT SPREAD ANALYSIS - {option_type_display} OPTIONS")
+        print("="*100)
+        if args.csv_dir:
+            print(f"CSV Directory: {args.csv_dir}")
+            print(f"CSV Files: {len(csv_paths)} file(s)")
+            if args.start_date or args.end_date:
+                date_range = f"{args.start_date or 'beginning'} to {args.end_date or 'today'}"
+                print(f"Date Range: {date_range}")
+        else:
+            print(f"CSV File(s): {args.csv_path if isinstance(args.csv_path, list) else args.csv_path}")
+        print(f"Option Type: {args.option_type}")
+        print(f"Underlying Ticker: {args.underlying_ticker or 'Auto-detected from CSV'}")
+        put_pct, call_pct = percent_beyond
+        if put_pct == call_pct:
+            print(f"Percent Beyond Previous Close: {put_pct * 100:.2f}%")
+        else:
+            print(f"Percent Beyond Previous Close: PUT {put_pct * 100:.2f}% / CALL {call_pct * 100:.2f}%")
+        print(f"Output Timezone: {args.output_timezone}")
+        if args.risk_cap is not None:
+            print(f"Risk Cap: ${args.risk_cap:.2f}")
+        put_max_width, call_max_width = max_spread_width
+        if put_max_width == call_max_width:
+            print(f"Max Spread Width: ${put_max_width:.2f}")
+        else:
+            print(f"Max Spread Width: PUT ${put_max_width:.2f} / CALL ${call_max_width:.2f}")
+        print(f"Min Contract Price: ${args.min_contract_price:.2f}")
+        # Get timezone name for display
+        try:
+            tz_display = output_tz.tzname(datetime.now())
+        except:
+            tz_display = args.output_timezone
+        print(f"Max Trading Hour: {args.max_trading_hour}:00 {tz_display}")
+        if args.force_close_hour is not None:
+            print(f"Force Close Hour: {args.force_close_hour}:00 {tz_display} (all positions closed, P&L calculated)")
+        if args.profit_target_pct is not None:
+            print(f"Profit Target: {args.profit_target_pct * 100:.0f}% of max credit")
+        if use_multiprocessing:
+            print(f"Parallel Processing: {num_processes} processes")
+        print(f"Total Intervals Analyzed: {total_intervals_count}")
+        if args.top_n:
+            print(f"Intervals with Valid Spreads: {len(results)} (Top-{args.top_n} per day from {original_results_count} total)")
+        else:
+            print(f"Intervals with Valid Spreads: {len(results)}")
+        print("="*100)
+        
+        if results:
                 # Find overall maximum credit spread (by total credit if available, otherwise per-contract credit)
                 overall_best = max(results, key=lambda x: x['best_spread'].get('total_credit') or x['best_spread'].get('net_credit_per_contract', x['best_spread']['net_credit'] * 100))
                 
@@ -3557,23 +3614,23 @@ async def main():
                             print(f"   Actual P&L: ${actual_pnl_per_share:+.2f} per share")
                     
                     print(f"   Total Valid Spreads: {result['total_spreads']}")
-            else:
-                print("\nNo valid credit spreads found matching the criteria.")
-            
-            print("\n" + "="*100)
+        else:
+            print("\nNo valid credit spreads found matching the criteria.")
         
-        # Print trading statistics for multi-file analysis
-        if results and len(csv_paths) > 1:
-            print_trading_statistics(results, output_tz, len(csv_paths))
-        
-        # Generate histogram if requested and we have multiple files
-        if args.histogram and results and len(csv_paths) > 1:
-            print("\nGenerating hourly analysis histogram...")
+        print("\n" + "="*100)
+    
+    # Print trading statistics for multi-file analysis
+    if results and len(csv_paths) > 1:
+        print_trading_statistics(results, output_tz, len(csv_paths))
+    
+    # Generate histogram if requested and we have multiple files
+    if args.histogram and results and len(csv_paths) > 1:
+        print("\nGenerating hourly analysis histogram...")
+        generate_hourly_histogram(results, args.histogram_output, output_tz)
+    elif args.histogram and len(csv_paths) == 1:
+        print("\nNote: Histogram generation is most useful with multiple input files.")
+        if results:
             generate_hourly_histogram(results, args.histogram_output, output_tz)
-        elif args.histogram and len(csv_paths) == 1:
-            print("\nNote: Histogram generation is most useful with multiple input files.")
-            if results:
-                generate_hourly_histogram(results, args.histogram_output, output_tz)
     
     return 0
 
