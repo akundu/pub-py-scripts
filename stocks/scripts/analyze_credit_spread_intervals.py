@@ -297,6 +297,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Resume grid search from existing output CSV, skipping completed combinations"
     )
+    parser.add_argument(
+        "--grid-processes",
+        type=int,
+        default=1,
+        help="Number of parallel processes for grid search (default: 1). Use 0 to auto-detect CPU count."
+    )
 
     return parser.parse_args()
 
@@ -2612,6 +2618,60 @@ def _write_grid_results_csv(results: List[dict], output_path: str):
     print(f"\nResults written to: {output_path} ({len(results)} rows)")
 
 
+def _run_grid_combo_worker(args_tuple):
+    """Worker function to run a single grid combination in a separate process."""
+    combo, fixed_params, csv_paths, cache_dir, no_cache, log_level = args_tuple
+
+    logger = get_logger(f"grid_worker_{os.getpid()}", level=log_level)
+
+    try:
+        # Load data from cache (fast)
+        df = load_data_cached(csv_paths, cache_dir=cache_dir, no_cache=no_cache, logger=None)
+
+        # Create DB connection for this worker
+        db_path = fixed_params.get('db_path')
+        if isinstance(db_path, str) and db_path.startswith('$'):
+            db_path = os.environ.get(db_path[1:], None)
+
+        db = StockQuestDB(
+            db_path,
+            enable_cache=not fixed_params.get('no_cache', False),
+            logger=None  # Reduce noise
+        )
+
+        # Group intervals
+        interval_groups = list(df.groupby('interval'))
+
+        # Resolve output timezone
+        output_tz = None
+        if fixed_params.get('output_timezone'):
+            try:
+                output_tz = resolve_timezone(fixed_params['output_timezone'])
+            except Exception:
+                pass
+
+        # Build params
+        params = dict(fixed_params)
+        params.update(combo)
+        params['output_tz'] = output_tz
+
+        # Run backtest
+        metrics = asyncio.run(_run_backtest_with_params_sync(interval_groups, db, params, logger))
+
+        # Close DB
+        asyncio.run(db.close())
+
+        return {'combo': combo, 'metrics': metrics, 'success': True}
+
+    except Exception as e:
+        return {'combo': combo, 'error': str(e), 'success': False}
+
+
+async def _run_backtest_with_params_sync(interval_groups, db, params, logger):
+    """Wrapper for run_backtest_with_params for use in worker processes."""
+    return await run_backtest_with_params(interval_groups, db, params, logger)
+
+
 async def run_grid_search(args):
     """Run the grid search optimization mode."""
     logger = get_logger("grid_search", level=getattr(args, 'log_level', 'INFO'))
@@ -2729,7 +2789,14 @@ async def run_grid_search(args):
         await db.close()
         return 0
 
+    # Determine number of processes
+    num_processes = getattr(args, 'grid_processes', 1)
+    if num_processes == 0:
+        num_processes = multiprocessing.cpu_count()
+    use_parallel = num_processes > 1
+
     print(f"  Combinations to run: {len(pending_combos):,}")
+    print(f"  Parallel processes: {num_processes}")
     print(f"\nStarting grid search...")
     print("-" * 80)
 
@@ -2738,35 +2805,69 @@ async def run_grid_search(args):
     failed_count = 0
     start_time = time.time()
 
-    try:
-        for idx, combo in enumerate(pending_combos, 1):
-            # Build params from combo + fixed_params
-            params = dict(fixed_params)
-            params.update(combo)
-            params['output_tz'] = output_tz
+    if use_parallel:
+        # Parallel execution using multiprocessing
+        await db.close()  # Close DB - workers will create their own
 
-            try:
-                metrics = await run_backtest_with_params(interval_groups, db, params, logger)
-                if metrics['total_trades'] > 0:
-                    successful_results.append({'combo': combo, 'metrics': metrics})
-                    print(
-                        f"  [{idx}/{len(pending_combos)}] OK  "
-                        f"Net P&L: ${metrics['net_pnl']:>10,.2f}  "
-                        f"PF: {metrics['profit_factor']:.2f}  "
-                        f"WR: {metrics['win_rate']:.0f}%  "
-                        f"Trades: {metrics['total_trades']}"
-                    )
+        # Prepare worker args
+        log_level = getattr(args, 'log_level', 'WARNING')
+        worker_args = [
+            (combo, fixed_params, csv_paths, cache_dir, no_cache, log_level)
+            for combo in pending_combos
+        ]
+
+        completed = 0
+        with multiprocessing.Pool(processes=num_processes) as pool:
+            for result in pool.imap_unordered(_run_grid_combo_worker, worker_args):
+                completed += 1
+                if result['success']:
+                    metrics = result['metrics']
+                    if metrics['total_trades'] > 0:
+                        successful_results.append({'combo': result['combo'], 'metrics': metrics})
+                        print(
+                            f"  [{completed}/{len(pending_combos)}] OK  "
+                            f"Net P&L: ${metrics['net_pnl']:>10,.2f}  "
+                            f"PF: {metrics['profit_factor']:.2f}  "
+                            f"WR: {metrics['win_rate']:.0f}%  "
+                            f"Trades: {metrics['total_trades']}"
+                        )
+                    else:
+                        failed_count += 1
                 else:
                     failed_count += 1
-                    if idx <= 5 or idx % 100 == 0:
-                        print(f"  [{idx}/{len(pending_combos)}] SKIP: No trades")
-            except Exception as e:
-                failed_count += 1
-                if idx <= 5 or idx % 100 == 0:
-                    print(f"  [{idx}/{len(pending_combos)}] FAIL: {str(e)[:80]}")
+                    if completed <= 5 or completed % 100 == 0:
+                        print(f"  [{completed}/{len(pending_combos)}] FAIL: {result.get('error', 'Unknown')[:80]}")
+    else:
+        # Sequential execution
+        try:
+            for idx, combo in enumerate(pending_combos, 1):
+                # Build params from combo + fixed_params
+                params = dict(fixed_params)
+                params.update(combo)
+                params['output_tz'] = output_tz
 
-    finally:
-        await db.close()
+                try:
+                    metrics = await run_backtest_with_params(interval_groups, db, params, logger)
+                    if metrics['total_trades'] > 0:
+                        successful_results.append({'combo': combo, 'metrics': metrics})
+                        print(
+                            f"  [{idx}/{len(pending_combos)}] OK  "
+                            f"Net P&L: ${metrics['net_pnl']:>10,.2f}  "
+                            f"PF: {metrics['profit_factor']:.2f}  "
+                            f"WR: {metrics['win_rate']:.0f}%  "
+                            f"Trades: {metrics['total_trades']}"
+                        )
+                    else:
+                        failed_count += 1
+                        if idx <= 5 or idx % 100 == 0:
+                            print(f"  [{idx}/{len(pending_combos)}] SKIP: No trades")
+                except Exception as e:
+                    failed_count += 1
+                    if idx <= 5 or idx % 100 == 0:
+                        print(f"  [{idx}/{len(pending_combos)}] FAIL: {str(e)[:80]}")
+
+        finally:
+            await db.close()
 
     elapsed = time.time() - start_time
     print("-" * 80)
