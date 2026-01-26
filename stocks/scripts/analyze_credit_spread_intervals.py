@@ -3311,10 +3311,119 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
             else:
                 print("NO RESULTS: No valid spreads found.")
     
-    # Print results (only in continuous mode, we'll skip detailed printing)
-    if not args.continuous:
-        # Normal printing logic would go here
-        pass
+    # Print summary results in continuous mode
+    if args.summary or args.summary_only:
+        if results:
+            # Sort by date (timestamp)
+            sorted_results = sorted(results, key=lambda x: x['timestamp'])
+            overall_best_call = None
+            overall_best_put = None
+            max_credit_call = 0
+            max_credit_put = 0
+            total_options = len(results)
+            
+            for result in sorted_results:
+                # Get max credit (total_credit if available, otherwise per-contract credit)
+                max_credit = result['best_spread'].get('total_credit')
+                if max_credit is None:
+                    max_credit = result['best_spread'].get('net_credit_per_contract', 0)
+                
+                # Track overall best for calls and puts separately
+                opt_type = result.get('option_type', 'UNKNOWN').lower()
+                if opt_type == 'call':
+                    if max_credit > max_credit_call:
+                        max_credit_call = max_credit
+                        overall_best_call = result
+                elif opt_type == 'put':
+                    if max_credit > max_credit_put:
+                        max_credit_put = max_credit
+                        overall_best_put = result
+                
+                # Only print individual lines if --summary is used (not --summary-only)
+                # Skip if --best-only --continuous was used (we already printed it above)
+                if args.summary and not args.summary_only and not (args.best_only and args.continuous is not None):
+                    timestamp_str = format_timestamp(result['timestamp'], output_tz)
+                    num_contracts = result['best_spread'].get('num_contracts', 0)
+                    if num_contracts is None:
+                        num_contracts = 0
+                    opt_type_upper = result.get('option_type', 'UNKNOWN').upper()
+                    short_strike = result['best_spread']['short_strike']
+                    long_strike = result['best_spread']['long_strike']
+                    print(f"{timestamp_str} | Type: {opt_type_upper} | Max Credit: ${max_credit:.2f} | Contracts: {num_contracts} | Spread: ${short_strike:.2f}/${long_strike:.2f}")
+            
+            # Print final one-line summary
+            summary_parts = []
+            if args.top_n:
+                summary_parts.append(f"Total Options: {total_options} (Top-{args.top_n} per day)")
+            else:
+                summary_parts.append(f"Total Options: {total_options}")
+            
+            if overall_best_call:
+                call_price_diff = overall_best_call.get('price_diff_pct')
+                call_price_diff_str = f"{call_price_diff:+.2f}%" if call_price_diff is not None else "N/A"
+                summary_parts.append(f"CALL Max Credit: ${max_credit_call:.2f} (Price Diff: {call_price_diff_str})")
+            
+            if overall_best_put:
+                put_price_diff = overall_best_put.get('price_diff_pct')
+                put_price_diff_str = f"{put_price_diff:+.2f}%" if put_price_diff is not None else "N/A"
+                summary_parts.append(f"PUT Max Credit: ${max_credit_put:.2f} (Price Diff: {put_price_diff_str})")
+            
+            # If analyzing both types, show the overall best across both modes
+            if args.option_type == "both" and overall_best_call and overall_best_put:
+                # Determine which is better based on max credit
+                if max_credit_call > max_credit_put:
+                    overall_best = overall_best_call
+                    best_type = "CALL"
+                    best_credit = max_credit_call
+                    best_price_diff = overall_best_call.get('price_diff_pct')
+                else:
+                    overall_best = overall_best_put
+                    best_type = "PUT"
+                    best_credit = max_credit_put
+                    best_price_diff = overall_best_put.get('price_diff_pct')
+                
+                best_price_diff_str = f"{best_price_diff:+.2f}%" if best_price_diff is not None else "N/A"
+                best_timestamp = format_timestamp(overall_best['timestamp'], output_tz)
+                best_contracts = overall_best['best_spread'].get('num_contracts', 0)
+                if best_contracts is None:
+                    best_contracts = 0
+                best_short_strike = overall_best['best_spread']['short_strike']
+                best_long_strike = overall_best['best_spread']['long_strike']
+                best_short_premium = overall_best['best_spread']['short_price']
+                best_long_premium = overall_best['best_spread']['long_price']
+                summary_parts.append(f"BEST: {best_type} ${best_credit:.2f} @ {best_timestamp} ({best_price_diff_str}, {best_contracts} contracts) | Spread: ${best_short_strike:.2f}/${best_long_strike:.2f} | Short: ${best_short_premium:.2f} Long: ${best_long_premium:.2f}")
+            elif args.option_type == "both" and overall_best_call:
+                # Only call available
+                call_price_diff = overall_best_call.get('price_diff_pct')
+                call_price_diff_str = f"{call_price_diff:+.2f}%" if call_price_diff is not None else "N/A"
+                call_timestamp = format_timestamp(overall_best_call['timestamp'], output_tz)
+                call_contracts = overall_best_call['best_spread'].get('num_contracts', 0)
+                if call_contracts is None:
+                    call_contracts = 0
+                call_short_strike = overall_best_call['best_spread']['short_strike']
+                call_long_strike = overall_best_call['best_spread']['long_strike']
+                call_short_premium = overall_best_call['best_spread']['short_price']
+                call_long_premium = overall_best_call['best_spread']['long_price']
+                summary_parts.append(f"BEST: CALL ${max_credit_call:.2f} @ {call_timestamp} ({call_price_diff_str}, {call_contracts} contracts) | Spread: ${call_short_strike:.2f}/${call_long_strike:.2f} | Short: ${call_short_premium:.2f} Long: {call_long_premium:.2f}")
+            elif args.option_type == "both" and overall_best_put:
+                # Only put available
+                put_price_diff = overall_best_put.get('price_diff_pct')
+                put_price_diff_str = f"{put_price_diff:+.2f}%" if put_price_diff is not None else "N/A"
+                put_timestamp = format_timestamp(overall_best_put['timestamp'], output_tz)
+                put_contracts = overall_best_put['best_spread'].get('num_contracts', 0)
+                if put_contracts is None:
+                    put_contracts = 0
+                put_short_strike = overall_best_put['best_spread']['short_strike']
+                put_long_strike = overall_best_put['best_spread']['long_strike']
+                put_short_premium = overall_best_put['best_spread']['short_price']
+                put_long_premium = overall_best_put['best_spread']['long_price']
+                summary_parts.append(f"BEST: PUT ${max_credit_put:.2f} @ {put_timestamp} ({put_price_diff_str}, {put_contracts} contracts) | Spread: ${put_short_strike:.2f}/${put_long_strike:.2f} | Short: ${put_short_premium:.2f} Long: ${put_long_premium:.2f}")
+            
+            if summary_parts:
+                print(f"SUMMARY: {' | '.join(summary_parts)}")
+        elif not args.most_recent:
+            # Only print summary "no results" if not using --most-recent (to avoid duplicate messages)
+            print("SUMMARY: No valid spreads found.")
 
 
 async def main():
