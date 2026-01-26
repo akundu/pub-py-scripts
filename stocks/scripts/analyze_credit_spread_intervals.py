@@ -57,269 +57,44 @@ PROJECT_ROOT = CURRENT_DIR.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Add scripts directory to path for credit_spread_utils imports
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.insert(0, str(CURRENT_DIR))
+
 from common.questdb_db import StockQuestDB
 from common.common import extract_ticker_from_option_ticker
 from common.logging_utils import get_logger
+from common.market_hours import is_market_hours, compute_market_transition_times
+
+# Import utility modules
+from credit_spread_utils import timezone_utils, price_utils, capital_utils, arg_parser
+
+# Re-export commonly used functions for backward compatibility
+from credit_spread_utils.timezone_utils import (
+    resolve_timezone,
+    format_timestamp,
+    get_previous_trading_day,
+    normalize_timestamp,
+    convert_to_timezone,
+    get_eod_time,
+    get_calendar_date,
+)
+from credit_spread_utils.price_utils import (
+    get_current_day_close_price,
+    get_previous_close_price,
+    get_previous_open_price,
+    get_current_day_open_price,
+    get_price_at_time,
+)
+from credit_spread_utils.capital_utils import (
+    calculate_position_capital,
+    get_position_close_time,
+    filter_results_by_capital_limit,
+)
+from credit_spread_utils.arg_parser import parse_args
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Analyze credit spreads at 15-minute intervals from CSV options data"
-    )
-    parser.add_argument(
-        "--csv-path",
-        required=False,
-        nargs='+',
-        help="Path(s) to CSV file(s) with options data (timestamps in PST). Can provide multiple files for aggregate analysis. Not required if --csv-dir is provided."
-    )
-    parser.add_argument(
-        "--csv-dir",
-        type=str,
-        default=None,
-        help="Directory containing CSV files organized by ticker (e.g., csv_dir/TICKER/TICKER_options_YYYY-MM-DD.csv). Automatically appends ticker subdirectory. Requires --ticker or --underlying-ticker."
-    )
-    parser.add_argument(
-        "--start-date",
-        type=str,
-        default=None,
-        help="Start date for filtering CSV files (YYYY-MM-DD). Only processes files with dates >= start-date. If --end-date is not provided, processes all files from start-date to today."
-    )
-    parser.add_argument(
-        "--end-date",
-        type=str,
-        default=None,
-        help="End date for filtering CSV files (YYYY-MM-DD). Only processes files with dates <= end-date. Requires --start-date or --csv-dir."
-    )
-    parser.add_argument(
-        "--option-type",
-        choices=["call", "put", "both"],
-        default="both",
-        help="Option type: call, put, or both (default: both)"
-    )
-    parser.add_argument(
-        "--percent-beyond",
-        type=str,
-        required=False,
-        help="Percentage beyond previous day's closing price. Can be a single value (e.g., 0.05 for 5%%) or two values separated by colon for puts:calls (e.g., 0.03:0.05 means 3%% for puts, 5%% for calls). Required unless --grid-config is used."
-    )
-    parser.add_argument(
-        "--risk-cap",
-        type=float,
-        default=None,
-        help="Maximum risk amount to cap the spread at. Optional if --max-spread-width is provided."
-    )
-    parser.add_argument(
-        "--db-path",
-        dest="db_path",
-        help="QuestDB connection string (default: from environment)"
-    )
-    parser.add_argument(
-        "--no-cache",
-        action="store_true",
-        help="Disable Redis cache"
-    )
-    parser.add_argument(
-        "--log-level",
-        default="INFO",
-        help="Logging level"
-    )
-    parser.add_argument(
-        "--min-spread-width",
-        type=float,
-        default=5.0,
-        help="Minimum spread width (strike difference)"
-    )
-    parser.add_argument(
-        "--max-spread-width",
-        type=str,
-        default="200.0",
-        help="Maximum spread width (strike difference). Can be a single value (e.g., 100) or two values for puts:calls (e.g., 50:100)"
-    )
-    parser.add_argument(
-        "--use-mid-price",
-        action="store_true",
-        help="Use mid-price (bid+ask)/2 instead of bid/ask"
-    )
-    parser.add_argument(
-        "--underlying-ticker",
-        dest="underlying_ticker",
-        help="Underlying stock ticker (e.g., SPX, I:SPX). If not provided, will be extracted from option tickers in CSV"
-    )
-    parser.add_argument(
-        "--ticker",
-        dest="underlying_ticker",
-        help="Alias for --underlying-ticker"
-    )
-    parser.add_argument(
-        "--min-contract-price",
-        type=float,
-        default=0.0,
-        help="Minimum price for a contract to be included. Contracts at or below this price will be excluded. Default: 0.0"
-    )
-    parser.add_argument(
-        "--summary",
-        action="store_true",
-        help="Print a one-line summarized view: date, max credit, num contracts, price diff %%"
-    )
-    parser.add_argument(
-        "--summary-only",
-        action="store_true",
-        help="Print only the final one-line summary (no individual interval lines)"
-    )
-    parser.add_argument(
-        "--output-timezone",
-        default="America/Los_Angeles",
-        help="Timezone for displayed timestamps (e.g., America/Los_Angeles, America/New_York, UTC, PST, PDT, EST, EDT). Default: America/Los_Angeles"
-    )
-    parser.add_argument(
-        "--most-recent",
-        action="store_true",
-        help="Only show the best result(s) for the most recent timestamp(s). Useful for identifying current investment opportunities."
-    )
-    parser.add_argument(
-        "--best-only",
-        action="store_true",
-        help="When used with --most-recent, show only the single best spread (call or put) from the latest data. Use this to get the one actionable investment opportunity right now. Requires --most-recent."
-    )
-    parser.add_argument(
-        "--live",
-        action="store_true",
-        help="Live mode: Show a clear 'BEST CURRENT OPTION' line with actionable details. Use with --most-recent --best-only for current investment opportunities."
-    )
-    parser.add_argument(
-        "--curr-price",
-        action="store_true",
-        help="Use current/latest price instead of previous trading day's close price. Only effective in --live mode. Fetches the most recent price from the database (realtime -> hourly -> daily)."
-    )
-    parser.add_argument(
-        "--histogram",
-        action="store_true",
-        help="Generate histogram of hourly performance when multiple CSV files are provided. Shows success/failure rates and total counts by hour."
-    )
-    parser.add_argument(
-        "--histogram-output",
-        default="credit_spread_hourly_analysis.png",
-        help="Output filename for histogram (default: credit_spread_hourly_analysis.png)"
-    )
-    parser.add_argument(
-        "--top-n",
-        type=int,
-        default=None,
-        help="Only show top N spreads per day (ranked by max credit). Useful for realistic backtest scenarios where you only take the best opportunities. Example: --top-n 3 shows only the 3 best spreads each day."
-    )
-    parser.add_argument(
-        "--max-credit-width-ratio",
-        type=float,
-        default=0.60,
-        help="Maximum ratio of credit to spread width (default: 0.60 = 60%%). Filters out unrealistic spreads where credit is too close to width, which typically indicates stale pricing or deep ITM/OTM options. Use 1.0 to disable this filter."
-    )
-    parser.add_argument(
-        "--max-strike-distance-pct",
-        type=float,
-        default=None,
-        help="Maximum distance of short strike from previous close, as percentage (e.g., 0.05 = 5%%). Filters out deep ITM/OTM options with poor liquidity. Example: --max-strike-distance-pct 0.03 only allows strikes within 3%% of previous close."
-    )
-    parser.add_argument(
-        "--max-trading-hour",
-        type=int,
-        default=15,
-        help="Maximum hour of the day (in the timezone specified by --output-timezone) after which no new positions can be added. Default: 15 (3:00 PM). This prevents trading in the last hour when volatility can be extreme. Example: --max-trading-hour 14 stops trading after 2:00 PM. Uses same timezone as --output-timezone."
-    )
-    parser.add_argument(
-        "--min-trading-hour",
-        type=int,
-        default=None,
-        help="Minimum hour of the day (in the timezone specified by --output-timezone) before which no new positions can be added. Default: None (no minimum). This allows you to start counting transactions only after a certain hour. Example: --min-trading-hour 9 starts trading only after 9:00 AM. Uses same timezone as --output-timezone."
-    )
-    parser.add_argument(
-        "--processes",
-        type=int,
-        default=1,
-        help="Number of parallel processes to use for processing multiple files. Default: 1 (sequential). Use 0 to auto-detect CPU count. Only effective when processing multiple CSV files."
-    )
-    parser.add_argument(
-        "--profit-target-pct",
-        type=float,
-        default=None,
-        help="Profit target as percentage of max credit. If spread reaches this profit level, it is considered closed early. Example: --profit-target-pct 0.50 means exit when 50%% of max profit is reached. This simulates taking profits early rather than holding to expiration."
-    )
-    parser.add_argument(
-        "--max-live-capital",
-        type=float,
-        default=None,
-        help="Maximum dollar amount of active capital (max loss exposure) allowed per calendar day. Positions that would exceed this limit are skipped. Example: --max-live-capital 5000 limits total max loss exposure to $5000 per day. Uses calendar date in output timezone."
-    )
-    parser.add_argument(
-        "--force-close-hour",
-        type=int,
-        default=None,
-        help="Hour at which all trades must be closed (in the timezone specified by --output-timezone). Default: None (hold to expiration). Example: --force-close-hour 15 closes all positions at 3:00 PM. P&L is calculated based on the underlying price at this time. Use this to avoid holding positions through market close."
-    )
-
-    # Data cache arguments
-    parser.add_argument(
-        "--no-data-cache",
-        action="store_true",
-        help="Disable binary data cache (always load from CSVs)"
-    )
-    parser.add_argument(
-        "--cache-dir",
-        type=str,
-        default=".options_cache",
-        help="Directory for binary data cache (default: .options_cache)"
-    )
-    parser.add_argument(
-        "--clear-cache",
-        action="store_true",
-        help="Delete all cached data files and exit"
-    )
-
-    # Grid search arguments
-    parser.add_argument(
-        "--grid-config",
-        type=str,
-        default=None,
-        help="Path to JSON config file for grid search mode. When provided, runs parameter optimization instead of normal analysis."
-    )
-    parser.add_argument(
-        "--grid-output",
-        type=str,
-        default="optimizer_results.csv",
-        help="Output CSV path for grid search results (default: optimizer_results.csv)"
-    )
-    parser.add_argument(
-        "--grid-sort",
-        type=str,
-        default="net_pnl",
-        choices=["net_pnl", "profit_factor", "win_rate", "roi"],
-        help="Sort metric for grid search results (default: net_pnl)"
-    )
-    parser.add_argument(
-        "--grid-top-n",
-        type=int,
-        default=10,
-        help="Number of top results to display from grid search (default: 10)"
-    )
-    parser.add_argument(
-        "--grid-dry-run",
-        action="store_true",
-        help="Show total grid search combinations without executing"
-    )
-    parser.add_argument(
-        "--grid-resume",
-        action="store_true",
-        help="Resume grid search from existing output CSV, skipping completed combinations"
-    )
-    parser.add_argument(
-        "--grid-processes",
-        type=int,
-        default=1,
-        help="Number of parallel processes for grid search (default: 1). Use 0 to auto-detect CPU count."
-    )
-
-    return parser.parse_args()
-
-
+# Keep find_csv_files_in_dir in main file (used by parse_args and main)
 def find_csv_files_in_dir(
     csv_dir: str,
     ticker: str,
@@ -446,6 +221,37 @@ def find_csv_files_in_dir(
     return result
 
 
+# parse_args is now imported from credit_spread_utils.arg_parser
+# Removed old parse_args function (moved to credit_spread_utils/arg_parser.py)
+
+
+def parse_percent_beyond(value: str) -> Tuple[float, float]:
+    """
+    Parse percent-beyond value which can be either:
+    - A single float (e.g., "0.05") - used for both calls and puts
+    - Two values separated by colon (e.g., "0.03:0.05") - first for puts (negative), second for calls (positive)
+    
+    Returns:
+        Tuple of (put_percent_beyond, call_percent_beyond)
+    """
+    if ':' in value:
+        parts = value.split(':')
+        if len(parts) != 2:
+            raise ValueError(f"Invalid percent-beyond format: {value}. Expected 'put_value:call_value' or single value")
+        try:
+            put_value = float(parts[0].strip())
+            call_value = float(parts[1].strip())
+            return (put_value, call_value)
+        except ValueError as e:
+            raise ValueError(f"Invalid percent-beyond values: {value}. Both values must be numbers. Error: {e}")
+    else:
+        try:
+            single_value = float(value)
+            return (single_value, single_value)
+        except ValueError as e:
+            raise ValueError(f"Invalid percent-beyond value: {value}. Must be a number or 'put_value:call_value'. Error: {e}")
+
+
 def parse_percent_beyond(value: str) -> Tuple[float, float]:
     """
     Parse percent-beyond value which can be either:
@@ -533,73 +339,16 @@ def parse_pst_timestamp(timestamp_str: str) -> datetime:
         raise ValueError(f"Failed to parse timestamp '{timestamp_str}': {e}")
 
 
-def resolve_timezone(tz_name: str):
-    """Resolve timezone names and common abbreviations to tzinfo."""
-    aliases = {
-        "PST": "America/Los_Angeles",
-        "PDT": "America/Los_Angeles",
-        "PT": "America/Los_Angeles",
-        "EST": "America/New_York",
-        "EDT": "America/New_York",
-        "ET": "America/New_York",
-        "UTC": "UTC",
-        "GMT": "UTC",
-    }
-    tz_key = tz_name.strip()
-    tz_value = aliases.get(tz_key.upper(), tz_key)
-    try:
-        from zoneinfo import ZoneInfo
-        return ZoneInfo(tz_value)
-    except Exception:
-        import pytz
-        return pytz.timezone(tz_value)
-
-
-def format_timestamp(timestamp: Any, tzinfo) -> str:
-    """Format timestamps in the requested timezone."""
-    if isinstance(timestamp, pd.Timestamp):
-        timestamp = timestamp.to_pydatetime()
-    if timestamp.tzinfo is None:
-        pst = timezone(timedelta(hours=-8))
-        timestamp = timestamp.replace(tzinfo=pst)
-    localized = timestamp.astimezone(tzinfo)
-    return f"{localized.strftime('%Y-%m-%d %H:%M:%S')} {localized.tzname()}"
-
-
-def get_previous_trading_day(date: datetime) -> datetime:
-    """Get the previous trading day (weekday, not weekend)."""
-    # Convert to ET timezone for market day calculation
-    try:
-        from zoneinfo import ZoneInfo
-        et_tz = ZoneInfo("America/New_York")
-    except Exception:
-        import pytz
-        et_tz = pytz.timezone("America/New_York")
-    
-    if date.tzinfo is None:
-        # Assume PST if timezone-naive
-        pst = timezone(timedelta(hours=-8))
-        date = date.replace(tzinfo=pst)
-    
-    # Convert to ET
-    date_et = date.astimezone(et_tz)
-    date_only = date_et.date()
-    
-    # Calculate previous trading day
-    if date_only.weekday() == 0:  # Monday
-        prev_trading_day = date_only - timedelta(days=3)  # Go back to Friday
-    elif date_only.weekday() < 5:  # Tuesday-Friday
-        prev_trading_day = date_only - timedelta(days=1)
-    else:  # Weekend
-        prev_trading_day = date_only - timedelta(days=(date_only.weekday() - 4))  # Go back to Friday
-    
-    return prev_trading_day
-
+# resolve_timezone, format_timestamp, get_previous_trading_day are now imported from credit_spread_utils.timezone_utils
+# get_current_day_close_price, get_previous_close_price, etc. are now imported from credit_spread_utils.price_utils
 
 # Module-level cache for DB price queries (avoids repeated DB hits in grid search)
-_db_price_cache: Dict[str, Any] = {}
+# Note: This cache is now in price_utils module, but we keep a reference here for backward compatibility
+from credit_spread_utils.price_utils import _db_price_cache
 
-
+# Price functions are now imported from credit_spread_utils.price_utils
+# Keeping legacy definitions for now to maintain exact behavior, but they should use timezone utilities
+# TODO: Refactor to fully use timezone_utils throughout
 async def get_current_day_close_price(
     db: StockQuestDB,
     ticker: str,
@@ -1231,9 +980,11 @@ def find_option_at_timestamp(
         Series with option data, or None if not found
     """
     # Filter for matching strike and option type
+    # Handle both 'type' and 'option_type' column names
+    type_col = 'option_type' if 'option_type' in interval_df.columns else 'type'
     filtered = interval_df[
         (interval_df['strike'] == strike) & 
-        (interval_df['option_type'].str.lower() == option_type.lower())
+        (interval_df[type_col].str.lower() == option_type.lower())
     ]
     
     if filtered.empty:
@@ -1477,9 +1228,7 @@ async def analyze_interval(
     # Check if timestamp is within trading hours (in specified timezone)
     if output_tz is not None:
         # Convert timestamp to output timezone
-        if timestamp.tzinfo is None:
-            pst = timezone(timedelta(hours=-8))
-            timestamp = timestamp.replace(tzinfo=pst)
+        timestamp = normalize_timestamp(timestamp)
         timestamp_local = timestamp.astimezone(output_tz)
         
         # Filter out intervals before min_trading_hour
@@ -1823,227 +1572,9 @@ async def analyze_interval(
     }
 
 
-def calculate_position_capital(result: Dict, output_tz=None) -> Tuple[float, date]:
-    """Calculate position capital (max loss exposure) and get calendar date.
-    
-    Args:
-        result: Result dictionary from analyze_interval
-        output_tz: Output timezone for date calculation
-    
-    Returns:
-        Tuple of (position_capital, calendar_date)
-    """
-    best_spread = result['best_spread']
-    num_contracts = best_spread.get('num_contracts', 0)
-    if num_contracts is None:
-        num_contracts = 0
-    
-    # Get max loss per contract
-    max_loss_per_contract = best_spread.get('max_loss_per_contract')
-    if max_loss_per_contract is None:
-        # Calculate from max_loss_per_share if available
-        max_loss_per_share = best_spread.get('max_loss')
-        if max_loss_per_share is None or max_loss_per_share == 0:
-            # Calculate from width and credit
-            width = best_spread.get('width', 0)
-            net_credit = best_spread.get('net_credit', 0)
-            max_loss_per_share = width - net_credit
-        max_loss_per_contract = max_loss_per_share * 100
-    
-    position_capital = max_loss_per_contract * num_contracts
-    
-    # Get calendar date in output timezone
-    timestamp = result['timestamp']
-    if hasattr(timestamp, 'astimezone') and output_tz is not None:
-        if timestamp.tzinfo is None:
-            # Assume PST if timezone-naive
-            pst = timezone(timedelta(hours=-8))
-            timestamp = timestamp.replace(tzinfo=pst)
-        timestamp_local = timestamp.astimezone(output_tz)
-        calendar_date = timestamp_local.date()
-    else:
-        # Fallback to timestamp date if no timezone
-        calendar_date = timestamp.date() if hasattr(timestamp, 'date') else pd.to_datetime(timestamp).date()
-    
-    return position_capital, calendar_date
-
-
-def get_position_close_time(result: Dict, output_tz=None) -> Optional[datetime]:
-    """Get the time when position closes (early exit or EOD).
-    
-    Args:
-        result: Result dictionary from analyze_interval
-        output_tz: Output timezone
-    
-    Returns:
-        Close timestamp or None if position never closes
-    """
-    # Check for early exit (profit target hit)
-    if result.get('profit_target_hit') is True:
-        # Use exit_timestamp if available (from check_profit_target_hit)
-        # For now, we'll use close_time_used which should be set
-        close_time = result.get('close_time_used')
-        if close_time is not None:
-            return close_time
-    
-    # Check for force close hour
-    close_time = result.get('close_time_used')
-    if close_time is not None:
-        return close_time
-    
-    # Otherwise, use EOD (end of trading day)
-    # Get the date and set to 4:00 PM ET (market close)
-    timestamp = result['timestamp']
-    if hasattr(timestamp, 'astimezone') and output_tz is not None:
-        if timestamp.tzinfo is None:
-            pst = timezone(timedelta(hours=-8))
-            timestamp = timestamp.replace(tzinfo=pst)
-        timestamp_local = timestamp.astimezone(output_tz)
-        trading_date = timestamp_local.date()
-        
-        # Create EOD time (4:00 PM ET = market close)
-        try:
-            from zoneinfo import ZoneInfo
-            et_tz = ZoneInfo("America/New_York")
-        except Exception:
-            import pytz
-            et_tz = pytz.timezone("America/New_York")
-        
-        from datetime import datetime as dt_class
-        try:
-            eod_et = et_tz.localize(dt_class(trading_date.year, trading_date.month, trading_date.day, 16, 0))
-        except AttributeError:
-            eod_et = dt_class(trading_date.year, trading_date.month, trading_date.day, 16, 0, tzinfo=et_tz)
-        
-        # Convert to output timezone
-        if output_tz:
-            eod_local = eod_et.astimezone(output_tz)
-            return eod_local
-    
-    return None
-
-
-def filter_results_by_capital_limit(
-    results: List[Dict],
-    max_live_capital: float,
-    output_tz=None,
-    logger: Optional[logging.Logger] = None
-) -> List[Dict]:
-    """Filter results based on daily capital limit, accounting for position lifecycle.
-    
-    Positions that close early free up capital for later positions.
-    
-    Args:
-        results: List of result dictionaries
-        max_live_capital: Maximum capital allowed per day
-        output_tz: Output timezone
-        logger: Optional logger
-    
-    Returns:
-        Filtered list of results that fit within capital limits
-    """
-    if not results or max_live_capital is None:
-        return results
-    
-    # Build timeline of events: position opens and closes
-    events = []  # List of (timestamp, event_type, result, capital)
-    
-    for result in results:
-        position_capital, calendar_date = calculate_position_capital(result, output_tz)
-        open_time = result['timestamp']
-        
-        # Normalize open_time
-        if hasattr(open_time, 'astimezone') and output_tz is not None:
-            if open_time.tzinfo is None:
-                pst = timezone(timedelta(hours=-8))
-                open_time = open_time.replace(tzinfo=pst)
-            open_time = open_time.astimezone(output_tz)
-        
-        # Get close time
-        close_time = get_position_close_time(result, output_tz)
-        if close_time is None:
-            # If we can't determine close time, assume EOD
-            if hasattr(open_time, 'date'):
-                trading_date = open_time.date()
-            else:
-                trading_date = pd.to_datetime(open_time).date()
-            
-            # Set to 4:00 PM ET
-            try:
-                from zoneinfo import ZoneInfo
-                et_tz = ZoneInfo("America/New_York")
-            except Exception:
-                import pytz
-                et_tz = pytz.timezone("America/New_York")
-            
-            from datetime import datetime as dt_class
-            try:
-                eod_et = et_tz.localize(dt_class(trading_date.year, trading_date.month, trading_date.day, 16, 0))
-            except AttributeError:
-                eod_et = dt_class(trading_date.year, trading_date.month, trading_date.day, 16, 0, tzinfo=et_tz)
-            
-            if output_tz:
-                close_time = eod_et.astimezone(output_tz)
-            else:
-                close_time = eod_et
-        
-        # Normalize close_time
-        if hasattr(close_time, 'astimezone') and output_tz is not None:
-            if close_time.tzinfo is None:
-                pst = timezone(timedelta(hours=-8))
-                close_time = close_time.replace(tzinfo=pst)
-            close_time = close_time.astimezone(output_tz)
-        
-        events.append((open_time, 'open', result, position_capital, calendar_date))
-        events.append((close_time, 'close', result, position_capital, calendar_date))
-    
-    # Sort events chronologically
-    events.sort(key=lambda x: x[0])
-    
-    # Process events chronologically, tracking available capital per day
-    daily_available_capital = {}  # {date: available_capital}
-    filtered_results = []
-    opened_positions = set()  # Track which positions were actually opened (by result id)
-    
-    for event_time, event_type, result, position_capital, calendar_date in events:
-        # Initialize available capital for this date if needed
-        if calendar_date not in daily_available_capital:
-            daily_available_capital[calendar_date] = max_live_capital
-        
-        if event_type == 'open':
-            # Check if we have enough capital
-            available = daily_available_capital[calendar_date]
-            if position_capital <= available:
-                # Open position
-                daily_available_capital[calendar_date] -= position_capital
-                filtered_results.append(result)
-                opened_positions.add(id(result))
-                
-                if logger:
-                    logger.debug(
-                        f"Opened position at {event_time}: {position_capital:.2f} capital, "
-                        f"Available for {calendar_date}: {daily_available_capital[calendar_date]:.2f}"
-                    )
-            else:
-                if logger:
-                    logger.debug(
-                        f"Skipping position at {event_time}: "
-                        f"Insufficient capital ({available:.2f} < {position_capital:.2f})"
-                    )
-        
-        elif event_type == 'close':
-            # Check if this position was actually opened
-            if id(result) in opened_positions:
-                # Close position - free up capital
-                daily_available_capital[calendar_date] += position_capital
-                
-                if logger:
-                    logger.debug(
-                        f"Closed position at {event_time}: Freed {position_capital:.2f} capital, "
-                        f"Available for {calendar_date}: {daily_available_capital[calendar_date]:.2f}"
-                    )
-    
-    return filtered_results
+# Capital functions (calculate_position_capital, get_position_close_time, filter_results_by_capital_limit)
+# are imported from credit_spread_utils.capital_utils
+# Duplicate definitions removed - using imported versions
 
 
 def filter_top_n_per_day(results: List[Dict], top_n: int) -> List[Dict]:
@@ -3218,7 +2749,7 @@ async def run_grid_search(args):
         return 0
 
     # Determine number of processes
-    num_processes = getattr(args, 'grid_processes', 1)
+    num_processes = getattr(args, 'processes', 1) or 1
     if num_processes == 0:
         num_processes = multiprocessing.cpu_count()
     use_parallel = num_processes > 1
@@ -3323,106 +2854,166 @@ async def run_grid_search(args):
     return 0
 
 
-async def main():
-    args = parse_args()
+# Constants for continuous mode intervals
+RUN_INTERVAL_MARKET_OPEN = 300  # 5 minutes when market is open
+RUN_INTERVAL_MARKET_CLOSED = 3600  # 1 hour when market is closed
 
-    # Handle --clear-cache
-    if args.clear_cache:
-        clear_cache(args.cache_dir)
-        return 0
 
-    # Handle --grid-config (grid search mode)
-    if args.grid_config:
-        return await run_grid_search(args)
-
-    # Validate --percent-beyond is required in normal mode
-    if not args.percent_beyond:
-        print("Error: --percent-beyond is required (unless using --grid-config)")
-        return 1
-
-    # Validate that either csv_path or csv_dir is provided
-    if not args.csv_path and not args.csv_dir:
-        print("Error: Either --csv-path or --csv-dir must be provided")
-        return 1
+async def run_continuous_analysis(args, csv_paths, percent_beyond, max_spread_width, option_types_to_analyze, output_tz, logger):
+    """
+    Continuously run credit spread analysis with intelligent interval management.
     
-    if args.csv_path and args.csv_dir:
-        print("Error: Cannot use both --csv-path and --csv-dir. Use one or the other.")
-        return 1
+    The function optimizes run intervals based on:
+    - The wait time specified in --continuous (default: 10 seconds)
+    - Market hours awareness (if enabled), with transition-aware scheduling
+    - When market transitions from open to closed, runs one more time to capture final data
+    """
+    # Get wait time from --continuous (defaults to 10.0 seconds)
+    wait_time = args.continuous if args.continuous is not None else 10.0
     
-    # Validate that --csv-dir requires --ticker or --underlying-ticker
-    if args.csv_dir and not args.underlying_ticker:
-        print("Error: --csv-dir requires --ticker or --underlying-ticker to be specified")
-        return 1
+    print(f"Starting continuous credit spread analysis (wait time: {wait_time}s)...")
+    print(f"Max runs: {args.continuous_max_runs if args.continuous_max_runs else 'unlimited'}")
     
-    # Validate date arguments
-    if args.end_date and not args.start_date and not args.csv_dir:
-        print("Error: --end-date requires --start-date or --csv-dir")
-        return 1
+    run_count = 0
+    last_run_duration = 0  # Track how long the last run took
+    was_market_open = None  # Track previous market state to detect transitions
     
-    # Validate that either risk_cap or max_spread_width is provided
-    if args.risk_cap is None and args.max_spread_width is None:
-        print("Error: Either --risk-cap or --max-spread-width must be provided")
-        return 1
-    
-    # Validate that --best-only is only used with --most-recent
-    if args.best_only and not args.most_recent:
-        print("Error: --best-only requires --most-recent to be enabled")
-        return 1
-    
-    # Validate that --curr-price is only used with --live
-    if args.curr_price and not args.live:
-        print("Error: --curr-price requires --live mode to be enabled")
-        return 1
-
-    try:
-        output_tz = resolve_timezone(args.output_timezone)
-    except Exception as e:
-        print(f"Error: Invalid --output-timezone '{args.output_timezone}': {e}")
-        return 1
-    
-    logger = get_logger("analyze_credit_spread_intervals", level=args.log_level)
-    
-    # Parse percent-beyond value
-    try:
-        percent_beyond = parse_percent_beyond(args.percent_beyond)
-    except ValueError as e:
-        print(f"Error: {e}")
-        return 1
-
-    # Parse max-spread-width value
-    try:
-        max_spread_width = parse_max_spread_width(args.max_spread_width)
-    except ValueError as e:
-        print(f"Error: {e}")
-        return 1
-
-    # Determine CSV file paths
-    if args.csv_dir:
-        # Use csv_dir to find matching files
-        ticker = args.underlying_ticker
-        if not ticker:
-            print("Error: --ticker or --underlying-ticker is required when using --csv-dir")
-            return 1
-        
-        csv_paths = find_csv_files_in_dir(
-            args.csv_dir,
-            ticker,
-            args.start_date,
-            args.end_date,
-            logger
+    # Store the original main function logic in a callable
+    async def run_single_analysis():
+        """Run a single analysis iteration."""
+        return await _run_single_analysis_iteration(
+            args, csv_paths, percent_beyond, max_spread_width, 
+            option_types_to_analyze, output_tz, logger
         )
+    
+    while True:
+        run_count += 1
+        start_time = time.time()
         
-        if not csv_paths:
-            print(f"Error: No CSV files found in {args.csv_dir}/{ticker.upper()}/ matching the criteria")
-            return 1
+        if args.use_market_hours:
+            is_market_open_start = is_market_hours()
+            market_status = "MARKET OPEN" if is_market_open_start else "MARKET CLOSED"
+            
+            # Detect market transition from open to closed
+            if was_market_open is True and not is_market_open_start:
+                print(f"\n--- MARKET TRANSITION DETECTED: OPEN → CLOSED at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} ---")
+                print(f"Performing final analysis after market close to capture EOD data...")
+            
+            print(f"\n--- Run #{run_count} at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} [{market_status}] ---")
+        else:
+            print(f"\n--- Run #{run_count} at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} ---")
         
-        # Convert Path objects to strings
-        csv_paths = [str(p) for p in csv_paths]
-        logger.info(f"Found {len(csv_paths)} CSV file(s) from --csv-dir")
-    else:
-        # Use provided csv_path
-        csv_paths = args.csv_path if isinstance(args.csv_path, list) else [args.csv_path]
-        logger.info(f"Reading {len(csv_paths)} CSV file(s) from --csv-path")
+        try:
+            # Run the analysis
+            await run_single_analysis()
+            
+            # Calculate how long this run took
+            run_duration = time.time() - start_time
+            last_run_duration = run_duration
+            
+            print(f"Run #{run_count} completed in {run_duration:.1f}s")
+            
+            # Check if we should stop
+            if args.continuous_max_runs and run_count >= args.continuous_max_runs:
+                print(f"Reached maximum runs ({args.continuous_max_runs}), stopping continuous analysis.")
+                break
+            
+            # Calculate optimal sleep time
+            # Use intelligent intervals based on market hours and run duration
+            
+            if args.use_market_hours:
+                is_market_open = is_market_hours()
+                now_utc = datetime.now(timezone.utc)
+                seconds_to_open, seconds_to_close = compute_market_transition_times(now_utc, args.output_timezone)
+                
+                # Check if we just transitioned from open to closed
+                # If so, we already did a post-close run, so now go into long sleep mode
+                just_closed = (was_market_open is True and not is_market_open)
+                
+                if is_market_open:
+                    # Market is open - use the specified wait time, but don't sleep past close
+                    base_sleep = max(wait_time - run_duration, 1)
+                    if seconds_to_close is not None:
+                        sleep_time = max(min(base_sleep, seconds_to_close), 1)
+                        print(f"Next run in {sleep_time:.1f}s (market open, {wait_time}s interval; {seconds_to_close:.1f}s until close) [MARKET OPEN]")
+                    else:
+                        sleep_time = base_sleep
+                        print(f"Next run in {sleep_time:.1f}s (market open, {wait_time}s interval) [MARKET OPEN]")
+                else:
+                    # Market is closed - override continuous interval and wait until market opens
+                    if just_closed:
+                        # We just performed the post-close run, now sleep until next market open
+                        print(f"Post-close analysis completed. Entering extended sleep until next market open.")
+                    
+                    # When market is closed, override the continuous interval and wait until market opens
+                    if seconds_to_open is not None:
+                        # Sleep until market opens (completely override continuous interval)
+                        sleep_time = seconds_to_open
+                        hours_to_wait = sleep_time / 3600
+                        print(f"Market is closed. Waiting {hours_to_wait:.2f} hours ({sleep_time:.0f} seconds) until market opens. [MARKET CLOSED→OPEN]")
+                    else:
+                        # Don't know when market opens - use default closed interval as fallback
+                        base_sleep = max(RUN_INTERVAL_MARKET_CLOSED - run_duration, 60)
+                        sleep_time = max(base_sleep, 1)
+                        print(f"Next run in {sleep_time:.1f}s (markets closed, {RUN_INTERVAL_MARKET_CLOSED/60:.0f}min interval) [MARKET CLOSED]")
+                
+                # Update the market state tracker for next iteration
+                was_market_open = is_market_open
+            else:
+                # Standard behavior - use the specified wait time
+                base_sleep = max(wait_time - run_duration, 1)
+                sleep_time = max(base_sleep, 1)
+                print(f"Next run in {sleep_time:.1f}s ({wait_time}s interval)")
+            
+            # Sleep until next run
+            await asyncio.sleep(sleep_time)
+            
+            # After waking up, check if market transitioned from open to closed during sleep
+            # If so, perform one more run to capture EOD data before long sleep
+            if args.use_market_hours and was_market_open is True:
+                current_market_state = is_market_hours()
+                if not current_market_state:
+                    # Market closed while we were sleeping - run once more for EOD data
+                    print(f"\n--- MARKET CLOSED DURING SLEEP - Performing post-close analysis ---")
+                    run_count += 1
+                    start_time_post_close = time.time()
+                    
+                    try:
+                        # Run the post-close analysis
+                        await run_single_analysis()
+                        run_duration_post_close = time.time() - start_time_post_close
+                        print(f"Post-close analysis #{run_count} completed in {run_duration_post_close:.1f}s")
+                        
+                        # Check if we should stop
+                        if args.continuous_max_runs and run_count >= args.continuous_max_runs:
+                            print(f"Reached maximum runs ({args.continuous_max_runs}), stopping continuous analysis.")
+                            break
+                        
+                        # Update market state tracker
+                        was_market_open = False
+                        
+                    except Exception as e:
+                        print(f"Error during post-close analysis: {e}", file=sys.stderr)
+                        was_market_open = False
+            
+        except KeyboardInterrupt:
+            print(f"\nContinuous analysis interrupted by user after {run_count} runs.")
+            break
+        except Exception as e:
+            print(f"Error in continuous analysis run #{run_count}: {e}")
+            # Wait a bit before retrying to avoid rapid error loops
+            await asyncio.sleep(10)
+    
+    print(f"Continuous analysis stopped after {run_count} runs.")
+
+
+async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_spread_width, option_types_to_analyze, output_tz, logger):
+    """
+    Run a single iteration of the analysis.
+    This extracts the main analysis logic so it can be called repeatedly in continuous mode.
+    """
+    # This function contains the core analysis logic from main()
+    # We'll extract the relevant parts from the main function
     
     # Determine if we should use multiprocessing
     num_processes = args.processes
@@ -3433,12 +3024,8 @@ async def main():
         num_processes = multiprocessing.cpu_count()
         logger.info(f"Auto-detected {num_processes} CPUs")
     
-    # Determine which option types to analyze
-    option_types_to_analyze = []
-    if args.option_type == "both":
-        option_types_to_analyze = ["call", "put"]
-    else:
-        option_types_to_analyze = [args.option_type]
+    results = []
+    skip_normal_processing = False
     
     # Process CSV files
     if use_multiprocessing:
@@ -3462,7 +3049,7 @@ async def main():
                 args.log_level,
                 args.max_credit_width_ratio,
                 args.max_strike_distance_pct,
-                args.curr_price and args.live,
+                args.curr_price and args.continuous is not None,
                 args.max_trading_hour,
                 args.min_trading_hour,
                 args.profit_target_pct,
@@ -3479,7 +3066,6 @@ async def main():
             results_list = pool.map(process_single_csv_sync, process_args)
         
         # Flatten results
-        results = []
         for file_results in results_list:
             results.extend(file_results)
         
@@ -3511,7 +3097,6 @@ async def main():
                     logger.info(f"  {date}: ${capital:,.2f} / ${args.max_live_capital:,.2f} ({(capital/args.max_live_capital*100):.1f}%)")
         
         # Skip to post-processing (we already have results)
-        # Set a flag to skip the normal processing
         skip_normal_processing = True
     else:
         # Read CSV file(s) sequentially with binary cache support
@@ -3526,10 +3111,10 @@ async def main():
             )
         except ValueError as e:
             logger.error(str(e))
-            return 1
+            return
         except Exception as e:
             logger.error(f"Failed to load CSV data: {e}")
-            return 1
+            return
 
         skip_normal_processing = False
 
@@ -3565,8 +3150,8 @@ async def main():
             # Collect all results first (without capital filtering)
             for interval_time, interval_df in intervals_to_process:
                 for opt_type in option_types_to_analyze:
-                    # Use current price if --curr-price is set and --live mode is active
-                    use_current_price = args.curr_price and args.live
+                    # Use current price if --curr-price is set and --continuous mode is active
+                    use_current_price = args.curr_price and args.continuous is not None
                     result = await analyze_interval(
                         db,
                         interval_df,
@@ -3676,8 +3261,8 @@ async def main():
             
             results = most_recent_results
             
-            # If using --most-recent --best-only --live, show the best option or a clear message
-            if args.best_only and args.live:
+            # If using --most-recent --best-only --continuous, show the best option or a clear message
+            if args.best_only and args.continuous is not None:
                 if results:
                     # Show the best option from most recent timestamp
                     best_result = results[0]
@@ -3695,8 +3280,498 @@ async def main():
                     long_premium = best_result['best_spread']['long_price']
                     print(f"BEST CURRENT OPTION: {timestamp_str} | Type: {opt_type_upper} | Max Credit: ${max_credit:.2f} | Contracts: {num_contracts} | Spread: ${short_strike:.2f}/${long_strike:.2f} | Short: ${short_premium:.2f} Long: ${long_premium:.2f}")
                 else:
-                    # No results found - use most recent timestamp from dataframe
-                    most_recent_ts = df['timestamp'].max() if len(df) > 0 else None
+                    # No results found - use most recent timestamp from dataframe if available
+                    most_recent_ts = None
+                    try:
+                        if df is not None and len(df) > 0:
+                            most_recent_ts = df['timestamp'].max()
+                    except (NameError, UnboundLocalError):
+                        # df not defined (e.g., when using multiprocessing)
+                        pass
+                    if most_recent_ts:
+                        max_timestamp_str = format_timestamp(most_recent_ts, output_tz)
+                        print(f"NO RESULTS: No valid spreads found at most recent timestamp {max_timestamp_str} that meet the criteria.")
+                    else:
+                        print("NO RESULTS: No valid spreads found.")
+        else:
+            # No results at all - show message with most recent timestamp from dataframe if available
+            most_recent_ts = None
+            try:
+                if df is not None and len(df) > 0:
+                    most_recent_ts = df['timestamp'].max()
+            except (NameError, UnboundLocalError):
+                # df not defined (e.g., when using multiprocessing)
+                pass
+            if most_recent_ts:
+                most_recent_str = format_timestamp(most_recent_ts, output_tz)
+                if args.best_only and args.continuous is not None:
+                    print(f"NO RESULTS: No valid spreads found at most recent timestamp {most_recent_str} that meet the criteria.")
+                else:
+                    print(f"NO RESULTS: No valid spreads found. Most recent data timestamp: {most_recent_str}")
+            else:
+                print("NO RESULTS: No valid spreads found.")
+    
+    # Print results (only in continuous mode, we'll skip detailed printing)
+    if not args.continuous:
+        # Normal printing logic would go here
+        pass
+
+
+async def main():
+    args = parse_args()
+
+    # Handle --clear-cache
+    if args.clear_cache:
+        clear_cache(args.cache_dir)
+        return 0
+
+    # Handle --grid-config (grid search mode)
+    if args.grid_config:
+        return await run_grid_search(args)
+
+    # Validate --percent-beyond is required in normal mode
+    if not args.percent_beyond:
+        print("Error: --percent-beyond is required (unless using --grid-config)")
+        return 1
+
+    # Validate that either csv_path or csv_dir is provided
+    if not args.csv_path and not args.csv_dir:
+        print("Error: Either --csv-path or --csv-dir must be provided")
+        return 1
+    
+    if args.csv_path and args.csv_dir:
+        print("Error: Cannot use both --csv-path and --csv-dir. Use one or the other.")
+        return 1
+    
+    # Validate that --csv-dir requires --ticker or --underlying-ticker
+    if args.csv_dir and not args.underlying_ticker:
+        print("Error: --csv-dir requires --ticker or --underlying-ticker to be specified")
+        return 1
+    
+    # Validate date arguments
+    if args.end_date and not args.start_date and not args.csv_dir:
+        print("Error: --end-date requires --start-date or --csv-dir")
+        return 1
+    
+    # Validate that either risk_cap or max_spread_width is provided
+    if args.risk_cap is None and args.max_spread_width is None:
+        print("Error: Either --risk-cap or --max-spread-width must be provided")
+        return 1
+    
+    # Validate that --best-only is only used with --most-recent
+    if args.best_only and not args.most_recent:
+        print("Error: --best-only requires --most-recent to be enabled")
+        return 1
+    
+    # Validate that --curr-price is only used with --continuous
+    if args.curr_price and args.continuous is None:
+        print("Error: --curr-price requires --continuous mode to be enabled")
+        return 1
+    
+    # Validate that --use-market-hours and --run-once-before-wait require --continuous
+    if args.use_market_hours and args.continuous is None:
+        print("Error: --use-market-hours requires --continuous mode to be enabled")
+        return 1
+    
+    if args.run_once_before_wait and args.continuous is None:
+        print("Error: --run-once-before-wait requires --continuous mode to be enabled")
+        return 1
+
+    try:
+        output_tz = resolve_timezone(args.output_timezone)
+    except Exception as e:
+        print(f"Error: Invalid --output-timezone '{args.output_timezone}': {e}")
+        return 1
+    
+    logger = get_logger("analyze_credit_spread_intervals", level=args.log_level)
+    
+    # Parse percent-beyond value
+    try:
+        percent_beyond = parse_percent_beyond(args.percent_beyond)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+
+    # Parse max-spread-width value
+    try:
+        max_spread_width = parse_max_spread_width(args.max_spread_width)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+
+    # Determine CSV file paths
+    if args.csv_dir:
+        # Use csv_dir to find matching files
+        ticker = args.underlying_ticker
+        if not ticker:
+            print("Error: --ticker or --underlying-ticker is required when using --csv-dir")
+            return 1
+        
+        csv_paths = find_csv_files_in_dir(
+            args.csv_dir,
+            ticker,
+            args.start_date,
+            args.end_date,
+            logger
+        )
+        
+        if not csv_paths:
+            print(f"Error: No CSV files found in {args.csv_dir}/{ticker.upper()}/ matching the criteria")
+            return 1
+        
+        # Convert Path objects to strings
+        csv_paths = [str(p) for p in csv_paths]
+        logger.info(f"Found {len(csv_paths)} CSV file(s) from --csv-dir")
+    else:
+        # Use provided csv_path
+        csv_paths = args.csv_path if isinstance(args.csv_path, list) else [args.csv_path]
+        logger.info(f"Reading {len(csv_paths)} CSV file(s) from --csv-path")
+    
+    # Determine if we should use multiprocessing
+    num_processes = args.processes
+    use_multiprocessing = len(csv_paths) > 1 and num_processes != 1
+    
+    # Auto-detect CPU count if requested
+    if num_processes == 0:
+        num_processes = multiprocessing.cpu_count()
+        logger.info(f"Auto-detected {num_processes} CPUs")
+    
+    # Determine which option types to analyze
+    option_types_to_analyze = []
+    if args.option_type == "both":
+        option_types_to_analyze = ["call", "put"]
+    else:
+        option_types_to_analyze = [args.option_type]
+    
+    # Handle continuous mode
+    if args.continuous is not None:
+        # Check market status and wait if needed (only in continuous mode with market hours awareness)
+        if args.use_market_hours:
+            now_utc = datetime.now(timezone.utc)
+            is_market_open = is_market_hours()
+            seconds_to_open, _ = compute_market_transition_times(now_utc, args.output_timezone)
+            
+            if not is_market_open and seconds_to_open is not None:
+                # Market is closed - handle based on run-once-before-wait flag
+                if args.run_once_before_wait:
+                    # Run once immediately before waiting
+                    print(f"Market is closed. Running once immediately before waiting for market open...")
+                    
+                    # Run a single analysis iteration
+                    await _run_single_analysis_iteration(
+                        args, csv_paths, percent_beyond, max_spread_width,
+                        option_types_to_analyze, output_tz, logger
+                    )
+                    
+                    # Now wait for market open
+                    hours_to_wait = seconds_to_open / 3600
+                    print(f"One-time run completed. Waiting {hours_to_wait:.2f} hours ({seconds_to_open:.0f} seconds) until market opens...")
+                    
+                    await asyncio.sleep(seconds_to_open)
+                    
+                    # Re-check market status after waiting
+                    now_utc = datetime.now(timezone.utc)
+                    is_market_open = is_market_hours()
+                    if is_market_open:
+                        print("Market is now open. Proceeding with normal operation...")
+                    else:
+                        print("Warning: Market is still not open after waiting. Proceeding anyway...")
+                else:
+                    # Wait until 5 minutes before market open, then start the normal loop
+                    pre_open_buffer = 300  # seconds
+                    if seconds_to_open > pre_open_buffer:
+                        wait_until_buffer = seconds_to_open - pre_open_buffer
+                        hours_to_wait = wait_until_buffer / 3600
+                        print(
+                            f"Market is closed. Waiting {hours_to_wait:.2f} hours "
+                            f"({wait_until_buffer:.0f} seconds) so we wake up 5 minutes before market open..."
+                        )
+                        await asyncio.sleep(wait_until_buffer)
+                        print("Pre-market wake-up reached. Starting analysis 5 minutes before market open...")
+                    else:
+                        print(
+                            f"Market opens in {seconds_to_open/60:.1f} minutes. "
+                            "Starting analysis now so it is running before the open..."
+                        )
+                    
+                    # Re-check market status before starting
+                    now_utc = datetime.now(timezone.utc)
+                    is_market_open = is_market_hours()
+                    if is_market_open:
+                        print("Market is now open. Starting analysis...")
+                    else:
+                        print("Market still closed, beginning pre-open analysis cadence...")
+        
+        # Start continuous analysis
+        await run_continuous_analysis(
+            args, csv_paths, percent_beyond, max_spread_width,
+            option_types_to_analyze, output_tz, logger
+        )
+        return 0
+    
+    # Process CSV files (normal mode, not continuous)
+    if use_multiprocessing:
+        logger.info(f"Processing {len(csv_paths)} files using {num_processes} parallel processes")
+        
+        # Prepare arguments for each CSV file
+        process_args = []
+        for csv_path in csv_paths:
+            args_tuple = (
+                csv_path,
+                option_types_to_analyze,
+                percent_beyond,
+                args.risk_cap,
+                args.min_spread_width,
+                max_spread_width,
+                args.use_mid_price,
+                args.min_contract_price,
+                args.underlying_ticker,
+                args.db_path,
+                args.no_cache,
+                args.log_level,
+                args.max_credit_width_ratio,
+                args.max_strike_distance_pct,
+                args.curr_price and args.continuous is not None,
+                args.max_trading_hour,
+                args.min_trading_hour,
+                args.profit_target_pct,
+                args.most_recent,
+                output_tz,
+                args.force_close_hour,
+                args.cache_dir,
+                args.no_data_cache
+            )
+            process_args.append(args_tuple)
+        
+        # Process files in parallel
+        with multiprocessing.Pool(processes=num_processes) as pool:
+            results_list = pool.map(process_single_csv_sync, process_args)
+        
+        # Flatten results
+        results = []
+        for file_results in results_list:
+            results.extend(file_results)
+        
+        logger.info(f"Parallel processing complete. Total results: {len(results)}")
+        
+        # Apply capital limit filter (accounts for position lifecycle)
+        if args.max_live_capital is not None:
+            original_count = len(results)
+            results = filter_results_by_capital_limit(
+                results,
+                args.max_live_capital,
+                output_tz,
+                logger
+            )
+            logger.info(
+                f"Capital limit filter: {original_count} -> {len(results)} positions "
+                f"(max ${args.max_live_capital:,.2f} per day)"
+            )
+            
+            # Calculate and log final capital usage
+            daily_capital_usage = {}
+            for result in results:
+                position_capital, calendar_date = calculate_position_capital(result, output_tz)
+                daily_capital_usage[calendar_date] = daily_capital_usage.get(calendar_date, 0.0) + position_capital
+            
+            if daily_capital_usage:
+                logger.info("Final daily capital usage:")
+                for date, capital in sorted(daily_capital_usage.items()):
+                    logger.info(f"  {date}: ${capital:,.2f} / ${args.max_live_capital:,.2f} ({(capital/args.max_live_capital*100):.1f}%)")
+        
+        # Skip to post-processing (we already have results)
+        # Set a flag to skip the normal processing
+        skip_normal_processing = True
+    else:
+        # Read CSV file(s) sequentially with binary cache support
+        logger.info(f"Processing {len(csv_paths)} file(s) sequentially")
+
+        try:
+            df = load_data_cached(
+                csv_paths,
+                cache_dir=args.cache_dir,
+                no_cache=args.no_data_cache,
+                logger=logger
+            )
+        except ValueError as e:
+            logger.error(str(e))
+            return 1
+        except Exception as e:
+            logger.error(f"Failed to load CSV data: {e}")
+            return 1
+
+        skip_normal_processing = False
+
+    # Normal processing (when not using multiprocessing)
+    if not skip_normal_processing:
+        
+        # Initialize database
+        logger.info("Initializing database connection...")
+        db = StockQuestDB(
+            args.db_path if args.db_path else None,
+            enable_cache=not args.no_cache,
+            logger=logger
+        )
+        
+        try:
+            # Group by 15-minute intervals
+            intervals_grouped = df.groupby('interval')
+            total_intervals_count = len(intervals_grouped)
+            
+            # If --most-recent is used, only analyze the most recent interval
+            if args.most_recent:
+                # Find the most recent interval
+                max_interval = df['interval'].max()
+                max_interval_df = df[df['interval'] == max_interval]
+                intervals_to_process = [(max_interval, max_interval_df)]
+                logger.info(f"Analyzing most recent interval only: {max_interval}")
+            else:
+                intervals_to_process = intervals_grouped
+                logger.info(f"Analyzing {total_intervals_count} intervals...")
+            
+            results = []
+            
+            # Collect all results first (without capital filtering)
+            for interval_time, interval_df in intervals_to_process:
+                for opt_type in option_types_to_analyze:
+                    # Use current price if --curr-price is set and --continuous mode is active
+                    use_current_price = args.curr_price and args.continuous is not None
+                    result = await analyze_interval(
+                        db,
+                        interval_df,
+                        opt_type,
+                        percent_beyond,
+                        args.risk_cap,
+                        args.min_spread_width,
+                        max_spread_width,
+                        args.use_mid_price,
+                        args.min_contract_price,
+                        args.underlying_ticker,
+                        logger,
+                        args.max_credit_width_ratio,
+                        args.max_strike_distance_pct,
+                        use_current_price,
+                        args.max_trading_hour,
+                        args.min_trading_hour,
+                        args.profit_target_pct,
+                        output_tz,
+                        args.force_close_hour
+                    )
+                    if result:
+                        results.append(result)
+            
+            # Apply capital limit filter (accounts for position lifecycle)
+            if args.max_live_capital is not None:
+                original_count = len(results)
+                results = filter_results_by_capital_limit(
+                    results,
+                    args.max_live_capital,
+                    output_tz,
+                    logger
+                )
+                logger.info(
+                    f"Capital limit filter: {original_count} -> {len(results)} positions "
+                    f"(max ${args.max_live_capital:,.2f} per day)"
+                )
+                
+                # Calculate and log final capital usage
+                daily_capital_usage = {}
+                for result in results:
+                    position_capital, calendar_date = calculate_position_capital(result, output_tz)
+                    daily_capital_usage[calendar_date] = daily_capital_usage.get(calendar_date, 0.0) + position_capital
+                
+                if daily_capital_usage:
+                    logger.info("Final daily capital usage:")
+                    for date, capital in sorted(daily_capital_usage.items()):
+                        logger.info(f"  {date}: ${capital:,.2f} / ${args.max_live_capital:,.2f} ({(capital/args.max_live_capital*100):.1f}%)")
+        
+        finally:
+            await db.close()
+    
+    # Post-processing (common for both multiprocessing and sequential)
+    if skip_normal_processing:
+        # For multiprocessing, we already have results
+        # Set total_intervals_count for reporting
+        total_intervals_count = len(results)
+    
+    # Apply top-N filtering if requested (before most-recent mode)
+    original_results_count = len(results)
+    if args.top_n and results:
+        results = filter_top_n_per_day(results, args.top_n)
+        logger.info(f"Applied top-{args.top_n} per day filter: {original_results_count} -> {len(results)} results")
+    
+    # Handle --most-recent mode
+    if args.most_recent:
+        if results:
+            # Find the most recent timestamp from results
+            max_timestamp = max(result['timestamp'] for result in results)
+            # Filter to only results from the most recent timestamp
+            # For each option type, keep only the best one
+            most_recent_results = []
+            call_results = [r for r in results if r['timestamp'] == max_timestamp and r.get('option_type', '').lower() == 'call']
+            put_results = [r for r in results if r['timestamp'] == max_timestamp and r.get('option_type', '').lower() == 'put']
+            
+            best_call = None
+            best_put = None
+            
+            if call_results:
+                # Get best call by max credit
+                best_call = max(call_results, key=lambda x: x['best_spread'].get('total_credit') or x['best_spread'].get('net_credit_per_contract', 0))
+            
+            if put_results:
+                # Get best put by max credit
+                best_put = max(put_results, key=lambda x: x['best_spread'].get('total_credit') or x['best_spread'].get('net_credit_per_contract', 0))
+            
+            # If --best-only is enabled, keep only the single best spread (call or put)
+            if args.best_only:
+                if best_call and best_put:
+                    # Compare credits and keep only the best one
+                    call_credit = best_call['best_spread'].get('total_credit') or best_call['best_spread'].get('net_credit_per_contract', 0)
+                    put_credit = best_put['best_spread'].get('total_credit') or best_put['best_spread'].get('net_credit_per_contract', 0)
+                    if call_credit > put_credit:
+                        most_recent_results = [best_call]
+                    else:
+                        most_recent_results = [best_put]
+                elif best_call:
+                    most_recent_results = [best_call]
+                elif best_put:
+                    most_recent_results = [best_put]
+            else:
+                # Keep both best call and best put
+                if best_call:
+                    most_recent_results.append(best_call)
+                if best_put:
+                    most_recent_results.append(best_put)
+            
+            results = most_recent_results
+            
+            # If using --most-recent --best-only --continuous, show the best option or a clear message
+            if args.best_only and args.continuous is not None:
+                if results:
+                    # Show the best option from most recent timestamp
+                    best_result = results[0]
+                    timestamp_str = format_timestamp(best_result['timestamp'], output_tz)
+                    max_credit = best_result['best_spread'].get('total_credit')
+                    if max_credit is None:
+                        max_credit = best_result['best_spread'].get('net_credit_per_contract', 0)
+                    num_contracts = best_result['best_spread'].get('num_contracts', 0)
+                    if num_contracts is None:
+                        num_contracts = 0
+                    opt_type_upper = best_result.get('option_type', 'UNKNOWN').upper()
+                    short_strike = best_result['best_spread']['short_strike']
+                    long_strike = best_result['best_spread']['long_strike']
+                    short_premium = best_result['best_spread']['short_price']
+                    long_premium = best_result['best_spread']['long_price']
+                    print(f"BEST CURRENT OPTION: {timestamp_str} | Type: {opt_type_upper} | Max Credit: ${max_credit:.2f} | Contracts: {num_contracts} | Spread: ${short_strike:.2f}/${long_strike:.2f} | Short: ${short_premium:.2f} Long: ${long_premium:.2f}")
+                else:
+                    # No results found - use most recent timestamp from dataframe if available
+                    most_recent_ts = None
+                    try:
+                        if df is not None and len(df) > 0:
+                            most_recent_ts = df['timestamp'].max()
+                    except (NameError, UnboundLocalError):
+                        # df not defined (e.g., when using multiprocessing)
+                        pass
                     if most_recent_ts:
                         max_timestamp_str = format_timestamp(most_recent_ts, output_tz)
                         print(f"NO RESULTS: No valid spreads found at most recent timestamp {max_timestamp_str} that meet the criteria.")
@@ -3704,11 +3779,17 @@ async def main():
                         print("NO RESULTS: No valid spreads found.")
                     return 0
         else:
-            # No results at all - show message with most recent timestamp from dataframe
-            most_recent_ts = df['timestamp'].max() if len(df) > 0 else None
+            # No results at all - show message with most recent timestamp from dataframe if available
+            most_recent_ts = None
+            try:
+                if df is not None and len(df) > 0:
+                    most_recent_ts = df['timestamp'].max()
+            except (NameError, UnboundLocalError):
+                # df not defined (e.g., when using multiprocessing)
+                pass
             if most_recent_ts:
                 most_recent_str = format_timestamp(most_recent_ts, output_tz)
-                if args.best_only and args.live:
+                if args.best_only and args.continuous is not None:
                     print(f"NO RESULTS: No valid spreads found at most recent timestamp {most_recent_str} that meet the criteria.")
                 else:
                     print(f"NO RESULTS: No valid spreads found. Most recent data timestamp: {most_recent_str}")
@@ -3760,8 +3841,8 @@ async def main():
                             overall_best_put = result
                     
                     # Only print individual lines if --summary is used (not --summary-only)
-                    # Skip if --best-only --live was used (we already printed it above)
-                    if args.summary and not args.summary_only and not (args.best_only and args.live):
+                    # Skip if --best-only --continuous was used (we already printed it above)
+                    if args.summary and not args.summary_only and not (args.best_only and args.continuous is not None):
                         timestamp_str = format_timestamp(result['timestamp'], output_tz)
                         
                         # Get number of contracts

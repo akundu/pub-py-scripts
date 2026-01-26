@@ -255,7 +255,7 @@ def format_risk_factors(vix_regime: Dict[str, Any], convergence: Dict[str, Dict]
             lines.append(f"  {colorize('⚠', Colors.YELLOW)} {param} showing divergence across timeframes")
 
     # General warnings
-    if vix_regime.get('vix_current', 0) > 0:
+    if (vix_regime.get('vix_current') or 0) > 0:
         lines.append(f"  - If VIX spikes >25: Consider widening thresholds")
 
     lines.append(f"  - Monitor early session for unusual activity")

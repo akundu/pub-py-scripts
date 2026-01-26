@@ -159,14 +159,33 @@ def _add_output_args(parser: argparse.ArgumentParser):
         help="When used with --most-recent, show only the single best spread (call or put) from the latest data. Use this to get the one actionable investment opportunity right now. Requires --most-recent."
     )
     parser.add_argument(
-        "--live",
+        "--continuous",
+        type=float,
+        nargs='?',
+        const=10.0,
+        default=None,
+        help="Continuously run analysis in a loop. Optionally specify wait time in seconds between runs (default: 10 seconds). Use with --most-recent --best-only for current investment opportunities. Similar to continuous mode in fetch_all_data.py."
+    )
+    parser.add_argument(
+        "--run-once-before-wait",
         action="store_true",
-        help="Live mode: Show a clear 'BEST CURRENT OPTION' line with actionable details. Use with --most-recent --best-only for current investment opportunities."
+        help="If market is closed, run once immediately before waiting for market open. Only effective with --continuous. Useful since options data doesn't change during non-market hours."
+    )
+    parser.add_argument(
+        "--use-market-hours",
+        action="store_true",
+        help="Use market hours awareness to adjust run intervals (longer intervals when markets are closed). Only effective with --continuous. Off by default."
+    )
+    parser.add_argument(
+        "--continuous-max-runs",
+        type=int,
+        default=None,
+        help="Maximum number of continuous runs before stopping (default: run indefinitely). Only effective with --continuous."
     )
     parser.add_argument(
         "--curr-price",
         action="store_true",
-        help="Use current/latest price instead of previous trading day's close price. Only effective in --live mode. Fetches the most recent price from the database (realtime -> hourly -> daily)."
+        help="Use current/latest price instead of previous trading day's close price. Only effective with --continuous. Fetches the most recent price from the database (realtime -> hourly -> daily)."
     )
     parser.add_argument(
         "--histogram",

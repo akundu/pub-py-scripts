@@ -16,16 +16,17 @@ WINDOW_DEFINITIONS = {
     '6mo': {'days': 180, 'label': '6 Months'},
     '3mo': {'days': 90, 'label': '3 Months'},
     '1mo': {'days': 30, 'label': '1 Month'},
+    '2wk': {'days': 14, 'label': '2 Weeks'},
     '1wk': {'days': 7, 'label': '1 Week'},
 }
 
 # Default weights for different regimes
 DEFAULT_WEIGHTS = {
-    'STABLE': {'1yr': 0.10, '6mo': 0.15, '3mo': 0.25, '1mo': 0.30, '1wk': 0.20},
-    'LOW': {'1yr': 0.10, '6mo': 0.15, '3mo': 0.25, '1mo': 0.30, '1wk': 0.20},
-    'MEDIUM': {'1yr': 0.08, '6mo': 0.12, '3mo': 0.25, '1mo': 0.30, '1wk': 0.25},
-    'HIGH': {'1yr': 0.05, '6mo': 0.10, '3mo': 0.20, '1mo': 0.35, '1wk': 0.30},
-    'EXTREME': {'1yr': 0.02, '6mo': 0.08, '3mo': 0.15, '1mo': 0.35, '1wk': 0.40},
+    'STABLE': {'6mo': 0.15, '3mo': 0.25, '1mo': 0.25, '2wk': 0.20, '1wk': 0.15},
+    'LOW': {'6mo': 0.15, '3mo': 0.25, '1mo': 0.25, '2wk': 0.20, '1wk': 0.15},
+    'MEDIUM': {'6mo': 0.12, '3mo': 0.23, '1mo': 0.25, '2wk': 0.22, '1wk': 0.18},
+    'HIGH': {'6mo': 0.10, '3mo': 0.18, '1mo': 0.27, '2wk': 0.25, '1wk': 0.20},
+    'EXTREME': {'6mo': 0.08, '3mo': 0.15, '1mo': 0.27, '2wk': 0.25, '1wk': 0.25},
 }
 
 
