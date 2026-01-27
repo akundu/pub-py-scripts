@@ -14,6 +14,7 @@ import pandas as pd
 import logging
 
 from .base import AbstractDataFetcher, FetchResult
+from common.symbol_utils import is_index_symbol, normalize_symbol_for_db
 
 logger = logging.getLogger(__name__)
 
@@ -326,18 +327,27 @@ class PolygonFetcher(AbstractDataFetcher):
         Fetch current price from Polygon.io.
         
         Args:
-            symbol: Stock ticker
+            symbol: Stock ticker or index symbol (e.g., "AAPL" or "I:VIX1D" or "VIX1D")
             
         Returns:
             Dict with price and metadata
         """
         try:
+            # Determine if this is an index symbol
+            is_index = is_index_symbol(symbol)
+            
+            # For Polygon API, indices need:
+            # 1. Asset class "indices" instead of "stocks"
+            # 2. Symbol without "I:" prefix (e.g., "VIX1D" not "I:VIX1D")
+            asset_class = "indices" if is_index else "stocks"
+            api_symbol = normalize_symbol_for_db(symbol) if is_index else symbol
+            
             def _fetch_snapshot():
                 try:
-                    snapshot = self.client.get_snapshot_ticker("stocks", symbol)
+                    snapshot = self.client.get_snapshot_ticker(asset_class, api_symbol)
                     return snapshot
                 except Exception as e:
-                    logger.error(f"Error fetching snapshot for {symbol}: {e}")
+                    logger.error(f"Error fetching snapshot for {symbol} (asset_class={asset_class}, api_symbol={api_symbol}): {e}")
                     raise
             
             snapshot = await asyncio.to_thread(_fetch_snapshot)

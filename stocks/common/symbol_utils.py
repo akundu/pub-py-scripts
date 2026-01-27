@@ -22,6 +22,7 @@ INDEX_TO_YFINANCE_MAP = {
     'QQQ': 'QQQ',        # NASDAQ ETF
     'RUT': '^RUT',       # Russell 2000
     'VIX': '^VIX',       # VIX Volatility Index
+    'VIX1D': '^VIX1D',   # VIX 1-Day Volatility Index
     'TNX': '^TNX',       # 10-Year Treasury Yield
     'FVX': '^FVX',       # 5-Year Treasury Yield
     'IRX': '^IRX',       # 13-Week Treasury Yield

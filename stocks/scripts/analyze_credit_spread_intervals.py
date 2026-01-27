@@ -306,6 +306,33 @@ def parse_max_spread_width(value: str) -> Tuple[float, float]:
             raise ValueError(f"Invalid max-spread-width value: {value}. Must be a number or 'put_value:call_value'. Error: {e}")
 
 
+def parse_min_premium_diff(value: str) -> Tuple[float, float]:
+    """Parse min-premium-diff argument which can be a single value or put:call format.
+
+    Args:
+        value: Either a single value (e.g., "0.50") or two values separated by colon (e.g., "0.30:0.50")
+
+    Returns:
+        Tuple of (put_min_premium_diff, call_min_premium_diff)
+    """
+    if ':' in value:
+        parts = value.split(':')
+        if len(parts) != 2:
+            raise ValueError(f"Invalid min-premium-diff format: {value}. Expected 'put_value:call_value' or single value")
+        try:
+            put_value = float(parts[0].strip())
+            call_value = float(parts[1].strip())
+            return (put_value, call_value)
+        except ValueError as e:
+            raise ValueError(f"Invalid min-premium-diff values: {value}. Both values must be numbers. Error: {e}")
+    else:
+        try:
+            single_value = float(value)
+            return (single_value, single_value)
+        except ValueError as e:
+            raise ValueError(f"Invalid min-premium-diff value: {value}. Must be a number or 'put_value:call_value'. Error: {e}")
+
+
 def round_to_15_minutes(dt: datetime) -> datetime:
     """Round datetime to nearest 15-minute interval."""
     minutes = (dt.minute // 15) * 15
@@ -1067,7 +1094,8 @@ def build_credit_spreads(
     use_mid: bool,
     min_contract_price: float = 0.0,
     max_credit_width_ratio: float = 0.80,
-    max_strike_distance_pct: Optional[float] = None
+    max_strike_distance_pct: Optional[float] = None,
+    min_premium_diff: Optional[Tuple[float, float]] = None
 ) -> List[Dict[str, Any]]:
     """Build credit spreads from options DataFrame.
     
@@ -1076,6 +1104,8 @@ def build_credit_spreads(
                                Filters out unrealistic spreads with credit too close to width.
         max_strike_distance_pct: Maximum distance of short strike from previous close (as percentage).
                                 Filters out deep ITM/OTM options. None = no filtering.
+        min_premium_diff: Minimum premium price difference between short and long side (net credit).
+                         Tuple of (put_min_premium_diff, call_min_premium_diff). None = no filtering.
     """
     results = []
     
@@ -1153,6 +1183,13 @@ def build_credit_spreads(
             if net_credit <= 0:
                 continue
             
+            # Filter by minimum premium difference (if specified)
+            if min_premium_diff is not None:
+                put_min_diff, call_min_diff = min_premium_diff
+                current_min_diff = call_min_diff if option_type.lower() == "call" else put_min_diff
+                if net_credit < current_min_diff:
+                    continue
+            
             # Filter out unrealistic spreads where credit is too close to width
             # This typically indicates stale pricing or deep ITM/OTM options
             credit_width_ratio = net_credit / width if width > 0 else 1.0
@@ -1216,7 +1253,8 @@ async def analyze_interval(
     min_trading_hour: Optional[int] = None,
     profit_target_pct: Optional[float] = None,
     output_tz = None,
-    force_close_hour: Optional[int] = None
+    force_close_hour: Optional[int] = None,
+    min_premium_diff: Optional[Tuple[float, float]] = None
 ) -> Optional[Dict[str, Any]]:
     """Analyze a single 15-minute interval."""
     if interval_df.empty:
@@ -1348,7 +1386,8 @@ async def analyze_interval(
         use_mid,
         min_contract_price,
         max_credit_width_ratio,
-        max_strike_distance_pct
+        max_strike_distance_pct,
+        min_premium_diff
     )
     
     if not spreads:
@@ -1926,7 +1965,8 @@ async def process_single_csv(
     output_tz = None,
     force_close_hour: Optional[int] = None,
     cache_dir: str = ".options_cache",
-    no_data_cache: bool = False
+    no_data_cache: bool = False,
+    min_premium_diff: Optional[Tuple[float, float]] = None
 ) -> List[Dict[str, Any]]:
     """Process a single CSV file and return results.
 
@@ -1994,7 +2034,8 @@ async def process_single_csv(
                         min_trading_hour,
                         profit_target_pct,
                         output_tz,
-                        force_close_hour
+                        force_close_hour,
+                        min_premium_diff
                     )
                     if result:
                         results.append(result)
@@ -2358,7 +2399,7 @@ def _load_existing_grid_results(csv_path: str) -> set:
             'max_spread_width', 'max_spread_width_put', 'max_spread_width_call',
             'min_contract_price', 'max_credit_width_ratio',
             'max_strike_distance_pct', 'min_trading_hour', 'max_trading_hour',
-            'profit_target_pct',
+            'profit_target_pct', 'min_premium_diff', 'min_premium_diff_put', 'min_premium_diff_call',
         ]
         for row in reader:
             combo = {}
@@ -2476,6 +2517,41 @@ async def run_backtest_with_params(
 
     for interval_time, interval_df in interval_groups:
         for opt_type in option_types:
+            # Construct min_premium_diff tuple from separate put/call keys or fallback to single value
+            min_premium_diff_default = params.get('min_premium_diff')
+            min_premium_diff = None
+            if min_premium_diff_default is not None:
+                if isinstance(min_premium_diff_default, str):
+                    # Parse if it's a string (put:call format)
+                    try:
+                        min_premium_diff = parse_min_premium_diff(min_premium_diff_default)
+                    except ValueError:
+                        logger.warning(f"Invalid min_premium_diff format: {min_premium_diff_default}")
+                        min_premium_diff = None
+                elif isinstance(min_premium_diff_default, (int, float)):
+                    # Single value - use for both puts and calls
+                    min_premium_diff = (float(min_premium_diff_default), float(min_premium_diff_default))
+                else:
+                    # Already a tuple or dict with separate keys
+                    if isinstance(min_premium_diff_default, dict):
+                        put_val = min_premium_diff_default.get('put', min_premium_diff_default.get('default'))
+                        call_val = min_premium_diff_default.get('call', min_premium_diff_default.get('default'))
+                        if put_val is not None and call_val is not None:
+                            min_premium_diff = (float(put_val), float(call_val))
+                    elif isinstance(min_premium_diff_default, (list, tuple)) and len(min_premium_diff_default) == 2:
+                        min_premium_diff = (float(min_premium_diff_default[0]), float(min_premium_diff_default[1]))
+            
+            # Fallback to separate put/call keys if available
+            if min_premium_diff is None:
+                min_premium_diff_put = params.get('min_premium_diff_put')
+                min_premium_diff_call = params.get('min_premium_diff_call')
+                if min_premium_diff_put is not None and min_premium_diff_call is not None:
+                    min_premium_diff = (float(min_premium_diff_put), float(min_premium_diff_call))
+                elif min_premium_diff_put is not None:
+                    min_premium_diff = (float(min_premium_diff_put), float(min_premium_diff_put))
+                elif min_premium_diff_call is not None:
+                    min_premium_diff = (float(min_premium_diff_call), float(min_premium_diff_call))
+            
             result = await analyze_interval(
                 db,
                 interval_df,
@@ -2496,6 +2572,7 @@ async def run_backtest_with_params(
                 params.get('profit_target_pct'),
                 params.get('output_tz'),
                 params.get('force_close_hour'),
+                min_premium_diff,
             )
             if result:
                 results.append(result)
@@ -2859,7 +2936,7 @@ RUN_INTERVAL_MARKET_OPEN = 300  # 5 minutes when market is open
 RUN_INTERVAL_MARKET_CLOSED = 3600  # 1 hour when market is closed
 
 
-async def run_continuous_analysis(args, csv_paths, percent_beyond, max_spread_width, option_types_to_analyze, output_tz, logger):
+async def run_continuous_analysis(args, csv_paths, percent_beyond, max_spread_width, option_types_to_analyze, output_tz, logger, min_premium_diff=None):
     """
     Continuously run credit spread analysis with intelligent interval management.
     
@@ -2883,7 +2960,7 @@ async def run_continuous_analysis(args, csv_paths, percent_beyond, max_spread_wi
         """Run a single analysis iteration."""
         return await _run_single_analysis_iteration(
             args, csv_paths, percent_beyond, max_spread_width, 
-            option_types_to_analyze, output_tz, logger
+            option_types_to_analyze, output_tz, logger, min_premium_diff
         )
     
     while True:
@@ -3007,7 +3084,7 @@ async def run_continuous_analysis(args, csv_paths, percent_beyond, max_spread_wi
     print(f"Continuous analysis stopped after {run_count} runs.")
 
 
-async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_spread_width, option_types_to_analyze, output_tz, logger):
+async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_spread_width, option_types_to_analyze, output_tz, logger, min_premium_diff=None):
     """
     Run a single iteration of the analysis.
     This extracts the main analysis logic so it can be called repeatedly in continuous mode.
@@ -3057,7 +3134,8 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
                 output_tz,
                 args.force_close_hour,
                 args.cache_dir,
-                args.no_data_cache
+                args.no_data_cache,
+                min_premium_diff
             )
             process_args.append(args_tuple)
         
@@ -3171,7 +3249,8 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
                         args.min_trading_hour,
                         args.profit_target_pct,
                         output_tz,
-                        args.force_close_hour
+                        args.force_close_hour,
+                        min_premium_diff
                     )
                     if result:
                         results.append(result)
@@ -3508,6 +3587,15 @@ async def main():
         print(f"Error: {e}")
         return 1
 
+    # Parse min-premium-diff value (if provided)
+    min_premium_diff = None
+    if args.min_premium_diff:
+        try:
+            min_premium_diff = parse_min_premium_diff(args.min_premium_diff)
+        except ValueError as e:
+            print(f"Error: {e}")
+            return 1
+
     # Determine CSV file paths
     if args.csv_dir:
         # Use csv_dir to find matching files
@@ -3569,7 +3657,7 @@ async def main():
                     # Run a single analysis iteration
                     await _run_single_analysis_iteration(
                         args, csv_paths, percent_beyond, max_spread_width,
-                        option_types_to_analyze, output_tz, logger
+                        option_types_to_analyze, output_tz, logger, min_premium_diff
                     )
                     
                     # Now wait for market open
@@ -3614,7 +3702,7 @@ async def main():
         # Start continuous analysis
         await run_continuous_analysis(
             args, csv_paths, percent_beyond, max_spread_width,
-            option_types_to_analyze, output_tz, logger
+            option_types_to_analyze, output_tz, logger, min_premium_diff
         )
         return 0
     
@@ -3648,7 +3736,8 @@ async def main():
                 output_tz,
                 args.force_close_hour,
                 args.cache_dir,
-                args.no_data_cache
+                args.no_data_cache,
+                min_premium_diff
             )
             process_args.append(args_tuple)
         
@@ -3764,7 +3853,8 @@ async def main():
                         args.min_trading_hour,
                         args.profit_target_pct,
                         output_tz,
-                        args.force_close_hour
+                        args.force_close_hour,
+                        min_premium_diff
                     )
                     if result:
                         results.append(result)

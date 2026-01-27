@@ -95,6 +95,12 @@ def _add_filter_args(parser: argparse.ArgumentParser):
         default=None,
         help="Maximum distance of short strike from previous close, as percentage (e.g., 0.05 = 5%%). Filters out deep ITM/OTM options with poor liquidity. Example: --max-strike-distance-pct 0.03 only allows strikes within 3%% of previous close."
     )
+    parser.add_argument(
+        "--min-premium-diff",
+        type=str,
+        default=None,
+        help="Minimum premium price difference between short and long side (net credit). Can be a single value (e.g., 0.50) or two values for puts:calls (e.g., 0.30:0.50). Filters out spreads with insufficient premium difference. Example: --min-premium-diff 0.50 requires at least $0.50 net credit per share."
+    )
 
 
 def _add_trading_args(parser: argparse.ArgumentParser):
