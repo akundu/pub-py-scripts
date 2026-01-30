@@ -325,6 +325,7 @@ def calculate_statistics(movements: List[Tuple[datetime.date, float]]) -> dict:
             75: magnitude_percentile(75),
             90: magnitude_percentile(90),
             95: magnitude_percentile(95),
+            98: magnitude_percentile(98),
             99: magnitude_percentile(99),
             100: magnitude_percentile(100),
         },
