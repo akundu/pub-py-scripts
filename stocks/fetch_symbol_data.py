@@ -2282,16 +2282,10 @@ async def get_current_price(
             current_db_instance = get_stock_db(db_type, actual_db_path, log_level=log_level)
     
     # When api_only=True, skip DB check and go straight to API (lowest latency)
-    if not api_only:
-        # Check if market is open to adjust age tolerance
-        from common.market_hours import is_market_hours
-        market_is_open = is_market_hours()
-        
-        # First, try to get the latest price from the database
-    # The service method (get_latest_price_with_data) handles caching internally
+    market_is_open = is_market_hours()  # set before use in effective_max_age and DB/API logic
     # Adjust max_age_seconds when market is closed - daily close prices are valid even if old
     effective_max_age = max_age_seconds
-    
+
     # When market is closed, be more lenient with age checks for daily/hourly data
     # Daily close prices from the last trading day are perfectly valid
     if not market_is_open:
