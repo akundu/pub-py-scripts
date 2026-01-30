@@ -2002,6 +2002,8 @@ async def _get_latest_price_with_timestamp(db_instance: StockDBBase, symbol: str
     
     When market is closed and use_market_time=True, prioritizes daily close price over realtime data.
     """
+    if db_instance is None:
+        return None
     try:
         # Check if market is open (only relevant when use_market_time is True)
         market_is_open = False
@@ -2540,8 +2542,8 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
             'fetch_time_ms': api_total_time
         }
         
-        # Save to realtime table if we have a database instance and it's a stock (not index)
-        if current_db_instance and not is_index:
+        # Save to realtime table if we have a database instance, it's a stock (not index), and we got a price
+        if current_db_instance and not is_index and price_data.get('price') is not None and price_data.get('timestamp') is not None:
             try:
                 timestamp = pd.to_datetime(price_data['timestamp'])
                 quote_df = pd.DataFrame({
@@ -2553,7 +2555,7 @@ async def _get_current_price_polygon(symbol: str, current_db_instance: StockDBBa
                 logging.debug(f"[DB SAVE] Saved quote data for {db_ticker} to realtime table")
             except Exception as e:
                 logging.warning(f"[DB SAVE ERROR] Failed to save quote data for {symbol} to realtime table: {e}")
-        
+
         return result
     except Exception as e:
         logging.error(f"Error fetching current price for {symbol}: {e}")

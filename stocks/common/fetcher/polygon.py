@@ -18,13 +18,18 @@ from common.symbol_utils import is_index_symbol, normalize_symbol_for_db, get_po
 
 logger = logging.getLogger(__name__)
 
-# Try to import Polygon client
+# Try to import Polygon client and exceptions
 try:
     from polygon.rest import RESTClient as PolygonRESTClient
     POLYGON_AVAILABLE = True
 except ImportError:
     POLYGON_AVAILABLE = False
     PolygonRESTClient = None
+
+try:
+    from polygon.exceptions import BadResponse
+except ImportError:
+    BadResponse = None  # type: ignore[misc, assignment]
 
 
 class PolygonFetcher(AbstractDataFetcher):
@@ -66,6 +71,65 @@ class PolygonFetcher(AbstractDataFetcher):
             'hourly': 'hour'
         }
         return mapping[timeframe]
+
+    def _fetch_aggs_list(
+        self,
+        ticker: str,
+        multiplier: int,
+        timespan: str,
+        from_: Any,
+        to: Any,
+        limit: int = 50000,
+        **kwargs: Any
+    ) -> List[Any]:
+        """
+        Fetch aggregate bars from Polygon. Compatible with polygon-api-client
+        versions that expose list_aggs, get_aggs, or client.aggs.
+        Returns a list of agg-like objects (with .timestamp, .open, .close, etc.).
+        """
+        client = self.client
+        # Try client.list_aggs (iterator)
+        list_aggs = getattr(client, "list_aggs", None)
+        if list_aggs is None and hasattr(client, "aggs"):
+            list_aggs = getattr(client.aggs, "list_aggs", None)
+        if list_aggs is not None:
+            return list(list_aggs(
+                ticker=ticker,
+                multiplier=multiplier,
+                timespan=timespan,
+                from_=from_,
+                to=to,
+                limit=limit,
+                **kwargs
+            ))
+        # Try client.get_aggs (returns response with .results or iterable)
+        get_aggs = getattr(client, "get_aggs", None)
+        if get_aggs is None and hasattr(client, "aggs"):
+            get_aggs = getattr(client.aggs, "get_aggs", None)
+        if get_aggs is not None:
+            resp = get_aggs(
+                ticker=ticker,
+                multiplier=multiplier,
+                timespan=timespan,
+                from_=from_,
+                to=to,
+                limit=limit,
+                **kwargs
+            )
+            if resp is None:
+                return []
+            results = getattr(resp, "results", None)
+            if results is None and isinstance(resp, dict):
+                results = resp.get("results")
+            if results is not None:
+                return list(results)
+            if hasattr(resp, "__iter__") and not isinstance(resp, (dict, str)):
+                return list(resp)
+            return []
+        raise AttributeError(
+            "Polygon RESTClient has no list_aggs or get_aggs. "
+            "Check polygon-api-client version (e.g. pip install polygon-api-client>=1.16.0)."
+        )
     
     def _determine_chunk_size(
         self,
@@ -156,17 +220,14 @@ class PolygonFetcher(AbstractDataFetcher):
         def _fetch_sync():
             try:
                 # Fetch aggregates (bars) from Polygon
-                aggs = []
-                for agg in self.client.list_aggs(
+                aggs = self._fetch_aggs_list(
                     ticker=ticker,
                     multiplier=1,
                     timespan=timespan,
                     from_=start_str,
                     to=end_str,
                     limit=50000
-                ):
-                    aggs.append(agg)
-                
+                )
                 if not aggs:
                     return pd.DataFrame()
                 
@@ -344,16 +405,28 @@ class PolygonFetcher(AbstractDataFetcher):
             # Stocks: use snapshot
             def _fetch_snapshot():
                 try:
-                    snapshot = self.client.get_snapshot_ticker("stocks", symbol)
-                    return snapshot
+                    return self.client.get_snapshot_ticker("stocks", symbol)
                 except Exception as e:
-                    logger.error(f"Error fetching snapshot for {symbol}: {e}")
+                    if BadResponse is not None and isinstance(e, BadResponse):
+                        if "NotFound" in str(e) or (getattr(e, "status", None) or "").lower() == "not found":
+                            logger.debug("Snapshot not found for %s (ticker not on Polygon): %s", symbol, e)
+                            return None
+                    logger.error("Error fetching snapshot for %s: %s", symbol, e)
                     raise
-            
+
             snapshot = await asyncio.to_thread(_fetch_snapshot)
-            
+
             if not snapshot or not hasattr(snapshot, 'last_trade'):
-                raise Exception(f"No snapshot data available for {symbol}")
+                # Ticker not found or no data - return a result dict with price=None so caller can handle without traceback
+                return {
+                    'symbol': symbol,
+                    'price': None,
+                    'timestamp': None,
+                    'source': self.name,
+                    'bid_price': None,
+                    'ask_price': None,
+                    'volume': None,
+                }
             
             last_trade = snapshot.last_trade
             timestamp = pd.to_datetime(last_trade.sip_timestamp, unit='ns', utc=True)
@@ -387,30 +460,24 @@ class PolygonFetcher(AbstractDataFetcher):
         from_str = (now - timedelta(days=2)).strftime('%Y-%m-%d')
 
         def _fetch_minute():
-            out = []
-            for agg in self.client.list_aggs(
+            return self._fetch_aggs_list(
                 ticker=polygon_ticker,
                 multiplier=1,
                 timespan="minute",
                 from_=from_ts,
                 to=to_ts,
                 limit=10,
-            ):
-                out.append(agg)
-            return out
+            )
 
         def _fetch_day():
-            out = []
-            for agg in self.client.list_aggs(
+            return self._fetch_aggs_list(
                 ticker=polygon_ticker,
                 multiplier=1,
                 timespan="day",
                 from_=from_str,
                 to=to_str,
                 limit=10,
-            ):
-                out.append(agg)
-            return out
+            )
 
         aggs = await asyncio.to_thread(_fetch_minute)
         if not aggs:
