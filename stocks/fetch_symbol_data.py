@@ -2211,7 +2211,8 @@ async def get_current_price(
     db_type: str = "sqlite",
     db_path: str | None = None,
     max_age_seconds: int = 600,  # Default 10 minutes (600 seconds)
-    cache_only: bool = False  # If True, only serve from cache, never fetch from API
+    cache_only: bool = False,  # If True, only serve from cache, never fetch from API
+    api_only: bool = False,  # If True, skip DB check and fetch from API only (fastest for realtime poll)
 ) -> dict:
     """
     Get the current price of a stock using the specified data source.
@@ -2223,6 +2224,7 @@ async def get_current_price(
         db_type: Database type if no instance provided
         db_path: Database path if no instance provided
         max_age_seconds: Maximum age of cached data in seconds
+        api_only: If True, skip database check and fetch from API only (lowest latency).
         
     Returns:
         Dictionary containing price information:
@@ -2241,9 +2243,15 @@ async def get_current_price(
     import time
     fetch_start = time.time()
     
-    # Initialize database instance if not provided
+    # Parse once (needed for API path in all cases)
+    api_ticker, db_ticker, is_index, yfinance_symbol = _parse_index_ticker(symbol)
+    db_lookup_symbol = db_ticker if is_index else symbol
+    
+    # When api_only=True, skip DB entirely for lowest latency (e.g. realtime poll path)
     current_db_instance = stock_db_instance
-    if current_db_instance is None:
+    if api_only:
+        current_db_instance = None
+    elif current_db_instance is None:
         actual_db_path = db_path
         if actual_db_path is None:
             actual_db_path = get_default_db_path("duckdb") if db_type == 'duckdb' else get_default_db_path("db")
@@ -2273,11 +2281,13 @@ async def get_current_price(
             # Local database - use specified type
             current_db_instance = get_stock_db(db_type, actual_db_path, log_level=log_level)
     
-    # Check if market is open to adjust age tolerance
-    from common.market_hours import is_market_hours
-    market_is_open = is_market_hours()
-    
-    # First, try to get the latest price from the database
+    # When api_only=True, skip DB check and go straight to API (lowest latency)
+    if not api_only:
+        # Check if market is open to adjust age tolerance
+        from common.market_hours import is_market_hours
+        market_is_open = is_market_hours()
+        
+        # First, try to get the latest price from the database
     # The service method (get_latest_price_with_data) handles caching internally
     # Adjust max_age_seconds when market is closed - daily close prices are valid even if old
     effective_max_age = max_age_seconds
@@ -2292,132 +2302,92 @@ async def get_current_price(
     else:
         logging.debug(f"[DB] Market OPEN: Using max_age of {max_age_seconds}s for {symbol}")
     
-    # Parse index symbols to get db_ticker for database lookups
-    # Database stores index data without ^ prefix (e.g., "VIX" not "^VIX")
-    api_ticker, db_ticker, is_index, yfinance_symbol = _parse_index_ticker(symbol)
-    # Use db_ticker for database lookups (stored without I: or ^ prefix)
-    db_lookup_symbol = db_ticker if is_index else symbol
-    
-    logging.debug(
-        f"[DB] Checking database for latest price for {db_lookup_symbol} "
-        f"(original: {symbol}, max_age: {effective_max_age}s)"
-    )
-    db_check_start = time.time()
-    try:
-        db_price_data = await _get_latest_price_with_timestamp(current_db_instance, db_lookup_symbol)
-        if db_price_data and db_price_data['price'] is not None:
-            # Check if the price is recent enough using both timestamp and write_timestamp
-            price_timestamp = db_price_data['timestamp']
-            write_timestamp = db_price_data.get('write_timestamp')
-            source = db_price_data.get('source', 'unknown')
-            current_time = datetime.now(timezone.utc)
-            
-            # Calculate age of the price data (original timestamp) - ensure UTC comparison
-            if isinstance(price_timestamp, str):
-                price_dt = datetime.fromisoformat(price_timestamp.replace('Z', '+00:00'))
-            else:
-                price_dt = price_timestamp
-            
-            # Ensure price_dt is timezone-aware (UTC)
-            if price_dt.tzinfo is None:
-                price_dt = price_dt.replace(tzinfo=timezone.utc)
-            elif price_dt.tzinfo != timezone.utc:
-                # Convert to UTC if it's in a different timezone
-                price_dt = price_dt.astimezone(timezone.utc)
-            
-            # Calculate age of the write timestamp if available - ensure UTC comparison
-            write_age_seconds = None
-            if write_timestamp:
-                if isinstance(write_timestamp, str):
-                    # Handle both timezone-aware and naive datetime strings
-                    if 'Z' in write_timestamp or '+' in write_timestamp:
-                        write_dt = datetime.fromisoformat(write_timestamp.replace('Z', '+00:00'))
-                    else:
-                        # If it's a naive datetime string, assume it's UTC
-                        write_dt = datetime.fromisoformat(write_timestamp).replace(tzinfo=timezone.utc)
+        logging.debug(
+            f"[DB] Checking database for latest price for {db_lookup_symbol} "
+            f"(original: {symbol}, max_age: {effective_max_age}s)"
+        )
+        db_check_start = time.time()
+        try:
+            db_price_data = await _get_latest_price_with_timestamp(current_db_instance, db_lookup_symbol)
+            if db_price_data and db_price_data['price'] is not None:
+                # Check if the price is recent enough using both timestamp and write_timestamp
+                price_timestamp = db_price_data['timestamp']
+                write_timestamp = db_price_data.get('write_timestamp')
+                source = db_price_data.get('source', 'unknown')
+                current_time = datetime.now(timezone.utc)
+
+                # Calculate age of the price data (original timestamp) - ensure UTC comparison
+                if isinstance(price_timestamp, str):
+                    price_dt = datetime.fromisoformat(price_timestamp.replace('Z', '+00:00'))
                 else:
-                    write_dt = write_timestamp
-                
-                # Ensure write_dt is timezone-aware (UTC)
-                if write_dt.tzinfo is None:
-                    write_dt = write_dt.replace(tzinfo=timezone.utc)
-                elif write_dt.tzinfo != timezone.utc:
+                    price_dt = price_timestamp
+
+                # Ensure price_dt is timezone-aware (UTC)
+                if price_dt.tzinfo is None:
+                    price_dt = price_dt.replace(tzinfo=timezone.utc)
+                elif price_dt.tzinfo != timezone.utc:
                     # Convert to UTC if it's in a different timezone
-                    write_dt = write_dt.astimezone(timezone.utc)
+                    price_dt = price_dt.astimezone(timezone.utc)
                 
-                write_age_seconds = (current_time - write_dt).total_seconds()
-            
-            # Calculate age using UTC timestamps
-            age_seconds = (current_time - price_dt).total_seconds()
-            
-            # Use write_timestamp for age calculation when available
-            # This prevents unnecessary fetches when data was recently written to database
-            if write_age_seconds is not None:
-                # Always use write_timestamp as the primary age check
-                max_age_check_seconds = write_age_seconds
-                used_timestamp = "write"
-            else:
-                # Fallback to original timestamp if no write_timestamp
-                max_age_check_seconds = age_seconds
-                used_timestamp = "original"
-            
-            db_check_time = (time.time() - db_check_start) * 1000
-            
-            # When market is closed and data is from daily/hourly, be more lenient
-            # Daily close prices from last trading day are valid even if hours/days old
-            if not market_is_open and source in ('daily', 'hourly'):
-                # Accept daily/hourly data when market is closed, regardless of age
-                # (as long as it's not ridiculously old, e.g., > 30 days)
-                if max_age_check_seconds <= (30 * 24 * 3600):  # 30 days max
-                    max_age_check_seconds = 0  # Force acceptance by setting to 0
-                    logging.debug(f"[DB] Market CLOSED: Accepting {source} price for {symbol} (age: {age_seconds:.1f}s, source: {source})")
-            
-            if max_age_check_seconds <= effective_max_age:
-                # Show which age was used for the decision
+                # Calculate age of the write timestamp if available - ensure UTC comparison
+                write_age_seconds = None
+                if write_timestamp:
+                    if isinstance(write_timestamp, str):
+                        # Handle both timezone-aware and naive datetime strings
+                        if 'Z' in write_timestamp or '+' in write_timestamp:
+                            write_dt = datetime.fromisoformat(write_timestamp.replace('Z', '+00:00'))
+                        else:
+                            # If it's a naive datetime string, assume it's UTC
+                            write_dt = datetime.fromisoformat(write_timestamp).replace(tzinfo=timezone.utc)
+                    else:
+                        write_dt = write_timestamp
+
+                    # Ensure write_dt is timezone-aware (UTC)
+                    if write_dt.tzinfo is None:
+                        write_dt = write_dt.replace(tzinfo=timezone.utc)
+                    elif write_dt.tzinfo != timezone.utc:
+                        # Convert to UTC if it's in a different timezone
+                        write_dt = write_dt.astimezone(timezone.utc)
+
+                    write_age_seconds = (current_time - write_dt).total_seconds()
+
+                # Calculate age using UTC timestamps
+                age_seconds = (current_time - price_dt).total_seconds()
+
+                # Use write_timestamp for age calculation when available
+                # This prevents unnecessary fetches when data was recently written to database
                 if write_age_seconds is not None:
-                    age_info = f"{used_timestamp} age: {max_age_check_seconds:.1f}s (used for decision)"
-                    if write_age_seconds != age_seconds:
-                        age_info += f", write age: {write_age_seconds:.1f}s, original age: {age_seconds:.1f}s"
+                    # Always use write_timestamp as the primary age check
+                    max_age_check_seconds = write_age_seconds
+                    used_timestamp = "write"
                 else:
-                    age_info = f"price age: {age_seconds:.1f}s"
-                
-                fetch_time = (time.time() - fetch_start) * 1000
-                logging.info(f"[DB HIT] Price for {symbol}: ${db_price_data['price']:.2f} (age: {age_info}, db_check: {db_check_time:.1f}ms, total: {fetch_time:.1f}ms)")
-                
-                result = {
-                    'symbol': symbol,  # Return original symbol (may have ^ prefix for display)
-                    'price': db_price_data['price'],
-                    'bid_price': None,
-                    'ask_price': None,
-                    'timestamp': price_timestamp.isoformat() if hasattr(price_timestamp, 'isoformat') else str(price_timestamp),
-                    'write_timestamp': write_timestamp.isoformat() if write_timestamp and hasattr(write_timestamp, 'isoformat') else str(write_timestamp) if write_timestamp else None,
-                    'source': 'database',
-                    'data_source': data_source,
-                    'cache_hit': False,
-                    'fetch_time_ms': fetch_time,
-                    'db_check_time_ms': db_check_time
-                }
-                
-                # Note: Caching is handled by PriceService.get_latest_price_with_data() internally
-                # No need to cache here - the service method already does it
-                
-                return result
-            else:
-                # Show which age was used for the decision
-                if write_age_seconds is not None:
-                    age_info = f"{used_timestamp} age: {max_age_check_seconds:.1f}s (used for decision)"
-                    if write_age_seconds != age_seconds:
-                        age_info += f", write age: {write_age_seconds:.1f}s, original age: {age_seconds:.1f}s"
-                else:
-                    age_info = f"price age: {age_seconds:.1f}s"
+                    # Fallback to original timestamp if no write_timestamp
+                    max_age_check_seconds = age_seconds
+                    used_timestamp = "original"
+
                 db_check_time = (time.time() - db_check_start) * 1000
-                
-                # Only fetch from API if market is open or if data is really old (> 30 days)
-                # BUT: Check cache_only first - if cache_only=True, don't fetch from API
-                if cache_only:
-                    # Cache-only mode: return stale data from database instead of fetching from API
-                    logging.debug(f"[DB STALE] Price for {symbol} too old ({age_info} > {effective_max_age}s), but cache_only=True - returning stale data from DB (db_check: {db_check_time:.1f}ms)")
+
+                # When market is closed and data is from daily/hourly, be more lenient
+                # Daily close prices from last trading day are valid even if hours/days old
+                if not market_is_open and source in ('daily', 'hourly'):
+                    # Accept daily/hourly data when market is closed, regardless of age
+                    # (as long as it's not ridiculously old, e.g., > 30 days)
+                    if max_age_check_seconds <= (30 * 24 * 3600):  # 30 days max
+                        max_age_check_seconds = 0  # Force acceptance by setting to 0
+                        logging.debug(f"[DB] Market CLOSED: Accepting {source} price for {symbol} (age: {age_seconds:.1f}s, source: {source})")
+
+                if max_age_check_seconds <= effective_max_age:
+                    # Show which age was used for the decision
+                    if write_age_seconds is not None:
+                        age_info = f"{used_timestamp} age: {max_age_check_seconds:.1f}s (used for decision)"
+                        if write_age_seconds != age_seconds:
+                            age_info += f", write age: {write_age_seconds:.1f}s, original age: {age_seconds:.1f}s"
+                    else:
+                        age_info = f"price age: {age_seconds:.1f}s"
+
                     fetch_time = (time.time() - fetch_start) * 1000
+                    logging.info(f"[DB HIT] Price for {symbol}: ${db_price_data['price']:.2f} (age: {age_info}, db_check: {db_check_time:.1f}ms, total: {fetch_time:.1f}ms)")
+
                     result = {
                         'symbol': symbol,  # Return original symbol (may have ^ prefix for display)
                         'price': db_price_data['price'],
@@ -2425,41 +2395,75 @@ async def get_current_price(
                         'ask_price': None,
                         'timestamp': price_timestamp.isoformat() if hasattr(price_timestamp, 'isoformat') else str(price_timestamp),
                         'write_timestamp': write_timestamp.isoformat() if write_timestamp and hasattr(write_timestamp, 'isoformat') else str(write_timestamp) if write_timestamp else None,
-                        'source': f'database_{source}',
-                        'data_source': data_source,
-                        'cache_hit': False,
-                        'fetch_time_ms': fetch_time,
-                        'db_check_time_ms': db_check_time,
-                        'stale': True  # Mark as stale
-                    }
-                    return result
-                elif market_is_open or max_age_check_seconds > (30 * 24 * 3600):
-                    logging.info(f"[DB STALE] Price for {symbol} too old ({age_info} > {effective_max_age}s), fetching from API (db_check: {db_check_time:.1f}ms)")
-                else:
-                    # Market closed and data is reasonable age - use it anyway
-                    logging.debug(f"[DB] Market CLOSED: Using {source} price for {symbol} despite age ({age_info}) - market closed, so this is expected")
-                    fetch_time = (time.time() - fetch_start) * 1000
-                    result = {
-                        'symbol': symbol,
-                        'price': db_price_data['price'],
-                        'bid_price': None,
-                        'ask_price': None,
-                        'timestamp': price_timestamp.isoformat() if hasattr(price_timestamp, 'isoformat') else str(price_timestamp),
-                        'write_timestamp': write_timestamp.isoformat() if write_timestamp and hasattr(write_timestamp, 'isoformat') else str(write_timestamp) if write_timestamp else None,
-                        'source': f'database_{source}',
+                        'source': 'database',
                         'data_source': data_source,
                         'cache_hit': False,
                         'fetch_time_ms': fetch_time,
                         'db_check_time_ms': db_check_time
                     }
-                    
+
                     # Note: Caching is handled by PriceService.get_latest_price_with_data() internally
                     # No need to cache here - the service method already does it
-                    
+
                     return result
-    except Exception as e:
-        db_check_time = (time.time() - db_check_start) * 1000
-        logging.error(f"[DB ERROR] Error getting price from database for {symbol}: {e} (db_check: {db_check_time:.1f}ms)")
+                else:
+                    # Show which age was used for the decision
+                    if write_age_seconds is not None:
+                        age_info = f"{used_timestamp} age: {max_age_check_seconds:.1f}s (used for decision)"
+                        if write_age_seconds != age_seconds:
+                            age_info += f", write age: {write_age_seconds:.1f}s, original age: {age_seconds:.1f}s"
+                    else:
+                        age_info = f"price age: {age_seconds:.1f}s"
+                    db_check_time = (time.time() - db_check_start) * 1000
+
+                    # Only fetch from API if market is open or if data is really old (> 30 days)
+                    # BUT: Check cache_only first - if cache_only=True, don't fetch from API
+                    if cache_only:
+                        # Cache-only mode: return stale data from database instead of fetching from API
+                        logging.debug(f"[DB STALE] Price for {symbol} too old ({age_info} > {effective_max_age}s), but cache_only=True - returning stale data from DB (db_check: {db_check_time:.1f}ms)")
+                        fetch_time = (time.time() - fetch_start) * 1000
+                        result = {
+                            'symbol': symbol,  # Return original symbol (may have ^ prefix for display)
+                            'price': db_price_data['price'],
+                            'bid_price': None,
+                            'ask_price': None,
+                            'timestamp': price_timestamp.isoformat() if hasattr(price_timestamp, 'isoformat') else str(price_timestamp),
+                            'write_timestamp': write_timestamp.isoformat() if write_timestamp and hasattr(write_timestamp, 'isoformat') else str(write_timestamp) if write_timestamp else None,
+                            'source': f'database_{source}',
+                            'data_source': data_source,
+                            'cache_hit': False,
+                            'fetch_time_ms': fetch_time,
+                            'db_check_time_ms': db_check_time,
+                            'stale': True  # Mark as stale
+                        }
+                        return result
+                    elif market_is_open or max_age_check_seconds > (30 * 24 * 3600):
+                        logging.info(f"[DB STALE] Price for {symbol} too old ({age_info} > {effective_max_age}s), fetching from API (db_check: {db_check_time:.1f}ms)")
+                    else:
+                        # Market closed and data is reasonable age - use it anyway
+                        logging.debug(f"[DB] Market CLOSED: Using {source} price for {symbol} despite age ({age_info}) - market closed, so this is expected")
+                        fetch_time = (time.time() - fetch_start) * 1000
+                        result = {
+                            'symbol': symbol,
+                            'price': db_price_data['price'],
+                            'bid_price': None,
+                            'ask_price': None,
+                            'timestamp': price_timestamp.isoformat() if hasattr(price_timestamp, 'isoformat') else str(price_timestamp),
+                            'write_timestamp': write_timestamp.isoformat() if write_timestamp and hasattr(write_timestamp, 'isoformat') else str(write_timestamp) if write_timestamp else None,
+                            'source': f'database_{source}',
+                            'data_source': data_source,
+                            'cache_hit': False,
+                            'fetch_time_ms': fetch_time,
+                            'db_check_time_ms': db_check_time
+                        }
+
+                        # Note: Caching is handled by PriceService.get_latest_price_with_data() internally
+                        # No need to cache here - the service method already does it
+
+                        return result
+        except Exception as e:
+            db_check_time = (time.time() - db_check_start) * 1000
+            logging.error(f"[DB ERROR] Error getting price from database for {symbol}: {e} (db_check: {db_check_time:.1f}ms)")
     
     # If no database price, fetch from API (unless cache_only mode)
     if cache_only:

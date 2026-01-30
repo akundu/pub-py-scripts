@@ -14,7 +14,7 @@ import pandas as pd
 import logging
 
 from .base import AbstractDataFetcher, FetchResult
-from common.symbol_utils import is_index_symbol, normalize_symbol_for_db
+from common.symbol_utils import is_index_symbol, normalize_symbol_for_db, get_polygon_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -326,28 +326,28 @@ class PolygonFetcher(AbstractDataFetcher):
         """
         Fetch current price from Polygon.io.
         
+        Stocks: use snapshot (last trade/quote). Indices: use aggs API (latest bar),
+        same as hourly/daily, since snapshot often 404s for indices.
+        
         Args:
-            symbol: Stock ticker or index symbol (e.g., "AAPL" or "I:VIX1D" or "VIX1D")
+            symbol: Stock ticker or index symbol (e.g., "AAPL", "I:SPX", "^GSPC")
             
         Returns:
             Dict with price and metadata
         """
         try:
-            # Determine if this is an index symbol
             is_index = is_index_symbol(symbol)
             
-            # For Polygon API, indices need:
-            # 1. Asset class "indices" instead of "stocks"
-            # 2. Symbol without "I:" prefix (e.g., "VIX1D" not "I:VIX1D")
-            asset_class = "indices" if is_index else "stocks"
-            api_symbol = normalize_symbol_for_db(symbol) if is_index else symbol
+            if is_index:
+                return await self._fetch_current_price_index(symbol)
             
+            # Stocks: use snapshot
             def _fetch_snapshot():
                 try:
-                    snapshot = self.client.get_snapshot_ticker(asset_class, api_symbol)
+                    snapshot = self.client.get_snapshot_ticker("stocks", symbol)
                     return snapshot
                 except Exception as e:
-                    logger.error(f"Error fetching snapshot for {symbol} (asset_class={asset_class}, api_symbol={api_symbol}): {e}")
+                    logger.error(f"Error fetching snapshot for {symbol}: {e}")
                     raise
             
             snapshot = await asyncio.to_thread(_fetch_snapshot)
@@ -371,3 +371,62 @@ class PolygonFetcher(AbstractDataFetcher):
         except Exception as e:
             logger.error(f"Error fetching current price for {symbol}: {e}")
             raise
+    
+    async def _fetch_current_price_index(self, symbol: str) -> Dict[str, Any]:
+        """
+        Fetch current price for an index using Polygon aggs API.
+        Tries minute aggregates first for fresher intraday data; falls back to daily.
+        Snapshot API often 404s for indices; aggs works with ticker I:SPX etc.
+        """
+        # Polygon aggs for indices: try minute first for fresher data, fallback to day
+        polygon_ticker = get_polygon_symbol(symbol)
+        now = datetime.now(timezone.utc)
+        to_ts = int((now + timedelta(hours=1)).timestamp() * 1000)
+        from_ts = int((now - timedelta(days=2)).timestamp() * 1000)
+        to_str = (now + timedelta(days=1)).strftime('%Y-%m-%d')
+        from_str = (now - timedelta(days=2)).strftime('%Y-%m-%d')
+
+        def _fetch_minute():
+            out = []
+            for agg in self.client.list_aggs(
+                ticker=polygon_ticker,
+                multiplier=1,
+                timespan="minute",
+                from_=from_ts,
+                to=to_ts,
+                limit=10,
+            ):
+                out.append(agg)
+            return out
+
+        def _fetch_day():
+            out = []
+            for agg in self.client.list_aggs(
+                ticker=polygon_ticker,
+                multiplier=1,
+                timespan="day",
+                from_=from_str,
+                to=to_str,
+                limit=10,
+            ):
+                out.append(agg)
+            return out
+
+        aggs = await asyncio.to_thread(_fetch_minute)
+        if not aggs:
+            aggs = await asyncio.to_thread(_fetch_day)
+        if not aggs:
+            raise Exception(f"No aggs data for index {symbol} (ticker={polygon_ticker})")
+        latest = max(aggs, key=lambda a: a.timestamp)
+        timestamp = pd.to_datetime(latest.timestamp, unit='ms', utc=True)
+        price = float(latest.close) if latest.close is not None else float(latest.open)
+        
+        return {
+            'symbol': symbol,
+            'price': price,
+            'timestamp': timestamp.isoformat(),
+            'source': self.name,
+            'bid_price': None,
+            'ask_price': None,
+            'volume': getattr(latest, 'volume', None) or 0,
+        }

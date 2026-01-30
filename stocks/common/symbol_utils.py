@@ -40,6 +40,12 @@ INDEX_TO_YFINANCE_MAP = {
 # Known index symbols (without prefix)
 KNOWN_INDEX_SYMBOLS = set(INDEX_TO_YFINANCE_MAP.keys())
 
+# Reverse map: Yahoo Finance symbol (without ^) -> canonical db/polygon index symbol.
+# Polygon uses I:SPX for S&P 500, not I:GSPC; so ^GSPC must normalize to SPX.
+YFINANCE_STRIPPED_TO_DB_INDEX = {
+    yf.lstrip("^"): db for db, yf in INDEX_TO_YFINANCE_MAP.items()
+}
+
 
 def is_index_symbol(symbol: str) -> bool:
     """
@@ -84,7 +90,7 @@ def normalize_symbol_for_db(symbol: str) -> str:
         >>> normalize_symbol_for_db("I:SPX")
         'SPX'
         >>> normalize_symbol_for_db("^GSPC")
-        'GSPC'
+        'SPX'
         >>> normalize_symbol_for_db("AAPL")
         'AAPL'
         >>> normalize_symbol_for_db("SPX")
@@ -99,9 +105,10 @@ def normalize_symbol_for_db(symbol: str) -> str:
     if symbol_upper.startswith("I:"):
         return symbol[2:].upper()
     
-    # Remove ^ prefix (Yahoo Finance format)
+    # Remove ^ prefix (Yahoo Finance format); map to canonical index symbol for Polygon/DB
     if symbol_upper.startswith("^"):
-        return symbol[1:].upper()
+        stripped = symbol[1:].upper()
+        return YFINANCE_STRIPPED_TO_DB_INDEX.get(stripped, stripped)
     
     # Return as-is (already normalized or regular stock)
     return symbol.upper()
@@ -202,8 +209,9 @@ def get_data_source(symbol: str, preferred_source: str = "polygon") -> str:
     """
     Determine the appropriate data source for a symbol.
     
-    For indices, prefers Polygon (which supports indices with I: prefix).
-    For regular stocks, uses the preferred source.
+    For indices, prefers Polygon (hourly/daily use aggs API; current price
+    uses aggs when snapshot is unavailable). For regular stocks, uses the
+    preferred source.
     
     Args:
         symbol: Symbol to fetch data for (e.g., "I:SPX", "SPX", "AAPL")
@@ -225,12 +233,10 @@ def get_data_source(symbol: str, preferred_source: str = "polygon") -> str:
     if not symbol:
         return preferred_source
     
-    # For indices, prefer Polygon (it supports indices with I: prefix)
+    # For indices, prefer Polygon (aggs API works for I:SPX etc.; snapshot may 404)
     if is_index_symbol(symbol):
-        # Polygon supports indices, so use it if preferred
         if preferred_source in ["polygon", "alpaca"]:
             return "polygon"
-        # Otherwise use preferred source
         return preferred_source
     
     # For regular stocks, use preferred source

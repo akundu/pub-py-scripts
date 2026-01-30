@@ -10,6 +10,12 @@ the database server's realtime feed. It supports:
 - Multiple WebSocket connections with configurable symbols per connection
 - Automatic reconnection and error handling
 - Both stocks and options markets (requires appropriate Polygon subscription plan)
+- Poll fallback: when a symbol gets no stream updates (e.g. I:SPX, I:NDX or any equity),
+  the streamer periodically fetches the current live price during market hours using
+  fetch_symbol_data and publishes it to Redis in the same format as WebSocket data
+  (configurable interval, default 15s). Use --no-poll-fallback to disable.
+- Poll-only mode (--poll-only): no WebSocket connections; only the periodic poll runs.
+  Use to test the poll path or when avoiding Polygon connection limits. Requires Redis and --market stocks.
 
 Usage Examples:
     # Stream quotes and trades for specific stock symbols
@@ -71,6 +77,9 @@ try:
     from common.stock_db import get_stock_db
     from common.symbol_loader import apply_symbol_exclusions
     from common.cache_warmup import warmup_stock_info_cache
+    from common.market_hours import is_market_hours
+    from common.symbol_utils import normalize_symbol_for_db
+    from fetch_symbol_data import get_current_price
 except ImportError as e:
     print(f"Error importing required modules: {e}", file=sys.stderr)
     sys.exit(1)
@@ -346,7 +355,8 @@ class PolygonStreamManager:
                  market: str = "stocks", symbols_per_connection: int = 10, max_retries: int = 3, 
                  retry_delay: float = 5.0, batch_interval: float = 5.0,
                  fetch_interval: float = 600.0, db_server_host: str = "localhost", 
-                 db_server_port: int = 9100):
+                 db_server_port: int = 9100, poll_interval: float = 15.0,
+                 poll_fallback_enabled: bool = True, poll_only: bool = False):
         self.api_key = api_key
         self.db_client = db_client
         self.redis_publisher = redis_publisher
@@ -359,6 +369,9 @@ class PolygonStreamManager:
         self.fetch_interval = fetch_interval  # Interval for triggering fetches (default: 10 minutes)
         self.db_server_host = db_server_host
         self.db_server_port = db_server_port
+        self.poll_interval = poll_interval  # Interval for polling symbols with no stream updates (default: 15s)
+        self.poll_fallback_enabled = poll_fallback_enabled
+        self.poll_only = poll_only  # If True, no WebSocket connections; only periodic poll fallback
         
         # Determine which method to use (Redis preferred if available)
         self.use_redis = redis_publisher is not None and redis_publisher.available
@@ -383,11 +396,16 @@ class PolygonStreamManager:
         self.last_fetch_cycle = time.time()
         self.fetch_task: Optional[asyncio.Task] = None
         
+        # Poll fallback: fetch live price for symbols with no stream updates (e.g. I:SPX, I:NDX)
+        self.poll_fallback_task: Optional[asyncio.Task] = None
+        self._poll_semaphore = asyncio.Semaphore(5)  # Limit concurrent API calls
+        
         # Data processing stats
         self.total_messages = 0
         self.successful_saves = 0
         self.failed_saves = 0
         self.batches_sent = 0
+        self.poll_fallback_publishes = 0  # Count of poll-fallback Redis/DB publishes
         self.start_time = time.time()
         
     async def start_streaming(self, all_symbols: List[str]):
@@ -399,16 +417,7 @@ class PolygonStreamManager:
         logger.info(f"Starting Polygon streaming for {len(all_symbols)} symbols")
         logger.info(f"Market: {self.market}")
         logger.info(f"Feed types: {', '.join(self.feed_types)}")
-        logger.info(f"Symbols per connection: {self.symbols_per_connection}")
         logger.info(f"Batch interval: {self.batch_interval} seconds")
-        
-        # Split symbols into chunks for multiple connections
-        symbol_chunks = [
-            all_symbols[i:i + self.symbols_per_connection] 
-            for i in range(0, len(all_symbols), self.symbols_per_connection)
-        ]
-        
-        logger.info(f"Creating {len(symbol_chunks)} WebSocket connections")
         
         # Initialize stats for all symbols
         for symbol in all_symbols:
@@ -419,11 +428,49 @@ class PolygonStreamManager:
                 'errors': 0
             }
         
-        # Start batch processing task
+        # Start batch processing task (used when WebSocket is active; no-op in poll-only)
         self.batch_task = asyncio.create_task(self._batch_processor())
         
-        # Start periodic fetch task
+        # Start periodic fetch task (used when WebSocket is active; no-op in poll-only)
         self.fetch_task = asyncio.create_task(self._periodic_fetch_processor())
+        
+        # Poll fallback: fetch live price and publish to Redis (all symbols in poll-only; else only stale)
+        poll_fallback_on = self.poll_fallback_enabled and self.use_redis and self.market == "stocks"
+        if poll_fallback_on:
+            self.poll_fallback_task = asyncio.create_task(self._poll_fallback_processor())
+            if self.poll_only:
+                logger.info(
+                    f"Poll-only mode: no WebSocket connections. Fetching live price every {self.poll_interval}s "
+                    f"for all {len(all_symbols)} symbols (market hours only), publishing to Redis."
+                )
+            else:
+                logger.info(
+                    f"Poll fallback enabled: fetching live price every {self.poll_interval}s for symbols with no stream updates (market hours only)"
+                )
+        
+        if self.poll_only:
+            if not poll_fallback_on:
+                logger.error(
+                    "Poll-only mode requires Redis (--redis-url or REDIS_URL), stocks market (--market stocks), "
+                    "and poll fallback (do not use --no-poll-fallback)."
+                )
+            # Keep running until shutdown; no WebSocket connections
+            try:
+                while not shutdown_flag:
+                    await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                await self._cleanup_connections()
+            return
+        
+        # Split symbols into chunks for multiple WebSocket connections
+        symbol_chunks = [
+            all_symbols[i:i + self.symbols_per_connection]
+            for i in range(0, len(all_symbols), self.symbols_per_connection)
+        ]
+        logger.info(f"Symbols per connection: {self.symbols_per_connection}")
+        logger.info(f"Creating {len(symbol_chunks)} WebSocket connections")
         
         # Start connections
         for i, symbols_chunk in enumerate(symbol_chunks):
@@ -493,100 +540,74 @@ class PolygonStreamManager:
         self.batches_sent += 1
         
     async def _send_quotes_batch(self, quote_updates: Dict[str, Dict]):
-        """Send a batch of quote updates."""
+        """Send a batch of quote updates (Redis and/or DB when both set)."""
         try:
             if self.use_redis and self.redis_publisher:
-                # Publish to Redis
                 for symbol, quote_data in quote_updates.items():
                     success = await self.redis_publisher.publish_realtime_data(
                         symbol=symbol,
                         data_type="quote",
                         records=[quote_data]
                     )
-                    
                     if success:
                         self.successful_saves += 1
                         logger.debug(f"Quote published to Redis for {symbol}")
                     else:
                         self.failed_saves += 1
                         self.symbol_stats[symbol]['errors'] += 1
-            elif self.db_client:
-                # Fallback to HTTP
-                records = []
+            if self.db_client:
                 for symbol, quote_data in quote_updates.items():
-                    records.append({
-                        'symbol': symbol,
-                        **quote_data
-                    })
-                    
-                # Send to database (we'll send individual updates for now)
-                for record in records:
-                    symbol = record.pop('symbol')
+                    db_ticker = normalize_symbol_for_db(symbol)
                     success = await self.db_client.save_realtime_data(
-                        symbol=symbol,
+                        symbol=db_ticker,
                         data_type="quote",
-                        records=[record],
+                        records=[quote_data],
                         index_col="timestamp"
                     )
-                    
                     if success:
                         self.successful_saves += 1
-                        logger.debug(f"Quote batch saved for {symbol}")
+                        logger.debug(f"Quote saved for {symbol} ({db_ticker}) to DB")
                     else:
                         self.failed_saves += 1
                         self.symbol_stats[symbol]['errors'] += 1
-            else:
+            if not (self.use_redis and self.redis_publisher) and not self.db_client:
                 logger.warning("No data distribution method available for quotes batch")
-                    
         except Exception as e:
             logger.error(f"Error sending quotes batch: {e}")
             
     async def _send_trades_batch(self, trade_updates: Dict[str, Dict]):
-        """Send a batch of trade updates."""
+        """Send a batch of trade updates (Redis and/or DB when both set)."""
         try:
             if self.use_redis and self.redis_publisher:
-                # Publish to Redis
                 for symbol, trade_data in trade_updates.items():
                     success = await self.redis_publisher.publish_realtime_data(
                         symbol=symbol,
                         data_type="trade",
                         records=[trade_data]
                     )
-                    
                     if success:
                         self.successful_saves += 1
                         logger.debug(f"Trade published to Redis for {symbol}")
                     else:
                         self.failed_saves += 1
                         self.symbol_stats[symbol]['errors'] += 1
-            elif self.db_client:
-                # Fallback to HTTP
-                records = []
+            if self.db_client:
                 for symbol, trade_data in trade_updates.items():
-                    records.append({
-                        'symbol': symbol,
-                        **trade_data
-                    })
-                    
-                # Send to database (we'll send individual updates for now)
-                for record in records:
-                    symbol = record.pop('symbol')
+                    db_ticker = normalize_symbol_for_db(symbol)
                     success = await self.db_client.save_realtime_data(
-                        symbol=symbol,
+                        symbol=db_ticker,
                         data_type="trade",
-                        records=[record],
+                        records=[trade_data],
                         index_col="timestamp"
                     )
-                    
                     if success:
                         self.successful_saves += 1
-                        logger.debug(f"Trade batch saved for {symbol}")
+                        logger.debug(f"Trade saved for {symbol} ({db_ticker}) to DB")
                     else:
                         self.failed_saves += 1
                         self.symbol_stats[symbol]['errors'] += 1
-            else:
+            if not (self.use_redis and self.redis_publisher) and not self.db_client:
                 logger.warning("No data distribution method available for trades batch")
-                    
         except Exception as e:
             logger.error(f"Error sending trades batch: {e}")
             
@@ -717,6 +738,16 @@ class PolygonStreamManager:
                     await self._handle_trade_raw(connection_id, msg)
                 elif msg.event_type == "Q":  # Quote
                     await self._handle_quote_raw(connection_id, msg)
+                elif msg.event_type == "status":
+                    status_msg = getattr(msg, 'message', None) or getattr(msg, 'status', '') or str(msg)
+                    if 'max_connection' in status_msg.lower() or 'connection limit' in status_msg.lower():
+                        logger.error(
+                            "[POLYGON] Connection limit exceeded. Another WebSocket is already using this API key. "
+                            "Close other streamer processes or contact Polygon to increase your limit. Message: %s",
+                            status_msg,
+                        )
+                    else:
+                        logger.debug(f"Connection {connection_id}: Polygon status: {status_msg}")
                 else:
                     logger.debug(f"Connection {connection_id}: Unknown event type: {msg.event_type}")
             elif hasattr(msg, 'ev'):  # Alternative attribute name
@@ -724,6 +755,17 @@ class PolygonStreamManager:
                     await self._handle_trade_raw(connection_id, msg)
                 elif msg.ev == "Q":  # Quote
                     await self._handle_quote_raw(connection_id, msg)
+                elif msg.ev == "status":
+                    # Polygon status (e.g. subscribed, max_connections, auth_success)
+                    status_msg = getattr(msg, 'message', None) or getattr(msg, 'status', '') or str(msg)
+                    if 'max_connection' in status_msg.lower() or 'connection limit' in status_msg.lower():
+                        logger.error(
+                            "[POLYGON] Connection limit exceeded. Another WebSocket is already using this API key. "
+                            "Close other streamer processes or contact Polygon to increase your limit. Message: %s",
+                            status_msg,
+                        )
+                    else:
+                        logger.debug(f"Connection {connection_id}: Polygon status: {status_msg}")
                 else:
                     logger.debug(f"Connection {connection_id}: Unknown event type: {msg.ev}")
             else:
@@ -906,6 +948,14 @@ class PolygonStreamManager:
                 await self.fetch_task
             except asyncio.CancelledError:
                 pass
+        
+        # Cancel the poll fallback task if it's still running
+        if self.poll_fallback_task and not self.poll_fallback_task.done():
+            self.poll_fallback_task.cancel()
+            try:
+                await self.poll_fallback_task
+            except asyncio.CancelledError:
+                pass
                 
     def print_stats(self):
         """Print streaming statistics."""
@@ -928,6 +978,8 @@ class PolygonStreamManager:
             
         print(f"Messages per second: {self.total_messages / runtime:.1f}")
         print(f"Active connections: {len(self.connections)}")
+        if self.poll_fallback_publishes > 0:
+            print(f"Poll fallback: {self.poll_fallback_publishes} symbol cycles (Redis/DB publishes: {self.successful_saves} total)")
         
         # Symbol-level stats
         active_symbols = [s for s, stats in self.symbol_stats.items() 
@@ -1016,6 +1068,121 @@ class PolygonStreamManager:
             
         except Exception as e:
             logger.warning(f"Error triggering fetch for {symbol}: {e}")
+    
+    async def _poll_fallback_processor(self):
+        """
+        During market hours, periodically fetch live price for symbols that have not
+        received any stream update (e.g. I:SPX, I:NDX or any equity with no WebSocket
+        traffic) and publish to Redis in the same format as the WebSocket stream.
+        Uses get_current_price from fetch_symbol_data (live quote/trade, not hourly/daily).
+        """
+        while not shutdown_flag:
+            try:
+                await asyncio.sleep(self.poll_interval)
+                if shutdown_flag:
+                    break
+                if not is_market_hours():
+                    continue
+                if not self.use_redis or not self.redis_publisher:
+                    continue
+                now = time.time()
+                # Symbols that have not been updated in the last poll_interval (or never)
+                stale_symbols = []
+                for symbol, stats in self.symbol_stats.items():
+                    last = stats.get("last_update")
+                    if last is None:
+                        stale_symbols.append(symbol)
+                    else:
+                        # last_update can be a pandas Timestamp
+                        if hasattr(last, "timestamp"):
+                            last_ts = last.timestamp()
+                        else:
+                            last_ts = pd.Timestamp(last).timestamp() if last else 0
+                        if (now - last_ts) >= self.poll_interval:
+                            stale_symbols.append(symbol)
+                if not stale_symbols:
+                    continue
+                logger.debug(f"[POLL FALLBACK] Fetching live price for {len(stale_symbols)} symbols with no stream updates")
+                tasks = [self._fetch_and_publish_to_stream(symbol) for symbol in stale_symbols]
+                await asyncio.gather(*tasks, return_exceptions=True)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in poll fallback processor: {e}")
+    
+    async def _fetch_and_publish_to_stream(self, symbol: str):
+        """
+        Fetch current (live) price for symbol via fetch_symbol_data.get_current_price,
+        publish to Redis as quote/trade records, and optionally save to the realtime
+        table via db_client (when --db-server is set) so data appears in the DB.
+        """
+        async with self._poll_semaphore:
+            if shutdown_flag:
+                return
+            try:
+                # Fetch live data only (no DB instance -> no save); uses Polygon/Yahoo last quote/trade
+                price_info = await get_current_price(
+                    symbol,
+                    data_source="polygon",
+                    stock_db_instance=None,
+                    max_age_seconds=0,
+                    api_only=True,  # Skip DB check for lowest latency in poll path
+                )
+                if not price_info or price_info.get("price") is None:
+                    return
+                ts = price_info.get("timestamp")
+                if isinstance(ts, str):
+                    ts_iso = ts
+                else:
+                    ts_iso = pd.Timestamp(ts, tz="UTC").isoformat() if ts else pd.Timestamp.now(tz="UTC").isoformat()
+                price = float(price_info["price"])
+                bid = price_info.get("bid_price")
+                ask = price_info.get("ask_price")
+                size = int(price_info.get("volume") or price_info.get("ask_size") or price_info.get("bid_size") or 0)
+                quote_record = {
+                    "timestamp": ts_iso,
+                    "price": price if bid is None else float(bid),
+                    "size": size,
+                    "ask_price": float(ask) if ask is not None else None,
+                    "ask_size": size,
+                }
+                trade_record = {"timestamp": ts_iso, "price": price, "size": size}
+                published = 0
+                # Publish to Redis (same shape as WebSocket)
+                if self.use_redis and self.redis_publisher:
+                    if "quotes" in self.feed_types:
+                        ok = await self.redis_publisher.publish_realtime_data(symbol, "quote", [quote_record])
+                        if ok:
+                            published += 1
+                            logger.debug(f"[POLL FALLBACK] Published quote for {symbol} to Redis")
+                    if "trades" in self.feed_types:
+                        ok = await self.redis_publisher.publish_realtime_data(symbol, "trade", [trade_record])
+                        if ok:
+                            published += 1
+                            logger.debug(f"[POLL FALLBACK] Published trade for {symbol} to Redis")
+                # Save to realtime table (db_server) so fetch_symbol_data --latest shows data
+                if self.db_client:
+                    db_ticker = normalize_symbol_for_db(symbol)  # I:SPX -> SPX, I:NDX -> NDX for DB
+                    if "quotes" in self.feed_types:
+                        ok = await self.db_client.save_realtime_data(
+                            db_ticker, "quote", [quote_record], index_col="timestamp"
+                        )
+                        if ok:
+                            published += 1
+                            logger.debug(f"[POLL FALLBACK] Saved quote for {symbol} ({db_ticker}) to DB")
+                    if "trades" in self.feed_types:
+                        ok = await self.db_client.save_realtime_data(
+                            db_ticker, "trade", [trade_record], index_col="timestamp"
+                        )
+                        if ok:
+                            published += 1
+                            logger.debug(f"[POLL FALLBACK] Saved trade for {symbol} ({db_ticker}) to DB")
+                if published > 0:
+                    self.poll_fallback_publishes += 1
+                    self.successful_saves += published
+            except Exception as e:
+                logger.debug(f"[POLL FALLBACK] Failed to fetch/publish for {symbol}: {e}")
+                self.failed_saves += 1
 
 async def load_symbols_from_types(args: argparse.Namespace) -> List[str]:
     """Load symbols from types (like in fetch_all_data.py)."""
@@ -1193,6 +1360,11 @@ def parse_args():
         action='store_true',
         help='Disable Redis Pub/Sub and use HTTP instead (for backward compatibility)'
     )
+    parser.add_argument(
+        '--no-db-write',
+        action='store_true',
+        help='Do not write to the realtime table (Redis only). When set, --db-server is not used for saving; use for Redis-only distribution.'
+    )
     
     # Symbol loading options
     parser.add_argument(
@@ -1279,6 +1451,24 @@ def parse_args():
         help='Database server port for periodic fetches (default: 9100)'
     )
     
+    # Poll fallback: when a symbol gets no stream updates (e.g. I:SPX, I:NDX), fetch live price and feed to Redis
+    parser.add_argument(
+        '--poll-interval',
+        type=float,
+        default=15.0,
+        help='Interval in seconds to fetch live price for symbols with no stream updates, during market hours (default: 15). Feed is published to Redis in same format as WebSocket data.'
+    )
+    parser.add_argument(
+        '--no-poll-fallback',
+        action='store_true',
+        help='Disable poll fallback (do not fetch live price for symbols with no stream updates)'
+    )
+    parser.add_argument(
+        '--poll-only',
+        action='store_true',
+        help='No WebSocket connections: only run periodic poll fallback (fetch live price every --poll-interval and publish to Redis). Requires Redis, --market stocks, and poll fallback enabled. Use to test poll path or avoid connection limits.'
+    )
+    
     # Test mode
     parser.add_argument(
         '--test-mode',
@@ -1324,7 +1514,10 @@ async def _run_streaming(api_key: str, redis_publisher: Optional[RedisPublisher]
         batch_interval=args.batch_interval,
         fetch_interval=args.fetch_interval,
         db_server_host=args.db_server_host,
-        db_server_port=args.db_server_port
+        db_server_port=args.db_server_port,
+        poll_interval=args.poll_interval,
+        poll_fallback_enabled=args.poll_only or not args.no_poll_fallback,
+        poll_only=args.poll_only,
     )
     
     # Start statistics task
@@ -1414,7 +1607,7 @@ async def main():
         if args.feed in ['trades', 'both']:
             feed_types.append('trades')
     
-    # Create Redis publisher (preferred) and database client (fallback)
+    # Create Redis publisher (preferred) and database client (optional for writes)
     redis_publisher = None
     db_client = None
     
@@ -1423,8 +1616,11 @@ async def main():
         redis_url = args.redis_url or os.getenv('REDIS_URL', 'redis://localhost:6379/0')
         redis_publisher = RedisPublisher(redis_url=redis_url)
     
-    # Create database client as fallback
-    db_client = DatabaseClient(args.db_server, args.db_timeout)
+    # Database client: used for saving to realtime table unless --no-db-write
+    if not args.no_db_write:
+        db_client = DatabaseClient(args.db_server, args.db_timeout)
+    else:
+        logger.info("DB write disabled (--no-db-write): data will not be saved to the realtime table")
     
     # Use context managers - handle both Redis and HTTP clients
     if redis_publisher:
@@ -1432,15 +1628,26 @@ async def main():
             # Check if Redis is actually available
             if not redis_publisher.available:
                 logger.warning("Redis not available, falling back to HTTP")
-                async with db_client:
-                    await _run_streaming(api_key, None, db_client, feed_types, args, all_symbols)
+                if db_client:
+                    async with db_client:
+                        await _run_streaming(api_key, None, db_client, feed_types, args, all_symbols)
+                else:
+                    await _run_streaming(api_key, None, None, feed_types, args, all_symbols)
             else:
-                # Use Redis
-                await _run_streaming(api_key, redis_publisher, None, feed_types, args, all_symbols)
+                # Use Redis; pass db_client too when not --no-db-write so data can fan out to DB
+                if db_client:
+                    async with db_client:
+                        await _run_streaming(api_key, redis_publisher, db_client, feed_types, args, all_symbols)
+                else:
+                    await _run_streaming(api_key, redis_publisher, None, feed_types, args, all_symbols)
     else:
-        # No Redis, use HTTP only
-        async with db_client:
-            await _run_streaming(api_key, None, db_client, feed_types, args, all_symbols)
+        # No Redis, use HTTP only (requires db_client)
+        if db_client:
+            async with db_client:
+                await _run_streaming(api_key, None, db_client, feed_types, args, all_symbols)
+        else:
+            logger.error("Neither Redis nor DB write enabled. Use Redis (default) or omit --no-db-write.")
+            return 1
     
     logger.info("Polygon Real-time Streamer stopped")
     return 0

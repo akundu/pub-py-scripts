@@ -291,21 +291,40 @@ def _add_advanced_args(parser: argparse.ArgumentParser):
     )
 
 
+def _add_rate_limit_args(parser: argparse.ArgumentParser):
+    """Add rate limiting arguments."""
+    parser.add_argument(
+        "--rate-limit-max",
+        type=int,
+        default=0,
+        help="Max transactions allowed in the rate limit window. 0 = disabled (default). "
+             "Example: --rate-limit-max 100 --rate-limit-window 60 = 100 per minute."
+    )
+    parser.add_argument(
+        "--rate-limit-window",
+        type=float,
+        default=0,
+        help="Time window in seconds for rate limiting. 0 = disabled (default). "
+             "Example: --rate-limit-max 100 --rate-limit-window 60 = 100 per minute."
+    )
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments.
-    
+
     Returns:
         Parsed arguments namespace
     """
     parser = argparse.ArgumentParser(
         description="Analyze credit spreads at 15-minute intervals from CSV options data"
     )
-    
+
     # Add argument groups
     _add_input_args(parser)
     _add_filter_args(parser)
     _add_trading_args(parser)
     _add_output_args(parser)
     _add_advanced_args(parser)
-    
+    _add_rate_limit_args(parser)
+
     return parser.parse_args()

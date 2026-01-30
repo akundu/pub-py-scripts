@@ -68,6 +68,7 @@ from common.market_hours import is_market_hours, compute_market_transition_times
 
 # Import utility modules
 from credit_spread_utils import timezone_utils, price_utils, capital_utils, arg_parser
+from credit_spread_utils.rate_limiter import SlidingWindowRateLimiter
 
 # Re-export commonly used functions for backward compatibility
 from credit_spread_utils.timezone_utils import (
@@ -1966,7 +1967,9 @@ async def process_single_csv(
     force_close_hour: Optional[int] = None,
     cache_dir: str = ".options_cache",
     no_data_cache: bool = False,
-    min_premium_diff: Optional[Tuple[float, float]] = None
+    min_premium_diff: Optional[Tuple[float, float]] = None,
+    rate_limit_max: int = 0,
+    rate_limit_window: float = 0,
 ) -> List[Dict[str, Any]]:
     """Process a single CSV file and return results.
 
@@ -1993,17 +1996,17 @@ async def process_single_csv(
             db_config = os.getenv('QUESTDB_CONNECTION_STRING', '') or os.getenv('QUESTDB_URL', '')
         else:
             db_config = db_path
-        
+
         db = StockQuestDB(
             db_config,
             enable_cache=not no_cache,
             logger=logger
         )
-        
+
         try:
             # Group by 15-minute intervals
             intervals_grouped = df.groupby('interval')
-            
+
             # If --most-recent is used, only analyze the most recent interval
             if most_recent:
                 max_interval = df['interval'].max()
@@ -2011,10 +2014,21 @@ async def process_single_csv(
                 intervals_to_process = [(max_interval, max_interval_df)]
             else:
                 intervals_to_process = intervals_grouped
-            
+
+            # Create rate limiter for this worker
+            rate_limiter = SlidingWindowRateLimiter(
+                max_transactions=rate_limit_max,
+                window_seconds=rate_limit_window,
+                logger=logger
+            )
+            if rate_limiter.is_enabled:
+                logger.info(f"Rate limiting enabled: {rate_limit_max} transactions per {rate_limit_window}s")
+
             results = []
             for interval_time, interval_df in intervals_to_process:
                 for opt_type in option_types:
+                    # Apply rate limiting before each interval analysis
+                    await rate_limiter.acquire()
                     result = await analyze_interval(
                         db,
                         interval_df,
@@ -2039,12 +2053,12 @@ async def process_single_csv(
                     )
                     if result:
                         results.append(result)
-            
+
             return results
-        
+
         finally:
             await db.close()
-    
+
     except Exception as e:
         logger.error(f"Error processing {csv_path}: {e}")
         import traceback
@@ -3103,11 +3117,11 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
     
     results = []
     skip_normal_processing = False
-    
+
     # Process CSV files
     if use_multiprocessing:
         logger.info(f"Processing {len(csv_paths)} files using {num_processes} parallel processes")
-        
+
         # Prepare arguments for each CSV file
         process_args = []
         for csv_path in csv_paths:
@@ -3135,10 +3149,12 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
                 args.force_close_hour,
                 args.cache_dir,
                 args.no_data_cache,
-                min_premium_diff
+                min_premium_diff,
+                args.rate_limit_max,
+                args.rate_limit_window,
             )
             process_args.append(args_tuple)
-        
+
         # Process files in parallel
         with multiprocessing.Pool(processes=num_processes) as pool:
             results_list = pool.map(process_single_csv_sync, process_args)
@@ -3198,7 +3214,7 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
 
     # Normal processing (when not using multiprocessing)
     if not skip_normal_processing:
-        
+
         # Initialize database
         logger.info("Initializing database connection...")
         db = StockQuestDB(
@@ -3206,12 +3222,12 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
             enable_cache=not args.no_cache,
             logger=logger
         )
-        
+
         try:
             # Group by 15-minute intervals
             intervals_grouped = df.groupby('interval')
             total_intervals_count = len(intervals_grouped)
-            
+
             # If --most-recent is used, only analyze the most recent interval
             if args.most_recent:
                 # Find the most recent interval
@@ -3222,12 +3238,23 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
             else:
                 intervals_to_process = intervals_grouped
                 logger.info(f"Analyzing {total_intervals_count} intervals...")
-            
+
             results = []
-            
+
+            # Create rate limiter for sequential mode
+            rate_limiter = SlidingWindowRateLimiter(
+                max_transactions=args.rate_limit_max,
+                window_seconds=args.rate_limit_window,
+                logger=logger
+            )
+            if rate_limiter.is_enabled:
+                logger.info(f"Rate limiting enabled: {args.rate_limit_max} transactions per {args.rate_limit_window}s")
+
             # Collect all results first (without capital filtering)
             for interval_time, interval_df in intervals_to_process:
                 for opt_type in option_types_to_analyze:
+                    # Apply rate limiting before each interval analysis
+                    await rate_limiter.acquire()
                     # Use current price if --curr-price is set and --continuous mode is active
                     use_current_price = args.curr_price and args.continuous is not None
                     result = await analyze_interval(
@@ -3254,7 +3281,7 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
                     )
                     if result:
                         results.append(result)
-            
+
             # Apply capital limit filter (accounts for position lifecycle)
             if args.max_live_capital is not None:
                 original_count = len(results)
@@ -3709,7 +3736,7 @@ async def main():
     # Process CSV files (normal mode, not continuous)
     if use_multiprocessing:
         logger.info(f"Processing {len(csv_paths)} files using {num_processes} parallel processes")
-        
+
         # Prepare arguments for each CSV file
         process_args = []
         for csv_path in csv_paths:
@@ -3737,14 +3764,16 @@ async def main():
                 args.force_close_hour,
                 args.cache_dir,
                 args.no_data_cache,
-                min_premium_diff
+                min_premium_diff,
+                args.rate_limit_max,
+                args.rate_limit_window,
             )
             process_args.append(args_tuple)
-        
+
         # Process files in parallel
         with multiprocessing.Pool(processes=num_processes) as pool:
             results_list = pool.map(process_single_csv_sync, process_args)
-        
+
         # Flatten results
         results = []
         for file_results in results_list:
@@ -3802,7 +3831,7 @@ async def main():
 
     # Normal processing (when not using multiprocessing)
     if not skip_normal_processing:
-        
+
         # Initialize database
         logger.info("Initializing database connection...")
         db = StockQuestDB(
@@ -3810,12 +3839,12 @@ async def main():
             enable_cache=not args.no_cache,
             logger=logger
         )
-        
+
         try:
             # Group by 15-minute intervals
             intervals_grouped = df.groupby('interval')
             total_intervals_count = len(intervals_grouped)
-            
+
             # If --most-recent is used, only analyze the most recent interval
             if args.most_recent:
                 # Find the most recent interval
@@ -3826,12 +3855,23 @@ async def main():
             else:
                 intervals_to_process = intervals_grouped
                 logger.info(f"Analyzing {total_intervals_count} intervals...")
-            
+
             results = []
-            
+
+            # Create rate limiter for sequential mode
+            rate_limiter = SlidingWindowRateLimiter(
+                max_transactions=args.rate_limit_max,
+                window_seconds=args.rate_limit_window,
+                logger=logger
+            )
+            if rate_limiter.is_enabled:
+                logger.info(f"Rate limiting enabled: {args.rate_limit_max} transactions per {args.rate_limit_window}s")
+
             # Collect all results first (without capital filtering)
             for interval_time, interval_df in intervals_to_process:
                 for opt_type in option_types_to_analyze:
+                    # Apply rate limiting before each interval analysis
+                    await rate_limiter.acquire()
                     # Use current price if --curr-price is set and --continuous mode is active
                     use_current_price = args.curr_price and args.continuous is not None
                     result = await analyze_interval(
@@ -3858,7 +3898,7 @@ async def main():
                     )
                     if result:
                         results.append(result)
-            
+
             # Apply capital limit filter (accounts for position lifecycle)
             if args.max_live_capital is not None:
                 original_count = len(results)
@@ -3872,18 +3912,18 @@ async def main():
                     f"Capital limit filter: {original_count} -> {len(results)} positions "
                     f"(max ${args.max_live_capital:,.2f} per day)"
                 )
-                
+
                 # Calculate and log final capital usage
                 daily_capital_usage = {}
                 for result in results:
                     position_capital, calendar_date = calculate_position_capital(result, output_tz)
                     daily_capital_usage[calendar_date] = daily_capital_usage.get(calendar_date, 0.0) + position_capital
-                
+
                 if daily_capital_usage:
                     logger.info("Final daily capital usage:")
                     for date, capital in sorted(daily_capital_usage.items()):
                         logger.info(f"  {date}: ${capital:,.2f} / ${args.max_live_capital:,.2f} ({(capital/args.max_live_capital*100):.1f}%)")
-        
+
         finally:
             await db.close()
     

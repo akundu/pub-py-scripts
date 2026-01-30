@@ -6,6 +6,7 @@ This package contains refactored utility functions organized by responsibility:
 - price_utils: Price fetching from database
 - capital_utils: Capital lifecycle management
 - arg_parser: Command line argument parsing
+- rate_limiter: Sliding window rate limiting for transaction throttling
 """
 
 __all__ = [
@@ -13,4 +14,5 @@ __all__ = [
     'price_utils',
     'capital_utils',
     'arg_parser',
+    'rate_limiter',
 ]

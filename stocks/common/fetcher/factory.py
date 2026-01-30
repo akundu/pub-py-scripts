@@ -110,7 +110,7 @@ class FetcherFactory:
                 if is_index_symbol(symbol):
                     logger.info(
                         f"Index symbol {symbol} detected, using {actual_data_source} "
-                        f"(Polygon supports indices with I: prefix)"
+                        f"(Polygon indices use aggs API)"
                     )
                 else:
                     logger.info(

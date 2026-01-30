@@ -87,6 +87,15 @@ except ImportError:
 # Global logger instance
 logger = logging.getLogger("db_server_logger")
 
+# Symbol normalization (e.g. I:SPX <-> SPX for Redis/dashboard alignment)
+try:
+    from common.symbol_utils import normalize_symbol_for_db, get_polygon_symbol
+except ImportError:
+    def normalize_symbol_for_db(s: str) -> str:
+        return s.upper().lstrip("I:").lstrip("^") if s else s
+    def get_polygon_symbol(s: str) -> str:
+        return s
+
 # Try to import fetch functions
 try:
     from fetch_symbol_data import get_current_price
@@ -222,31 +231,34 @@ class WebSocketManager:
             return False
     
     async def _subscribe_to_symbol(self, symbol: str) -> None:
-        """Subscribe to Redis channels for a symbol."""
+        """Subscribe to Redis channels for a symbol. Also subscribes to Polygon stream format (e.g. I:SPX) when different, so streamer messages are received when dashboard asks for SPX."""
         if not self.enable_redis or not self.redis_pubsub:
             return
             
         try:
-            # Subscribe to both quote and trade channels for this symbol
-            quote_channel = f"realtime:quote:{symbol}"
-            trade_channel = f"realtime:trade:{symbol}"
+            # Symbols to subscribe to: the client symbol (e.g. SPX) and Polygon stream format (e.g. I:SPX) when different
+            symbols_to_sub = [symbol]
+            polygon_symbol = get_polygon_symbol(symbol)
+            if polygon_symbol and polygon_symbol != symbol:
+                symbols_to_sub.append(polygon_symbol)
             
-            # Check if this is a new symbol being tracked (neither channel exists yet)
-            is_new_symbol = quote_channel not in self.subscribed_channels and trade_channel not in self.subscribed_channels
+            is_new_symbol = True
+            for sym in symbols_to_sub:
+                quote_channel = f"realtime:quote:{sym}"
+                trade_channel = f"realtime:trade:{sym}"
+                if quote_channel not in self.subscribed_channels:
+                    await self.redis_pubsub.subscribe(quote_channel)
+                    self.subscribed_channels.add(quote_channel)
+                    logger.debug(f"[REDIS] Subscribed to channel: {quote_channel}")
+                    is_new_symbol = True
+                if trade_channel not in self.subscribed_channels:
+                    await self.redis_pubsub.subscribe(trade_channel)
+                    self.subscribed_channels.add(trade_channel)
+                    logger.debug(f"[REDIS] Subscribed to channel: {trade_channel}")
+                    is_new_symbol = True
             
-            if quote_channel not in self.subscribed_channels:
-                await self.redis_pubsub.subscribe(quote_channel)
-                self.subscribed_channels.add(quote_channel)
-                logger.debug(f"[REDIS] Subscribed to channel: {quote_channel}")
-                
-            if trade_channel not in self.subscribed_channels:
-                await self.redis_pubsub.subscribe(trade_channel)
-                self.subscribed_channels.add(trade_channel)
-                logger.debug(f"[REDIS] Subscribed to channel: {trade_channel}")
-            
-            # Log at INFO level when tracking a new symbol for the first time
             if is_new_symbol:
-                logger.info(f"[REDIS] Tracking symbol from Redis: {symbol}")
+                logger.info(f"[REDIS] Tracking symbol from Redis: {symbol}" + (f" (also {polygon_symbol})" if polygon_symbol != symbol else ""))
                 
         except Exception as e:
             logger.error(f"Error subscribing to Redis channels for {symbol}: {e}")
@@ -345,24 +357,23 @@ class WebSocketManager:
             self.redis_messages_received += 1
             logger.info(f"[REDIS] Received {data_type} message for {symbol} from channel {channel} ({len(records)} records) [Total: {self.redis_messages_received}]")
             
-            # Save to database
+            # Normalize symbol for DB and for clients that subscribed with normalized form (e.g. SPX not I:SPX)
+            db_ticker = normalize_symbol_for_db(symbol)
+            
+            # Save to database (use normalized ticker so fetch_symbol_data --latest NDX finds it)
             if self.db_instance:
                 try:
-                    # Convert records to DataFrame
                     df = pd.DataFrame.from_records(records)
                     if 'timestamp' in df.columns:
                         df['timestamp'] = pd.to_datetime(df['timestamp'])
                         df.set_index('timestamp', inplace=True)
-                    
-                    # Save to database
-                    await self.db_instance.save_realtime_data(df, symbol, data_type)
+                    await self.db_instance.save_realtime_data(df, db_ticker, data_type)
                     self.redis_messages_processed += 1
-                    logger.info(f"[REDIS] Saved {data_type} data for {symbol} to database (from Redis) [Processed: {self.redis_messages_processed}]")
+                    logger.info(f"[REDIS] Saved {data_type} data for {db_ticker} to database (from Redis) [Processed: {self.redis_messages_processed}]")
                 except Exception as e:
-                    logger.error(f"Error saving {data_type} data for {symbol} to database: {e}", exc_info=True)
+                    logger.error(f"Error saving {data_type} data for {db_ticker} to database: {e}", exc_info=True)
             
-            # Broadcast to WebSocket subscribers
-            # Format the data like save_realtime_data does
+            # Broadcast to WebSocket subscribers: both raw symbol (I:SPX) and normalized (SPX) so dashboard subscribed as SPX gets updates
             if records:
                 transformed_payload = []
                 for record in records:
@@ -374,7 +385,7 @@ class WebSocketManager:
                             "ask_price": record.get("ask_price"),
                             "ask_size": record.get("ask_size")
                         })
-                    else:  # trade
+                    else:
                         transformed_payload.append(record)
                 
                 if transformed_payload:
@@ -385,6 +396,8 @@ class WebSocketManager:
                         "payload": transformed_payload
                     }
                     await self.broadcast(symbol, broadcast_data)
+                    if db_ticker != symbol:
+                        await self.broadcast(db_ticker, broadcast_data)
                     
         except json.JSONDecodeError as e:
             logger.error(f"Error parsing Redis message JSON: {e}")
