@@ -1185,3 +1185,146 @@ def analyze_chord_progression(notes_history, window_size=5):
         return None
     
     return find_best_matching_chord(stable_notes)
+
+def constrain_chord_to_song(
+    raw_result: dict,
+    song_chords: list,
+    in_song_weight: float = 1.0,
+    out_of_song_penalty: float = 0.4,
+    related_chord_weight: float = 0.7,
+    verbose: bool = False
+) -> dict:
+    """
+    Re-weight chord candidates based on song context.
+    
+    Args:
+        raw_result: Raw chord detection result dict with 'primary_chords', 'confidence', etc.
+        song_chords: List of chords known to be in the song
+        in_song_weight: Multiplier for chords that appear in the song (default: 1.0)
+        out_of_song_penalty: Multiplier for chords NOT in the song (default: 0.4)
+        related_chord_weight: Multiplier for harmonically related chords (default: 0.7)
+        verbose: If True, print debug info
+    
+    Returns:
+        Enhanced result dict with both raw and song-constrained results
+    """
+    from lib.song_loader import SongLoader
+    
+    if not song_chords:
+        # No song context, return raw result with metadata
+        return {
+            **raw_result,
+            "song_constrained": False,
+            "raw_chord": raw_result.get("primary_chords", [None])[0] if raw_result.get("primary_chords") else None,
+            "raw_confidence": raw_result.get("chord_confidence", 0.0)
+        }
+    
+    loader = SongLoader()
+    
+    # Get all candidate chords from raw result
+    all_candidates = []
+    
+    # Primary chords with their confidence
+    if raw_result.get("primary_chords"):
+        for chord in raw_result["primary_chords"]:
+            conf = raw_result.get("chord_confidence", 0.5)
+            all_candidates.append((chord, conf, "primary"))
+    
+    # Alternative chords with lower confidence
+    if raw_result.get("alternative_chords"):
+        for chord in raw_result["alternative_chords"]:
+            conf = raw_result.get("chord_confidence", 0.3)
+            all_candidates.append((chord, conf * 0.8, "alternative"))
+    
+    if not all_candidates:
+        return {
+            **raw_result,
+            "song_constrained": True,
+            "song_chords": song_chords,
+            "raw_chord": None,
+            "raw_confidence": 0.0,
+            "final_chord": None,
+            "final_confidence": 0.0,
+            "song_match": False
+        }
+    
+    # Score each candidate against song chords
+    scored_candidates = []
+    
+    for chord_name, raw_conf, source in all_candidates:
+        # Check if chord is directly in the song
+        if chord_name in song_chords:
+            weighted_conf = raw_conf * in_song_weight
+            match_type = "exact"
+            suggested_chord = chord_name
+            
+        else:
+            # Find best matching chord from song
+            best_match = loader.find_best_match_in_song(chord_name, song_chords)
+            
+            if best_match:
+                similarity = best_match["similarity"]
+                suggested_chord = best_match["chord"]
+                
+                if similarity >= 0.9:
+                    # Very similar (e.g., Em vs Em7)
+                    weighted_conf = raw_conf * related_chord_weight
+                    match_type = "related"
+                elif similarity >= 0.6:
+                    # Somewhat similar (shares many notes)
+                    weighted_conf = raw_conf * (related_chord_weight * 0.8)
+                    match_type = "partial"
+                else:
+                    # Not very similar
+                    weighted_conf = raw_conf * out_of_song_penalty
+                    match_type = "none"
+            else:
+                # No match found
+                weighted_conf = raw_conf * out_of_song_penalty
+                match_type = "none"
+                suggested_chord = song_chords[0] if song_chords else chord_name
+        
+        scored_candidates.append({
+            "detected": chord_name,
+            "raw_confidence": raw_conf,
+            "weighted_confidence": weighted_conf,
+            "suggested": suggested_chord if chord_name not in song_chords else None,
+            "match_type": match_type,
+            "source": source
+        })
+    
+    # Sort by weighted confidence
+    scored_candidates.sort(key=lambda x: x["weighted_confidence"], reverse=True)
+    
+    if verbose and scored_candidates:
+        print(f"🎵 Song-Constrained Analysis:", file=sys.stderr)
+        print(f"   Song Chords: {song_chords}", file=sys.stderr)
+        for i, candidate in enumerate(scored_candidates[:3]):
+            print(f"   #{i+1}: {candidate['detected']} (raw: {candidate['raw_confidence']:.2f}, "
+                  f"weighted: {candidate['weighted_confidence']:.2f}, match: {candidate['match_type']})",
+                  file=sys.stderr)
+    
+    # Build enhanced result
+    best = scored_candidates[0] if scored_candidates else None
+    raw_best = all_candidates[0] if all_candidates else (None, 0.0, None)
+    
+    result = {
+        **raw_result,
+        "song_constrained": True,
+        "song_chords": song_chords,
+        "raw_chord": raw_best[0],
+        "raw_confidence": raw_best[1],
+        "final_chord": best["detected"] if best else None,
+        "final_confidence": best["weighted_confidence"] if best else 0.0,
+        "suggested_chord": best.get("suggested") if best else None,
+        "match_type": best["match_type"] if best else "none",
+        "song_match": best["match_type"] in ["exact", "related"] if best else False,
+        "all_candidates": scored_candidates[:5]  # Top 5 for debugging
+    }
+    
+    # If the suggested chord is different and has better weight, promote it
+    if best and best.get("suggested") and best["match_type"] in ["exact", "related"]:
+        result["final_chord"] = best["suggested"]
+        result["promotion_reason"] = f"Promoted {best['suggested']} from song context"
+    
+    return result

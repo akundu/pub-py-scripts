@@ -1,0 +1,31 @@
+{
+  "song_id": "pd_001",
+  "title": "Greensleeves",
+  "composer": "Traditional",
+  "tempo": 96,
+  "time_signature": "3/4",
+  "difficulty": "beginner",
+  "license_status": "public_domain",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    { "time": 0.0, "string": 4, "fret": 0, "duration": 0.625 },
+    { "time": 0.625, "string": 3, "fret": 2, "duration": 1.25 },
+    { "time": 1.875, "string": 3, "fret": 0, "duration": 0.625 },
+    { "time": 2.5, "string": 2, "fret": 0, "duration": 0.625 },
+    { "time": 3.125, "string": 2, "fret": 1, "duration": 0.3125 },
+    { "time": 3.4375, "string": 2, "fret": 0, "duration": 0.3125 },
+    { "time": 3.75, "string": 3, "fret": 2, "duration": 0.625 },
+    { "time": 4.375, "string": 3, "fret": 0, "duration": 0.625 },
+    { "time": 5.0, "string": 4, "fret": 2, "duration": 0.625 },
+    { "time": 5.625, "string": 4, "fret": 0, "duration": 1.25 },
+    { "time": 6.875, "string": 5, "fret": 2, "duration": 0.625 },
+    { "time": 7.5, "string": 4, "fret": 0, "duration": 0.625 },
+    { "time": 8.125, "string": 4, "fret": 2, "duration": 0.3125 },
+    { "time": 8.4375, "string": 4, "fret": 0, "duration": 0.3125 },
+    { "time": 8.75, "string": 5, "fret": 3, "duration": 0.625 },
+    { "time": 9.375, "string": 5, "fret": 2, "duration": 0.625 },
+    { "time": 10.0, "string": 4, "fret": 0, "duration": 1.875 }
+  ]
+}
+

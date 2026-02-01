@@ -1,0 +1,719 @@
+{
+  "version": "1.0",
+  "total_songs": 77,
+  "by_level": {
+    "advanced": 6,
+    "beginner": 24,
+    "elementary": 8,
+    "expert": 10,
+    "intermediate": 8,
+    "novice": 15,
+    "proficient": 6
+  },
+  "by_genre": {
+    "classical": 14,
+    "jazz": 8,
+    "rock": 20,
+    "blues": 5,
+    "country": 5,
+    "folk": 8,
+    "pop": 10,
+    "metal": 2,
+    "unknown": 5
+  },
+  "songs": [
+    {
+      "song_id": "av_cl_001",
+      "title": "Concierto de Aranjuez",
+      "composer": "Joaqu\u00edn Rodrigo",
+      "difficulty": "advanced",
+      "genre": "classical",
+      "tempo": 60,
+      "file": "av_cl_001_concierto_de_aranjuez.json"
+    },
+    {
+      "song_id": "av_cl_002",
+      "title": "Capricho \u00c1rabe",
+      "composer": "Francisco T\u00e1rrega",
+      "difficulty": "advanced",
+      "genre": "classical",
+      "tempo": 80,
+      "file": "av_cl_002_capricho_\u00e1rabe.json"
+    },
+    {
+      "song_id": "av_jz_001",
+      "title": "Giant Steps",
+      "composer": "John Coltrane",
+      "difficulty": "advanced",
+      "genre": "jazz",
+      "tempo": 266,
+      "file": "av_jz_001_giant_steps.json"
+    },
+    {
+      "song_id": "av_jz_002",
+      "title": "Cherokee",
+      "composer": "Ray Noble",
+      "difficulty": "advanced",
+      "genre": "jazz",
+      "tempo": 300,
+      "file": "av_jz_002_cherokee.json"
+    },
+    {
+      "song_id": "av_rk_001",
+      "title": "Cliffs of Dover",
+      "composer": "Eric Johnson",
+      "difficulty": "advanced",
+      "genre": "rock",
+      "tempo": 134,
+      "file": "av_rk_001_cliffs_of_dover.json"
+    },
+    {
+      "song_id": "av_rk_002",
+      "title": "Little Wing",
+      "composer": "Jimi Hendrix",
+      "difficulty": "advanced",
+      "genre": "rock",
+      "tempo": 63,
+      "file": "av_rk_002_little_wing.json"
+    },
+    {
+      "song_id": "bg_bl_001",
+      "title": "House of the Rising Sun",
+      "composer": "The Animals",
+      "difficulty": "beginner",
+      "genre": "blues",
+      "tempo": 90,
+      "file": "bg_bl_001_house_of_the_rising_sun.json"
+    },
+    {
+      "song_id": "bg_bl_002",
+      "title": "Midnight Special",
+      "composer": "Traditional",
+      "difficulty": "beginner",
+      "genre": "blues",
+      "tempo": 120,
+      "file": "bg_bl_002_midnight_special.json"
+    },
+    {
+      "song_id": "bg_bl_003",
+      "title": "The Thrill Is Gone (Simple)",
+      "composer": "B.B. King",
+      "difficulty": "beginner",
+      "genre": "blues",
+      "tempo": 60,
+      "file": "bg_bl_003_the_thrill_is_gone__simple_.json"
+    },
+    {
+      "song_id": "bg_cl_001",
+      "title": "Canon in D (Simple)",
+      "composer": "Pachelbel",
+      "difficulty": "beginner",
+      "genre": "classical",
+      "tempo": 50,
+      "file": "bg_cl_001_canon_in_d__simple_.json"
+    },
+    {
+      "song_id": "bg_cl_002",
+      "title": "Minuet in G",
+      "composer": "Bach",
+      "difficulty": "beginner",
+      "genre": "classical",
+      "tempo": 120,
+      "file": "bg_cl_002_minuet_in_g.json"
+    },
+    {
+      "song_id": "bg_cl_003",
+      "title": "Air on G String (Simple)",
+      "composer": "Bach",
+      "difficulty": "beginner",
+      "genre": "classical",
+      "tempo": 60,
+      "file": "bg_cl_003_air_on_g_string__simple_.json"
+    },
+    {
+      "song_id": "bg_ct_001",
+      "title": "Take Me Home, Country Roads",
+      "composer": "John Denver",
+      "difficulty": "beginner",
+      "genre": "country",
+      "tempo": 80,
+      "file": "bg_ct_001_take_me_home__country_roads.json"
+    },
+    {
+      "song_id": "bg_ct_002",
+      "title": "Ring of Fire",
+      "composer": "Johnny Cash",
+      "difficulty": "beginner",
+      "genre": "country",
+      "tempo": 150,
+      "file": "bg_ct_002_ring_of_fire.json"
+    },
+    {
+      "song_id": "bg_ct_003",
+      "title": "Friends in Low Places",
+      "composer": "Garth Brooks",
+      "difficulty": "beginner",
+      "genre": "country",
+      "tempo": 120,
+      "file": "bg_ct_003_friends_in_low_places.json"
+    },
+    {
+      "song_id": "bg_fk_001",
+      "title": "Blowin' in the Wind",
+      "composer": "Bob Dylan",
+      "difficulty": "beginner",
+      "genre": "folk",
+      "tempo": 90,
+      "file": "bg_fk_001_blowin__in_the_wind.json"
+    },
+    {
+      "song_id": "bg_fk_002",
+      "title": "Scarborough Fair",
+      "composer": "Traditional",
+      "difficulty": "beginner",
+      "genre": "folk",
+      "tempo": 100,
+      "file": "bg_fk_002_scarborough_fair.json"
+    },
+    {
+      "song_id": "bg_fk_003",
+      "title": "The Times They Are A-Changin'",
+      "composer": "Bob Dylan",
+      "difficulty": "beginner",
+      "genre": "folk",
+      "tempo": 120,
+      "file": "bg_fk_003_the_times_they_are_a_changin_.json"
+    },
+    {
+      "song_id": "bg_pp_001",
+      "title": "Let It Be",
+      "composer": "The Beatles",
+      "difficulty": "beginner",
+      "genre": "pop",
+      "tempo": 73,
+      "file": "bg_pp_001_let_it_be.json"
+    },
+    {
+      "song_id": "bg_pp_002",
+      "title": "Perfect",
+      "composer": "Ed Sheeran",
+      "difficulty": "beginner",
+      "genre": "pop",
+      "tempo": 95,
+      "file": "bg_pp_002_perfect.json"
+    },
+    {
+      "song_id": "bg_pp_003",
+      "title": "Someone Like You",
+      "composer": "Adele",
+      "difficulty": "beginner",
+      "genre": "pop",
+      "tempo": 67,
+      "file": "bg_pp_003_someone_like_you.json"
+    },
+    {
+      "song_id": "bg_pp_004",
+      "title": "Hey Jude",
+      "composer": "The Beatles",
+      "difficulty": "beginner",
+      "genre": "pop",
+      "tempo": 75,
+      "file": "bg_pp_004_hey_jude.json"
+    },
+    {
+      "song_id": "bg_rk_001",
+      "title": "Wonderwall",
+      "composer": "Oasis",
+      "difficulty": "beginner",
+      "genre": "rock",
+      "tempo": 87,
+      "file": "bg_rk_001_wonderwall.json"
+    },
+    {
+      "song_id": "bg_rk_002",
+      "title": "Horse with No Name",
+      "composer": "America",
+      "difficulty": "beginner",
+      "genre": "rock",
+      "tempo": 120,
+      "file": "bg_rk_002_horse_with_no_name.json"
+    },
+    {
+      "song_id": "bg_rk_003",
+      "title": "Bad Moon Rising",
+      "composer": "CCR",
+      "difficulty": "beginner",
+      "genre": "rock",
+      "tempo": 180,
+      "file": "bg_rk_003_bad_moon_rising.json"
+    },
+    {
+      "song_id": "bg_rk_004",
+      "title": "Paperback Writer",
+      "composer": "The Beatles",
+      "difficulty": "beginner",
+      "genre": "rock",
+      "tempo": 132,
+      "file": "bg_rk_004_paperback_writer.json"
+    },
+    {
+      "song_id": "el_fk_001",
+      "title": "Fast Car",
+      "composer": "Tracy Chapman",
+      "difficulty": "elementary",
+      "genre": "folk",
+      "tempo": 104,
+      "file": "el_fk_001_fast_car.json"
+    },
+    {
+      "song_id": "el_fk_002",
+      "title": "Mad World",
+      "composer": "Gary Jules",
+      "difficulty": "elementary",
+      "genre": "folk",
+      "tempo": 75,
+      "file": "el_fk_002_mad_world.json"
+    },
+    {
+      "song_id": "el_pp_001",
+      "title": "Someone You Loved",
+      "composer": "Lewis Capaldi",
+      "difficulty": "elementary",
+      "genre": "pop",
+      "tempo": 110,
+      "file": "el_pp_001_someone_you_loved.json"
+    },
+    {
+      "song_id": "el_pp_002",
+      "title": "All of Me",
+      "composer": "John Legend",
+      "difficulty": "elementary",
+      "genre": "pop",
+      "tempo": 120,
+      "file": "el_pp_002_all_of_me.json"
+    },
+    {
+      "song_id": "el_pp_003",
+      "title": "Stay With Me",
+      "composer": "Sam Smith",
+      "difficulty": "elementary",
+      "genre": "pop",
+      "tempo": 84,
+      "file": "el_pp_003_stay_with_me.json"
+    },
+    {
+      "song_id": "el_rk_001",
+      "title": "Zombie",
+      "composer": "The Cranberries",
+      "difficulty": "elementary",
+      "genre": "rock",
+      "tempo": 84,
+      "file": "el_rk_001_zombie.json"
+    },
+    {
+      "song_id": "el_rk_002",
+      "title": "Creep",
+      "composer": "Radiohead",
+      "difficulty": "elementary",
+      "genre": "rock",
+      "tempo": 92,
+      "file": "el_rk_002_creep.json"
+    },
+    {
+      "song_id": "el_rk_003",
+      "title": "With or Without You",
+      "composer": "U2",
+      "difficulty": "elementary",
+      "genre": "rock",
+      "tempo": 110,
+      "file": "el_rk_003_with_or_without_you.json"
+    },
+    {
+      "song_id": "ex_cl_001",
+      "title": "Cello Suite No. 1",
+      "composer": "Bach",
+      "difficulty": "expert",
+      "genre": "classical",
+      "tempo": 60,
+      "file": "ex_cl_001_cello_suite_no__1.json"
+    },
+    {
+      "song_id": "ex_cl_002",
+      "title": "Caprice No. 24",
+      "composer": "Paganini",
+      "difficulty": "expert",
+      "genre": "classical",
+      "tempo": 120,
+      "file": "ex_cl_002_caprice_no__24.json"
+    },
+    {
+      "song_id": "ex_cl_003",
+      "title": "Chaconne",
+      "composer": "Bach",
+      "difficulty": "expert",
+      "genre": "classical",
+      "tempo": 60,
+      "file": "ex_cl_003_chaconne.json"
+    },
+    {
+      "song_id": "ex_jz_001",
+      "title": "Giant Steps (Advanced)",
+      "composer": "John Coltrane",
+      "difficulty": "expert",
+      "genre": "jazz",
+      "tempo": 266,
+      "file": "ex_jz_001_giant_steps__advanced_.json"
+    },
+    {
+      "song_id": "ex_jz_002",
+      "title": "Donna Lee",
+      "composer": "Charlie Parker",
+      "difficulty": "expert",
+      "genre": "jazz",
+      "tempo": 200,
+      "file": "ex_jz_002_donna_lee.json"
+    },
+    {
+      "song_id": "ex_mt_001",
+      "title": "Technical Difficulties",
+      "composer": "Paul Gilbert",
+      "difficulty": "expert",
+      "genre": "metal",
+      "tempo": 140,
+      "file": "ex_mt_001_technical_difficulties.json"
+    },
+    {
+      "song_id": "ex_mt_002",
+      "title": "The Dance of Eternity",
+      "composer": "Dream Theater",
+      "difficulty": "expert",
+      "genre": "metal",
+      "tempo": 120,
+      "file": "ex_mt_002_the_dance_of_eternity.json"
+    },
+    {
+      "song_id": "ex_rk_001",
+      "title": "Eruption",
+      "composer": "Van Halen",
+      "difficulty": "expert",
+      "genre": "rock",
+      "tempo": 100,
+      "file": "ex_rk_001_eruption.json"
+    },
+    {
+      "song_id": "ex_rk_002",
+      "title": "YYZ",
+      "composer": "Rush",
+      "difficulty": "expert",
+      "genre": "rock",
+      "tempo": 88,
+      "file": "ex_rk_002_yyz.json"
+    },
+    {
+      "song_id": "ex_rk_003",
+      "title": "For the Love of God",
+      "composer": "Steve Vai",
+      "difficulty": "expert",
+      "genre": "rock",
+      "tempo": 65,
+      "file": "ex_rk_003_for_the_love_of_god.json"
+    },
+    {
+      "song_id": "im_cl_001",
+      "title": "Romance de Amor",
+      "composer": "Anonymous",
+      "difficulty": "intermediate",
+      "genre": "classical",
+      "tempo": 60,
+      "file": "im_cl_001_romance_de_amor.json"
+    },
+    {
+      "song_id": "im_cl_002",
+      "title": "L\u00e1grima",
+      "composer": "Francisco T\u00e1rrega",
+      "difficulty": "intermediate",
+      "genre": "classical",
+      "tempo": 70,
+      "file": "im_cl_002_l\u00e1grima.json"
+    },
+    {
+      "song_id": "im_jz_001",
+      "title": "Autumn Leaves",
+      "composer": "Joseph Kosma",
+      "difficulty": "intermediate",
+      "genre": "jazz",
+      "tempo": 120,
+      "file": "im_jz_001_autumn_leaves.json"
+    },
+    {
+      "song_id": "im_jz_002",
+      "title": "Fly Me to the Moon",
+      "composer": "Frank Sinatra",
+      "difficulty": "intermediate",
+      "genre": "jazz",
+      "tempo": 110,
+      "file": "im_jz_002_fly_me_to_the_moon.json"
+    },
+    {
+      "song_id": "im_rk_001",
+      "title": "Stairway to Heaven",
+      "composer": "Led Zeppelin",
+      "difficulty": "intermediate",
+      "genre": "rock",
+      "tempo": 82,
+      "file": "im_rk_001_stairway_to_heaven.json"
+    },
+    {
+      "song_id": "im_rk_002",
+      "title": "More Than Words",
+      "composer": "Extreme",
+      "difficulty": "intermediate",
+      "genre": "rock",
+      "tempo": 91,
+      "file": "im_rk_002_more_than_words.json"
+    },
+    {
+      "song_id": "im_rk_003",
+      "title": "Blackbird",
+      "composer": "The Beatles",
+      "difficulty": "intermediate",
+      "genre": "rock",
+      "tempo": 96,
+      "file": "im_rk_003_blackbird.json"
+    },
+    {
+      "song_id": "nv_bl_001",
+      "title": "Simple 12-Bar Blues",
+      "composer": "Traditional",
+      "difficulty": "novice",
+      "genre": "blues",
+      "tempo": 80,
+      "file": "nv_bl_001_simple_12_bar_blues.json"
+    },
+    {
+      "song_id": "nv_bl_002",
+      "title": "Freight Train",
+      "composer": "Elizabeth Cotten",
+      "difficulty": "novice",
+      "genre": "blues",
+      "tempo": 100,
+      "file": "nv_bl_002_freight_train.json"
+    },
+    {
+      "song_id": "nv_cl_001",
+      "title": "Ode to Joy (Simple)",
+      "composer": "Beethoven",
+      "difficulty": "novice",
+      "genre": "classical",
+      "tempo": 120,
+      "file": "nv_cl_001_ode_to_joy__simple_.json"
+    },
+    {
+      "song_id": "nv_cl_002",
+      "title": "Mary Had a Little Lamb",
+      "composer": "Traditional",
+      "difficulty": "novice",
+      "genre": "classical",
+      "tempo": 108,
+      "file": "nv_cl_002_mary_had_a_little_lamb.json"
+    },
+    {
+      "song_id": "nv_ct_001",
+      "title": "Home on the Range",
+      "composer": "Traditional",
+      "difficulty": "novice",
+      "genre": "country",
+      "tempo": 110,
+      "file": "nv_ct_001_home_on_the_range.json"
+    },
+    {
+      "song_id": "nv_ct_002",
+      "title": "She'll Be Coming Round",
+      "composer": "Traditional",
+      "difficulty": "novice",
+      "genre": "country",
+      "tempo": 130,
+      "file": "nv_ct_002_she_ll_be_coming_round.json"
+    },
+    {
+      "song_id": "nv_fk_001",
+      "title": "This Old Man",
+      "composer": "Traditional",
+      "difficulty": "novice",
+      "genre": "folk",
+      "tempo": 110,
+      "file": "nv_fk_001_this_old_man.json"
+    },
+    {
+      "song_id": "nv_fk_002",
+      "title": "Old MacDonald",
+      "composer": "Traditional",
+      "difficulty": "novice",
+      "genre": "folk",
+      "tempo": 120,
+      "file": "nv_fk_002_old_macdonald.json"
+    },
+    {
+      "song_id": "nv_fk_003",
+      "title": "Kumbaya",
+      "composer": "Traditional",
+      "difficulty": "novice",
+      "genre": "folk",
+      "tempo": 90,
+      "file": "nv_fk_003_kumbaya.json"
+    },
+    {
+      "song_id": "nv_pp_001",
+      "title": "Happy Birthday",
+      "composer": "Traditional",
+      "difficulty": "novice",
+      "genre": "pop",
+      "tempo": 120,
+      "file": "nv_pp_001_happy_birthday.json"
+    },
+    {
+      "song_id": "nv_pp_002",
+      "title": "Twinkle Twinkle Little Star",
+      "composer": "Traditional",
+      "difficulty": "novice",
+      "genre": "pop",
+      "tempo": 120,
+      "file": "nv_pp_002_twinkle_twinkle_little_star.json"
+    },
+    {
+      "song_id": "nv_pp_003",
+      "title": "Row Row Row Your Boat",
+      "composer": "Traditional",
+      "difficulty": "novice",
+      "genre": "pop",
+      "tempo": 100,
+      "file": "nv_pp_003_row_row_row_your_boat.json"
+    },
+    {
+      "song_id": "nv_rk_001",
+      "title": "Smoke on the Water (Riff Only)",
+      "composer": "Deep Purple",
+      "difficulty": "novice",
+      "genre": "rock",
+      "tempo": 112,
+      "file": "nv_rk_001_smoke_on_the_water__riff_only_.json"
+    },
+    {
+      "song_id": "nv_rk_002",
+      "title": "Wild Thing",
+      "composer": "The Troggs",
+      "difficulty": "novice",
+      "genre": "rock",
+      "tempo": 108,
+      "file": "nv_rk_002_wild_thing.json"
+    },
+    {
+      "song_id": "nv_rk_003",
+      "title": "Louie Louie (Simple)",
+      "composer": "The Kingsmen",
+      "difficulty": "novice",
+      "genre": "rock",
+      "tempo": 126,
+      "file": "nv_rk_003_louie_louie__simple_.json"
+    },
+    {
+      "song_id": "pd_001",
+      "title": "Greensleeves",
+      "composer": "Traditional",
+      "difficulty": "beginner",
+      "genre": "unknown",
+      "tempo": 96,
+      "file": "pd_001_greensleeves.json"
+    },
+    {
+      "song_id": "pd_002",
+      "title": "Ode to Joy",
+      "composer": "Ludwig van Beethoven",
+      "difficulty": "beginner",
+      "genre": "unknown",
+      "tempo": 100,
+      "file": "pd_002_ode_to_joy.json"
+    },
+    {
+      "song_id": "pd_003",
+      "title": "Amazing Grace",
+      "composer": "John Newton",
+      "difficulty": "beginner",
+      "genre": "unknown",
+      "tempo": 72,
+      "file": "pd_003_amazing_grace.json"
+    },
+    {
+      "song_id": "pd_004",
+      "title": "Canon in D (Simplified)",
+      "composer": "Johann Pachelbel",
+      "difficulty": "intermediate",
+      "genre": "unknown",
+      "tempo": 66,
+      "file": "pd_004_canon_in_d.json"
+    },
+    {
+      "song_id": "pd_005",
+      "title": "Twinkle Twinkle Little Star",
+      "composer": "Traditional",
+      "difficulty": "beginner",
+      "genre": "unknown",
+      "tempo": 90,
+      "file": "pd_005_twinkle_star.json"
+    },
+    {
+      "song_id": "pf_cl_001",
+      "title": "Asturias",
+      "composer": "Isaac Alb\u00e9niz",
+      "difficulty": "proficient",
+      "genre": "classical",
+      "tempo": 120,
+      "file": "pf_cl_001_asturias.json"
+    },
+    {
+      "song_id": "pf_cl_002",
+      "title": "Recuerdos de la Alhambra",
+      "composer": "Francisco T\u00e1rrega",
+      "difficulty": "proficient",
+      "genre": "classical",
+      "tempo": 60,
+      "file": "pf_cl_002_recuerdos_de_la_alhambra.json"
+    },
+    {
+      "song_id": "pf_jz_001",
+      "title": "All The Things You Are",
+      "composer": "Jerome Kern",
+      "difficulty": "proficient",
+      "genre": "jazz",
+      "tempo": 120,
+      "file": "pf_jz_001_all_the_things_you_are.json"
+    },
+    {
+      "song_id": "pf_jz_002",
+      "title": "Body and Soul",
+      "composer": "Johnny Green",
+      "difficulty": "proficient",
+      "genre": "jazz",
+      "tempo": 60,
+      "file": "pf_jz_002_body_and_soul.json"
+    },
+    {
+      "song_id": "pf_rk_001",
+      "title": "Hotel California",
+      "composer": "Eagles",
+      "difficulty": "proficient",
+      "genre": "rock",
+      "tempo": 74,
+      "file": "pf_rk_001_hotel_california.json"
+    },
+    {
+      "song_id": "pf_rk_002",
+      "title": "Nothing Else Matters",
+      "composer": "Metallica",
+      "difficulty": "proficient",
+      "genre": "rock",
+      "tempo": 72,
+      "file": "pf_rk_002_nothing_else_matters.json"
+    }
+  ]
+}

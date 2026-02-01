@@ -401,11 +401,16 @@ class PolygonFetcher(AbstractDataFetcher):
             
             if is_index:
                 return await self._fetch_current_price_index(symbol)
-            
-            # Stocks: use snapshot
+
+            # Stocks: try snapshot API if available, else fall back to aggs
+            snapshot_fn = self._get_snapshot_ticker_fn()
+            if snapshot_fn is None:
+                logger.debug("Snapshot API not available on RESTClient, using aggs for %s", symbol)
+                return await self._fetch_current_price_via_aggs(symbol, symbol)
+
             def _fetch_snapshot():
                 try:
-                    return self.client.get_snapshot_ticker("stocks", symbol)
+                    return snapshot_fn("stocks", symbol)
                 except Exception as e:
                     if BadResponse is not None and isinstance(e, BadResponse):
                         if "NotFound" in str(e) or (getattr(e, "status", None) or "").lower() == "not found":
@@ -417,20 +422,23 @@ class PolygonFetcher(AbstractDataFetcher):
             snapshot = await asyncio.to_thread(_fetch_snapshot)
 
             if not snapshot or not hasattr(snapshot, 'last_trade'):
-                # Ticker not found or no data - return a result dict with price=None so caller can handle without traceback
-                return {
-                    'symbol': symbol,
-                    'price': None,
-                    'timestamp': None,
-                    'source': self.name,
-                    'bid_price': None,
-                    'ask_price': None,
-                    'volume': None,
-                }
-            
+                # Ticker not found or no data - try aggs as fallback for stocks
+                try:
+                    return await self._fetch_current_price_via_aggs(symbol, symbol)
+                except Exception:
+                    return {
+                        'symbol': symbol,
+                        'price': None,
+                        'timestamp': None,
+                        'source': self.name,
+                        'bid_price': None,
+                        'ask_price': None,
+                        'volume': None,
+                    }
+
             last_trade = snapshot.last_trade
             timestamp = pd.to_datetime(last_trade.sip_timestamp, unit='ns', utc=True)
-            
+
             return {
                 'symbol': symbol,
                 'price': float(last_trade.price),
@@ -445,14 +453,24 @@ class PolygonFetcher(AbstractDataFetcher):
             logger.error(f"Error fetching current price for {symbol}: {e}")
             raise
     
-    async def _fetch_current_price_index(self, symbol: str) -> Dict[str, Any]:
+    def _get_snapshot_ticker_fn(self) -> Optional[Any]:
+        """Return the snapshot ticker callable if available (supports client or client.snapshot)."""
+        client = self.client
+        fn = getattr(client, "get_snapshot_ticker", None)
+        if callable(fn):
+            return fn
+        snapshot = getattr(client, "snapshot", None)
+        if snapshot is not None:
+            fn = getattr(snapshot, "get_snapshot_ticker", None)
+            if callable(fn):
+                return fn
+        return None
+
+    async def _fetch_current_price_via_aggs(self, ticker: str, symbol: str) -> Dict[str, Any]:
         """
-        Fetch current price for an index using Polygon aggs API.
-        Tries minute aggregates first for fresher intraday data; falls back to daily.
-        Snapshot API often 404s for indices; aggs works with ticker I:SPX etc.
+        Fetch current price using Polygon aggs API (minute then day fallback).
+        Works for both stocks and indices (ticker can be symbol or I:SPX etc.).
         """
-        # Polygon aggs for indices: try minute first for fresher data, fallback to day
-        polygon_ticker = get_polygon_symbol(symbol)
         now = datetime.now(timezone.utc)
         to_ts = int((now + timedelta(hours=1)).timestamp() * 1000)
         from_ts = int((now - timedelta(days=2)).timestamp() * 1000)
@@ -461,7 +479,7 @@ class PolygonFetcher(AbstractDataFetcher):
 
         def _fetch_minute():
             return self._fetch_aggs_list(
-                ticker=polygon_ticker,
+                ticker=ticker,
                 multiplier=1,
                 timespan="minute",
                 from_=from_ts,
@@ -471,7 +489,7 @@ class PolygonFetcher(AbstractDataFetcher):
 
         def _fetch_day():
             return self._fetch_aggs_list(
-                ticker=polygon_ticker,
+                ticker=ticker,
                 multiplier=1,
                 timespan="day",
                 from_=from_str,
@@ -483,11 +501,10 @@ class PolygonFetcher(AbstractDataFetcher):
         if not aggs:
             aggs = await asyncio.to_thread(_fetch_day)
         if not aggs:
-            raise Exception(f"No aggs data for index {symbol} (ticker={polygon_ticker})")
+            raise Exception(f"No aggs data for {symbol} (ticker={ticker})")
         latest = max(aggs, key=lambda a: a.timestamp)
         timestamp = pd.to_datetime(latest.timestamp, unit='ms', utc=True)
         price = float(latest.close) if latest.close is not None else float(latest.open)
-        
         return {
             'symbol': symbol,
             'price': price,
@@ -497,3 +514,12 @@ class PolygonFetcher(AbstractDataFetcher):
             'ask_price': None,
             'volume': getattr(latest, 'volume', None) or 0,
         }
+
+    async def _fetch_current_price_index(self, symbol: str) -> Dict[str, Any]:
+        """
+        Fetch current price for an index using Polygon aggs API.
+        Tries minute aggregates first for fresher intraday data; falls back to daily.
+        Snapshot API often 404s for indices; aggs works with ticker I:SPX etc.
+        """
+        polygon_ticker = get_polygon_symbol(symbol)
+        return await self._fetch_current_price_via_aggs(polygon_ticker, symbol)

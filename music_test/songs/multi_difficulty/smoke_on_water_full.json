@@ -1,0 +1,166 @@
+{
+  "song_id": "smoke_on_water_full",
+  "licensed_song_id": "SMOKE_ON_WATER",
+  "title": "Smoke on the Water",
+  "subtitle": "Full - Complete Transcription",
+  "composer": "Deep Purple",
+  "tempo": 112,
+  "time_signature": "4/4",
+  "difficulty": "advanced",
+  "difficulty_description": "Full power chords with palm muting, exact rhythm, all techniques",
+  "license_status": "educational_use",
+  "genre": "rock",
+  "tuning": "standard",
+  "capo": 0,
+  "chords": ["G5", "Bb5", "C5", "Db5", "F5"],
+  "original_duration": "5:40",
+  "learning_time": "2 weeks",
+  "educational_transformation": {
+    "simplification_level": "none",
+    "notes_removed_percent": 0,
+    "chords_simplified": false,
+    "rhythm_simplified": false,
+    "techniques_removed": []
+  },
+  "sections": [
+    {"name": "main_riff", "start": 0.0, "end": 8.0},
+    {"name": "riff_repeat", "start": 8.0, "end": 16.0},
+    {"name": "verse_riff", "start": 16.0, "end": 32.0}
+  ],
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 0, "duration": 0.35, "velocity": 0.9, "technique": "palm_mute"},
+    {"time": 0.02, "string": 4, "fret": 0, "duration": 0.33, "velocity": 0.8, "technique": "palm_mute"},
+    {"time": 0.04, "string": 3, "fret": 0, "duration": 0.31, "velocity": 0.7, "technique": "palm_mute"},
+    
+    {"time": 0.75, "string": 5, "fret": 3, "duration": 0.35, "velocity": 0.9, "technique": "palm_mute"},
+    {"time": 0.77, "string": 4, "fret": 3, "duration": 0.33, "velocity": 0.8, "technique": "palm_mute"},
+    {"time": 0.79, "string": 3, "fret": 3, "duration": 0.31, "velocity": 0.7, "technique": "palm_mute"},
+    
+    {"time": 1.5, "string": 5, "fret": 5, "duration": 0.6, "velocity": 1.0, "technique": "pluck"},
+    {"time": 1.52, "string": 4, "fret": 5, "duration": 0.58, "velocity": 0.9, "technique": "pluck"},
+    {"time": 1.54, "string": 3, "fret": 5, "duration": 0.56, "velocity": 0.8, "technique": "pluck"},
+    
+    {"time": 2.25, "string": 5, "fret": 5, "duration": 0.1, "velocity": 0.5, "technique": "mute"},
+    {"time": 2.26, "string": 4, "fret": 5, "duration": 0.1, "velocity": 0.5, "technique": "mute"},
+    {"time": 2.27, "string": 3, "fret": 5, "duration": 0.1, "velocity": 0.5, "technique": "mute"},
+    
+    {"time": 2.5, "string": 5, "fret": 0, "duration": 0.35, "velocity": 0.9, "technique": "palm_mute"},
+    {"time": 2.52, "string": 4, "fret": 0, "duration": 0.33, "velocity": 0.8, "technique": "palm_mute"},
+    {"time": 2.54, "string": 3, "fret": 0, "duration": 0.31, "velocity": 0.7, "technique": "palm_mute"},
+    
+    {"time": 3.25, "string": 5, "fret": 3, "duration": 0.35, "velocity": 0.9, "technique": "palm_mute"},
+    {"time": 3.27, "string": 4, "fret": 3, "duration": 0.33, "velocity": 0.8, "technique": "palm_mute"},
+    {"time": 3.29, "string": 3, "fret": 3, "duration": 0.31, "velocity": 0.7, "technique": "palm_mute"},
+    
+    {"time": 4.0, "string": 5, "fret": 6, "duration": 0.15, "velocity": 0.8, "technique": "pluck"},
+    {"time": 4.02, "string": 4, "fret": 6, "duration": 0.13, "velocity": 0.7, "technique": "pluck"},
+    {"time": 4.04, "string": 3, "fret": 6, "duration": 0.11, "velocity": 0.6, "technique": "pluck"},
+    
+    {"time": 4.25, "string": 5, "fret": 5, "duration": 0.6, "velocity": 1.0, "technique": "pluck"},
+    {"time": 4.27, "string": 4, "fret": 5, "duration": 0.58, "velocity": 0.9, "technique": "pluck"},
+    {"time": 4.29, "string": 3, "fret": 5, "duration": 0.56, "velocity": 0.8, "technique": "pluck"},
+    
+    {"time": 5.0, "string": 5, "fret": 5, "duration": 0.1, "velocity": 0.5, "technique": "mute"},
+    {"time": 5.01, "string": 4, "fret": 5, "duration": 0.1, "velocity": 0.5, "technique": "mute"},
+    {"time": 5.02, "string": 3, "fret": 5, "duration": 0.1, "velocity": 0.5, "technique": "mute"},
+    
+    {"time": 5.25, "string": 5, "fret": 0, "duration": 0.35, "velocity": 0.9, "technique": "palm_mute"},
+    {"time": 5.27, "string": 4, "fret": 0, "duration": 0.33, "velocity": 0.8, "technique": "palm_mute"},
+    {"time": 5.29, "string": 3, "fret": 0, "duration": 0.31, "velocity": 0.7, "technique": "palm_mute"},
+    
+    {"time": 6.0, "string": 5, "fret": 3, "duration": 0.35, "velocity": 0.9, "technique": "palm_mute"},
+    {"time": 6.02, "string": 4, "fret": 3, "duration": 0.33, "velocity": 0.8, "technique": "palm_mute"},
+    {"time": 6.04, "string": 3, "fret": 3, "duration": 0.31, "velocity": 0.7, "technique": "palm_mute"},
+    
+    {"time": 6.75, "string": 5, "fret": 5, "duration": 0.6, "velocity": 1.0, "technique": "pluck"},
+    {"time": 6.77, "string": 4, "fret": 5, "duration": 0.58, "velocity": 0.9, "technique": "pluck"},
+    {"time": 6.79, "string": 3, "fret": 5, "duration": 0.56, "velocity": 0.8, "technique": "pluck"},
+    
+    {"time": 7.5, "string": 5, "fret": 5, "duration": 0.1, "velocity": 0.5, "technique": "mute"},
+    {"time": 7.51, "string": 4, "fret": 5, "duration": 0.1, "velocity": 0.5, "technique": "mute"},
+    {"time": 7.52, "string": 3, "fret": 5, "duration": 0.1, "velocity": 0.5, "technique": "mute"},
+    
+    {"time": 7.75, "string": 5, "fret": 3, "duration": 0.35, "velocity": 0.9, "technique": "palm_mute"},
+    {"time": 7.77, "string": 4, "fret": 3, "duration": 0.33, "velocity": 0.8, "technique": "palm_mute"},
+    {"time": 7.79, "string": 3, "fret": 3, "duration": 0.31, "velocity": 0.7, "technique": "palm_mute"},
+    
+    {"time": 8.5, "string": 5, "fret": 0, "duration": 1.0, "velocity": 1.0, "technique": "pluck"},
+    {"time": 8.52, "string": 4, "fret": 0, "duration": 0.98, "velocity": 0.9, "technique": "pluck"},
+    {"time": 8.54, "string": 3, "fret": 0, "duration": 0.96, "velocity": 0.8, "technique": "pluck"},
+    
+    {"time": 10.0, "string": 5, "fret": 0, "duration": 0.35, "velocity": 0.9, "technique": "palm_mute"},
+    {"time": 10.02, "string": 4, "fret": 0, "duration": 0.33, "velocity": 0.8, "technique": "palm_mute"},
+    {"time": 10.04, "string": 3, "fret": 0, "duration": 0.31, "velocity": 0.7, "technique": "palm_mute"},
+    
+    {"time": 10.75, "string": 5, "fret": 3, "duration": 0.35, "velocity": 0.9, "technique": "palm_mute"},
+    {"time": 10.77, "string": 4, "fret": 3, "duration": 0.33, "velocity": 0.8, "technique": "palm_mute"},
+    {"time": 10.79, "string": 3, "fret": 3, "duration": 0.31, "velocity": 0.7, "technique": "palm_mute"},
+    
+    {"time": 11.5, "string": 5, "fret": 5, "duration": 0.6, "velocity": 1.0, "technique": "pluck"},
+    {"time": 11.52, "string": 4, "fret": 5, "duration": 0.58, "velocity": 0.9, "technique": "pluck"},
+    {"time": 11.54, "string": 3, "fret": 5, "duration": 0.56, "velocity": 0.8, "technique": "pluck"},
+    
+    {"time": 12.5, "string": 5, "fret": 0, "duration": 0.35, "velocity": 0.9, "technique": "palm_mute"},
+    {"time": 12.52, "string": 4, "fret": 0, "duration": 0.33, "velocity": 0.8, "technique": "palm_mute"},
+    {"time": 12.54, "string": 3, "fret": 0, "duration": 0.31, "velocity": 0.7, "technique": "palm_mute"},
+    
+    {"time": 13.25, "string": 5, "fret": 3, "duration": 0.35, "velocity": 0.9, "technique": "palm_mute"},
+    {"time": 13.27, "string": 4, "fret": 3, "duration": 0.33, "velocity": 0.8, "technique": "palm_mute"},
+    {"time": 13.29, "string": 3, "fret": 3, "duration": 0.31, "velocity": 0.7, "technique": "palm_mute"},
+    
+    {"time": 14.0, "string": 5, "fret": 6, "duration": 0.15, "velocity": 0.8, "technique": "pluck"},
+    {"time": 14.02, "string": 4, "fret": 6, "duration": 0.13, "velocity": 0.7, "technique": "pluck"},
+    {"time": 14.04, "string": 3, "fret": 6, "duration": 0.11, "velocity": 0.6, "technique": "pluck"},
+    
+    {"time": 14.25, "string": 5, "fret": 5, "duration": 0.6, "velocity": 1.0, "technique": "pluck"},
+    {"time": 14.27, "string": 4, "fret": 5, "duration": 0.58, "velocity": 0.9, "technique": "pluck"},
+    {"time": 14.29, "string": 3, "fret": 5, "duration": 0.56, "velocity": 0.8, "technique": "pluck"},
+    
+    {"time": 15.5, "string": 5, "fret": 0, "duration": 1.5, "velocity": 1.0, "technique": "pluck"},
+    {"time": 15.52, "string": 4, "fret": 0, "duration": 1.48, "velocity": 0.9, "technique": "pluck"},
+    {"time": 15.54, "string": 3, "fret": 0, "duration": 1.46, "velocity": 0.8, "technique": "pluck"},
+    
+    {"time": 17.0, "string": 5, "fret": 0, "duration": 0.2, "velocity": 0.7, "technique": "palm_mute"},
+    {"time": 17.02, "string": 4, "fret": 0, "duration": 0.18, "velocity": 0.6, "technique": "palm_mute"},
+    {"time": 17.5, "string": 5, "fret": 0, "duration": 0.2, "velocity": 0.7, "technique": "palm_mute"},
+    {"time": 17.52, "string": 4, "fret": 0, "duration": 0.18, "velocity": 0.6, "technique": "palm_mute"},
+    {"time": 18.0, "string": 5, "fret": 0, "duration": 0.2, "velocity": 0.7, "technique": "palm_mute"},
+    {"time": 18.02, "string": 4, "fret": 0, "duration": 0.18, "velocity": 0.6, "technique": "palm_mute"},
+    {"time": 18.5, "string": 5, "fret": 0, "duration": 0.2, "velocity": 0.7, "technique": "palm_mute"},
+    {"time": 18.52, "string": 4, "fret": 0, "duration": 0.18, "velocity": 0.6, "technique": "palm_mute"},
+    
+    {"time": 19.0, "string": 5, "fret": 5, "duration": 0.5, "velocity": 0.9, "technique": "pluck"},
+    {"time": 19.02, "string": 4, "fret": 5, "duration": 0.48, "velocity": 0.8, "technique": "pluck"},
+    {"time": 19.04, "string": 3, "fret": 5, "duration": 0.46, "velocity": 0.7, "technique": "pluck"},
+    
+    {"time": 19.75, "string": 5, "fret": 3, "duration": 0.5, "velocity": 0.9, "technique": "pluck"},
+    {"time": 19.77, "string": 4, "fret": 3, "duration": 0.48, "velocity": 0.8, "technique": "pluck"},
+    {"time": 19.79, "string": 3, "fret": 3, "duration": 0.46, "velocity": 0.7, "technique": "pluck"},
+    
+    {"time": 20.5, "string": 5, "fret": 0, "duration": 0.5, "velocity": 0.9, "technique": "pluck"},
+    {"time": 20.52, "string": 4, "fret": 0, "duration": 0.48, "velocity": 0.8, "technique": "pluck"},
+    {"time": 20.54, "string": 3, "fret": 0, "duration": 0.46, "velocity": 0.7, "technique": "pluck"},
+    
+    {"time": 21.0, "string": 5, "fret": 0, "duration": 0.2, "velocity": 0.7, "technique": "palm_mute"},
+    {"time": 21.02, "string": 4, "fret": 0, "duration": 0.18, "velocity": 0.6, "technique": "palm_mute"},
+    {"time": 21.5, "string": 5, "fret": 0, "duration": 0.2, "velocity": 0.7, "technique": "palm_mute"},
+    {"time": 21.52, "string": 4, "fret": 0, "duration": 0.18, "velocity": 0.6, "technique": "palm_mute"},
+    {"time": 22.0, "string": 5, "fret": 0, "duration": 0.2, "velocity": 0.7, "technique": "palm_mute"},
+    {"time": 22.02, "string": 4, "fret": 0, "duration": 0.18, "velocity": 0.6, "technique": "palm_mute"},
+    {"time": 22.5, "string": 5, "fret": 0, "duration": 0.2, "velocity": 0.7, "technique": "palm_mute"},
+    {"time": 22.52, "string": 4, "fret": 0, "duration": 0.18, "velocity": 0.6, "technique": "palm_mute"},
+    
+    {"time": 23.0, "string": 5, "fret": 5, "duration": 0.5, "velocity": 0.9, "technique": "pluck"},
+    {"time": 23.02, "string": 4, "fret": 5, "duration": 0.48, "velocity": 0.8, "technique": "pluck"},
+    {"time": 23.04, "string": 3, "fret": 5, "duration": 0.46, "velocity": 0.7, "technique": "pluck"},
+    
+    {"time": 23.75, "string": 5, "fret": 3, "duration": 0.5, "velocity": 0.9, "technique": "pluck"},
+    {"time": 23.77, "string": 4, "fret": 3, "duration": 0.48, "velocity": 0.8, "technique": "pluck"},
+    {"time": 23.79, "string": 3, "fret": 3, "duration": 0.46, "velocity": 0.7, "technique": "pluck"},
+    
+    {"time": 24.5, "string": 5, "fret": 0, "duration": 2.0, "velocity": 1.0, "technique": "pluck"},
+    {"time": 24.52, "string": 4, "fret": 0, "duration": 1.98, "velocity": 0.9, "technique": "pluck"},
+    {"time": 24.54, "string": 3, "fret": 0, "duration": 1.96, "velocity": 0.8, "technique": "pluck"}
+  ]
+}
+

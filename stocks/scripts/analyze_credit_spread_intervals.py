@@ -69,6 +69,7 @@ from common.market_hours import is_market_hours, compute_market_transition_times
 # Import utility modules
 from credit_spread_utils import timezone_utils, price_utils, capital_utils, arg_parser
 from credit_spread_utils.rate_limiter import SlidingWindowRateLimiter
+from credit_spread_utils.time_block_rate_limiter import TimeBlockRateLimiter
 
 # Re-export commonly used functions for backward compatibility
 from credit_spread_utils.timezone_utils import (
@@ -1970,6 +1971,7 @@ async def process_single_csv(
     min_premium_diff: Optional[Tuple[float, float]] = None,
     rate_limit_max: int = 0,
     rate_limit_window: float = 0,
+    rate_limit_blocks: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Process a single CSV file and return results.
 
@@ -2016,19 +2018,29 @@ async def process_single_csv(
                 intervals_to_process = intervals_grouped
 
             # Create rate limiter for this worker
-            rate_limiter = SlidingWindowRateLimiter(
-                max_transactions=rate_limit_max,
-                window_seconds=rate_limit_window,
-                logger=logger
-            )
-            if rate_limiter.is_enabled:
-                logger.info(f"Rate limiting enabled: {rate_limit_max} transactions per {rate_limit_window}s")
+            # Time-block rate limiter takes precedence over sliding window
+            time_block_limiter = None
+            sliding_limiter = None
+
+            if rate_limit_blocks:
+                time_block_limiter = TimeBlockRateLimiter.from_string(rate_limit_blocks, logger=logger)
+                logger.info(f"Time-block rate limiting enabled: {rate_limit_blocks}")
+            elif rate_limit_max > 0 and rate_limit_window > 0:
+                sliding_limiter = SlidingWindowRateLimiter(
+                    max_transactions=rate_limit_max,
+                    window_seconds=rate_limit_window,
+                    logger=logger
+                )
+                logger.info(f"Sliding window rate limiting enabled: {rate_limit_max} transactions per {rate_limit_window}s")
 
             results = []
             for interval_time, interval_df in intervals_to_process:
                 for opt_type in option_types:
                     # Apply rate limiting before each interval analysis
-                    await rate_limiter.acquire()
+                    if time_block_limiter:
+                        await time_block_limiter.acquire()
+                    elif sliding_limiter:
+                        await sliding_limiter.acquire()
                     result = await analyze_interval(
                         db,
                         interval_df,
@@ -2520,14 +2532,43 @@ async def run_backtest_with_params(
     results = []
     option_types = ['call', 'put'] if params.get('option_type', 'both') == 'both' else [params['option_type']]
 
-    percent_beyond = (params.get('percent_beyond_put', 0.02), params.get('percent_beyond_call', 0.02))
+    # Construct percent_beyond tuple from separate put/call keys or parse combined format
+    percent_beyond_raw = params.get('percent_beyond')
+    if percent_beyond_raw is not None:
+        if isinstance(percent_beyond_raw, str):
+            # Parse string format (e.g., "0.02" or "0.02:0.03")
+            try:
+                percent_beyond = parse_percent_beyond(percent_beyond_raw)
+            except ValueError:
+                percent_beyond = (0.02, 0.02)
+        elif isinstance(percent_beyond_raw, (int, float)):
+            # Single numeric value - use for both
+            percent_beyond = (float(percent_beyond_raw), float(percent_beyond_raw))
+        elif isinstance(percent_beyond_raw, (list, tuple)) and len(percent_beyond_raw) == 2:
+            percent_beyond = (float(percent_beyond_raw[0]), float(percent_beyond_raw[1]))
+        else:
+            percent_beyond = (0.02, 0.02)
+    else:
+        # Fallback to separate put/call keys
+        percent_beyond = (params.get('percent_beyond_put', 0.02), params.get('percent_beyond_call', 0.02))
 
-    # Construct max_spread_width tuple from separate put/call keys or fallback to single value
-    max_spread_width_default = params.get('max_spread_width', 200)
-    max_spread_width = (
-        params.get('max_spread_width_put', max_spread_width_default),
-        params.get('max_spread_width_call', max_spread_width_default)
-    )
+    # Construct max_spread_width tuple from separate put/call keys or parse combined format
+    max_spread_width_raw = params.get('max_spread_width', 200)
+    if isinstance(max_spread_width_raw, str):
+        # Parse string format (e.g., "30" or "30:40")
+        try:
+            max_spread_width = parse_max_spread_width(max_spread_width_raw)
+        except ValueError:
+            max_spread_width = (200, 200)
+    elif isinstance(max_spread_width_raw, (int, float)):
+        max_spread_width = (float(max_spread_width_raw), float(max_spread_width_raw))
+    elif isinstance(max_spread_width_raw, (list, tuple)) and len(max_spread_width_raw) == 2:
+        max_spread_width = (float(max_spread_width_raw[0]), float(max_spread_width_raw[1]))
+    else:
+        max_spread_width = (
+            params.get('max_spread_width_put', 200),
+            params.get('max_spread_width_call', 200)
+        )
 
     for interval_time, interval_df in interval_groups:
         for opt_type in option_types:
@@ -3152,6 +3193,7 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
                 min_premium_diff,
                 args.rate_limit_max,
                 args.rate_limit_window,
+                getattr(args, 'rate_limit_blocks', None),
             )
             process_args.append(args_tuple)
 
@@ -3242,19 +3284,29 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
             results = []
 
             # Create rate limiter for sequential mode
-            rate_limiter = SlidingWindowRateLimiter(
-                max_transactions=args.rate_limit_max,
-                window_seconds=args.rate_limit_window,
-                logger=logger
-            )
-            if rate_limiter.is_enabled:
-                logger.info(f"Rate limiting enabled: {args.rate_limit_max} transactions per {args.rate_limit_window}s")
+            # Time-block rate limiter takes precedence over sliding window
+            time_block_limiter = None
+            sliding_limiter = None
+
+            if hasattr(args, 'rate_limit_blocks') and args.rate_limit_blocks:
+                time_block_limiter = TimeBlockRateLimiter.from_string(args.rate_limit_blocks, logger=logger)
+                logger.info(f"Time-block rate limiting enabled: {args.rate_limit_blocks}")
+            elif args.rate_limit_max > 0 and args.rate_limit_window > 0:
+                sliding_limiter = SlidingWindowRateLimiter(
+                    max_transactions=args.rate_limit_max,
+                    window_seconds=args.rate_limit_window,
+                    logger=logger
+                )
+                logger.info(f"Sliding window rate limiting enabled: {args.rate_limit_max} transactions per {args.rate_limit_window}s")
 
             # Collect all results first (without capital filtering)
             for interval_time, interval_df in intervals_to_process:
                 for opt_type in option_types_to_analyze:
                     # Apply rate limiting before each interval analysis
-                    await rate_limiter.acquire()
+                    if time_block_limiter:
+                        await time_block_limiter.acquire()
+                    elif sliding_limiter:
+                        await sliding_limiter.acquire()
                     # Use current price if --curr-price is set and --continuous mode is active
                     use_current_price = args.curr_price and args.continuous is not None
                     result = await analyze_interval(
@@ -3767,6 +3819,7 @@ async def main():
                 min_premium_diff,
                 args.rate_limit_max,
                 args.rate_limit_window,
+                getattr(args, 'rate_limit_blocks', None),
             )
             process_args.append(args_tuple)
 
@@ -3859,19 +3912,29 @@ async def main():
             results = []
 
             # Create rate limiter for sequential mode
-            rate_limiter = SlidingWindowRateLimiter(
-                max_transactions=args.rate_limit_max,
-                window_seconds=args.rate_limit_window,
-                logger=logger
-            )
-            if rate_limiter.is_enabled:
-                logger.info(f"Rate limiting enabled: {args.rate_limit_max} transactions per {args.rate_limit_window}s")
+            # Time-block rate limiter takes precedence over sliding window
+            time_block_limiter = None
+            sliding_limiter = None
+
+            if hasattr(args, 'rate_limit_blocks') and args.rate_limit_blocks:
+                time_block_limiter = TimeBlockRateLimiter.from_string(args.rate_limit_blocks, logger=logger)
+                logger.info(f"Time-block rate limiting enabled: {args.rate_limit_blocks}")
+            elif args.rate_limit_max > 0 and args.rate_limit_window > 0:
+                sliding_limiter = SlidingWindowRateLimiter(
+                    max_transactions=args.rate_limit_max,
+                    window_seconds=args.rate_limit_window,
+                    logger=logger
+                )
+                logger.info(f"Sliding window rate limiting enabled: {args.rate_limit_max} transactions per {args.rate_limit_window}s")
 
             # Collect all results first (without capital filtering)
             for interval_time, interval_df in intervals_to_process:
                 for opt_type in option_types_to_analyze:
                     # Apply rate limiting before each interval analysis
-                    await rate_limiter.acquire()
+                    if time_block_limiter:
+                        await time_block_limiter.acquire()
+                    elif sliding_limiter:
+                        await sliding_limiter.acquire()
                     # Use current price if --curr-price is set and --continuous mode is active
                     use_current_price = args.curr_price and args.continuous is not None
                     result = await analyze_interval(

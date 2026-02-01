@@ -1,0 +1,1430 @@
+{
+  "song_id": "bg_pp_004",
+  "title": "Hey Jude",
+  "composer": "The Beatles",
+  "tempo": 75,
+  "time_signature": "4/4",
+  "difficulty": "beginner",
+  "license_status": "educational_use",
+  "genre": "pop",
+  "chords": [
+    "F",
+    "C",
+    "G",
+    "Am"
+  ],
+  "original_duration": "7:11",
+  "learning_time": "3 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {
+      "time": 0.0,
+      "string": 1,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.6037137740028777,
+      "technique": "strum"
+    },
+    {
+      "time": 0.02,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.6659410098924905,
+      "technique": "strum"
+    },
+    {
+      "time": 0.04,
+      "string": 3,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.6581035708959622,
+      "technique": "strum"
+    },
+    {
+      "time": 0.06,
+      "string": 4,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6751583238888318,
+      "technique": "strum"
+    },
+    {
+      "time": 0.08,
+      "string": 5,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6678935070392006,
+      "technique": "strum"
+    },
+    {
+      "time": 0.1,
+      "string": 6,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7441499130707796,
+      "technique": "strum"
+    },
+    {
+      "time": 13.469,
+      "string": 1,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7571613285190468,
+      "technique": "strum"
+    },
+    {
+      "time": 13.489,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.6129105990374517,
+      "technique": "strum"
+    },
+    {
+      "time": 13.509,
+      "string": 3,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7850425335192698,
+      "technique": "strum"
+    },
+    {
+      "time": 13.529,
+      "string": 4,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7760478569355557,
+      "technique": "strum"
+    },
+    {
+      "time": 13.549,
+      "string": 5,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7091085482360772,
+      "technique": "strum"
+    },
+    {
+      "time": 13.569,
+      "string": 6,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7194958204447814,
+      "technique": "strum"
+    },
+    {
+      "time": 26.938,
+      "string": 1,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.6991228022434076,
+      "technique": "strum"
+    },
+    {
+      "time": 26.957,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.735690928988485,
+      "technique": "strum"
+    },
+    {
+      "time": 26.977,
+      "string": 3,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7085081820278191,
+      "technique": "strum"
+    },
+    {
+      "time": 26.997,
+      "string": 4,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7575824885419478,
+      "technique": "strum"
+    },
+    {
+      "time": 27.017,
+      "string": 5,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7328854156926246,
+      "technique": "strum"
+    },
+    {
+      "time": 27.038,
+      "string": 6,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.6728026855482248,
+      "technique": "strum"
+    },
+    {
+      "time": 40.406,
+      "string": 1,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7148855896530841,
+      "technique": "strum"
+    },
+    {
+      "time": 40.426,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7132504780118618,
+      "technique": "strum"
+    },
+    {
+      "time": 40.446,
+      "string": 3,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.6567715705404081,
+      "technique": "strum"
+    },
+    {
+      "time": 40.466,
+      "string": 4,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6781970798995394,
+      "technique": "strum"
+    },
+    {
+      "time": 40.486,
+      "string": 5,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7041410640282191,
+      "technique": "strum"
+    },
+    {
+      "time": 40.506,
+      "string": 6,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7652799162165789,
+      "technique": "strum"
+    },
+    {
+      "time": 53.875,
+      "string": 1,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6550016615105625,
+      "technique": "strum"
+    },
+    {
+      "time": 53.895,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7990892700137913,
+      "technique": "strum"
+    },
+    {
+      "time": 53.915,
+      "string": 3,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7156506061395368,
+      "technique": "strum"
+    },
+    {
+      "time": 53.935,
+      "string": 4,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.6557890774211487,
+      "technique": "strum"
+    },
+    {
+      "time": 53.955,
+      "string": 5,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7023609038263051,
+      "technique": "strum"
+    },
+    {
+      "time": 67.344,
+      "string": 1,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6654958058800194,
+      "technique": "strum"
+    },
+    {
+      "time": 67.364,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.6603599708073887,
+      "technique": "strum"
+    },
+    {
+      "time": 67.384,
+      "string": 3,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6778448279467495,
+      "technique": "strum"
+    },
+    {
+      "time": 67.404,
+      "string": 4,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.6161237634068009,
+      "technique": "strum"
+    },
+    {
+      "time": 67.424,
+      "string": 5,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6839832921815132,
+      "technique": "strum"
+    },
+    {
+      "time": 80.812,
+      "string": 1,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6224591119857175,
+      "technique": "strum"
+    },
+    {
+      "time": 80.832,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7361472856484252,
+      "technique": "strum"
+    },
+    {
+      "time": 80.853,
+      "string": 3,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7102596671065482,
+      "technique": "strum"
+    },
+    {
+      "time": 80.873,
+      "string": 4,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.6431364330034443,
+      "technique": "strum"
+    },
+    {
+      "time": 80.892,
+      "string": 5,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6296726426448411,
+      "technique": "strum"
+    },
+    {
+      "time": 94.281,
+      "string": 1,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7939257499504555,
+      "technique": "strum"
+    },
+    {
+      "time": 94.301,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.6766677998741011,
+      "technique": "strum"
+    },
+    {
+      "time": 94.321,
+      "string": 3,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7731222245187256,
+      "technique": "strum"
+    },
+    {
+      "time": 94.341,
+      "string": 4,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7842682420552477,
+      "technique": "strum"
+    },
+    {
+      "time": 94.361,
+      "string": 5,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6709752044807348,
+      "technique": "strum"
+    },
+    {
+      "time": 107.75,
+      "string": 1,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7838606447214318,
+      "technique": "strum"
+    },
+    {
+      "time": 107.77,
+      "string": 2,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7957386268990092,
+      "technique": "strum"
+    },
+    {
+      "time": 107.79,
+      "string": 3,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7855015800044867,
+      "technique": "strum"
+    },
+    {
+      "time": 107.81,
+      "string": 4,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7166322954414933,
+      "technique": "strum"
+    },
+    {
+      "time": 107.83,
+      "string": 5,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7538388560107309,
+      "technique": "strum"
+    },
+    {
+      "time": 107.85,
+      "string": 6,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6151149984394433,
+      "technique": "strum"
+    },
+    {
+      "time": 121.219,
+      "string": 1,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7410446670536028,
+      "technique": "strum"
+    },
+    {
+      "time": 121.239,
+      "string": 2,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6088183796590956,
+      "technique": "strum"
+    },
+    {
+      "time": 121.259,
+      "string": 3,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.693433486125571,
+      "technique": "strum"
+    },
+    {
+      "time": 121.279,
+      "string": 4,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7861392176160811,
+      "technique": "strum"
+    },
+    {
+      "time": 121.299,
+      "string": 5,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.6805931039608818,
+      "technique": "strum"
+    },
+    {
+      "time": 121.319,
+      "string": 6,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6477302997410412,
+      "technique": "strum"
+    },
+    {
+      "time": 134.688,
+      "string": 1,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6075034624744444,
+      "technique": "strum"
+    },
+    {
+      "time": 134.708,
+      "string": 2,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6462236484740811,
+      "technique": "strum"
+    },
+    {
+      "time": 134.727,
+      "string": 3,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6724757411732534,
+      "technique": "strum"
+    },
+    {
+      "time": 134.748,
+      "string": 4,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6729222532597748,
+      "technique": "strum"
+    },
+    {
+      "time": 134.768,
+      "string": 5,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.6628682391432134,
+      "technique": "strum"
+    },
+    {
+      "time": 134.787,
+      "string": 6,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7957676770639349,
+      "technique": "strum"
+    },
+    {
+      "time": 148.156,
+      "string": 1,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6364258620704336,
+      "technique": "strum"
+    },
+    {
+      "time": 148.176,
+      "string": 2,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6102020958842246,
+      "technique": "strum"
+    },
+    {
+      "time": 148.196,
+      "string": 3,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7188289870447574,
+      "technique": "strum"
+    },
+    {
+      "time": 148.216,
+      "string": 4,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.733282387009267,
+      "technique": "strum"
+    },
+    {
+      "time": 148.236,
+      "string": 5,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7031371274507726,
+      "technique": "strum"
+    },
+    {
+      "time": 148.256,
+      "string": 6,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7620117409233624,
+      "technique": "strum"
+    },
+    {
+      "time": 161.625,
+      "string": 1,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7652063454273403,
+      "technique": "strum"
+    },
+    {
+      "time": 161.645,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7807004196390281,
+      "technique": "strum"
+    },
+    {
+      "time": 161.665,
+      "string": 3,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.6146974353647154,
+      "technique": "strum"
+    },
+    {
+      "time": 161.685,
+      "string": 4,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7948649000741843,
+      "technique": "strum"
+    },
+    {
+      "time": 161.705,
+      "string": 5,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7918529925149919,
+      "technique": "strum"
+    },
+    {
+      "time": 175.094,
+      "string": 1,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7867779387347553,
+      "technique": "strum"
+    },
+    {
+      "time": 175.114,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.6975839835012939,
+      "technique": "strum"
+    },
+    {
+      "time": 175.134,
+      "string": 3,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7905461250433914,
+      "technique": "strum"
+    },
+    {
+      "time": 175.154,
+      "string": 4,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7165579234373725,
+      "technique": "strum"
+    },
+    {
+      "time": 175.174,
+      "string": 5,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7484848372831252,
+      "technique": "strum"
+    },
+    {
+      "time": 188.562,
+      "string": 1,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.621692916071189,
+      "technique": "strum"
+    },
+    {
+      "time": 188.583,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7714326746436121,
+      "technique": "strum"
+    },
+    {
+      "time": 188.602,
+      "string": 3,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.6046550113463499,
+      "technique": "strum"
+    },
+    {
+      "time": 188.623,
+      "string": 4,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7297451847058616,
+      "technique": "strum"
+    },
+    {
+      "time": 188.643,
+      "string": 5,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7082024191611621,
+      "technique": "strum"
+    },
+    {
+      "time": 202.031,
+      "string": 1,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7491663150859829,
+      "technique": "strum"
+    },
+    {
+      "time": 202.051,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.723346036826737,
+      "technique": "strum"
+    },
+    {
+      "time": 202.071,
+      "string": 3,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.6631598725777715,
+      "technique": "strum"
+    },
+    {
+      "time": 202.091,
+      "string": 4,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.6682988037484096,
+      "technique": "strum"
+    },
+    {
+      "time": 202.111,
+      "string": 5,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6562447382632968,
+      "technique": "strum"
+    },
+    {
+      "time": 215.5,
+      "string": 1,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7348442216810093,
+      "technique": "strum"
+    },
+    {
+      "time": 215.52,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.690739090451085,
+      "technique": "strum"
+    },
+    {
+      "time": 215.54,
+      "string": 3,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7588205343502786,
+      "technique": "strum"
+    },
+    {
+      "time": 215.56,
+      "string": 4,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.71382541219192,
+      "technique": "strum"
+    },
+    {
+      "time": 215.58,
+      "string": 5,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.774414823062746,
+      "technique": "strum"
+    },
+    {
+      "time": 215.6,
+      "string": 6,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.6147477475885584,
+      "technique": "strum"
+    },
+    {
+      "time": 228.969,
+      "string": 1,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7747429385000885,
+      "technique": "strum"
+    },
+    {
+      "time": 228.989,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7674273676756672,
+      "technique": "strum"
+    },
+    {
+      "time": 229.009,
+      "string": 3,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.6949848787197108,
+      "technique": "strum"
+    },
+    {
+      "time": 229.029,
+      "string": 4,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.715284379465861,
+      "technique": "strum"
+    },
+    {
+      "time": 229.049,
+      "string": 5,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6077388962205108,
+      "technique": "strum"
+    },
+    {
+      "time": 229.069,
+      "string": 6,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.6949756291932696,
+      "technique": "strum"
+    },
+    {
+      "time": 242.438,
+      "string": 1,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.6024787300730996,
+      "technique": "strum"
+    },
+    {
+      "time": 242.458,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.676798488112123,
+      "technique": "strum"
+    },
+    {
+      "time": 242.477,
+      "string": 3,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7105087999996224,
+      "technique": "strum"
+    },
+    {
+      "time": 242.498,
+      "string": 4,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6426272021645381,
+      "technique": "strum"
+    },
+    {
+      "time": 242.518,
+      "string": 5,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6644484114719216,
+      "technique": "strum"
+    },
+    {
+      "time": 242.537,
+      "string": 6,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7509478837139857,
+      "technique": "strum"
+    },
+    {
+      "time": 255.906,
+      "string": 1,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.6579357449744585,
+      "technique": "strum"
+    },
+    {
+      "time": 255.926,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.6565761414299842,
+      "technique": "strum"
+    },
+    {
+      "time": 255.946,
+      "string": 3,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7857926988186372,
+      "technique": "strum"
+    },
+    {
+      "time": 255.966,
+      "string": 4,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7876017390046401,
+      "technique": "strum"
+    },
+    {
+      "time": 255.986,
+      "string": 5,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7555811464564982,
+      "technique": "strum"
+    },
+    {
+      "time": 256.006,
+      "string": 6,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7287237672558469,
+      "technique": "strum"
+    },
+    {
+      "time": 269.375,
+      "string": 1,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6707403205921627,
+      "technique": "strum"
+    },
+    {
+      "time": 269.395,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7226844716964267,
+      "technique": "strum"
+    },
+    {
+      "time": 269.415,
+      "string": 3,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6378044520286744,
+      "technique": "strum"
+    },
+    {
+      "time": 269.435,
+      "string": 4,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.6392157613443222,
+      "technique": "strum"
+    },
+    {
+      "time": 269.455,
+      "string": 5,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.630583145246983,
+      "technique": "strum"
+    },
+    {
+      "time": 282.844,
+      "string": 1,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6421231463188599,
+      "technique": "strum"
+    },
+    {
+      "time": 282.864,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7610940253567102,
+      "technique": "strum"
+    },
+    {
+      "time": 282.884,
+      "string": 3,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6255702716707312,
+      "technique": "strum"
+    },
+    {
+      "time": 282.904,
+      "string": 4,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7100477487958814,
+      "technique": "strum"
+    },
+    {
+      "time": 282.924,
+      "string": 5,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6056160731033751,
+      "technique": "strum"
+    },
+    {
+      "time": 296.312,
+      "string": 1,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7865461066704534,
+      "technique": "strum"
+    },
+    {
+      "time": 296.332,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.610047407918464,
+      "technique": "strum"
+    },
+    {
+      "time": 296.353,
+      "string": 3,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7221061820836738,
+      "technique": "strum"
+    },
+    {
+      "time": 296.373,
+      "string": 4,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.623295730690504,
+      "technique": "strum"
+    },
+    {
+      "time": 296.392,
+      "string": 5,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6254777748866658,
+      "technique": "strum"
+    },
+    {
+      "time": 309.781,
+      "string": 1,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7993930523599428,
+      "technique": "strum"
+    },
+    {
+      "time": 309.801,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7318252715768865,
+      "technique": "strum"
+    },
+    {
+      "time": 309.821,
+      "string": 3,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6775879578155928,
+      "technique": "strum"
+    },
+    {
+      "time": 309.841,
+      "string": 4,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7801126818764378,
+      "technique": "strum"
+    },
+    {
+      "time": 309.861,
+      "string": 5,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7414566067681572,
+      "technique": "strum"
+    },
+    {
+      "time": 323.25,
+      "string": 1,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7327607886490304,
+      "technique": "strum"
+    },
+    {
+      "time": 323.27,
+      "string": 2,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6841877161623398,
+      "technique": "strum"
+    },
+    {
+      "time": 323.29,
+      "string": 3,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6495409851150156,
+      "technique": "strum"
+    },
+    {
+      "time": 323.31,
+      "string": 4,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6434243535221519,
+      "technique": "strum"
+    },
+    {
+      "time": 323.33,
+      "string": 5,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7623415557793783,
+      "technique": "strum"
+    },
+    {
+      "time": 323.35,
+      "string": 6,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.676786289435943,
+      "technique": "strum"
+    },
+    {
+      "time": 336.719,
+      "string": 1,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7524883786808723,
+      "technique": "strum"
+    },
+    {
+      "time": 336.739,
+      "string": 2,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7738690251753549,
+      "technique": "strum"
+    },
+    {
+      "time": 336.759,
+      "string": 3,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7282539467885999,
+      "technique": "strum"
+    },
+    {
+      "time": 336.779,
+      "string": 4,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6705949806220053,
+      "technique": "strum"
+    },
+    {
+      "time": 336.799,
+      "string": 5,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7418073787037899,
+      "technique": "strum"
+    },
+    {
+      "time": 336.819,
+      "string": 6,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6930691500204854,
+      "technique": "strum"
+    },
+    {
+      "time": 350.188,
+      "string": 1,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6205959301827939,
+      "technique": "strum"
+    },
+    {
+      "time": 350.207,
+      "string": 2,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6705992779521774,
+      "technique": "strum"
+    },
+    {
+      "time": 350.228,
+      "string": 3,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7230171787592373,
+      "technique": "strum"
+    },
+    {
+      "time": 350.248,
+      "string": 4,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7920603938906818,
+      "technique": "strum"
+    },
+    {
+      "time": 350.267,
+      "string": 5,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.602769293177285,
+      "technique": "strum"
+    },
+    {
+      "time": 350.288,
+      "string": 6,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7781997479503733,
+      "technique": "strum"
+    },
+    {
+      "time": 363.656,
+      "string": 1,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.7355588883897287,
+      "technique": "strum"
+    },
+    {
+      "time": 363.676,
+      "string": 2,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6522952649683982,
+      "technique": "strum"
+    },
+    {
+      "time": 363.696,
+      "string": 3,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6762826671311799,
+      "technique": "strum"
+    },
+    {
+      "time": 363.716,
+      "string": 4,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7252038289475431,
+      "technique": "strum"
+    },
+    {
+      "time": 363.736,
+      "string": 5,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7721907802365617,
+      "technique": "strum"
+    },
+    {
+      "time": 363.756,
+      "string": 6,
+      "fret": 3,
+      "duration": 12.122,
+      "velocity": 0.6216723579888793,
+      "technique": "strum"
+    },
+    {
+      "time": 377.125,
+      "string": 1,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6772719253115366,
+      "technique": "strum"
+    },
+    {
+      "time": 377.145,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7705079769750075,
+      "technique": "strum"
+    },
+    {
+      "time": 377.165,
+      "string": 3,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7655145269112316,
+      "technique": "strum"
+    },
+    {
+      "time": 377.185,
+      "string": 4,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7502775609414567,
+      "technique": "strum"
+    },
+    {
+      "time": 377.205,
+      "string": 5,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7065454738316138,
+      "technique": "strum"
+    },
+    {
+      "time": 390.594,
+      "string": 1,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6640000798428193,
+      "technique": "strum"
+    },
+    {
+      "time": 390.614,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.6195378232535582,
+      "technique": "strum"
+    },
+    {
+      "time": 390.634,
+      "string": 3,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.6299783091463169,
+      "technique": "strum"
+    },
+    {
+      "time": 390.654,
+      "string": 4,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7957725373619599,
+      "technique": "strum"
+    },
+    {
+      "time": 390.674,
+      "string": 5,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.7049144755554718,
+      "technique": "strum"
+    },
+    {
+      "time": 404.062,
+      "string": 1,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6289706225593468,
+      "technique": "strum"
+    },
+    {
+      "time": 404.082,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.6779149217458991,
+      "technique": "strum"
+    },
+    {
+      "time": 404.103,
+      "string": 3,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7292808376787802,
+      "technique": "strum"
+    },
+    {
+      "time": 404.123,
+      "string": 4,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.6838611830349347,
+      "technique": "strum"
+    },
+    {
+      "time": 404.142,
+      "string": 5,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.721393837707323,
+      "technique": "strum"
+    },
+    {
+      "time": 417.531,
+      "string": 1,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6412170391108643,
+      "technique": "strum"
+    },
+    {
+      "time": 417.551,
+      "string": 2,
+      "fret": 1,
+      "duration": 12.122,
+      "velocity": 0.7325711655529199,
+      "technique": "strum"
+    },
+    {
+      "time": 417.571,
+      "string": 3,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7450669609101676,
+      "technique": "strum"
+    },
+    {
+      "time": 417.591,
+      "string": 4,
+      "fret": 2,
+      "duration": 12.122,
+      "velocity": 0.7538809767962663,
+      "technique": "strum"
+    },
+    {
+      "time": 417.611,
+      "string": 5,
+      "fret": 0,
+      "duration": 12.122,
+      "velocity": 0.6427378939779042,
+      "technique": "strum"
+    }
+  ]
+}

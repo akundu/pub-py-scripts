@@ -1,0 +1,35 @@
+{
+  "song_id": "pd_005",
+  "title": "Twinkle Twinkle Little Star",
+  "composer": "Traditional",
+  "tempo": 90,
+  "time_signature": "4/4",
+  "difficulty": "beginner",
+  "license_status": "public_domain",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    { "time": 0.0, "string": 3, "fret": 0, "duration": 0.667 },
+    { "time": 0.667, "string": 3, "fret": 0, "duration": 0.667 },
+    { "time": 1.333, "string": 2, "fret": 0, "duration": 0.667 },
+    { "time": 2.0, "string": 2, "fret": 0, "duration": 0.667 },
+    { "time": 2.667, "string": 2, "fret": 1, "duration": 0.667 },
+    { "time": 3.333, "string": 2, "fret": 1, "duration": 0.667 },
+    { "time": 4.0, "string": 2, "fret": 0, "duration": 1.333 },
+    { "time": 5.333, "string": 2, "fret": 3, "duration": 0.667 },
+    { "time": 6.0, "string": 2, "fret": 3, "duration": 0.667 },
+    { "time": 6.667, "string": 3, "fret": 2, "duration": 0.667 },
+    { "time": 7.333, "string": 3, "fret": 2, "duration": 0.667 },
+    { "time": 8.0, "string": 3, "fret": 0, "duration": 0.667 },
+    { "time": 8.667, "string": 3, "fret": 0, "duration": 0.667 },
+    { "time": 9.333, "string": 4, "fret": 2, "duration": 1.333 },
+    { "time": 10.667, "string": 2, "fret": 0, "duration": 0.667 },
+    { "time": 11.333, "string": 2, "fret": 0, "duration": 0.667 },
+    { "time": 12.0, "string": 2, "fret": 3, "duration": 0.667 },
+    { "time": 12.667, "string": 2, "fret": 3, "duration": 0.667 },
+    { "time": 13.333, "string": 3, "fret": 2, "duration": 0.667 },
+    { "time": 14.0, "string": 3, "fret": 2, "duration": 0.667 },
+    { "time": 14.667, "string": 3, "fret": 0, "duration": 1.333 }
+  ]
+}
+

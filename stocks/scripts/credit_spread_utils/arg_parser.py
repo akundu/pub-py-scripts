@@ -307,6 +307,17 @@ def _add_rate_limit_args(parser: argparse.ArgumentParser):
         help="Time window in seconds for rate limiting. 0 = disabled (default). "
              "Example: --rate-limit-max 100 --rate-limit-window 60 = 100 per minute."
     )
+    parser.add_argument(
+        "--rate-limit-blocks",
+        type=str,
+        default=None,
+        help="Time-block based rate limiting with different limits per time block. "
+             "Format: 'HH:MM-HH:MM=N,HH:MM-HH:MM=N,...' where N is max transactions per block. "
+             "Times are in ET (Eastern Time). Transactions are evenly spaced within each block. "
+             "Example: '09:30-10:00=3,10:00-11:00=4,11:00-12:00=2' means 3 trades in first 30min, "
+             "4 trades in the next hour, 2 trades in the following hour. "
+             "Takes precedence over --rate-limit-max/--rate-limit-window if both are specified."
+    )
 
 
 def parse_args() -> argparse.Namespace:

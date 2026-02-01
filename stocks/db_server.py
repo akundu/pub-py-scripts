@@ -11419,6 +11419,81 @@ async def handle_catch_all(request: web.Request) -> web.Response:
         ]
     }, status=404)
 
+# Allowed script names for /run_script (must exist in run_scripts/ and be in this list)
+RUN_SCRIPT_ALLOWLIST = frozenset({"ms1_cron.sh", "ms1_run.sh", "prediction_setup.sh"})
+
+
+async def handle_run_script(request: web.Request) -> web.Response:
+    """
+    Execute a script from run_scripts/ via GET with query parameter `script`.
+    Optional query params: start_date, end_date (YYYY-MM-DD) passed as env vars to the script.
+    Returns JSON with stdout, stderr, and returncode from the execution.
+    """
+    if request.method != "GET":
+        return web.json_response({"error": "Only GET is allowed"}, status=405)
+
+    script_name = request.query.get("script")
+    if not script_name:
+        return web.json_response({
+            "error": "Missing query parameter 'script'",
+            "usage": "GET /run_script?script=ms1_cron.sh",
+            "optional": "start_date=YYYY-MM-DD, end_date=YYYY-MM-DD, days_back=N",
+        }, status=400)
+
+    # Resolve run_scripts directory relative to db_server.py
+    base_dir = Path(__file__).resolve().parent
+    run_scripts_dir = base_dir / "run_scripts"
+    script_path = run_scripts_dir / script_name
+
+    if script_name not in RUN_SCRIPT_ALLOWLIST:
+        return web.json_response({
+            "error": f"Script '{script_name}' is not allowed",
+            "allowed": sorted(RUN_SCRIPT_ALLOWLIST),
+        }, status=400)
+    if not script_path.exists():
+        return web.json_response({
+            "error": f"Script not found: {script_path}",
+        }, status=404)
+
+    start_date = request.query.get("start_date", "").strip()
+    end_date = request.query.get("end_date", "").strip()
+    days_back = request.query.get("days_back", "").strip()
+    env = os.environ.copy()
+    if start_date:
+        env["START_DATE"] = start_date
+    if end_date:
+        env["END_DATE"] = end_date
+    if days_back:
+        env["DAYS_BACK"] = days_back
+
+    try:
+        # Use exec (list args) so script path with spaces is not split by shell
+        script_path_str = str(script_path.resolve())
+        proc = await asyncio.create_subprocess_exec(
+            "sh",
+            script_path_str,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(base_dir),
+            env=env,
+        )
+        stdout_bytes, stderr_bytes = await proc.communicate()
+        stdout_text = (stdout_bytes or b"").decode("utf-8", errors="replace")
+        stderr_text = (stderr_bytes or b"").decode("utf-8", errors="replace")
+        return web.json_response({
+            "script": script_name,
+            "returncode": proc.returncode,
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+        })
+    except Exception as e:
+        logger.exception("run_script failed")
+        return web.json_response({
+            "error": "Execution failed",
+            "detail": str(e),
+        }, status=500)
+
+
 async def handle_db_command(request: web.Request) -> web.Response:
     """
     Handles POST requests to /db_command to execute database operations.

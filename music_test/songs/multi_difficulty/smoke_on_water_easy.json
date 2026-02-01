@@ -1,0 +1,46 @@
+{
+  "song_id": "smoke_on_water_easy",
+  "licensed_song_id": "SMOKE_ON_WATER",
+  "title": "Smoke on the Water",
+  "subtitle": "Easy - Single Note Riff",
+  "composer": "Deep Purple",
+  "tempo": 112,
+  "time_signature": "4/4",
+  "difficulty": "easy",
+  "difficulty_description": "Single notes only, simplified rhythm, root notes of power chords",
+  "license_status": "educational_use",
+  "genre": "rock",
+  "tuning": "standard",
+  "capo": 0,
+  "chords": [],
+  "original_duration": "5:40",
+  "learning_time": "1 day",
+  "educational_transformation": {
+    "simplification_level": "high",
+    "notes_removed_percent": 75,
+    "chords_simplified": true,
+    "rhythm_simplified": true,
+    "techniques_removed": ["palm_mute", "power_chord", "vibrato"]
+  },
+  "sections": [
+    {"name": "main_riff", "start": 0.0, "end": 8.0}
+  ],
+  "events": [
+    {"time": 0.0, "string": 4, "fret": 0, "duration": 0.5, "velocity": 0.8, "technique": "pluck"},
+    {"time": 0.75, "string": 4, "fret": 3, "duration": 0.5, "velocity": 0.8, "technique": "pluck"},
+    {"time": 1.5, "string": 4, "fret": 5, "duration": 0.75, "velocity": 0.8, "technique": "pluck"},
+    
+    {"time": 2.5, "string": 4, "fret": 0, "duration": 0.5, "velocity": 0.8, "technique": "pluck"},
+    {"time": 3.25, "string": 4, "fret": 3, "duration": 0.5, "velocity": 0.8, "technique": "pluck"},
+    {"time": 4.0, "string": 4, "fret": 6, "duration": 0.25, "velocity": 0.7, "technique": "pluck"},
+    {"time": 4.25, "string": 4, "fret": 5, "duration": 0.75, "velocity": 0.8, "technique": "pluck"},
+    
+    {"time": 5.25, "string": 4, "fret": 0, "duration": 0.5, "velocity": 0.8, "technique": "pluck"},
+    {"time": 6.0, "string": 4, "fret": 3, "duration": 0.5, "velocity": 0.8, "technique": "pluck"},
+    {"time": 6.75, "string": 4, "fret": 5, "duration": 0.75, "velocity": 0.8, "technique": "pluck"},
+    
+    {"time": 7.75, "string": 4, "fret": 3, "duration": 0.5, "velocity": 0.8, "technique": "pluck"},
+    {"time": 8.5, "string": 4, "fret": 0, "duration": 1.0, "velocity": 0.9, "technique": "pluck"}
+  ]
+}
+

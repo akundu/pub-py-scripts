@@ -4,6 +4,7 @@ let audioContext = null;
 let mediaStream = null;
 let isRecording = false;
 let config = {};
+let currentSongId = null;
 
 // Helper function to get timestamp for logging
 function getTimestamp() {
@@ -34,9 +35,15 @@ function debugLog(...args) {
   }
 }
 
+// Track which parameters came from URL
+let urlParams = {};
+let configSource = {};
+
 // Get config from URL parameters or use defaults
 function getConfigFromURL() {
   const params = new URLSearchParams(window.location.search);
+  urlParams = Object.fromEntries(params);
+  
   const defaultConfig = {
     instrument: 'guitar',
     sensitivity: 0.8,  // Default
@@ -62,9 +69,10 @@ function getConfigFromURL() {
 
   const config = { ...defaultConfig };
 
-  // Override with URL parameters
+  // Override with URL parameters and track source
   for (const [key, value] of params.entries()) {
     if (key in defaultConfig) {
+      configSource[key] = 'url';
       if (typeof defaultConfig[key] === 'boolean') {
         config[key] = value.toLowerCase() === 'true';
       } else if (typeof defaultConfig[key] === 'number') {
@@ -75,6 +83,13 @@ function getConfigFromURL() {
     }
   }
 
+  // Mark defaults
+  for (const key in defaultConfig) {
+    if (!configSource[key]) {
+      configSource[key] = 'default';
+    }
+  }
+
   // Ensure amplitude_threshold matches silence_threshold if not explicitly set
   // This matches CLI behavior where both default to the same value (0.005)
   if (!params.has('amplitude_threshold')) {
@@ -82,6 +97,12 @@ function getConfigFromURL() {
   }
 
   return config;
+}
+
+// Get song ID from URL parameters
+function getSongFromURL() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('song') || params.get('song_id');
 }
 
 // Initialize settings from URL or defaults
@@ -129,6 +150,259 @@ function updateStatus(connected, text) {
 
   indicator.className = 'status-indicator ' + (connected ? 'connected' : 'disconnected');
   statusText.textContent = text;
+}
+
+// Store songs globally for search
+let allSongs = [];
+
+// Fuzzy search function
+function fuzzySearch(query, text) {
+  query = query.toLowerCase();
+  text = text.toLowerCase();
+  
+  // Exact match gets highest score
+  if (text.includes(query)) {
+    return 100 - text.indexOf(query);
+  }
+  
+  // Character-by-character fuzzy match
+  let queryIndex = 0;
+  let matchScore = 0;
+  let consecutiveMatches = 0;
+  
+  for (let i = 0; i < text.length && queryIndex < query.length; i++) {
+    if (text[i] === query[queryIndex]) {
+      queryIndex++;
+      consecutiveMatches++;
+      matchScore += consecutiveMatches * 2; // Bonus for consecutive matches
+    } else {
+      consecutiveMatches = 0;
+    }
+  }
+  
+  // Return score only if all characters matched
+  return queryIndex === query.length ? matchScore : 0;
+}
+
+// Search songs
+function searchSongs(query) {
+  if (!query || query.trim() === '') {
+    return allSongs.slice(0, 50); // Show first 50 if no query
+  }
+  
+  const results = allSongs.map(song => {
+    // Search in multiple fields
+    const idScore = fuzzySearch(query, song.song_id) * 2; // ID matches weighted more
+    const titleScore = fuzzySearch(query, song.title);
+    const composerScore = fuzzySearch(query, song.composer) * 0.8;
+    const genreScore = fuzzySearch(query, song.genre) * 0.6;
+    const difficultyScore = fuzzySearch(query, song.difficulty) * 0.5;
+    
+    const totalScore = idScore + titleScore + composerScore + genreScore + difficultyScore;
+    
+    return { song, score: totalScore };
+  })
+  .filter(item => item.score > 0)
+  .sort((a, b) => b.score - a.score)
+  .slice(0, 20) // Top 20 results
+  .map(item => item.song);
+  
+  return results;
+}
+
+// Load songs list
+async function loadSongs() {
+  try {
+    const basePath = getBasePath();
+    const response = await fetch(`${basePath}/api/songs`);
+    const data = await response.json();
+    
+    if (data.songs && data.songs.length > 0) {
+      allSongs = data.songs;
+      logWithTimestamp(`📚 Loaded ${data.songs.length} songs`);
+      
+      // Initialize search
+      setupSongSearch();
+    }
+  } catch (error) {
+    console.error('Error loading songs:', error);
+  }
+}
+
+// Setup song search autocomplete
+function setupSongSearch() {
+  const searchInput = document.getElementById('songSearch');
+  const dropdown = document.getElementById('songDropdown');
+  const clearBtn = document.getElementById('clearSongBtn');
+  const selectedSongIdInput = document.getElementById('selectedSongId');
+  let currentSelection = -1;
+  
+  // Show dropdown on focus
+  searchInput.addEventListener('focus', () => {
+    if (!selectedSongIdInput.value) {
+      updateDropdown('');
+    }
+  });
+  
+  // Search as user types
+  searchInput.addEventListener('input', (e) => {
+    selectedSongIdInput.value = ''; // Clear selection when typing
+    searchInput.classList.remove('has-selection');
+    clearBtn.classList.add('hidden');
+    currentSelection = -1;
+    updateDropdown(e.target.value);
+  });
+  
+  // Keyboard navigation
+  searchInput.addEventListener('keydown', (e) => {
+    const items = dropdown.querySelectorAll('.song-dropdown-item[data-song-id]');
+    
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      currentSelection = Math.min(currentSelection + 1, items.length - 1);
+      updateSelection(items);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      currentSelection = Math.max(currentSelection - 1, -1);
+      updateSelection(items);
+    } else if (e.key === 'Enter' && currentSelection >= 0 && items[currentSelection]) {
+      e.preventDefault();
+      items[currentSelection].click();
+    } else if (e.key === 'Escape') {
+      dropdown.classList.add('hidden');
+      currentSelection = -1;
+    }
+  });
+  
+  // Hide dropdown when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!searchInput.contains(e.target) && !dropdown.contains(e.target)) {
+      dropdown.classList.add('hidden');
+      currentSelection = -1;
+    }
+  });
+  
+  // Clear button
+  clearBtn.addEventListener('click', () => {
+    searchInput.value = '';
+    searchInput.classList.remove('has-selection');
+    selectedSongIdInput.value = '';
+    clearBtn.classList.add('hidden');
+    currentSelection = -1;
+    updateURLWithSong(''); // Clear URL parameter
+    handleSongSelect(''); // Clear song selection
+  });
+  
+  function updateSelection(items) {
+    items.forEach((item, index) => {
+      if (index === currentSelection) {
+        item.classList.add('selected');
+        item.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      } else {
+        item.classList.remove('selected');
+      }
+    });
+  }
+  
+  function updateDropdown(query) {
+    const results = searchSongs(query);
+    
+    if (results.length === 0) {
+      dropdown.innerHTML = '<div class="song-dropdown-item no-results">No songs found</div>';
+      dropdown.classList.remove('hidden');
+      return;
+    }
+    
+    dropdown.innerHTML = results.map(song => `
+      <div class="song-dropdown-item" data-song-id="${song.song_id}">
+        <div class="song-item-title">${song.title}</div>
+        <div class="song-item-meta">
+          ${song.composer} • ${song.genre} • ${song.difficulty}
+          <span class="song-item-id">${song.song_id}</span>
+        </div>
+      </div>
+    `).join('');
+    
+    // Add click handlers
+    dropdown.querySelectorAll('.song-dropdown-item[data-song-id]').forEach(item => {
+      item.addEventListener('click', () => {
+        const songId = item.getAttribute('data-song-id');
+        const song = allSongs.find(s => s.song_id === songId);
+        if (song) {
+          selectSong(song);
+        }
+      });
+    });
+    
+    dropdown.classList.remove('hidden');
+  }
+  
+  function selectSong(song) {
+    searchInput.value = `${song.title} - ${song.composer}`;
+    searchInput.classList.add('has-selection');
+    selectedSongIdInput.value = song.song_id;
+    dropdown.classList.add('hidden');
+    clearBtn.classList.remove('hidden');
+    currentSelection = -1;
+    updateURLWithSong(song.song_id);
+    handleSongSelect(song.song_id);
+  }
+  
+  // Auto-select song from URL if present
+  const urlSongId = getSongFromURL();
+  if (urlSongId) {
+    const song = allSongs.find(s => s.song_id === urlSongId);
+    if (song) {
+      // Delay to ensure WebSocket is connected
+      setTimeout(() => {
+        selectSong(song);
+        logWithTimestamp(`🎵 Auto-loaded song from URL: ${song.title}`);
+      }, 1000);
+    } else {
+      console.warn(`Song ID from URL not found: ${urlSongId}`);
+    }
+  }
+}
+
+// Update URL with song parameter (without reloading page)
+function updateURLWithSong(songId) {
+  const url = new URL(window.location);
+  if (songId) {
+    url.searchParams.set('song', songId);
+  } else {
+    url.searchParams.delete('song');
+    url.searchParams.delete('song_id');
+  }
+  window.history.pushState({}, '', url);
+}
+
+// Handle song selection
+function handleSongSelect(songId) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    console.error('Cannot set song: WebSocket not connected');
+    return;
+  }
+  
+  currentSongId = songId;
+  
+  const message = {
+    type: 'set_song',
+    song_id: songId || null
+  };
+  
+  ws.send(JSON.stringify(message));
+  
+  // Update display mode
+  const constrainedDisplay = document.getElementById('constrainedDisplay');
+  const chordDisplay = document.getElementById('chordDisplay');
+  
+  if (songId) {
+    constrainedDisplay.style.display = 'flex';
+    chordDisplay.style.display = 'none';
+  } else {
+    constrainedDisplay.style.display = 'none';
+    chordDisplay.style.display = 'block';
+  }
 }
 
 // Get base path for WebSocket (handles Envoy prefix)
@@ -274,6 +548,17 @@ function handleWebSocketMessage(data) {
     return;
   }
 
+  if (data.type === 'song_loaded') {
+    logWithTimestamp(`🎵 Song loaded: ${data.song_info.title} by ${data.song_info.composer}`);
+    logWithTimestamp(`   Chords: ${data.chords.join(', ')}`);
+    return;
+  }
+
+  if (data.type === 'song_cleared') {
+    logWithTimestamp('🎵 Song cleared - using raw detection only');
+    return;
+  }
+
   // Log detection results only when log mode or debug mode is enabled
   if (data.type === 'chord' || data.type === 'notes' || data.type === 'frequencies') {
     if (config.log || config.debug) {
@@ -331,36 +616,91 @@ function handleWebSocketMessage(data) {
 
 // Update chord display
 function updateChordDisplay(data) {
-  const chordNameEl = document.getElementById('chordName');
-  const chordConfidenceEl = document.getElementById('chordConfidence');
-  const chordStabilityEl = document.getElementById('chordStability');
-
-  if (data && data.chord) {
-    chordNameEl.textContent = data.chord;
-    chordNameEl.className = 'chord-name detected';
-
-    if (data.confidence !== undefined) {
-      // Show votes info if available (when using chord_window smoothing)
-      let confidenceText = `Confidence: ${(data.confidence * 100).toFixed(1)}%`;
-      if (data.votes !== undefined && data.total_votes !== undefined) {
-        confidenceText += ` (${data.votes}/${data.total_votes} votes)`;
-      }
-      chordConfidenceEl.textContent = confidenceText;
-      chordConfidenceEl.style.display = 'block';
-    } else {
-      chordConfidenceEl.style.display = 'none';
-    }
-
-    if (data.stability !== undefined) {
-      const stabilityText = data.stability >= 2 ? 'Stable' : 'Unstable';
-      chordStabilityEl.textContent = stabilityText;
-      chordStabilityEl.className = data.stability >= 2 ? 'chord-stability stable' : 'chord-stability unstable';
-    }
+  if (data && data.song_constrained && currentSongId) {
+    // Show constrained display
+    updateConstrainedDisplay(data);
   } else {
-    chordNameEl.textContent = '--';
-    chordNameEl.className = 'chord-name';
-    chordConfidenceEl.style.display = 'none';
-    chordStabilityEl.textContent = '';
+    // Show regular display
+    const chordNameEl = document.getElementById('chordName');
+    const chordConfidenceEl = document.getElementById('chordConfidence');
+    const chordStabilityEl = document.getElementById('chordStability');
+
+    if (data && data.chord) {
+      chordNameEl.textContent = data.chord;
+      chordNameEl.className = 'chord-name detected';
+
+      if (data.confidence !== undefined) {
+        // Show votes info if available (when using chord_window smoothing)
+        let confidenceText = `Confidence: ${(data.confidence * 100).toFixed(1)}%`;
+        if (data.votes !== undefined && data.total_votes !== undefined) {
+          confidenceText += ` (${data.votes}/${data.total_votes} votes)`;
+        }
+        chordConfidenceEl.textContent = confidenceText;
+        chordConfidenceEl.style.display = 'block';
+      } else {
+        chordConfidenceEl.style.display = 'none';
+      }
+
+      if (data.stability !== undefined) {
+        const stabilityText = data.stability >= 2 ? 'Stable' : 'Unstable';
+        chordStabilityEl.textContent = stabilityText;
+        chordStabilityEl.className = data.stability >= 2 ? 'chord-stability stable' : 'chord-stability unstable';
+      }
+    } else {
+      chordNameEl.textContent = '--';
+      chordNameEl.className = 'chord-name';
+      chordConfidenceEl.style.display = 'none';
+      chordStabilityEl.textContent = '';
+    }
+  }
+}
+
+// Update constrained display (both raw and song-constrained results)
+function updateConstrainedDisplay(data) {
+  const rawChordEl = document.getElementById('rawChord');
+  const rawConfidenceEl = document.getElementById('rawConfidence');
+  const finalChordEl = document.getElementById('finalChord');
+  const finalConfidenceEl = document.getElementById('finalConfidence');
+  const matchIndicatorEl = document.getElementById('matchIndicator');
+  const matchTypeEl = document.getElementById('matchType');
+  
+  if (data.raw_chord) {
+    rawChordEl.textContent = data.raw_chord;
+    rawConfidenceEl.textContent = `Confidence: ${(data.raw_confidence * 100).toFixed(1)}%`;
+  } else {
+    rawChordEl.textContent = '--';
+    rawConfidenceEl.textContent = '';
+  }
+  
+  if (data.final_chord) {
+    finalChordEl.textContent = data.final_chord;
+    finalConfidenceEl.textContent = `Confidence: ${(data.final_confidence * 100).toFixed(1)}%`;
+    
+    // Update match indicator
+    if (data.song_match) {
+      matchIndicatorEl.textContent = '✓';
+      matchIndicatorEl.className = 'match-indicator match';
+      matchIndicatorEl.title = 'Chord is in song';
+    } else {
+      matchIndicatorEl.textContent = '⚠';
+      matchIndicatorEl.className = 'match-indicator no-match';
+      matchIndicatorEl.title = 'Chord not in song';
+    }
+    
+    // Update match type
+    const matchTypeText = {
+      'exact': 'Exact match',
+      'related': 'Related chord',
+      'partial': 'Partial match',
+      'none': 'No match'
+    };
+    matchTypeEl.textContent = matchTypeText[data.match_type] || '';
+    matchTypeEl.className = `match-type match-${data.match_type}`;
+  } else {
+    finalChordEl.textContent = '--';
+    finalConfidenceEl.textContent = '';
+    matchIndicatorEl.textContent = '';
+    matchTypeEl.textContent = '';
   }
 }
 
@@ -652,13 +992,115 @@ resetSettingsBtn.addEventListener('click', () => {
   initializeSettings();
 });
 
+// Display configuration panel
+function displayConfigPanel() {
+  const panel = document.getElementById('configPanel');
+  
+  // Song Info
+  const songInfoEl = document.getElementById('configSongInfo');
+  if (currentSongId) {
+    const song = allSongs.find(s => s.song_id === currentSongId);
+    if (song) {
+      songInfoEl.innerHTML = `
+        <div class="config-item">
+          <span class="config-item-label">Song ID:</span>
+          <span class="config-item-value from-url">${song.song_id}</span>
+        </div>
+        <div class="config-item">
+          <span class="config-item-label">Title:</span>
+          <span class="config-item-value">${song.title}</span>
+        </div>
+        <div class="config-item">
+          <span class="config-item-label">Composer:</span>
+          <span class="config-item-value">${song.composer}</span>
+        </div>
+        <div class="config-item">
+          <span class="config-item-label">Genre:</span>
+          <span class="config-item-value">${song.genre}</span>
+        </div>
+        <div class="config-item">
+          <span class="config-item-label">Difficulty:</span>
+          <span class="config-item-value">${song.difficulty}</span>
+        </div>
+      `;
+    }
+  } else {
+    songInfoEl.innerHTML = '<div class="config-empty">No song selected (raw detection only)</div>';
+  }
+  
+  // Detection Parameters
+  const detectionEl = document.getElementById('configDetectionParams');
+  detectionEl.innerHTML = `
+    ${configItem('Instrument', config.instrument, configSource.instrument)}
+    ${configItem('Multi-pitch Detection', config.multi_pitch, configSource.multi_pitch, true)}
+    ${configItem('Single-pitch Detection', config.single_pitch, configSource.single_pitch, true)}
+    ${configItem('Progression Analysis', config.progression, configSource.progression, true)}
+    ${configItem('Overlap Ratio', config.overlap, configSource.overlap)}
+  `;
+  
+  // Thresholds
+  const thresholdsEl = document.getElementById('configThresholds');
+  thresholdsEl.innerHTML = `
+    ${configItem('Sensitivity', config.sensitivity, configSource.sensitivity)}
+    ${configItem('Confidence Threshold', config.confidence_threshold, configSource.confidence_threshold)}
+    ${configItem('Silence Threshold', config.silence_threshold, configSource.silence_threshold)}
+    ${configItem('Amplitude Threshold', config.amplitude_threshold, configSource.amplitude_threshold)}
+    ${configItem('Chord Window', config.chord_window + 's', configSource.chord_window)}
+    ${configItem('Window Confidence', config.chord_window_confidence, configSource.chord_window_confidence)}
+  `;
+  
+  // Advanced
+  const advancedEl = document.getElementById('configAdvanced');
+  advancedEl.innerHTML = `
+    ${configItem('Show Frequencies', config.show_frequencies, configSource.show_frequencies, true)}
+    ${configItem('Show Chroma', config.show_chroma, configSource.show_chroma, true)}
+    ${configItem('Show FFT', config.show_fft, configSource.show_fft, true)}
+    ${configItem('Raw Frequencies', config.raw_frequencies, configSource.raw_frequencies, true)}
+    ${configItem('Frequencies Only', config.frequencies_only, configSource.frequencies_only, true)}
+    ${configItem('Notes Only', config.notes_only, configSource.notes_only, true)}
+    ${configItem('Debug Mode', config.debug, configSource.debug, true)}
+    ${configItem('Log Mode', config.log, configSource.log, true)}
+    ${configItem('Log Interval', config.log_interval + 's', configSource.log_interval)}
+  `;
+  
+  panel.classList.remove('hidden');
+}
+
+function configItem(label, value, source, isBoolean = false) {
+  let valueClass = 'config-item-value';
+  let displayValue = value;
+  
+  if (isBoolean) {
+    valueClass += value ? ' boolean-true' : ' boolean-false';
+    displayValue = value ? '✓ Enabled' : '✗ Disabled';
+  } else if (source === 'url') {
+    valueClass += ' from-url';
+  }
+  
+  const sourceLabel = source === 'url' ? '<span class="config-source">(from URL)</span>' : '';
+  
+  return `
+    <div class="config-item">
+      <span class="config-item-label">${label}:</span>
+      <span class="${valueClass}">${displayValue}${sourceLabel}</span>
+    </div>
+  `;
+}
+
 // Event listeners
 document.getElementById('startBtn').addEventListener('click', startRecording);
 document.getElementById('stopBtn').addEventListener('click', stopRecording);
 
+// Config panel toggle
+document.getElementById('configBtn').addEventListener('click', displayConfigPanel);
+document.getElementById('closeConfigBtn').addEventListener('click', () => {
+  document.getElementById('configPanel').classList.add('hidden');
+});
+
 // Initialize on page load
 window.addEventListener('load', () => {
   initializeSettings();
+  loadSongs();
   // Disable start button until WebSocket connects
   document.getElementById('startBtn').disabled = true;
   connectWebSocket();

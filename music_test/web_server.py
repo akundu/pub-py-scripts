@@ -53,6 +53,10 @@ class ConnectionState:
         self.low_freq = config.get('low_freq') or preset['low_freq']
         self.high_freq = config.get('high_freq') or preset['high_freq']
         self.instrument_name = config.get('instrument_name') or preset['name']
+        
+        # Song context for chord constraint
+        self.song_chords = config.get('song_chords', [])
+        self.song_info = config.get('song_info', None)
     
     def update_buffer(self, new_samples, chunk_size):
         """Update circular audio buffer with new samples."""
@@ -243,6 +247,20 @@ async def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "connections": len(active_connections)}
 
+@app.get("/api/songs")
+async def get_songs():
+    """Get list of available songs."""
+    try:
+        from lib.song_loader import get_song_loader
+        loader = get_song_loader()
+        songs = loader.get_song_list()
+        return {
+            "songs": songs,
+            "total": len(songs)
+        }
+    except Exception as e:
+        return {"error": str(e), "songs": []}
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for audio streaming and chord detection."""
@@ -324,8 +342,49 @@ async def websocket_endpoint(websocket: WebSocket):
                                 config.update(text_data.get("config", {}))
                                 if config.get('debug') or SERVER_LOG_LEVEL == 'DEBUG':
                                     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔧 Config updated: {connection_id}")
+                            elif text_data.get("type") == "set_song":
+                                # Load song and update state
+                                song_id = text_data.get("song_id")
+                                if song_id:
+                                    try:
+                                        from lib.song_loader import get_song_loader
+                                        loader = get_song_loader()
+                                        song_chords = loader.get_song_chords(song_id)
+                                        song_info = loader.get_song_info(song_id)
+                                        
+                                        state.song_chords = song_chords
+                                        state.song_info = song_info
+                                        config['song_chords'] = song_chords
+                                        config['song_info'] = song_info
+                                        
+                                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🎵 Song set: {song_info['title']} by {song_info['composer']}")
+                                        print(f"   Chords: {', '.join(song_chords)}")
+                                        
+                                        await websocket.send_json({
+                                            "type": "song_loaded",
+                                            "song_id": song_id,
+                                            "song_info": song_info,
+                                            "chords": song_chords
+                                        })
+                                    except Exception as e:
+                                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ Error loading song: {e}")
+                                        await websocket.send_json({
+                                            "type": "error",
+                                            "message": f"Failed to load song: {e}"
+                                        })
+                                else:
+                                    # Clear song selection
+                                    state.song_chords = []
+                                    state.song_info = None
+                                    config['song_chords'] = []
+                                    config['song_info'] = None
+                                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🎵 Song cleared")
+                                    await websocket.send_json({
+                                        "type": "song_cleared"
+                                    })
                             continue
-                        except:
+                        except Exception as e:
+                            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⚠️ Error handling text message: {e}")
                             pass
                     continue
                 
@@ -372,7 +431,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             # Only output if confidence meets threshold
                             chord_window_confidence = config.get('chord_window_confidence', 0.485)
                             if best and best['confidence'] >= chord_window_confidence:
-                                # Build the result to send
+                                # Build the base result
                                 smoothed_result = {
                                     "type": "chord",
                                     "chord": best['chord'],
@@ -387,6 +446,31 @@ async def websocket_endpoint(websocket: WebSocket):
                                 if config.get('show_chroma') and best.get('chroma') is not None:
                                     chroma = best['chroma']
                                     smoothed_result["chroma"] = chroma.tolist() if hasattr(chroma, 'tolist') else chroma
+                                
+                                # Apply song constraint if enabled
+                                if state.song_chords:
+                                    from lib.music_understanding import constrain_chord_to_song
+                                    chord_result = {
+                                        'primary_chords': [best['chord']],
+                                        'chord_confidence': best['confidence']
+                                    }
+                                    constrained = constrain_chord_to_song(chord_result, state.song_chords, verbose=config.get('debug'))
+                                    
+                                    # Add constrained data to result
+                                    smoothed_result['raw_chord'] = constrained['raw_chord']
+                                    smoothed_result['raw_confidence'] = constrained['raw_confidence']
+                                    smoothed_result['final_chord'] = constrained['final_chord']
+                                    smoothed_result['final_confidence'] = constrained['final_confidence']
+                                    smoothed_result['song_match'] = constrained['song_match']
+                                    smoothed_result['match_type'] = constrained['match_type']
+                                    smoothed_result['song_constrained'] = True
+                                    if constrained.get('suggested_chord'):
+                                        smoothed_result['suggested_chord'] = constrained['suggested_chord']
+                                    
+                                    # Update stability based on final chord
+                                    smoothed_result['stability'] = state.update_chord_stability(constrained['final_chord'])
+                                else:
+                                    smoothed_result['song_constrained'] = False
 
                                 await websocket.send_json(smoothed_result)
 
@@ -482,36 +566,53 @@ def log_result(result: dict, config: dict, connection_id: str):
     
     elif result.get('type') == 'chord':
         if result.get('chord'):
-            chord_name = result['chord']
-            confidence = result.get('confidence', 0.0)
-            stability = result.get('stability', 0)
-            stability_suffix = "" if stability >= 2 else " [unstable]"
-            
-            # Build output to match CLI format exactly
-            output_parts = []
-            
-            # CLI shows chroma if show_chroma is enabled
-            if config.get('show_chroma') and result.get('chroma'):
-                chroma_values = [f"{val:.3f}" for val in result['chroma']]
-                output_parts.append(f"Chroma: [{', '.join(chroma_values)}]")
-            
-            # CLI shows frequencies if show_frequencies is enabled
-            if config.get('show_frequencies') and result.get('notes'):
-                note_str = ", ".join([f"{note}({freq:.0f}Hz)" for note, freq in result['notes']])
-                output_parts.append(f"Notes: {note_str}")
-            
-            chord_display = chord_name
-            if config.get('debug'):
-                chord_display += f" ({confidence:.2f})"
-            
-            # Match CLI format: "Chroma: [...] -> ChordName [unstable]"
-            if output_parts:
-                full_output = " | ".join(output_parts) + f" -> {chord_display}"
+            # Check if song-constrained
+            if result.get('song_constrained'):
+                raw_chord = result.get('raw_chord', result['chord'])
+                raw_conf = result.get('raw_confidence', result.get('confidence', 0.0))
+                final_chord = result.get('final_chord', result['chord'])
+                final_conf = result.get('final_confidence', result.get('confidence', 0.0))
+                match_indicator = "✓" if result.get('song_match') else "⚠"
+                stability = result.get('stability', 0)
+                stability_suffix = "" if stability >= 2 else " [unstable]"
+                
+                # Build output with both raw and final
+                raw_str = f"Raw: {raw_chord} ({raw_conf:.1%})"
+                final_str = f"→ {final_chord} ({final_conf:.1%}) {match_indicator}"
+                
+                print(f"[{timestamp}] {raw_str} {final_str}{stability_suffix}")
             else:
-                full_output = chord_display
-            
-            # Remove connection_id from output to match CLI format
-            print(f"[{timestamp}] {full_output}{stability_suffix}")
+                # Non-constrained output (original format)
+                chord_name = result['chord']
+                confidence = result.get('confidence', 0.0)
+                stability = result.get('stability', 0)
+                stability_suffix = "" if stability >= 2 else " [unstable]"
+                
+                # Build output to match CLI format exactly
+                output_parts = []
+                
+                # CLI shows chroma if show_chroma is enabled
+                if config.get('show_chroma') and result.get('chroma'):
+                    chroma_values = [f"{val:.3f}" for val in result['chroma']]
+                    output_parts.append(f"Chroma: [{', '.join(chroma_values)}]")
+                
+                # CLI shows frequencies if show_frequencies is enabled
+                if config.get('show_frequencies') and result.get('notes'):
+                    note_str = ", ".join([f"{note}({freq:.0f}Hz)" for note, freq in result['notes']])
+                    output_parts.append(f"Notes: {note_str}")
+                
+                chord_display = chord_name
+                if config.get('debug'):
+                    chord_display += f" ({confidence:.2f})"
+                
+                # Match CLI format: "Chroma: [...] -> ChordName [unstable]"
+                if output_parts:
+                    full_output = " | ".join(output_parts) + f" -> {chord_display}"
+                else:
+                    full_output = chord_display
+                
+                # Remove connection_id from output to match CLI format
+                print(f"[{timestamp}] {full_output}{stability_suffix}")
         else:
             if config.get('debug'):
                 print(f"[{timestamp}] [{connection_id}] Listening...")

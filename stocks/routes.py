@@ -26,6 +26,7 @@ def register_routes(app: web.Application) -> None:
     
     # Import from db_server for now (will be migrated to handler modules)
     from db_server import (
+        handle_run_script,
         handle_db_command,
         handle_websocket,
         handle_health_check,
@@ -57,6 +58,9 @@ def register_routes(app: web.Application) -> None:
         handle_catch_all,
     )
     
+    # Run script endpoint (run_scripts/ with ?script=...&start_date=...&end_date=...)
+    app.router.add_get("/run_script", handle_run_script)
+
     # Core endpoints
     app.router.add_post("/db_command", handle_db_command)
     app.router.add_get("/ws", handle_websocket)

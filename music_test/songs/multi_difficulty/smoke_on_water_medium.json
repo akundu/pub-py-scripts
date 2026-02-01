@@ -1,0 +1,91 @@
+{
+  "song_id": "smoke_on_water_medium",
+  "licensed_song_id": "SMOKE_ON_WATER",
+  "title": "Smoke on the Water",
+  "subtitle": "Medium - Power Chord Riff",
+  "composer": "Deep Purple",
+  "tempo": 112,
+  "time_signature": "4/4",
+  "difficulty": "medium",
+  "difficulty_description": "Two-note power chords (fourths), original rhythm pattern",
+  "license_status": "educational_use",
+  "genre": "rock",
+  "tuning": "standard",
+  "capo": 0,
+  "chords": ["G5", "Bb5", "C5", "Db5"],
+  "original_duration": "5:40",
+  "learning_time": "1 week",
+  "educational_transformation": {
+    "simplification_level": "medium",
+    "notes_removed_percent": 40,
+    "chords_simplified": true,
+    "rhythm_simplified": false,
+    "techniques_removed": ["palm_mute", "vibrato"]
+  },
+  "sections": [
+    {"name": "main_riff", "start": 0.0, "end": 8.0},
+    {"name": "riff_repeat", "start": 8.0, "end": 16.0}
+  ],
+  "events": [
+    {"time": 0.0, "string": 4, "fret": 0, "duration": 0.4, "velocity": 0.8, "technique": "pluck"},
+    {"time": 0.02, "string": 3, "fret": 0, "duration": 0.38, "velocity": 0.7, "technique": "pluck"},
+    
+    {"time": 0.75, "string": 4, "fret": 3, "duration": 0.4, "velocity": 0.8, "technique": "pluck"},
+    {"time": 0.77, "string": 3, "fret": 3, "duration": 0.38, "velocity": 0.7, "technique": "pluck"},
+    
+    {"time": 1.5, "string": 4, "fret": 5, "duration": 0.7, "velocity": 0.9, "technique": "pluck"},
+    {"time": 1.52, "string": 3, "fret": 5, "duration": 0.68, "velocity": 0.8, "technique": "pluck"},
+    
+    {"time": 2.5, "string": 4, "fret": 0, "duration": 0.4, "velocity": 0.8, "technique": "pluck"},
+    {"time": 2.52, "string": 3, "fret": 0, "duration": 0.38, "velocity": 0.7, "technique": "pluck"},
+    
+    {"time": 3.25, "string": 4, "fret": 3, "duration": 0.4, "velocity": 0.8, "technique": "pluck"},
+    {"time": 3.27, "string": 3, "fret": 3, "duration": 0.38, "velocity": 0.7, "technique": "pluck"},
+    
+    {"time": 4.0, "string": 4, "fret": 6, "duration": 0.2, "velocity": 0.7, "technique": "pluck"},
+    {"time": 4.02, "string": 3, "fret": 6, "duration": 0.18, "velocity": 0.6, "technique": "pluck"},
+    
+    {"time": 4.25, "string": 4, "fret": 5, "duration": 0.7, "velocity": 0.9, "technique": "pluck"},
+    {"time": 4.27, "string": 3, "fret": 5, "duration": 0.68, "velocity": 0.8, "technique": "pluck"},
+    
+    {"time": 5.25, "string": 4, "fret": 0, "duration": 0.4, "velocity": 0.8, "technique": "pluck"},
+    {"time": 5.27, "string": 3, "fret": 0, "duration": 0.38, "velocity": 0.7, "technique": "pluck"},
+    
+    {"time": 6.0, "string": 4, "fret": 3, "duration": 0.4, "velocity": 0.8, "technique": "pluck"},
+    {"time": 6.02, "string": 3, "fret": 3, "duration": 0.38, "velocity": 0.7, "technique": "pluck"},
+    
+    {"time": 6.75, "string": 4, "fret": 5, "duration": 0.7, "velocity": 0.9, "technique": "pluck"},
+    {"time": 6.77, "string": 3, "fret": 5, "duration": 0.68, "velocity": 0.8, "technique": "pluck"},
+    
+    {"time": 7.75, "string": 4, "fret": 3, "duration": 0.4, "velocity": 0.8, "technique": "pluck"},
+    {"time": 7.77, "string": 3, "fret": 3, "duration": 0.38, "velocity": 0.7, "technique": "pluck"},
+    
+    {"time": 8.5, "string": 4, "fret": 0, "duration": 1.0, "velocity": 0.9, "technique": "pluck"},
+    {"time": 8.52, "string": 3, "fret": 0, "duration": 0.98, "velocity": 0.8, "technique": "pluck"},
+    
+    {"time": 10.0, "string": 4, "fret": 0, "duration": 0.4, "velocity": 0.8, "technique": "pluck"},
+    {"time": 10.02, "string": 3, "fret": 0, "duration": 0.38, "velocity": 0.7, "technique": "pluck"},
+    
+    {"time": 10.75, "string": 4, "fret": 3, "duration": 0.4, "velocity": 0.8, "technique": "pluck"},
+    {"time": 10.77, "string": 3, "fret": 3, "duration": 0.38, "velocity": 0.7, "technique": "pluck"},
+    
+    {"time": 11.5, "string": 4, "fret": 5, "duration": 0.7, "velocity": 0.9, "technique": "pluck"},
+    {"time": 11.52, "string": 3, "fret": 5, "duration": 0.68, "velocity": 0.8, "technique": "pluck"},
+    
+    {"time": 12.5, "string": 4, "fret": 0, "duration": 0.4, "velocity": 0.8, "technique": "pluck"},
+    {"time": 12.52, "string": 3, "fret": 0, "duration": 0.38, "velocity": 0.7, "technique": "pluck"},
+    
+    {"time": 13.25, "string": 4, "fret": 3, "duration": 0.4, "velocity": 0.8, "technique": "pluck"},
+    {"time": 13.27, "string": 3, "fret": 3, "duration": 0.38, "velocity": 0.7, "technique": "pluck"},
+    
+    {"time": 14.0, "string": 4, "fret": 6, "duration": 0.2, "velocity": 0.7, "technique": "pluck"},
+    {"time": 14.02, "string": 3, "fret": 6, "duration": 0.18, "velocity": 0.6, "technique": "pluck"},
+    
+    {"time": 14.25, "string": 4, "fret": 5, "duration": 0.7, "velocity": 0.9, "technique": "pluck"},
+    {"time": 14.27, "string": 3, "fret": 5, "duration": 0.68, "velocity": 0.8, "technique": "pluck"},
+    
+    {"time": 15.5, "string": 4, "fret": 0, "duration": 1.5, "velocity": 1.0, "technique": "pluck"},
+    {"time": 15.52, "string": 3, "fret": 0, "duration": 1.48, "velocity": 0.9, "technique": "pluck"}
+  ]
+}
+

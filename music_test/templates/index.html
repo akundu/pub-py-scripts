@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Chord Detector</title>
-    <link rel="stylesheet" href="static/css/style.css?v=3">
+    <link rel="stylesheet" href="static/css/style.css?v=6">
 </head>
 <body>
     <div class="container">
@@ -19,9 +19,51 @@
         <main>
             <!-- Controls Section -->
             <section class="controls">
-                <button id="startBtn" class="btn btn-primary">Start Detection</button>
-                <button id="stopBtn" class="btn btn-secondary" disabled>Stop Detection</button>
-                <button id="settingsBtn" class="btn btn-secondary">Settings</button>
+                <div class="control-row">
+                    <button id="startBtn" class="btn btn-primary">Start Detection</button>
+                    <button id="stopBtn" class="btn btn-secondary" disabled>Stop Detection</button>
+                    <button id="settingsBtn" class="btn btn-secondary">Settings</button>
+                    <button id="configBtn" class="btn btn-secondary">Show Config</button>
+                </div>
+                <div class="control-row song-selector-row">
+                    <label for="songSearch" class="song-label">Song Context:</label>
+                    <div class="song-search-container">
+                        <input type="text" 
+                               id="songSearch" 
+                               class="song-search-input" 
+                               placeholder="Search by name, ID, composer, or genre..."
+                               autocomplete="off">
+                        <div id="songDropdown" class="song-dropdown hidden"></div>
+                        <input type="hidden" id="selectedSongId" value="">
+                        <button id="clearSongBtn" class="clear-song-btn hidden" title="Clear song selection">×</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Configuration Display Panel -->
+            <section id="configPanel" class="config-panel hidden">
+                <div class="config-header">
+                    <h3>📊 Active Configuration</h3>
+                    <button id="closeConfigBtn" class="close-config-btn">×</button>
+                </div>
+                <div class="config-content">
+                    <div class="config-section">
+                        <h4>🎵 Song Context</h4>
+                        <div id="configSongInfo" class="config-info"></div>
+                    </div>
+                    <div class="config-section">
+                        <h4>🎸 Detection Parameters</h4>
+                        <div id="configDetectionParams" class="config-info"></div>
+                    </div>
+                    <div class="config-section">
+                        <h4>🎚️ Thresholds & Sensitivity</h4>
+                        <div id="configThresholds" class="config-info"></div>
+                    </div>
+                    <div class="config-section">
+                        <h4>⚙️ Advanced Options</h4>
+                        <div id="configAdvanced" class="config-info"></div>
+                    </div>
+                </div>
             </section>
 
             <!-- Main Display Section -->
@@ -30,6 +72,22 @@
                     <div class="chord-name" id="chordName">--</div>
                     <div class="chord-confidence" id="chordConfidence"></div>
                     <div class="chord-stability" id="chordStability"></div>
+                </div>
+
+                <!-- Song-Constrained Results (hidden by default) -->
+                <div class="constrained-display" id="constrainedDisplay" style="display: none;">
+                    <div class="result-panel raw-result">
+                        <h4>Raw Detection</h4>
+                        <div class="result-chord" id="rawChord">--</div>
+                        <div class="result-confidence" id="rawConfidence"></div>
+                    </div>
+                    <div class="arrow">→</div>
+                    <div class="result-panel final-result">
+                        <h4>Song-Constrained <span class="match-indicator" id="matchIndicator"></span></h4>
+                        <div class="result-chord" id="finalChord">--</div>
+                        <div class="result-confidence" id="finalConfidence"></div>
+                        <div class="match-type" id="matchType"></div>
+                    </div>
                 </div>
 
                 <div class="notes-display" id="notesDisplay">
@@ -170,7 +228,7 @@
 
     <script src="static/js/audio_handler.js?v=2"></script>
     <script src="static/js/visualizations.js?v=2"></script>
-    <script src="static/js/main.js?v=5"></script>
+    <script src="static/js/main.js?v=8"></script>
 </body>
 </html>
 

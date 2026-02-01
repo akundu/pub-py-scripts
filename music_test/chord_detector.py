@@ -37,6 +37,7 @@ def parse_args():
     parser.add_argument('--chord-window-confidence', type=float, default=0.485, help='Minimum confidence for chord-window results (default: 0.485)')
     parser.add_argument('--list-devices', action='store_true', help='List available audio input devices and exit')
     parser.add_argument('--device', type=int, help='Audio input device ID (use --list-devices to see available devices)')
+    parser.add_argument('--song', type=str, help='Song ID to constrain chord detection (e.g., bg_rk_001)')
     args = parser.parse_args()
 
     # Handle single-pitch override
@@ -170,6 +171,23 @@ def main():
         if args.progression and not args.frequencies_only and not args.notes_only:
             print("📈 Chord progression analysis enabled")
 
+    # Load song data if provided
+    song_chords = []
+    song_info = None
+    if args.song:
+        try:
+            from lib.song_loader import get_song_loader
+            loader = get_song_loader()
+            song_chords = loader.get_song_chords(args.song)
+            song_info = loader.get_song_info(args.song)
+            if song_info:
+                print(f"🎵 Loaded song: {song_info['title']} by {song_info['composer']}")
+                print(f"   Song chords: {', '.join(song_chords)}")
+            else:
+                print(f"⚠️  Warning: Song '{args.song}' not found")
+        except Exception as e:
+            print(f"⚠️  Warning: Could not load song '{args.song}': {e}")
+
     # Build config dict for the new API
     config = {
         'instrument': args.instrument,
@@ -195,6 +213,8 @@ def main():
         'low_freq': low_freq,
         'high_freq': high_freq,
         'instrument_name': instrument_name,
+        'song_chords': song_chords,
+        'song_info': song_info,
     }
 
     # Create state using proper AudioProcessingState class
@@ -233,16 +253,41 @@ def main():
                             best = state.get_best_chord()
                             # Only output if confidence meets threshold
                             if best and best['confidence'] >= config.get('chord_window_confidence', 0.485):
-                                # Format and print the result
-                                timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-                                stability = state.update_chord_stability(best['chord'])
-                                stability_str = "" if stability >= 2 else " [unstable]"
-                                votes_str = f" ({best['votes']}/{best['total_votes']} votes)"
-
-                                if args.log:
-                                    print(f"[{timestamp}] {best['chord']} (conf: {best['confidence']:.1%}){votes_str}{stability_str}")
+                                # Apply song constraint if enabled
+                                if song_chords:
+                                    from lib.music_understanding import constrain_chord_to_song
+                                    chord_result = {
+                                        'primary_chords': [best['chord']],
+                                        'chord_confidence': best['confidence']
+                                    }
+                                    constrained = constrain_chord_to_song(chord_result, song_chords, verbose=args.debug)
+                                    
+                                    # Format and print the result
+                                    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                                    stability = state.update_chord_stability(constrained['final_chord'])
+                                    stability_str = "" if stability >= 2 else " [unstable]"
+                                    votes_str = f" ({best['votes']}/{best['total_votes']} votes)"
+                                    
+                                    # Show both raw and constrained
+                                    raw_str = f"Raw: {constrained['raw_chord']} ({constrained['raw_confidence']:.1%})"
+                                    final_str = f"→ {constrained['final_chord']} ({constrained['final_confidence']:.1%})"
+                                    match_indicator = "✓" if constrained['song_match'] else "⚠"
+                                    
+                                    if args.log:
+                                        print(f"[{timestamp}] {raw_str} {final_str} {match_indicator}{votes_str}{stability_str}")
+                                    else:
+                                        print(f"\r{raw_str} {final_str} {match_indicator}{votes_str}{stability_str}    ", end='', flush=True)
                                 else:
-                                    print(f"\r{best['chord']} (conf: {best['confidence']:.1%}){votes_str}{stability_str}    ", end='', flush=True)
+                                    # No song context, show raw result
+                                    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                                    stability = state.update_chord_stability(best['chord'])
+                                    stability_str = "" if stability >= 2 else " [unstable]"
+                                    votes_str = f" ({best['votes']}/{best['total_votes']} votes)"
+
+                                    if args.log:
+                                        print(f"[{timestamp}] {best['chord']} (conf: {best['confidence']:.1%}){votes_str}{stability_str}")
+                                    else:
+                                        print(f"\r{best['chord']} (conf: {best['confidence']:.1%}){votes_str}{stability_str}    ", end='', flush=True)
 
                             # Reset for next window
                             state.reset_accumulator()
