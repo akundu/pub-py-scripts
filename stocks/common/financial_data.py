@@ -814,6 +814,8 @@ async def get_financial_info(
                             logger.warning(f"[FINANCIAL 52-WEEK] {symbol}: No close/price column found in merged_df")
                     else:
                         logger.warning(f"[FINANCIAL 52-WEEK] {symbol}: merged_df is None, empty, or not a DataFrame - cannot calculate 52-week range")
+                except NotImplementedError:
+                    logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: Backend does not support get_merged_price_series - skipping 52-week range calculation")
                 except Exception as e:
                     logger.warning(f"[FINANCIAL 52-WEEK] {symbol}: Error calculating 52-week range: {e}", exc_info=True)
             else:
@@ -880,6 +882,8 @@ async def get_financial_info(
                                 logger.warning(f"[FINANCIAL 52-WEEK] {symbol}: No close/price column found in merged_df")
                         else:
                             logger.warning(f"[FINANCIAL 52-WEEK] {symbol}: merged_df is None, empty, or not a DataFrame - cannot calculate 52-week range")
+                    except NotImplementedError:
+                        logger.debug(f"[FINANCIAL 52-WEEK] {symbol}: Backend does not support get_merged_price_series - skipping 52-week range before save")
                     except Exception as e:
                         logger.warning(f"[FINANCIAL 52-WEEK] {symbol}: Error calculating 52-week range before save: {e}", exc_info=True)
             
