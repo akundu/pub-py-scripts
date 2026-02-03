@@ -768,10 +768,10 @@ class RealtimeDataRepository(BaseRepository):
                     'ticker': row['ticker'],
                     'timestamp': TimezoneHandler.to_naive_utc(timestamp_val, "realtime timestamp"),
                     'type': row['type'],
-                    'price': float(row.get('price', 0.0)),
-                    'size': int(row.get('size', 0)),
-                    'ask_price': float(row.get('ask_price', 0.0)) if 'ask_price' in row else None,
-                    'ask_size': int(row.get('ask_size', 0)) if 'ask_size' in row else None,
+                    'price': float(row.get('price', 0.0) or 0.0),
+                    'size': int(row.get('size', 0) or 0),
+                    'ask_price': float(row.get('ask_price') or 0.0) if 'ask_price' in row else None,
+                    'ask_size': int(row.get('ask_size') or 0) if 'ask_size' in row else None,
                     'write_timestamp': TimezoneHandler.to_naive_utc(write_timestamp_val, "realtime write_timestamp")
                 }
                 records.append(record)

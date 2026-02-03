@@ -2478,7 +2478,7 @@ async def get_current_price(
     
     # For API fetch, use yfinance_symbol if it's an index, otherwise use original symbol
     api_fetch_symbol = yfinance_symbol if is_index and yfinance_symbol else symbol
-    logging.info(f"[API] Fetching price for {api_fetch_symbol} from {data_source} API (original: {symbol}, DB check completed)")
+    logging.info(f"[API] Fetching price for {api_fetch_symbol}: source={data_source} (original: {symbol}, DB check completed)")
     api_fetch_start = time.time()
     if data_source == "polygon":
         result = await _get_current_price_polygon(api_fetch_symbol, current_db_instance)
@@ -2494,7 +2494,12 @@ async def get_current_price(
     result['fetch_time_ms'] = total_fetch_time
     result['api_fetch_time_ms'] = api_fetch_time
     
-    logging.info(f"[API FETCH] Price for {symbol}: ${result.get('price', 'N/A'):.2f} from {result.get('source', 'API')} (api_fetch: {api_fetch_time:.1f}ms, total: {total_fetch_time:.1f}ms)")
+    price_val = result.get('price', None)
+    price_str = f"{float(price_val):.2f}" if isinstance(price_val, (int, float)) else (str(price_val) if price_val is not None else "N/A")
+    source_val = result.get('source', 'API')
+    logging.info(
+        f"[API FETCH] Price for {symbol}: source={source_val} price={price_str} (api_fetch: {api_fetch_time:.1f}ms, total: {total_fetch_time:.1f}ms)"
+    )
     
     # Note: For API results, we could cache them, but typically API results should go through
     # the database first (which then gets cached by PriceService). However, if we're fetching

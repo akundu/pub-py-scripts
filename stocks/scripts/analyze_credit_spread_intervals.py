@@ -70,6 +70,19 @@ from common.market_hours import is_market_hours, compute_market_transition_times
 from credit_spread_utils import timezone_utils, price_utils, capital_utils, arg_parser
 from credit_spread_utils.rate_limiter import SlidingWindowRateLimiter
 from credit_spread_utils.time_block_rate_limiter import TimeBlockRateLimiter
+from credit_spread_utils.scale_in_utils import (
+    ScaleInConfig,
+    ScaleInTradeState,
+    LayerPosition,
+    initialize_scale_in_trade,
+    calculate_layered_pnl,
+    process_price_update,
+    generate_scale_in_summary,
+    format_scale_in_result,
+    load_scale_in_config,
+    check_breach,
+    calculate_layer_pnl,
+)
 
 # Re-export commonly used functions for backward compatibility
 from credit_spread_utils.timezone_utils import (
@@ -94,6 +107,14 @@ from credit_spread_utils.capital_utils import (
     filter_results_by_capital_limit,
 )
 from credit_spread_utils.arg_parser import parse_args
+from credit_spread_utils.delta_utils import (
+    DeltaFilterConfig,
+    calculate_delta_for_option,
+    filter_spread_by_delta,
+    parse_delta_range,
+    get_vix1d_at_timestamp,
+    format_delta_filter_info,
+)
 
 
 # Keep find_csv_files_in_dir in main file (used by parse_args and main)
@@ -1097,10 +1118,13 @@ def build_credit_spreads(
     min_contract_price: float = 0.0,
     max_credit_width_ratio: float = 0.80,
     max_strike_distance_pct: Optional[float] = None,
-    min_premium_diff: Optional[Tuple[float, float]] = None
+    min_premium_diff: Optional[Tuple[float, float]] = None,
+    dynamic_width_config: Optional['DynamicWidthConfig'] = None,
+    delta_filter_config: Optional['DeltaFilterConfig'] = None,
+    vix1d_value: Optional[float] = None
 ) -> List[Dict[str, Any]]:
     """Build credit spreads from options DataFrame.
-    
+
     Args:
         max_credit_width_ratio: Maximum ratio of credit to spread width (default 0.80).
                                Filters out unrealistic spreads with credit too close to width.
@@ -1108,6 +1132,12 @@ def build_credit_spreads(
                                 Filters out deep ITM/OTM options. None = no filtering.
         min_premium_diff: Minimum premium price difference between short and long side (net credit).
                          Tuple of (put_min_premium_diff, call_min_premium_diff). None = no filtering.
+        dynamic_width_config: Configuration for dynamic spread width based on strike distance.
+                             When enabled, max spread width scales with distance from prev_close.
+        delta_filter_config: Configuration for delta-based spread filtering.
+                            When enabled, filters spreads by option delta (probability of ITM).
+        vix1d_value: VIX1D value at this timestamp (as decimal, e.g., 0.15 for 15%).
+                    Used for Black-Scholes delta calculation when option IV unavailable.
     """
     results = []
     
@@ -1160,7 +1190,21 @@ def build_credit_spreads(
             width = abs(long_leg['strike'] - short_leg['strike'])
             # Unpack max_width tuple: (put_max_width, call_max_width)
             put_max_width, call_max_width = max_width
-            current_max_width = call_max_width if option_type.lower() == "call" else put_max_width
+            static_max_width = call_max_width if option_type.lower() == "call" else put_max_width
+
+            # Calculate dynamic max width if enabled
+            if dynamic_width_config is not None:
+                from credit_spread_utils.dynamic_width_utils import calculate_dynamic_width
+                short_strike = float(short_leg['strike'])
+                current_max_width = calculate_dynamic_width(
+                    short_strike=short_strike,
+                    prev_close=prev_close,
+                    config=dynamic_width_config,
+                    fallback_max=static_max_width
+                )
+            else:
+                current_max_width = static_max_width
+
             if width < min_width or width > current_max_width:
                 continue
             
@@ -1203,7 +1247,7 @@ def build_credit_spreads(
             max_loss_per_share = width - net_credit
             max_loss_per_contract = max_loss_per_share * 100
             
-            # Get delta values if available
+            # Get delta values if available from CSV data
             short_delta = short_leg.get('delta')
             long_delta = long_leg.get('delta')
             if pd.notna(short_delta):
@@ -1214,7 +1258,36 @@ def build_credit_spreads(
                 long_delta = float(long_delta)
             else:
                 long_delta = None
-            
+
+            # Calculate delta using Black-Scholes if missing and delta filtering is active
+            if delta_filter_config is not None and delta_filter_config.is_active():
+                default_iv = delta_filter_config.default_iv
+                iv_for_calc = vix1d_value if delta_filter_config.use_vix1d and vix1d_value else None
+
+                # Calculate short leg delta if missing
+                if short_delta is None:
+                    short_delta = calculate_delta_for_option(
+                        short_leg.to_dict() if hasattr(short_leg, 'to_dict') else dict(short_leg),
+                        prev_close,
+                        default_iv,
+                        option_type,
+                        iv_for_calc
+                    )
+
+                # Calculate long leg delta if missing
+                if long_delta is None:
+                    long_delta = calculate_delta_for_option(
+                        long_leg.to_dict() if hasattr(long_leg, 'to_dict') else dict(long_leg),
+                        prev_close,
+                        default_iv,
+                        option_type,
+                        iv_for_calc
+                    )
+
+                # Apply delta filter
+                if not filter_spread_by_delta(short_delta, long_delta, delta_filter_config):
+                    continue
+
             spread = {
                 "short_strike": float(short_leg['strike']),
                 "long_strike": float(long_leg['strike']),
@@ -1256,7 +1329,9 @@ async def analyze_interval(
     profit_target_pct: Optional[float] = None,
     output_tz = None,
     force_close_hour: Optional[int] = None,
-    min_premium_diff: Optional[Tuple[float, float]] = None
+    min_premium_diff: Optional[Tuple[float, float]] = None,
+    dynamic_width_config: Optional['DynamicWidthConfig'] = None,
+    delta_filter_config: Optional['DeltaFilterConfig'] = None
 ) -> Optional[Dict[str, Any]]:
     """Analyze a single 15-minute interval."""
     if interval_df.empty:
@@ -1377,6 +1452,14 @@ async def analyze_interval(
     else:
         logger.debug(f"[{underlying}] Current Day: No data found")
     
+    # Get VIX1D value for delta calculation if delta filtering is enabled and use_vix1d is set
+    vix1d_value = None
+    if delta_filter_config is not None and delta_filter_config.is_active() and delta_filter_config.use_vix1d:
+        vix1d_dir = delta_filter_config.vix1d_dir or '../equities_output/I:VIX1D'
+        vix1d_value = get_vix1d_at_timestamp(timestamp, vix1d_dir)
+        if vix1d_value is not None:
+            logger.debug(f"[{underlying}] VIX1D at {timestamp}: {vix1d_value:.2%}")
+
     # Build credit spreads
     spreads = build_credit_spreads(
         interval_df,
@@ -1389,12 +1472,15 @@ async def analyze_interval(
         min_contract_price,
         max_credit_width_ratio,
         max_strike_distance_pct,
-        min_premium_diff
+        min_premium_diff,
+        dynamic_width_config,
+        delta_filter_config,
+        vix1d_value
     )
-    
+
     if not spreads:
         return None
-    
+
     # Filter by risk cap if provided (risk_cap is in dollars, compare with max_loss_per_contract)
     if risk_cap is not None:
         valid_spreads = [s for s in spreads if s['max_loss_per_contract'] > 0 and s['max_loss_per_contract'] <= risk_cap]
@@ -2269,6 +2355,386 @@ def generate_hourly_histogram(results: List[Dict], output_path: str, output_tz):
 
 
 # ============================================================================
+# SCALE-IN ANALYSIS FUNCTIONS
+# ============================================================================
+
+async def analyze_scale_in_trade(
+    db: StockQuestDB,
+    trading_date: datetime,
+    option_type: str,
+    prev_close: float,
+    current_close: float,
+    scale_in_config: ScaleInConfig,
+    logger: logging.Logger,
+    intraday_prices: Optional[List[Tuple[datetime, float]]] = None,
+) -> Dict[str, Any]:
+    """
+    Analyze a scale-in trade for a single day.
+
+    This function simulates the scale-in strategy for a single trading day,
+    tracking which layers get triggered based on price movements and
+    calculating the final P&L for all layers.
+
+    Args:
+        db: Database connection
+        trading_date: The trading date
+        option_type: 'put' or 'call'
+        prev_close: Previous day's closing price
+        current_close: Current day's closing price (EOD)
+        scale_in_config: Scale-in configuration
+        logger: Logger instance
+        intraday_prices: Optional list of (timestamp, price) tuples for intraday simulation
+
+    Returns:
+        Dictionary with trade state and summary
+    """
+    # Initialize the trade with all layer positions
+    trade_state = initialize_scale_in_trade(
+        trading_date=trading_date,
+        option_type=option_type,
+        prev_close=prev_close,
+        config=scale_in_config,
+        initial_credit_estimate=3.50,  # Conservative estimate
+        logger=logger
+    )
+
+    # If we have intraday prices, simulate price updates to trigger layers
+    if intraday_prices:
+        for price_time, price in intraday_prices:
+            trade_state, new_layer_triggered = process_price_update(
+                trade_state=trade_state,
+                current_price=price,
+                current_time=price_time,
+                config=scale_in_config,
+                logger=logger
+            )
+
+            if new_layer_triggered:
+                logger.debug(f"Layer triggered at {price_time}: price={price:.2f}")
+    else:
+        # Without intraday prices, check if layers would have been triggered by EOD price
+        # This is a simplified simulation - just check if price breached each layer
+        layers = scale_in_config.get_layers(option_type)
+
+        for layer_config in layers:
+            layer_position = trade_state.get_layer(layer_config.level)
+            if layer_position is None:
+                continue
+
+            # Skip L1 as it's always triggered at entry
+            if layer_config.trigger == 'entry':
+                continue
+
+            # Check if previous layer was breached by EOD price
+            prev_layer_num = layer_config.level - 1
+            prev_layer = trade_state.get_layer(prev_layer_num)
+
+            if prev_layer and prev_layer.triggered:
+                # Check if EOD price breached the previous layer
+                if check_breach(option_type, prev_layer.short_strike, current_close):
+                    # Trigger this layer
+                    layer_position.triggered = True
+                    layer_position.entry_time = trading_date
+                    trade_state.current_layer = layer_config.level
+                    logger.debug(
+                        f"Layer {layer_config.level} triggered (EOD breach): "
+                        f"price={current_close:.2f}, L{prev_layer_num} strike={prev_layer.short_strike:.2f}"
+                    )
+
+    # Calculate P&L for all triggered layers
+    trade_state = calculate_layered_pnl(
+        trade_state=trade_state,
+        close_price=current_close,
+        close_time=trading_date
+    )
+
+    # Generate summary
+    # Calculate what single-entry P&L would have been for comparison
+    single_entry_pnl = None
+    l1 = trade_state.get_layer(1)
+    if l1 and l1.triggered and l1.actual_pnl_total is not None:
+        # Estimate single-entry P&L as if all capital was in L1
+        # Scale up L1 P&L based on capital ratio
+        l1_capital_ratio = 0.40  # L1 typically gets 40%
+        single_entry_pnl = l1.actual_pnl_total / l1_capital_ratio
+
+    summary = generate_scale_in_summary(trade_state, single_entry_pnl)
+
+    return {
+        'trade_state': trade_state,
+        'summary': summary,
+        'formatted': format_scale_in_result(summary)
+    }
+
+
+def aggregate_scale_in_results(
+    scale_in_results: List[Dict[str, Any]],
+    output_tz=None
+) -> Dict[str, Any]:
+    """
+    Aggregate scale-in results across multiple trading days.
+
+    Args:
+        scale_in_results: List of scale-in trade results
+        output_tz: Output timezone for date formatting
+
+    Returns:
+        Aggregated statistics dictionary
+    """
+    if not scale_in_results:
+        return {
+            'total_trades': 0,
+            'total_capital_deployed': 0.0,
+            'total_initial_credit': 0.0,
+            'total_actual_pnl': 0.0,
+            'win_rate': 0.0,
+            'avg_layers_triggered': 0.0,
+            'avg_layers_breached': 0.0,
+            'total_recovery_amount': 0.0,
+            'avg_recovery_pct': 0.0,
+        }
+
+    total_trades = len(scale_in_results)
+    total_capital_deployed = 0.0
+    total_initial_credit = 0.0
+    total_actual_pnl = 0.0
+    total_layers_triggered = 0
+    total_layers_breached = 0
+    winning_trades = 0
+    total_recovery_amount = 0.0
+    recovery_count = 0
+
+    # Per-layer statistics
+    layer_stats = {1: {'triggered': 0, 'breached': 0, 'pnl': 0.0},
+                   2: {'triggered': 0, 'breached': 0, 'pnl': 0.0},
+                   3: {'triggered': 0, 'breached': 0, 'pnl': 0.0}}
+
+    for result in scale_in_results:
+        summary = result['summary']
+
+        total_capital_deployed += summary.get('total_capital_deployed', 0.0)
+        total_initial_credit += summary.get('total_initial_credit', 0.0)
+
+        pnl = summary.get('total_actual_pnl')
+        if pnl is not None:
+            total_actual_pnl += pnl
+            if pnl > 0:
+                winning_trades += 1
+
+        total_layers_triggered += summary.get('num_layers_triggered', 0)
+        total_layers_breached += summary.get('num_layers_breached', 0)
+
+        # Track recovery
+        if 'recovery_vs_single' in summary:
+            recovery = summary['recovery_vs_single']
+            total_recovery_amount += recovery.get('recovery_amount', 0.0)
+            recovery_count += 1
+
+        # Per-layer stats
+        for layer in summary.get('layers', []):
+            level = layer.get('level', 0)
+            if level in layer_stats:
+                if layer.get('triggered'):
+                    layer_stats[level]['triggered'] += 1
+                if layer.get('breach_detected'):
+                    layer_stats[level]['breached'] += 1
+                if layer.get('actual_pnl') is not None:
+                    layer_stats[level]['pnl'] += layer['actual_pnl']
+
+    testable_trades = total_trades
+    win_rate = (winning_trades / testable_trades * 100) if testable_trades > 0 else 0
+    avg_layers_triggered = total_layers_triggered / total_trades if total_trades > 0 else 0
+    avg_layers_breached = total_layers_breached / total_trades if total_trades > 0 else 0
+    avg_recovery_pct = (total_recovery_amount / recovery_count) if recovery_count > 0 else 0
+
+    # Calculate ROI
+    roi = (total_actual_pnl / total_capital_deployed * 100) if total_capital_deployed > 0 else 0
+
+    return {
+        'total_trades': total_trades,
+        'winning_trades': winning_trades,
+        'losing_trades': testable_trades - winning_trades,
+        'win_rate': round(win_rate, 2),
+        'total_capital_deployed': round(total_capital_deployed, 2),
+        'total_initial_credit': round(total_initial_credit, 2),
+        'total_actual_pnl': round(total_actual_pnl, 2),
+        'roi': round(roi, 2),
+        'avg_layers_triggered': round(avg_layers_triggered, 2),
+        'avg_layers_breached': round(avg_layers_breached, 2),
+        'total_recovery_amount': round(total_recovery_amount, 2),
+        'avg_recovery_pct': round(avg_recovery_pct, 2),
+        'recovery_count': recovery_count,
+        'layer_stats': layer_stats,
+    }
+
+
+def print_scale_in_statistics(
+    aggregate_stats: Dict[str, Any],
+    scale_in_results: List[Dict[str, Any]],
+    scale_in_config: ScaleInConfig,
+    comparison_results: Optional[List[Dict]] = None,
+    summary_only: bool = False
+):
+    """
+    Print comprehensive scale-in statistics.
+
+    Args:
+        aggregate_stats: Aggregated statistics from aggregate_scale_in_results
+        scale_in_results: List of individual trade results
+        scale_in_config: The scale-in configuration used
+        comparison_results: Optional standard (non-scale-in) results for comparison
+        summary_only: If True, only print summary statistics
+    """
+    print("\n" + "="*100)
+    print("SCALE-IN ON BREACH STRATEGY ANALYSIS")
+    print("="*100)
+
+    # Configuration summary
+    print(f"\nCONFIGURATION:")
+    print(f"  Total Capital: ${scale_in_config.total_capital:,.2f}")
+    print(f"  Spread Width: ${scale_in_config.spread_width:.2f}")
+    print(f"  Min Time Between Layers: {scale_in_config.min_time_between_layers_minutes} minutes")
+
+    # PUT layers
+    print(f"\n  PUT Layers:")
+    for layer in scale_in_config.put_layers:
+        print(f"    L{layer.level}: {layer.percent_beyond*100:.2f}% beyond | "
+              f"{layer.capital_pct*100:.0f}% capital | Trigger: {layer.trigger}")
+
+    # CALL layers
+    print(f"\n  CALL Layers:")
+    for layer in scale_in_config.call_layers:
+        print(f"    L{layer.level}: {layer.percent_beyond*100:.2f}% beyond | "
+              f"{layer.capital_pct*100:.0f}% capital | Trigger: {layer.trigger}")
+
+    # Overall statistics
+    print(f"\nOVERALL STATISTICS:")
+    print(f"  Total Trades: {aggregate_stats['total_trades']}")
+    print(f"  Winning Trades: {aggregate_stats['winning_trades']}")
+    print(f"  Losing Trades: {aggregate_stats['losing_trades']}")
+    print(f"  Win Rate: {aggregate_stats['win_rate']:.1f}%")
+    print(f"  Total Capital Deployed: ${aggregate_stats['total_capital_deployed']:,.2f}")
+    print(f"  Total Initial Credit: ${aggregate_stats['total_initial_credit']:,.2f}")
+
+    pnl = aggregate_stats['total_actual_pnl']
+    pnl_str = f"${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+    print(f"  Total P&L: {pnl_str}")
+    print(f"  ROI: {aggregate_stats['roi']:+.2f}%")
+
+    # Layer-by-layer breakdown
+    print(f"\nLAYER BREAKDOWN:")
+    print(f"  Avg Layers Triggered: {aggregate_stats['avg_layers_triggered']:.2f}")
+    print(f"  Avg Layers Breached: {aggregate_stats['avg_layers_breached']:.2f}")
+
+    layer_stats = aggregate_stats.get('layer_stats', {})
+    print(f"\n  {'Layer':<8} {'Triggered':<12} {'Breached':<12} {'P&L':<15}")
+    print(f"  {'-'*8} {'-'*12} {'-'*12} {'-'*15}")
+
+    for level in [1, 2, 3]:
+        stats = layer_stats.get(level, {})
+        triggered = stats.get('triggered', 0)
+        breached = stats.get('breached', 0)
+        pnl = stats.get('pnl', 0)
+        pnl_str = f"${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+        print(f"  L{level:<7} {triggered:<12} {breached:<12} {pnl_str:<15}")
+
+    # Recovery statistics
+    if aggregate_stats.get('recovery_count', 0) > 0:
+        print(f"\nRECOVERY ANALYSIS:")
+        print(f"  Trades with Recovery: {aggregate_stats['recovery_count']}")
+        print(f"  Total Recovery Amount: ${aggregate_stats['total_recovery_amount']:,.2f}")
+        print(f"  Avg Recovery per Trade: ${aggregate_stats['total_recovery_amount']/aggregate_stats['recovery_count']:,.2f}")
+
+    # Comparison with single-entry strategy (if available)
+    if comparison_results:
+        print(f"\nCOMPARISON WITH SINGLE-ENTRY STRATEGY:")
+
+        # Calculate single-entry metrics
+        single_total_credits = 0
+        single_total_gains = 0
+        single_total_losses = 0
+        single_winning = 0
+        single_total = 0
+
+        for result in comparison_results:
+            backtest_result = result.get('backtest_successful')
+            credit = result['best_spread'].get('total_credit') or result['best_spread'].get('net_credit_per_contract', 0)
+            max_loss = result['best_spread'].get('total_max_loss') or result['best_spread'].get('max_loss_per_contract', 0)
+
+            actual_pnl_per_share = result.get('actual_pnl_per_share')
+            num_contracts = result['best_spread'].get('num_contracts', 1)
+
+            if actual_pnl_per_share is not None and num_contracts:
+                actual_pnl = actual_pnl_per_share * num_contracts * 100
+            else:
+                actual_pnl = credit if backtest_result else -max_loss
+
+            single_total_credits += credit
+            single_total += 1
+
+            if backtest_result is True:
+                single_winning += 1
+                single_total_gains += actual_pnl if actual_pnl > 0 else credit
+            elif backtest_result is False:
+                single_total_losses += abs(actual_pnl) if actual_pnl < 0 else max_loss
+
+        single_net_pnl = single_total_gains - single_total_losses
+        single_win_rate = (single_winning / single_total * 100) if single_total > 0 else 0
+
+        print(f"  {'Metric':<30} {'Single-Entry':<20} {'Scale-In':<20} {'Difference':<15}")
+        print(f"  {'-'*30} {'-'*20} {'-'*20} {'-'*15}")
+        print(f"  {'Total Trades':<30} {single_total:<20} {aggregate_stats['total_trades']:<20} {'-':<15}")
+        print(f"  {'Win Rate':<30} {single_win_rate:.1f}%{'':<14} {aggregate_stats['win_rate']:.1f}%{'':<14} {aggregate_stats['win_rate'] - single_win_rate:+.1f}%")
+
+        single_pnl_str = f"${single_net_pnl:,.2f}" if single_net_pnl >= 0 else f"-${abs(single_net_pnl):,.2f}"
+        scale_pnl_str = f"${aggregate_stats['total_actual_pnl']:,.2f}" if aggregate_stats['total_actual_pnl'] >= 0 else f"-${abs(aggregate_stats['total_actual_pnl']):,.2f}"
+        diff_pnl = aggregate_stats['total_actual_pnl'] - single_net_pnl
+        diff_pnl_str = f"${diff_pnl:+,.2f}"
+
+        print(f"  {'Net P&L':<30} {single_pnl_str:<20} {scale_pnl_str:<20} {diff_pnl_str:<15}")
+
+        if single_total_losses > 0:
+            single_total_str = f"${single_total_losses:,.2f}"
+            scale_losses = aggregate_stats.get('total_actual_pnl', 0)
+            if scale_losses < 0:
+                scale_total_losses = abs(scale_losses)
+            else:
+                scale_total_losses = 0
+            scale_total_str = f"${scale_total_losses:,.2f}"
+
+            recovery = single_total_losses - scale_total_losses
+            recovery_pct = (recovery / single_total_losses * 100) if single_total_losses > 0 else 0
+
+            print(f"  {'Total Losses':<30} {single_total_str:<20} {scale_total_str:<20} {recovery_pct:.1f}% saved")
+
+    # Individual trade details (unless summary_only)
+    if not summary_only and scale_in_results:
+        print(f"\nINDIVIDUAL TRADE DETAILS:")
+        print("-"*100)
+
+        for i, result in enumerate(scale_in_results[:20], 1):  # Limit to first 20
+            summary = result['summary']
+            print(f"\n{i}. Date: {summary['trading_date']}, Type: {summary['option_type'].upper()}")
+            print(f"   Prev Close: ${summary['prev_close']:,.2f}")
+            print(f"   Layers Triggered: {summary['num_layers_triggered']}, Breached: {summary['num_layers_breached']}")
+            print(f"   Capital: ${summary['total_capital_deployed']:,.2f}, Credit: ${summary['total_initial_credit']:,.2f}")
+
+            pnl = summary.get('total_actual_pnl')
+            if pnl is not None:
+                pnl_str = f"${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+                print(f"   P&L: {pnl_str}")
+
+            if 'recovery_vs_single' in summary:
+                recovery = summary['recovery_vs_single']
+                print(f"   Recovery: ${recovery['recovery_amount']:,.2f} ({recovery['recovery_pct']:.1f}%)")
+
+        if len(scale_in_results) > 20:
+            print(f"\n... and {len(scale_in_results) - 20} more trades")
+
+    print("\n" + "="*100)
+
+
+# ============================================================================
 # DATA CACHE FUNCTIONS
 # ============================================================================
 
@@ -2410,7 +2876,14 @@ def _generate_combinations(grid_params: dict) -> List[dict]:
 
 def _combo_to_key(combo: dict) -> tuple:
     """Create a hashable key from a parameter combination."""
-    return tuple(sorted(combo.items()))
+    # Convert dict/list values to JSON strings for hashability
+    hashable_items = []
+    for k, v in sorted(combo.items()):
+        if isinstance(v, (dict, list)):
+            hashable_items.append((k, json.dumps(v, sort_keys=True)))
+        else:
+            hashable_items.append((k, v))
+    return tuple(hashable_items)
 
 
 def _load_existing_grid_results(csv_path: str) -> set:
@@ -2426,6 +2899,8 @@ def _load_existing_grid_results(csv_path: str) -> set:
             'min_contract_price', 'max_credit_width_ratio',
             'max_strike_distance_pct', 'min_trading_hour', 'max_trading_hour',
             'profit_target_pct', 'min_premium_diff', 'min_premium_diff_put', 'min_premium_diff_call',
+            'max_short_delta', 'min_short_delta', 'max_long_delta', 'min_long_delta',
+            'delta_range', 'require_delta', 'delta_default_iv', 'use_vix1d',
         ]
         for row in reader:
             combo = {}
@@ -2570,6 +3045,42 @@ async def run_backtest_with_params(
             params.get('max_spread_width_call', 200)
         )
 
+    # Parse dynamic_spread_width config if provided
+    dynamic_width_config = None
+    dynamic_width_raw = params.get('dynamic_spread_width')
+    if dynamic_width_raw:
+        from credit_spread_utils.dynamic_width_utils import DynamicWidthConfig
+        if isinstance(dynamic_width_raw, dict):
+            dynamic_width_config = DynamicWidthConfig.from_dict(dynamic_width_raw)
+        elif isinstance(dynamic_width_raw, str):
+            from credit_spread_utils.dynamic_width_utils import parse_dynamic_width_config
+            dynamic_width_config = parse_dynamic_width_config(dynamic_width_raw)
+
+    # Build delta filter config if any delta params are provided
+    delta_filter_config = None
+    if any(params.get(k) is not None for k in ['max_short_delta', 'min_short_delta', 'max_long_delta',
+                                                 'min_long_delta', 'delta_range']) or params.get('require_delta'):
+        # Parse delta_range if provided (overrides min/max_short_delta)
+        min_short_delta = params.get('min_short_delta')
+        max_short_delta = params.get('max_short_delta')
+        if params.get('delta_range'):
+            parsed_min, parsed_max = parse_delta_range(params['delta_range'])
+            if parsed_min is not None:
+                min_short_delta = parsed_min
+            if parsed_max is not None:
+                max_short_delta = parsed_max
+
+        delta_filter_config = DeltaFilterConfig(
+            max_short_delta=max_short_delta,
+            min_short_delta=min_short_delta,
+            max_long_delta=params.get('max_long_delta'),
+            min_long_delta=params.get('min_long_delta'),
+            require_delta=params.get('require_delta', False),
+            default_iv=params.get('delta_default_iv', 0.20),
+            use_vix1d=params.get('use_vix1d', False),
+            vix1d_dir=params.get('vix1d_dir', '../equities_output/I:VIX1D'),
+        )
+
     for interval_time, interval_df in interval_groups:
         for opt_type in option_types:
             # Construct min_premium_diff tuple from separate put/call keys or fallback to single value
@@ -2628,6 +3139,8 @@ async def run_backtest_with_params(
                 params.get('output_tz'),
                 params.get('force_close_hour'),
                 min_premium_diff,
+                dynamic_width_config,
+                delta_filter_config,
             )
             if result:
                 results.append(result)
@@ -2991,10 +3504,10 @@ RUN_INTERVAL_MARKET_OPEN = 300  # 5 minutes when market is open
 RUN_INTERVAL_MARKET_CLOSED = 3600  # 1 hour when market is closed
 
 
-async def run_continuous_analysis(args, csv_paths, percent_beyond, max_spread_width, option_types_to_analyze, output_tz, logger, min_premium_diff=None):
+async def run_continuous_analysis(args, csv_paths, percent_beyond, max_spread_width, option_types_to_analyze, output_tz, logger, min_premium_diff=None, delta_filter_config=None):
     """
     Continuously run credit spread analysis with intelligent interval management.
-    
+
     The function optimizes run intervals based on:
     - The wait time specified in --continuous (default: 10 seconds)
     - Market hours awareness (if enabled), with transition-aware scheduling
@@ -3002,20 +3515,20 @@ async def run_continuous_analysis(args, csv_paths, percent_beyond, max_spread_wi
     """
     # Get wait time from --continuous (defaults to 10.0 seconds)
     wait_time = args.continuous if args.continuous is not None else 10.0
-    
+
     print(f"Starting continuous credit spread analysis (wait time: {wait_time}s)...")
     print(f"Max runs: {args.continuous_max_runs if args.continuous_max_runs else 'unlimited'}")
-    
+
     run_count = 0
     last_run_duration = 0  # Track how long the last run took
     was_market_open = None  # Track previous market state to detect transitions
-    
+
     # Store the original main function logic in a callable
     async def run_single_analysis():
         """Run a single analysis iteration."""
         return await _run_single_analysis_iteration(
-            args, csv_paths, percent_beyond, max_spread_width, 
-            option_types_to_analyze, output_tz, logger, min_premium_diff
+            args, csv_paths, percent_beyond, max_spread_width,
+            option_types_to_analyze, output_tz, logger, min_premium_diff, delta_filter_config
         )
     
     while True:
@@ -3139,7 +3652,7 @@ async def run_continuous_analysis(args, csv_paths, percent_beyond, max_spread_wi
     print(f"Continuous analysis stopped after {run_count} runs.")
 
 
-async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_spread_width, option_types_to_analyze, output_tz, logger, min_premium_diff=None):
+async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_spread_width, option_types_to_analyze, output_tz, logger, min_premium_diff=None, delta_filter_config=None):
     """
     Run a single iteration of the analysis.
     This extracts the main analysis logic so it can be called repeatedly in continuous mode.
@@ -3259,8 +3772,14 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
 
         # Initialize database
         logger.info("Initializing database connection...")
+        # If db_path is None, check environment variables or use empty string
+        # QuestDBConnection doesn't handle None properly (calls .startswith() on None)
+        if args.db_path:
+            db_config = args.db_path
+        else:
+            db_config = os.getenv('QUESTDB_CONNECTION_STRING', '') or os.getenv('QUESTDB_URL', '')
         db = StockQuestDB(
-            args.db_path if args.db_path else None,
+            db_config,
             enable_cache=not args.no_cache,
             logger=logger
         )
@@ -3329,12 +3848,14 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
                         args.profit_target_pct,
                         output_tz,
                         args.force_close_hour,
-                        min_premium_diff
+                        min_premium_diff,
+                        None,  # dynamic_width_config
+                        delta_filter_config,
                     )
                     if result:
                         results.append(result)
 
-            # Apply capital limit filter (accounts for position lifecycle)
+            # Apply capital limit filter (accounts for position lifecycle) [single analysis iteration]
             if args.max_live_capital is not None:
                 original_count = len(results)
                 results = filter_results_by_capital_limit(
@@ -3347,7 +3868,7 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
                     f"Capital limit filter: {original_count} -> {len(results)} positions "
                     f"(max ${args.max_live_capital:,.2f} per day)"
                 )
-                
+
                 # Calculate and log final capital usage
                 daily_capital_usage = {}
                 for result in results:
@@ -3639,10 +4160,26 @@ async def main():
     if args.use_market_hours and args.continuous is None:
         print("Error: --use-market-hours requires --continuous mode to be enabled")
         return 1
-    
+
     if args.run_once_before_wait and args.continuous is None:
         print("Error: --run-once-before-wait requires --continuous mode to be enabled")
         return 1
+
+    # Validate scale-in arguments
+    if args.scale_in_enabled and not args.scale_in_config:
+        print("Error: --scale-in-enabled requires --scale-in-config to specify a configuration file")
+        return 1
+
+    # Load scale-in configuration if provided
+    scale_in_config = None
+    if args.scale_in_config:
+        try:
+            scale_in_config = load_scale_in_config(args.scale_in_config)
+            if args.scale_in_enabled:
+                print(f"Scale-in strategy enabled with config: {args.scale_in_config}")
+        except ValueError as e:
+            print(f"Error: {e}")
+            return 1
 
     try:
         output_tz = resolve_timezone(args.output_timezone)
@@ -3674,6 +4211,39 @@ async def main():
         except ValueError as e:
             print(f"Error: {e}")
             return 1
+
+    # Build delta filter config from CLI arguments
+    delta_filter_config = None
+    delta_filtering_active = (
+        args.max_short_delta is not None or
+        args.min_short_delta is not None or
+        args.max_long_delta is not None or
+        args.min_long_delta is not None or
+        args.delta_range is not None or
+        args.require_delta
+    )
+    if delta_filtering_active:
+        # Parse delta_range if provided (overrides min/max_short_delta)
+        min_short_delta = args.min_short_delta
+        max_short_delta = args.max_short_delta
+        if args.delta_range:
+            parsed_min, parsed_max = parse_delta_range(args.delta_range)
+            if parsed_min is not None:
+                min_short_delta = parsed_min
+            if parsed_max is not None:
+                max_short_delta = parsed_max
+
+        delta_filter_config = DeltaFilterConfig(
+            max_short_delta=max_short_delta,
+            min_short_delta=min_short_delta,
+            max_long_delta=args.max_long_delta,
+            min_long_delta=args.min_long_delta,
+            require_delta=args.require_delta,
+            default_iv=args.delta_default_iv,
+            use_vix1d=args.use_vix1d,
+            vix1d_dir=args.vix1d_dir,
+        )
+        logger.info(format_delta_filter_info(delta_filter_config))
 
     # Determine CSV file paths
     if args.csv_dir:
@@ -3732,13 +4302,13 @@ async def main():
                 if args.run_once_before_wait:
                     # Run once immediately before waiting
                     print(f"Market is closed. Running once immediately before waiting for market open...")
-                    
+
                     # Run a single analysis iteration
                     await _run_single_analysis_iteration(
                         args, csv_paths, percent_beyond, max_spread_width,
-                        option_types_to_analyze, output_tz, logger, min_premium_diff
+                        option_types_to_analyze, output_tz, logger, min_premium_diff, delta_filter_config
                     )
-                    
+
                     # Now wait for market open
                     hours_to_wait = seconds_to_open / 3600
                     print(f"One-time run completed. Waiting {hours_to_wait:.2f} hours ({seconds_to_open:.0f} seconds) until market opens...")
@@ -3781,7 +4351,7 @@ async def main():
         # Start continuous analysis
         await run_continuous_analysis(
             args, csv_paths, percent_beyond, max_spread_width,
-            option_types_to_analyze, output_tz, logger, min_premium_diff
+            option_types_to_analyze, output_tz, logger, min_premium_diff, delta_filter_config
         )
         return 0
     
@@ -3887,8 +4457,14 @@ async def main():
 
         # Initialize database
         logger.info("Initializing database connection...")
+        # If db_path is None, check environment variables or use empty string
+        # QuestDBConnection doesn't handle None properly (calls .startswith() on None)
+        if args.db_path:
+            db_config = args.db_path
+        else:
+            db_config = os.getenv('QUESTDB_CONNECTION_STRING', '') or os.getenv('QUESTDB_URL', '')
         db = StockQuestDB(
-            args.db_path if args.db_path else None,
+            db_config,
             enable_cache=not args.no_cache,
             logger=logger
         )
@@ -3957,12 +4533,14 @@ async def main():
                         args.profit_target_pct,
                         output_tz,
                         args.force_close_hour,
-                        min_premium_diff
+                        min_premium_diff,
+                        None,  # dynamic_width_config (not used in main, only in grid search)
+                        delta_filter_config,
                     )
                     if result:
                         results.append(result)
 
-            # Apply capital limit filter (accounts for position lifecycle)
+            # Apply capital limit filter (accounts for position lifecycle) [main]
             if args.max_live_capital is not None:
                 original_count = len(results)
                 results = filter_results_by_capital_limit(
@@ -4445,7 +5023,99 @@ async def main():
     # Print trading statistics for multi-file analysis
     if results and len(csv_paths) > 1:
         print_trading_statistics(results, output_tz, len(csv_paths))
-    
+
+    # Scale-in analysis (if enabled)
+    if args.scale_in_enabled and scale_in_config and results:
+        print("\n" + "="*100)
+        print("Running Scale-In on Breach Strategy Analysis...")
+        print("="*100)
+
+        # Group results by date and option type for scale-in analysis
+        from collections import defaultdict
+        results_by_date = defaultdict(lambda: {'put': [], 'call': []})
+
+        for result in results:
+            timestamp = result['timestamp']
+            if hasattr(timestamp, 'date'):
+                trading_date = timestamp.date()
+            else:
+                trading_date = pd.to_datetime(timestamp).date()
+
+            opt_type = result.get('option_type', 'unknown').lower()
+            if opt_type in ['put', 'call']:
+                results_by_date[trading_date][opt_type].append(result)
+
+        # Initialize database for scale-in analysis (need prices)
+        # If db_path is None, check environment variables or use empty string
+        if args.db_path:
+            scale_in_db_config = args.db_path
+        else:
+            scale_in_db_config = os.getenv('QUESTDB_CONNECTION_STRING', '') or os.getenv('QUESTDB_URL', '')
+        db = StockQuestDB(
+            scale_in_db_config,
+            enable_cache=not args.no_cache,
+            logger=logger
+        )
+
+        try:
+            scale_in_results = []
+
+            for trading_date, type_results in sorted(results_by_date.items()):
+                for opt_type in ['put', 'call']:
+                    day_results = type_results[opt_type]
+                    if not day_results:
+                        continue
+
+                    # Get prev_close and current_close from the first result
+                    first_result = day_results[0]
+                    prev_close = first_result.get('prev_close')
+                    current_close = first_result.get('current_close')
+
+                    if prev_close is None or current_close is None:
+                        logger.debug(f"Skipping {trading_date} {opt_type}: missing price data")
+                        continue
+
+                    # Create datetime for trading_date
+                    trading_datetime = datetime.combine(trading_date, datetime.min.time())
+                    if output_tz:
+                        try:
+                            trading_datetime = output_tz.localize(trading_datetime)
+                        except AttributeError:
+                            trading_datetime = trading_datetime.replace(tzinfo=output_tz)
+
+                    # Analyze scale-in trade for this day
+                    try:
+                        scale_in_result = await analyze_scale_in_trade(
+                            db=db,
+                            trading_date=trading_datetime,
+                            option_type=opt_type,
+                            prev_close=prev_close,
+                            current_close=current_close,
+                            scale_in_config=scale_in_config,
+                            logger=logger,
+                            intraday_prices=None  # We don't have intraday prices in backtest mode
+                        )
+                        scale_in_results.append(scale_in_result)
+                    except Exception as e:
+                        logger.warning(f"Error analyzing scale-in for {trading_date} {opt_type}: {e}")
+                        continue
+
+            # Aggregate and print scale-in statistics
+            if scale_in_results:
+                aggregate_stats = aggregate_scale_in_results(scale_in_results, output_tz)
+                print_scale_in_statistics(
+                    aggregate_stats=aggregate_stats,
+                    scale_in_results=scale_in_results,
+                    scale_in_config=scale_in_config,
+                    comparison_results=results,
+                    summary_only=getattr(args, 'scale_in_summary_only', False)
+                )
+            else:
+                print("No scale-in trades could be analyzed (missing price data)")
+
+        finally:
+            await db.close()
+
     # Generate histogram if requested and we have multiple files
     if args.histogram and results and len(csv_paths) > 1:
         print("\nGenerating hourly analysis histogram...")
@@ -4454,7 +5124,7 @@ async def main():
         print("\nNote: Histogram generation is most useful with multiple input files.")
         if results:
             generate_hourly_histogram(results, args.histogram_output, output_tz)
-    
+
     return 0
 
 

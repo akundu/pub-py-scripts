@@ -101,6 +101,18 @@ def _add_filter_args(parser: argparse.ArgumentParser):
         default=None,
         help="Minimum premium price difference between short and long side (net credit). Can be a single value (e.g., 0.50) or two values for puts:calls (e.g., 0.30:0.50). Filters out spreads with insufficient premium difference. Example: --min-premium-diff 0.50 requires at least $0.50 net credit per share."
     )
+    parser.add_argument(
+        "--dynamic-spread-width",
+        type=str,
+        default=None,
+        help="Enable dynamic spread width based on strike distance from previous close. "
+             "Can be a JSON string or path to JSON config file. "
+             "Example: '{\"mode\": \"linear\", \"base_width\": 20, \"slope_factor\": 1000}' "
+             "Modes: 'linear' (width = base + distance_pct * slope), "
+             "'stepped' (lookup table with thresholds), 'formula' (custom expression). "
+             "When enabled, max-spread-width becomes the ceiling. "
+             "Wider spreads for further OTM positions capture more premium at safer distances."
+    )
 
 
 def _add_trading_args(parser: argparse.ArgumentParser):
@@ -320,6 +332,101 @@ def _add_rate_limit_args(parser: argparse.ArgumentParser):
     )
 
 
+def _add_scale_in_args(parser: argparse.ArgumentParser):
+    """Add scale-in strategy arguments."""
+    parser.add_argument(
+        "--scale-in-config",
+        type=str,
+        default=None,
+        help="Path to JSON config file for scale-in on breach strategy. "
+             "The config defines layered entry levels that trigger when previous layers are breached. "
+             "Example: scale_in_config_ndx.json"
+    )
+    parser.add_argument(
+        "--scale-in-enabled",
+        action="store_true",
+        help="Enable scale-in on breach strategy. Requires --scale-in-config. "
+             "When enabled, positions are entered in layers: L1 at entry, L2 when L1 breached, etc. "
+             "This strategy reduces average losses by 23-68%% compared to single entry."
+    )
+    parser.add_argument(
+        "--scale-in-summary-only",
+        action="store_true",
+        help="When using scale-in strategy, only show aggregate summary statistics "
+             "instead of individual layer details."
+    )
+
+
+def _add_delta_filter_args(parser: argparse.ArgumentParser):
+    """Add delta-based filtering arguments."""
+    parser.add_argument(
+        "--max-short-delta",
+        type=float,
+        default=None,
+        help="Maximum absolute delta for short leg (e.g., 0.15 = 15 delta). "
+             "Filters out spreads where short leg delta exceeds this value. "
+             "Lower delta = further OTM = lower probability of being ITM at expiration."
+    )
+    parser.add_argument(
+        "--min-short-delta",
+        type=float,
+        default=None,
+        help="Minimum absolute delta for short leg (e.g., 0.05 = 5 delta). "
+             "Filters out spreads where short leg delta is below this value. "
+             "Ensures spreads have sufficient premium (very low delta = low premium)."
+    )
+    parser.add_argument(
+        "--max-long-delta",
+        type=float,
+        default=None,
+        help="Maximum absolute delta for long leg. Rarely needed since long leg "
+             "is typically further OTM than short leg."
+    )
+    parser.add_argument(
+        "--min-long-delta",
+        type=float,
+        default=None,
+        help="Minimum absolute delta for long leg. Rarely needed."
+    )
+    parser.add_argument(
+        "--delta-range",
+        type=str,
+        default=None,
+        help="Shorthand for min/max short delta range. Format: 'MIN-MAX' (e.g., '0.05-0.20' for 5-20 delta). "
+             "Can also specify just max: '0.15' means max 15 delta. "
+             "Overrides --min-short-delta and --max-short-delta if both are specified."
+    )
+    parser.add_argument(
+        "--require-delta",
+        action="store_true",
+        help="Skip spreads where delta cannot be determined. By default, spreads "
+             "with unknown delta are included. Use this to require delta calculation."
+    )
+    parser.add_argument(
+        "--delta-default-iv",
+        type=float,
+        default=0.20,
+        help="Default IV for Black-Scholes delta calculation when option IV is unavailable "
+             "and VIX1D is not used. Default: 0.20 (20%%). "
+             "This is the fallback IV used for delta estimation."
+    )
+    parser.add_argument(
+        "--vix1d-dir",
+        type=str,
+        default="../equities_output/I:VIX1D",
+        help="Directory containing VIX1D CSV files for IV lookup. "
+             "Files should be named I:VIX1D_equities_YYYY-MM-DD.csv. "
+             "Default: ../equities_output/I:VIX1D"
+    )
+    parser.add_argument(
+        "--use-vix1d",
+        action="store_true",
+        help="Use VIX1D for IV in Black-Scholes delta calculation instead of default IV. "
+             "VIX1D provides 1-day expected volatility which is more accurate for 0DTE options. "
+             "Requires VIX1D data files in --vix1d-dir."
+    )
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments.
 
@@ -337,5 +444,7 @@ def parse_args() -> argparse.Namespace:
     _add_output_args(parser)
     _add_advanced_args(parser)
     _add_rate_limit_args(parser)
+    _add_scale_in_args(parser)
+    _add_delta_filter_args(parser)
 
     return parser.parse_args()

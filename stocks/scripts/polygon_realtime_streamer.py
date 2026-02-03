@@ -34,7 +34,7 @@ Usage Examples:
     python polygon_realtime_streamer.py --symbols-list symbols.yaml --feed quotes --symbols-per-connection 5 --market stocks
 
     # Stream S&P 500 symbols (trades only) to remote database server
-    python polygon_realtime_streamer.py --types sp500 --feed trades --db-server localhost:8080 --market stocks
+    python polygon_realtime_streamer.py --types sp500 --feed trades --db-path localhost:8080 --market stocks
 """
 
 import os
@@ -47,6 +47,7 @@ import time
 import yaml
 import json
 from pathlib import Path
+from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta, date
 from typing import List, Dict, Set, Optional, Tuple
 import pandas as pd
@@ -97,6 +98,8 @@ logger = logging.getLogger(__name__)
 
 class DatabaseClient:
     """Client for sending data to the database server via HTTP."""
+    
+    _405_hint_logged = False  # class-level: log --no-db-write hint only once
     
     def __init__(self, server_url: str, timeout: float = 30.0):
         self.server_url = server_url
@@ -151,6 +154,11 @@ class DatabaseClient:
                 else:
                     error_text = await response.text()
                     logger.error(f"HTTP error {response.status} for {symbol}: {error_text}")
+                    if response.status == 405 and not DatabaseClient._405_hint_logged:
+                        DatabaseClient._405_hint_logged = True
+                        logger.error(
+                            "DB server returned Method Not Allowed (405). Use --no-db-write for Redis-only mode."
+                        )
                     return False
         except Exception as e:
             logger.error(f"Error sending data for {symbol}: {e}")
@@ -195,7 +203,13 @@ class RedisPublisher:
         if self.redis_client:
             await self.redis_client.aclose()
             
-    async def publish_realtime_data(self, symbol: str, data_type: str, records: List[Dict]) -> bool:
+    async def publish_realtime_data(
+        self,
+        symbol: str,
+        data_type: str,
+        records: List[Dict],
+        source: str = "Polygon",
+    ) -> bool:
         """Publish realtime data to Redis channel."""
         if not self.available or not self.redis_client:
             return False
@@ -203,6 +217,9 @@ class RedisPublisher:
         try:
             # Channel format: realtime:{data_type}:{symbol}
             channel = f"realtime:{data_type}:{symbol}"
+            price_str = ""
+            if records and isinstance(records[0], dict) and "price" in records[0]:
+                price_str = f" source={source} price={records[0]['price']}"
             
             # Create message payload
             message = {
@@ -214,7 +231,9 @@ class RedisPublisher:
             
             # Publish to Redis channel
             await self.redis_client.publish(channel, json.dumps(message))
-            logger.info(f"[REDIS] Published {data_type} data for {symbol} to channel {channel} ({len(records)} records)")
+            logger.info(
+                f"[REDIS] Published {data_type} data for {symbol} to channel {channel} ({len(records)} records){price_str}"
+            )
             return True
             
         except Exception as e:
@@ -356,7 +375,8 @@ class PolygonStreamManager:
                  retry_delay: float = 5.0, batch_interval: float = 5.0,
                  fetch_interval: float = 600.0, db_server_host: str = "localhost", 
                  db_server_port: int = 9100, poll_interval: float = 15.0,
-                 poll_fallback_enabled: bool = True, poll_only: bool = False):
+                 poll_fallback_enabled: bool = True, poll_only: bool = False,
+                 print_data: bool = False):
         self.api_key = api_key
         self.db_client = db_client
         self.redis_publisher = redis_publisher
@@ -372,6 +392,7 @@ class PolygonStreamManager:
         self.poll_interval = poll_interval  # Interval for polling symbols with no stream updates (default: 15s)
         self.poll_fallback_enabled = poll_fallback_enabled
         self.poll_only = poll_only  # If True, no WebSocket connections; only periodic poll fallback
+        self.print_data = print_data  # If True, print raw Polygon data and built records to stdout
         
         # Determine which method to use (Redis preferred if available)
         self.use_redis = redis_publisher is not None and redis_publisher.available
@@ -1114,13 +1135,14 @@ class PolygonStreamManager:
         """
         Fetch current (live) price for symbol via fetch_symbol_data.get_current_price,
         publish to Redis as quote/trade records, and optionally save to the realtime
-        table via db_client (when --db-server is set) so data appears in the DB.
+        table via db_client (when --db-path is set) so data appears in the DB.
         """
         async with self._poll_semaphore:
             if shutdown_flag:
                 return
             try:
                 # Fetch live data only (no DB instance -> no save); uses Polygon/Yahoo last quote/trade
+                # Data source: Polygon API (last quote/trade via REST)
                 price_info = await get_current_price(
                     symbol,
                     data_source="polygon",
@@ -1130,6 +1152,23 @@ class PolygonStreamManager:
                 )
                 if not price_info or price_info.get("price") is None:
                     return
+                # Log what we got from Polygon (one line at INFO; full payload with --print-data)
+                bid = price_info.get("bid_price")
+                ask = price_info.get("ask_price")
+                price_val = price_info.get("price")
+                logger.info(
+                    "[POLL] Polygon data for %s: source=Polygon price=%s",
+                    symbol, price_val,
+                )
+                logger.debug("[POLL] %s bid=%s ask=%s", symbol, bid, ask)
+                if self.print_data:
+                    # Serialize for print (timestamps may be non-JSON-serializable)
+                    def _serialize(obj):
+                        if hasattr(obj, "isoformat"):
+                            return obj.isoformat()
+                        return str(obj)
+                    print(f"[POLL] {symbol} raw price_info from Polygon:")
+                    print(json.dumps({k: _serialize(v) for k, v in price_info.items()}, indent=2))
                 ts = price_info.get("timestamp")
                 if isinstance(ts, str):
                     ts_iso = ts
@@ -1147,6 +1186,9 @@ class PolygonStreamManager:
                     "ask_size": size,
                 }
                 trade_record = {"timestamp": ts_iso, "price": price, "size": size}
+                if self.print_data:
+                    print(f"[POLL] {symbol} built quote_record: {json.dumps(quote_record, indent=2)}")
+                    print(f"[POLL] {symbol} built trade_record: {json.dumps(trade_record, indent=2)}")
                 published = 0
                 # Publish to Redis (same shape as WebSocket)
                 if self.use_redis and self.redis_publisher:
@@ -1261,6 +1303,52 @@ async def get_all_symbols(args: argparse.Namespace) -> List[str]:
     
     return all_symbols
 
+def parse_db_path(db_path: str) -> Tuple[str, int]:
+    """Parse db-path into (host, port). Handles host:port and questdb:// (or postgresql://) URLs."""
+    if not db_path or not db_path.strip():
+        return "localhost", 8080
+    s = db_path.strip()
+    # questdb://user:pass@host:port/path or postgresql://... -> extract host and port for HTTP server
+    if s.startswith("questdb://"):
+        parsed = urlparse(s)
+        netloc = parsed.netloc  # user:pass@host:port
+        default_port = 8812  # QuestDB HTTP API
+        if "@" in netloc:
+            host_port = netloc.rsplit("@", 1)[1]
+        else:
+            host_port = netloc
+        if ":" in host_port:
+            host, port_str = host_port.rsplit(":", 1)
+            try:
+                return host.strip() or "localhost", int(port_str.strip())
+            except ValueError:
+                return host.strip() or "localhost", default_port
+        return host_port.strip() or "localhost", default_port
+    if s.startswith("postgresql://"):
+        parsed = urlparse(s)
+        netloc = parsed.netloc
+        default_port = 5432
+        if "@" in netloc:
+            host_port = netloc.rsplit("@", 1)[1]
+        else:
+            host_port = netloc
+        if ":" in host_port:
+            host, port_str = host_port.rsplit(":", 1)
+            try:
+                return host.strip() or "localhost", int(port_str.strip())
+            except ValueError:
+                return host.strip() or "localhost", default_port
+        return host_port.strip() or "localhost", default_port
+    # Plain host:port
+    if ":" in s:
+        host, port_str = s.rsplit(":", 1)
+        try:
+            return host.strip() or "localhost", int(port_str.strip())
+        except ValueError:
+            return host.strip() or "localhost", 8080
+    return s or "localhost", 8080
+
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -1333,19 +1421,12 @@ def parse_args():
         help='Number of symbols per WebSocket connection (default: 25)'
     )
     
-    # Database server configuration
+    # Database server configuration (same style as fetch_symbol_data.py --db-path)
     parser.add_argument(
-        '--db-server',
+        '--db-path',
         type=str,
         default='localhost:8080',
-        help='Database server address in host:port format (default: localhost:8080). Used as fallback if Redis is not available.'
-    )
-    
-    parser.add_argument(
-        '--db-timeout',
-        type=float,
-        default=30.0,
-        help='Database request timeout in seconds (default: 30.0)'
+        help='Database server address: host:port or questdb://user:pass@host:port/path (default: localhost:8080). Used for realtime table writes and periodic fetch trigger.'
     )
     
     parser.add_argument(
@@ -1363,7 +1444,7 @@ def parse_args():
     parser.add_argument(
         '--no-db-write',
         action='store_true',
-        help='Do not write to the realtime table (Redis only). When set, --db-server is not used for saving; use for Redis-only distribution.'
+        help='Do not write to the realtime table (Redis only). Use when publishing only to Redis (e.g. --poll-only) to avoid HTTP 405 from a server that does not accept POST /db_command.'
     )
     
     # Symbol loading options
@@ -1437,20 +1518,6 @@ def parse_args():
         help='Interval for triggering fetches for updated symbols in seconds (default: 600 = 10 minutes)'
     )
     
-    parser.add_argument(
-        '--db-server-host',
-        type=str,
-        default='localhost',
-        help='Database server hostname for periodic fetches (default: localhost)'
-    )
-    
-    parser.add_argument(
-        '--db-server-port',
-        type=int,
-        default=9100,
-        help='Database server port for periodic fetches (default: 9100)'
-    )
-    
     # Poll fallback: when a symbol gets no stream updates (e.g. I:SPX, I:NDX), fetch live price and feed to Redis
     parser.add_argument(
         '--poll-interval',
@@ -1474,6 +1541,11 @@ def parse_args():
         '--test-mode',
         type=int,
         help='Run in test mode for specified seconds (useful for testing)'
+    )
+    parser.add_argument(
+        '--print-data',
+        action='store_true',
+        help='Print raw Polygon data and built quote/trade records to stdout (poll path). Confirms data source and payload.'
     )
     
     return parser.parse_args()
@@ -1501,6 +1573,7 @@ async def _run_streaming(api_key: str, redis_publisher: Optional[RedisPublisher]
                         db_client: Optional[DatabaseClient], feed_types: List[str],
                         args: argparse.Namespace, all_symbols: List[str]):
     """Helper function to run streaming with given clients."""
+    db_host, db_port = parse_db_path(args.db_path)
     # Create stream manager with available clients
     stream_manager = PolygonStreamManager(
         api_key=api_key,
@@ -1513,11 +1586,12 @@ async def _run_streaming(api_key: str, redis_publisher: Optional[RedisPublisher]
         retry_delay=args.retry_delay,
         batch_interval=args.batch_interval,
         fetch_interval=args.fetch_interval,
-        db_server_host=args.db_server_host,
-        db_server_port=args.db_server_port,
+        db_server_host=db_host,
+        db_server_port=db_port,
         poll_interval=args.poll_interval,
         poll_fallback_enabled=args.poll_only or not args.no_poll_fallback,
         poll_only=args.poll_only,
+        print_data=args.print_data,
     )
     
     # Start statistics task
@@ -1618,7 +1692,8 @@ async def main():
     
     # Database client: used for saving to realtime table unless --no-db-write
     if not args.no_db_write:
-        db_client = DatabaseClient(args.db_server, args.db_timeout)
+        db_host, db_port = parse_db_path(args.db_path)
+        db_client = DatabaseClient(f"{db_host}:{db_port}", timeout=30.0)
     else:
         logger.info("DB write disabled (--no-db-write): data will not be saved to the realtime table")
     
