@@ -83,6 +83,18 @@ from credit_spread_utils.scale_in_utils import (
     check_breach,
     calculate_layer_pnl,
 )
+from credit_spread_utils.tiered_investment_utils import (
+    TieredInvestmentConfig,
+    TieredTradeState,
+    TierPosition,
+    initialize_tiered_trade,
+    calculate_all_tiers_pnl,
+    generate_tiered_summary,
+    aggregate_tiered_results,
+    print_tiered_statistics,
+    load_tiered_config,
+)
+from credit_spread_utils.price_utils import _get_close_from_csv
 
 # Re-export commonly used functions for backward compatibility
 from credit_spread_utils.timezone_utils import (
@@ -471,15 +483,37 @@ async def get_current_day_close_price(
                 return result
 
         if logger:
-            logger.debug(f"DEBUG get_current_day_close_price: No data found for {ticker} on {trading_day}")
+            logger.debug(f"DEBUG get_current_day_close_price: No data found in DB for {ticker} on {trading_day}, trying CSV fallback")
+        csv_close = _get_close_from_csv(ticker, trading_day, logger=logger)
+        if csv_close is not None:
+            result = (csv_close, trading_day)
+            _db_price_cache[cache_key] = result
+            return result
         _db_price_cache[cache_key] = None
         return None
     except Exception as e:
-        error_msg = f"Error getting current day close for {ticker}: {e}"
         if logger:
-            logger.error(error_msg)
-        else:
-            logging.error(error_msg)
+            logger.debug(f"DB unavailable for current day close {ticker}: {e}, trying CSV fallback")
+        try:
+            try:
+                from zoneinfo import ZoneInfo
+                et_tz = ZoneInfo("America/New_York")
+            except Exception:
+                import pytz
+                et_tz = pytz.timezone("America/New_York")
+            if reference_date.tzinfo is None:
+                pst = timezone(timedelta(hours=-8))
+                reference_date = reference_date.replace(tzinfo=pst)
+            trading_day = reference_date.astimezone(et_tz).date()
+            csv_close = _get_close_from_csv(ticker, trading_day, logger=logger)
+            if csv_close is not None:
+                result = (csv_close, trading_day)
+                _db_price_cache[cache_key] = result
+                return result
+        except Exception as csv_e:
+            if logger:
+                logger.debug(f"CSV fallback also failed for current day close {ticker}: {csv_e}")
+        _db_price_cache[cache_key] = None
         return None
 
 
@@ -596,15 +630,30 @@ async def get_previous_close_price(
                 return result
 
         if logger:
-            logger.debug(f"DEBUG get_previous_close_price: No data found for {ticker}")
+            logger.debug(f"DEBUG get_previous_close_price: No data found in DB for {ticker}, trying CSV fallback")
+        csv_close = _get_close_from_csv(ticker, prev_trading_day, logger=logger)
+        if csv_close is not None:
+            prev_date = prev_trading_day.date() if hasattr(prev_trading_day, 'date') else prev_trading_day
+            result = (csv_close, prev_date)
+            _db_price_cache[cache_key] = result
+            return result
         _db_price_cache[cache_key] = None
         return None
     except Exception as e:
-        error_msg = f"Error getting previous close for {ticker}: {e}"
         if logger:
-            logger.error(error_msg)
-        else:
-            logging.error(error_msg)
+            logger.debug(f"DB unavailable for {ticker}: {e}, trying CSV fallback")
+        try:
+            prev_trading_day = get_previous_trading_day(reference_date)
+            csv_close = _get_close_from_csv(ticker, prev_trading_day, logger=logger)
+            if csv_close is not None:
+                prev_date = prev_trading_day.date() if hasattr(prev_trading_day, 'date') else prev_trading_day
+                result = (csv_close, prev_date)
+                _db_price_cache[cache_key] = result
+                return result
+        except Exception as csv_e:
+            if logger:
+                logger.debug(f"CSV fallback also failed for {ticker}: {csv_e}")
+        _db_price_cache[cache_key] = None
         return None
 
 
@@ -3957,7 +4006,9 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
                     long_strike = best_result['best_spread']['long_strike']
                     short_premium = best_result['best_spread']['short_price']
                     long_premium = best_result['best_spread']['long_price']
-                    print(f"BEST CURRENT OPTION: {timestamp_str} | Type: {opt_type_upper} | Max Credit: ${max_credit:.2f} | Contracts: {num_contracts} | Spread: ${short_strike:.2f}/${long_strike:.2f} | Short: ${short_premium:.2f} Long: ${long_premium:.2f}")
+                    _short_lbl = "Short (bid)" if not getattr(args, 'use_mid_price', False) else "Short"
+                    _long_lbl = "Long (ask)" if not getattr(args, 'use_mid_price', False) else "Long"
+                    print(f"BEST CURRENT OPTION: {timestamp_str} | Type: {opt_type_upper} | Max Credit: ${max_credit:.2f} | Contracts: {num_contracts} | Spread: ${short_strike:.2f}/${long_strike:.2f} | {_short_lbl}: ${short_premium:.2f} {_long_lbl}: ${long_premium:.2f}")
                 else:
                     # No results found - use most recent timestamp from dataframe if available
                     most_recent_ts = None
@@ -4070,7 +4121,9 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
                 best_long_strike = overall_best['best_spread']['long_strike']
                 best_short_premium = overall_best['best_spread']['short_price']
                 best_long_premium = overall_best['best_spread']['long_price']
-                summary_parts.append(f"BEST: {best_type} ${best_credit:.2f} @ {best_timestamp} ({best_price_diff_str}, {best_contracts} contracts) | Spread: ${best_short_strike:.2f}/${best_long_strike:.2f} | Short: ${best_short_premium:.2f} Long: ${best_long_premium:.2f}")
+                _s = "Short (bid)" if not getattr(args, 'use_mid_price', False) else "Short"
+                _l = "Long (ask)" if not getattr(args, 'use_mid_price', False) else "Long"
+                summary_parts.append(f"BEST: {best_type} ${best_credit:.2f} @ {best_timestamp} ({best_price_diff_str}, {best_contracts} contracts) | Spread: ${best_short_strike:.2f}/${best_long_strike:.2f} | {_s}: ${best_short_premium:.2f} {_l}: ${best_long_premium:.2f}")
             elif args.option_type == "both" and overall_best_call:
                 # Only call available
                 call_price_diff = overall_best_call.get('price_diff_pct')
@@ -4083,7 +4136,9 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
                 call_long_strike = overall_best_call['best_spread']['long_strike']
                 call_short_premium = overall_best_call['best_spread']['short_price']
                 call_long_premium = overall_best_call['best_spread']['long_price']
-                summary_parts.append(f"BEST: CALL ${max_credit_call:.2f} @ {call_timestamp} ({call_price_diff_str}, {call_contracts} contracts) | Spread: ${call_short_strike:.2f}/${call_long_strike:.2f} | Short: ${call_short_premium:.2f} Long: {call_long_premium:.2f}")
+                _s = "Short (bid)" if not getattr(args, 'use_mid_price', False) else "Short"
+                _l = "Long (ask)" if not getattr(args, 'use_mid_price', False) else "Long"
+                summary_parts.append(f"BEST: CALL ${max_credit_call:.2f} @ {call_timestamp} ({call_price_diff_str}, {call_contracts} contracts) | Spread: ${call_short_strike:.2f}/${call_long_strike:.2f} | {_s}: ${call_short_premium:.2f} {_l}: ${call_long_premium:.2f}")
             elif args.option_type == "both" and overall_best_put:
                 # Only put available
                 put_price_diff = overall_best_put.get('price_diff_pct')
@@ -4096,7 +4151,9 @@ async def _run_single_analysis_iteration(args, csv_paths, percent_beyond, max_sp
                 put_long_strike = overall_best_put['best_spread']['long_strike']
                 put_short_premium = overall_best_put['best_spread']['short_price']
                 put_long_premium = overall_best_put['best_spread']['long_price']
-                summary_parts.append(f"BEST: PUT ${max_credit_put:.2f} @ {put_timestamp} ({put_price_diff_str}, {put_contracts} contracts) | Spread: ${put_short_strike:.2f}/${put_long_strike:.2f} | Short: ${put_short_premium:.2f} Long: ${put_long_premium:.2f}")
+                _s = "Short (bid)" if not getattr(args, 'use_mid_price', False) else "Short"
+                _l = "Long (ask)" if not getattr(args, 'use_mid_price', False) else "Long"
+                summary_parts.append(f"BEST: PUT ${max_credit_put:.2f} @ {put_timestamp} ({put_price_diff_str}, {put_contracts} contracts) | Spread: ${put_short_strike:.2f}/${put_long_strike:.2f} | {_s}: ${put_short_premium:.2f} {_l}: ${put_long_premium:.2f}")
             
             if summary_parts:
                 print(f"SUMMARY: {' | '.join(summary_parts)}")
@@ -4177,6 +4234,22 @@ async def main():
             scale_in_config = load_scale_in_config(args.scale_in_config)
             if args.scale_in_enabled:
                 print(f"Scale-in strategy enabled with config: {args.scale_in_config}")
+        except ValueError as e:
+            print(f"Error: {e}")
+            return 1
+
+    # Validate tiered investment arguments
+    if args.tiered_enabled and not args.tiered_config:
+        print("Error: --tiered-enabled requires --tiered-config to specify a configuration file")
+        return 1
+
+    # Load tiered investment configuration if provided
+    tiered_config = None
+    if args.tiered_config:
+        try:
+            tiered_config = load_tiered_config(args.tiered_config)
+            if args.tiered_enabled:
+                print(f"Tiered investment strategy enabled with config: {args.tiered_config}")
         except ValueError as e:
             print(f"Error: {e}")
             return 1
@@ -4642,7 +4715,9 @@ async def main():
                     long_strike = best_result['best_spread']['long_strike']
                     short_premium = best_result['best_spread']['short_price']
                     long_premium = best_result['best_spread']['long_price']
-                    print(f"BEST CURRENT OPTION: {timestamp_str} | Type: {opt_type_upper} | Max Credit: ${max_credit:.2f} | Contracts: {num_contracts} | Spread: ${short_strike:.2f}/${long_strike:.2f} | Short: ${short_premium:.2f} Long: ${long_premium:.2f}")
+                    _short_lbl = "Short (bid)" if not getattr(args, 'use_mid_price', False) else "Short"
+                    _long_lbl = "Long (ask)" if not getattr(args, 'use_mid_price', False) else "Long"
+                    print(f"BEST CURRENT OPTION: {timestamp_str} | Type: {opt_type_upper} | Max Credit: ${max_credit:.2f} | Contracts: {num_contracts} | Spread: ${short_strike:.2f}/${long_strike:.2f} | {_short_lbl}: ${short_premium:.2f} {_long_lbl}: ${long_premium:.2f}")
                 else:
                     # No results found - use most recent timestamp from dataframe if available
                     most_recent_ts = None
@@ -4804,7 +4879,9 @@ async def main():
                     best_long_strike = overall_best['best_spread']['long_strike']
                     best_short_premium = overall_best['best_spread']['short_price']
                     best_long_premium = overall_best['best_spread']['long_price']
-                    summary_parts.append(f"BEST: {best_type} ${best_credit:.2f} @ {best_timestamp} ({best_price_diff_str}, {best_contracts} contracts) | Spread: ${best_short_strike:.2f}/${best_long_strike:.2f} | Short: ${best_short_premium:.2f} Long: ${best_long_premium:.2f}")
+                    _s = "Short (bid)" if not getattr(args, 'use_mid_price', False) else "Short"
+                    _l = "Long (ask)" if not getattr(args, 'use_mid_price', False) else "Long"
+                    summary_parts.append(f"BEST: {best_type} ${best_credit:.2f} @ {best_timestamp} ({best_price_diff_str}, {best_contracts} contracts) | Spread: ${best_short_strike:.2f}/${best_long_strike:.2f} | {_s}: ${best_short_premium:.2f} {_l}: ${best_long_premium:.2f}")
                 elif args.option_type == "both" and overall_best_call:
                     # Only call available
                     call_price_diff = overall_best_call.get('price_diff_pct')
@@ -4817,7 +4894,9 @@ async def main():
                     call_long_strike = overall_best_call['best_spread']['long_strike']
                     call_short_premium = overall_best_call['best_spread']['short_price']
                     call_long_premium = overall_best_call['best_spread']['long_price']
-                    summary_parts.append(f"BEST: CALL ${max_credit_call:.2f} @ {call_timestamp} ({call_price_diff_str}, {call_contracts} contracts) | Spread: ${call_short_strike:.2f}/${call_long_strike:.2f} | Short: ${call_short_premium:.2f} Long: ${call_long_premium:.2f}")
+                    _s = "Short (bid)" if not getattr(args, 'use_mid_price', False) else "Short"
+                    _l = "Long (ask)" if not getattr(args, 'use_mid_price', False) else "Long"
+                    summary_parts.append(f"BEST: CALL ${max_credit_call:.2f} @ {call_timestamp} ({call_price_diff_str}, {call_contracts} contracts) | Spread: ${call_short_strike:.2f}/${call_long_strike:.2f} | {_s}: ${call_short_premium:.2f} {_l}: ${call_long_premium:.2f}")
                 elif args.option_type == "both" and overall_best_put:
                     # Only put available
                     put_price_diff = overall_best_put.get('price_diff_pct')
@@ -4830,7 +4909,9 @@ async def main():
                     put_long_strike = overall_best_put['best_spread']['long_strike']
                     put_short_premium = overall_best_put['best_spread']['short_price']
                     put_long_premium = overall_best_put['best_spread']['long_price']
-                    summary_parts.append(f"BEST: PUT ${max_credit_put:.2f} @ {put_timestamp} ({put_price_diff_str}, {put_contracts} contracts) | Spread: ${put_short_strike:.2f}/${put_long_strike:.2f} | Short: ${put_short_premium:.2f} Long: ${put_long_premium:.2f}")
+                    _s = "Short (bid)" if not getattr(args, 'use_mid_price', False) else "Short"
+                    _l = "Long (ask)" if not getattr(args, 'use_mid_price', False) else "Long"
+                    summary_parts.append(f"BEST: PUT ${max_credit_put:.2f} @ {put_timestamp} ({put_price_diff_str}, {put_contracts} contracts) | Spread: ${put_short_strike:.2f}/${put_long_strike:.2f} | {_s}: ${put_short_premium:.2f} {_l}: ${put_long_premium:.2f}")
                 
                 if summary_parts:
                     print(f"SUMMARY: {' | '.join(summary_parts)}")
@@ -5050,7 +5131,7 @@ async def main():
         if args.db_path:
             scale_in_db_config = args.db_path
         else:
-            scale_in_db_config = os.getenv('QUESTDB_CONNECTION_STRING', '') or os.getenv('QUESTDB_URL', '')
+            scale_in_db_config = os.getenv('QUEST_DB_STRING', '') or os.getenv('QUESTDB_CONNECTION_STRING', '') or os.getenv('QUESTDB_URL', '')
         db = StockQuestDB(
             scale_in_db_config,
             enable_cache=not args.no_cache,
@@ -5115,6 +5196,100 @@ async def main():
 
         finally:
             await db.close()
+
+    # Tiered investment analysis (if enabled)
+    if args.tiered_enabled and tiered_config and results:
+        print("\n" + "="*100)
+        print("Running Tiered Investment Strategy Analysis...")
+        print("="*100)
+
+        # Group results by date and option type for tiered analysis
+        from collections import defaultdict
+        tiered_results_by_date = defaultdict(lambda: {'put': [], 'call': []})
+
+        for result in results:
+            timestamp = result['timestamp']
+            if hasattr(timestamp, 'date'):
+                trading_date = timestamp.date()
+            else:
+                trading_date = pd.to_datetime(timestamp).date()
+
+            opt_type = result.get('option_type', 'unknown').lower()
+            if opt_type in ['put', 'call']:
+                tiered_results_by_date[trading_date][opt_type].append(result)
+
+        tiered_results = []
+
+        for trading_date, type_results in sorted(tiered_results_by_date.items()):
+            for opt_type in ['put', 'call']:
+                day_results = type_results[opt_type]
+                if not day_results:
+                    continue
+
+                first_result = day_results[0]
+                prev_close = first_result.get('prev_close')
+                current_close = first_result.get('current_close')
+
+                if prev_close is None or current_close is None:
+                    logger.debug(f"Skipping tiered {trading_date} {opt_type}: missing price data")
+                    continue
+
+                trading_datetime = datetime.combine(trading_date, datetime.min.time())
+                if output_tz:
+                    try:
+                        trading_datetime = output_tz.localize(trading_datetime)
+                    except AttributeError:
+                        trading_datetime = trading_datetime.replace(tzinfo=output_tz)
+
+                try:
+                    # Initialize tiered trade - activates tiers that pass constraints
+                    trade_state = initialize_tiered_trade(
+                        trading_date=trading_datetime,
+                        option_type=opt_type,
+                        prev_close=prev_close,
+                        config=tiered_config,
+                        day_results=day_results,
+                        min_premium_diff=min_premium_diff,
+                        max_credit_width_ratio=args.max_credit_width_ratio,
+                        min_contract_price=args.min_contract_price,
+                        max_strike_distance_pct=args.max_strike_distance_pct,
+                        logger=logger,
+                    )
+
+                    # Calculate P&L for all activated tiers at close
+                    trade_state = calculate_all_tiers_pnl(trade_state, current_close)
+
+                    # Calculate single-entry P&L for comparison
+                    single_entry_pnl = None
+                    for r in day_results:
+                        pnl = r.get('actual_pnl_per_share')
+                        bs = r.get('best_spread', {})
+                        n = bs.get('num_contracts') or 0
+                        if pnl is not None and n > 0:
+                            single_entry_pnl = pnl * n * 100
+                            break
+
+                    summary = generate_tiered_summary(trade_state, single_entry_pnl)
+                    tiered_results.append({
+                        'trade_state': trade_state,
+                        'summary': summary,
+                    })
+                except Exception as e:
+                    logger.warning(f"Error analyzing tiered for {trading_date} {opt_type}: {e}")
+                    continue
+
+        # Aggregate and print tiered statistics
+        if tiered_results:
+            tiered_aggregate = aggregate_tiered_results(tiered_results, output_tz)
+            print_tiered_statistics(
+                aggregate_stats=tiered_aggregate,
+                tiered_results=tiered_results,
+                config=tiered_config,
+                comparison_results=results,
+                summary_only=getattr(args, 'tiered_summary_only', False),
+            )
+        else:
+            print("No tiered trades could be analyzed (missing price data or no qualifying tiers)")
 
     # Generate histogram if requested and we have multiple files
     if args.histogram and results and len(csv_paths) > 1:

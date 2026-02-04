@@ -1,0 +1,21 @@
+{
+  "fixed_params": {
+    "csv_dir": "options_csv_output",
+    "underlying_ticker": "NDX",
+    "percent_beyond": "0.005",
+    "max_spread_width": "50",
+    "risk_cap": 5000,
+    "max_credit_width_ratio": 0.60,
+    "db_path": "questdb://stock_user:stock_password@lin1.kundu.dev:8812/stock_data",
+    "max_trading_hour": 15,
+    "min_trading_hour": 7,
+    "use_vix1d": true,
+    "vix1d_dir": "equities_output/I:VIX1D",
+    "start_date": "2025-11-05",
+    "end_date": "2026-02-02"
+  },
+  "grid_params": {
+    "option_type": ["put", "call"],
+    "max_short_delta": [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20]
+  }
+}

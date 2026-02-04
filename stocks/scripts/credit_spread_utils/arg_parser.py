@@ -357,6 +357,32 @@ def _add_scale_in_args(parser: argparse.ArgumentParser):
     )
 
 
+def _add_tiered_args(parser: argparse.ArgumentParser):
+    """Add tiered investment strategy arguments."""
+    parser.add_argument(
+        "--tiered-config",
+        type=str,
+        default=None,
+        help="Path to JSON config file for tiered investment strategy. "
+             "The config defines multiple concurrent tiers with per-tier contract count (N) "
+             "and spread width (M). Example: tiered_config_ndx.json"
+    )
+    parser.add_argument(
+        "--tiered-enabled",
+        action="store_true",
+        help="Enable tiered investment strategy. Requires --tiered-config. "
+             "When enabled, multiple concurrent positions enter at different distances "
+             "from close, each with its own N contracts and M width. "
+             "Tiers activate when framework constraints are satisfied."
+    )
+    parser.add_argument(
+        "--tiered-summary-only",
+        action="store_true",
+        help="When using tiered strategy, only show aggregate summary statistics "
+             "instead of individual trade details."
+    )
+
+
 def _add_delta_filter_args(parser: argparse.ArgumentParser):
     """Add delta-based filtering arguments."""
     parser.add_argument(
@@ -434,7 +460,114 @@ def parse_args() -> argparse.Namespace:
         Parsed arguments namespace
     """
     parser = argparse.ArgumentParser(
-        description="Analyze credit spreads at 15-minute intervals from CSV options data"
+        description="Analyze credit spreads at 15-minute intervals from CSV options data",
+        epilog="""
+DELTA GRID SEARCH EXAMPLES
+===========================
+
+Run a delta grid search to compare performance at different delta levels.
+Creates a CSV showing win rate, P&L, profit factor, and ROI for each delta.
+
+1. Single ticker, puts only (delta 0.01 to 0.20):
+
+   python scripts/analyze_credit_spread_intervals.py \\
+       --grid-config scripts/grid_config_ndx_delta_puts.json \\
+       --grid-output scripts/ndx_delta_puts_results.csv \\
+       --grid-sort net_pnl --grid-top-n 20 --log-level WARNING --no-data-cache
+
+2. Single ticker, calls only:
+
+   python scripts/analyze_credit_spread_intervals.py \\
+       --grid-config scripts/grid_config_ndx_delta_calls.json \\
+       --grid-output scripts/ndx_delta_calls_results.csv \\
+       --grid-sort net_pnl --grid-top-n 20 --log-level WARNING --no-data-cache
+
+3. Both puts and calls in one grid (option_type in grid_params):
+
+   python scripts/analyze_credit_spread_intervals.py \\
+       --grid-config scripts/grid_config_ndx_delta_grid.json \\
+       --grid-output scripts/ndx_delta_grid_results.csv \\
+       --grid-sort net_pnl --grid-top-n 40 --log-level WARNING --no-data-cache
+
+4. Run NDX and SPX in parallel (separate terminal windows or backgrounded):
+
+   # Terminal 1 - NDX puts
+   python scripts/analyze_credit_spread_intervals.py \\
+       --grid-config scripts/grid_config_ndx_delta_puts.json \\
+       --grid-output scripts/ndx_delta_puts_results.csv \\
+       --grid-sort net_pnl --grid-top-n 20 --log-level WARNING --no-data-cache &
+
+   # Terminal 2 - NDX calls
+   python scripts/analyze_credit_spread_intervals.py \\
+       --grid-config scripts/grid_config_ndx_delta_calls.json \\
+       --grid-output scripts/ndx_delta_calls_results.csv \\
+       --grid-sort net_pnl --grid-top-n 20 --log-level WARNING --no-data-cache &
+
+   # Terminal 3 - SPX puts
+   python scripts/analyze_credit_spread_intervals.py \\
+       --grid-config scripts/grid_config_spx_delta_puts.json \\
+       --grid-output scripts/spx_delta_puts_results.csv \\
+       --grid-sort net_pnl --grid-top-n 20 --log-level WARNING --no-data-cache &
+
+   # Terminal 4 - SPX calls
+   python scripts/analyze_credit_spread_intervals.py \\
+       --grid-config scripts/grid_config_spx_delta_calls.json \\
+       --grid-output scripts/spx_delta_calls_results.csv \\
+       --grid-sort net_pnl --grid-top-n 20 --log-level WARNING --no-data-cache &
+
+   wait  # Wait for all to finish
+
+GRID CONFIG FILE FORMAT (e.g., grid_config_ndx_delta_puts.json):
+
+   {
+     "fixed_params": {
+       "csv_dir": "options_csv_output",
+       "underlying_ticker": "NDX",
+       "percent_beyond": "0.005",
+       "max_spread_width": "50",
+       "risk_cap": 5000,
+       "max_credit_width_ratio": 0.60,
+       "max_trading_hour": 15,
+       "min_trading_hour": 7,
+       "option_type": "put",
+       "use_vix1d": true,
+       "vix1d_dir": "equities_output/I:VIX1D",
+       "db_path": "questdb://user:pass@host:8812/db",
+       "start_date": "2025-11-05",
+       "end_date": "2026-02-02"
+     },
+     "grid_params": {
+       "max_short_delta": [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08,
+                           0.09, 0.10, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16,
+                           0.17, 0.18, 0.19, 0.20]
+     }
+   }
+
+   For both puts and calls, move option_type to grid_params:
+     "grid_params": {
+       "option_type": ["put", "call"],
+       "max_short_delta": [0.01, 0.02, ..., 0.20]
+     }
+
+OUTPUT CSV COLUMNS:
+   rank, max_short_delta, total_trades, win_rate, total_credits,
+   total_gains, total_losses, net_pnl, profit_factor, roi
+
+SINGLE-RUN DELTA FILTER EXAMPLES:
+
+   # Max 15 delta for short leg using VIX1D for IV
+   python scripts/analyze_credit_spread_intervals.py \\
+       --csv-dir options_csv_output --ticker NDX \\
+       --percent-beyond 0.005 --max-short-delta 0.15 \\
+       --use-vix1d --option-type put --summary
+
+   # Delta range 5-20 for short leg
+   python scripts/analyze_credit_spread_intervals.py \\
+       --csv-dir options_csv_output --ticker NDX \\
+       --percent-beyond 0.005 --delta-range 0.05-0.20 \\
+       --use-vix1d --option-type call --summary
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
     # Add argument groups
@@ -445,6 +578,7 @@ def parse_args() -> argparse.Namespace:
     _add_advanced_args(parser)
     _add_rate_limit_args(parser)
     _add_scale_in_args(parser)
+    _add_tiered_args(parser)
     _add_delta_filter_args(parser)
 
     return parser.parse_args()

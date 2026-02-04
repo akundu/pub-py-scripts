@@ -10,6 +10,7 @@ This package contains refactored utility functions organized by responsibility:
 - dynamic_width_utils: Dynamic spread width calculation based on strike distance
 - scale_in_utils: Scale-in on breach strategy for layered entries
 - delta_utils: Delta calculation and filtering for probability-based entry criteria
+- tiered_investment_utils: Tiered investment strategy with per-tier N contracts and M width
 """
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     'dynamic_width_utils',
     'scale_in_utils',
     'delta_utils',
+    'tiered_investment_utils',
 ]
