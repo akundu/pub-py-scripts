@@ -500,7 +500,11 @@ async def fetch_types(args, add_types: List[str] | None = None, subtract_types: 
             print(f"Subtracted {removed_count} symbols from {subtract_types} (remaining: {len(all_symbols)})", file=sys.stderr)
 
     all_symbols_list = sorted(list(all_symbols))
-    print(f"Total unique symbols from specified types: {len(all_symbols_list)}")
+    # When called for a subset (e.g. missing types only), clarify to avoid confusion with the full list count
+    if len(current_types_for_fetching) == 1 and len(all_symbols_list) == 0:
+        print(f"No symbols for type '{current_types_for_fetching[0]}' (file not found or empty).", file=sys.stderr)
+    else:
+        print(f"Total unique symbols from specified types: {len(all_symbols_list)}")
     return all_symbols_list
 
 def load_symbols_from_disk(args, add_types: List[str] | None = None, subtract_types: List[str] | None = None):

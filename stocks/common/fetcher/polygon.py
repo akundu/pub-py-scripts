@@ -513,9 +513,7 @@ class PolygonFetcher(AbstractDataFetcher):
             'bid_price': None,
             'ask_price': None,
             'volume': getattr(latest, 'volume', None) or 0,
-        }
-
-    async def _fetch_current_price_index(self, symbol: str) -> Dict[str, Any]:
+        }    async def _fetch_current_price_index(self, symbol: str) -> Dict[str, Any]:
         """
         Fetch current price for an index using Polygon aggs API.
         Tries minute aggregates first for fresher intraday data; falls back to daily.

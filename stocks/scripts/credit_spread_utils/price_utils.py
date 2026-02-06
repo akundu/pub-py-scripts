@@ -1,12 +1,15 @@
 """
 Price fetching utilities for credit spread analysis.
 
-Consolidates price fetching functions from QuestDB.
+Consolidates price fetching functions from QuestDB, with CSV-based fallback
+when the database is unavailable.
 """
 
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple, Dict, Any, List
 import logging
+import os
+from pathlib import Path
 
 import pandas as pd
 
@@ -20,6 +23,74 @@ from .timezone_utils import (
 
 # Module-level cache for DB price queries (avoids repeated DB hits in grid search)
 _db_price_cache: Dict[str, Any] = {}
+
+# Default equities directory (relative to the stocks project root)
+_DEFAULT_EQUITIES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'equities_output')
+
+
+def _get_close_from_csv(
+    ticker: str,
+    target_date,
+    equities_dir: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
+) -> Optional[float]:
+    """
+    Get closing price from equities CSV files.
+
+    Tries multiple ticker formats: I:{ticker}, {ticker}, and the ticker as-is.
+
+    Args:
+        ticker: Ticker symbol (e.g., 'NDX', 'SPX', 'I:NDX')
+        target_date: Date to get close price for (date or datetime)
+        equities_dir: Directory containing equities data
+        logger: Optional logger
+
+    Returns:
+        Closing price or None if not found
+    """
+    if equities_dir is None:
+        equities_dir = _DEFAULT_EQUITIES_DIR
+
+    base_dir = Path(equities_dir)
+    if not base_dir.exists():
+        return None
+
+    if hasattr(target_date, 'date'):
+        target_date = target_date.date()
+
+    date_str = target_date.strftime('%Y-%m-%d')
+
+    # Try multiple ticker formats for directory and filename
+    ticker_variants = [ticker]
+    if not ticker.startswith('I:'):
+        ticker_variants.append(f'I:{ticker}')
+    else:
+        ticker_variants.append(ticker[2:])  # strip I: prefix
+
+    for tv in ticker_variants:
+        ticker_dir = base_dir / tv
+        if not ticker_dir.exists():
+            continue
+
+        filename = f"{tv}_equities_{date_str}.csv"
+        filepath = ticker_dir / filename
+        if not filepath.exists():
+            continue
+
+        try:
+            df = pd.read_csv(filepath)
+            if 'close' in df.columns and len(df) > 0:
+                # Get last row's close (EOD)
+                close_val = float(df['close'].iloc[-1])
+                if logger:
+                    logger.debug(f"CSV fallback: {ticker} close=${close_val:.2f} for {date_str}")
+                return close_val
+        except Exception as e:
+            if logger:
+                logger.debug(f"CSV fallback error reading {filepath}: {e}")
+            continue
+
+    return None
 
 
 def clear_price_cache():
@@ -94,15 +165,29 @@ async def get_current_day_close_price(
                 return result
 
         if logger:
-            logger.debug(f"DEBUG get_current_day_close_price: No data found for {ticker} on {trading_day}")
+            logger.debug(f"DEBUG get_current_day_close_price: No data found in DB for {ticker} on {trading_day}, trying CSV fallback")
+        csv_close = _get_close_from_csv(ticker, trading_day, logger=logger)
+        if csv_close is not None:
+            result = (csv_close, trading_day)
+            _db_price_cache[cache_key] = result
+            return result
         _db_price_cache[cache_key] = None
         return None
     except Exception as e:
-        error_msg = f"Error getting current day close for {ticker}: {e}"
         if logger:
-            logger.error(error_msg)
-        else:
-            logging.error(error_msg)
+            logger.debug(f"DB unavailable for current day close {ticker}: {e}, trying CSV fallback")
+        try:
+            et_tz = get_timezone("America/New_York")
+            ref_normalized = normalize_timestamp(reference_date)
+            trading_day = ref_normalized.astimezone(et_tz).date()
+            csv_close = _get_close_from_csv(ticker, trading_day, logger=logger)
+            if csv_close is not None:
+                result = (csv_close, trading_day)
+                _db_price_cache[cache_key] = result
+                return result
+        except Exception as csv_e:
+            if logger:
+                logger.debug(f"CSV fallback also failed for current day close {ticker}: {csv_e}")
         _db_price_cache[cache_key] = None
         return None
 
@@ -216,15 +301,31 @@ async def get_previous_close_price(
                 return result
 
         if logger:
-            logger.debug(f"DEBUG get_previous_close_price: No data found for {ticker}")
+            logger.debug(f"DEBUG get_previous_close_price: No data found in DB for {ticker}, trying CSV fallback")
+        # CSV fallback when DB has no data
+        csv_close = _get_close_from_csv(ticker, prev_trading_day, logger=logger)
+        if csv_close is not None:
+            prev_date = prev_trading_day.date() if hasattr(prev_trading_day, 'date') else prev_trading_day
+            result = (csv_close, prev_date)
+            _db_price_cache[cache_key] = result
+            return result
         _db_price_cache[cache_key] = None
         return None
     except Exception as e:
-        error_msg = f"Error getting previous close for {ticker}: {e}"
         if logger:
-            logger.error(error_msg)
-        else:
-            logging.error(error_msg)
+            logger.debug(f"DB unavailable for {ticker}: {e}, trying CSV fallback")
+        # CSV fallback when DB is unavailable
+        try:
+            prev_trading_day = get_previous_trading_day(reference_date)
+            csv_close = _get_close_from_csv(ticker, prev_trading_day, logger=logger)
+            if csv_close is not None:
+                prev_date = prev_trading_day.date() if hasattr(prev_trading_day, 'date') else prev_trading_day
+                result = (csv_close, prev_date)
+                _db_price_cache[cache_key] = result
+                return result
+        except Exception as csv_e:
+            if logger:
+                logger.debug(f"CSV fallback also failed for {ticker}: {csv_e}")
         _db_price_cache[cache_key] = None
         return None
 

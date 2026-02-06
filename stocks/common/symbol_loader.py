@@ -248,8 +248,11 @@ async def fetch_lists_data(
                 all_symbols_set.update(network_symbols)
                 all_symbols_list = sorted(list(all_symbols_set))
                 
-                if not quiet and all_symbols_list:
-                    print(f"Combined symbols from disk and network: {len(all_symbols_list)} total unique symbols")
+                if not quiet:
+                    if all_symbols_list:
+                        print(f"Combined symbols from disk and network: {len(all_symbols_list)} total unique symbols")
+                    elif loaded_types:
+                        print(f"Warning: Disk had {len(loaded_types)} type(s) but combined list is empty. Check --data-dir and paths.", file=sys.stderr)
             elif not all_symbols_list:
                 # Nothing was loaded and nothing to fetch
                 if not quiet:
