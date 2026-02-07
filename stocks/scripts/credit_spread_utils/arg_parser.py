@@ -462,110 +462,178 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Analyze credit spreads at 15-minute intervals from CSV options data",
         epilog="""
-DELTA GRID SEARCH EXAMPLES
-===========================
+================================================================================
+DAILY WORKFLOW COMMANDS
+================================================================================
 
-Run a delta grid search to compare performance at different delta levels.
-Creates a CSV showing win rate, P&L, profit factor, and ROI for each delta.
+These are the primary commands for daily trading analysis. Run from the project
+root directory (stocks/).
 
-1. Single ticker, puts only (delta 0.01 to 0.20):
+--- BACKTESTING (historical analysis) ---
+
+1. Standard backtest - NDX, last 3 months:
 
    python scripts/analyze_credit_spread_intervals.py \\
-       --grid-config scripts/grid_config_ndx_delta_puts.json \\
+       --csv-dir options_csv_output --ticker NDX \\
+       --start-date 2025-11-01 --end-date 2026-02-07 \\
+       --percent-beyond 0.005:0.015 --max-spread-width 20:30 \\
+       --risk-cap 500000 --profit-target-pct 0.80 \\
+       --min-trading-hour 6 --max-trading-hour 12 \\
+       --output-timezone America/Los_Angeles --summary
+
+2. Backtest with dynamic spread widths (Linear-500 config):
+
+   python scripts/analyze_credit_spread_intervals.py \\
+       --csv-dir options_csv_output --ticker NDX \\
+       --start-date 2025-11-01 \\
+       --percent-beyond 0.005:0.015 --max-spread-width 50 \\
+       --dynamic-spread-width '{"mode":"linear","base_width":15,"slope_factor":500,"min_width":10,"max_width":50}' \\
+       --risk-cap 500000 --profit-target-pct 0.80 --summary
+
+3. Backtest with scale-in strategy:
+
+   python scripts/analyze_credit_spread_intervals.py \\
+       --csv-dir options_csv_output --ticker NDX \\
+       --start-date 2025-11-01 \\
+       --percent-beyond 0.025:0.026 --max-spread-width 25 \\
+       --scale-in-enabled --scale-in-config scripts/scale_in_config_ndx.json \\
+       --risk-cap 500000 --summary
+
+4. Backtest with tiered investment strategy:
+
+   python scripts/analyze_credit_spread_intervals.py \\
+       --csv-dir options_csv_output --ticker NDX \\
+       --start-date 2025-11-01 \\
+       --percent-beyond 0.02 --max-spread-width 50 \\
+       --tiered-enabled --tiered-config scripts/tiered_config_ndx.json \\
+       --summary
+
+5. Backtest with delta filtering (VIX1D-based IV):
+
+   python scripts/analyze_credit_spread_intervals.py \\
+       --csv-dir options_csv_output --ticker NDX \\
+       --start-date 2025-11-01 \\
+       --percent-beyond 0.005 --max-spread-width 50 \\
+       --max-short-delta 0.15 --use-vix1d \\
+       --option-type put --summary
+
+--- GRID SEARCH (parameter optimization) ---
+
+6. Multi-timeframe grid search (run each timeframe separately):
+
+   # 1-week
+   python scripts/analyze_credit_spread_intervals.py \\
+       --grid-config scripts/grid_config_ndx_1wk_100pct.json \\
+       --grid-output scripts/ndx_1wk_100pct_results.csv \\
+       --grid-sort net_pnl --grid-top-n 20 --log-level WARNING
+
+   # 1-month
+   python scripts/analyze_credit_spread_intervals.py \\
+       --grid-config scripts/grid_config_ndx_1mo_100pct.json \\
+       --grid-output scripts/ndx_1mo_100pct_results.csv \\
+       --grid-sort net_pnl --grid-top-n 20 --log-level WARNING
+
+   # 3-month, 6-month: same pattern with different grid configs
+
+7. Delta grid search (NDX puts, delta 0.01-0.20):
+
+   python scripts/analyze_credit_spread_intervals.py \\
+       --grid-config scripts/ndx_optimal_puts_config.json \\
        --grid-output scripts/ndx_delta_puts_results.csv \\
        --grid-sort net_pnl --grid-top-n 20 --log-level WARNING --no-data-cache
 
-2. Single ticker, calls only:
+8. Resume an interrupted grid search:
 
    python scripts/analyze_credit_spread_intervals.py \\
-       --grid-config scripts/grid_config_ndx_delta_calls.json \\
-       --grid-output scripts/ndx_delta_calls_results.csv \\
-       --grid-sort net_pnl --grid-top-n 20 --log-level WARNING --no-data-cache
+       --grid-config scripts/grid_config_ndx_1mo_100pct.json \\
+       --grid-output scripts/ndx_1mo_100pct_results.csv \\
+       --grid-resume --grid-sort net_pnl --grid-top-n 20
 
-3. Both puts and calls in one grid (option_type in grid_params):
+9. Grid search with strategy framework:
 
    python scripts/analyze_credit_spread_intervals.py \\
-       --grid-config scripts/grid_config_ndx_delta_grid.json \\
-       --grid-output scripts/ndx_delta_grid_results.csv \\
-       --grid-sort net_pnl --grid-top-n 40 --log-level WARNING --no-data-cache
+       --grid-config scripts/grid_config_with_strategy.json \\
+       --grid-output scripts/strategy_grid_results.csv \\
+       --grid-sort net_pnl --grid-top-n 20
 
-4. Run NDX and SPX in parallel (separate terminal windows or backgrounded):
-
-   # Terminal 1 - NDX puts
-   python scripts/analyze_credit_spread_intervals.py \\
-       --grid-config scripts/grid_config_ndx_delta_puts.json \\
-       --grid-output scripts/ndx_delta_puts_results.csv \\
-       --grid-sort net_pnl --grid-top-n 20 --log-level WARNING --no-data-cache &
-
-   # Terminal 2 - NDX calls
-   python scripts/analyze_credit_spread_intervals.py \\
-       --grid-config scripts/grid_config_ndx_delta_calls.json \\
-       --grid-output scripts/ndx_delta_calls_results.csv \\
-       --grid-sort net_pnl --grid-top-n 20 --log-level WARNING --no-data-cache &
-
-   # Terminal 3 - SPX puts
-   python scripts/analyze_credit_spread_intervals.py \\
-       --grid-config scripts/grid_config_spx_delta_puts.json \\
-       --grid-output scripts/spx_delta_puts_results.csv \\
-       --grid-sort net_pnl --grid-top-n 20 --log-level WARNING --no-data-cache &
-
-   # Terminal 4 - SPX calls
-   python scripts/analyze_credit_spread_intervals.py \\
-       --grid-config scripts/grid_config_spx_delta_calls.json \\
-       --grid-output scripts/spx_delta_calls_results.csv \\
-       --grid-sort net_pnl --grid-top-n 20 --log-level WARNING --no-data-cache &
-
-   wait  # Wait for all to finish
-
-GRID CONFIG FILE FORMAT (e.g., grid_config_ndx_delta_puts.json):
-
+   Grid config with strategy section:
    {
-     "fixed_params": {
-       "csv_dir": "options_csv_output",
-       "underlying_ticker": "NDX",
-       "percent_beyond": "0.005",
-       "max_spread_width": "50",
-       "risk_cap": 5000,
-       "max_credit_width_ratio": 0.60,
-       "max_trading_hour": 15,
-       "min_trading_hour": 7,
-       "option_type": "put",
-       "use_vix1d": true,
-       "vix1d_dir": "equities_output/I:VIX1D",
-       "db_path": "questdb://user:pass@host:8812/db",
-       "start_date": "2025-11-05",
-       "end_date": "2026-02-02"
-     },
+     "strategy": {"name": "tiered", "config_file": "tiered_config_ndx.json"},
+     "fixed_params": { ... },
      "grid_params": {
-       "max_short_delta": [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08,
-                           0.09, 0.10, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16,
-                           0.17, 0.18, 0.19, 0.20]
+       "strategy.feature_flags.greedy_t3_first": [true, false],
+       "percent_beyond": [0.015, 0.020, 0.025]
      }
    }
 
-   For both puts and calls, move option_type to grid_params:
-     "grid_params": {
-       "option_type": ["put", "call"],
-       "max_short_delta": [0.01, 0.02, ..., 0.20]
-     }
+--- CONTINUOUS MODE (live monitoring) ---
+
+10. Live monitoring during market hours:
+
+   python scripts/analyze_credit_spread_intervals.py \\
+       --csv-dir options_csv_output --ticker NDX \\
+       --percent-beyond 0.005:0.015 --max-spread-width 20:30 \\
+       --risk-cap 500000 --profit-target-pct 0.80 \\
+       --continuous 10 --most-recent --best-only \\
+       --curr-price --use-market-hours \\
+       --output-timezone America/Los_Angeles
+
+11. Continuous with market hours and auto-stop:
+
+   python scripts/analyze_credit_spread_intervals.py \\
+       --csv-dir options_csv_output --ticker NDX \\
+       --percent-beyond 0.005:0.015 --max-spread-width 20:30 \\
+       --continuous 15 --most-recent --best-only \\
+       --curr-price --use-market-hours \\
+       --run-once-before-wait --continuous-max-runs 100
+
+--- SUPPORTING SCRIPTS (separate from main analyzer) ---
+
+12. Price movement analysis (close-to-close, intraday extremes):
+   python scripts/fetch_index_prices.py --ticker NDX --period 6mo
+
+13. Risk gradient analysis:
+   python scripts/ndx_risk_gradient_analysis.py
+
+================================================================================
+GRID CONFIG FILE FORMAT
+================================================================================
+
+{
+  "fixed_params": {
+    "csv_dir": "options_csv_output",
+    "underlying_ticker": "NDX",
+    "percent_beyond": "0.005",
+    "max_spread_width": "50",
+    "risk_cap": 5000,
+    "max_credit_width_ratio": 0.60,
+    "max_trading_hour": 15,
+    "min_trading_hour": 7,
+    "option_type": "put",
+    "use_vix1d": true,
+    "vix1d_dir": "equities_output/I:VIX1D",
+    "start_date": "2025-11-05",
+    "end_date": "2026-02-02"
+  },
+  "grid_params": {
+    "max_short_delta": [0.01, 0.02, 0.05, 0.10, 0.15, 0.20]
+  }
+}
+
+For both puts and calls, move option_type to grid_params:
+  "grid_params": {
+    "option_type": ["put", "call"],
+    "max_short_delta": [0.01, 0.02, ..., 0.20]
+  }
 
 OUTPUT CSV COLUMNS:
-   rank, max_short_delta, total_trades, win_rate, total_credits,
-   total_gains, total_losses, net_pnl, profit_factor, roi
+  rank, max_short_delta, total_trades, win_rate, total_credits,
+  total_gains, total_losses, net_pnl, profit_factor, roi
 
-SINGLE-RUN DELTA FILTER EXAMPLES:
-
-   # Max 15 delta for short leg using VIX1D for IV
-   python scripts/analyze_credit_spread_intervals.py \\
-       --csv-dir options_csv_output --ticker NDX \\
-       --percent-beyond 0.005 --max-short-delta 0.15 \\
-       --use-vix1d --option-type put --summary
-
-   # Delta range 5-20 for short leg
-   python scripts/analyze_credit_spread_intervals.py \\
-       --csv-dir options_csv_output --ticker NDX \\
-       --percent-beyond 0.005 --delta-range 0.05-0.20 \\
-       --use-vix1d --option-type call --summary
+================================================================================
+ARCHITECTURE: See docs/CREDIT_SPREAD_STRATEGIES.md for full architecture,
+module map, and strategy framework documentation.
+================================================================================
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -580,5 +648,31 @@ SINGLE-RUN DELTA FILTER EXAMPLES:
     _add_scale_in_args(parser)
     _add_tiered_args(parser)
     _add_delta_filter_args(parser)
+    _add_strategy_args(parser)
 
     return parser.parse_args()
+
+
+def _add_strategy_args(parser):
+    """Add strategy framework arguments."""
+    group = parser.add_argument_group('Strategy Framework',
+                                     'Select and configure trading strategies')
+    group.add_argument(
+        '--strategy',
+        choices=['single_entry', 'scale_in', 'tiered'],
+        default=None,
+        help='Strategy to use. When specified, uses the strategy framework. '
+             'Default behavior (None) uses legacy code paths. '
+             'single_entry=default best-spread-per-interval, '
+             'scale_in=layered entry on breach, '
+             'tiered=multi-tier position management.'
+    )
+    group.add_argument(
+        '--strategy-config',
+        type=str,
+        default=None,
+        help='Path to JSON strategy configuration file with feature flags. '
+             'Format: {"strategy": "tiered", "enabled": true, '
+             '"feature_flags": {"greedy_t3_first": true}, '
+             '"config_file": "tiered_config_ndx.json"}'
+    )
