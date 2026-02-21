@@ -1,0 +1,31 @@
+{
+  "song_id": "im_mt_002",
+  "title": "One (Intro)",
+  "composer": "Metallica",
+  "tempo": 108,
+  "time_signature": "4/4",
+  "difficulty": "intermediate",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["Bm", "Gmaj7", "A", "D"],
+  "original_duration": "7:27",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 2, "duration": 2.22, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.28, "string": 3, "fret": 4, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.56, "string": 2, "fret": 3, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.84, "string": 1, "fret": 2, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.12, "string": 2, "fret": 3, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.40, "string": 3, "fret": 4, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.68, "string": 1, "fret": 2, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.96, "string": 2, "fret": 3, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.22, "string": 6, "fret": 3, "duration": 2.22, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 2.50, "string": 3, "fret": 0, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.78, "string": 2, "fret": 0, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.06, "string": 1, "fret": 2, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.34, "string": 2, "fret": 0, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.62, "string": 3, "fret": 0, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

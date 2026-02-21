@@ -1,0 +1,21 @@
+{
+  "song_id": "av_jz_004",
+  "title": "Blue in Green",
+  "composer": "Miles Davis",
+  "tempo": 60,
+  "time_signature": "4/4",
+  "difficulty": "advanced",
+  "license_status": "educational_use",
+  "genre": "jazz",
+  "chords": ["Gm7", "A7alt", "Dm7", "Db7#11", "Cm7", "F7", "Bbmaj7", "A7#9", "Dm6"],
+  "original_duration": "5:27",
+  "learning_time": "6 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 3, "duration": 4.0, "velocity": 0.5, "technique": "strum"},
+    {"time": 0.02, "string": 4, "fret": 3, "duration": 4.0, "velocity": 0.5, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 3, "duration": 4.0, "velocity": 0.5, "technique": "strum"},
+    {"time": 0.06, "string": 2, "fret": 3, "duration": 4.0, "velocity": 0.5, "technique": "strum"}
+  ]
+}

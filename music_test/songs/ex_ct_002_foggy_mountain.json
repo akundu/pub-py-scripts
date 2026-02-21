@@ -1,0 +1,25 @@
+{
+  "song_id": "ex_ct_002",
+  "title": "Foggy Mountain Breakdown (Guitar)",
+  "composer": "Earl Scruggs (Arranged)",
+  "tempo": 180,
+  "time_signature": "4/4",
+  "difficulty": "expert",
+  "license_status": "educational_use",
+  "genre": "country",
+  "chords": ["G", "Em", "D"],
+  "original_duration": "2:30",
+  "learning_time": "8 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 3, "duration": 1.33, "velocity": 0.8, "technique": "flatpick"},
+    {"time": 0.17, "string": 2, "fret": 0, "duration": 0.17, "velocity": 0.8, "technique": "flatpick"},
+    {"time": 0.34, "string": 3, "fret": 0, "duration": 0.17, "velocity": 0.8, "technique": "flatpick"},
+    {"time": 0.51, "string": 4, "fret": 0, "duration": 0.17, "velocity": 0.8, "technique": "flatpick"},
+    {"time": 0.68, "string": 5, "fret": 2, "duration": 0.17, "velocity": 0.8, "technique": "flatpick"},
+    {"time": 0.85, "string": 4, "fret": 0, "duration": 0.17, "velocity": 0.8, "technique": "flatpick"},
+    {"time": 1.02, "string": 3, "fret": 0, "duration": 0.17, "velocity": 0.8, "technique": "flatpick"},
+    {"time": 1.19, "string": 2, "fret": 0, "duration": 0.17, "velocity": 0.8, "technique": "flatpick"}
+  ]
+}

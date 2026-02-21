@@ -1,0 +1,22 @@
+{
+  "mode": "dte-comparison",
+  "fixed_params": {
+    "mode": "dte-comparison",
+    "multi_dte_dir": "options_csv_output_full",
+    "underlying_ticker": "SPX",
+    "start_date": "2024-06-01",
+    "end_date": "2026-02-12",
+    "risk_cap": 30000,
+    "min_spread_width": 10,
+    "max_spread_width": "50:50",
+    "max_credit_width_ratio": 0.60,
+    "option_type": "both",
+    "db_path": "$QUEST_DB_STRING"
+  },
+  "grid_params": {
+    "dte_buckets": ["0", "0,3", "0,3,5", "0,3,5,10"],
+    "exit_profit_pcts": ["50", "60,70,80", "50,60,70,80,90"],
+    "percent_beyond": ["0.010:0.010", "0.015:0.015", "0.020:0.020"],
+    "min_volume": [1, 5, 10, 25]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "tiers": {
+    "put": [
+      {"level": 1, "percent_beyond": 0.0212, "num_contracts": 24, "spread_width": 20},
+      {"level": 2, "percent_beyond": 0.0212, "num_contracts": 28, "spread_width": 30},
+      {"level": 3, "percent_beyond": 0.0238, "num_contracts": 33, "spread_width": 50}
+    ],
+    "call": [
+      {"level": 1, "percent_beyond": 0.0220, "num_contracts": 24, "spread_width": 20},
+      {"level": 2, "percent_beyond": 0.0220, "num_contracts": 28, "spread_width": 30},
+      {"level": 3, "percent_beyond": 0.0238, "num_contracts": 33, "spread_width": 50}
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "song_id": "el_fk_004",
+  "title": "Sound of Silence",
+  "composer": "Simon & Garfunkel",
+  "tempo": 106,
+  "time_signature": "4/4",
+  "difficulty": "elementary",
+  "license_status": "educational_use",
+  "genre": "folk",
+  "chords": ["Am", "G", "F", "C"],
+  "original_duration": "3:00",
+  "learning_time": "2 weeks",
+  "tuning": "standard",
+  "capo": 6,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 0, "duration": 2.26, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.28, "string": 3, "fret": 2, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.56, "string": 2, "fret": 1, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.84, "string": 1, "fret": 0, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.12, "string": 2, "fret": 1, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.40, "string": 3, "fret": 2, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.68, "string": 1, "fret": 0, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.96, "string": 2, "fret": 1, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.26, "string": 6, "fret": 3, "duration": 2.26, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 2.54, "string": 3, "fret": 0, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.82, "string": 2, "fret": 3, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.10, "string": 1, "fret": 3, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.38, "string": 2, "fret": 3, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.66, "string": 3, "fret": 0, "duration": 0.28, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

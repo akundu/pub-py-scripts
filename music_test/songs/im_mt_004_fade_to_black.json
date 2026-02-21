@@ -1,0 +1,31 @@
+{
+  "song_id": "im_mt_004",
+  "title": "Fade to Black (Intro)",
+  "composer": "Metallica",
+  "tempo": 114,
+  "time_signature": "4/4",
+  "difficulty": "intermediate",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["Bm", "A", "E", "F#m", "D"],
+  "original_duration": "6:57",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 2, "duration": 2.1, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.26, "string": 3, "fret": 4, "duration": 0.26, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.52, "string": 2, "fret": 3, "duration": 0.26, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.78, "string": 1, "fret": 2, "duration": 0.26, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.04, "string": 2, "fret": 3, "duration": 0.26, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.30, "string": 3, "fret": 4, "duration": 0.26, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.56, "string": 1, "fret": 2, "duration": 0.26, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.82, "string": 2, "fret": 3, "duration": 0.26, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.1, "string": 5, "fret": 0, "duration": 2.1, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 2.36, "string": 3, "fret": 2, "duration": 0.26, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.62, "string": 2, "fret": 2, "duration": 0.26, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.88, "string": 1, "fret": 0, "duration": 0.26, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.14, "string": 2, "fret": 2, "duration": 0.26, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.40, "string": 3, "fret": 2, "duration": 0.26, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

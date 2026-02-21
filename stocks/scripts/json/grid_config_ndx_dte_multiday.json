@@ -1,0 +1,25 @@
+{
+  "fixed_params": {
+    "mode": "dte-comparison",
+    "underlying_ticker": "NDX",
+    "multi_dte_dir": "options_csv_output_full",
+    "dte_buckets": "0,3,5,10",
+    "min_spread_width": 10,
+    "max_spread_width": "100",
+    "risk_cap": 30000,
+    "max_credit_width_ratio": 0.60,
+    "min_volume": 5,
+    "output_timezone": "America/Los_Angeles",
+    "db_path": "$QUEST_DB_STRING",
+    "start_date": "2024-06-01",
+    "end_date": "2026-02-12",
+    "two_phase": true,
+    "percentile_lookback": 180
+  },
+  "grid_params": {
+    "percent_beyond_percentile": [90, 95, 99],
+    "exit_profit_pcts": [30, 50, 70, 90],
+    "exit_dte": [null, 1, 2, 3],
+    "min_vix1d_entry": [null, 14, 18, 22]
+  }
+}

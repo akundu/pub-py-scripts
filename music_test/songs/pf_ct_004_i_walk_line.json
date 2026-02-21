@@ -1,0 +1,25 @@
+{
+  "song_id": "pf_ct_004",
+  "title": "I Walk the Line",
+  "composer": "Johnny Cash",
+  "tempo": 185,
+  "time_signature": "4/4",
+  "difficulty": "proficient",
+  "license_status": "educational_use",
+  "genre": "country",
+  "chords": ["F", "Bb", "C7", "A", "D", "E"],
+  "original_duration": "2:44",
+  "learning_time": "2 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 1, "duration": 1.30, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.32, "string": 5, "fret": 3, "duration": 0.32, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.64, "string": 6, "fret": 1, "duration": 0.32, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.97, "string": 4, "fret": 3, "duration": 0.32, "velocity": 0.6, "technique": "strum"},
+    {"time": 1.30, "string": 5, "fret": 1, "duration": 1.30, "velocity": 0.7, "technique": "strum"},
+    {"time": 1.62, "string": 4, "fret": 3, "duration": 0.32, "velocity": 0.6, "technique": "strum"},
+    {"time": 1.94, "string": 5, "fret": 1, "duration": 0.32, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.27, "string": 3, "fret": 3, "duration": 0.32, "velocity": 0.6, "technique": "strum"}
+  ]
+}

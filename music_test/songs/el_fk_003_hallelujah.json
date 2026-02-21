@@ -1,0 +1,29 @@
+{
+  "song_id": "el_fk_003",
+  "title": "Hallelujah",
+  "composer": "Leonard Cohen",
+  "tempo": 56,
+  "time_signature": "6/8",
+  "difficulty": "elementary",
+  "license_status": "educational_use",
+  "genre": "folk",
+  "chords": ["C", "Am", "F", "G", "E7"],
+  "original_duration": "4:30",
+  "learning_time": "2 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 3, "duration": 2.14, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.36, "string": 3, "fret": 0, "duration": 0.36, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.72, "string": 2, "fret": 1, "duration": 0.36, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.08, "string": 1, "fret": 0, "duration": 0.36, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.44, "string": 2, "fret": 1, "duration": 0.36, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.80, "string": 3, "fret": 0, "duration": 0.36, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.16, "string": 5, "fret": 0, "duration": 2.14, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 2.52, "string": 3, "fret": 2, "duration": 0.36, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.88, "string": 2, "fret": 1, "duration": 0.36, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.24, "string": 1, "fret": 0, "duration": 0.36, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.60, "string": 2, "fret": 1, "duration": 0.36, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.96, "string": 3, "fret": 2, "duration": 0.36, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

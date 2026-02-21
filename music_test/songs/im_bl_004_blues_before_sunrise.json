@@ -1,0 +1,29 @@
+{
+  "song_id": "im_bl_004",
+  "title": "Blues Before Sunrise",
+  "composer": "Elmore James",
+  "tempo": 90,
+  "time_signature": "4/4",
+  "difficulty": "intermediate",
+  "license_status": "educational_use",
+  "genre": "blues",
+  "chords": ["E", "A", "B"],
+  "original_duration": "3:00",
+  "learning_time": "2 weeks",
+  "tuning": "open_d",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 0, "duration": 2.67, "velocity": 0.7, "technique": "slide"},
+    {"time": 0.33, "string": 1, "fret": 3, "duration": 0.33, "velocity": 0.7, "technique": "slide"},
+    {"time": 0.66, "string": 1, "fret": 0, "duration": 0.33, "velocity": 0.7, "technique": "single_note"},
+    {"time": 0.99, "string": 2, "fret": 0, "duration": 0.33, "velocity": 0.7, "technique": "single_note"},
+    {"time": 1.32, "string": 1, "fret": 3, "duration": 0.33, "velocity": 0.7, "technique": "slide"},
+    {"time": 1.65, "string": 1, "fret": 0, "duration": 0.33, "velocity": 0.7, "technique": "single_note"},
+    {"time": 1.98, "string": 3, "fret": 0, "duration": 0.33, "velocity": 0.7, "technique": "single_note"},
+    {"time": 2.31, "string": 1, "fret": 0, "duration": 0.33, "velocity": 0.7, "technique": "single_note"},
+    {"time": 2.67, "string": 4, "fret": 0, "duration": 2.67, "velocity": 0.7, "technique": "single_note"},
+    {"time": 3.0, "string": 3, "fret": 0, "duration": 0.33, "velocity": 0.7, "technique": "single_note"},
+    {"time": 3.33, "string": 2, "fret": 3, "duration": 0.33, "velocity": 0.7, "technique": "slide"},
+    {"time": 3.66, "string": 2, "fret": 0, "duration": 0.33, "velocity": 0.7, "technique": "single_note"}
+  ]
+}

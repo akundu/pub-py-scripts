@@ -1,0 +1,25 @@
+{
+  "song_id": "ex_pp_002",
+  "title": "A Day in the Life",
+  "composer": "The Beatles",
+  "tempo": 78,
+  "time_signature": "4/4",
+  "difficulty": "expert",
+  "license_status": "educational_use",
+  "genre": "pop",
+  "chords": ["G", "Bm", "Em", "C", "D", "A", "E"],
+  "original_duration": "5:33",
+  "learning_time": "6 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 3, "duration": 3.08, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.39, "string": 3, "fret": 0, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.78, "string": 2, "fret": 3, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.17, "string": 1, "fret": 3, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.56, "string": 2, "fret": 3, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.95, "string": 3, "fret": 0, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.34, "string": 1, "fret": 3, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.73, "string": 2, "fret": 3, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

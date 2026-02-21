@@ -1,0 +1,23 @@
+{
+  "grid_params": {
+    "percent_beyond": [
+      "0.0300:0.0210",
+      "0.0325:0.0235",
+      "0.0350:0.0260"
+    ],
+    "max_spread_width": [20, 25, 30]
+  },
+  "fixed_params": {
+    "csv_dir": "options_csv_output",
+    "underlying_ticker": "NDX",
+    "option_type": "both",
+    "risk_cap": 30000,
+    "max_live_capital": 300000,
+    "min_trading_hour": 6,
+    "max_trading_hour": 12,
+    "output_timezone": "America/Los_Angeles",
+    "db_path": "postgresql://admin:quest@localhost:8812/qdb?sslmode=disable",
+    "start_date": "2025-11-01",
+    "end_date": "2026-01-30"
+  }
+}

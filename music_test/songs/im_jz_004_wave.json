@@ -1,0 +1,21 @@
+{
+  "song_id": "im_jz_004",
+  "title": "Wave",
+  "composer": "Antonio Carlos Jobim",
+  "tempo": 130,
+  "time_signature": "4/4",
+  "difficulty": "intermediate",
+  "license_status": "educational_use",
+  "genre": "jazz",
+  "chords": ["Dmaj7", "Bbdim7", "Am7", "D7", "Gmaj7", "Gm6", "F#m7", "B7", "Em7", "A7"],
+  "original_duration": "4:30",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 4, "fret": 0, "duration": 1.85, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.02, "string": 3, "fret": 2, "duration": 1.85, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.04, "string": 2, "fret": 2, "duration": 1.85, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.06, "string": 1, "fret": 2, "duration": 1.85, "velocity": 0.6, "technique": "strum"}
+  ]
+}

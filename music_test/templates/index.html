@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chord Detector</title>
+    <link rel="stylesheet" href="static/css/style.css?v=6">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎸 Chord Detector</h1>
+            <div class="status" id="status">
+                <span class="status-indicator" id="statusIndicator"></span>
+                <span id="statusText">Disconnected</span>
+            </div>
+        </header>
+
+        <main>
+            <!-- Controls Section -->
+            <section class="controls">
+                <div class="control-row">
+                    <button id="startBtn" class="btn btn-primary">Start Detection</button>
+                    <button id="stopBtn" class="btn btn-secondary" disabled>Stop Detection</button>
+                    <button id="settingsBtn" class="btn btn-secondary">Settings</button>
+                    <button id="configBtn" class="btn btn-secondary">Show Config</button>
+                </div>
+                <div class="control-row song-selector-row">
+                    <label for="songSearch" class="song-label">Song Context:</label>
+                    <div class="song-search-container">
+                        <input type="text" 
+                               id="songSearch" 
+                               class="song-search-input" 
+                               placeholder="Search by name, ID, composer, or genre..."
+                               autocomplete="off">
+                        <div id="songDropdown" class="song-dropdown hidden"></div>
+                        <input type="hidden" id="selectedSongId" value="">
+                        <button id="clearSongBtn" class="clear-song-btn hidden" title="Clear song selection">×</button>
+                    </div>
+                </div>
+                <div class="control-row song-influence-row">
+                    <label for="songInfluenceLive" class="song-label">Song influence (only when song selected):</label>
+                    <div class="song-influence-control">
+                        <input type="range" id="songInfluenceLive" min="0" max="1" step="0.05" value="0.5" title="0 = raw detection wins, 1 = song chords dominate">
+                        <span id="songInfluenceLiveValue" class="song-influence-value">0.50</span>
+                        <span class="song-influence-hint">0 = raw wins, 1 = song dominates</span>
+                    </div>
+                </div>
+                <div class="control-row map-variants-row">
+                    <label class="song-label">Stabilize chord names:</label>
+                    <div class="map-variants-control">
+                        <label class="checkbox-inline">
+                            <input type="checkbox" id="mapSimilarVariantsLive" checked title="Map similar variants (Em/Em7/Emin) to one form">
+                            Map similar chord variants
+                        </label>
+                        <span class="song-influence-hint">(works with or without a song; reduces jumping between Em / Em7 / Emin)</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Configuration Display Panel -->
+            <section id="configPanel" class="config-panel hidden">
+                <div class="config-header">
+                    <h3>📊 Active Configuration</h3>
+                    <button id="closeConfigBtn" class="close-config-btn">×</button>
+                </div>
+                <div class="config-content">
+                    <div class="config-section">
+                        <h4>🎵 Song Context</h4>
+                        <div id="configSongInfo" class="config-info"></div>
+                    </div>
+                    <div class="config-section">
+                        <h4>🎸 Detection Parameters</h4>
+                        <div id="configDetectionParams" class="config-info"></div>
+                    </div>
+                    <div class="config-section">
+                        <h4>🎚️ Thresholds & Sensitivity</h4>
+                        <div id="configThresholds" class="config-info"></div>
+                    </div>
+                    <div class="config-section">
+                        <h4>⚙️ Advanced Options</h4>
+                        <div id="configAdvanced" class="config-info"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Main Display Section -->
+            <section class="display-section">
+                <div class="chord-display" id="chordDisplay">
+                    <div class="chord-name" id="chordName">--</div>
+                    <div class="chord-confidence" id="chordConfidence"></div>
+                    <div class="chord-stability" id="chordStability"></div>
+                </div>
+
+                <!-- Song-Constrained Results (hidden by default) -->
+                <div class="constrained-display" id="constrainedDisplay" style="display: none;">
+                    <div class="result-panel raw-result">
+                        <h4>Raw Detection</h4>
+                        <div class="result-chord" id="rawChord">--</div>
+                        <div class="result-confidence" id="rawConfidence"></div>
+                    </div>
+                    <div class="arrow">→</div>
+                    <div class="result-panel final-result">
+                        <h4>Song-Constrained <span class="match-indicator" id="matchIndicator"></span></h4>
+                        <div class="result-chord" id="finalChord">--</div>
+                        <div class="result-confidence" id="finalConfidence"></div>
+                        <div class="match-type" id="matchType"></div>
+                    </div>
+                </div>
+
+                <div class="notes-display" id="notesDisplay">
+                    <h3>Detected Notes</h3>
+                    <div class="notes-list" id="notesList">No notes detected</div>
+                </div>
+            </section>
+
+            <!-- Visualizations Section -->
+            <section class="visualizations">
+                <p class="viz-help">Enable <strong>Show Frequencies</strong> and <strong>Show Chroma Vector</strong> in Settings (or <code>?show_frequencies=true&amp;show_chroma=true</code> in the URL), then start detection to see data in the graphs below. The waveform uses your microphone input.</p>
+                <div class="viz-panel">
+                    <h3>Frequency Spectrum</h3>
+                    <canvas id="frequencyCanvas" width="800" height="200"></canvas>
+                </div>
+                
+                <div class="viz-panel">
+                    <h3>Chroma Vector</h3>
+                    <canvas id="chromaCanvas" width="800" height="150"></canvas>
+                </div>
+
+                <div class="viz-panel">
+                    <h3>Audio Waveform</h3>
+                    <canvas id="waveformCanvas" width="800" height="150"></canvas>
+                </div>
+            </section>
+
+            <!-- Settings Modal -->
+            <div id="settingsModal" class="modal">
+                <div class="modal-content">
+                    <span class="close">&times;</span>
+                    <h2>Settings</h2>
+                    <form id="settingsForm">
+                        <div class="form-group">
+                            <label for="instrument">Instrument:</label>
+                            <select id="instrument" name="instrument">
+                                <option value="guitar">Guitar</option>
+                                <option value="piano">Piano</option>
+                                <option value="bass">Bass</option>
+                                <option value="violin">Violin</option>
+                                <option value="cello">Cello</option>
+                                <option value="flute">Flute</option>
+                                <option value="clarinet">Clarinet</option>
+                                <option value="saxophone">Saxophone</option>
+                                <option value="trumpet">Trumpet</option>
+                                <option value="voice">Voice</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="sensitivity">Sensitivity:</label>
+                            <input type="range" id="sensitivity" name="sensitivity" min="0.1" max="2.0" step="0.1" value="0.8">
+                            <span id="sensitivityValue">0.8</span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="confidenceThreshold">Confidence Threshold:</label>
+                            <input type="range" id="confidenceThreshold" name="confidence_threshold" min="0.1" max="1.0" step="0.05" value="0.2">
+                            <span id="confidenceValue">0.2</span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="silenceThreshold">Silence Threshold:</label>
+                            <input type="range" id="silenceThreshold" name="silence_threshold" min="0.001" max="0.1" step="0.001" value="0.005">
+                            <span id="silenceValue">0.005</span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="overlap">Overlap Ratio:</label>
+                            <input type="range" id="overlap" name="overlap" min="0.0" max="0.9" step="0.05" value="0.75">
+                            <span id="overlapValue">0.75</span>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="chordWindow">Chord Smoothing Window (seconds):</label>
+                            <input type="range" id="chordWindow" name="chord_window" min="0.0" max="3.0" step="0.05" value="0.3">
+                            <span id="chordWindowValue">0.3</span>
+                            <div class="help-text">Set to 0 for instant updates, or higher values (e.g., 1.0-2.0s) for smoother, more stable chord detection</div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="chordWindowConfidence">Chord Window Confidence:</label>
+                            <input type="range" id="chordWindowConfidence" name="chord_window_confidence" min="0.1" max="1.0" step="0.005" value="0.45">
+                            <span id="chordWindowConfidenceValue">0.45</span>
+                            <div class="help-text">Minimum confidence required for chord-window results (only applies when chord-window > 0)</div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="songInfluence">Song influence (only when song selected):</label>
+                            <input type="range" id="songInfluence" name="song_influence" min="0" max="1" step="0.05" value="0.7">
+                            <span id="songInfluenceValue">0.70</span>
+                            <div class="help-text">0 = raw detection wins; 1 = song chords dominate. Only applies when a song is chosen above.</div>
+                        </div>
+
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="mapSimilarVariants" name="map_similar_variants" checked>
+                                Map similar chord variants
+                            </label>
+                            <div class="help-text">Stabilize display by mapping Em / Em7 / Emin to one form. Works with or without a song.</div>
+                        </div>
+
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="progression" name="progression" checked>
+                                Enable Chord Progression Analysis
+                            </label>
+                        </div>
+
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="multiPitch" name="multi_pitch" checked>
+                                Multi-pitch Detection (better for chords)
+                            </label>
+                        </div>
+
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="showFrequencies" name="show_frequencies">
+                                Show Frequencies
+                            </label>
+                        </div>
+
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="showChroma" name="show_chroma">
+                                Show Chroma Vector
+                            </label>
+                        </div>
+
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="debug" name="debug">
+                                Debug Mode (server logging)
+                            </label>
+                        </div>
+
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="log" name="log">
+                                Log Mode (timestamped output)
+                            </label>
+                        </div>
+
+                        <div class="form-actions">
+                            <button type="submit" class="btn btn-primary">Apply Settings</button>
+                            <button type="button" class="btn btn-secondary" id="resetSettings">Reset to Defaults</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="static/js/audio_handler.js?v=2"></script>
+    <script src="static/js/visualizations.js?v=2"></script>
+    <script src="static/js/main.js?v=9"></script>
+</body>
+</html>
+

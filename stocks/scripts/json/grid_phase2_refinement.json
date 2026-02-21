@@ -1,0 +1,48 @@
+{
+  "phase": 2,
+  "name": "Strategy Refinement",
+  "description": "Test strategies, exit rules, and fine-tune timing on 60-day dataset",
+  "dataset": {
+    "start_date": "2025-12-01",
+    "end_date": "2026-02-15",
+    "days": 60,
+    "comment": "Extended dataset including Phase 1 dates plus 30 additional days"
+  },
+  "base_configs": "results/phase1_top_configs.json",
+  "base_config_comment": "Load top 10 (DTE, percentile, width) combinations from Phase 1",
+  "fixed_params": {
+    "underlying_ticker": "NDX",
+    "multi_dte_dir": "options_csv_output_full",
+    "use_percentile_strikes": true,
+    "percentile_lookback_days": 182,
+    "use_mid_price": false,
+    "min_contract_price": 0.05,
+    "output_timezone": "America/Los_Angeles",
+    "max_loss_per_position": 30000,
+    "max_live_capital": 400000,
+    "processes": 10
+  },
+  "grid_params": {
+    "strategy_type": ["put_spread", "call_spread", "iron_condor"],
+    "direction_window_minutes": [5, 15, 30, 60],
+    "flow_mode": ["with_flow", "against_flow", "neutral"],
+    "entry_time": ["06:30", "09:00", "10:00", "12:00"],
+    "profit_target_pct": [0.3, 0.5, 0.7]
+  },
+  "grid_size": {
+    "total_configs": 4320,
+    "breakdown": "10 base configs × 3 strategies × 4 windows × 3 flow modes × 4 entry times × 3 profit targets = 4,320"
+  },
+  "output": {
+    "file": "results/phase2_refinement.csv",
+    "summary_file": "results/phase2_summary.txt",
+    "top_n": 20,
+    "sort_by": ["sharpe_ratio", "win_rate"],
+    "generate_charts": true,
+    "chart_dir": "results/phase2_charts"
+  },
+  "expected_runtime": {
+    "estimate": "2-3 hours",
+    "with_processes": 10
+  }
+}

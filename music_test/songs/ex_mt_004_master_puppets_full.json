@@ -1,0 +1,21 @@
+{
+  "song_id": "ex_mt_004",
+  "title": "Master of Puppets (Full)",
+  "composer": "Metallica",
+  "tempo": 212,
+  "time_signature": "4/4",
+  "difficulty": "expert",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["E5", "F5", "F#5", "G5", "G#5", "B5", "D5"],
+  "original_duration": "8:35",
+  "learning_time": "12 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 0, "duration": 1.13, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.14, "string": 6, "fret": 1, "duration": 0.14, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.28, "string": 6, "fret": 2, "duration": 0.14, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.42, "string": 6, "fret": 3, "duration": 0.14, "velocity": 0.9, "technique": "single_note"}
+  ]
+}

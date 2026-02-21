@@ -1,0 +1,48 @@
+{
+  "_strategy_name": "NDX Credit Spread - PUTS ONLY (Bullish Bias)",
+  "_description": "Use when expecting upward trend or neutral market",
+  "_trend_guidance": "SELL PUTS when bullish - you profit if market stays flat or rises",
+
+  "_optimal_parameters": {
+    "percent_beyond": "3.30% below close",
+    "spread_width": "15-20 points",
+    "safe_zone": "3.55% below close (100% historical win rate)"
+  },
+
+  "fixed_params": {
+    "csv_dir": "../options_csv_output",
+    "underlying_ticker": "NDX",
+    "option_type": "put",
+    "min_spread_width": 10,
+    "max_spread_width": 20,
+    "risk_cap": 150000,
+    "profit_target_pct": 0.80,
+    "min_trading_hour": 9,
+    "max_trading_hour": 12,
+    "min_premium_diff": 0.50,
+    "output_timezone": "America/New_York",
+    "db_path": "$QUEST_DB_STRING",
+    "percent_beyond": 0.0330,
+    "dynamic_spread_width": {
+      "mode": "linear",
+      "base_width": 15,
+      "slope_factor": 500,
+      "min_width": 10,
+      "max_width": 50
+    }
+  },
+
+  "_when_to_use": [
+    "Market is in uptrend",
+    "VIX is falling or stable",
+    "No major bearish catalysts expected",
+    "Support levels holding"
+  ],
+
+  "_strike_example": {
+    "if_close": 25900,
+    "sell_put_strike": 25045,
+    "buy_put_strike": 25025,
+    "max_loss_per_spread": 2000
+  }
+}

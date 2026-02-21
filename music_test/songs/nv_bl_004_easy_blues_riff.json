@@ -1,0 +1,32 @@
+{
+  "song_id": "nv_bl_004",
+  "title": "Easy Blues Riff",
+  "composer": "Traditional",
+  "tempo": 75,
+  "time_signature": "4/4",
+  "difficulty": "novice",
+  "license_status": "educational_use",
+  "genre": "blues",
+  "chords": ["A", "D", "E"],
+  "original_duration": "1:15",
+  "learning_time": "2 days",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 0, "duration": 3.2, "velocity": 0.7, "technique": "single_note"},
+    {"time": 0.8, "string": 5, "fret": 2, "duration": 0.4, "velocity": 0.7, "technique": "single_note"},
+    {"time": 1.2, "string": 5, "fret": 3, "duration": 0.4, "velocity": 0.7, "technique": "single_note"},
+    {"time": 1.6, "string": 5, "fret": 2, "duration": 0.4, "velocity": 0.7, "technique": "single_note"},
+    {"time": 2.0, "string": 5, "fret": 0, "duration": 1.2, "velocity": 0.7, "technique": "single_note"},
+    {"time": 3.2, "string": 4, "fret": 0, "duration": 3.2, "velocity": 0.7, "technique": "single_note"},
+    {"time": 4.0, "string": 4, "fret": 2, "duration": 0.4, "velocity": 0.7, "technique": "single_note"},
+    {"time": 4.4, "string": 4, "fret": 3, "duration": 0.4, "velocity": 0.7, "technique": "single_note"},
+    {"time": 4.8, "string": 4, "fret": 2, "duration": 0.4, "velocity": 0.7, "technique": "single_note"},
+    {"time": 5.2, "string": 4, "fret": 0, "duration": 1.2, "velocity": 0.7, "technique": "single_note"},
+    {"time": 6.4, "string": 6, "fret": 0, "duration": 3.2, "velocity": 0.7, "technique": "single_note"},
+    {"time": 7.2, "string": 6, "fret": 2, "duration": 0.4, "velocity": 0.7, "technique": "single_note"},
+    {"time": 7.6, "string": 6, "fret": 3, "duration": 0.4, "velocity": 0.7, "technique": "single_note"},
+    {"time": 8.0, "string": 6, "fret": 2, "duration": 0.4, "velocity": 0.7, "technique": "single_note"},
+    {"time": 8.4, "string": 6, "fret": 0, "duration": 1.2, "velocity": 0.7, "technique": "single_note"}
+  ]
+}

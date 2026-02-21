@@ -1,0 +1,38 @@
+{
+  "description": "NDX grid search with time-block rate limiting and dynamic premium",
+  "fixed_params": {
+    "csv_dir": "../options_csv_output",
+    "underlying_ticker": "NDX",
+    "start_date": "2025-10-29",
+    "end_date": "2026-01-29",
+    "option_type": "both",
+    "min_spread_width": 10,
+    "max_spread_width": "30:30",
+    "risk_cap": 30000,
+    "profit_target_pct": 0.90,
+    "min_trading_hour": 9,
+    "max_trading_hour": 13,
+    "rate_limit_blocks": "09:30-10:00=3,10:00-11:00=4,11:00-12:00=2",
+    "min_premium_diff_range": "0.50-1.00:0.50-1.00",
+    "premium_decay_mode": "linear",
+    "output_timezone": "America/Los_Angeles",
+    "db_path": "$QUEST_DB_STRING"
+  },
+  "grid_params": {
+    "percent_beyond": [
+      "0.005", "0.006", "0.007", "0.008", "0.009", "0.010",
+      "0.011", "0.012", "0.013", "0.014", "0.015",
+      "0.016", "0.017", "0.018", "0.019", "0.020",
+      "0.021", "0.022", "0.023", "0.024", "0.025"
+    ]
+  },
+  "notes": {
+    "time_blocks_pst": "6:30-7=3, 7-8=4, 8-9=2 (converted to ET in rate_limit_blocks)",
+    "trading_hours": "6-10am PST = 9am-1pm ET",
+    "premium_range": "0.50-1.00 for both puts and calls with linear time decay",
+    "spread_width": "10-30 points",
+    "risk_cap": "30k per transaction",
+    "exit": "90% profit target or EOD",
+    "date_range": "Last 3 months (Oct 29, 2025 to Jan 29, 2026)"
+  }
+}

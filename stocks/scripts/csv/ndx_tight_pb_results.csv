@@ -1,0 +1,7 @@
+rank,dynamic_spread_width,percent_beyond,total_trades,win_rate,total_credits,total_gains,total_losses,net_pnl,profit_factor,roi
+1,"{'mode': 'linear', 'base_width': 15, 'slope_factor': 500, 'min_width': 10, 'max_width': 50}",0.020:0.021,108,98.15,539130.0,317420.73,58330.0,259090.73,5.4418,8.25
+2,"{'mode': 'linear', 'base_width': 15, 'slope_factor': 500, 'min_width': 10, 'max_width': 50}",0.025:0.025,59,100.0,210951.0,210951.0,0.0,210951.0,inf,12.28
+3,"{'mode': 'linear', 'base_width': 15, 'slope_factor': 1000, 'min_width': 10, 'max_width': 75}",0.025:0.025,89,100.0,199997.0,199997.0,0.0,199997.0,inf,8.03
+4,"{'mode': 'linear', 'base_width': 15, 'slope_factor': 1000, 'min_width': 10, 'max_width': 75}",0.020:0.021,124,96.77,544299.0,255472.95,73920.96,181551.99,3.456,5.11
+5,,0.020:0.021,170,99.41,309387.0,176955.03,1603.07,175351.96,110.3849,3.76
+6,,0.025:0.025,108,100.0,133946.0,133946.0,0.0,133946.0,inf,4.46

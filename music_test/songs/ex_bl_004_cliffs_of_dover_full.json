@@ -1,0 +1,25 @@
+{
+  "song_id": "ex_bl_004",
+  "title": "Cliffs of Dover (Full)",
+  "composer": "Eric Johnson",
+  "tempo": 134,
+  "time_signature": "4/4",
+  "difficulty": "expert",
+  "license_status": "educational_use",
+  "genre": "blues",
+  "chords": ["G", "C", "D", "Em", "Am"],
+  "original_duration": "4:09",
+  "learning_time": "14 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 15, "duration": 1.79, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.22, "string": 1, "fret": 17, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.44, "string": 1, "fret": 15, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.66, "string": 2, "fret": 17, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.88, "string": 2, "fret": 15, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 1.10, "string": 3, "fret": 16, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 1.32, "string": 3, "fret": 14, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 1.54, "string": 4, "fret": 16, "duration": 0.22, "velocity": 0.8, "technique": "single_note"}
+  ]
+}

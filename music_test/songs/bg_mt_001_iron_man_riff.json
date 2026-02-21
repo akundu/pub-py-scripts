@@ -1,0 +1,29 @@
+{
+  "song_id": "bg_mt_001",
+  "title": "Iron Man (Riff)",
+  "composer": "Black Sabbath",
+  "tempo": 76,
+  "time_signature": "4/4",
+  "difficulty": "beginner",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["B5", "D5", "E5", "G5"],
+  "original_duration": "1:30",
+  "learning_time": "1 week",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 4, "duration": 1.58, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 0.02, "string": 6, "fret": 2, "duration": 1.58, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 1.58, "string": 4, "fret": 2, "duration": 1.58, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 1.60, "string": 5, "fret": 0, "duration": 1.58, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 3.16, "string": 5, "fret": 2, "duration": 1.58, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 3.18, "string": 6, "fret": 0, "duration": 1.58, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 4.74, "string": 5, "fret": 2, "duration": 0.79, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 4.76, "string": 6, "fret": 0, "duration": 0.79, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 5.53, "string": 5, "fret": 5, "duration": 0.79, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 5.55, "string": 6, "fret": 3, "duration": 0.79, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 6.32, "string": 5, "fret": 7, "duration": 1.58, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 6.34, "string": 6, "fret": 5, "duration": 1.58, "velocity": 0.9, "technique": "power_chord"}
+  ]
+}

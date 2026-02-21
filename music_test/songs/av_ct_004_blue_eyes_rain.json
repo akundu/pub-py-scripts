@@ -1,0 +1,25 @@
+{
+  "song_id": "av_ct_004",
+  "title": "Blue Eyes Crying in the Rain",
+  "composer": "Fred Rose/Willie Nelson",
+  "tempo": 76,
+  "time_signature": "4/4",
+  "difficulty": "advanced",
+  "license_status": "educational_use",
+  "genre": "country",
+  "chords": ["E", "A", "B7"],
+  "original_duration": "2:17",
+  "learning_time": "3 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 0, "duration": 3.16, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.40, "string": 4, "fret": 2, "duration": 0.40, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.80, "string": 3, "fret": 1, "duration": 0.40, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.20, "string": 2, "fret": 0, "duration": 0.40, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.60, "string": 1, "fret": 0, "duration": 0.40, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.00, "string": 2, "fret": 0, "duration": 0.40, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.40, "string": 3, "fret": 1, "duration": 0.40, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.80, "string": 4, "fret": 2, "duration": 0.40, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

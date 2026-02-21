@@ -1,0 +1,81 @@
+{
+  "_strategy_name": "NDX Credit Spread - Optimal 100% Win Rate Strategy",
+  "_description": "Based on 6-month analysis with 90-day intraday risk gradient",
+  "_key_insight": "Only Safe Point and -0.25% offset maintain 100% win rates",
+
+  "_safe_points": {
+    "put_pct": 3.55,
+    "call_pct": 2.82,
+    "metric": "90-day intraday extreme"
+  },
+
+  "_optimal_offset": {
+    "offset": "-0.25%",
+    "put_pct": 3.30,
+    "call_pct": 2.57,
+    "expected_win_rate": "100%",
+    "expected_roi": "14.4%"
+  },
+
+  "_dynamic_width_rationale": {
+    "mode": "Linear-500",
+    "formula": "width = base_width + (distance_pct * slope_factor)",
+    "example_1pct": "15 + (0.01 * 500) = 20",
+    "example_2pct": "15 + (0.02 * 500) = 25",
+    "example_3pct": "15 + (0.03 * 500) = 30"
+  },
+
+  "fixed_params": {
+    "csv_dir": "../options_csv_output",
+    "underlying_ticker": "NDX",
+    "option_type": "both",
+    "min_spread_width": 10,
+    "max_spread_width": "20:25",
+    "risk_cap": 300000,
+    "profit_target_pct": 0.80,
+    "min_trading_hour": 9,
+    "max_trading_hour": 12,
+    "min_premium_diff": "0.50:0.50",
+    "output_timezone": "America/New_York",
+    "db_path": "$QUEST_DB_STRING",
+    "percent_beyond": "0.0330:0.0257",
+    "dynamic_spread_width": {
+      "mode": "linear",
+      "base_width": 15,
+      "slope_factor": 500,
+      "min_width": 10,
+      "max_width": 50
+    }
+  },
+
+  "_capital_allocation": {
+    "total": 300000,
+    "per_time_block": {
+      "9:30-10:30_ET": 100000,
+      "10:30-12:00_ET": 100000,
+      "12:00-14:30_ET": 100000
+    },
+    "per_trade_max": 50000,
+    "concurrent_positions": 6
+  },
+
+  "_strike_calculation": {
+    "put_sell_strike": "close * (1 - 0.0330) = close * 0.967",
+    "call_sell_strike": "close * (1 + 0.0257) = close * 1.0257",
+    "example_close_25900": {
+      "put_strike": 25045,
+      "call_strike": 26565
+    }
+  },
+
+  "_danger_zones": {
+    "never_sell_puts_below": "close * 0.965 (3.5% down)",
+    "never_sell_calls_above": "close * 1.026 (2.6% up)"
+  },
+
+  "_exit_rules": {
+    "profit_target": "80% of max premium",
+    "time_stop": "Close by 12:00 PM ET unless at 80% profit",
+    "stop_loss": "Evaluate early exit if position loses 50% of premium"
+  }
+}

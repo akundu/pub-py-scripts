@@ -1,0 +1,25 @@
+{
+  "song_id": "av_pp_001",
+  "title": "Dear Prudence",
+  "composer": "The Beatles",
+  "tempo": 74,
+  "time_signature": "4/4",
+  "difficulty": "advanced",
+  "license_status": "educational_use",
+  "genre": "pop",
+  "chords": ["D", "Dmaj7", "D7", "Gmaj7/D", "G/D", "Gm/D", "A", "G"],
+  "original_duration": "3:56",
+  "learning_time": "5 weeks",
+  "tuning": "DADGAD",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 4, "fret": 0, "duration": 3.24, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.41, "string": 3, "fret": 0, "duration": 0.41, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.82, "string": 2, "fret": 0, "duration": 0.41, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.23, "string": 1, "fret": 0, "duration": 0.41, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.64, "string": 2, "fret": 0, "duration": 0.41, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.05, "string": 3, "fret": 0, "duration": 0.41, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.46, "string": 1, "fret": 0, "duration": 0.41, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.87, "string": 2, "fret": 0, "duration": 0.41, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

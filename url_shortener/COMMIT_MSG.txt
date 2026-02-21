@@ -1,0 +1,28 @@
+url_shortener: proxy path prefix, port 9200, concurrency, and Docker fixes
+
+- Server port: switch default from 8080/8888 to 9200 (config, Dockerfile,
+  docker-compose, env examples, scripts, tests).
+
+- Docker Compose: remove QuestDB and Envoy; DB and Redis come from env
+  (e.g. .envrc). Add PATH_PREFIX default /u_s for proxy deployment.
+  Publish port as 127.0.0.1:9200:9200. Default WORKERS=1 so port
+  publishing works reliably.
+
+- Proxy /u_s support: serve correctly at kundu.dev/u_s/ and localhost:9200.
+  - Use relative asset links in UX HTML (index, result, error) so both
+    direct and proxied access resolve CSS/JS correctly.
+  - When X-Forwarded-Prefix is set (Envoy), rewrite HTML and short URLs
+    to use that prefix; when absent (direct access), keep relative links
+    and no prefix so localhost:9200 loads /css/, /js/.
+  - Add get_forwarded_path_prefix() and inject_forwarded_prefix_into_html()
+  - Move HTML prefix helper to web_app/html_prefix.py to avoid circular
+    import with web routes.
+  - Add ENVOY_PREFIX_STRIP.md: prefix_rewrite and X-Forwarded-Prefix
+    for http-proxy Envoy config.
+
+- Concurrency: add config.workers and uvicorn workers; add
+  tests/test_concurrent.py (concurrent health, shorten, stats, redirect).
+
+- .envrc: set QUESTDB_URL and QUESTDB_CREATE_TABLES for app/env alignment.
+
+- .env: set APP_PORT=9200 and BASE_URL=http://localhost:9200 (was 8080).

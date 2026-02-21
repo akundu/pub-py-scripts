@@ -1,0 +1,21 @@
+{
+  "song_id": "pf_cl_004",
+  "title": "Study in B minor",
+  "composer": "Fernando Sor",
+  "tempo": 75,
+  "time_signature": "3/4",
+  "difficulty": "proficient",
+  "license_status": "public_domain",
+  "genre": "classical",
+  "chords": ["Bm", "F#7", "Em", "A"],
+  "original_duration": "2:15",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 2, "duration": 2.4, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.40, "string": 3, "fret": 4, "duration": 0.40, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.80, "string": 2, "fret": 3, "duration": 0.40, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.20, "string": 1, "fret": 2, "duration": 0.40, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

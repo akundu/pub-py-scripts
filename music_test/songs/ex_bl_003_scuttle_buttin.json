@@ -1,0 +1,25 @@
+{
+  "song_id": "ex_bl_003",
+  "title": "Scuttle Buttin'",
+  "composer": "Stevie Ray Vaughan",
+  "tempo": 200,
+  "time_signature": "4/4",
+  "difficulty": "expert",
+  "license_status": "educational_use",
+  "genre": "blues",
+  "chords": ["E", "A", "B"],
+  "original_duration": "1:52",
+  "learning_time": "12 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 0, "duration": 1.2, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.15, "string": 6, "fret": 0, "duration": 0.15, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.30, "string": 6, "fret": 2, "duration": 0.15, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.45, "string": 5, "fret": 2, "duration": 0.15, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.60, "string": 6, "fret": 0, "duration": 0.15, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.75, "string": 5, "fret": 4, "duration": 0.15, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.90, "string": 6, "fret": 0, "duration": 0.15, "velocity": 0.9, "technique": "single_note"},
+    {"time": 1.05, "string": 6, "fret": 2, "duration": 0.15, "velocity": 0.9, "technique": "single_note"}
+  ]
+}

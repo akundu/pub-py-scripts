@@ -1,0 +1,44 @@
+{
+  "enabled": true,
+  "total_capital": 500000,
+  "ticker": "I:NDX",
+  "equities_dir": "equities_output",
+  "carry_forward_decay": 0.5,
+  "direction_priority_split": 0.70,
+  "max_concurrent_exposure": 300000,
+
+  "hourly_windows": [
+    {"label": "6am", "start_hour_pst": 6, "end_hour_pst": 7, "end_minute_pst": 0, "budget_pct": 0.30, "start_minute_pst": 30},
+    {"label": "7am", "start_hour_pst": 7, "end_hour_pst": 8, "end_minute_pst": 0, "budget_pct": 0.35},
+    {"label": "8am", "start_hour_pst": 8, "end_hour_pst": 9, "end_minute_pst": 0, "budget_pct": 0.25},
+    {"label": "9am", "start_hour_pst": 9, "end_hour_pst": 9, "end_minute_pst": 30, "budget_pct": "remainder"}
+  ],
+
+  "tiers": {
+    "put": [
+      {"level": 3, "percent_beyond": 0.025, "spread_width": 200, "roi_threshold": 0.015, "max_cumulative_budget_pct": 0.65, "daily_capital_limit": 200000},
+      {"level": 2, "percent_beyond": 0.020, "spread_width": 190, "roi_threshold": 0.020, "max_cumulative_budget_pct": 0.95, "daily_capital_limit": 50000},
+      {"level": 1, "percent_beyond": 0.015, "spread_width": 150, "roi_threshold": 0.025, "max_cumulative_budget_pct": 1.00, "daily_capital_limit": 30000}
+    ],
+    "call": [
+      {"level": 3, "percent_beyond": 0.025, "spread_width": 200, "roi_threshold": 0.015, "max_cumulative_budget_pct": 0.65, "daily_capital_limit": 200000},
+      {"level": 2, "percent_beyond": 0.020, "spread_width": 190, "roi_threshold": 0.020, "max_cumulative_budget_pct": 0.95, "daily_capital_limit": 50000},
+      {"level": 1, "percent_beyond": 0.015, "spread_width": 150, "roi_threshold": 0.025, "max_cumulative_budget_pct": 1.00, "daily_capital_limit": 30000}
+    ]
+  },
+
+  "slope_detection": {
+    "lookback_bars": 5,
+    "flatten_ratio_threshold": 0.4,
+    "min_directional_move_pct": 0.0005,
+    "require_double_flatten": false,
+    "skip_slope": true
+  },
+
+  "profit_targets": {
+    "6am": 0.60,
+    "7am": 0.50,
+    "8am": 0.40,
+    "9am": 0.30
+  }
+}

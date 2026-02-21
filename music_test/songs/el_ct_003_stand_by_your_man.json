@@ -1,0 +1,32 @@
+{
+  "song_id": "el_ct_003",
+  "title": "Stand By Your Man",
+  "composer": "Tammy Wynette",
+  "tempo": 75,
+  "time_signature": "4/4",
+  "difficulty": "elementary",
+  "license_status": "educational_use",
+  "genre": "country",
+  "chords": ["D", "G", "A", "Bm"],
+  "original_duration": "2:45",
+  "learning_time": "2 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 2, "duration": 3.2, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.02, "string": 2, "fret": 3, "duration": 3.2, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 2, "duration": 3.2, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.06, "string": 4, "fret": 0, "duration": 3.2, "velocity": 0.6, "technique": "strum"},
+    {"time": 3.2, "string": 1, "fret": 3, "duration": 3.2, "velocity": 0.6, "technique": "strum"},
+    {"time": 3.22, "string": 2, "fret": 3, "duration": 3.2, "velocity": 0.6, "technique": "strum"},
+    {"time": 3.24, "string": 3, "fret": 0, "duration": 3.2, "velocity": 0.6, "technique": "strum"},
+    {"time": 3.26, "string": 4, "fret": 0, "duration": 3.2, "velocity": 0.6, "technique": "strum"},
+    {"time": 3.28, "string": 5, "fret": 2, "duration": 3.2, "velocity": 0.6, "technique": "strum"},
+    {"time": 3.30, "string": 6, "fret": 3, "duration": 3.2, "velocity": 0.6, "technique": "strum"},
+    {"time": 6.4, "string": 1, "fret": 0, "duration": 3.2, "velocity": 0.6, "technique": "strum"},
+    {"time": 6.42, "string": 2, "fret": 2, "duration": 3.2, "velocity": 0.6, "technique": "strum"},
+    {"time": 6.44, "string": 3, "fret": 2, "duration": 3.2, "velocity": 0.6, "technique": "strum"},
+    {"time": 6.46, "string": 4, "fret": 2, "duration": 3.2, "velocity": 0.6, "technique": "strum"},
+    {"time": 6.48, "string": 5, "fret": 0, "duration": 3.2, "velocity": 0.6, "technique": "strum"}
+  ]
+}

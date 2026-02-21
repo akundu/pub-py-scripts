@@ -9301,6 +9301,10 @@ async def handle_lazy_load_today_prediction(request: web.Request) -> web.Respons
         if cached is not None:
             cached_data, cache_timestamp = cached
             if isinstance(cached_data, dict) and 'error' not in cached_data:
+                # Still record snapshot for band convergence chart
+                if history is not None and cached_data.get('current_price', 0) > 0:
+                    date_str = datetime.now(ET_TZ).strftime('%Y-%m-%d')
+                    await history.add_snapshot(ticker, date_str, cached_data)
                 return web.json_response({**cached_data, 'cache_timestamp': cache_timestamp})
 
     result = await fetch_today_prediction(ticker, cache, force_refresh=force_refresh, history=history, lookback=lookback)

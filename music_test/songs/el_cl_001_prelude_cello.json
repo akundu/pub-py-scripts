@@ -1,0 +1,32 @@
+{
+  "song_id": "el_cl_001",
+  "title": "Prelude (Cello Suite Adapted)",
+  "composer": "Bach",
+  "tempo": 72,
+  "time_signature": "4/4",
+  "difficulty": "elementary",
+  "license_status": "public_domain",
+  "genre": "classical",
+  "chords": ["G", "Am", "D", "Em"],
+  "original_duration": "2:30",
+  "learning_time": "2 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 3, "duration": 0.83, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.83, "string": 4, "fret": 0, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.25, "string": 3, "fret": 0, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.67, "string": 2, "fret": 3, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.09, "string": 3, "fret": 0, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.51, "string": 4, "fret": 0, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.93, "string": 2, "fret": 3, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.35, "string": 3, "fret": 0, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.77, "string": 4, "fret": 0, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.19, "string": 5, "fret": 0, "duration": 0.83, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 5.02, "string": 4, "fret": 2, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 5.44, "string": 3, "fret": 2, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 5.86, "string": 2, "fret": 1, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 6.28, "string": 3, "fret": 2, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 6.70, "string": 4, "fret": 2, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

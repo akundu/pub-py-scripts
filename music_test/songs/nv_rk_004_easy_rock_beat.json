@@ -1,0 +1,32 @@
+{
+  "song_id": "nv_rk_004",
+  "title": "Easy Rock Beat",
+  "composer": "Traditional",
+  "tempo": 110,
+  "time_signature": "4/4",
+  "difficulty": "novice",
+  "license_status": "educational_use",
+  "genre": "rock",
+  "chords": ["E", "A", "D"],
+  "original_duration": "1:00",
+  "learning_time": "2 days",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 0, "duration": 2.18, "velocity": 0.8, "technique": "strum"},
+    {"time": 0.02, "string": 2, "fret": 0, "duration": 2.18, "velocity": 0.8, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 1, "duration": 2.18, "velocity": 0.8, "technique": "strum"},
+    {"time": 0.06, "string": 4, "fret": 2, "duration": 2.18, "velocity": 0.8, "technique": "strum"},
+    {"time": 0.08, "string": 5, "fret": 2, "duration": 2.18, "velocity": 0.8, "technique": "strum"},
+    {"time": 0.10, "string": 6, "fret": 0, "duration": 2.18, "velocity": 0.8, "technique": "strum"},
+    {"time": 2.18, "string": 1, "fret": 0, "duration": 2.18, "velocity": 0.8, "technique": "strum"},
+    {"time": 2.20, "string": 2, "fret": 2, "duration": 2.18, "velocity": 0.8, "technique": "strum"},
+    {"time": 2.22, "string": 3, "fret": 2, "duration": 2.18, "velocity": 0.8, "technique": "strum"},
+    {"time": 2.24, "string": 4, "fret": 2, "duration": 2.18, "velocity": 0.8, "technique": "strum"},
+    {"time": 2.26, "string": 5, "fret": 0, "duration": 2.18, "velocity": 0.8, "technique": "strum"},
+    {"time": 4.36, "string": 1, "fret": 2, "duration": 2.18, "velocity": 0.8, "technique": "strum"},
+    {"time": 4.38, "string": 2, "fret": 3, "duration": 2.18, "velocity": 0.8, "technique": "strum"},
+    {"time": 4.40, "string": 3, "fret": 2, "duration": 2.18, "velocity": 0.8, "technique": "strum"},
+    {"time": 4.42, "string": 4, "fret": 0, "duration": 2.18, "velocity": 0.8, "technique": "strum"}
+  ]
+}

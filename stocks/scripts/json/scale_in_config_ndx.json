@@ -1,0 +1,48 @@
+{
+  "enabled": true,
+  "total_capital": 200000,
+  "spread_width": 25,
+  "min_time_between_layers_minutes": 5,
+  "layers": {
+    "put": [
+      {
+        "level": 1,
+        "percent_beyond": 0.0215,
+        "capital_pct": 0.40,
+        "trigger": "entry"
+      },
+      {
+        "level": 2,
+        "percent_beyond": 0.0240,
+        "capital_pct": 0.35,
+        "trigger": "L1_breach"
+      },
+      {
+        "level": 3,
+        "percent_beyond": 0.0270,
+        "capital_pct": 0.25,
+        "trigger": "L2_breach"
+      }
+    ],
+    "call": [
+      {
+        "level": 1,
+        "percent_beyond": 0.0225,
+        "capital_pct": 0.40,
+        "trigger": "entry"
+      },
+      {
+        "level": 2,
+        "percent_beyond": 0.0250,
+        "capital_pct": 0.35,
+        "trigger": "L1_breach"
+      },
+      {
+        "level": 3,
+        "percent_beyond": 0.0280,
+        "capital_pct": 0.25,
+        "trigger": "L2_breach"
+      }
+    ]
+  }
+}

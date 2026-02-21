@@ -1,0 +1,33 @@
+{
+  "song_id": "el_ct_004",
+  "title": "Achy Breaky Heart",
+  "composer": "Don Von Tress",
+  "tempo": 120,
+  "time_signature": "4/4",
+  "difficulty": "elementary",
+  "license_status": "educational_use",
+  "genre": "country",
+  "chords": ["A", "E"],
+  "original_duration": "3:00",
+  "learning_time": "1 week",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 0, "duration": 2.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.02, "string": 2, "fret": 2, "duration": 2.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 2, "duration": 2.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.06, "string": 4, "fret": 2, "duration": 2.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.08, "string": 5, "fret": 0, "duration": 2.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.0, "string": 1, "fret": 0, "duration": 2.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.02, "string": 2, "fret": 0, "duration": 2.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.04, "string": 3, "fret": 1, "duration": 2.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.06, "string": 4, "fret": 2, "duration": 2.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.08, "string": 5, "fret": 2, "duration": 2.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.10, "string": 6, "fret": 0, "duration": 2.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 4.0, "string": 1, "fret": 0, "duration": 2.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 4.02, "string": 2, "fret": 2, "duration": 2.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 4.04, "string": 3, "fret": 2, "duration": 2.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 4.06, "string": 4, "fret": 2, "duration": 2.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 4.08, "string": 5, "fret": 0, "duration": 2.0, "velocity": 0.7, "technique": "strum"}
+  ]
+}

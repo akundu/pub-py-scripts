@@ -1,0 +1,25 @@
+{
+  "song_id": "pf_mt_004",
+  "title": "Battery (Intro)",
+  "composer": "Metallica",
+  "tempo": 95,
+  "time_signature": "4/4",
+  "difficulty": "proficient",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["Em", "Am", "D", "G", "C", "B5"],
+  "original_duration": "5:13",
+  "learning_time": "5 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 0, "duration": 2.53, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.32, "string": 4, "fret": 2, "duration": 0.32, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 0.64, "string": 3, "fret": 0, "duration": 0.32, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 0.96, "string": 2, "fret": 0, "duration": 0.32, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 1.28, "string": 1, "fret": 0, "duration": 0.32, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 1.60, "string": 2, "fret": 0, "duration": 0.32, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 1.92, "string": 3, "fret": 0, "duration": 0.32, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 2.24, "string": 4, "fret": 2, "duration": 0.32, "velocity": 0.4, "technique": "fingerpick"}
+  ]
+}

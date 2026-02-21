@@ -1,0 +1,38 @@
+{
+  "song_id": "pd_004",
+  "title": "Canon in D (Simplified)",
+  "composer": "Johann Pachelbel",
+  "tempo": 66,
+  "time_signature": "4/4",
+  "difficulty": "intermediate",
+  "license_status": "public_domain",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    { "time": 0.0, "string": 4, "fret": 0, "duration": 0.909 },
+    { "time": 0.909, "string": 5, "fret": 3, "duration": 0.909 },
+    { "time": 1.818, "string": 5, "fret": 0, "duration": 0.909 },
+    { "time": 2.727, "string": 4, "fret": 2, "duration": 0.909 },
+    { "time": 3.636, "string": 4, "fret": 3, "duration": 0.909 },
+    { "time": 4.545, "string": 4, "fret": 0, "duration": 0.909 },
+    { "time": 5.454, "string": 4, "fret": 3, "duration": 0.909 },
+    { "time": 6.363, "string": 4, "fret": 2, "duration": 0.909 },
+    { "time": 7.272, "string": 3, "fret": 2, "duration": 0.454 },
+    { "time": 7.726, "string": 3, "fret": 0, "duration": 0.454 },
+    { "time": 8.18, "string": 2, "fret": 0, "duration": 0.454 },
+    { "time": 8.634, "string": 2, "fret": 1, "duration": 0.454 },
+    { "time": 9.088, "string": 3, "fret": 0, "duration": 0.454 },
+    { "time": 9.542, "string": 2, "fret": 3, "duration": 0.454 },
+    { "time": 9.996, "string": 2, "fret": 1, "duration": 0.454 },
+    { "time": 10.45, "string": 2, "fret": 0, "duration": 0.454 },
+    { "time": 10.904, "string": 3, "fret": 2, "duration": 0.909 },
+    { "time": 11.813, "string": 3, "fret": 0, "duration": 0.909 },
+    { "time": 12.722, "string": 2, "fret": 0, "duration": 0.909 },
+    { "time": 13.631, "string": 2, "fret": 1, "duration": 0.909 },
+    { "time": 14.54, "string": 2, "fret": 3, "duration": 0.909 },
+    { "time": 15.449, "string": 3, "fret": 0, "duration": 0.909 },
+    { "time": 16.358, "string": 2, "fret": 3, "duration": 0.909 },
+    { "time": 17.267, "string": 2, "fret": 1, "duration": 0.909 }
+  ]
+}
+

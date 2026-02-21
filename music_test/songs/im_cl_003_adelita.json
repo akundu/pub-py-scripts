@@ -1,0 +1,21 @@
+{
+  "song_id": "im_cl_003",
+  "title": "Adelita",
+  "composer": "Francisco Tárrega",
+  "tempo": 80,
+  "time_signature": "3/4",
+  "difficulty": "intermediate",
+  "license_status": "public_domain",
+  "genre": "classical",
+  "chords": ["E", "Am", "B7", "G"],
+  "original_duration": "1:30",
+  "learning_time": "3 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 0, "duration": 2.25, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.38, "string": 3, "fret": 1, "duration": 0.38, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.76, "string": 2, "fret": 0, "duration": 0.38, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.14, "string": 1, "fret": 0, "duration": 0.38, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "song_id": "av_ct_002",
+  "title": "Guitar Town",
+  "composer": "Steve Earle",
+  "tempo": 180,
+  "time_signature": "4/4",
+  "difficulty": "advanced",
+  "license_status": "educational_use",
+  "genre": "country",
+  "chords": ["A", "D", "E", "G"],
+  "original_duration": "3:06",
+  "learning_time": "3 weeks",
+  "tuning": "open_e",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 0, "duration": 1.33, "velocity": 0.8, "technique": "strum"},
+    {"time": 0.02, "string": 2, "fret": 0, "duration": 1.33, "velocity": 0.8, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 1, "duration": 1.33, "velocity": 0.8, "technique": "strum"},
+    {"time": 0.06, "string": 4, "fret": 2, "duration": 1.33, "velocity": 0.8, "technique": "strum"},
+    {"time": 0.08, "string": 5, "fret": 2, "duration": 1.33, "velocity": 0.8, "technique": "strum"},
+    {"time": 0.10, "string": 6, "fret": 0, "duration": 1.33, "velocity": 0.8, "technique": "strum"}
+  ]
+}

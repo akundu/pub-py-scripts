@@ -1,0 +1,37 @@
+{
+  "_description": "NDX Dynamic Spread Width Test - comparing fixed vs dynamic widths",
+  "_hypothesis": "Wider spreads at safer (further OTM) distances capture more premium without proportional risk increase",
+  "fixed_params": {
+    "csv_dir": "../options_csv_output",
+    "underlying_ticker": "NDX",
+    "start_date": "2025-11-01",
+    "end_date": "2026-01-29",
+    "option_type": "both",
+    "min_spread_width": 10,
+    "max_spread_width": "100:100",
+    "risk_cap": 500000,
+    "profit_target_pct": 0.90,
+    "min_trading_hour": 9,
+    "max_trading_hour": 12,
+    "min_premium_diff": "0.50:0.50",
+    "output_timezone": "America/Los_Angeles",
+    "db_path": "$QUEST_DB_STRING",
+    "percent_beyond": "0.025:0.025"
+  },
+  "grid_params": {
+    "dynamic_spread_width": [
+      null,
+      {"mode": "linear", "base_width": 15, "slope_factor": 500, "min_width": 10, "max_width": 50},
+      {"mode": "linear", "base_width": 15, "slope_factor": 1000, "min_width": 10, "max_width": 75},
+      {"mode": "linear", "base_width": 20, "slope_factor": 1500, "min_width": 10, "max_width": 100},
+      {"mode": "stepped", "base_width": 15, "steps": {"0.01": 20, "0.02": 30, "0.03": 50}, "min_width": 10, "max_width": 75}
+    ]
+  },
+  "_grid_legend": {
+    "null": "Baseline: Fixed max width (100)",
+    "linear_500": "Linear: base=15, slope=500 (at 2% OTM: width=25)",
+    "linear_1000": "Linear: base=15, slope=1000 (at 2% OTM: width=35)",
+    "linear_1500": "Linear: base=20, slope=1500 (at 2% OTM: width=50)",
+    "stepped": "Stepped: 1%=20, 2%=30, 3%=50"
+  }
+}

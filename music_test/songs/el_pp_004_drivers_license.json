@@ -1,0 +1,22 @@
+{
+  "song_id": "el_pp_004",
+  "title": "Drivers License",
+  "composer": "Olivia Rodrigo",
+  "tempo": 72,
+  "time_signature": "4/4",
+  "difficulty": "elementary",
+  "license_status": "educational_use",
+  "genre": "pop",
+  "chords": ["Bb", "F", "Gm", "Eb"],
+  "original_duration": "4:02",
+  "learning_time": "2 weeks",
+  "tuning": "standard",
+  "capo": 1,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 1, "duration": 3.33, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.02, "string": 2, "fret": 3, "duration": 3.33, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 3, "duration": 3.33, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.06, "string": 4, "fret": 3, "duration": 3.33, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.08, "string": 5, "fret": 1, "duration": 3.33, "velocity": 0.6, "technique": "strum"}
+  ]
+}

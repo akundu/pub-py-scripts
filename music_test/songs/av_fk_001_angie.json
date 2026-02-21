@@ -1,0 +1,25 @@
+{
+  "song_id": "av_fk_001",
+  "title": "Angie",
+  "composer": "Bert Jansch",
+  "tempo": 92,
+  "time_signature": "4/4",
+  "difficulty": "advanced",
+  "license_status": "educational_use",
+  "genre": "folk",
+  "chords": ["Am", "G", "F", "C", "D"],
+  "original_duration": "2:43",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 0, "duration": 2.61, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.33, "string": 3, "fret": 2, "duration": 0.33, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.66, "string": 2, "fret": 1, "duration": 0.33, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.99, "string": 1, "fret": 0, "duration": 0.33, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.32, "string": 2, "fret": 1, "duration": 0.33, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.65, "string": 3, "fret": 2, "duration": 0.33, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.98, "string": 1, "fret": 0, "duration": 0.33, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.31, "string": 2, "fret": 1, "duration": 0.33, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

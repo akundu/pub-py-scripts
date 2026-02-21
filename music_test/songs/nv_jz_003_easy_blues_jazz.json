@@ -1,0 +1,32 @@
+{
+  "song_id": "nv_jz_003",
+  "title": "Easy Blues Jazz",
+  "composer": "Traditional",
+  "tempo": 80,
+  "time_signature": "4/4",
+  "difficulty": "novice",
+  "license_status": "educational_use",
+  "genre": "jazz",
+  "chords": ["A", "D", "E"],
+  "original_duration": "1:00",
+  "learning_time": "2 days",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 0, "duration": 3.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.02, "string": 2, "fret": 2, "duration": 3.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 2, "duration": 3.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.06, "string": 4, "fret": 2, "duration": 3.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.08, "string": 5, "fret": 0, "duration": 3.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 3.0, "string": 1, "fret": 2, "duration": 3.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 3.02, "string": 2, "fret": 3, "duration": 3.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 3.04, "string": 3, "fret": 2, "duration": 3.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 3.06, "string": 4, "fret": 0, "duration": 3.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 6.0, "string": 1, "fret": 0, "duration": 3.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 6.02, "string": 2, "fret": 0, "duration": 3.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 6.04, "string": 3, "fret": 1, "duration": 3.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 6.06, "string": 4, "fret": 2, "duration": 3.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 6.08, "string": 5, "fret": 2, "duration": 3.0, "velocity": 0.7, "technique": "strum"},
+    {"time": 6.10, "string": 6, "fret": 0, "duration": 3.0, "velocity": 0.7, "technique": "strum"}
+  ]
+}

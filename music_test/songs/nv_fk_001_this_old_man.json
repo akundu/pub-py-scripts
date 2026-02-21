@@ -1,0 +1,7068 @@
+{
+  "song_id": "nv_fk_001",
+  "title": "This Old Man",
+  "composer": "Traditional",
+  "tempo": 110,
+  "time_signature": "4/4",
+  "difficulty": "novice",
+  "license_status": "educational_use",
+  "genre": "folk",
+  "chords": [
+    "C",
+    "G"
+  ],
+  "original_duration": "2:00",
+  "learning_time": "3 days",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {
+      "time": 0.0,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 0.136,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 0.273,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 0.409,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 0.545,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 0.682,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 0.818,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 0.955,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 1.091,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 1.227,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 1.364,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 1.5,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 1.636,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 1.773,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 1.909,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 2.045,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 2.182,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 2.318,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 2.455,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 2.591,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 2.727,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 2.864,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 3.0,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 3.136,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 3.273,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 3.409,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 3.545,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 3.682,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 3.818,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 3.955,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 4.091,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 4.227,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 4.364,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 4.5,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 4.636,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 4.773,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 4.909,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 5.045,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 5.182,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 5.318,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 5.455,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 5.591,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 5.727,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 5.864,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 6.0,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 6.136,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 6.273,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 6.409,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 6.545,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 6.682,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 6.818,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 6.955,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 7.091,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 7.227,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 7.364,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 7.5,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 7.636,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 7.773,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 7.909,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 8.045,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 8.182,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 8.318,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 8.455,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 8.591,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 8.727,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 8.864,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 9.0,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 9.136,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 9.273,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 9.409,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 9.545,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 9.682,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 9.818,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 9.955,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 10.091,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 10.227,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 10.364,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 10.5,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 10.636,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 10.773,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 10.909,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 11.045,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 11.182,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 11.318,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 11.455,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 11.591,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 11.727,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 11.864,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 12.0,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 12.136,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 12.273,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 12.409,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 12.545,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 12.682,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 12.818,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 12.955,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 13.091,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 13.227,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 13.364,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 13.5,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 13.636,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 13.773,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 13.909,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 14.045,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 14.182,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 14.318,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 14.455,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 14.591,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 14.727,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 14.864,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 15.0,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 15.136,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 15.273,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 15.409,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 15.545,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 15.682,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 15.818,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 15.955,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 16.091,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 16.227,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 16.364,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 16.5,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 16.636,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 16.773,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 16.909,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 17.045,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 17.182,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 17.318,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 17.455,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 17.591,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 17.727,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 17.864,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 18.0,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 18.136,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 18.273,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 18.409,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 18.545,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 18.682,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 18.818,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 18.955,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 19.091,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 19.227,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 19.364,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 19.5,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 19.636,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 19.773,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 19.909,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 20.045,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 20.182,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 20.318,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 20.455,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 20.591,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 20.727,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 20.864,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 21.0,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 21.136,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 21.273,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 21.409,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 21.545,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 21.682,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 21.818,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 21.955,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 22.091,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 22.227,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 22.364,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 22.5,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 22.636,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 22.773,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 22.909,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 23.045,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 23.182,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 23.318,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 23.455,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 23.591,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 23.727,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 23.864,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 24.0,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 24.136,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 24.273,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 24.409,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 24.545,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 24.682,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 24.818,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 24.955,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 25.091,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 25.227,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 25.364,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 25.5,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 25.636,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 25.773,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 25.909,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 26.045,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 26.182,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 26.318,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 26.455,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 26.591,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 26.727,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 26.864,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 27.0,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 27.136,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 27.273,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 27.409,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 27.545,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 27.682,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 27.818,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 27.955,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 28.091,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 28.227,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 28.364,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 28.5,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 28.636,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 28.773,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 28.909,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 29.045,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 29.182,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 29.318,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 29.455,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 29.591,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 29.727,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 29.864,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 30.0,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 30.136,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 30.273,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 30.409,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 30.545,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 30.682,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 30.818,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 30.955,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 31.091,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 31.227,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 31.364,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 31.5,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 31.636,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 31.773,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 31.909,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 32.045,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 32.182,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 32.318,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 32.455,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 32.591,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 32.727,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 32.864,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 33.0,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 33.136,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 33.273,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 33.409,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 33.545,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 33.682,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 33.818,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 33.955,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 34.091,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 34.227,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 34.364,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 34.5,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 34.636,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 34.773,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 34.909,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 35.045,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 35.182,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 35.318,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 35.455,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 35.591,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 35.727,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 35.864,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 36.0,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 36.136,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 36.273,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 36.409,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 36.545,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 36.682,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 36.818,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 36.955,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 37.091,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 37.227,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 37.364,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 37.5,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 37.636,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 37.773,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 37.909,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 38.045,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 38.182,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 38.318,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 38.455,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 38.591,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 38.727,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 38.864,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 39.0,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 39.136,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 39.273,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 39.409,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 39.545,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 39.682,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 39.818,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 39.955,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 40.091,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 40.227,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 40.364,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 40.5,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 40.636,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 40.773,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 40.909,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 41.045,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 41.182,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 41.318,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 41.455,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 41.591,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 41.727,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 41.864,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 42.0,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 42.136,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 42.273,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 42.409,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 42.545,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 42.682,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 42.818,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 42.955,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 43.091,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 43.227,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 43.364,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 43.5,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 43.636,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 43.773,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 43.909,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 44.045,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 44.182,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 44.318,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 44.455,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 44.591,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 44.727,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 44.864,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 45.0,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 45.136,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 45.273,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 45.409,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 45.545,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 45.682,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 45.818,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 45.955,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 46.091,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 46.227,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 46.364,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 46.5,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 46.636,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 46.773,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 46.909,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 47.045,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 47.182,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 47.318,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 47.455,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 47.591,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 47.727,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 47.864,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 48.0,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 48.136,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 48.273,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 48.409,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 48.545,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 48.682,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 48.818,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 48.955,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 49.091,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 49.227,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 49.364,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 49.5,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 49.636,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 49.773,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 49.909,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 50.045,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 50.182,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 50.318,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 50.455,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 50.591,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 50.727,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 50.864,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 51.0,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 51.136,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 51.273,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 51.409,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 51.545,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 51.682,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 51.818,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 51.955,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 52.091,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 52.227,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 52.364,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 52.5,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 52.636,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 52.773,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 52.909,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 53.045,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 53.182,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 53.318,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 53.455,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 53.591,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 53.727,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 53.864,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 54.0,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 54.136,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 54.273,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 54.409,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 54.545,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 54.682,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 54.818,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 54.955,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 55.091,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 55.227,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 55.364,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 55.5,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 55.636,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 55.773,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 55.909,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 56.045,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 56.182,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 56.318,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 56.455,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 56.591,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 56.727,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 56.864,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 57.0,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 57.136,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 57.273,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 57.409,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 57.545,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 57.682,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 57.818,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 57.955,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 58.091,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 58.227,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 58.364,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 58.5,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 58.636,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 58.773,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 58.909,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 59.045,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 59.182,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 59.318,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 59.455,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 59.591,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 59.727,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 59.864,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 60.0,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 60.0,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 60.136,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 60.273,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 60.409,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 60.545,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 60.682,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 60.818,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 60.955,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 61.091,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 61.227,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 61.364,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 61.5,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 61.636,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 61.773,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 61.909,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 62.045,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 62.182,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 62.318,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 62.455,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 62.591,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 62.727,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 62.864,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 63.0,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 63.136,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 63.273,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 63.409,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 63.545,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 63.682,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 63.818,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 63.955,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 64.091,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 64.227,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 64.364,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 64.5,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 64.636,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 64.773,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 64.909,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 65.045,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 65.182,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 65.318,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 65.455,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 65.591,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 65.727,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 65.864,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 66.0,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 66.136,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 66.273,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 66.409,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 66.545,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 66.682,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 66.818,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 66.955,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 67.091,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 67.227,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 67.364,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 67.5,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 67.636,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 67.773,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 67.909,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 68.045,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 68.182,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 68.318,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 68.455,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 68.591,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 68.727,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 68.864,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 69.0,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 69.136,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 69.273,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 69.409,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 69.545,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 69.682,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 69.818,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 69.955,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 70.091,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 70.227,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 70.364,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 70.5,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 70.636,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 70.773,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 70.909,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 71.045,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 71.182,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 71.318,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 71.455,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 71.591,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 71.727,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 71.864,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 72.0,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 72.136,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 72.273,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 72.409,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 72.545,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 72.682,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 72.818,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 72.955,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 73.091,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 73.227,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 73.364,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 73.5,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 73.636,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 73.773,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 73.909,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 74.045,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 74.182,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 74.318,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 74.455,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 74.591,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 74.727,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 74.864,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 75.0,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 75.136,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 75.273,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 75.409,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 75.545,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 75.682,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 75.818,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 75.955,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 76.091,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 76.227,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 76.364,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 76.5,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 76.636,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 76.773,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 76.909,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 77.045,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 77.182,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 77.318,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 77.455,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 77.591,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 77.727,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 77.864,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 78.0,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 78.136,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 78.273,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 78.409,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 78.545,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 78.682,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 78.818,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 78.955,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 79.091,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 79.227,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 79.364,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 79.5,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 79.636,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 79.773,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 79.909,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 80.045,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 80.182,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 80.318,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 80.455,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 80.591,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 80.727,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 80.864,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 81.0,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 81.136,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 81.273,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 81.409,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 81.545,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 81.682,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 81.818,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 81.955,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 82.091,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 82.227,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 82.364,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 82.5,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 82.636,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 82.773,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 82.909,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 83.045,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 83.182,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 83.318,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 83.455,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 83.591,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 83.727,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 83.864,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 84.0,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 84.136,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 84.273,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 84.409,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 84.545,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 84.682,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 84.818,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 84.955,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 85.091,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 85.227,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 85.364,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 85.5,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 85.636,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 85.773,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 85.909,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 86.045,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 86.182,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 86.318,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 86.455,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 86.591,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 86.727,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 86.864,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 87.0,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 87.136,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 87.273,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 87.409,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 87.545,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 87.682,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 87.818,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 87.955,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 88.091,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 88.227,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 88.364,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 88.5,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 88.636,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 88.773,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 88.909,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 89.045,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 89.182,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 89.318,
+      "string": 1,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 89.455,
+      "string": 2,
+      "fret": 1,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 89.591,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 89.727,
+      "string": 4,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 89.864,
+      "string": 5,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 90.0,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 90.136,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 90.273,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 90.409,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 90.545,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 90.682,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 90.818,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 90.955,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 91.091,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 91.227,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 91.364,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 91.5,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 91.636,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 91.773,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 91.909,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 92.045,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 92.182,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 92.318,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 92.455,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 92.591,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 92.727,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 92.864,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 93.0,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 93.136,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 93.273,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 93.409,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 93.545,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 93.682,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 93.818,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 93.955,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 94.091,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 94.227,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 94.364,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 94.5,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 94.636,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 94.773,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 94.909,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 95.045,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 95.182,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 95.318,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 95.455,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 95.591,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 95.727,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 95.864,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 96.0,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 96.136,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 96.273,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 96.409,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 96.545,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 96.682,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 96.818,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 96.955,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 97.091,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 97.227,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 97.364,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 97.5,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 97.636,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 97.773,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 97.909,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 98.045,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 98.182,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 98.318,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 98.455,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 98.591,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 98.727,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 98.864,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 99.0,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 99.136,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 99.273,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 99.409,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 99.545,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 99.682,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 99.818,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 99.955,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 100.091,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 100.227,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 100.364,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 100.5,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 100.636,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 100.773,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 100.909,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 101.045,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 101.182,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 101.318,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 101.455,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 101.591,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 101.727,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 101.864,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 102.0,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 102.136,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 102.273,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 102.409,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 102.545,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 102.682,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 102.818,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 102.955,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 103.091,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 103.227,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 103.364,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 103.5,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 103.636,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 103.773,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 103.909,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 104.045,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 104.182,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 104.318,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 104.455,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 104.591,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 104.727,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 104.864,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 105.0,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 105.136,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 105.273,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 105.409,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 105.545,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 105.682,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 105.818,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 105.955,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 106.091,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 106.227,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 106.364,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 106.5,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 106.636,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 106.773,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 106.909,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 107.045,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 107.182,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 107.318,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 107.455,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 107.591,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 107.727,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 107.864,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 108.0,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 108.136,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 108.273,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 108.409,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 108.545,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 108.682,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 108.818,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 108.955,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 109.091,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 109.227,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 109.364,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 109.5,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 109.636,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 109.773,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 109.909,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 110.045,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 110.182,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 110.318,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 110.455,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 110.591,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 110.727,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 110.864,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 111.0,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 111.136,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 111.273,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 111.409,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 111.545,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 111.682,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 111.818,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 111.955,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 112.091,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 112.227,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 112.364,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 112.5,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 112.636,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 112.773,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 112.909,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 113.045,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 113.182,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 113.318,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 113.455,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 113.591,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 113.727,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 113.864,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 114.0,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 114.136,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 114.273,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 114.409,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 114.545,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 114.682,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 114.818,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 114.955,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 115.091,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 115.227,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 115.364,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 115.5,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 115.636,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 115.773,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 115.909,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 116.045,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 116.182,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 116.318,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 116.455,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 116.591,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 116.727,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 116.864,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 117.0,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 117.136,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 117.273,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 117.409,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 117.545,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 117.682,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 117.818,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 117.955,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 118.091,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 118.227,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 118.364,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 118.5,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 118.636,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 118.773,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 118.909,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 119.045,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 119.182,
+      "string": 5,
+      "fret": 2,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 119.318,
+      "string": 6,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 119.455,
+      "string": 1,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.6,
+      "technique": "pluck"
+    },
+    {
+      "time": 119.591,
+      "string": 2,
+      "fret": 3,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 119.727,
+      "string": 3,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    },
+    {
+      "time": 119.864,
+      "string": 4,
+      "fret": 0,
+      "duration": 0.273,
+      "velocity": 0.5,
+      "technique": "pluck"
+    }
+  ]
+}

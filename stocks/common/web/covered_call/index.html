@@ -1,0 +1,1393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📊 Options Analysis Results (Calls & Puts)</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 95%;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        
+        .tabs {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .tab-button {
+            padding: 12px 24px;
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            user-select: none;
+        }
+        
+        .tab-button:hover {
+            background: rgba(255, 255, 255, 0.3);
+            border-color: rgba(255, 255, 255, 0.5);
+        }
+        
+        .tab-button.active {
+            background: white;
+            color: #667eea;
+            border-color: white;
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block !important;
+        }
+        
+        .table-wrapper {
+            overflow-x: auto;
+            padding: 20px;
+            display: block;
+        }
+        
+        /* Hidden columns handling */
+        .table-wrapper.hide-hidden th.is-hidden-col,
+        .table-wrapper.hide-hidden td.is-hidden-col {
+            display: none;
+        }
+        
+        /* Always hidden columns (hidden in all cases) */
+        th.always-hidden,
+        td.always-hidden {
+            display: none !important;
+        }
+        
+        /* Hide group header row when hidden columns are shown */
+        .table-wrapper:not(.hide-hidden) tr.group-header-row {
+            display: none;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9em;
+            table-layout: auto;
+        }
+        
+        thead {
+            background: #f8f9fa;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        
+        th {
+            padding: 15px 8px;
+            text-align: center;
+            font-weight: 600;
+            color: #333;
+            border-bottom: 2px solid #dee2e6;
+            cursor: pointer;
+            user-select: none;
+            white-space: normal;
+            word-wrap: break-word;
+            word-break: break-word;
+            width: auto;
+            max-width: 12ch;
+            min-width: fit-content;
+            line-height: 1.3;
+            position: relative;
+        }
+        
+        /* Group header row styling */
+        tr.group-header-row th.group-header {
+            background: #667eea;
+            color: white;
+            text-align: center;
+            font-weight: 700;
+            font-size: 0.95em;
+            border-bottom: 2px solid #5568d3;
+            cursor: default;
+            padding: 10px 12px;
+        }
+        
+        tr.group-header-row th.group-header.is-hidden-col {
+            display: none;
+        }
+        
+        tr.group-header-row th.group-header:hover {
+            background: #5568d3;
+        }
+        
+        /* Column header row styling (second row) */
+        tr.column-header-row th {
+            border-top: 1px solid #dee2e6;
+            padding: 10px 12px;
+            font-size: 0.9em;
+        }
+        
+        th.even-col {
+            background: #f0f0f0;
+        }
+        
+        th:hover {
+            background: #e9ecef;
+        }
+        
+        th.even-col:hover {
+            background: #d0d0d0;
+        }
+        
+        
+        .column-name-display {
+            display: block;
+        }
+        
+        .column-name-short-long {
+            display: none;
+            font-weight: 600;
+            font-size: 0.85em;
+            color: #495057;
+        }
+        
+        .column-name-filterable {
+            display: none;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            color: #667eea;
+        }
+        
+        /* When filter section is NOT expanded, show short/long labels for grouped columns */
+        th.grouped-column:not(.showing-filterable) .column-name-display {
+            display: none;
+        }
+        
+        th.grouped-column:not(.showing-filterable) .column-name-short-long {
+            display: block;
+        }
+        
+        th.showing-filterable .column-name-display {
+            display: none;
+        }
+        
+        th.showing-filterable .column-name-short-long {
+            display: none;
+        }
+        
+        th.showing-filterable .column-name-filterable {
+            display: block;
+        }
+        
+        th.sortable::after {
+            content: ' ↕';
+            opacity: 0.5;
+            font-size: 0.8em;
+        }
+        
+        th.sort-asc::after {
+            content: ' ↑';
+            opacity: 1;
+            color: #667eea;
+        }
+        
+        th.sort-desc::after {
+            content: ' ↓';
+            opacity: 1;
+            color: #667eea;
+        }
+        
+        td {
+            padding: 12px 8px;
+            border-bottom: 1px solid #dee2e6;
+            color: #495057;
+            text-align: center;
+            white-space: normal;
+            word-wrap: break-word;
+            word-break: break-word;
+            width: auto;
+            max-width: 12ch;
+            min-width: fit-content;
+        }
+        
+        /* Wrap text if content exceeds 12 characters */
+        td, th {
+            overflow-wrap: break-word;
+            word-break: break-word;
+        }
+        
+        td.even-col {
+            background: #f9f9f9;
+        }
+        
+        td .cell-main {
+            font-weight: 600;
+            line-height: 1.2;
+        }
+        
+        td .cell-sub {
+            font-size: 0.8em;
+            color: #6c757d;
+            line-height: 1.1;
+            margin-top: 3px;
+        }
+        
+        td .cell-sub.theta-percent {
+            font-weight: 500;
+            color: #007bff;
+        }
+        
+        td.price-positive {
+            color: #28a745;
+            font-weight: 600;
+        }
+        
+        td.price-negative {
+            color: #dc3545;
+            font-weight: 600;
+        }
+        
+        tbody tr.even-row {
+            background: #f8f9fa;
+        }
+        
+        tbody tr.even-row td.even-col {
+            background: #f0f0f0;
+        }
+        
+        tbody tr:hover {
+            background: #e9ecef !important;
+        }
+        
+        tbody tr:hover td {
+            background: #e9ecef !important;
+        }
+        
+        tbody tr.even-row:hover {
+            background: #d9d9d9 !important;
+        }
+        
+        tbody tr.even-row:hover td {
+            background: #d9d9d9 !important;
+        }
+        
+        .stats {
+            padding: 20px;
+            background: #f8f9fa;
+            border-top: 1px solid #dee2e6;
+            display: flex;
+            justify-content: space-around;
+            flex-wrap: wrap;
+        }
+        
+        .stat-item {
+            text-align: center;
+            padding: 10px;
+        }
+        
+        .stat-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #667eea;
+        }
+        
+        .stat-label {
+            font-size: 0.9em;
+            color: #6c757d;
+            margin-top: 5px;
+        }
+        
+        .detailed-analysis {
+            padding: 30px;
+            background: #f8f9fa;
+            border-top: 2px solid #dee2e6;
+        }
+        
+        .detailed-analysis h2 {
+            color: #667eea;
+            font-size: 2em;
+            margin-bottom: 20px;
+            text-align: center;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 10px;
+        }
+        
+        .analysis-item {
+            background: white;
+            border-radius: 8px;
+            padding: 25px;
+            margin-bottom: 25px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            border-left: 4px solid #667eea;
+        }
+        
+        .analysis-item h3 {
+            color: #667eea;
+            font-size: 1.5em;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #e9ecef;
+            padding-bottom: 10px;
+        }
+        
+        .analysis-section {
+            margin-bottom: 20px;
+        }
+        
+        .analysis-section h4 {
+            color: #495057;
+            font-size: 1.2em;
+            margin-bottom: 10px;
+            margin-top: 15px;
+        }
+        
+        .analysis-section p {
+            margin: 8px 0;
+            line-height: 1.6;
+            color: #495057;
+        }
+        
+        .analysis-section .label {
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .option-tickers {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .option-tickers .short {
+            color: #dc3545;
+        }
+        
+        .option-tickers .long {
+            color: #28a745;
+        }
+        
+        .risk-badge {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-weight: 600;
+            font-size: 0.9em;
+        }
+        
+        .risk-low {
+            background: #d4edda;
+            color: #155724;
+        }
+        
+        .risk-moderate {
+            background: #fff3cd;
+            color: #856404;
+        }
+        
+        .risk-high {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        
+        .score-badge {
+            display: inline-block;
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-weight: bold;
+            font-size: 1.1em;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .filter-section {
+            background: #f8f9fa;
+            padding: 20px;
+            border-bottom: 2px solid #dee2e6;
+            margin-bottom: 20px;
+            display: none; /* Hidden by default */
+        }
+        
+        .filter-section.expanded {
+            display: block;
+        }
+        
+        .filter-controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .filter-input-group {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            flex: 1;
+            min-width: 250px;
+        }
+        
+        .filter-input {
+            flex: 1;
+            padding: 10px;
+            border: 2px solid #dee2e6;
+            border-radius: 6px;
+            font-size: 0.9em;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .filter-input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .filter-button {
+            padding: 10px 20px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9em;
+            font-weight: 600;
+            transition: background 0.3s ease;
+        }
+        
+        .filter-button:hover {
+            background: #5568d3;
+        }
+        
+        .filter-button.clear {
+            background: #6c757d;
+        }
+        
+        .filter-button.clear:hover {
+            background: #5a6268;
+        }
+        
+        .filter-logic {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        
+        .filter-logic label {
+            font-weight: 600;
+            color: #495057;
+        }
+        
+        .filter-logic input[type="radio"] {
+            margin-right: 5px;
+        }
+        
+        .filter-help {
+            font-size: 0.85em;
+            color: #6c757d;
+            margin-top: 10px;
+            padding: 10px;
+            background: white;
+            border-radius: 5px;
+            border-left: 3px solid #667eea;
+        }
+        
+        .filter-help code {
+            background: #f8f9fa;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+        
+        /* Loading indicator */
+        .loading-indicator {
+            display: none;
+            position: relative;
+            text-align: center;
+            padding: 40px 20px;
+            background: white;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        
+        .loading-indicator.active {
+            display: block;
+        }
+        
+        .loading-spinner {
+            display: inline-block;
+            width: 50px;
+            height: 50px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 15px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .pulse-dots {
+            display: inline-block;
+        }
+        
+        .pulse-dots span {
+            display: inline-block;
+            animation: pulse 1.4s ease-in-out infinite;
+            margin: 0 2px;
+            font-size: 20px;
+            color: #667eea;
+        }
+        
+        .pulse-dots span:nth-child(1) {
+            animation-delay: 0s;
+        }
+        
+        .pulse-dots span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+        
+        .pulse-dots span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+        
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 0.3;
+                transform: scale(1);
+            }
+            50% {
+                opacity: 1;
+                transform: scale(1.2);
+            }
+        }
+        
+        .loading-text {
+            color: #667eea;
+            font-size: 1.1em;
+            font-weight: 600;
+            margin-top: 10px;
+        }
+        
+        /* Mobile loading indicator */
+        @media (max-width: 768px) {
+            .loading-indicator {
+                padding: 30px 15px;
+                margin: 15px 0;
+            }
+            
+            .loading-spinner {
+                width: 40px;
+                height: 40px;
+                border-width: 3px;
+            }
+            
+            .loading-text {
+                font-size: 1em;
+            }
+        }
+        
+        .filter-error {
+            color: #dc3545;
+            font-size: 0.9em;
+            margin-top: 5px;
+            padding: 5px;
+            background: #f8d7da;
+            border-radius: 3px;
+        }
+        
+        /* Mobile Card Layout */
+        .card-wrapper {
+            display: none;
+            padding: 15px;
+        }
+        
+        .data-card {
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+            transition: box-shadow 0.3s ease;
+        }
+        
+        .data-card:hover {
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        }
+        
+        .data-card.hidden {
+            display: none;
+        }
+        
+        .card-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        
+        .card-header-main {
+            flex: 1;
+            min-width: 200px;
+        }
+        
+        .card-ticker {
+            font-size: 1.3em;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        
+        .card-price {
+            font-size: 1.1em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        
+        .card-price-value {
+            font-weight: 600;
+        }
+        
+        .card-price-change {
+            font-size: 0.9em;
+            padding: 2px 8px;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.2);
+        }
+        
+        .card-price-change.positive {
+            background: rgba(40, 167, 69, 0.3);
+        }
+        
+        .card-price-change.negative {
+            background: rgba(220, 53, 69, 0.3);
+        }
+        
+        .card-body {
+            padding: 15px;
+        }
+        
+        .card-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #f0f0f0;
+            align-items: center;
+        }
+        
+        .card-row:last-child {
+            border-bottom: none;
+        }
+        
+        .card-label {
+            font-weight: 600;
+            color: #495057;
+            font-size: 0.9em;
+            flex: 1;
+        }
+        
+        .card-value {
+            color: #212529;
+            text-align: right;
+            flex: 1;
+            font-size: 0.95em;
+        }
+        
+        .card-section {
+            margin-bottom: 15px;
+        }
+        
+        .card-section-title {
+            font-weight: 700;
+            color: #667eea;
+            font-size: 0.95em;
+            margin-bottom: 10px;
+            padding-bottom: 5px;
+            border-bottom: 2px solid #667eea;
+        }
+        
+        .card-details {
+            display: none;
+        }
+        
+        .card-details.expanded {
+            display: block;
+        }
+        
+        .card-toggle {
+            background: #f8f9fa;
+            border: none;
+            width: 100%;
+            padding: 12px;
+            cursor: pointer;
+            font-size: 0.9em;
+            color: #667eea;
+            font-weight: 600;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+            transition: background 0.3s ease;
+        }
+        
+        .card-toggle:hover {
+            background: #e9ecef;
+        }
+        
+        .card-toggle-icon {
+            transition: transform 0.3s ease;
+        }
+        
+        .card-toggle.expanded .card-toggle-icon {
+            transform: rotate(180deg);
+        }
+        
+        .card-primary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        
+        .card-primary-item {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 6px;
+            text-align: center;
+        }
+        
+        .card-primary-label {
+            font-size: 0.75em;
+            color: #6c757d;
+            margin-bottom: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .card-primary-value {
+            font-size: 1.1em;
+            font-weight: 600;
+            color: #212529;
+        }
+        
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 1.8em;
+            }
+            
+            /* Hide table on mobile */
+            .table-wrapper {
+                display: none !important;
+            }
+            
+            /* Show cards on mobile */
+            .card-wrapper {
+                display: block !important;
+            }
+            
+            table {
+                font-size: 0.8em;
+            }
+            
+            th, td {
+                padding: 8px 6px;
+            }
+            
+            .filter-controls {
+                flex-direction: column;
+            }
+            
+            .filter-input-group {
+                width: 100%;
+            }
+            
+            .container {
+                max-width: 100%;
+                border-radius: 0;
+            }
+            
+            body {
+                padding: 0;
+            }
+            
+            .card-header {
+                padding: 12px;
+            }
+            
+            .card-ticker {
+                font-size: 1.2em;
+            }
+            
+            .card-body {
+                padding: 12px;
+            }
+        }
+        
+        @media (min-width: 769px) {
+            /* Hide cards on desktop */
+            .card-wrapper {
+                display: none !important;
+            }
+            
+            /* Show table on desktop */
+            .table-wrapper {
+                display: block !important;
+            }
+            
+            /* Show desktop-only messages */
+            .desktop-only {
+                display: block;
+            }
+            
+            .mobile-only {
+                display: none;
+            }
+        }
+        
+        .desktop-only {
+            display: block;
+        }
+        
+        .mobile-only {
+            display: none;
+        }
+        
+        /* CRITICAL FIX: Ensure proper tab and view visibility */
+        /* Hide inactive tabs completely */
+        .tab-content:not(.active) {
+            display: none !important;
+        }
+        
+        /* Desktop: Show tables, hide cards */
+        @media (min-width: 769px) {
+            .tab-content.active .table-wrapper {
+                display: block !important;
+            }
+            .tab-content.active .card-wrapper {
+                display: none !important;
+            }
+            .desktop-only {
+                display: block;
+            }
+            .mobile-only {
+                display: none;
+            }
+        }
+        
+        /* Mobile: Show cards, hide tables */
+        @media (max-width: 768px) {
+            .tab-content.active .table-wrapper {
+                display: none !important;
+            }
+            .tab-content.active .card-wrapper {
+                display: block !important;
+            }
+            .desktop-only {
+                display: none;
+            }
+            .mobile-only {
+                display: block;
+            }
+        }
+
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Options Analysis Results (Calls & Puts)</h1>
+            <div class="tabs">
+                <button class="tab-button active" onclick="switchTab(0)">📞 Calls</button>
+                <button class="tab-button" onclick="switchTab(1)">📉 Puts</button>
+                <button class="tab-button" onclick="switchTab(2)">📊 Comprehensive Analysis</button>
+                <button class="tab-button" onclick="switchTab(3)">📈 Stock Analysis</button>
+            </div>
+            <p id="generatedTime" data-generated="">Data updated: <span id="dataTimestamp">Loading...</span> <span id="timeAgo"></span></p>
+            <p class="desktop-only">Click column headers to sort • 0 total results</p>
+            <p class="mobile-only">Tap cards to expand details • 0 total results</p>
+        </div>
+        <div class="tab-content active" id="callsTab">
+        <div style="margin-bottom: 15px; display: flex; justify-content: space-between; gap: 10px; align-items: center;">
+            <div>
+                <button class="filter-button clear" onclick="toggleHiddenColumns('calls')" id="callstoggleHiddenBtn">
+                    👁️ Show hidden columns
+                </button>
+            </div>
+            <div style="text-align: right;">
+                <button class="filter-button" onclick="toggleFilterSection('calls')" id="callstoggleFilterBtn">
+                    🔍 Filter
+                </button>
+            </div>
+        </div>
+        <div class="filter-section" id="callsfilterSection">
+            <h3 style="margin-top: 0; color: #667eea;">🔍 Filter Options</h3>
+            <div class="filter-logic">
+                <label>Filter Logic:</label>
+                <label><input type="radio" name="callsfilterLogic" value="AND" checked onchange="updateFilterLogic('calls', 'AND')"> AND</label>
+                <label><input type="radio" name="callsfilterLogic" value="OR" onchange="updateFilterLogic('calls', 'OR')"> OR</label>
+            </div>
+            <div class="filter-controls">
+                <div class="filter-input-group">
+                    <input type="text" id="callsfilterInput" class="filter-input" placeholder="e.g., pe_ratio > 20, volume exists, net_daily_premium > 100" onkeypress="handleFilterKeyPress(event, 'calls')">
+                    <button class="filter-button" onclick="addFilter('calls')">Add Filter</button>
+                    <button class="filter-button clear" onclick="clearFilters('calls')">Clear All</button>
+                </div>
+            </div>
+            <div id="callsfilterError" class="filter-error"></div>
+            <div id="callsactiveFilters" style="margin-top: 10px;"></div>
+            <div class="filter-help">
+                <strong>📋 All Filterable Fields:</strong><br>
+                <strong>Stock Info:</strong> <code>ticker</code>, <code>current_price</code> (or <code>curr_price</code>), <code>pe_ratio</code>, <code>market_cap_b</code>, <code>price_change_pct</code>, <code>price_with_change</code><br>
+                <strong>Strike Prices:</strong> <code>strike_price</code>, <code>l_strike</code> (long strike)<br>
+                <strong>Expiration Dates:</strong> <code>expiration_date</code>, <code>l_expiration_date</code> (long expiration), <code>days_to_expiry</code>, <code>l_days_to_expiry</code><br>
+                <strong>Option Premiums:</strong> <code>opt_prem.</code> (or <code>option_premium</code>), <code>l_prem</code> (or <code>l_opt_prem</code>), <code>premium_ratio_pct</code>, <code>s_prem_tot</code>, <code>l_prem_tot</code>, <code>net_premium</code><br>
+                <strong>Bid/Ask:</strong> <code>bid:ask</code>, <code>l_bid:ask</code> (long bid/ask)<br>
+                <strong>Greeks:</strong> <code>delta</code>, <code>l_delta</code> (long delta), <code>theta</code>, <code>l_theta</code> (long theta)<br>
+                <strong>Daily Premiums:</strong> <code>s_day_prem</code>, <code>net_daily_premi</code> (or <code>net_daily_premium</code>), <code>net_daily_premium_after_spread</code><br>
+                <strong>Trading:</strong> <code>volume</code>, <code>num_contracts</code>, <code>option_ticker</code>, <code>l_option_ticker</code><br>
+                <strong>Spread Analysis:</strong> <code>spread</code> (virtual field - short leg spread), <code>l_spread</code> (virtual field - long leg spread), <code>spread_slippage</code>, <code>spread_impact_pct</code><br>
+                <strong>Bid/Ask Virtual Fields:</strong> <code>bid</code> (virtual - extracts bid from bid:ask), <code>ask</code> (virtual - extracts ask from bid:ask), <code>l_bid</code> (virtual - extracts bid from l_bid:ask), <code>l_ask</code> (virtual - extracts ask from l_bid:ask)<br>
+                <strong>Quality Metrics:</strong> <code>trade_quality</code>, <code>liquidity_score</code>, <code>assignment_risk</code><br>
+                <strong>IV Metrics:</strong> <code>risk_score</code>, <code>iv_rank_30</code>, <code>iv_rank_90</code>, <code>iv_recommendation</code>, <code>roll_yield</code><br>
+                <strong>Ticker Info (tkr_info.*):</strong> <code>tkr_info.risk_score</code>, <code>tkr_info.iv_rank_30</code>, <code>tkr_info.iv_rank_90</code>, <code>tkr_info.iv_recommendation</code>, <code>tkr_info.roll_yield</code><br>
+                <strong>Other:</strong> <code>option_type</code>, <code>buy_cost</code>, <code>price_above_curr</code>, <code>premium_diff</code>, <code>latest_option_writets</code><br>
+                <br>
+                <strong>Filter Examples:</strong><br>
+                • <code>pe_ratio > 20</code> - P/E ratio greater than 20<br>
+                • <code>market_cap_b < 3.5</code> - Market cap less than 3.5B<br>
+                • <code>volume exists</code> - Volume data exists<br>
+                • <code>net_daily_premium > 100</code> - Net daily premium greater than 100<br>
+                • <code>delta < 0.5</code> - Delta less than 0.5<br>
+                • <code>days_to_expiry >= 7</code> - Days to expiry at least 7<br>
+                • <code>premium_ratio_pct > 20</code> - Premium ratio greater than 20%<br>
+                • <code>s_day_prem > 1000</code> - Short daily premium greater than $1000<br>
+                • <code>trade_quality > 0</code> - Trade quality score positive<br>
+                • <code>risk_score < 5</code> - Risk score less than 5<br>
+                • <code>iv_rank_30 > 50</code> - 30-day IV rank greater than 50<br>
+                • <code>roll_yield > 0</code> - Roll yield positive (backwardation)<br>
+                • <code>bid > 0</code> - Short leg bid price greater than 0<br>
+                <strong>Ticker Info (tkr_info.*) Filters:</strong><br>
+                The <code>tkr_info</code> column (visible next to the ticker symbol) displays IV metrics in a compact table format. To filter on these metrics, use the <code>tkr_info.*</code> dot notation syntax. This is a virtual field that extracts values from the underlying IV analysis data.<br>
+                <strong>Available tkr_info sub-fields:</strong><br>
+                • <code>tkr_info.risk_score</code> or <code>tkr_info.risk</code> - Risk score (0-10, lower is better)<br>
+                • <code>tkr_info.iv_rank_30</code> or <code>tkr_info.rank_30</code> - 30-day IV rank (0-100, percentile)<br>
+                • <code>tkr_info.iv_rank_90</code> or <code>tkr_info.rank_90</code> - 90-day IV rank (0-100, percentile)<br>
+                • <code>tkr_info.iv_recommendation</code> or <code>tkr_info.recommendation</code> or <code>tkr_info.rec</code> - IV recommendation text (e.g., "SELL PREMIUM", "BUY LEAP", "HOLD / NEUTRAL")<br>
+                • <code>tkr_info.roll_yield</code> or <code>tkr_info.roll</code> or <code>tkr_info.yield</code> - Roll yield percentage (positive = backwardation, negative = contango)<br>
+                <strong>tkr_info Filter Examples:</strong><br>
+                • <code>tkr_info.risk_score < 5</code> - Risk score less than 5 (low risk)<br>
+                • <code>tkr_info.risk >= 7</code> - Risk score 7 or higher (high risk)<br>
+                • <code>tkr_info.iv_rank_30 > 50</code> - 30-day IV rank above 50th percentile (expensive volatility)<br>
+                • <code>tkr_info.rank_30 < 25</code> - 30-day IV rank below 25th percentile (cheap volatility)<br>
+                • <code>tkr_info.iv_rank_90 > 75</code> - 90-day IV rank above 75th percentile<br>
+                • <code>tkr_info.roll_yield > 0</code> - Roll yield positive (backwardation - front month more expensive)<br>
+                • <code>tkr_info.roll_yield < -5</code> - Roll yield less than -5% (strong contango)<br>
+                • <code>tkr_info.iv_recommendation == "SELL PREMIUM"</code> - IV recommendation is "SELL PREMIUM"<br>
+                • <code>tkr_info.rec == "BUY LEAP"</code> - IV recommendation is "BUY LEAP" (using alias)<br>
+                • <code>tkr_info.risk_score exists</code> - Risk score data exists (not null)<br>
+                • <code>tkr_info.iv_rank_30 >= 50 && tkr_info.roll_yield > 0</code> - High IV rank AND backwardation<br>
+                <strong>💡 tkr_info Filter Tip:</strong> The <code>tkr_info</code> column is a virtual field (like <code>spread</code> or <code>bid</code>), meaning it extracts data from the underlying row data rather than a direct column. Use the dot notation (<code>tkr_info.field_name</code>) to access individual metrics. You can use short aliases (e.g., <code>tkr_info.risk</code> instead of <code>tkr_info.risk_score</code>) for convenience. All standard operators work with numeric fields, and string comparison works for <code>iv_recommendation</code>.<br>
+                • <code>bid > 0</code> - Short leg bid price greater than 0<br>
+                • <code>ask < 5</code> - Short leg ask price less than $5<br>
+                • <code>l_bid > 10</code> - Long leg bid price greater than $10<br>
+                <strong>Spread Filters:</strong><br>
+                • <code>spread < 0.1</code> - Short leg bid/ask spread less than $0.10 (absolute value)<br>
+                • <code>spread < 10%</code> - Short leg spread less than 10% of option premium (percentage-based)<br>
+                • <code>l_spread < 0.1</code> - Long leg bid/ask spread less than $0.10 (absolute value)<br>
+                • <code>l_spread < 10%</code> - Long leg spread less than 10% of option premium (percentage-based)<br>
+                <strong>💡 Spread Filter Tip:</strong> Use percentage-based spread filters (e.g., <code>spread < 20%</code>) to filter by spread relative to option premium. This helps find liquid options where the bid/ask spread is a small percentage of the premium value.<br>
+                <strong>Advanced Filters:</strong><br>
+                • <code>num_contracts > volume</code> - Field-to-field comparison<br>
+                • <code>curr_price*1.05 < strike_price</code> - Mathematical expression (5% above current price less than strike)<br>
+                • <code>strike_price*0.95 > curr_price</code> - Mathematical expression (strike 5% below current)<br>
+                • <code>opt_prem. / l_prem > 0.2</code> - Premium ratio calculation<br>
+                <strong>Operators:</strong> <code>&gt;</code> <code>&gt;=</code> <code>&lt;</code> <code>&lt;=</code> <code>==</code> <code>!=</code> <code>exists</code> <code>not_exists</code><br>
+                <strong>Math Operations:</strong> Use <code>+</code> <code>-</code> <code>*</code> <code>/</code> in expressions (e.g., <code>field*1.05</code>, <code>field+100</code>)<br>
+                <strong>💡 Tip:</strong> When the filter section is expanded, column headers show their filterable field names. Filters are automatically saved in the URL - share the URL to share your filtered view!
+            </div>
+        </div>
+        <div class="loading-indicator" id="callsloadingIndicator">
+            <div class="loading-spinner"></div>
+            <div class="loading-text">Loading data...</div>
+        </div>
+        <div class="table-wrapper hide-hidden" id="callstableWrapper">
+            <table id="callsresultsTable">
+                <thead>
+                    <tr class="group-header-row">
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header" colspan="2">Strike Price</th>
+                        <th class="group-header" colspan="2">Expiration Date</th>
+                        <th class="group-header" colspan="3">Option Premium</th>
+                        <th class="group-header" colspan="2">Bid:Ask</th>
+                        <th class="group-header" colspan="2">Delta</th>
+                        <th class="group-header" colspan="2">Theta</th>
+                        <th class="group-header" colspan="2">Premium Total</th>
+                        <th class="group-header" colspan="2">Daily Premium</th>
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                    </tr>
+                    <tr class="column-header-row">
+                        <th class="sortable" onclick="sortTable('calls', 0)" data-filterable-name="ticker">                            <span class="column-name-display">ticker</span>                            <span class="column-name-filterable">ticker</span>                        </th>
+                        <th class="sortable" onclick="sortTable('calls', 1)" data-filterable-name="tkr_info">                            <span class="column-name-display">tkr_info</span>                            <span class="column-name-filterable">tkr_info</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('calls', 2)" data-filterable-name="option_type">                            <span class="column-name-display">option_type</span>                            <span class="column-name-filterable">option_type</span>                        </th>
+                        <th class="sortable" onclick="sortTable('calls', 3)" data-filterable-name="current_price">                            <span class="column-name-display">current_price</span>                            <span class="column-name-filterable">current_price</span>                        </th>
+                        <th class="sortable" onclick="sortTable('calls', 4)" data-filterable-name="pe_ratio">                            <span class="column-name-display">pe_ratio</span>                            <span class="column-name-filterable">pe_ratio</span>                        </th>
+                        <th class="sortable" onclick="sortTable('calls', 5)" data-filterable-name="market_cap_b">                            <span class="column-name-display">market_cap_b</span>                            <span class="column-name-filterable">market_cap_b</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('calls', 6)" data-filterable-name="l_prem_tot">                            <span class="column-name-display">l_prem_tot</span>                            <span class="column-name-filterable">l_prem_tot</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('calls', 7)" data-filterable-name="spread_slippage">                            <span class="column-name-display">spread_slippage</span>                            <span class="column-name-filterable">spread_slippage</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('calls', 8)" data-filterable-name="net_premium_after_spread">                            <span class="column-name-display">net_premium_aft</span>                            <span class="column-name-filterable">net_premium_after_spread</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('calls', 9)" data-filterable-name="net_daily_premium_after_spread">                            <span class="column-name-display">net_daily_premi</span>                            <span class="column-name-filterable">net_daily_premium_after_spread</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('calls', 10)" data-filterable-name="spread_impact_pct">                            <span class="column-name-display">spread_impact_p</span>                            <span class="column-name-filterable">spread_impact_pct</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('calls', 11)" data-filterable-name="liquidity_score">                            <span class="column-name-display">liquidity_score</span>                            <span class="column-name-filterable">liquidity_score</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('calls', 12)" data-filterable-name="assignment_risk">                            <span class="column-name-display">assignment_risk</span>                            <span class="column-name-filterable">assignment_risk</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('calls', 13)" data-filterable-name="option_ticker">                            <span class="column-name-display">option_ticker</span>                            <span class="column-name-filterable">option_ticker</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('calls', 14)" data-filterable-name="l_option_ticker">                            <span class="column-name-display">l_option_ticker</span>                            <span class="column-name-filterable">l_option_ticker</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('calls', 15)" data-filterable-name="days_to_expiry">                            <span class="column-name-display">days_to_expiry</span>                            <span class="column-name-filterable">days_to_expiry</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('calls', 16)" data-filterable-name="l_days_to_expiry">                            <span class="column-name-display">l_days_to_expir</span>                            <span class="column-name-filterable">l_days_to_expiry</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 17)" data-filterable-name="strike_price">                            <span class="column-name-display">strike_price</span>                            <span class="column-name-short-long">Short</span>                            <span class="column-name-filterable">strike_price</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 18)" data-filterable-name="l_strike">                            <span class="column-name-display">l_strike</span>                            <span class="column-name-short-long">Long</span>                            <span class="column-name-filterable">l_strike</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 19)" data-filterable-name="expiration_date">                            <span class="column-name-display">expiration_date</span>                            <span class="column-name-short-long">Short</span>                            <span class="column-name-filterable">expiration_date</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 20)" data-filterable-name="l_expiration_date">                            <span class="column-name-display">l_expiration_da</span>                            <span class="column-name-short-long">Long</span>                            <span class="column-name-filterable">l_expiration_date</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 21)" data-filterable-name="opt_prem.">                            <span class="column-name-display">opt_prem.</span>                            <span class="column-name-short-long">Short</span>                            <span class="column-name-filterable">opt_prem.</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 22)" data-filterable-name="l_prem">                            <span class="column-name-display">l_prem</span>                            <span class="column-name-short-long">Long</span>                            <span class="column-name-filterable">l_prem</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 23)" data-filterable-name="premium_ratio_pct">                            <span class="column-name-display">premium_ratio_p</span>                            <span class="column-name-filterable">premium_ratio_pct</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 24)" data-filterable-name="bid:ask">                            <span class="column-name-display">bid:ask</span>                            <span class="column-name-short-long">Short</span>                            <span class="column-name-filterable">bid:ask</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 25)" data-filterable-name="l_bid:ask">                            <span class="column-name-display">l_bid:ask</span>                            <span class="column-name-short-long">Long</span>                            <span class="column-name-filterable">l_bid:ask</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 26)" data-filterable-name="delta">                            <span class="column-name-display">delta</span>                            <span class="column-name-short-long">Short</span>                            <span class="column-name-filterable">delta</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 27)" data-filterable-name="l_delta">                            <span class="column-name-display">l_delta</span>                            <span class="column-name-short-long">Long</span>                            <span class="column-name-filterable">l_delta</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 28)" data-filterable-name="theta">                            <span class="column-name-display">theta</span>                            <span class="column-name-short-long">Short</span>                            <span class="column-name-filterable">theta</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 29)" data-filterable-name="l_theta">                            <span class="column-name-display">l_theta</span>                            <span class="column-name-short-long">Long</span>                            <span class="column-name-filterable">l_theta</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 30)" data-filterable-name="s_prem_tot">                            <span class="column-name-display">s_prem_tot</span>                            <span class="column-name-short-long">Short</span>                            <span class="column-name-filterable">s_prem_tot</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 31)" data-filterable-name="net_premium">                            <span class="column-name-display">net_premium</span>                            <span class="column-name-short-long">Long</span>                            <span class="column-name-filterable">net_premium</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 32)" data-filterable-name="s_day_prem">                            <span class="column-name-display">s_day_prem</span>                            <span class="column-name-short-long">Short</span>                            <span class="column-name-filterable">s_day_prem</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('calls', 33)" data-filterable-name="net_daily_premi">                            <span class="column-name-display">net_daily_premi</span>                            <span class="column-name-short-long">Long</span>                            <span class="column-name-filterable">net_daily_premi</span>                        </th>
+                        <th class="sortable" onclick="sortTable('calls', 34)" data-filterable-name="num_contracts">                            <span class="column-name-display">num_contracts</span>                            <span class="column-name-filterable">num_contracts</span>                        </th>
+                        <th class="sortable" onclick="sortTable('calls', 35)" data-filterable-name="volume">                            <span class="column-name-display">volume</span>                            <span class="column-name-filterable">volume</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('calls', 36)" data-filterable-name="price_change_pct">                            <span class="column-name-display">price_change_pc</span>                            <span class="column-name-filterable">price_change_pct</span>                        </th>
+                        <th class="sortable" onclick="sortTable('calls', 37)" data-filterable-name="latest_option_writets">                            <span class="column-name-display">latest_option_w</span>                            <span class="column-name-filterable">latest_option_writets</span>                        </th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td colspan="100%" style="text-align: center; padding: 20px;">Loading data...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+<div id="callscardsContainer" class="cards-container"></div>
+        <div class="stats">
+            <div class="stat-item">
+                <div class="stat-value" id="callstotalCount">0</div>
+                <div class="stat-label">Total Results</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="callsvisibleCount">0</div>
+                <div class="stat-label">Visible Rows</div>
+            </div>
+        </div>
+
+        </div>
+
+        <div class="tab-content" id="putsTab">
+        <div style="margin-bottom: 15px; display: flex; justify-content: space-between; gap: 10px; align-items: center;">
+            <div>
+                <button class="filter-button clear" onclick="toggleHiddenColumns('puts')" id="putstoggleHiddenBtn">
+                    👁️ Show hidden columns
+                </button>
+            </div>
+            <div style="text-align: right;">
+                <button class="filter-button" onclick="toggleFilterSection('puts')" id="putstoggleFilterBtn">
+                    🔍 Filter
+                </button>
+            </div>
+        </div>
+        <div class="filter-section" id="putsfilterSection">
+            <h3 style="margin-top: 0; color: #667eea;">🔍 Filter Options</h3>
+            <div class="filter-logic">
+                <label>Filter Logic:</label>
+                <label><input type="radio" name="putsfilterLogic" value="AND" checked onchange="updateFilterLogic('puts', 'AND')"> AND</label>
+                <label><input type="radio" name="putsfilterLogic" value="OR" onchange="updateFilterLogic('puts', 'OR')"> OR</label>
+            </div>
+            <div class="filter-controls">
+                <div class="filter-input-group">
+                    <input type="text" id="putsfilterInput" class="filter-input" placeholder="e.g., pe_ratio > 20, volume exists, net_daily_premium > 100" onkeypress="handleFilterKeyPress(event, 'puts')">
+                    <button class="filter-button" onclick="addFilter('puts')">Add Filter</button>
+                    <button class="filter-button clear" onclick="clearFilters('puts')">Clear All</button>
+                </div>
+            </div>
+            <div id="putsfilterError" class="filter-error"></div>
+            <div id="putsactiveFilters" style="margin-top: 10px;"></div>
+            <div class="filter-help">
+                <strong>📋 All Filterable Fields:</strong><br>
+                <strong>Stock Info:</strong> <code>ticker</code>, <code>current_price</code> (or <code>curr_price</code>), <code>pe_ratio</code>, <code>market_cap_b</code>, <code>price_change_pct</code>, <code>price_with_change</code><br>
+                <strong>Strike Prices:</strong> <code>strike_price</code>, <code>l_strike</code> (long strike)<br>
+                <strong>Expiration Dates:</strong> <code>expiration_date</code>, <code>l_expiration_date</code> (long expiration), <code>days_to_expiry</code>, <code>l_days_to_expiry</code><br>
+                <strong>Option Premiums:</strong> <code>opt_prem.</code> (or <code>option_premium</code>), <code>l_prem</code> (or <code>l_opt_prem</code>), <code>premium_ratio_pct</code>, <code>s_prem_tot</code>, <code>l_prem_tot</code>, <code>net_premium</code><br>
+                <strong>Bid/Ask:</strong> <code>bid:ask</code>, <code>l_bid:ask</code> (long bid/ask)<br>
+                <strong>Greeks:</strong> <code>delta</code>, <code>l_delta</code> (long delta), <code>theta</code>, <code>l_theta</code> (long theta)<br>
+                <strong>Daily Premiums:</strong> <code>s_day_prem</code>, <code>net_daily_premi</code> (or <code>net_daily_premium</code>), <code>net_daily_premium_after_spread</code><br>
+                <strong>Trading:</strong> <code>volume</code>, <code>num_contracts</code>, <code>option_ticker</code>, <code>l_option_ticker</code><br>
+                <strong>Spread Analysis:</strong> <code>spread</code> (virtual field - short leg spread), <code>l_spread</code> (virtual field - long leg spread), <code>spread_slippage</code>, <code>spread_impact_pct</code><br>
+                <strong>Bid/Ask Virtual Fields:</strong> <code>bid</code> (virtual - extracts bid from bid:ask), <code>ask</code> (virtual - extracts ask from bid:ask), <code>l_bid</code> (virtual - extracts bid from l_bid:ask), <code>l_ask</code> (virtual - extracts ask from l_bid:ask)<br>
+                <strong>Quality Metrics:</strong> <code>trade_quality</code>, <code>liquidity_score</code>, <code>assignment_risk</code><br>
+                <strong>IV Metrics:</strong> <code>risk_score</code>, <code>iv_rank_30</code>, <code>iv_rank_90</code>, <code>iv_recommendation</code>, <code>roll_yield</code><br>
+                <strong>Ticker Info (tkr_info.*):</strong> <code>tkr_info.risk_score</code>, <code>tkr_info.iv_rank_30</code>, <code>tkr_info.iv_rank_90</code>, <code>tkr_info.iv_recommendation</code>, <code>tkr_info.roll_yield</code><br>
+                <strong>Other:</strong> <code>option_type</code>, <code>buy_cost</code>, <code>price_above_curr</code>, <code>premium_diff</code>, <code>latest_option_writets</code><br>
+                <br>
+                <strong>Filter Examples:</strong><br>
+                • <code>pe_ratio > 20</code> - P/E ratio greater than 20<br>
+                • <code>market_cap_b < 3.5</code> - Market cap less than 3.5B<br>
+                • <code>volume exists</code> - Volume data exists<br>
+                • <code>net_daily_premium > 100</code> - Net daily premium greater than 100<br>
+                • <code>delta < 0.5</code> - Delta less than 0.5<br>
+                • <code>days_to_expiry >= 7</code> - Days to expiry at least 7<br>
+                • <code>premium_ratio_pct > 20</code> - Premium ratio greater than 20%<br>
+                • <code>s_day_prem > 1000</code> - Short daily premium greater than $1000<br>
+                • <code>trade_quality > 0</code> - Trade quality score positive<br>
+                • <code>risk_score < 5</code> - Risk score less than 5<br>
+                • <code>iv_rank_30 > 50</code> - 30-day IV rank greater than 50<br>
+                • <code>roll_yield > 0</code> - Roll yield positive (backwardation)<br>
+                • <code>bid > 0</code> - Short leg bid price greater than 0<br>
+                <strong>Ticker Info (tkr_info.*) Filters:</strong><br>
+                The <code>tkr_info</code> column (visible next to the ticker symbol) displays IV metrics in a compact table format. To filter on these metrics, use the <code>tkr_info.*</code> dot notation syntax. This is a virtual field that extracts values from the underlying IV analysis data.<br>
+                <strong>Available tkr_info sub-fields:</strong><br>
+                • <code>tkr_info.risk_score</code> or <code>tkr_info.risk</code> - Risk score (0-10, lower is better)<br>
+                • <code>tkr_info.iv_rank_30</code> or <code>tkr_info.rank_30</code> - 30-day IV rank (0-100, percentile)<br>
+                • <code>tkr_info.iv_rank_90</code> or <code>tkr_info.rank_90</code> - 90-day IV rank (0-100, percentile)<br>
+                • <code>tkr_info.iv_recommendation</code> or <code>tkr_info.recommendation</code> or <code>tkr_info.rec</code> - IV recommendation text (e.g., "SELL PREMIUM", "BUY LEAP", "HOLD / NEUTRAL")<br>
+                • <code>tkr_info.roll_yield</code> or <code>tkr_info.roll</code> or <code>tkr_info.yield</code> - Roll yield percentage (positive = backwardation, negative = contango)<br>
+                <strong>tkr_info Filter Examples:</strong><br>
+                • <code>tkr_info.risk_score < 5</code> - Risk score less than 5 (low risk)<br>
+                • <code>tkr_info.risk >= 7</code> - Risk score 7 or higher (high risk)<br>
+                • <code>tkr_info.iv_rank_30 > 50</code> - 30-day IV rank above 50th percentile (expensive volatility)<br>
+                • <code>tkr_info.rank_30 < 25</code> - 30-day IV rank below 25th percentile (cheap volatility)<br>
+                • <code>tkr_info.iv_rank_90 > 75</code> - 90-day IV rank above 75th percentile<br>
+                • <code>tkr_info.roll_yield > 0</code> - Roll yield positive (backwardation - front month more expensive)<br>
+                • <code>tkr_info.roll_yield < -5</code> - Roll yield less than -5% (strong contango)<br>
+                • <code>tkr_info.iv_recommendation == "SELL PREMIUM"</code> - IV recommendation is "SELL PREMIUM"<br>
+                • <code>tkr_info.rec == "BUY LEAP"</code> - IV recommendation is "BUY LEAP" (using alias)<br>
+                • <code>tkr_info.risk_score exists</code> - Risk score data exists (not null)<br>
+                • <code>tkr_info.iv_rank_30 >= 50 && tkr_info.roll_yield > 0</code> - High IV rank AND backwardation<br>
+                <strong>💡 tkr_info Filter Tip:</strong> The <code>tkr_info</code> column is a virtual field (like <code>spread</code> or <code>bid</code>), meaning it extracts data from the underlying row data rather than a direct column. Use the dot notation (<code>tkr_info.field_name</code>) to access individual metrics. You can use short aliases (e.g., <code>tkr_info.risk</code> instead of <code>tkr_info.risk_score</code>) for convenience. All standard operators work with numeric fields, and string comparison works for <code>iv_recommendation</code>.<br>
+                • <code>bid > 0</code> - Short leg bid price greater than 0<br>
+                • <code>ask < 5</code> - Short leg ask price less than $5<br>
+                • <code>l_bid > 10</code> - Long leg bid price greater than $10<br>
+                <strong>Spread Filters:</strong><br>
+                • <code>spread < 0.1</code> - Short leg bid/ask spread less than $0.10 (absolute value)<br>
+                • <code>spread < 10%</code> - Short leg spread less than 10% of option premium (percentage-based)<br>
+                • <code>l_spread < 0.1</code> - Long leg bid/ask spread less than $0.10 (absolute value)<br>
+                • <code>l_spread < 10%</code> - Long leg spread less than 10% of option premium (percentage-based)<br>
+                <strong>💡 Spread Filter Tip:</strong> Use percentage-based spread filters (e.g., <code>spread < 20%</code>) to filter by spread relative to option premium. This helps find liquid options where the bid/ask spread is a small percentage of the premium value.<br>
+                <strong>Advanced Filters:</strong><br>
+                • <code>num_contracts > volume</code> - Field-to-field comparison<br>
+                • <code>curr_price*1.05 < strike_price</code> - Mathematical expression (5% above current price less than strike)<br>
+                • <code>strike_price*0.95 > curr_price</code> - Mathematical expression (strike 5% below current)<br>
+                • <code>opt_prem. / l_prem > 0.2</code> - Premium ratio calculation<br>
+                <strong>Operators:</strong> <code>&gt;</code> <code>&gt;=</code> <code>&lt;</code> <code>&lt;=</code> <code>==</code> <code>!=</code> <code>exists</code> <code>not_exists</code><br>
+                <strong>Math Operations:</strong> Use <code>+</code> <code>-</code> <code>*</code> <code>/</code> in expressions (e.g., <code>field*1.05</code>, <code>field+100</code>)<br>
+                <strong>💡 Tip:</strong> When the filter section is expanded, column headers show their filterable field names. Filters are automatically saved in the URL - share the URL to share your filtered view!
+            </div>
+        </div>
+        <div class="loading-indicator" id="putsloadingIndicator">
+            <div class="loading-spinner"></div>
+            <div class="loading-text">Loading data...</div>
+        </div>
+        <div class="table-wrapper hide-hidden" id="putstableWrapper">
+            <table id="putsresultsTable">
+                <thead>
+                    <tr class="group-header-row">
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header" colspan="2">Strike Price</th>
+                        <th class="group-header" colspan="2">Expiration Date</th>
+                        <th class="group-header" colspan="3">Option Premium</th>
+                        <th class="group-header" colspan="2">Bid:Ask</th>
+                        <th class="group-header" colspan="2">Delta</th>
+                        <th class="group-header" colspan="2">Theta</th>
+                        <th class="group-header" colspan="2">Premium Total</th>
+                        <th class="group-header" colspan="2">Daily Premium</th>
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header is-hidden-col" colspan="1" style="background: transparent; border: none;"></th>
+                        <th class="group-header" colspan="1" style="background: transparent; border: none;"></th>
+                    </tr>
+                    <tr class="column-header-row">
+                        <th class="sortable" onclick="sortTable('puts', 0)" data-filterable-name="ticker">                            <span class="column-name-display">ticker</span>                            <span class="column-name-filterable">ticker</span>                        </th>
+                        <th class="sortable" onclick="sortTable('puts', 1)" data-filterable-name="tkr_info">                            <span class="column-name-display">tkr_info</span>                            <span class="column-name-filterable">tkr_info</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('puts', 2)" data-filterable-name="option_type">                            <span class="column-name-display">option_type</span>                            <span class="column-name-filterable">option_type</span>                        </th>
+                        <th class="sortable" onclick="sortTable('puts', 3)" data-filterable-name="current_price">                            <span class="column-name-display">current_price</span>                            <span class="column-name-filterable">current_price</span>                        </th>
+                        <th class="sortable" onclick="sortTable('puts', 4)" data-filterable-name="pe_ratio">                            <span class="column-name-display">pe_ratio</span>                            <span class="column-name-filterable">pe_ratio</span>                        </th>
+                        <th class="sortable" onclick="sortTable('puts', 5)" data-filterable-name="market_cap_b">                            <span class="column-name-display">market_cap_b</span>                            <span class="column-name-filterable">market_cap_b</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('puts', 6)" data-filterable-name="l_prem_tot">                            <span class="column-name-display">l_prem_tot</span>                            <span class="column-name-filterable">l_prem_tot</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('puts', 7)" data-filterable-name="spread_slippage">                            <span class="column-name-display">spread_slippage</span>                            <span class="column-name-filterable">spread_slippage</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('puts', 8)" data-filterable-name="net_premium_after_spread">                            <span class="column-name-display">net_premium_aft</span>                            <span class="column-name-filterable">net_premium_after_spread</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('puts', 9)" data-filterable-name="net_daily_premium_after_spread">                            <span class="column-name-display">net_daily_premi</span>                            <span class="column-name-filterable">net_daily_premium_after_spread</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('puts', 10)" data-filterable-name="spread_impact_pct">                            <span class="column-name-display">spread_impact_p</span>                            <span class="column-name-filterable">spread_impact_pct</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('puts', 11)" data-filterable-name="liquidity_score">                            <span class="column-name-display">liquidity_score</span>                            <span class="column-name-filterable">liquidity_score</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('puts', 12)" data-filterable-name="assignment_risk">                            <span class="column-name-display">assignment_risk</span>                            <span class="column-name-filterable">assignment_risk</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('puts', 13)" data-filterable-name="option_ticker">                            <span class="column-name-display">option_ticker</span>                            <span class="column-name-filterable">option_ticker</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('puts', 14)" data-filterable-name="l_option_ticker">                            <span class="column-name-display">l_option_ticker</span>                            <span class="column-name-filterable">l_option_ticker</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('puts', 15)" data-filterable-name="days_to_expiry">                            <span class="column-name-display">days_to_expiry</span>                            <span class="column-name-filterable">days_to_expiry</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('puts', 16)" data-filterable-name="l_days_to_expiry">                            <span class="column-name-display">l_days_to_expir</span>                            <span class="column-name-filterable">l_days_to_expiry</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 17)" data-filterable-name="strike_price">                            <span class="column-name-display">strike_price</span>                            <span class="column-name-short-long">Short</span>                            <span class="column-name-filterable">strike_price</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 18)" data-filterable-name="l_strike">                            <span class="column-name-display">l_strike</span>                            <span class="column-name-short-long">Long</span>                            <span class="column-name-filterable">l_strike</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 19)" data-filterable-name="expiration_date">                            <span class="column-name-display">expiration_date</span>                            <span class="column-name-short-long">Short</span>                            <span class="column-name-filterable">expiration_date</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 20)" data-filterable-name="l_expiration_date">                            <span class="column-name-display">l_expiration_da</span>                            <span class="column-name-short-long">Long</span>                            <span class="column-name-filterable">l_expiration_date</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 21)" data-filterable-name="opt_prem.">                            <span class="column-name-display">opt_prem.</span>                            <span class="column-name-short-long">Short</span>                            <span class="column-name-filterable">opt_prem.</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 22)" data-filterable-name="l_prem">                            <span class="column-name-display">l_prem</span>                            <span class="column-name-short-long">Long</span>                            <span class="column-name-filterable">l_prem</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 23)" data-filterable-name="premium_ratio_pct">                            <span class="column-name-display">premium_ratio_p</span>                            <span class="column-name-filterable">premium_ratio_pct</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 24)" data-filterable-name="bid:ask">                            <span class="column-name-display">bid:ask</span>                            <span class="column-name-short-long">Short</span>                            <span class="column-name-filterable">bid:ask</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 25)" data-filterable-name="l_bid:ask">                            <span class="column-name-display">l_bid:ask</span>                            <span class="column-name-short-long">Long</span>                            <span class="column-name-filterable">l_bid:ask</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 26)" data-filterable-name="delta">                            <span class="column-name-display">delta</span>                            <span class="column-name-short-long">Short</span>                            <span class="column-name-filterable">delta</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 27)" data-filterable-name="l_delta">                            <span class="column-name-display">l_delta</span>                            <span class="column-name-short-long">Long</span>                            <span class="column-name-filterable">l_delta</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 28)" data-filterable-name="theta">                            <span class="column-name-display">theta</span>                            <span class="column-name-short-long">Short</span>                            <span class="column-name-filterable">theta</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 29)" data-filterable-name="l_theta">                            <span class="column-name-display">l_theta</span>                            <span class="column-name-short-long">Long</span>                            <span class="column-name-filterable">l_theta</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 30)" data-filterable-name="s_prem_tot">                            <span class="column-name-display">s_prem_tot</span>                            <span class="column-name-short-long">Short</span>                            <span class="column-name-filterable">s_prem_tot</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 31)" data-filterable-name="net_premium">                            <span class="column-name-display">net_premium</span>                            <span class="column-name-short-long">Long</span>                            <span class="column-name-filterable">net_premium</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 32)" data-filterable-name="s_day_prem">                            <span class="column-name-display">s_day_prem</span>                            <span class="column-name-short-long">Short</span>                            <span class="column-name-filterable">s_day_prem</span>                        </th>
+                        <th class="sortable grouped-column" onclick="sortTable('puts', 33)" data-filterable-name="net_daily_premi">                            <span class="column-name-display">net_daily_premi</span>                            <span class="column-name-short-long">Long</span>                            <span class="column-name-filterable">net_daily_premi</span>                        </th>
+                        <th class="sortable" onclick="sortTable('puts', 34)" data-filterable-name="num_contracts">                            <span class="column-name-display">num_contracts</span>                            <span class="column-name-filterable">num_contracts</span>                        </th>
+                        <th class="sortable" onclick="sortTable('puts', 35)" data-filterable-name="volume">                            <span class="column-name-display">volume</span>                            <span class="column-name-filterable">volume</span>                        </th>
+                        <th class="sortable is-hidden-col" onclick="sortTable('puts', 36)" data-filterable-name="price_change_pct">                            <span class="column-name-display">price_change_pc</span>                            <span class="column-name-filterable">price_change_pct</span>                        </th>
+                        <th class="sortable" onclick="sortTable('puts', 37)" data-filterable-name="latest_option_writets">                            <span class="column-name-display">latest_option_w</span>                            <span class="column-name-filterable">latest_option_writets</span>                        </th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td colspan="100%" style="text-align: center; padding: 20px;">Loading data...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+<div id="putscardsContainer" class="cards-container"></div>
+        <div class="stats">
+            <div class="stat-item">
+                <div class="stat-value" id="putstotalCount">0</div>
+                <div class="stat-label">Total Results</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="putsvisibleCount">0</div>
+                <div class="stat-label">Visible Rows</div>
+            </div>
+        </div>
+
+        </div>
+
+        <div class="tab-content" id="analysisTab">
+        <div class="analysis-controls" style="margin-bottom: 20px; padding: 15px; background: #f5f5f5; border-radius: 8px;">
+            <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
+                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                    <input type="checkbox" id="useGeminiAnalysis" style="width: 18px; height: 18px; cursor: pointer;">
+                    <span style="font-weight: 500;">Use Gemini AI Analysis</span>
+                </label>
+                <button id="loadAnalysisBtn" onclick="loadComprehensiveAnalysis()" style="padding: 8px 16px; background: #667eea; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 500;">
+                    🔄 Load Analysis
+                </button>
+                <span id="analysisStatus" style="color: #666; font-size: 14px;"></span>
+            </div>
+            <div style="margin-top: 10px; font-size: 12px; color: #888;">
+                <strong>Rule-based:</strong> Fast, deterministic analysis based on scoring algorithm (loads automatically)<br>
+                <strong>Gemini AI:</strong> AI-powered analysis with risk/aggressive/conservative recommendations (check box and click button, slower, requires API key)
+            </div>
+        </div>
+        <div id="analysisContent">
+            <div class="loading-indicator"><div class="spinner"></div><div class="loading-text">Loading rule-based analysis...</div></div>
+        </div>
+        </div>
+
+        <div class="tab-content" id="stockAnalysisTab">
+            <div class="loading-indicator" id="stockAnalysisLoadingIndicator">
+                <div class="loading-spinner"></div>
+                <div class="loading-text">Loading stock analysis...</div>
+            </div>
+            <div id="stockAnalysisContent" style="padding: 20px;">
+                <!-- Content will be populated by JavaScript -->
+            </div>
+        </div>
+
+    </div>
+
+    <script src="app.js?v=20241226"></script>
+</body>
+</html>

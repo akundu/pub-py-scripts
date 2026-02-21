@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title id="pageTitle">Stock Information</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.umd.min.js"></script>
+  <script
+    src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: #0d1117;
+      color: #c9d1d9;
+      line-height: 1.6;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    .header {
+      background: #161b22;
+      padding: 20px 30px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      border: 1px solid #30363d;
+    }
+
+    .header h1 {
+      font-size: 32px;
+      margin-bottom: 5px;
+      color: #f0f6fc;
+    }
+
+    .header .symbol-info {
+      font-size: 14px;
+      color: #8b949e;
+      margin-bottom: 20px;
+    }
+
+    .header-content-wrapper {
+      display: flex;
+      flex-direction: row;
+      gap: 40px;
+      margin: 20px 0;
+      align-items: flex-start;
+    }
+
+    .price-section {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      flex: 0 0 auto;
+      min-width: 300px;
+    }
+
+    .price-row {
+      display: flex;
+      align-items: baseline;
+      gap: 15px;
+    }
+
+    .price {
+      font-size: 48px;
+      font-weight: 600;
+      color: #f0f6fc;
+    }
+
+    .change {
+      font-size: 24px;
+      font-weight: 500;
+    }
+
+    .change.positive {
+      color: #26a641;
+    }
+
+    .change.negative {
+      color: #f85149;
+    }
+
+    .price-timestamp {
+      font-size: 13px;
+      color: #8b949e;
+      margin-top: 5px;
+    }
+
+    .after-hours,
+    .pre-market {
+      display: flex;
+      align-items: baseline;
+      gap: 15px;
+      padding-top: 15px;
+      border-top: 1px solid #30363d;
+      margin-top: 15px;
+    }
+
+    .after-hours .label,
+    .pre-market .label {
+      font-size: 13px;
+      color: #8b949e;
+      margin-right: 10px;
+    }
+
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 15px;
+      width: 100%;
+    }
+
+    .metrics-grid.main-metrics {
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0;
+      flex: 1 1 auto;
+      margin-top: 0;
+    }
+
+    .metrics-grid.financial-ratios {
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 15px;
+    }
+
+    .metric-card {
+      background: transparent;
+      padding: 12px 0;
+    }
+    
+    .metrics-grid.main-metrics .metric-card {
+      border-right: 1px solid #30363d;
+      padding-right: 20px;
+    }
+    
+    .metrics-grid.main-metrics .metric-card:last-child {
+      border-right: none;
+    }
+
+    .metric-label {
+      font-size: 12px;
+      color: #8b949e;
+      margin-bottom: 4px;
+    }
+
+    .metric-value {
+      font-size: 16px;
+      font-weight: 600;
+      color: #f0f6fc;
+    }
+
+    .chart-section {
+      background: #161b22;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      border: 1px solid #30363d;
+    }
+
+    .chart-controls {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+
+    .chart-btn {
+      padding: 6px 12px;
+      border: 1px solid #30363d;
+      background: #0d1117;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      color: #c9d1d9;
+      transition: all 0.2s;
+    }
+
+    .chart-btn:hover {
+      background: #161b22;
+      border-color: #58a6ff;
+    }
+
+    .chart-btn.active {
+      background: #1f6feb;
+      color: white;
+      border-color: #1f6feb;
+    }
+
+    .chart-container {
+      position: relative;
+      height: 400px;
+    }
+
+    .data-section {
+      background: #161b22;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      border: 1px solid #30363d;
+    }
+
+    .data-section h2 {
+      margin-bottom: 15px;
+      color: #667eea;
+    }
+
+    .tabs-container {
+      background: #161b22;
+      padding: 0;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      border: 1px solid #30363d;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      padding: 15px 20px;
+      border-bottom: 1px solid #30363d;
+    }
+
+    .tab {
+      padding: 10px 20px;
+      background: transparent;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      color: #8b949e;
+      transition: all 0.2s;
+      text-decoration: none;
+    }
+
+    .tab:hover {
+      background: #21262d;
+      color: #c9d1d9;
+      border-color: #58a6ff;
+    }
+
+    .tab.active {
+      background: #1f6feb;
+      color: white;
+      border-color: #1f6feb;
+    }
+
+    .strategy-section {
+      background: #161b22;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      border: 1px solid #30363d;
+      min-height: 200px;
+    }
+
+    .strategy-loading {
+      text-align: center;
+      padding: 40px;
+      color: #8b949e;
+    }
+
+    .strategy-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 15px;
+      margin-top: 15px;
+    }
+
+    .strategy-card {
+      background: #0d1117;
+      padding: 15px;
+      border-radius: 6px;
+      border: 1px solid #30363d;
+    }
+
+    .strategy-card.active {
+      border-color: #26a641;
+      background: #0d1f0d;
+    }
+
+    .strategy-card.inactive {
+      border-color: #f85149;
+      opacity: 0.7;
+    }
+
+    .strategy-name {
+      font-size: 16px;
+      font-weight: 600;
+      color: #f0f6fc;
+      margin-bottom: 10px;
+    }
+
+    .strategy-details {
+      font-size: 13px;
+      color: #8b949e;
+      line-height: 1.6;
+    }
+
+    .strategy-details strong {
+      color: #c9d1d9;
+    }
+
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .data-table th,
+    .data-table td {
+      padding: 12px;
+      text-align: left;
+      border-bottom: 1px solid #21262d;
+    }
+
+    .data-table th {
+      background: #0d1117;
+      font-weight: 600;
+      color: #8b949e;
+      font-size: 13px;
+    }
+
+    .data-table td {
+      color: #c9d1d9;
+    }
+
+    .data-table tr:hover {
+      background: #161b22;
+    }
+
+    .status-indicator {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      margin-right: 5px;
+    }
+
+    .status-indicator.connected {
+      background: #16a34a;
+    }
+
+    .status-indicator.disconnected {
+      background: #dc2626;
+    }
+
+    .realtime-section {
+      background: #f9fafb;
+      padding: 10px;
+      border-radius: 4px;
+      margin-top: 10px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="symbol-info">NYSE - Nasdaq Real Time Price • USD</div>
+      <h1 id="symbolHeader">Loading...</h1>
+      <div class="header-content-wrapper">
+        <div class="price-section">
+          <div class="price-row">
+            <div class="price" id="mainPrice">--</div>
+            <div class="change" id="mainChange">--</div>
+          </div>
+          <div class="price-timestamp" id="closeTimeContainer" style="display: none;">At close: <span
+              id="closeTime">Loading...</span></div>
+
+          <div class="pre-market" id="preMarketSection" style="display: none;">
+            <div>
+              <span class="label">🌅 Pre-market:</span>
+              <span class="price" style="font-size: 24px;" id="preMarketPrice">--</span>
+              <span class="change" id="preMarketChange">--</span>
+            </div>
+            <div class="price-timestamp" id="preMarketTime">--</div>
+          </div>
+
+          <div class="after-hours" id="afterHoursSection" style="display: none;">
+            <div>
+              <span class="label">🌙 After hours:</span>
+              <span class="price" style="font-size: 24px;" id="afterHoursPrice">--</span>
+              <span class="change" id="afterHoursChange">--</span>
+            </div>
+            <div class="price-timestamp" id="afterHoursTime">--</div>
+          </div>
+
+          <div class="realtime-section" style="margin-top: 15px;">
+            <span class="status-indicator disconnected" id="wsStatus"></span>
+            <span id="wsStatusText" style="color: #8b949e;">Connecting to real-time data...</span>
+            <span id="realtimePrice" style="margin-left: 20px; font-weight: 600; color: #f0f6fc;"></span>
+          </div>
+        </div>
+
+        <div class="metrics-grid main-metrics" id="mainMetricsGrid">
+          <!-- Will be populated by JavaScript -->
+        </div>
+      </div>
+    </div>
+
+    <div class="tabs-container">
+      <div class="tabs">
+        <a href="#chart" class="tab active" onclick="scrollToSection('chart'); return false;">Price Chart</a>
+        <a href="#financial" class="tab" onclick="scrollToSection('financial'); return false;">Financial Ratios</a>
+        <a href="#strategies" class="tab" onclick="scrollToSection('strategies'); return false;">Strategy Analysis</a>
+        <a href="#options" class="tab" onclick="scrollToSection('options'); return false;">Options</a>
+        <a href="#news" class="tab" onclick="scrollToSection('news'); return false;">News</a>
+      </div>
+    </div>
+
+    <div class="chart-section">
+      <a id="chart"></a>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+        <h2 style="margin: 0;">Price Chart</h2>
+        <div id="chartRangeInfo" style="display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; background: #161b22; border-radius: 6px; border: 1px solid #30363d; font-size: 13px; color: #c9d1d9; min-width: 200px;">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <span id="rangeDates" style="color: #8b949e;">--</span>
+            <span id="rangeMove" style="font-weight: 600;">--</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 10px; font-size: 12px; color: #8b949e;">
+            <span>Min: <span id="rangeMin" style="color: #ef5350; font-weight: 500;">--</span></span>
+            <span>Max: <span id="rangeMax" style="color: #26a69a; font-weight: 500;">--</span></span>
+          </div>
+        </div>
+      </div>
+      <div class="chart-controls" style="display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px;">
+        <button class="chart-btn active" onclick="switchTimePeriod('1d')" id="btn-1d">1D</button>
+        <button class="chart-btn" onclick="switchTimePeriod('1w')" id="btn-1w">1W</button>
+        <button class="chart-btn" onclick="switchTimePeriod('1m')" id="btn-1m">1M</button>
+        <button class="chart-btn" onclick="switchTimePeriod('3m')" id="btn-3m">3M</button>
+        <button class="chart-btn" onclick="switchTimePeriod('6m')" id="btn-6m">6M</button>
+        <button class="chart-btn" onclick="switchTimePeriod('ytd')" id="btn-ytd">YTD</button>
+        <button class="chart-btn" onclick="switchTimePeriod('1y')" id="btn-1y">1Y</button>
+        <button class="chart-btn" onclick="switchTimePeriod('2y')" id="btn-2y">2Y</button>
+      </div>
+      <div class="chart-container">
+        <canvas id="priceChart"></canvas>
+        <div id="chartNoDataMessage" style="display: none; text-align: center; padding: 40px; color: #666;">
+          <p>No historical price data available for this symbol.</p>
+          <p style="font-size: 12px; margin-top: 10px;">Try adding <code>?force_fetch=true</code> to the URL to fetch
+            data from the API.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="data-section" id="financialRatiosSection" style="display: none;">
+      <a id="financial"></a>
+      <h2>Financial Ratios & Metrics</h2>
+      <div class="metrics-grid financial-ratios" id="financialRatiosGrid">
+        <!-- Will be populated by JavaScript -->
+      </div>
+    </div>
+
+    <div class="strategy-section" id="strategies" style="display: none;">
+      <h2>Strategy Analysis</h2>
+      <div id="strategyDisplay" class="strategy-loading">
+        <p>Loading strategy analysis...</p>
+      </div>
+    </div>
+
+    <div class="data-section" id="optionsSection" style="display: none;">
+      <a id="options"></a>
+      <h2 id="optionsHeader">Options</h2>
+      <div id="optionsDisplay">
+        <!-- Will be populated by JavaScript -->
+      </div>
+    </div>
+
+    <div class="data-section" id="newsSection" style="display: none;">
+      <a id="news"></a>
+      <h2>Latest News (Database)</h2>
+      <div id="newsDisplay">
+        <!-- Will be populated by JavaScript -->
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function scrollToSection(sectionId) {
+      const section = document.getElementById(sectionId);
+      if (section) {
+        section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        // Update active tab
+        document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+        event.target.classList.add('active');
+      }
+    }
+
+    // Update active tab on scroll
+    window.addEventListener('scroll', () => {
+      const sections = ['chart', 'financial', 'strategies', 'options', 'news'];
+      const scrollPos = window.scrollY + 100;
+
+      for (const sectionId of sections) {
+        const section = document.getElementById(sectionId);
+        if (section) {
+          const top = section.offsetTop;
+          const bottom = top + section.offsetHeight;
+          if (scrollPos >= top && scrollPos < bottom) {
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            const tab = document.querySelector(`.tab[href="#${sectionId}"]`);
+            if (tab) tab.classList.add('active');
+            break;
+          }
+        }
+      }
+    });
+  </script>
+
+  <!-- Embedded JSON data -->
+  <script id="stockData" type="application/json"></script>
+
+  <!-- Renderer script (inline) -->
+  <script src="/static/stock_info/render.js"></script>
+
+  <!-- Chart and WebSocket initialization will be added here by server -->
+  <script id="chartInitScript"></script>
+</body>
+
+</html>

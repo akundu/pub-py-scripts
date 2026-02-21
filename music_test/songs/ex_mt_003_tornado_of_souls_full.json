@@ -1,0 +1,21 @@
+{
+  "song_id": "ex_mt_003",
+  "title": "Tornado of Souls (Full)",
+  "composer": "Megadeth",
+  "tempo": 171,
+  "time_signature": "4/4",
+  "difficulty": "expert",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["E5", "D5", "C5", "B5", "F#5", "G5"],
+  "original_duration": "5:19",
+  "learning_time": "12 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 12, "duration": 1.40, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.18, "string": 1, "fret": 15, "duration": 0.18, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.36, "string": 1, "fret": 12, "duration": 0.18, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.54, "string": 2, "fret": 15, "duration": 0.18, "velocity": 0.9, "technique": "single_note"}
+  ]
+}

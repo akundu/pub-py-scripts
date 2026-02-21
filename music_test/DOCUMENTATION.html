@@ -1,0 +1,959 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chord Detector &mdash; Technical Documentation</title>
+<style>
+  :root {
+    --bg: #fdfdfd;
+    --fg: #1a1a2e;
+    --accent: #2563eb;
+    --accent-light: #dbeafe;
+    --border: #d1d5db;
+    --code-bg: #f3f4f6;
+    --table-stripe: #f9fafb;
+    --heading-color: #111827;
+    --sidebar-bg: #f8fafc;
+    --sidebar-active: #eff6ff;
+    --green: #059669;
+    --orange: #d97706;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.65;
+    color: var(--fg);
+    background: var(--bg);
+    display: flex;
+    min-height: 100vh;
+  }
+
+  /* Sidebar / Table of Contents */
+  nav.sidebar {
+    position: fixed;
+    top: 0; left: 0;
+    width: 280px;
+    height: 100vh;
+    overflow-y: auto;
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--border);
+    padding: 24px 16px 40px;
+    z-index: 10;
+  }
+  nav.sidebar h2 {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #6b7280;
+    margin-bottom: 12px;
+  }
+  nav.sidebar ul {
+    list-style: none;
+  }
+  nav.sidebar li { margin-bottom: 2px; }
+  nav.sidebar a {
+    display: block;
+    padding: 5px 10px;
+    border-radius: 5px;
+    color: #374151;
+    text-decoration: none;
+    font-size: 13.5px;
+    transition: background 0.15s;
+  }
+  nav.sidebar a:hover { background: var(--sidebar-active); color: var(--accent); }
+  nav.sidebar ul ul { padding-left: 14px; }
+  nav.sidebar ul ul a { font-size: 12.5px; color: #6b7280; }
+
+  /* Main content */
+  main {
+    margin-left: 280px;
+    max-width: 860px;
+    padding: 40px 48px 80px;
+    width: 100%;
+  }
+
+  h1 {
+    font-size: 32px;
+    font-weight: 700;
+    color: var(--heading-color);
+    margin-bottom: 8px;
+    letter-spacing: -0.02em;
+  }
+  h1 + p.subtitle {
+    font-size: 16px;
+    color: #6b7280;
+    margin-bottom: 36px;
+  }
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--heading-color);
+    margin-top: 48px;
+    margin-bottom: 16px;
+    padding-bottom: 6px;
+    border-bottom: 2px solid var(--accent);
+  }
+  h3 {
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--heading-color);
+    margin-top: 32px;
+    margin-bottom: 10px;
+  }
+  h4 {
+    font-size: 15px;
+    font-weight: 600;
+    color: #374151;
+    margin-top: 20px;
+    margin-bottom: 8px;
+  }
+  p { margin-bottom: 12px; }
+  ul, ol { margin-bottom: 12px; padding-left: 24px; }
+  li { margin-bottom: 4px; }
+
+  /* Code */
+  code {
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 13px;
+    background: var(--code-bg);
+    padding: 2px 5px;
+    border-radius: 3px;
+  }
+  pre {
+    background: #1e293b;
+    color: #e2e8f0;
+    padding: 18px 20px;
+    border-radius: 8px;
+    overflow-x: auto;
+    margin-bottom: 16px;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  pre code {
+    background: none;
+    padding: 0;
+    color: inherit;
+    font-size: inherit;
+  }
+  .comment { color: #94a3b8; }
+  .keyword { color: #7dd3fc; }
+  .string { color: #86efac; }
+  .number { color: #fbbf24; }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 20px;
+    font-size: 13.5px;
+  }
+  th, td {
+    text-align: left;
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+  }
+  th {
+    background: var(--accent);
+    color: white;
+    font-weight: 600;
+    font-size: 12.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  tr:nth-child(even) { background: var(--table-stripe); }
+  td code { font-size: 12.5px; }
+
+  /* Architecture diagram */
+  .diagram {
+    background: #f0f9ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 20px;
+    overflow-x: auto;
+  }
+  .diagram pre {
+    background: none;
+    color: #1e40af;
+    padding: 0;
+    margin: 0;
+    font-size: 13px;
+  }
+
+  /* Info boxes */
+  .info-box {
+    border-left: 4px solid var(--accent);
+    background: var(--accent-light);
+    padding: 14px 18px;
+    border-radius: 0 6px 6px 0;
+    margin-bottom: 16px;
+  }
+  .info-box.warn {
+    border-left-color: var(--orange);
+    background: #fffbeb;
+  }
+  .info-box.success {
+    border-left-color: var(--green);
+    background: #ecfdf5;
+  }
+  .info-box strong { display: block; margin-bottom: 4px; }
+
+  /* Formula blocks */
+  .formula {
+    background: #fefce8;
+    border: 1px solid #fde68a;
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin-bottom: 16px;
+    font-family: 'SF Mono', monospace;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+
+  /* Responsive */
+  @media (max-width: 900px) {
+    nav.sidebar { display: none; }
+    main { margin-left: 0; padding: 24px 20px 60px; }
+  }
+</style>
+</head>
+<body>
+
+<nav class="sidebar">
+  <h2>Contents</h2>
+  <ul>
+    <li><a href="#overview">Architecture Overview</a></li>
+    <li><a href="#algorithm">Detection Algorithm</a>
+      <ul>
+        <li><a href="#chroma">Chroma Extraction</a></li>
+        <li><a href="#matching">Chord Matching</a></li>
+        <li><a href="#buffer">Buffer Processing</a></li>
+        <li><a href="#smoothing">Temporal Smoothing</a></li>
+      </ul>
+    </li>
+    <li><a href="#song-constraint">Song Constraint System</a>
+      <ul>
+        <li><a href="#song-how">How It Works</a></li>
+        <li><a href="#similarity">Similarity Calculation</a></li>
+        <li><a href="#influence">Song Influence Knob</a></li>
+      </ul>
+    </li>
+    <li><a href="#variant-mapping">Chord Variant Mapping</a></li>
+    <li><a href="#parameters">Parameters Reference</a>
+      <ul>
+        <li><a href="#params-core">Core Detection</a></li>
+        <li><a href="#params-song">Song Constraint</a></li>
+        <li><a href="#params-output">Output Modes</a></li>
+        <li><a href="#params-device">Device &amp; Timing</a></li>
+        <li><a href="#params-freq">Freq/Notes-Only</a></li>
+        <li><a href="#params-web">Web Server</a></li>
+      </ul>
+    </li>
+    <li><a href="#files">File Structure</a></li>
+    <li><a href="#chords">Supported Chords</a></li>
+    <li><a href="#presets">Instrument Presets</a></li>
+    <li><a href="#constants">Audio Constants</a></li>
+    <li><a href="#examples">Usage Examples</a></li>
+  </ul>
+</nav>
+
+<main>
+
+<h1>Chord Detector</h1>
+<p class="subtitle">Technical Documentation &mdash; Real-time chord detection with CLI and web interfaces</p>
+
+<!-- ============================================================ -->
+<h2 id="overview">Architecture Overview</h2>
+
+<p>The system uses <strong>peak-based harmonic grouping</strong> and <strong>chroma-template matching</strong> to identify chords from live audio. The processing pipeline is shared between the CLI (<code>chord_detector.py</code>) and web (<code>web_server.py</code>) via <code>process_audio_chunk()</code>.</p>
+
+<div class="diagram">
+<pre>
+Audio Input (microphone or browser stream)
+       |
+       v
++-------------------------------+
+| 1. Circular Buffer            |
+|    4096-sample frames         |
+|    75% overlap (hop = 1024)   |
++-------------------------------+
+       |
+       v
++-------------------------------+
+| 2. Mode Dispatch              |
+|    - Chord mode (default)     |
+|    - Frequencies-only mode    |
+|    - Notes-only mode          |
++-------------------------------+
+       |
+       v  (chord mode)
++-------------------------------+
+| 3. Chroma Extraction          |
+|    chroma_from_fft()          |
+|    - Hann window + 4x pad    |
+|    - Peak detection           |
+|    - Harmonic grouping        |
+|    - 12-bin pitch class vector|
++-------------------------------+
+       |
+       v
++-------------------------------+
+| 4. Chord Matching             |
+|    _match_chroma_to_chord()   |
+|    Score all 168 candidates   |
+|    Precision-weighted scoring |
++-------------------------------+
+       |
+       v
++-------------------------------+
+| 5. Confidence Threshold       |
+|    >= 0.4 to output           |
++-------------------------------+
+       |
+       v
++-------------------------------+
+| 6. Temporal Smoothing         |
+|    Accumulate over 0.35s      |
+|    Pick best via voting       |
++-------------------------------+
+       |
+       v
++-------------------------------+
+| 7. Song Constraint (optional) |
+|    Re-weight against song     |
+|    Collapse variants          |
++-------------------------------+
+       |
+       v
++-------------------------------+
+| 8. Variant Mapping (optional) |
+|    Em7 / Emin -> Em           |
++-------------------------------+
+       |
+       v
+     Output
+  (CLI print or WebSocket JSON)
+</pre>
+</div>
+
+<p>Temporal smoothing and song constraints are applied by the callers, not inside the shared <code>process_audio_chunk()</code> function.</p>
+
+
+<!-- ============================================================ -->
+<h2 id="algorithm">Detection Algorithm</h2>
+
+<!-- ---- Chroma ---- -->
+<h3 id="chroma">Chroma Extraction (Peak-Based Harmonic Grouping)</h3>
+
+<p><strong>Function:</strong> <code>chroma_from_fft()</code> in <code>lib/music_understanding.py</code></p>
+
+<p>Builds a 12-dimensional chroma vector (one value per pitch class: C, C#, D, &hellip;, B) from a raw audio frame.</p>
+
+<h4>Step 1: Windowing and FFT</h4>
+<pre><code>audio frame (4096 samples at 44.1kHz, ~93ms)
+    |  Apply <strong>Blackman window</strong> (-58 dB sidelobe rejection vs Hann's -43 dB)
+    |  Zero-pad to 4x length (16384 samples)
+    v
+Compute FFT &rarr; magnitude spectrum</code></pre>
+
+<p>The <strong>4x zero-padding</strong> gives ~2.7 Hz frequency resolution, necessary for resolving low guitar notes where adjacent semitones are only ~5 Hz apart (e.g., E2 at 82.4 Hz vs F2 at 87.3 Hz). The <strong>Blackman window</strong> provides 15 dB better sidelobe rejection than Hann, reducing cross-contamination between adjacent semitones.</p>
+
+<h4>Step 2: Adaptive Peak Detection</h4>
+<ul>
+  <li>Find local maxima: higher than both immediate and second neighbors</li>
+  <li><strong>SNR-based adaptive threshold:</strong>
+    <ul>
+      <li>Clean signal (SNR &gt; 30): 4% of max</li>
+      <li>Moderate (SNR &gt; 15): 6% of max</li>
+      <li>Noisy: 10% of max</li>
+    </ul>
+  </li>
+  <li>Frequency within instrument range (with margin)</li>
+  <li><strong>Parabolic interpolation</strong> refines each peak to sub-bin frequency accuracy</li>
+</ul>
+
+<h4>Step 3: Harmonic Grouping with Adaptive Tolerance</h4>
+
+<div class="info-box">
+  <strong>Key Innovation</strong>
+  For each detected peak, check if it is a harmonic (2x&ndash;7x) of an existing stronger fundamental within adaptive tolerance. The tolerance scales with harmonic number (2% base + 0.5% per harmonic above 2) to account for accumulating frequency errors and real instrument inharmonicity.
+</div>
+
+<pre><code><span class="keyword">for</span> peak <span class="keyword">in</span> peaks (sorted by amplitude, strongest first):
+    <span class="keyword">for</span> fundamental f0 <span class="keyword">in</span> existing_fundamentals:
+        <span class="keyword">for</span> h <span class="keyword">in</span> [<span class="number">2</span>, <span class="number">3</span>, <span class="number">4</span>, <span class="number">5</span>, <span class="number">6</span>, <span class="number">7</span>]:
+            <span class="comment"># Adaptive tolerance: 2% base + 0.5% per harmonic</span>
+            tolerance = <span class="number">0.02</span> + (h - <span class="number">2</span>) * <span class="number">0.005</span>
+
+            <span class="comment"># Inharmonicity compensation (B=0.0004 for guitar strings)</span>
+            expected = f0 * h * (<span class="number">1.0</span> + <span class="number">0.0004</span> * h * h * <span class="number">0.5</span>)
+
+            <span class="keyword">if</span> |peak_freq - expected| / expected &lt; tolerance:
+                <span class="comment"># This peak is a harmonic of f0</span>
+                fundamentals[f0] += amplitude / h
+                <span class="keyword">break</span>
+    <span class="keyword">else</span>:
+        <span class="comment"># New fundamental</span>
+        fundamentals[peak_freq] = amplitude</code></pre>
+
+<div class="info-box warn">
+  <strong>Why not harmonic sieving (subtraction)?</strong>
+  Chord notes are often harmonically related &mdash; E is the 3rd harmonic of A. Subtracting A's harmonics would kill the actual E note in an Am chord. Grouping avoids this because it only claims a peak as a harmonic if it aligns with an existing <em>stronger</em> fundamental.
+</div>
+
+<h4>Step 4: Bass Note Detection</h4>
+<pre><code><span class="comment"># Find lowest significant fundamental (bass note)</span>
+bass_freq = infinity
+bass_pitch_class = -<span class="number">1</span>
+max_fundamental_energy = max(fundamentals.values())
+
+<span class="keyword">for</span> freq, energy <span class="keyword">in</span> fundamentals:
+    <span class="keyword">if</span> freq &lt; bass_freq <span class="keyword">and</span> energy &gt;= max_fundamental_energy * <span class="number">0.15</span>:
+        bass_freq = freq
+        bass_pitch_class = freq_to_pitch_class(freq)</code></pre>
+
+<p>The bass note (lowest fundamental with ≥15% energy of the strongest fundamental) is critical for disambiguating chords with identical pitch classes, like Am7 vs C6.</p>
+
+<h4>Step 5: Chroma Vector Construction</h4>
+<pre><code><span class="keyword">for</span> freq, energy <span class="keyword">in</span> fundamentals:
+    midi = <span class="number">12</span> * log2(freq / <span class="number">440</span>) + <span class="number">69</span>
+    pitch_class = round(midi) % <span class="number">12</span>
+    chroma[pitch_class] += energy
+
+chroma = chroma / ||chroma||   <span class="comment"># L2 normalization</span>
+
+<span class="keyword">return</span> chroma, bass_pitch_class</code></pre>
+
+<p>Result: 12-element chroma vector mapping to pitch classes C, C#, D, D#, E, F, F#, G, G#, A, A#, B, plus the detected bass pitch class.</p>
+
+
+<!-- ---- Matching ---- -->
+<h3 id="matching">Chord Matching (Precision-Weighted Scoring with Bass Disambiguation)</h3>
+
+<p><strong>Function:</strong> <code>_match_chroma_to_chord()</code> in <code>lib/music_understanding.py</code></p>
+
+<p>Each of <strong>12 roots &times; 14 chord types = 168 candidates</strong> is scored:</p>
+
+<div class="formula">
+<strong>Dynamic root weighting:</strong><br>
+root_weight = 2.0 if root_energy ≥ 15% else 1.5<br><br>
+chord_energy = &Sigma; chroma[bin] &times; weight &nbsp;&nbsp;<em>(root gets dynamic weight)</em><br>
+precision = chord_energy / total_weighted_energy<br>
+noise_penalty = (non_chord_energy / total_energy) &times; 0.15<br>
+complexity_penalty = num_intervals &times; 0.02<br><br>
+<strong>score = precision &minus; noise_penalty &minus; complexity_penalty</strong><br><br>
+<strong>Bass disambiguation bonus:</strong><br>
+if bass_pitch_class == root: score += 0.12<br>
+elif bass_pitch_class in chord_tones: score &minus;= 0.04
+</div>
+
+<div class="info-box success">
+  <strong>Why precision-based scoring?</strong>
+  Previous cosine similarity let extended chords (9ths, 13ths) win by having more template entries that &ldquo;capture&rdquo; spread energy. Precision measures what fraction of <em>actual energy</em> a chord explains &mdash; naturally favoring the correct, simpler chord.
+</div>
+
+<p>The <strong>root gets dynamic weight</strong> (2.0x if strong, 1.5x if weak) to adapt to inverted voicings. The <strong>bass disambiguation bonus</strong> uses the detected bass note to distinguish chords with identical pitch classes (e.g., Am7 vs C6). This achieves 100% accuracy on previously ambiguous chord pairs. The <strong>complexity penalty</strong> (0.02 per interval) breaks ties in favor of simpler chords.</p>
+
+
+<!-- ---- Buffer ---- -->
+<h3 id="buffer">Buffer Processing (Multi-Resolution Analysis)</h3>
+
+<p><strong>Function:</strong> <code>detect_chord_from_buffer()</code></p>
+
+<p>The circular audio buffer (8192 samples) is processed using <strong>multi-resolution FFT analysis</strong> that blends short overlapping windows (better temporal resolution) with a full-buffer FFT (better frequency resolution).</p>
+
+<pre><code>chroma_accum = zeros(<span class="number">12</span>)
+bass_votes = {}
+
+<span class="comment"># Pass 1: Short overlapping windows (~2.7 Hz resolution)</span>
+<span class="keyword">for</span> window <span class="keyword">in</span> overlapping_frames(buffer, size=<span class="number">4096</span>, hop=<span class="number">1024</span>):
+    rms = sqrt(mean(window**<span class="number">2</span>))
+    <span class="keyword">if</span> rms &lt; silence_threshold: <span class="keyword">continue</span>
+
+    chroma, bass_pc = chroma_from_fft(window)
+    chroma_accum += chroma * rms
+    <span class="keyword">if</span> bass_pc &gt;= <span class="number">0</span>:
+        bass_votes[bass_pc] += rms
+
+<span class="comment"># Pass 2: Full-buffer FFT (~1.35 Hz resolution)</span>
+full_chroma, full_bass = chroma_from_fft(full_buffer)
+chroma_accum += full_chroma * avg_rms * n_windows * <span class="number">0.4</span>
+<span class="keyword">if</span> full_bass &gt;= <span class="number">0</span>:
+    bass_votes[full_bass] += full_rms * <span class="number">2.0</span>    <span class="comment"># 2x weight (more reliable)</span>
+
+<span class="comment"># Bass consensus and chord matching</span>
+consensus_bass = max(bass_votes, key=bass_votes.get)
+chroma_accum = normalize(chroma_accum)
+chord, confidence, notes = _match_chroma_to_chord(chroma_accum, bass_pitch_class=consensus_bass)</code></pre>
+
+<p><strong>Why multi-resolution?</strong> Low guitar notes (E2=82.4Hz, F2=87.3Hz) are only 5Hz apart. Short windows provide adequate resolution (~2.7Hz) for most notes, while the full-buffer FFT's superior resolution (~1.35Hz) enables better bass discrimination. Blending gives 60% weight to short windows (temporal accuracy) and 40% to full buffer (frequency accuracy). The full buffer gets 2× bass voting weight due to its superior reliability.</p>
+
+
+<!-- ---- Smoothing ---- -->
+<h3 id="smoothing">Temporal Smoothing (Exponential Weighting + Hysteresis)</h3>
+
+<p>Handled by callers (<code>chord_detector.py</code>, <code>web_server.py</code>), not the shared pipeline.</p>
+
+<ol>
+  <li>Each call to <code>process_audio_chunk()</code> returns a single chord + confidence</li>
+  <li>Caller accumulates results over a time window (default <strong>0.3 seconds</strong>)</li>
+  <li>When the window completes, <strong>exponentially-weighted voting with hysteresis</strong> picks the winner</li>
+</ol>
+
+<pre><code><span class="comment"># Exponential temporal weighting (half-life = 0.3s)</span>
+DECAY_RATE = <span class="number">2.3</span>
+now = time.time()
+
+<span class="keyword">for</span> detection <span class="keyword">in</span> chord_accumulator:
+    age = now - detection[<span class="string">'timestamp'</span>]
+    time_weight = exp(-DECAY_RATE * age)
+    weighted_conf = confidence * time_weight
+    chord_scores[chord][<span class="string">'weighted_confidence'</span>] += weighted_conf
+
+<span class="comment"># Hysteresis bonus (prevents oscillation)</span>
+HYSTERESIS_BONUS = <span class="number">0.15</span>    <span class="comment"># 15% bonus</span>
+<span class="keyword">if</span> last_chord <span class="keyword">and</span> chord_stability &gt;= <span class="number">2</span>:
+    chord_scores[last_chord][<span class="string">'weighted_confidence'</span>] *= (<span class="number">1.0</span> + HYSTERESIS_BONUS)
+
+<span class="comment"># Winner selection</span>
+winner = max(chord_scores, key=<span class="keyword">lambda</span> c: chord_scores[c][<span class="string">'weighted_confidence'</span>])</code></pre>
+
+<p><strong>Example:</strong></p>
+<pre><code><span class="comment">Window: [Em(0.65, t=0.0s), Em(0.70, t=0.1s), G(0.45, t=0.2s), Em(0.68, t=0.3s)]</span>
+  Em: weighted = <span class="number">0.65</span>*<span class="number">1.0</span> + <span class="number">0.70</span>*<span class="number">0.79</span> + <span class="number">0.68</span>*<span class="number">0.50</span> = <span class="number">1.54</span>, avg = <span class="number">0.68</span>
+  G:  weighted = <span class="number">0.45</span>*<span class="number">0.63</span> = <span class="number">0.28</span>, avg = <span class="number">0.45</span>
+  Winner: Em (<span class="number">0.68</span> confidence)
+  If Em was stable &times;<span class="number">2</span>+ frames: Em score *= <span class="number">1.15</span> &rarr; even stronger</code></pre>
+
+<p>Output is only produced if average confidence meets <code>chord_window_confidence</code> (default 0.4). The exponential weighting gives more importance to recent detections while the hysteresis bonus prevents brief fluctuations from causing output changes.</p>
+
+
+<!-- ============================================================ -->
+<h2 id="song-constraint">Song Constraint System</h2>
+
+<h3 id="song-how">How It Works</h3>
+
+<p>Activated with <code>--song &lt;song_id&gt;</code> (CLI) or by selecting a song in the web UI. The raw chord detection runs identically &mdash; the song only biases the final output by re-weighting candidates.</p>
+
+<pre><code><span class="comment"># Example flow</span>
+Raw detection: <span class="string">"Em7"</span> at confidence <span class="number">0.65</span>
+Song chords:   [C, G, Am, Em, F]
+
+<span class="number">1.</span> Is <span class="string">"Em7"</span> in the song?  No (exact match fails)
+<span class="number">2.</span> Closest song chord: <span class="string">"Em"</span>
+   Em7 = {E, G, B, D}   Em = {E, G, B}
+   Jaccard = 3/4 = <span class="number">0.75</span>  &rarr; <span class="string">"partial"</span> match
+<span class="number">3.</span> Penalize Em7: <span class="number">0.65</span> &times; related_weight
+<span class="number">4.</span> Inject <span class="string">"Em"</span> as competing candidate
+<span class="number">5.</span> <span class="string">"Em"</span> wins with higher weighted score</code></pre>
+
+<p>The system also <strong>collapses variants</strong>: if Em, Em7, and Emin are all detected at various times, they collapse to whichever form appears in the song's chord list.</p>
+
+
+<h3 id="similarity">Similarity Calculation</h3>
+
+<p>Chord similarity uses <strong>Jaccard similarity</strong> on pitch class sets:</p>
+
+<div class="formula">
+Jaccard(A, B) = |A &cap; B| / |A &cup; B|
+</div>
+
+<table>
+  <thead><tr><th>Comparison</th><th>Pitch Classes</th><th>Jaccard</th></tr></thead>
+  <tbody>
+    <tr><td>Em vs Em7</td><td>{E,G,B} vs {E,G,B,D}</td><td><strong>0.75</strong></td></tr>
+    <tr><td>C vs Am</td><td>{C,E,G} vs {A,C,E}</td><td><strong>0.50</strong></td></tr>
+    <tr><td>C vs F</td><td>{C,E,G} vs {F,A,C}</td><td><strong>0.20</strong></td></tr>
+    <tr><td>Em vs Em</td><td>{E,G,B} vs {E,G,B}</td><td><strong>1.00</strong></td></tr>
+  </tbody>
+</table>
+
+<p>Match categories: <strong>Exact</strong> (chord literally in song list), <strong>Related</strong> (Jaccard &ge; 0.9), <strong>Partial</strong> (Jaccard &ge; 0.6), <strong>None</strong> (Jaccard &lt; 0.6).</p>
+
+
+<h3 id="influence">Song Influence Knob</h3>
+
+<p><code>--song-influence</code> (0.0 to 1.0) controls how strongly the song biases detection. It maps to three internal weights:</p>
+
+<table>
+  <thead><tr><th>Influence</th><th>out_of_song_penalty</th><th>related_chord_weight</th><th>in_song_weight</th></tr></thead>
+  <tbody>
+    <tr><td>0.0</td><td>1.00 (no penalty)</td><td>1.00</td><td>1.00</td></tr>
+    <tr><td>0.25</td><td>0.76</td><td>0.90</td><td>1.09</td></tr>
+    <tr><td>0.5 (default)</td><td>0.53</td><td>0.80</td><td>1.18</td></tr>
+    <tr><td>0.75</td><td>0.29</td><td>0.70</td><td>1.26</td></tr>
+    <tr><td>1.0</td><td>0.05 (heavy)</td><td>0.60</td><td>1.35 (strong)</td></tr>
+  </tbody>
+</table>
+
+<p>At higher influence, the closest song chord is also <strong>injected as a competing candidate</strong> with a boosted score, making it more likely to win over a penalized non-song detection.</p>
+
+
+<!-- ============================================================ -->
+<h2 id="variant-mapping">Chord Variant Mapping</h2>
+
+<p>Two independent mechanisms reduce display noise from near-identical chord variants:</p>
+
+<h3>1. Display Normalization (no song needed)</h3>
+
+<p><code>normalize_chord_variant()</code> collapses similar suffixes:</p>
+
+<table>
+  <thead><tr><th>Detected</th><th>Normalized</th></tr></thead>
+  <tbody>
+    <tr><td>Em7</td><td>Em</td></tr>
+    <tr><td>Emin7</td><td>Em</td></tr>
+    <tr><td>Emin</td><td>Em</td></tr>
+    <tr><td>Cmaj7</td><td>C</td></tr>
+  </tbody>
+</table>
+
+<p><strong>Control:</strong> Enabled by default. Disable with <code>--no-map-similar-variants</code>.</p>
+
+<h3>2. Song-Based Collapse (requires --song)</h3>
+
+<p>When a song is active, detected variants collapse to whichever form appears in the song's chord list. Built into the constraint scoring &mdash; cannot be separately disabled.</p>
+
+<h3>Controlling Both</h3>
+
+<table>
+  <thead><tr><th>Desired Behavior</th><th>Settings</th></tr></thead>
+  <tbody>
+    <tr><td>Raw output, no mapping</td><td>No <code>--song</code>, add <code>--no-map-similar-variants</code></td></tr>
+    <tr><td>Stable display, no song</td><td>Default (variant mapping on)</td></tr>
+    <tr><td>Song-aware mapping</td><td><code>--song &lt;id&gt;</code> with desired <code>--song-influence</code></td></tr>
+    <tr><td>Song loaded but raw output</td><td><code>--song &lt;id&gt; --song-influence 0.0</code></td></tr>
+  </tbody>
+</table>
+
+
+<!-- ============================================================ -->
+<h2 id="parameters">Parameters Reference</h2>
+
+<h3 id="params-core">Core Detection Parameters</h3>
+
+<table>
+  <thead><tr><th>Parameter</th><th>CLI Flag</th><th>Default</th><th>Range</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Silence Threshold</td>
+      <td><code>--silence-threshold</code></td>
+      <td>0.005</td>
+      <td>0.0&ndash;1.0</td>
+      <td>RMS energy below which audio is treated as silence. Lower = more sensitive to quiet playing.</td>
+    </tr>
+    <tr>
+      <td>Confidence Threshold</td>
+      <td><code>--confidence-threshold</code></td>
+      <td>0.45</td>
+      <td>0.0&ndash;1.0</td>
+      <td>Minimum chord match confidence to display a result. Lower = more results but more false positives.</td>
+    </tr>
+    <tr>
+      <td>Chord Window</td>
+      <td><code>--chord-window</code></td>
+      <td>0.3</td>
+      <td>0.0+ sec</td>
+      <td>Temporal smoothing window duration. Collects predictions over this period then picks the best via exponentially-weighted voting. Set to 0 for instant output. Higher values (1.0&ndash;2.0s) = smoother.</td>
+    </tr>
+    <tr>
+      <td>Chord Window Confidence</td>
+      <td><code>--chord-window-confidence</code></td>
+      <td>0.4</td>
+      <td>0.0&ndash;1.0</td>
+      <td>Minimum average confidence from the smoothing window to output a result.</td>
+    </tr>
+    <tr>
+      <td>Instrument</td>
+      <td><code>--instrument</code></td>
+      <td>guitar</td>
+      <td>See <a href="#presets">presets</a></td>
+      <td>Frequency range preset for the instrument being detected.</td>
+    </tr>
+    <tr>
+      <td>Low Frequency</td>
+      <td><code>--low-freq</code></td>
+      <td>(from preset)</td>
+      <td>Hz</td>
+      <td>Custom low frequency cutoff. Overrides instrument preset.</td>
+    </tr>
+    <tr>
+      <td>High Frequency</td>
+      <td><code>--high-freq</code></td>
+      <td>(from preset)</td>
+      <td>Hz</td>
+      <td>Custom high frequency cutoff. Overrides instrument preset.</td>
+    </tr>
+    <tr>
+      <td>Overlap</td>
+      <td><code>--overlap</code></td>
+      <td>0.75</td>
+      <td>0.0&ndash;0.9</td>
+      <td>Window overlap ratio. Higher = more temporal resolution but more computation.</td>
+    </tr>
+  </tbody>
+</table>
+
+
+<h3 id="params-song">Song Constraint Parameters</h3>
+
+<table>
+  <thead><tr><th>Parameter</th><th>CLI Flag</th><th>Default</th><th>Range</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Song</td>
+      <td><code>--song</code></td>
+      <td>(none)</td>
+      <td>song ID</td>
+      <td>Load a song to constrain chord detection.</td>
+    </tr>
+    <tr>
+      <td>Song Influence</td>
+      <td><code>--song-influence</code></td>
+      <td>0.7</td>
+      <td>0.0&ndash;1.0</td>
+      <td>How strongly the song biases output. 0 = raw detection, 1 = song chords heavily favored.</td>
+    </tr>
+    <tr>
+      <td>Map Variants</td>
+      <td><code>--no-map-similar-variants</code></td>
+      <td>enabled</td>
+      <td>flag</td>
+      <td>When set, disables collapsing of similar chord variants (Em7 &rarr; Em).</td>
+    </tr>
+  </tbody>
+</table>
+
+
+<h3 id="params-output">Output Mode Parameters</h3>
+
+<table>
+  <thead><tr><th>Parameter</th><th>CLI Flag</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>Show Frequencies</td><td><code>--show-frequencies</code></td><td>off</td><td>Include detected frequencies alongside chord output.</td></tr>
+    <tr><td>Show Chroma</td><td><code>--show-chroma</code></td><td>off</td><td>Include the 12-bin chroma vector in output.</td></tr>
+    <tr><td>Log Mode</td><td><code>--log</code></td><td>off</td><td>Show timestamped detections instead of overwriting the line.</td></tr>
+    <tr><td>Log Interval</td><td><code>--log-interval</code></td><td>0.5s</td><td>Minimum interval between log entries.</td></tr>
+    <tr><td>Frequencies Only</td><td><code>--frequencies-only</code></td><td>off</td><td>Skip chord detection; show only frequencies.</td></tr>
+    <tr><td>Notes Only</td><td><code>--notes-only</code></td><td>off</td><td>Skip chord detection; show only note names.</td></tr>
+    <tr><td>Debug</td><td><code>--debug</code></td><td>off</td><td>Show audio levels and detection internals.</td></tr>
+  </tbody>
+</table>
+
+
+<h3 id="params-device">Device &amp; Timing Parameters</h3>
+
+<table>
+  <thead><tr><th>Parameter</th><th>CLI Flag</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>List Devices</td><td><code>--list-devices</code></td><td>&mdash;</td><td>List available audio input devices and exit.</td></tr>
+    <tr><td>Device</td><td><code>--device</code></td><td>system default</td><td>Audio input device ID.</td></tr>
+    <tr><td>Wait Time</td><td><code>--wait-time</code></td><td>0.0s</td><td>Delay between processing iterations.</td></tr>
+  </tbody>
+</table>
+
+
+<h3 id="params-freq">Frequencies/Notes-Only Mode Parameters</h3>
+
+<p>These only apply when using <code>--frequencies-only</code> or <code>--notes-only</code>. They have <strong>no effect</strong> in the default chord detection mode.</p>
+
+<table>
+  <thead><tr><th>Parameter</th><th>CLI Flag</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>Sensitivity</td><td><code>--sensitivity</code></td><td>1.0</td><td>Detection sensitivity multiplier (0.1&ndash;2.0).</td></tr>
+    <tr><td>Single Pitch</td><td><code>--single-pitch</code></td><td>off</td><td>Use autocorrelation for single fundamental detection.</td></tr>
+    <tr><td>Show FFT</td><td><code>--show-fft</code></td><td>off</td><td>Show raw FFT analysis data.</td></tr>
+    <tr><td>Raw Frequencies</td><td><code>--raw-frequencies</code></td><td>off</td><td>Show unfiltered frequency peaks.</td></tr>
+  </tbody>
+</table>
+
+
+<h3 id="params-web">Web Server Parameters</h3>
+
+<p>Command-line flags for <code>web_server.py</code> only:</p>
+
+<table>
+  <thead><tr><th>Parameter</th><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td>Host</td><td><code>--host</code></td><td>0.0.0.0</td><td>Network interface to bind to.</td></tr>
+    <tr><td>Port</td><td><code>--port</code></td><td>9103</td><td>Port number.</td></tr>
+    <tr><td>Reload</td><td><code>--reload</code></td><td>off</td><td>Auto-reload on code changes (development).</td></tr>
+    <tr><td>Log Level</td><td><code>--log-level</code></td><td>INFO</td><td>Server logging verbosity.</td></tr>
+    <tr><td>Workers</td><td><code>--workers</code></td><td>1</td><td>Worker processes. Cannot use with <code>--reload</code>.</td></tr>
+  </tbody>
+</table>
+
+<p>All detection parameters can also be set via <strong>URL query parameters</strong> or the web UI settings panel (use underscores: <code>?confidence_threshold=0.5&amp;chord_window=1.0</code>).</p>
+
+
+<!-- ============================================================ -->
+<h2 id="files">File Structure</h2>
+
+<pre><code>music_test/
+├── chord_detector.py            <span class="comment">CLI entry point</span>
+├── web_server.py                <span class="comment">FastAPI web server with WebSocket</span>
+├── lib/
+│   ├── music_understanding.py   <span class="comment">Core: FFT, chroma, chord matching, song constraints</span>
+│   ├── audio_processing.py      <span class="comment">Shared pipeline: process_audio_chunk()</span>
+│   ├── state.py                 <span class="comment">AudioProcessingState: buffers, history, accumulator</span>
+│   ├── common.py                <span class="comment">Audio constants: CHUNK, RATE, OVERLAP</span>
+│   ├── config.py                <span class="comment">Unified config (argparse + dict)</span>
+│   ├── sound_capture.py         <span class="comment">Sounddevice microphone capture (CLI)</span>
+│   ├── web_audio_processing.py  <span class="comment">Web audio processing wrapper</span>
+│   ├── song_loader.py           <span class="comment">Song data loading, chord similarity</span>
+│   └── output.py                <span class="comment">Output formatters (console, dict)</span>
+├── songs/                       <span class="comment">Song manifest + chord data files</span>
+├── static/js/main.js            <span class="comment">Web frontend JavaScript</span>
+├── templates/index.html         <span class="comment">Web UI</span>
+└── tests/conftest.py            <span class="comment">Test fixtures</span></code></pre>
+
+<h3>Key Files</h3>
+<table>
+  <thead><tr><th>File</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>lib/music_understanding.py</code></td>
+      <td>All detection algorithms. Contains <code>chroma_from_fft()</code>, <code>_match_chroma_to_chord()</code>, <code>detect_chord_from_buffer()</code>, <code>constrain_chord_to_song()</code>, <code>normalize_chord_variant()</code>, <code>CHORD_TEMPLATES</code>, <code>INSTRUMENT_PRESETS</code>.</td>
+    </tr>
+    <tr>
+      <td><code>lib/audio_processing.py</code></td>
+      <td><code>process_audio_chunk()</code> &mdash; the shared pipeline for CLI and web. Handles mode dispatch, calls detection functions, applies confidence thresholding. Does NOT do temporal smoothing.</td>
+    </tr>
+    <tr>
+      <td><code>lib/state.py</code></td>
+      <td><code>AudioProcessingState</code> &mdash; circular buffer, detection history (deque maxlen=8), chord stability counter, chord accumulator with <code>accumulate_chord()</code> / <code>get_best_chord()</code> / <code>is_window_complete()</code>.</td>
+    </tr>
+    <tr>
+      <td><code>lib/common.py</code></td>
+      <td>Constants: CHUNK=4096, RATE=44100, OVERLAP_RATIO=0.75, HOP_SIZE=1024, BUFFER_SIZE=8192.</td>
+    </tr>
+  </tbody>
+</table>
+
+
+<!-- ============================================================ -->
+<h2 id="chords">Supported Chords</h2>
+
+<p>14 chord qualities across all 12 roots (168 total candidates):</p>
+
+<table>
+  <thead><tr><th>Suffix</th><th>Name</th><th>Intervals</th><th>Example (C root)</th></tr></thead>
+  <tbody>
+    <tr><td>(none)</td><td>Major</td><td>0, 4, 7</td><td>C (C, E, G)</td></tr>
+    <tr><td>m</td><td>Minor</td><td>0, 3, 7</td><td>Cm (C, Eb, G)</td></tr>
+    <tr><td>7</td><td>Dominant 7th</td><td>0, 4, 7, 10</td><td>C7 (C, E, G, Bb)</td></tr>
+    <tr><td>maj7</td><td>Major 7th</td><td>0, 4, 7, 11</td><td>Cmaj7 (C, E, G, B)</td></tr>
+    <tr><td>m7</td><td>Minor 7th</td><td>0, 3, 7, 10</td><td>Cm7 (C, Eb, G, Bb)</td></tr>
+    <tr><td>5</td><td>Power Chord</td><td>0, 7</td><td>C5 (C, G)</td></tr>
+    <tr><td>sus2</td><td>Suspended 2nd</td><td>0, 2, 7</td><td>Csus2 (C, D, G)</td></tr>
+    <tr><td>sus4</td><td>Suspended 4th</td><td>0, 5, 7</td><td>Csus4 (C, F, G)</td></tr>
+    <tr><td>dim / &deg;</td><td>Diminished</td><td>0, 3, 6</td><td>Cdim (C, Eb, Gb)</td></tr>
+    <tr><td>aug / +</td><td>Augmented</td><td>0, 4, 8</td><td>Caug (C, E, G#)</td></tr>
+    <tr><td>6</td><td>Major 6th</td><td>0, 4, 7, 9</td><td>C6 (C, E, G, A)</td></tr>
+    <tr><td>m6</td><td>Minor 6th</td><td>0, 3, 7, 9</td><td>Cm6 (C, Eb, G, A)</td></tr>
+    <tr><td>add9</td><td>Added 9th</td><td>0, 2, 4, 7</td><td>Cadd9 (C, D, E, G)</td></tr>
+    <tr><td>9</td><td>Dominant 9th</td><td>0, 2, 4, 7, 10</td><td>C9 (C, D, E, G, Bb)</td></tr>
+  </tbody>
+</table>
+
+
+<!-- ============================================================ -->
+<h2 id="presets">Instrument Presets</h2>
+
+<table>
+  <thead><tr><th>Preset</th><th>Low (Hz)</th><th>High (Hz)</th><th>Use</th></tr></thead>
+  <tbody>
+    <tr><td>guitar</td><td>80</td><td>2000</td><td>Acoustic/electric guitar</td></tr>
+    <tr><td>piano</td><td>100</td><td>4000</td><td>Piano/keyboard</td></tr>
+    <tr><td>bass</td><td>40</td><td>800</td><td>Bass guitar</td></tr>
+    <tr><td>violin</td><td>200</td><td>3000</td><td>Violin</td></tr>
+    <tr><td>cello</td><td>65</td><td>1000</td><td>Cello</td></tr>
+    <tr><td>flute</td><td>250</td><td>2500</td><td>Flute</td></tr>
+    <tr><td>clarinet</td><td>150</td><td>1500</td><td>Clarinet</td></tr>
+    <tr><td>saxophone</td><td>100</td><td>800</td><td>Saxophone</td></tr>
+    <tr><td>trumpet</td><td>150</td><td>1000</td><td>Trumpet</td></tr>
+    <tr><td>voice</td><td>80</td><td>1000</td><td>Vocals</td></tr>
+  </tbody>
+</table>
+
+<p>The frequency range filters which FFT peaks are considered, reducing false detections from noise or other instruments outside the range.</p>
+
+
+<!-- ============================================================ -->
+<h2 id="constants">Audio Constants</h2>
+
+<table>
+  <thead><tr><th>Constant</th><th>Value</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td>CHUNK</td><td>4096 samples</td><td>FFT frame size</td></tr>
+    <tr><td>RATE</td><td>44100 Hz</td><td>Sample rate</td></tr>
+    <tr><td>CHANNELS</td><td>1</td><td>Mono audio</td></tr>
+    <tr><td>OVERLAP_RATIO</td><td>0.75</td><td>Window overlap (configurable)</td></tr>
+    <tr><td>HOP_SIZE</td><td>1024 samples</td><td>Stride between windows</td></tr>
+    <tr><td>BUFFER_SIZE</td><td>8192 samples</td><td>Circular buffer</td></tr>
+    <tr><td>Frame duration</td><td>~93 ms</td><td>CHUNK / RATE</td></tr>
+    <tr><td>Hop duration</td><td>~23 ms</td><td>HOP_SIZE / RATE</td></tr>
+    <tr><td>FFT zero-pad</td><td>4x (16384)</td><td>~2.7 Hz resolution</td></tr>
+    <tr><td>Peak threshold</td><td>6% of max</td><td>Minimum peak amplitude</td></tr>
+    <tr><td>Harmonic tolerance</td><td>3%</td><td>Frequency match for grouping</td></tr>
+  </tbody>
+</table>
+
+
+<!-- ============================================================ -->
+<h2 id="examples">Usage Examples</h2>
+
+<h3>CLI &mdash; Basic Chord Detection</h3>
+<pre><code>python chord_detector.py</code></pre>
+
+<h3>CLI &mdash; Select Audio Device</h3>
+<pre><code>python chord_detector.py --list-devices
+python chord_detector.py --device 3</code></pre>
+
+<h3>CLI &mdash; Noisy Environment</h3>
+<pre><code>python chord_detector.py --silence-threshold 0.02 --confidence-threshold 0.5</code></pre>
+
+<h3>CLI &mdash; Smoother Output</h3>
+<pre><code>python chord_detector.py --chord-window 1.0</code></pre>
+
+<h3>CLI &mdash; Instant Output (No Smoothing)</h3>
+<pre><code>python chord_detector.py --chord-window 0</code></pre>
+
+<h3>CLI &mdash; With Song Constraint</h3>
+<pre><code>python chord_detector.py --song bg_rk_001 --song-influence 0.7</code></pre>
+
+<h3>CLI &mdash; Timestamped Log</h3>
+<pre><code>python chord_detector.py --log --log-interval 1.0</code></pre>
+
+<h3>CLI &mdash; Debug Mode</h3>
+<pre><code>python chord_detector.py --debug</code></pre>
+
+<h3>CLI &mdash; Different Instrument</h3>
+<pre><code>python chord_detector.py --instrument piano
+python chord_detector.py --low-freq 100 --high-freq 3000</code></pre>
+
+<h3>CLI &mdash; Frequencies/Notes Only</h3>
+<pre><code>python chord_detector.py --frequencies-only --sensitivity 1.5
+python chord_detector.py --notes-only</code></pre>
+
+<h3>CLI &mdash; Show Extra Data</h3>
+<pre><code>python chord_detector.py --show-chroma --show-frequencies</code></pre>
+
+<h3>CLI &mdash; Raw Output, No Variant Mapping</h3>
+<pre><code>python chord_detector.py --no-map-similar-variants</code></pre>
+
+<h3>Web &mdash; Start Server</h3>
+<pre><code>python web_server.py
+python web_server.py --port 8080 --log-level DEBUG</code></pre>
+
+<h3>Web &mdash; URL Parameters</h3>
+<pre><code>http://localhost:9103/?instrument=guitar&amp;confidence_threshold=0.5&amp;debug=true
+http://localhost:9103/?chord_window=1.0&amp;song_influence=0.8
+http://localhost:9103/?frequencies_only=true&amp;sensitivity=1.5</code></pre>
+
+</main>
+</body>
+</html>

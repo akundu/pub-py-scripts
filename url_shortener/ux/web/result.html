@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>URL Shortened Successfully</title>
+    <link rel="stylesheet" href="../../css/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>✅ Success!</h1>
+            <p class="subtitle">Your URL has been shortened</p>
+        </header>
+
+        <main>
+            <div class="result-card">
+                <div class="result-section">
+                    <label>Your short URL:</label>
+                    <div class="url-display">
+                        <input 
+                            type="text" 
+                            id="shortUrl" 
+                            value="{{short_url}}" 
+                            readonly 
+                            class="form-input short-url-input"
+                        >
+                        <button onclick="copyToClipboard()" class="btn btn-secondary" id="copyBtn">
+                            📋 Copy
+                        </button>
+                    </div>
+                </div>
+
+                <div class="result-section">
+                    <label>Short code:</label>
+                    <p class="short-code">{{short_code}}</p>
+                </div>
+
+                <div class="result-section">
+                    <label>Original URL:</label>
+                    <p class="original-url">{{original_url}}</p>
+                </div>
+
+                <div class="actions">
+                    <a href="{{short_url}}" target="_blank" class="btn btn-outline">
+                        🔗 Test Link
+                    </a>
+                    <a href="../.." class="btn btn-primary">
+                        ➕ Shorten Another
+                    </a>
+                </div>
+            </div>
+
+            <div class="info-box">
+                <h3>📌 What's next?</h3>
+                <ul>
+                    <li>Share your short URL anywhere</li>
+                    <li>Use the short code: <code>{{short_code}}</code></li>
+                    <li>Track clicks via API: <code>GET /api/urls/{{short_code}}</code></li>
+                </ul>
+            </div>
+        </main>
+
+        <footer>
+            <p>Built with FastAPI, QuestDB, and ❤️</p>
+        </footer>
+    </div>
+
+    <script>
+        function copyToClipboard() {
+            const input = document.getElementById('shortUrl');
+            const btn = document.getElementById('copyBtn');
+            
+            input.select();
+            input.setSelectionRange(0, 99999); // For mobile devices
+            
+            navigator.clipboard.writeText(input.value).then(() => {
+                const originalText = btn.innerHTML;
+                btn.innerHTML = '✅ Copied!';
+                btn.classList.add('copied');
+                
+                setTimeout(() => {
+                    btn.innerHTML = originalText;
+                    btn.classList.remove('copied');
+                }, 2000);
+            }).catch(err => {
+                alert('Failed to copy: ' + err);
+            });
+        }
+    </script>
+</body>
+</html>
+
+
+
+
+
+

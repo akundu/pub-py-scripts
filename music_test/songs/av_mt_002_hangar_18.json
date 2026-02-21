@@ -1,0 +1,25 @@
+{
+  "song_id": "av_mt_002",
+  "title": "Hangar 18",
+  "composer": "Megadeth",
+  "tempo": 150,
+  "time_signature": "4/4",
+  "difficulty": "advanced",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["E5", "F#5", "G5", "A5", "B5", "D5"],
+  "original_duration": "5:14",
+  "learning_time": "8 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 0, "duration": 0.80, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.20, "string": 6, "fret": 2, "duration": 0.20, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.40, "string": 6, "fret": 3, "duration": 0.20, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.60, "string": 6, "fret": 5, "duration": 0.20, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.80, "string": 6, "fret": 7, "duration": 0.80, "velocity": 0.9, "technique": "single_note"},
+    {"time": 1.00, "string": 5, "fret": 0, "duration": 0.20, "velocity": 0.9, "technique": "single_note"},
+    {"time": 1.20, "string": 5, "fret": 2, "duration": 0.20, "velocity": 0.9, "technique": "single_note"},
+    {"time": 1.40, "string": 5, "fret": 3, "duration": 0.20, "velocity": 0.9, "technique": "single_note"}
+  ]
+}

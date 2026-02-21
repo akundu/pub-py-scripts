@@ -1,0 +1,22 @@
+{
+  "song_id": "pf_ct_003",
+  "title": "Crazy",
+  "composer": "Willie Nelson (Patsy Cline)",
+  "tempo": 66,
+  "time_signature": "4/4",
+  "difficulty": "proficient",
+  "license_status": "educational_use",
+  "genre": "country",
+  "chords": ["Bb", "G7", "Cm", "F7", "Dm", "Gm"],
+  "original_duration": "2:43",
+  "learning_time": "3 weeks",
+  "tuning": "standard",
+  "capo": 1,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 1, "duration": 3.64, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.02, "string": 2, "fret": 3, "duration": 3.64, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 3, "duration": 3.64, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.06, "string": 4, "fret": 3, "duration": 3.64, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.08, "string": 5, "fret": 1, "duration": 3.64, "velocity": 0.6, "technique": "strum"}
+  ]
+}

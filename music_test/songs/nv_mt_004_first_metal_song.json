@@ -1,0 +1,25 @@
+{
+  "song_id": "nv_mt_004",
+  "title": "First Metal Song",
+  "composer": "Traditional",
+  "tempo": 95,
+  "time_signature": "4/4",
+  "difficulty": "novice",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["E5", "B5", "A5"],
+  "original_duration": "1:00",
+  "learning_time": "2 days",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 2, "duration": 2.53, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 0.02, "string": 6, "fret": 0, "duration": 2.53, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 2.53, "string": 4, "fret": 4, "duration": 2.53, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 2.55, "string": 5, "fret": 2, "duration": 2.53, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 5.06, "string": 4, "fret": 2, "duration": 2.53, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 5.08, "string": 5, "fret": 0, "duration": 2.53, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 7.59, "string": 5, "fret": 2, "duration": 2.53, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 7.61, "string": 6, "fret": 0, "duration": 2.53, "velocity": 0.9, "technique": "power_chord"}
+  ]
+}

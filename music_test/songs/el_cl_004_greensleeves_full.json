@@ -1,0 +1,30 @@
+{
+  "song_id": "el_cl_004",
+  "title": "Greensleeves (Full)",
+  "composer": "Traditional",
+  "tempo": 80,
+  "time_signature": "3/4",
+  "difficulty": "elementary",
+  "license_status": "public_domain",
+  "genre": "classical",
+  "chords": ["Am", "G", "Em", "E"],
+  "original_duration": "3:00",
+  "learning_time": "2 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 0, "duration": 0.75, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.75, "string": 3, "fret": 2, "duration": 0.75, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.5, "string": 2, "fret": 1, "duration": 0.75, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.25, "string": 3, "fret": 0, "duration": 1.5, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 3.75, "string": 3, "fret": 2, "duration": 0.75, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.5, "string": 6, "fret": 3, "duration": 0.75, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 5.25, "string": 3, "fret": 0, "duration": 0.75, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 6.0, "string": 2, "fret": 3, "duration": 0.75, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 6.75, "string": 2, "fret": 0, "duration": 1.5, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 8.25, "string": 2, "fret": 1, "duration": 0.75, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 9.0, "string": 6, "fret": 0, "duration": 0.75, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 9.75, "string": 3, "fret": 0, "duration": 0.75, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 10.5, "string": 2, "fret": 0, "duration": 0.75, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

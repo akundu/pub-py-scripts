@@ -1,0 +1,25 @@
+{
+  "song_id": "bg_mt_004",
+  "title": "Back in Black (Riff)",
+  "composer": "AC/DC",
+  "tempo": 92,
+  "time_signature": "4/4",
+  "difficulty": "beginner",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["E5", "D5", "A5"],
+  "original_duration": "1:00",
+  "learning_time": "1 week",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 2, "duration": 0.65, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 0.02, "string": 6, "fret": 0, "duration": 0.65, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 0.65, "string": 4, "fret": 2, "duration": 0.65, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 0.67, "string": 5, "fret": 0, "duration": 0.65, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 1.30, "string": 4, "fret": 2, "duration": 0.65, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 1.32, "string": 5, "fret": 0, "duration": 0.65, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 1.95, "string": 5, "fret": 2, "duration": 0.65, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 1.97, "string": 6, "fret": 0, "duration": 0.65, "velocity": 0.9, "technique": "power_chord"}
+  ]
+}

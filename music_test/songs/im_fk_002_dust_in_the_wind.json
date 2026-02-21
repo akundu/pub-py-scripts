@@ -1,0 +1,33 @@
+{
+  "song_id": "im_fk_002",
+  "title": "Dust in the Wind",
+  "composer": "Kansas",
+  "tempo": 96,
+  "time_signature": "4/4",
+  "difficulty": "intermediate",
+  "license_status": "educational_use",
+  "genre": "folk",
+  "chords": ["C", "Cmaj7", "Cadd9", "Am", "G/B"],
+  "original_duration": "3:27",
+  "learning_time": "3 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 3, "duration": 2.5, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.31, "string": 4, "fret": 2, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.62, "string": 3, "fret": 0, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.93, "string": 2, "fret": 1, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.24, "string": 1, "fret": 0, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.55, "string": 2, "fret": 1, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.86, "string": 3, "fret": 0, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.17, "string": 4, "fret": 2, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.5, "string": 5, "fret": 3, "duration": 2.5, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 2.81, "string": 4, "fret": 2, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.12, "string": 3, "fret": 0, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.43, "string": 2, "fret": 0, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.74, "string": 1, "fret": 0, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.05, "string": 2, "fret": 0, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.36, "string": 3, "fret": 0, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.67, "string": 4, "fret": 2, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

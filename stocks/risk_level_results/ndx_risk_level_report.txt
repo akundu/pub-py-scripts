@@ -1,0 +1,308 @@
+
+================================================================================
+ NDX DYNAMIC RISK LEVEL ANALYSIS RESULTS
+================================================================================
+
+Base Parameters (Risk Level 5):
+  percent_beyond_put: 0.0075
+  percent_beyond_call: 0.015
+  max_spread_width_put: 20
+  max_spread_width_call: 20
+
+Risk Level Parameters Summary
+======================================================================
+Level  pb       pc       msw_put    msw_call   Style          
+----------------------------------------------------------------------
+1      0.0112   0.0225   10         10         Very Conservative
+2      0.0105   0.0210   12         12         Conservative   
+3      0.0097   0.0195   14         14         Mod Conservative
+4      0.0086   0.0172   17         17         Slightly Conserv
+5      0.0075   0.0150   20         20         Neutral        
+6      0.0067   0.0135   22         22         Slightly Aggress
+7      0.0060   0.0120   24         24         Mod Aggressive 
+8      0.0052   0.0105   26         26         Aggressive     
+9      0.0045   0.0090   28         28         Very Aggressive
+10     0.0037   0.0075   30         30         Max Aggressive 
+======================================================================
+
+================================================================================
+ 3MO WINDOW RESULTS
+================================================================================
+
+Risk        Net P&L   Win Rate   Trades       PF    Avg Win   Avg Loss
+----------------------------------------------------------------------
+9      $  2,797,454   8125.0%     2053     1.16 $        0 $        0
+10     $  2,622,914   7908.0%     2223     1.12 $        0 $        0
+8      $    857,941   8190.0%     1939     1.05 $        0 $        0
+2      $    694,232   8524.0%     1145     1.09 $        0 $        0
+4      $    527,397   8489.0%     1330     1.05 $        0 $        0
+1      $    390,761   8581.0%     1092     1.05 $        0 $        0
+7      $    149,438   8238.0%     1805     1.01 $        0 $        0
+3      $    111,071   8442.0%     1200     1.01 $        0 $        0
+6      $    -70,439   8290.0%     1702     0.99 $        0 $        0
+5      $   -601,430   8272.0%     1574     0.95 $        0 $        0
+
+  Best performing: Risk Level 9 ($2,797,454 P&L)
+
+================================================================================
+ 2MO WINDOW RESULTS
+================================================================================
+
+Risk        Net P&L   Win Rate   Trades       PF    Avg Win   Avg Loss
+----------------------------------------------------------------------
+6      $  2,544,584   9008.0%      998     1.54 $        0 $        0
+9      $  2,512,333   8519.0%     1242     1.31 $        0 $        0
+10     $  2,383,720   8242.0%     1365     1.23 $        0 $        0
+5      $  2,212,836   9066.0%      921     1.54 $        0 $        0
+8      $  2,207,932   8690.0%     1160     1.31 $        0 $        0
+7      $  2,048,590   8825.0%     1064     1.34 $        0 $        0
+4      $  1,904,148   9234.0%      757     1.69 $        0 $        0
+2      $  1,019,408   9141.0%      629     1.40 $        0 $        0
+3      $    985,524   9119.0%      670     1.35 $        0 $        0
+1      $    679,655   9147.0%      598     1.27 $        0 $        0
+
+  Best performing: Risk Level 6 ($2,544,584 P&L)
+
+================================================================================
+ 1MO WINDOW RESULTS
+================================================================================
+
+Risk        Net P&L   Win Rate   Trades       PF    Avg Win   Avg Loss
+----------------------------------------------------------------------
+9      $  1,158,066   8381.0%      630     1.27 $        0 $        0
+8      $  1,123,105   8701.0%      585     1.32 $        0 $        0
+4      $    918,835   9357.0%      373     1.83 $        0 $        0
+6      $    752,690   9008.0%      494     1.32 $        0 $        0
+5      $    701,135   9077.0%      455     1.37 $        0 $        0
+7      $    690,090   8830.0%      530     1.24 $        0 $        0
+2      $    546,638   9283.0%      307     1.54 $        0 $        0
+3      $    489,889   9264.0%      326     1.44 $        0 $        0
+1      $    416,339   9298.0%      285     1.42 $        0 $        0
+10     $    406,073   7953.0%      684     1.07 $        0 $        0
+
+  Best performing: Risk Level 9 ($1,158,066 P&L)
+
+================================================================================
+ 2WK WINDOW RESULTS
+================================================================================
+
+Risk        Net P&L   Win Rate   Trades       PF    Avg Win   Avg Loss
+----------------------------------------------------------------------
+6      $     89,153   8717.0%      226     1.06 $        0 $        0
+9      $     28,667   8185.0%      270     1.01 $        0 $        0
+10     $    -28,483   8007.0%      286     0.99 $        0 $        0
+5      $    -38,714   8641.0%      206     0.97 $        0 $        0
+4      $   -184,580   8545.0%      165     0.83 $        0 $        0
+2      $   -196,815   8370.0%      135     0.80 $        0 $        0
+1      $   -205,002   8462.0%      130     0.79 $        0 $        0
+3      $   -311,815   8333.0%      144     0.72 $        0 $        0
+7      $   -356,364   8279.0%      244     0.82 $        0 $        0
+8      $   -367,662   8132.0%      257     0.84 $        0 $        0
+
+  Best performing: Risk Level 6 ($89,153 P&L)
+
+================================================================================
+ 1WK WINDOW RESULTS
+================================================================================
+
+Risk        Net P&L   Win Rate   Trades       PF    Avg Win   Avg Loss
+----------------------------------------------------------------------
+6      $    539,910  10000.0%      112      inf $        0 $        0
+5      $    402,156  10000.0%       98      inf $        0 $        0
+4      $    285,436  10000.0%       75      inf $        0 $        0
+3      $    170,665  10000.0%       62      inf $        0 $        0
+2      $    162,017  10000.0%       58      inf $        0 $        0
+1      $    121,123  10000.0%       54      inf $        0 $        0
+7      $     15,344   9008.0%      121     1.03 $        0 $        0
+9      $       -541   8636.0%      132     1.00 $        0 $        0
+8      $   -146,360   8661.0%      127     0.80 $        0 $        0
+10     $   -213,116   8175.0%      137     0.83 $        0 $        0
+
+  Best performing: Risk Level 6 ($539,910 P&L)
+
+================================================================================
+ CROSS-WINDOW ANALYSIS
+================================================================================
+
+Risk        Avg P&L      Total P&L     Avg WR   Avg PF  Consistency
+----------------------------------------------------------------------
+1      $    280,575 $    1,402,876   9097.6%      inf         80%
+2      $    445,096 $    2,225,480   9063.6%      inf         80%
+3      $    289,067 $    1,445,333   9031.6%      inf         80%
+4      $    690,247 $    3,451,235   9125.0%      inf         80%
+5      $    535,196 $    2,675,982   9011.2%      inf         60%
+6      $    771,180 $    3,855,898   9004.6%      inf         80%
+7      $    509,420 $    2,547,099   8636.0%     1.09         80%
+8      $    734,991 $    3,674,957   8474.8%     1.06         60%
+9      $  1,299,196 $    6,495,978   8369.2%     1.15         80%
+10     $  1,034,222 $    5,171,108   8057.0%     1.05         60%
+
+
+================================================================================
+ NDX RECOMMENDATIONS FOR TOMORROW
+================================================================================
+
+------------------------------------------------------------
+ Conservative (1-3)
+------------------------------------------------------------
+
+  Recommended Risk Level: 1
+
+  Parameters:
+    percent_beyond_put:  0.0112
+    percent_beyond_call: 0.0225
+    max_spread_width_put:  10
+    max_spread_width_call: 10
+
+  Recent Performance:
+     1wk: P&L $   121,123, WR 10000%, PF inf, 54 trades
+     2wk: P&L $  -205,002, WR 8462%, PF 0.79, 130 trades
+     1mo: P&L $   416,339, WR 9298%, PF 1.42, 285 trades
+
+  Trading Instructions:
+    Entry Window: 6:30 AM - 10:00 AM PDT
+    Exit: At 80% profit target or by 1:00 PM PDT
+    Max Concurrent Capital: $300,000
+    Risk per Trade: $50,000
+
+------------------------------------------------------------
+ Neutral (4-6)
+------------------------------------------------------------
+
+  Recommended Risk Level: 4
+
+  Parameters:
+    percent_beyond_put:  0.0086
+    percent_beyond_call: 0.0172
+    max_spread_width_put:  17
+    max_spread_width_call: 17
+
+  Recent Performance:
+     1wk: P&L $   285,436, WR 10000%, PF inf, 75 trades
+     2wk: P&L $  -184,580, WR 8545%, PF 0.83, 165 trades
+     1mo: P&L $   918,835, WR 9357%, PF 1.83, 373 trades
+
+  Trading Instructions:
+    Entry Window: 6:30 AM - 10:00 AM PDT
+    Exit: At 80% profit target or by 1:00 PM PDT
+    Max Concurrent Capital: $300,000
+    Risk per Trade: $50,000
+
+------------------------------------------------------------
+ Aggressive (7-10)
+------------------------------------------------------------
+
+  Recommended Risk Level: 7
+
+  Parameters:
+    percent_beyond_put:  0.0060
+    percent_beyond_call: 0.0120
+    max_spread_width_put:  24
+    max_spread_width_call: 24
+
+  Recent Performance:
+     1wk: P&L $    15,344, WR 9008%, PF 1.03, 121 trades
+     2wk: P&L $  -356,364, WR 8279%, PF 0.82, 244 trades
+     1mo: P&L $   690,090, WR 8830%, PF 1.24, 530 trades
+
+  Trading Instructions:
+    Entry Window: 6:30 AM - 10:00 AM PDT
+    Exit: At 80% profit target or by 1:00 PM PDT
+    Max Concurrent Capital: $300,000
+    Risk per Trade: $50,000
+
+================================================================================
+ OVERALL RECOMMENDATION
+================================================================================
+
+  Best Overall Risk Level: 1
+
+  Use these parameters for balanced risk/reward:
+    percent_beyond_put:  0.0112
+    percent_beyond_call: 0.0225
+    max_spread_width_put:  10
+    max_spread_width_call: 10 NDX DYNAMIC RISK LEVEL ANALYSIS - SUMMARY
+
+  Performance by Time Window
+  ┌───────────────┬────────────┬────────┬──────────┬───────────────┐
+  │    Window     │ Best Level │  P&L   │ Win Rate │ Profit Factor │
+  ├───────────────┼────────────┼────────┼──────────┼───────────────┤
+  │ 3mo (58 days) │ Level 9    │ $2.80M │ 81.3%    │ 1.16          │
+  ├───────────────┼────────────┼────────┼──────────┼───────────────┤
+  │ 2mo (37 days) │ Level 6    │ $2.54M │ 90.1%    │ 1.54          │
+  ├───────────────┼────────────┼────────┼──────────┼───────────────┤
+  │ 1mo (18 days) │ Level 9    │ $1.16M │ 83.8%    │ 1.27          │
+  ├───────────────┼────────────┼────────┼──────────┼───────────────┤
+  │ 2wk (7 days)  │ Level 6    │ $89K   │ 87.2%    │ 1.06          │
+  ├───────────────┼────────────┼────────┼──────────┼───────────────┤
+  │ 1wk (3 days)  │ Level 6    │ $540K  │ 100%     │ inf           │
+  └───────────────┴────────────┴────────┴──────────┴───────────────┘
+  Key Findings
+
+  1. Recent 2-Week Period Was Challenging
+    - Most risk levels LOST money (levels 1-5, 7-8, 10 all negative)
+    - Only Level 6 (+$89K) and Level 9 (+$29K) were profitable
+  2. Last Week Was Exceptional for Conservative-to-Moderate Levels
+    - Levels 1-6 all achieved 100% win rate (no losses!)
+    - Level 6 was the clear winner with $540K profit
+    - Aggressive levels 7-10 did NOT maintain 100% win rate and some lost money
+  3. Level 6 is the Only Level Profitable in BOTH Recent Periods (1wk AND 2wk)
+  4. Level 4 Has the Best Profit Factor
+    - 1.83 in 1-month window
+    - 1.69 in 2-month window
+
+  ---
+  RECOMMENDATIONS FOR TOMORROW
+
+  Primary Recommendation: RISK LEVEL 6 (Slightly Aggressive)
+
+  Parameters:
+    percent_beyond_put:   0.0067  (0.67% below current price)
+    percent_beyond_call:  0.0135  (1.35% above current price)
+    max_spread_width_put:  22
+    max_spread_width_call: 22
+
+  Why Level 6?
+  - Only level profitable in both 1-week AND 2-week windows
+  - 100% win rate last week with $540K profit (highest among 100% WR levels)
+  - Strong performance across all timeframes
+  - Good balance: not too conservative (missing opportunities), not too aggressive (getting stopped out)
+
+  Trading Instructions:
+  - Entry Window: 6:30 AM - 10:00 AM PDT
+  - Exit: At 80% profit target or by 1:00 PM PDT
+  - Max Concurrent Capital: $300,000
+  - Risk per Trade: $50,000
+
+  ---
+  Alternative by Risk Preference:
+  ┌────────────────────────┬───────────┬──────────────────────────────┬───────────────────────────────────────────────────────┐
+  │      If You Want       │ Use Level │          Parameters          │                  Recent Performance                   │
+  ├────────────────────────┼───────────┼──────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ Conservative           │ Level 4   │ pb=0.0086, pc=0.0172, msw=17 │ Best profit factor (1.83 in 1mo), 100% WR last week   │
+  ├────────────────────────┼───────────┼──────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ Moderate (Recommended) │ Level 6   │ pb=0.0067, pc=0.0135, msw=22 │ Only level profitable in both 1wk and 2wk             │
+  ├────────────────────────┼───────────┼──────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ Aggressive             │ Level 9   │ pb=0.0045, pc=0.0090, msw=28 │ Highest total P&L historically, but lost money in 1wk │
+  └────────────────────────┴───────────┴──────────────────────────────┴───────────────────────────────────────────────────────┘
+  ---
+  AVOID These Levels Tomorrow
+
+  Levels 8, 10 - Both lost money in the most recent week despite good longer-term performance. The tighter thresholds are getting hit in current market conditions.
+
+  ---
+  Risk-Adjusted Summary
+  ┌───────┬───────────────────────┬─────────────────────────┬─────────────┬────────────────────┐
+  │ Level │         Style         │ Total P&L (all windows) │ Consistency │    Recommended?    │
+  ├───────┼───────────────────────┼─────────────────────────┼─────────────┼────────────────────┤
+  │ 4     │ Slightly Conservative │ $3.45M                  │ 80%         │ Yes - best PF      │
+  ├───────┼───────────────────────┼─────────────────────────┼─────────────┼────────────────────┤
+  │ 6     │ Slightly Aggressive   │ $3.86M                  │ 80%         │ Primary Pick       │
+  ├───────┼───────────────────────┼─────────────────────────┼─────────────┼────────────────────┤
+  │ 9     │ Very Aggressive       │ $6.50M                  │ 80%         │ For long-term only │
+  └───────┴───────────────────────┴─────────────────────────┴─────────────┴────────────────────┘
+  ---
+  The full report has been saved to:
+  - JSON: ndx_risk_levels.json
+  - Report: risk_level_results/ndx_risk_level_report.txt
+

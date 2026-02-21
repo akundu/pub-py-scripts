@@ -1,0 +1,25 @@
+{
+  "song_id": "pf_bl_002",
+  "title": "Texas Flood",
+  "composer": "Larry Davis/Stevie Ray Vaughan",
+  "tempo": 64,
+  "time_signature": "4/4",
+  "difficulty": "proficient",
+  "license_status": "educational_use",
+  "genre": "blues",
+  "chords": ["G", "C", "D"],
+  "original_duration": "5:19",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 3, "duration": 3.75, "velocity": 0.7, "technique": "vibrato"},
+    {"time": 0.47, "string": 1, "fret": 6, "duration": 0.47, "velocity": 0.7, "technique": "bend"},
+    {"time": 0.94, "string": 1, "fret": 3, "duration": 0.47, "velocity": 0.7, "technique": "single_note"},
+    {"time": 1.41, "string": 2, "fret": 6, "duration": 0.47, "velocity": 0.7, "technique": "single_note"},
+    {"time": 1.88, "string": 2, "fret": 3, "duration": 0.47, "velocity": 0.7, "technique": "single_note"},
+    {"time": 2.35, "string": 3, "fret": 5, "duration": 0.47, "velocity": 0.7, "technique": "single_note"},
+    {"time": 2.82, "string": 3, "fret": 3, "duration": 0.47, "velocity": 0.7, "technique": "single_note"},
+    {"time": 3.29, "string": 4, "fret": 5, "duration": 0.47, "velocity": 0.7, "technique": "single_note"}
+  ]
+}

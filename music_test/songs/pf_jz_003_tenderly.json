@@ -1,0 +1,21 @@
+{
+  "song_id": "pf_jz_003",
+  "title": "Tenderly",
+  "composer": "Walter Gross",
+  "tempo": 70,
+  "time_signature": "3/4",
+  "difficulty": "proficient",
+  "license_status": "educational_use",
+  "genre": "jazz",
+  "chords": ["Ebmaj7", "Ab7", "G7", "Cm7", "Fm7", "Bb7", "Dm7b5"],
+  "original_duration": "3:30",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 6, "duration": 2.57, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.02, "string": 3, "fret": 8, "duration": 2.57, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.04, "string": 2, "fret": 8, "duration": 2.57, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.06, "string": 1, "fret": 6, "duration": 2.57, "velocity": 0.6, "technique": "strum"}
+  ]
+}

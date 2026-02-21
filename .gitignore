@@ -1,0 +1,35 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+tmp/
+md/
+requirements/
+
+# Virtual environments
+.venv
+
+# env files
+.envrc
+
+# Environment files (to avoid exposing API keys)
+.env
+.env.local
+.env.*.local
+
+# db files
+data/
+.db
+
+# lock
+*.lock
+
+# tmp
+tmp*/
+tmp*
+
+# MDs
+MDs/

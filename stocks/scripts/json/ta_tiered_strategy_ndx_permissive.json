@@ -1,0 +1,6 @@
+{
+  "strategy": "time_allocated_tiered",
+  "enabled": true,
+  "feature_flags": {},
+  "config_file": "scripts/json/time_allocated_tiered_config_ndx_permissive.json"
+}

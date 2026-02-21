@@ -1,0 +1,5 @@
+rank,dynamic_spread_width,total_trades,win_rate,total_credits,total_gains,total_losses,net_pnl,profit_factor,roi
+1,"{'mode': 'linear', 'base_width': 15, 'slope_factor': 1000, 'min_width': 10, 'max_width': 75}",18,100.0,312709.0,312709.0,0.0,312709.0,inf,3.49
+2,"{'mode': 'stepped', 'base_width': 15, 'steps': {'0.01': 20, '0.02': 30, '0.03': 50}, 'min_width': 10, 'max_width': 75}",15,100.0,286785.0,286785.0,0.0,286785.0,inf,3.84
+3,,21,100.0,250323.0,250323.0,0.0,250323.0,inf,2.4
+4,"{'mode': 'linear', 'base_width': 15, 'slope_factor': 500, 'min_width': 10, 'max_width': 50}",7,100.0,227833.0,227833.0,0.0,227833.0,inf,6.52

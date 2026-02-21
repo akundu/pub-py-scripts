@@ -1,0 +1,25 @@
+{
+  "song_id": "nv_mt_001",
+  "title": "Power Chord Basics",
+  "composer": "Traditional",
+  "tempo": 90,
+  "time_signature": "4/4",
+  "difficulty": "novice",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["E5", "A5", "D5"],
+  "original_duration": "1:00",
+  "learning_time": "2 days",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 2, "duration": 2.67, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 0.02, "string": 6, "fret": 0, "duration": 2.67, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 2.67, "string": 4, "fret": 2, "duration": 2.67, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 2.69, "string": 5, "fret": 0, "duration": 2.67, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 5.34, "string": 3, "fret": 2, "duration": 2.67, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 5.36, "string": 4, "fret": 0, "duration": 2.67, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 8.01, "string": 5, "fret": 2, "duration": 2.67, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 8.03, "string": 6, "fret": 0, "duration": 2.67, "velocity": 0.9, "technique": "power_chord"}
+  ]
+}

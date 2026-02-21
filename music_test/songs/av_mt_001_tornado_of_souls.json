@@ -1,0 +1,25 @@
+{
+  "song_id": "av_mt_001",
+  "title": "Tornado of Souls",
+  "composer": "Megadeth",
+  "tempo": 171,
+  "time_signature": "4/4",
+  "difficulty": "advanced",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["E5", "D5", "C5", "B5", "A5"],
+  "original_duration": "5:19",
+  "learning_time": "8 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 0, "duration": 0.70, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.18, "string": 6, "fret": 0, "duration": 0.18, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.36, "string": 5, "fret": 3, "duration": 0.18, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.54, "string": 5, "fret": 5, "duration": 0.18, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.70, "string": 6, "fret": 3, "duration": 0.70, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.88, "string": 6, "fret": 0, "duration": 0.18, "velocity": 0.9, "technique": "single_note"},
+    {"time": 1.06, "string": 5, "fret": 2, "duration": 0.18, "velocity": 0.9, "technique": "single_note"},
+    {"time": 1.24, "string": 5, "fret": 3, "duration": 0.18, "velocity": 0.9, "technique": "single_note"}
+  ]
+}

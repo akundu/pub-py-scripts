@@ -1,0 +1,32 @@
+{
+  "song_id": "im_ct_004",
+  "title": "Mama Tried",
+  "composer": "Merle Haggard",
+  "tempo": 112,
+  "time_signature": "4/4",
+  "difficulty": "intermediate",
+  "license_status": "educational_use",
+  "genre": "country",
+  "chords": ["D", "G", "A"],
+  "original_duration": "2:32",
+  "learning_time": "2 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 2, "duration": 2.14, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.02, "string": 2, "fret": 3, "duration": 2.14, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 2, "duration": 2.14, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.06, "string": 4, "fret": 0, "duration": 2.14, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.14, "string": 1, "fret": 3, "duration": 2.14, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.16, "string": 2, "fret": 3, "duration": 2.14, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.18, "string": 3, "fret": 0, "duration": 2.14, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.20, "string": 4, "fret": 0, "duration": 2.14, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.22, "string": 5, "fret": 2, "duration": 2.14, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.24, "string": 6, "fret": 3, "duration": 2.14, "velocity": 0.7, "technique": "strum"},
+    {"time": 4.28, "string": 1, "fret": 0, "duration": 2.14, "velocity": 0.7, "technique": "strum"},
+    {"time": 4.30, "string": 2, "fret": 2, "duration": 2.14, "velocity": 0.7, "technique": "strum"},
+    {"time": 4.32, "string": 3, "fret": 2, "duration": 2.14, "velocity": 0.7, "technique": "strum"},
+    {"time": 4.34, "string": 4, "fret": 2, "duration": 2.14, "velocity": 0.7, "technique": "strum"},
+    {"time": 4.36, "string": 5, "fret": 0, "duration": 2.14, "velocity": 0.7, "technique": "strum"}
+  ]
+}

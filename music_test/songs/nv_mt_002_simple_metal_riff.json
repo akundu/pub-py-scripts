@@ -1,0 +1,25 @@
+{
+  "song_id": "nv_mt_002",
+  "title": "Simple Metal Riff",
+  "composer": "Traditional",
+  "tempo": 100,
+  "time_signature": "4/4",
+  "difficulty": "novice",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["E5", "G5", "A5"],
+  "original_duration": "0:50",
+  "learning_time": "2 days",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 2, "duration": 1.2, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 0.02, "string": 6, "fret": 0, "duration": 1.2, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 1.2, "string": 5, "fret": 5, "duration": 1.2, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 1.22, "string": 6, "fret": 3, "duration": 1.2, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 2.4, "string": 4, "fret": 2, "duration": 1.2, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 2.42, "string": 5, "fret": 0, "duration": 1.2, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 3.6, "string": 5, "fret": 2, "duration": 1.2, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 3.62, "string": 6, "fret": 0, "duration": 1.2, "velocity": 0.9, "technique": "power_chord"}
+  ]
+}

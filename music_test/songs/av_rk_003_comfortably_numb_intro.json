@@ -1,0 +1,21 @@
+{
+  "song_id": "av_rk_003",
+  "title": "Comfortably Numb (Intro)",
+  "composer": "Pink Floyd",
+  "tempo": 63,
+  "time_signature": "4/4",
+  "difficulty": "advanced",
+  "license_status": "educational_use",
+  "genre": "rock",
+  "chords": ["Bm", "A", "G", "Em"],
+  "original_duration": "6:22",
+  "learning_time": "5 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 2, "duration": 3.81, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.48, "string": 3, "fret": 4, "duration": 0.48, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 0.96, "string": 2, "fret": 3, "duration": 0.48, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 1.44, "string": 1, "fret": 2, "duration": 0.48, "velocity": 0.4, "technique": "fingerpick"}
+  ]
+}

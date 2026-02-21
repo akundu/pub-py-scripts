@@ -1,0 +1,31 @@
+{
+  "song_id": "el_rk_004",
+  "title": "Under the Bridge (Intro)",
+  "composer": "Red Hot Chili Peppers",
+  "tempo": 69,
+  "time_signature": "4/4",
+  "difficulty": "elementary",
+  "license_status": "educational_use",
+  "genre": "rock",
+  "chords": ["D", "F#m", "E", "A"],
+  "original_duration": "4:30",
+  "learning_time": "3 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 4, "fret": 0, "duration": 3.48, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.43, "string": 3, "fret": 2, "duration": 0.43, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.86, "string": 2, "fret": 3, "duration": 0.43, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.29, "string": 1, "fret": 2, "duration": 0.43, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.72, "string": 2, "fret": 3, "duration": 0.43, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.15, "string": 3, "fret": 2, "duration": 0.43, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.58, "string": 1, "fret": 2, "duration": 0.43, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.01, "string": 2, "fret": 3, "duration": 0.43, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.48, "string": 5, "fret": 4, "duration": 3.48, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 3.91, "string": 3, "fret": 2, "duration": 0.43, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.34, "string": 2, "fret": 2, "duration": 0.43, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.77, "string": 1, "fret": 2, "duration": 0.43, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 5.20, "string": 2, "fret": 2, "duration": 0.43, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 5.63, "string": 3, "fret": 2, "duration": 0.43, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

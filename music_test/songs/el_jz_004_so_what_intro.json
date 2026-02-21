@@ -1,0 +1,33 @@
+{
+  "song_id": "el_jz_004",
+  "title": "So What (Intro)",
+  "composer": "Miles Davis",
+  "tempo": 136,
+  "time_signature": "4/4",
+  "difficulty": "elementary",
+  "license_status": "educational_use",
+  "genre": "jazz",
+  "chords": ["Dm7", "Ebm7"],
+  "original_duration": "2:00",
+  "learning_time": "2 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 1, "duration": 1.76, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.02, "string": 2, "fret": 1, "duration": 1.76, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 2, "duration": 1.76, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.06, "string": 4, "fret": 0, "duration": 1.76, "velocity": 0.7, "technique": "strum"},
+    {"time": 1.76, "string": 1, "fret": 1, "duration": 1.76, "velocity": 0.7, "technique": "strum"},
+    {"time": 1.78, "string": 2, "fret": 1, "duration": 1.76, "velocity": 0.7, "technique": "strum"},
+    {"time": 1.80, "string": 3, "fret": 2, "duration": 1.76, "velocity": 0.7, "technique": "strum"},
+    {"time": 1.82, "string": 4, "fret": 0, "duration": 1.76, "velocity": 0.7, "technique": "strum"},
+    {"time": 3.52, "string": 1, "fret": 2, "duration": 1.76, "velocity": 0.7, "technique": "strum"},
+    {"time": 3.54, "string": 2, "fret": 2, "duration": 1.76, "velocity": 0.7, "technique": "strum"},
+    {"time": 3.56, "string": 3, "fret": 3, "duration": 1.76, "velocity": 0.7, "technique": "strum"},
+    {"time": 3.58, "string": 4, "fret": 1, "duration": 1.76, "velocity": 0.7, "technique": "strum"},
+    {"time": 5.28, "string": 1, "fret": 1, "duration": 1.76, "velocity": 0.7, "technique": "strum"},
+    {"time": 5.30, "string": 2, "fret": 1, "duration": 1.76, "velocity": 0.7, "technique": "strum"},
+    {"time": 5.32, "string": 3, "fret": 2, "duration": 1.76, "velocity": 0.7, "technique": "strum"},
+    {"time": 5.34, "string": 4, "fret": 0, "duration": 1.76, "velocity": 0.7, "technique": "strum"}
+  ]
+}

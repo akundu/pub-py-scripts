@@ -1,0 +1,30 @@
+ADDITIONAL CANDIDATE INFORMATION
+=================================
+
+This is a template file for providing additional information about the candidate
+that may not be fully captured in their LinkedIn profile or resume.
+
+You can include:
+- Specific project details or achievements
+- Additional certifications or training
+- Unique work experiences or collaborations
+- Publications, patents, or research contributions
+- Awards or recognitions
+- Language proficiencies
+- Any other relevant information for the PERM application
+
+Example content:
+-----------------
+
+The candidate has extensive experience in:
+- Leading cross-functional teams of 10+ engineers
+- Implementing cloud migration strategies for Fortune 500 companies
+- Published research papers in peer-reviewed journals
+- Holds patents in distributed systems architecture
+- Fluent in English, Spanish, and Mandarin
+
+Specific achievements:
+- Reduced system latency by 40% through innovative caching strategies
+- Led a team that successfully migrated 50+ microservices to Kubernetes
+- Developed proprietary algorithms that improved recommendation accuracy by 25%
+

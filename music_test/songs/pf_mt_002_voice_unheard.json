@@ -1,0 +1,25 @@
+{
+  "song_id": "pf_mt_002",
+  "title": "The Call of Ktulu",
+  "composer": "Metallica",
+  "tempo": 110,
+  "time_signature": "4/4",
+  "difficulty": "proficient",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["Em", "F", "G5", "A5", "B5"],
+  "original_duration": "8:53",
+  "learning_time": "6 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 0, "duration": 2.18, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.27, "string": 5, "fret": 2, "duration": 0.27, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.54, "string": 4, "fret": 2, "duration": 0.27, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.81, "string": 3, "fret": 0, "duration": 0.27, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.08, "string": 2, "fret": 0, "duration": 0.27, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.35, "string": 1, "fret": 0, "duration": 0.27, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.62, "string": 2, "fret": 0, "duration": 0.27, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.89, "string": 3, "fret": 0, "duration": 0.27, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

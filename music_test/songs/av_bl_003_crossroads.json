@@ -1,0 +1,25 @@
+{
+  "song_id": "av_bl_003",
+  "title": "Crossroads (Cream)",
+  "composer": "Robert Johnson/Eric Clapton",
+  "tempo": 130,
+  "time_signature": "4/4",
+  "difficulty": "advanced",
+  "license_status": "educational_use",
+  "genre": "blues",
+  "chords": ["A", "D", "E"],
+  "original_duration": "4:16",
+  "learning_time": "5 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 5, "duration": 1.85, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.23, "string": 1, "fret": 8, "duration": 0.23, "velocity": 0.8, "technique": "bend"},
+    {"time": 0.46, "string": 1, "fret": 5, "duration": 0.23, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.69, "string": 2, "fret": 8, "duration": 0.23, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.92, "string": 2, "fret": 5, "duration": 0.23, "velocity": 0.8, "technique": "single_note"},
+    {"time": 1.15, "string": 3, "fret": 7, "duration": 0.23, "velocity": 0.8, "technique": "single_note"},
+    {"time": 1.38, "string": 3, "fret": 5, "duration": 0.23, "velocity": 0.8, "technique": "single_note"},
+    {"time": 1.61, "string": 4, "fret": 7, "duration": 0.23, "velocity": 0.8, "technique": "single_note"}
+  ]
+}

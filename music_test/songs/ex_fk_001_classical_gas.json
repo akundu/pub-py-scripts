@@ -1,0 +1,25 @@
+{
+  "song_id": "ex_fk_001",
+  "title": "Classical Gas",
+  "composer": "Mason Williams",
+  "tempo": 120,
+  "time_signature": "4/4",
+  "difficulty": "expert",
+  "license_status": "educational_use",
+  "genre": "folk",
+  "chords": ["Am", "G", "F", "E", "Dm", "C"],
+  "original_duration": "3:07",
+  "learning_time": "8 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 0, "duration": 2.0, "velocity": 0.7, "technique": "fingerpick"},
+    {"time": 0.25, "string": 3, "fret": 2, "duration": 0.25, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.50, "string": 2, "fret": 1, "duration": 0.25, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.75, "string": 1, "fret": 0, "duration": 0.25, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 1.00, "string": 2, "fret": 1, "duration": 0.25, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 1.25, "string": 3, "fret": 2, "duration": 0.25, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 1.50, "string": 1, "fret": 0, "duration": 0.25, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 1.75, "string": 2, "fret": 1, "duration": 0.25, "velocity": 0.6, "technique": "fingerpick"}
+  ]
+}

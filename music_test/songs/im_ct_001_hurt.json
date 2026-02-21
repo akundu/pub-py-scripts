@@ -1,0 +1,31 @@
+{
+  "song_id": "im_ct_001",
+  "title": "Hurt",
+  "composer": "Trent Reznor (Johnny Cash version)",
+  "tempo": 72,
+  "time_signature": "4/4",
+  "difficulty": "intermediate",
+  "license_status": "educational_use",
+  "genre": "country",
+  "chords": ["Am", "C", "D", "G"],
+  "original_duration": "3:38",
+  "learning_time": "2 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 0, "duration": 3.33, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.42, "string": 3, "fret": 2, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.84, "string": 2, "fret": 1, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.26, "string": 1, "fret": 0, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.68, "string": 2, "fret": 1, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.10, "string": 3, "fret": 2, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.52, "string": 1, "fret": 0, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.94, "string": 2, "fret": 1, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.33, "string": 5, "fret": 3, "duration": 3.33, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 3.75, "string": 3, "fret": 0, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.17, "string": 2, "fret": 1, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.59, "string": 1, "fret": 0, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 5.01, "string": 2, "fret": 1, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 5.43, "string": 3, "fret": 0, "duration": 0.42, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

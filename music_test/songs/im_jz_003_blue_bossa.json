@@ -1,0 +1,21 @@
+{
+  "song_id": "im_jz_003",
+  "title": "Blue Bossa",
+  "composer": "Kenny Dorham",
+  "tempo": 160,
+  "time_signature": "4/4",
+  "difficulty": "intermediate",
+  "license_status": "educational_use",
+  "genre": "jazz",
+  "chords": ["Cm", "Fm7", "Dm7b5", "G7", "Ebmaj7", "Ab7", "Db7"],
+  "original_duration": "5:00",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 3, "duration": 1.5, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.02, "string": 3, "fret": 4, "duration": 1.5, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.04, "string": 2, "fret": 4, "duration": 1.5, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.06, "string": 1, "fret": 3, "duration": 1.5, "velocity": 0.7, "technique": "strum"}
+  ]
+}

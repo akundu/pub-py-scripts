@@ -1,0 +1,37 @@
+{
+  "_description": "Find optimal parameters for Linear-500 and Linear-1000 over last 2 weeks",
+  "fixed_params": {
+    "csv_dir": "../options_csv_output",
+    "underlying_ticker": "NDX",
+    "start_date": "2026-01-15",
+    "end_date": "2026-01-29",
+    "option_type": "both",
+    "min_spread_width": 10,
+    "max_spread_width": "100:100",
+    "risk_cap": 500000,
+    "profit_target_pct": 0.90,
+    "min_premium_diff": "0.50:0.50",
+    "output_timezone": "America/Los_Angeles",
+    "db_path": "$QUEST_DB_STRING"
+  },
+  "grid_params": {
+    "percent_beyond": [
+      "0.020:0.020",
+      "0.020:0.025",
+      "0.025:0.020",
+      "0.025:0.025",
+      "0.025:0.030",
+      "0.030:0.025",
+      "0.030:0.030",
+      "0.030:0.035",
+      "0.035:0.030",
+      "0.035:0.035"
+    ],
+    "min_trading_hour": [9, 10],
+    "max_trading_hour": [12, 13, 14],
+    "dynamic_spread_width": [
+      {"mode": "linear", "base_width": 15, "slope_factor": 500, "min_width": 10, "max_width": 50},
+      {"mode": "linear", "base_width": 15, "slope_factor": 1000, "min_width": 10, "max_width": 75}
+    ]
+  }
+}

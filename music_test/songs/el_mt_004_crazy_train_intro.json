@@ -1,0 +1,29 @@
+{
+  "song_id": "el_mt_004",
+  "title": "Crazy Train (Intro)",
+  "composer": "Ozzy Osbourne",
+  "tempo": 138,
+  "time_signature": "4/4",
+  "difficulty": "elementary",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["F#5", "A5", "E5", "D5"],
+  "original_duration": "4:00",
+  "learning_time": "3 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 4, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.22, "string": 4, "fret": 4, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.44, "string": 5, "fret": 4, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.66, "string": 5, "fret": 7, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.88, "string": 5, "fret": 4, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 1.10, "string": 4, "fret": 4, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 1.32, "string": 5, "fret": 4, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 1.54, "string": 5, "fret": 5, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 1.76, "string": 5, "fret": 4, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 1.98, "string": 4, "fret": 4, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 2.20, "string": 5, "fret": 4, "duration": 0.22, "velocity": 0.8, "technique": "single_note"},
+    {"time": 2.42, "string": 5, "fret": 7, "duration": 0.22, "velocity": 0.8, "technique": "single_note"}
+  ]
+}

@@ -1,0 +1,8 @@
+python db_server.py --db-file questdb://user:password@localhost:8812/stock_data --port 9102 --log-level WARNING --heartbeat-interval 180 --workers 1 --enable-access-log
+python db_server.py --db-file questdb://user:password@localhost:8812/stock_data --port 9100 --log-level WARNING --heartbeat-interval 180 --workers 4 --enable-access-log
+
+ulimit -n 65536; python  scripts/polygon_realtime_streamer.py --types stocks_to_track --feed quotes --db-server localhost:9102 --log-level ERROR --symbols-per-connection 10
+ rm fo_out; python scripts/fetch_options.py --types all --continuous --months-ahead 6 --max-concurrent 20   --executor-type process --use-db questdb://user:password@localhost:8812/stock_data  --ticker-chunk-size 250  --db-batch-size 500 --refresh-threshold-seconds 300 2>&1 |tee fo_out
+
+ ulimit -n  65536;  python scripts/stock_display_dashboard.py --symbols AMZN GOOG NFLX CART UBER TQQQ QQQ SPY NVDA TSLA AAPL SPXL MU RGTI TSM HOOD --db-server localhost:9102 --log-level ERROR
+

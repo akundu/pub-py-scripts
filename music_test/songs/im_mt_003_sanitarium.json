@@ -1,0 +1,30 @@
+{
+  "song_id": "im_mt_003",
+  "title": "Welcome Home (Sanitarium)",
+  "composer": "Metallica",
+  "tempo": 200,
+  "time_signature": "4/4",
+  "difficulty": "intermediate",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["Em", "Am", "C", "G", "B5"],
+  "original_duration": "6:27",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 0, "duration": 1.2, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.15, "string": 2, "fret": 0, "duration": 0.15, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.30, "string": 3, "fret": 0, "duration": 0.15, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.45, "string": 4, "fret": 2, "duration": 0.15, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.60, "string": 5, "fret": 2, "duration": 0.15, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.75, "string": 6, "fret": 0, "duration": 0.15, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.90, "string": 5, "fret": 2, "duration": 0.15, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.05, "string": 4, "fret": 2, "duration": 0.15, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.2, "string": 1, "fret": 0, "duration": 1.2, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 1.35, "string": 2, "fret": 1, "duration": 0.15, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.50, "string": 3, "fret": 2, "duration": 0.15, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.65, "string": 4, "fret": 2, "duration": 0.15, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.80, "string": 5, "fret": 0, "duration": 0.15, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

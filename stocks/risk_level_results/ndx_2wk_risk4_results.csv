@@ -1,0 +1,2 @@
+rank,max_spread_width_call,max_spread_width_put,max_trading_hour,min_trading_hour,option_type,percent_beyond_call,percent_beyond_put,total_trades,win_rate,total_credits,total_gains,total_losses,net_pnl,profit_factor,roi
+1,17,17,13,6,both,0.0172,0.0086,165,85.45,1794875.0,922934.89,1107515.04,-184580.15,0.8333,-2.25

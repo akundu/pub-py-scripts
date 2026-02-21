@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Unified Close Predictor - Architecture &amp; Guide</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --accent-hover: #79c0ff;
+    --green: #3fb950;
+    --orange: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --code-bg: #1c2128;
+    --table-alt: #1c2128;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 0;
+  }
+  .wrapper {
+    display: flex;
+    min-height: 100vh;
+  }
+  /* Sidebar / Table of Contents */
+  .sidebar {
+    width: 280px;
+    min-width: 280px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    padding: 24px 16px;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    overflow-y: auto;
+    z-index: 10;
+  }
+  .sidebar h2 {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    color: var(--text-muted);
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .sidebar a {
+    display: block;
+    color: var(--text-muted);
+    text-decoration: none;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 14px;
+    transition: all 0.15s ease;
+  }
+  .sidebar a:hover {
+    color: var(--accent);
+    background: rgba(88,166,255,0.08);
+  }
+  .sidebar a.active {
+    color: var(--accent);
+    background: rgba(88,166,255,0.12);
+    font-weight: 600;
+  }
+  .sidebar .sub-link {
+    padding-left: 24px;
+    font-size: 13px;
+  }
+  /* Main content */
+  .content {
+    margin-left: 280px;
+    max-width: 960px;
+    padding: 40px 48px 80px;
+    flex: 1;
+  }
+  /* Headings */
+  h1 {
+    font-size: 32px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    color: var(--text);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 12px;
+  }
+  h2 {
+    font-size: 24px;
+    font-weight: 600;
+    margin-top: 48px;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+  }
+  h3 {
+    font-size: 20px;
+    font-weight: 600;
+    margin-top: 32px;
+    margin-bottom: 12px;
+    color: var(--text);
+  }
+  h4 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-top: 24px;
+    margin-bottom: 8px;
+    color: var(--accent);
+  }
+  blockquote {
+    background: rgba(210,153,34,0.1);
+    border-left: 4px solid var(--orange);
+    padding: 16px 20px;
+    margin: 16px 0 24px;
+    border-radius: 0 8px 8px 0;
+    color: var(--text);
+  }
+  blockquote strong {
+    color: var(--orange);
+  }
+  p {
+    margin-bottom: 16px;
+  }
+  strong { color: var(--text); }
+  a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  a:hover {
+    text-decoration: underline;
+    color: var(--accent-hover);
+  }
+  /* Lists */
+  ul, ol {
+    margin: 8px 0 16px 24px;
+  }
+  li {
+    margin-bottom: 4px;
+  }
+  /* Code */
+  code {
+    font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+    color: var(--accent-hover);
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    overflow-x: auto;
+    margin: 12px 0 20px;
+    position: relative;
+  }
+  pre code {
+    background: none;
+    padding: 0;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  /* Copy button */
+  .code-block {
+    position: relative;
+  }
+  .copy-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: inherit;
+    transition: all 0.15s;
+    opacity: 0;
+  }
+  .code-block:hover .copy-btn {
+    opacity: 1;
+  }
+  .copy-btn:hover {
+    background: var(--border);
+    color: var(--text);
+  }
+  .copy-btn.copied {
+    color: var(--green);
+    border-color: var(--green);
+  }
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0 20px;
+    font-size: 14px;
+  }
+  th {
+    background: var(--surface);
+    color: var(--text);
+    font-weight: 600;
+    text-align: left;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+  }
+  td {
+    padding: 8px 14px;
+    border: 1px solid var(--border);
+    vertical-align: top;
+  }
+  tr:nth-child(even) td {
+    background: var(--table-alt);
+  }
+  td code {
+    font-size: 12px;
+  }
+  /* Horizontal rule */
+  hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+  }
+  /* Syntax highlighting hints */
+  .kw { color: #ff7b72; }
+  .str { color: #a5d6ff; }
+  .comment { color: #8b949e; font-style: italic; }
+  .fn { color: #d2a8ff; }
+  .num { color: #79c0ff; }
+  /* ASCII diagram */
+  .diagram pre {
+    background: var(--surface);
+    border-color: var(--border);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .diagram pre code {
+    color: var(--green);
+  }
+  /* Section badges */
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+  .badge-green { background: rgba(63,185,80,0.15); color: var(--green); }
+  .badge-orange { background: rgba(210,153,34,0.15); color: var(--orange); }
+  .badge-purple { background: rgba(188,140,255,0.15); color: var(--purple); }
+  /* Responsive */
+  @media (max-width: 900px) {
+    .sidebar { display: none; }
+    .content { margin-left: 0; padding: 24px 20px 60px; }
+  }
+  /* Scroll margin for section anchors */
+  [id] { scroll-margin-top: 20px; }
+</style>
+</head>
+<body>
+<div class="wrapper">
+
+<!-- Sidebar -->
+<nav class="sidebar">
+  <h2>Navigation</h2>
+  <a href="#system-overview">System Overview</a>
+  <a href="#architecture">Architecture</a>
+  <a href="#arch-data-flow" class="sub-link">Data Flow</a>
+  <a href="#arch-dep-graph" class="sub-link">Dependency Graph</a>
+  <a href="#module-map">Module Map</a>
+  <a href="#cli-commands">CLI Commands</a>
+  <a href="#cmd-backtest" class="sub-link">Backtest</a>
+  <a href="#cmd-live" class="sub-link">Live Mode</a>
+  <a href="#cmd-demo" class="sub-link">Demo Mode</a>
+  <a href="#prediction-models">Prediction Models</a>
+  <a href="#model-percentile" class="sub-link">Percentile Range</a>
+  <a href="#model-statistical" class="sub-link">Statistical Bucket</a>
+  <a href="#model-combined" class="sub-link">Combined Output</a>
+  <a href="#band-system">Band System</a>
+  <a href="#feature-engineering">Feature Engineering</a>
+  <a href="#feat-reversal" class="sub-link">Reversal Detection</a>
+  <a href="#feat-intraday-vol" class="sub-link">Intraday Vol</a>
+  <a href="#backtest-results">Backtest Results</a>
+  <a href="#adding-features">Adding New Features</a>
+  <a href="#dependencies">Dependencies</a>
+  <a href="#testing">Testing</a>
+  <a href="#change-log">Change Log</a>
+</nav>
+
+<!-- Main Content -->
+<main class="content">
+
+<h1>Unified Close Predictor</h1>
+<p style="font-size:18px; color:var(--text-muted); margin-bottom:24px;">Architecture &amp; Guide</p>
+
+<blockquote>
+  <strong>MANDATE:</strong> This document MUST be updated with every code change to the
+  Unified Close Predictor system. When adding, modifying, or removing modules,
+  features, or CLI options, update the relevant sections below.
+</blockquote>
+
+<hr>
+
+<!-- SYSTEM OVERVIEW -->
+<h2 id="system-overview">System Overview</h2>
+
+<p>End-of-day closing price range predictor combining two models into a single tool
+for <strong>NDX</strong> and <strong>SPX</strong>. Produces confidence bands
+(<code>P95</code>, <code>P98</code>, <code>P99</code>, <code>P100</code>) that
+estimate where the closing price will land, given the current price and time of day.</p>
+
+<p>Two models are combined via a <strong>"best across best"</strong> approach that takes
+the wider (more conservative) range at each band level:</p>
+
+<ol>
+  <li><strong>Percentile Range Model</strong> &mdash; historical move distributions filtered
+    by time slot, above/below prev close, and vol-scaled</li>
+  <li><strong>Statistical Bucket Model</strong> &mdash; VIX1D regime, overnight gap,
+    intraday move, momentum, and other features</li>
+</ol>
+
+<hr>
+
+<!-- ARCHITECTURE -->
+<h2 id="architecture">Architecture</h2>
+
+<h3 id="arch-data-flow">Data Flow</h3>
+
+<div class="diagram">
+<pre><code>&#x250C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2510;
+&#x2502;                   CLI (argparse)                    &#x2502;
+&#x2502;           unified_close_predictor.py                &#x2502;
+&#x2514;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x252C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x252C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2518;
+         &#x2502;                               &#x2502;
+    &#x250C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2534;&#x2500;&#x2500;&#x2500;&#x2500;&#x2510;                    &#x250C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2534;&#x2500;&#x2500;&#x2500;&#x2500;&#x2510;
+    &#x2502;backtest &#x2502;                    &#x2502;   live   &#x2502;
+    &#x2502;         &#x2502;                    &#x2502;  / demo  &#x2502;
+    &#x2514;&#x2500;&#x2500;&#x2500;&#x2500;&#x252C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2518;                    &#x2514;&#x2500;&#x2500;&#x2500;&#x2500;&#x252C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2518;
+         &#x2502;                              &#x2502;
+    &#x250C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2534;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2534;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2510;
+    &#x2502;            prediction.py                &#x2502;
+    &#x2502;  make_unified_prediction()              &#x2502;
+    &#x2514;&#x2500;&#x2500;&#x2500;&#x2500;&#x252C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x252C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x252C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2518;
+         &#x2502;              &#x2502;                &#x2502;
+    &#x250C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2534;&#x2500;&#x2500;&#x2500;&#x2500;&#x2510;   &#x250C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2534;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2510;   &#x250C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2534;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2510;
+    &#x2502;bands.py &#x2502;   &#x2502;features.py&#x2502;   &#x2502;display.py  &#x2502;
+    &#x2514;&#x2500;&#x2500;&#x2500;&#x2500;&#x252C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2518;   &#x2514;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x252C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2518;   &#x2514;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2518;
+         &#x2502;              &#x2502;
+    &#x250C;&#x2500;&#x2500;&#x2500;&#x2500;&#x2534;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2534;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2510;
+    &#x2502;       models.py         &#x2502;
+    &#x2502;  UnifiedBand             &#x2502;
+    &#x2502;  UnifiedPrediction       &#x2502;
+    &#x2502;  Constants               &#x2502;
+    &#x2514;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2500;&#x2518;</code></pre>
+</div>
+
+<h3 id="arch-dep-graph">Module Dependency Graph (acyclic)</h3>
+
+<div class="diagram">
+<pre><code>models.py          &larr; no internal deps (constants + dataclasses only)
+  &uarr;
+bands.py           &larr; models
+  &uarr;
+features.py        &larr; models (FULL_DAY_BARS, _intraday_vol_cache)
+  &uarr;
+prediction.py      &larr; models, bands, features
+  &uarr;
+display.py         &larr; models
+  &uarr;
+backtest.py        &larr; models, bands, features, prediction, display
+live.py            &larr; models, features, prediction, display</code></pre>
+</div>
+
+<hr>
+
+<!-- MODULE MAP -->
+<h2 id="module-map">Module Map</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Module</th>
+      <th>Purpose</th>
+      <th>Key Exports</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>models.py</code></td>
+      <td>Constants + data classes</td>
+      <td><code>UnifiedBand</code>, <code>UnifiedPrediction</code>, <code>UNIFIED_BAND_NAMES</code>, <code>FULL_DAY_BARS</code>, <code>ET_TZ</code>, <code>STAT_FEATURE_CONFIG</code>, <code>_intraday_vol_cache</code></td>
+    </tr>
+    <tr>
+      <td><code>bands.py</code></td>
+      <td>Band mapping + combination</td>
+      <td><code>map_statistical_to_bands()</code>, <code>map_percentile_to_bands()</code>, <code>combine_bands()</code></td>
+    </tr>
+    <tr>
+      <td><code>features.py</code></td>
+      <td>Reversal detection + intraday vol</td>
+      <td><code>detect_reversal_strength()</code>, <code>compute_intraday_vol_from_bars()</code>, <code>compute_intraday_vol_factor()</code>, <code>get_intraday_vol_factor()</code></td>
+    </tr>
+    <tr>
+      <td><code>prediction.py</code></td>
+      <td>Core prediction pipeline + training</td>
+      <td><code>train_both_models()</code>, <code>make_unified_prediction()</code>, <code>compute_percentile_prediction()</code>, <code>compute_statistical_prediction()</code></td>
+    </tr>
+    <tr>
+      <td><code>display.py</code></td>
+      <td>Output formatting</td>
+      <td><code>print_live_display()</code>, <code>print_backtest_results()</code></td>
+    </tr>
+    <tr>
+      <td><code>backtest.py</code></td>
+      <td>Walk-forward backtest engine</td>
+      <td><code>run_backtest()</code></td>
+    </tr>
+    <tr>
+      <td><code>live.py</code></td>
+      <td>Live + demo modes</td>
+      <td><code>run_demo_loop()</code>, <code>run_live_loop()</code></td>
+    </tr>
+    <tr>
+      <td><code>__init__.py</code></td>
+      <td>Re-exports</td>
+      <td>All key symbols for <code>from scripts.close_predictor import ...</code></td>
+    </tr>
+  </tbody>
+</table>
+
+<hr>
+
+<!-- CLI COMMANDS -->
+<h2 id="cli-commands">CLI Commands</h2>
+
+<h3 id="cmd-backtest">Backtest</h3>
+<p>Walk-forward accuracy comparison across models:</p>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code># Default: 10 test days, NDX, vol-scaled
+python scripts/unified_close_predictor.py backtest --ticker NDX --test-days 10
+
+# SPX with more test days
+python scripts/unified_close_predictor.py backtest --ticker SPX --test-days 20
+
+# Raw mode (no vol-scaling), all 30-min slots
+python scripts/unified_close_predictor.py backtest --ticker NDX --test-days 10 --no-vol-scale --all-slots
+
+# Custom lookback
+python scripts/unified_close_predictor.py backtest --ticker NDX --lookback 500 --test-days 15</code></pre>
+</div>
+
+<h3 id="cmd-live">Live Mode</h3>
+<p>Real-time predictions using QuestDB:</p>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code># Default: NDX, 30s refresh
+python scripts/unified_close_predictor.py live --ticker NDX --interval 30
+
+# SPX with faster refresh
+python scripts/unified_close_predictor.py live --ticker SPX --interval 10</code></pre>
+</div>
+
+<h3 id="cmd-demo">Demo Mode</h3>
+<p>CSV-based simulation of the most recent trading day (no QuestDB required):</p>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>python scripts/unified_close_predictor.py live --ticker NDX --demo
+python scripts/unified_close_predictor.py live --ticker SPX --demo</code></pre>
+</div>
+
+<hr>
+
+<!-- PREDICTION MODELS -->
+<h2 id="prediction-models">Prediction Models</h2>
+
+<h3 id="model-percentile">Percentile Range Model</h3>
+<p>Collects historical closing-price moves relative to the current price at each 30-minute
+time slot. Filters by above/below previous close and applies 5-day realized volatility
+scaling. Output: empirical percentile bands from the move distribution.</p>
+
+<h3 id="model-statistical">Statistical Bucket Model</h3>
+<p>Uses <code>StatisticalClosePredictor</code> trained on features:</p>
+<ul>
+  <li>VIX1D regime</li>
+  <li>Overnight gap size</li>
+  <li>Intraday move from open</li>
+  <li>Intraday range (high-low)</li>
+  <li>5-day momentum</li>
+  <li>First hour range</li>
+  <li>Opening range breakout</li>
+  <li>Day-of-week, OPEX proximity</li>
+  <li>Prior-day signals</li>
+</ul>
+<p>Output: P10/P90 prediction interval, extrapolated to P95-P100 via tail extension.</p>
+
+<h3 id="model-combined">Combined Output</h3>
+<p>For each band level (P95, P98, P99, P100):</p>
+<ul>
+  <li><code>lo_price = min(percentile_lo, statistical_lo)</code></li>
+  <li><code>hi_price = max(percentile_hi, statistical_hi)</code></li>
+</ul>
+<p>This "best across best" approach ensures the combined range is always at least
+as wide as either model alone.</p>
+
+<hr>
+
+<!-- BAND SYSTEM -->
+<h2 id="band-system">Band System</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Band</th>
+      <th>Coverage</th>
+      <th>Percentile Range</th>
+      <th>Use Case</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>P95</code></td>
+      <td>95%</td>
+      <td>2.5th &ndash; 97.5th</td>
+      <td>Standard credit spread sizing</td>
+    </tr>
+    <tr>
+      <td><code>P98</code></td>
+      <td>98%</td>
+      <td>1.0th &ndash; 99.0th</td>
+      <td>Conservative spreads</td>
+    </tr>
+    <tr>
+      <td><code>P99</code></td>
+      <td>99%</td>
+      <td>0.5th &ndash; 99.5th</td>
+      <td>High-confidence bounds</td>
+    </tr>
+    <tr>
+      <td><code>P100</code></td>
+      <td>100%</td>
+      <td>0.0th &ndash; 100.0th</td>
+      <td>Absolute historical extremes</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr>
+
+<!-- FEATURE ENGINEERING -->
+<h2 id="feature-engineering">Feature Engineering</h2>
+
+<h3 id="feat-reversal">Reversal Detection <span class="badge badge-green">New</span></h3>
+
+<p><code>detect_reversal_strength()</code> returns a blend weight in <code>[0.0, 0.5]</code>
+based on three signals:</p>
+
+<ol>
+  <li><strong>Overshoot/Undershoot</strong> &mdash; has the day already traded on the
+    opposite side of prev_close?</li>
+  <li><strong>Directional signal</strong> &mdash; is price moving toward prev_close
+    (rising while below, or falling while above)?</li>
+  <li><strong>Proximity</strong> &mdash; how close is current price to prev_close?
+    Closer = more likely to cross.</li>
+</ol>
+
+<p>When the blend weight &gt; 0, opposite-condition training data is mixed into the
+percentile model to widen the relevant tail.</p>
+
+<h3 id="feat-intraday-vol">Intraday Volatility Adaptation <span class="badge badge-green">New</span></h3>
+
+<p><code>get_intraday_vol_factor()</code> compares today's realized intraday vol
+(from 5-min bar returns) to the historical average at the same time of day:</p>
+
+<ul>
+  <li><code>factor = current_vol / historical_avg</code>, clipped to <code>[0.5, 2.0]</code></li>
+  <li>Factor &gt; 1.0 widens bands (volatile day)</li>
+  <li>Factor &lt; 1.0 tightens bands (quiet day)</li>
+</ul>
+
+<p>The historical average is cached per <code>ticker:time_label</code> key to avoid
+recomputation across slots.</p>
+
+<hr>
+
+<!-- BACKTEST RESULTS -->
+<h2 id="backtest-results">Backtest Results Example</h2>
+
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>=======================================================================
+ NDX ABOVE Prev Close &mdash; Unified Backtest Accuracy
+ (does actual close fall within predicted range?)
+=======================================================================
+                    P95                P98                P99               P100
+HrsLeft  Time    N  Pctl    Stat    Comb   Pctl    Stat    Comb ...
+6.0h     10:00   8   88%     75%    100%    88%     88%    100% ...
+5.0h     11:00   8  100%     88%    100%   100%     88%    100% ...
+4.0h     12:00   8  100%     88%    100%   100%    100%    100% ...
+3.0h     13:00   8  100%    100%    100%   100%    100%    100% ...
+2.0h     14:00   8  100%    100%    100%   100%    100%    100% ...
+1.0h     15:00   8  100%    100%    100%   100%    100%    100% ...
+
+Total predictions: 96 across 8 test days
+P95: Pctl=97% Stat=93% Comb=100%</code></pre>
+</div>
+
+<hr>
+
+<!-- ADDING FEATURES -->
+<h2 id="adding-features">Adding New Features</h2>
+
+<p>To add a new feature to the prediction pipeline:</p>
+
+<ol>
+  <li><strong>Add constants/types</strong> to <code>models.py</code> if needed</li>
+  <li><strong>Implement feature logic</strong> in <code>features.py</code></li>
+  <li><strong>Integrate into prediction</strong> in <code>prediction.py</code>:
+    <ul>
+      <li>Add parameters to <code>make_unified_prediction()</code></li>
+      <li>Pass the feature to <code>compute_percentile_prediction()</code>
+        or <code>compute_statistical_prediction()</code></li>
+    </ul>
+  </li>
+  <li><strong>Update display</strong> in <code>display.py</code> to show the new feature</li>
+  <li><strong>Thread through backtest</strong> in <code>backtest.py</code></li>
+  <li><strong>Thread through live/demo</strong> in <code>live.py</code></li>
+  <li><strong>Add tests</strong> in <code>tests/test_unified_close_predictor.py</code></li>
+</ol>
+
+<hr>
+
+<!-- DEPENDENCIES -->
+<h2 id="dependencies">Dependencies</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Dependency</th>
+      <th>Purpose</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>numpy</code>, <code>pandas</code></td>
+      <td>Numerical computation</td>
+    </tr>
+    <tr>
+      <td><code>scripts.percentile_range_backtest</code></td>
+      <td>Percentile data collection + vol scaling</td>
+    </tr>
+    <tr>
+      <td><code>scripts.strategy_utils.close_predictor</code></td>
+      <td>Statistical bucket model</td>
+    </tr>
+    <tr>
+      <td><code>scripts.csv_prediction_backtest</code></td>
+      <td>CSV data loading + training data construction</td>
+    </tr>
+    <tr>
+      <td><code>common.stock_db</code></td>
+      <td>QuestDB access (live mode only, lazy import)</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr>
+
+<!-- TESTING -->
+<h2 id="testing">Testing</h2>
+
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code># Run all unified close predictor tests
+pytest tests/test_unified_close_predictor.py -v
+
+# Run a specific test class
+pytest tests/test_unified_close_predictor.py::TestDetectReversalStrength -v
+
+# Quick import check
+python -c "from scripts.close_predictor import run_backtest, UnifiedBand; print('OK')"</code></pre>
+</div>
+
+<p>Test classes:</p>
+<table>
+  <thead>
+    <tr>
+      <th>Test Class</th>
+      <th>Tests</th>
+      <th>What&rsquo;s Verified</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>TestUnifiedModels</code></td>
+      <td>3</td>
+      <td>UnifiedBand creation, UnifiedPrediction defaults, field values</td>
+    </tr>
+    <tr>
+      <td><code>TestMapStatisticalToBands</code></td>
+      <td>4</td>
+      <td>Returns 4 bands, widens monotonically, source label, symmetric input</td>
+    </tr>
+    <tr>
+      <td><code>TestMapPercentileToBands</code></td>
+      <td>4</td>
+      <td>Returns 4 bands, wider input = wider bands, source label, negative moves</td>
+    </tr>
+    <tr>
+      <td><code>TestCombineBands</code></td>
+      <td>4</td>
+      <td>Takes wider range, single model fallback, both empty, source label</td>
+    </tr>
+    <tr>
+      <td><code>TestDetectReversalStrength</code></td>
+      <td>7</td>
+      <td>No reversal, overshoot, undershoot, max cap, zero prev_close, proximity, direction</td>
+    </tr>
+    <tr>
+      <td><code>TestComputeIntradayVolFactor</code></td>
+      <td>6</td>
+      <td>Equal vol, double, clipped high/low, None inputs, zero historical</td>
+    </tr>
+    <tr>
+      <td><code>TestComputeIntradayVolFromBars</code></td>
+      <td>3</td>
+      <td>Sufficient bars, insufficient bars, constant prices</td>
+    </tr>
+    <tr>
+      <td><code>TestEndToEndImports</code></td>
+      <td>2</td>
+      <td>Package imports, CLI module imports</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr>
+
+<!-- CHANGE LOG -->
+<h2 id="change-log">Change Log</h2>
+
+<ul>
+  <li><strong>2025-02-08</strong>: Modularized into <code>scripts/close_predictor/</code>
+    package (models, bands, features, prediction, display, backtest, live). Added unit
+    tests. Reversal detection + intraday vol features preserved from monolith. Created
+    architecture documentation.</li>
+</ul>
+
+</main>
+</div>
+
+<script>
+function copyCode(btn) {
+  const pre = btn.parentElement.querySelector('pre');
+  const text = pre.textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = 'Copy';
+      btn.classList.remove('copied');
+    }, 2000);
+  });
+}
+
+// Highlight active sidebar link on scroll
+const sections = document.querySelectorAll('[id]');
+const navLinks = document.querySelectorAll('.sidebar a');
+
+window.addEventListener('scroll', () => {
+  let current = '';
+  sections.forEach(section => {
+    const sectionTop = section.offsetTop - 80;
+    if (window.scrollY >= sectionTop) {
+      current = section.getAttribute('id');
+    }
+  });
+  navLinks.forEach(link => {
+    link.classList.remove('active');
+    if (link.getAttribute('href') === '#' + current) {
+      link.classList.add('active');
+    }
+  });
+});
+</script>
+</body>
+</html>

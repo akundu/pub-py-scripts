@@ -1,0 +1,21 @@
+{
+  "song_id": "av_jz_003",
+  "title": "Days of Wine and Roses",
+  "composer": "Henry Mancini",
+  "tempo": 120,
+  "time_signature": "4/4",
+  "difficulty": "advanced",
+  "license_status": "educational_use",
+  "genre": "jazz",
+  "chords": ["Fmaj7", "Eb7", "Am7", "Dm7", "Gm7", "Em7b5", "A7", "Bbmaj7"],
+  "original_duration": "4:30",
+  "learning_time": "5 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 4, "fret": 3, "duration": 2.0, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.02, "string": 3, "fret": 2, "duration": 2.0, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.04, "string": 2, "fret": 1, "duration": 2.0, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.06, "string": 1, "fret": 0, "duration": 2.0, "velocity": 0.6, "technique": "strum"}
+  ]
+}

@@ -1,0 +1,66 @@
+{
+  "_comment": "NDX Risk Gradient Analysis - 180-day close_to_close metric",
+  "_safe_point": {
+    "put_pct": 3.492043901341202,
+    "call_pct": 2.616710150789724,
+    "lookback_days": 180,
+    "metric_type": "close_to_close"
+  },
+  "_gradient_legend": [
+    {
+      "offset": "-0.00%",
+      "risk": "Zero historical risk"
+    },
+    {
+      "offset": "-0.25%",
+      "risk": "Minimal risk"
+    },
+    {
+      "offset": "-0.50%",
+      "risk": "Low risk"
+    },
+    {
+      "offset": "-0.75%",
+      "risk": "Moderate risk"
+    },
+    {
+      "offset": "-1.00%",
+      "risk": "Higher risk"
+    },
+    {
+      "offset": "-1.25%",
+      "risk": "High risk"
+    },
+    {
+      "offset": "-1.50%",
+      "risk": "Very high risk"
+    }
+  ],
+  "grid_params": {
+    "percent_beyond": [
+      "0.0349:0.0262",
+      "0.0324:0.0237",
+      "0.0299:0.0212",
+      "0.0274:0.0187",
+      "0.0249:0.0162",
+      "0.0224:0.0137",
+      "0.0199:0.0112"
+    ]
+  },
+  "fixed_params": {
+    "csv_dir": "../options_csv_output",
+    "underlying_ticker": "NDX",
+    "option_type": "both",
+    "min_spread_width": 10,
+    "max_spread_width": "30:30",
+    "risk_cap": 500000,
+    "profit_target_pct": 0.9,
+    "min_trading_hour": 9,
+    "max_trading_hour": 12,
+    "min_premium_diff": "0.50:0.50",
+    "output_timezone": "America/Los_Angeles",
+    "db_path": "$QUEST_DB_STRING",
+    "start_date": "2025-08-05",
+    "end_date": "2026-02-01"
+  }
+}

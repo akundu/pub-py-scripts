@@ -1,0 +1,25 @@
+{
+  "song_id": "ex_ct_004",
+  "title": "Dueling Banjos (Guitar Part)",
+  "composer": "Arthur Smith",
+  "tempo": 160,
+  "time_signature": "4/4",
+  "difficulty": "expert",
+  "license_status": "educational_use",
+  "genre": "country",
+  "chords": ["G", "C", "D"],
+  "original_duration": "4:15",
+  "learning_time": "8 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 3, "duration": 1.5, "velocity": 0.7, "technique": "flatpick"},
+    {"time": 0.19, "string": 2, "fret": 0, "duration": 0.19, "velocity": 0.7, "technique": "flatpick"},
+    {"time": 0.38, "string": 1, "fret": 0, "duration": 0.19, "velocity": 0.7, "technique": "flatpick"},
+    {"time": 0.57, "string": 2, "fret": 0, "duration": 0.19, "velocity": 0.7, "technique": "flatpick"},
+    {"time": 0.75, "string": 1, "fret": 3, "duration": 0.19, "velocity": 0.7, "technique": "flatpick"},
+    {"time": 0.94, "string": 2, "fret": 0, "duration": 0.19, "velocity": 0.7, "technique": "flatpick"},
+    {"time": 1.13, "string": 1, "fret": 0, "duration": 0.19, "velocity": 0.7, "technique": "flatpick"},
+    {"time": 1.32, "string": 2, "fret": 0, "duration": 0.19, "velocity": 0.7, "technique": "flatpick"}
+  ]
+}

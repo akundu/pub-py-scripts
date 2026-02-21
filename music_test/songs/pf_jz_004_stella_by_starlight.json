@@ -1,0 +1,21 @@
+{
+  "song_id": "pf_jz_004",
+  "title": "Stella By Starlight",
+  "composer": "Victor Young",
+  "tempo": 120,
+  "time_signature": "4/4",
+  "difficulty": "proficient",
+  "license_status": "educational_use",
+  "genre": "jazz",
+  "chords": ["Em7b5", "A7b9", "Cm7", "F7", "Fm7", "Bb7", "Ebmaj7", "Ab7", "Bbmaj7", "Em7b5", "A7", "Dm7"],
+  "original_duration": "4:00",
+  "learning_time": "5 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 7, "duration": 2.0, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.02, "string": 4, "fret": 8, "duration": 2.0, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 6, "duration": 2.0, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.06, "string": 2, "fret": 8, "duration": 2.0, "velocity": 0.6, "technique": "strum"}
+  ]
+}

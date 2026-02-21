@@ -1,0 +1,883 @@
+{
+  "ticker": "NDX",
+  "base_params": {
+    "percent_beyond_put": 0.0075,
+    "percent_beyond_call": 0.015,
+    "max_spread_width_put": 20,
+    "max_spread_width_call": 20
+  },
+  "params_by_level": {
+    "1": {
+      "percent_beyond_put": 0.0112,
+      "percent_beyond_call": 0.0225,
+      "max_spread_width_put": 10,
+      "max_spread_width_call": 10
+    },
+    "2": {
+      "percent_beyond_put": 0.0105,
+      "percent_beyond_call": 0.021,
+      "max_spread_width_put": 12,
+      "max_spread_width_call": 12
+    },
+    "3": {
+      "percent_beyond_put": 0.0097,
+      "percent_beyond_call": 0.0195,
+      "max_spread_width_put": 14,
+      "max_spread_width_call": 14
+    },
+    "4": {
+      "percent_beyond_put": 0.0086,
+      "percent_beyond_call": 0.0172,
+      "max_spread_width_put": 17,
+      "max_spread_width_call": 17
+    },
+    "5": {
+      "percent_beyond_put": 0.0075,
+      "percent_beyond_call": 0.015,
+      "max_spread_width_put": 20,
+      "max_spread_width_call": 20
+    },
+    "6": {
+      "percent_beyond_put": 0.0067,
+      "percent_beyond_call": 0.0135,
+      "max_spread_width_put": 22,
+      "max_spread_width_call": 22
+    },
+    "7": {
+      "percent_beyond_put": 0.006,
+      "percent_beyond_call": 0.012,
+      "max_spread_width_put": 24,
+      "max_spread_width_call": 24
+    },
+    "8": {
+      "percent_beyond_put": 0.0052,
+      "percent_beyond_call": 0.0105,
+      "max_spread_width_put": 26,
+      "max_spread_width_call": 26
+    },
+    "9": {
+      "percent_beyond_put": 0.0045,
+      "percent_beyond_call": 0.009,
+      "max_spread_width_put": 28,
+      "max_spread_width_call": 28
+    },
+    "10": {
+      "percent_beyond_put": 0.0037,
+      "percent_beyond_call": 0.0075,
+      "max_spread_width_put": 30,
+      "max_spread_width_call": 30
+    }
+  },
+  "results": {
+    "3mo": {
+      "1": {
+        "risk_level": 1,
+        "net_pnl": 390760.56,
+        "profit_factor": 1.0523,
+        "win_rate": 85.81,
+        "total_trades": 1092,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0112,
+          "percent_beyond_call": 0.0225,
+          "max_spread_width_put": 10,
+          "max_spread_width_call": 10
+        }
+      },
+      "2": {
+        "risk_level": 2,
+        "net_pnl": 694231.97,
+        "profit_factor": 1.0866,
+        "win_rate": 85.24,
+        "total_trades": 1145,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0105,
+          "percent_beyond_call": 0.021,
+          "max_spread_width_put": 12,
+          "max_spread_width_call": 12
+        }
+      },
+      "3": {
+        "risk_level": 3,
+        "net_pnl": 111070.53,
+        "profit_factor": 1.0123,
+        "win_rate": 84.42,
+        "total_trades": 1200,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0097,
+          "percent_beyond_call": 0.0195,
+          "max_spread_width_put": 14,
+          "max_spread_width_call": 14
+        }
+      },
+      "4": {
+        "risk_level": 4,
+        "net_pnl": 527396.53,
+        "profit_factor": 1.0544,
+        "win_rate": 84.89,
+        "total_trades": 1330,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0086,
+          "percent_beyond_call": 0.0172,
+          "max_spread_width_put": 17,
+          "max_spread_width_call": 17
+        }
+      },
+      "5": {
+        "risk_level": 5,
+        "net_pnl": -601430.21,
+        "profit_factor": 0.9536,
+        "win_rate": 82.72,
+        "total_trades": 1574,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0075,
+          "percent_beyond_call": 0.015,
+          "max_spread_width_put": 20,
+          "max_spread_width_call": 20
+        }
+      },
+      "6": {
+        "risk_level": 6,
+        "net_pnl": -70439.0,
+        "profit_factor": 0.9949,
+        "win_rate": 82.9,
+        "total_trades": 1702,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0067,
+          "percent_beyond_call": 0.0135,
+          "max_spread_width_put": 22,
+          "max_spread_width_call": 22
+        }
+      },
+      "7": {
+        "risk_level": 7,
+        "net_pnl": 149438.43,
+        "profit_factor": 1.0098,
+        "win_rate": 82.38,
+        "total_trades": 1805,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.006,
+          "percent_beyond_call": 0.012,
+          "max_spread_width_put": 24,
+          "max_spread_width_call": 24
+        }
+      },
+      "8": {
+        "risk_level": 8,
+        "net_pnl": 857940.99,
+        "profit_factor": 1.051,
+        "win_rate": 81.9,
+        "total_trades": 1939,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0052,
+          "percent_beyond_call": 0.0105,
+          "max_spread_width_put": 26,
+          "max_spread_width_call": 26
+        }
+      },
+      "9": {
+        "risk_level": 9,
+        "net_pnl": 2797453.86,
+        "profit_factor": 1.1572,
+        "win_rate": 81.25,
+        "total_trades": 2053,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0045,
+          "percent_beyond_call": 0.009,
+          "max_spread_width_put": 28,
+          "max_spread_width_call": 28
+        }
+      },
+      "10": {
+        "risk_level": 10,
+        "net_pnl": 2622914.13,
+        "profit_factor": 1.125,
+        "win_rate": 79.08,
+        "total_trades": 2223,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0037,
+          "percent_beyond_call": 0.0075,
+          "max_spread_width_put": 30,
+          "max_spread_width_call": 30
+        }
+      }
+    },
+    "2mo": {
+      "1": {
+        "risk_level": 1,
+        "net_pnl": 679655.2,
+        "profit_factor": 1.2731,
+        "win_rate": 91.47,
+        "total_trades": 598,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0112,
+          "percent_beyond_call": 0.0225,
+          "max_spread_width_put": 10,
+          "max_spread_width_call": 10
+        }
+      },
+      "2": {
+        "risk_level": 2,
+        "net_pnl": 1019408.16,
+        "profit_factor": 1.3996,
+        "win_rate": 91.41,
+        "total_trades": 629,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0105,
+          "percent_beyond_call": 0.021,
+          "max_spread_width_put": 12,
+          "max_spread_width_call": 12
+        }
+      },
+      "3": {
+        "risk_level": 3,
+        "net_pnl": 985524.16,
+        "profit_factor": 1.352,
+        "win_rate": 91.19,
+        "total_trades": 670,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0097,
+          "percent_beyond_call": 0.0195,
+          "max_spread_width_put": 14,
+          "max_spread_width_call": 14
+        }
+      },
+      "4": {
+        "risk_level": 4,
+        "net_pnl": 1904148.16,
+        "profit_factor": 1.6925,
+        "win_rate": 92.34,
+        "total_trades": 757,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0086,
+          "percent_beyond_call": 0.0172,
+          "max_spread_width_put": 17,
+          "max_spread_width_call": 17
+        }
+      },
+      "5": {
+        "risk_level": 5,
+        "net_pnl": 2212835.64,
+        "profit_factor": 1.5439,
+        "win_rate": 90.66,
+        "total_trades": 921,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0075,
+          "percent_beyond_call": 0.015,
+          "max_spread_width_put": 20,
+          "max_spread_width_call": 20
+        }
+      },
+      "6": {
+        "risk_level": 6,
+        "net_pnl": 2544583.62,
+        "profit_factor": 1.5372,
+        "win_rate": 90.08,
+        "total_trades": 998,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0067,
+          "percent_beyond_call": 0.0135,
+          "max_spread_width_put": 22,
+          "max_spread_width_call": 22
+        }
+      },
+      "7": {
+        "risk_level": 7,
+        "net_pnl": 2048590.05,
+        "profit_factor": 1.3423,
+        "win_rate": 88.25,
+        "total_trades": 1064,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.006,
+          "percent_beyond_call": 0.012,
+          "max_spread_width_put": 24,
+          "max_spread_width_call": 24
+        }
+      },
+      "8": {
+        "risk_level": 8,
+        "net_pnl": 2207931.9,
+        "profit_factor": 1.3056,
+        "win_rate": 86.9,
+        "total_trades": 1160,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0052,
+          "percent_beyond_call": 0.0105,
+          "max_spread_width_put": 26,
+          "max_spread_width_call": 26
+        }
+      },
+      "9": {
+        "risk_level": 9,
+        "net_pnl": 2512332.51,
+        "profit_factor": 1.31,
+        "win_rate": 85.19,
+        "total_trades": 1242,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0045,
+          "percent_beyond_call": 0.009,
+          "max_spread_width_put": 28,
+          "max_spread_width_call": 28
+        }
+      },
+      "10": {
+        "risk_level": 10,
+        "net_pnl": 2383719.61,
+        "profit_factor": 1.2261,
+        "win_rate": 82.42,
+        "total_trades": 1365,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0037,
+          "percent_beyond_call": 0.0075,
+          "max_spread_width_put": 30,
+          "max_spread_width_call": 30
+        }
+      }
+    },
+    "1mo": {
+      "1": {
+        "risk_level": 1,
+        "net_pnl": 416338.89,
+        "profit_factor": 1.4181,
+        "win_rate": 92.98,
+        "total_trades": 285,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0112,
+          "percent_beyond_call": 0.0225,
+          "max_spread_width_put": 10,
+          "max_spread_width_call": 10
+        }
+      },
+      "2": {
+        "risk_level": 2,
+        "net_pnl": 546637.85,
+        "profit_factor": 1.5421,
+        "win_rate": 92.83,
+        "total_trades": 307,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0105,
+          "percent_beyond_call": 0.021,
+          "max_spread_width_put": 12,
+          "max_spread_width_call": 12
+        }
+      },
+      "3": {
+        "risk_level": 3,
+        "net_pnl": 489888.85,
+        "profit_factor": 1.4423,
+        "win_rate": 92.64,
+        "total_trades": 326,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0097,
+          "percent_beyond_call": 0.0195,
+          "max_spread_width_put": 14,
+          "max_spread_width_call": 14
+        }
+      },
+      "4": {
+        "risk_level": 4,
+        "net_pnl": 918834.85,
+        "profit_factor": 1.8296,
+        "win_rate": 93.57,
+        "total_trades": 373,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0086,
+          "percent_beyond_call": 0.0172,
+          "max_spread_width_put": 17,
+          "max_spread_width_call": 17
+        }
+      },
+      "5": {
+        "risk_level": 5,
+        "net_pnl": 701134.64,
+        "profit_factor": 1.3707,
+        "win_rate": 90.77,
+        "total_trades": 455,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0075,
+          "percent_beyond_call": 0.015,
+          "max_spread_width_put": 20,
+          "max_spread_width_call": 20
+        }
+      },
+      "6": {
+        "risk_level": 6,
+        "net_pnl": 752689.91,
+        "profit_factor": 1.3216,
+        "win_rate": 90.08,
+        "total_trades": 494,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0067,
+          "percent_beyond_call": 0.0135,
+          "max_spread_width_put": 22,
+          "max_spread_width_call": 22
+        }
+      },
+      "7": {
+        "risk_level": 7,
+        "net_pnl": 690090.03,
+        "profit_factor": 1.2366,
+        "win_rate": 88.3,
+        "total_trades": 530,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.006,
+          "percent_beyond_call": 0.012,
+          "max_spread_width_put": 24,
+          "max_spread_width_call": 24
+        }
+      },
+      "8": {
+        "risk_level": 8,
+        "net_pnl": 1123105.48,
+        "profit_factor": 1.3195,
+        "win_rate": 87.01,
+        "total_trades": 585,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0052,
+          "percent_beyond_call": 0.0105,
+          "max_spread_width_put": 26,
+          "max_spread_width_call": 26
+        }
+      },
+      "9": {
+        "risk_level": 9,
+        "net_pnl": 1158065.7,
+        "profit_factor": 1.2719,
+        "win_rate": 83.81,
+        "total_trades": 630,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0045,
+          "percent_beyond_call": 0.009,
+          "max_spread_width_put": 28,
+          "max_spread_width_call": 28
+        }
+      },
+      "10": {
+        "risk_level": 10,
+        "net_pnl": 406073.33,
+        "profit_factor": 1.0655,
+        "win_rate": 79.53,
+        "total_trades": 684,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0037,
+          "percent_beyond_call": 0.0075,
+          "max_spread_width_put": 30,
+          "max_spread_width_call": 30
+        }
+      }
+    },
+    "2wk": {
+      "1": {
+        "risk_level": 1,
+        "net_pnl": -205002.11,
+        "profit_factor": 0.7941,
+        "win_rate": 84.62,
+        "total_trades": 130,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0112,
+          "percent_beyond_call": 0.0225,
+          "max_spread_width_put": 10,
+          "max_spread_width_call": 10
+        }
+      },
+      "2": {
+        "risk_level": 2,
+        "net_pnl": -196815.15,
+        "profit_factor": 0.8048,
+        "win_rate": 83.7,
+        "total_trades": 135,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0105,
+          "percent_beyond_call": 0.021,
+          "max_spread_width_put": 12,
+          "max_spread_width_call": 12
+        }
+      },
+      "3": {
+        "risk_level": 3,
+        "net_pnl": -311815.15,
+        "profit_factor": 0.7185,
+        "win_rate": 83.33,
+        "total_trades": 144,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0097,
+          "percent_beyond_call": 0.0195,
+          "max_spread_width_put": 14,
+          "max_spread_width_call": 14
+        }
+      },
+      "4": {
+        "risk_level": 4,
+        "net_pnl": -184580.15,
+        "profit_factor": 0.8333,
+        "win_rate": 85.45,
+        "total_trades": 165,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0086,
+          "percent_beyond_call": 0.0172,
+          "max_spread_width_put": 17,
+          "max_spread_width_call": 17
+        }
+      },
+      "5": {
+        "risk_level": 5,
+        "net_pnl": -38714.0,
+        "profit_factor": 0.9721,
+        "win_rate": 86.41,
+        "total_trades": 206,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0075,
+          "percent_beyond_call": 0.015,
+          "max_spread_width_put": 20,
+          "max_spread_width_call": 20
+        }
+      },
+      "6": {
+        "risk_level": 6,
+        "net_pnl": 89153.0,
+        "profit_factor": 1.0621,
+        "win_rate": 87.17,
+        "total_trades": 226,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0067,
+          "percent_beyond_call": 0.0135,
+          "max_spread_width_put": 22,
+          "max_spread_width_call": 22
+        }
+      },
+      "7": {
+        "risk_level": 7,
+        "net_pnl": -356363.86,
+        "profit_factor": 0.8206,
+        "win_rate": 82.79,
+        "total_trades": 244,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.006,
+          "percent_beyond_call": 0.012,
+          "max_spread_width_put": 24,
+          "max_spread_width_call": 24
+        }
+      },
+      "8": {
+        "risk_level": 8,
+        "net_pnl": -367661.86,
+        "profit_factor": 0.839,
+        "win_rate": 81.32,
+        "total_trades": 257,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0052,
+          "percent_beyond_call": 0.0105,
+          "max_spread_width_put": 26,
+          "max_spread_width_call": 26
+        }
+      },
+      "9": {
+        "risk_level": 9,
+        "net_pnl": 28666.99,
+        "profit_factor": 1.0121,
+        "win_rate": 81.85,
+        "total_trades": 270,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0045,
+          "percent_beyond_call": 0.009,
+          "max_spread_width_put": 28,
+          "max_spread_width_call": 28
+        }
+      },
+      "10": {
+        "risk_level": 10,
+        "net_pnl": -28483.16,
+        "profit_factor": 0.9897,
+        "win_rate": 80.07,
+        "total_trades": 286,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0037,
+          "percent_beyond_call": 0.0075,
+          "max_spread_width_put": 30,
+          "max_spread_width_call": 30
+        }
+      }
+    },
+    "1wk": {
+      "1": {
+        "risk_level": 1,
+        "net_pnl": 121123.0,
+        "profit_factor": Infinity,
+        "win_rate": 100.0,
+        "total_trades": 54,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0112,
+          "percent_beyond_call": 0.0225,
+          "max_spread_width_put": 10,
+          "max_spread_width_call": 10
+        }
+      },
+      "2": {
+        "risk_level": 2,
+        "net_pnl": 162017.0,
+        "profit_factor": Infinity,
+        "win_rate": 100.0,
+        "total_trades": 58,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0105,
+          "percent_beyond_call": 0.021,
+          "max_spread_width_put": 12,
+          "max_spread_width_call": 12
+        }
+      },
+      "3": {
+        "risk_level": 3,
+        "net_pnl": 170665.0,
+        "profit_factor": Infinity,
+        "win_rate": 100.0,
+        "total_trades": 62,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0097,
+          "percent_beyond_call": 0.0195,
+          "max_spread_width_put": 14,
+          "max_spread_width_call": 14
+        }
+      },
+      "4": {
+        "risk_level": 4,
+        "net_pnl": 285436.0,
+        "profit_factor": Infinity,
+        "win_rate": 100.0,
+        "total_trades": 75,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0086,
+          "percent_beyond_call": 0.0172,
+          "max_spread_width_put": 17,
+          "max_spread_width_call": 17
+        }
+      },
+      "5": {
+        "risk_level": 5,
+        "net_pnl": 402156.0,
+        "profit_factor": Infinity,
+        "win_rate": 100.0,
+        "total_trades": 98,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0075,
+          "percent_beyond_call": 0.015,
+          "max_spread_width_put": 20,
+          "max_spread_width_call": 20
+        }
+      },
+      "6": {
+        "risk_level": 6,
+        "net_pnl": 539910.0,
+        "profit_factor": Infinity,
+        "win_rate": 100.0,
+        "total_trades": 112,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0067,
+          "percent_beyond_call": 0.0135,
+          "max_spread_width_put": 22,
+          "max_spread_width_call": 22
+        }
+      },
+      "7": {
+        "risk_level": 7,
+        "net_pnl": 15344.14,
+        "profit_factor": 1.0306,
+        "win_rate": 90.08,
+        "total_trades": 121,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.006,
+          "percent_beyond_call": 0.012,
+          "max_spread_width_put": 24,
+          "max_spread_width_call": 24
+        }
+      },
+      "8": {
+        "risk_level": 8,
+        "net_pnl": -146359.86,
+        "profit_factor": 0.8046,
+        "win_rate": 86.61,
+        "total_trades": 127,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0052,
+          "percent_beyond_call": 0.0105,
+          "max_spread_width_put": 26,
+          "max_spread_width_call": 26
+        }
+      },
+      "9": {
+        "risk_level": 9,
+        "net_pnl": -541.01,
+        "profit_factor": 0.9994,
+        "win_rate": 86.36,
+        "total_trades": 132,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0045,
+          "percent_beyond_call": 0.009,
+          "max_spread_width_put": 28,
+          "max_spread_width_call": 28
+        }
+      },
+      "10": {
+        "risk_level": 10,
+        "net_pnl": -213116.0,
+        "profit_factor": 0.8264,
+        "win_rate": 81.75,
+        "total_trades": 137,
+        "avg_win": 0.0,
+        "avg_loss": 0.0,
+        "max_drawdown": 0.0,
+        "params": {
+          "percent_beyond_put": 0.0037,
+          "percent_beyond_call": 0.0075,
+          "max_spread_width_put": 30,
+          "max_spread_width_call": 30
+        }
+      }
+    }
+  }
+}

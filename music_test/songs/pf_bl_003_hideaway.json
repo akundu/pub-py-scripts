@@ -1,0 +1,25 @@
+{
+  "song_id": "pf_bl_003",
+  "title": "Hideaway",
+  "composer": "Freddie King",
+  "tempo": 160,
+  "time_signature": "4/4",
+  "difficulty": "proficient",
+  "license_status": "educational_use",
+  "genre": "blues",
+  "chords": ["E", "A", "B"],
+  "original_duration": "2:35",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 12, "duration": 0.75, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.19, "string": 1, "fret": 12, "duration": 0.19, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.38, "string": 2, "fret": 12, "duration": 0.19, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.57, "string": 1, "fret": 12, "duration": 0.19, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.75, "string": 1, "fret": 15, "duration": 0.75, "velocity": 0.8, "technique": "bend"},
+    {"time": 1.13, "string": 1, "fret": 12, "duration": 0.19, "velocity": 0.8, "technique": "single_note"},
+    {"time": 1.32, "string": 2, "fret": 15, "duration": 0.19, "velocity": 0.8, "technique": "single_note"},
+    {"time": 1.51, "string": 2, "fret": 12, "duration": 0.19, "velocity": 0.8, "technique": "single_note"}
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "configurations": [
+    {"dte": 0, "percentile": 95, "spread_width": 30, "flow_mode": "neutral"},
+    {"dte": 0, "percentile": 95, "spread_width": 20, "flow_mode": "neutral"},
+    {"dte": 0, "percentile": 96, "spread_width": 30, "flow_mode": "neutral"},
+    {"dte": 0, "percentile": 97, "spread_width": 30, "flow_mode": "neutral"},
+    {"dte": 0, "percentile": 98, "spread_width": 30, "flow_mode": "neutral"}
+  ]
+}

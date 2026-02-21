@@ -1,0 +1,18 @@
+{
+  "fixed_params": {
+    "csv_path": "./options_csv_output/NDX/NDX_options_*.csv",
+    "db_path": "$QUEST_DB_STRING",
+    "underlying_ticker": "NDX",
+    "risk_cap": 100000,
+    "top_n": 5,
+    "min_contract_price": 0.5
+  },
+  "grid_params": {
+    "option_type": ["both"],
+    "percent_beyond_put": [0.005],
+    "percent_beyond_call": [0.02],
+    "max_spread_width": [10],
+    "min_trading_hour": [10, 11],
+    "max_trading_hour": [10, 11]
+  }
+}

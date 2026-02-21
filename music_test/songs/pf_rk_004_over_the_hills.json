@@ -1,0 +1,21 @@
+{
+  "song_id": "pf_rk_004",
+  "title": "Over the Hills and Far Away",
+  "composer": "Led Zeppelin",
+  "tempo": 98,
+  "time_signature": "4/4",
+  "difficulty": "proficient",
+  "license_status": "educational_use",
+  "genre": "rock",
+  "chords": ["G", "D", "C", "Em", "A"],
+  "original_duration": "4:50",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 4, "fret": 0, "duration": 2.45, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.31, "string": 3, "fret": 0, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.62, "string": 2, "fret": 0, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.93, "string": 1, "fret": 3, "duration": 0.31, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

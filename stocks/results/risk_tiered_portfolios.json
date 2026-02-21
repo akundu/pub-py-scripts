@@ -1,0 +1,53 @@
+{
+  "conservative": {
+    "strategies": [
+      "DTE2_p99_w50_neutral",
+      "DTE2_p100_w50_neutral",
+      "DTE2_p99_w100_neutral"
+    ],
+    "allocations": {
+      "DTE2_p99_w50_neutral": 3.101749864797728e-12,
+      "DTE2_p100_w50_neutral": 2.3261523495903197e-12,
+      "DTE2_p99_w100_neutral": 0.9999999999945721
+    },
+    "expected_roi": 675.7468815477679,
+    "estimated_sharpe": 0.041008220501377236,
+    "diversification": 0.7000000000000001
+  },
+  "moderate": {
+    "strategies": [
+      "DTE1_p99_w25_neutral",
+      "DTE1_p100_w25_neutral",
+      "DTE1_p98_w25_neutral",
+      "DTE1_p98_w100_neutral"
+    ],
+    "allocations": {
+      "DTE1_p99_w25_neutral": 0.25,
+      "DTE1_p100_w25_neutral": 0.25,
+      "DTE1_p98_w25_neutral": 0.25,
+      "DTE1_p98_w100_neutral": 0.25
+    },
+    "expected_roi": 293647652255945.56,
+    "estimated_sharpe": 0.02435375644782049,
+    "diversification": 0.6333333333333333
+  },
+  "aggressive": {
+    "strategies": [
+      "DTE1_p99_w25_neutral",
+      "DTE1_p100_w25_neutral",
+      "DTE1_p98_w25_neutral",
+      "DTE1_p97_w25_neutral",
+      "DTE1_p96_w25_neutral"
+    ],
+    "allocations": {
+      "DTE1_p99_w25_neutral": 0.2,
+      "DTE1_p100_w25_neutral": 0.2,
+      "DTE1_p98_w25_neutral": 0.2,
+      "DTE1_p97_w25_neutral": 0.2,
+      "DTE1_p96_w25_neutral": 0.2
+    },
+    "expected_roi": 347819452802907.25,
+    "estimated_sharpe": 0.029134752439730398,
+    "diversification": 0.6299999999999999
+  }
+}

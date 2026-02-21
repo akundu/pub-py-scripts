@@ -1,0 +1,25 @@
+{
+  "song_id": "av_pp_004",
+  "title": "And I Love Her",
+  "composer": "The Beatles",
+  "tempo": 127,
+  "time_signature": "4/4",
+  "difficulty": "advanced",
+  "license_status": "educational_use",
+  "genre": "pop",
+  "chords": ["F#m", "C#m", "A", "B", "E", "Gm", "Dm", "Bb", "C"],
+  "original_duration": "2:32",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 4, "duration": 1.89, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.24, "string": 3, "fret": 2, "duration": 0.24, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.48, "string": 2, "fret": 2, "duration": 0.24, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.72, "string": 1, "fret": 2, "duration": 0.24, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.96, "string": 2, "fret": 2, "duration": 0.24, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.20, "string": 3, "fret": 2, "duration": 0.24, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.44, "string": 1, "fret": 2, "duration": 0.24, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.68, "string": 2, "fret": 2, "duration": 0.24, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

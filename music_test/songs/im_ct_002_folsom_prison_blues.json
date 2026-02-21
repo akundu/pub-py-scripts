@@ -1,0 +1,29 @@
+{
+  "song_id": "im_ct_002",
+  "title": "Folsom Prison Blues",
+  "composer": "Johnny Cash",
+  "tempo": 220,
+  "time_signature": "4/4",
+  "difficulty": "intermediate",
+  "license_status": "educational_use",
+  "genre": "country",
+  "chords": ["E", "A", "B7"],
+  "original_duration": "2:51",
+  "learning_time": "2 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 0, "duration": 1.09, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.27, "string": 4, "fret": 2, "duration": 0.27, "velocity": 0.6, "technique": "strum"},
+    {"time": 0.54, "string": 6, "fret": 0, "duration": 0.27, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.81, "string": 4, "fret": 2, "duration": 0.27, "velocity": 0.6, "technique": "strum"},
+    {"time": 1.09, "string": 5, "fret": 0, "duration": 1.09, "velocity": 0.7, "technique": "strum"},
+    {"time": 1.36, "string": 3, "fret": 2, "duration": 0.27, "velocity": 0.6, "technique": "strum"},
+    {"time": 1.63, "string": 5, "fret": 0, "duration": 0.27, "velocity": 0.7, "technique": "strum"},
+    {"time": 1.90, "string": 3, "fret": 2, "duration": 0.27, "velocity": 0.6, "technique": "strum"},
+    {"time": 2.18, "string": 5, "fret": 2, "duration": 1.09, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.45, "string": 3, "fret": 2, "duration": 0.27, "velocity": 0.6, "technique": "strum"},
+    {"time": 2.72, "string": 5, "fret": 2, "duration": 0.27, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.99, "string": 3, "fret": 2, "duration": 0.27, "velocity": 0.6, "technique": "strum"}
+  ]
+}

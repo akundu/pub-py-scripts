@@ -1,0 +1,13 @@
+services:
+  web-server:
+    build: .
+    container_name: music-test-web-server
+    ports:
+      - "9103:9103"
+    restart: unless-stopped
+    environment:
+      - CHORD_DETECTOR_LOG_LEVEL=INFO
+    # Optional: uncomment to mount code for development (comment out for production)
+    # volumes:
+    #   - .:/app
+    command: python web_server.py --port 9103 --workers 2 --log-level ${CHORD_DETECTOR_LOG_LEVEL:-INFO}

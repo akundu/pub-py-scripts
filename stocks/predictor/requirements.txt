@@ -1,0 +1,29 @@
+# Core dependencies
+numpy>=1.21.0
+pandas>=1.3.0
+scipy>=1.7.0
+scikit-learn>=1.0.0
+
+# Visualization
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# Configuration and CLI
+pydantic>=1.8.0
+typer>=0.4.0
+
+# Terminal output
+rich>=12.0.0
+
+# Async HTTP client
+aiohttp>=3.8.0
+
+# Optional: HMM support
+# hmmlearn>=0.2.7
+
+# Development dependencies (optional)
+# pytest>=6.0.0
+# pytest-asyncio>=0.18.0
+# jupyter>=1.0.0
+# ipykernel>=6.0.0
+

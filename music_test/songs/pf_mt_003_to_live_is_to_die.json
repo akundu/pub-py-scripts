@@ -1,0 +1,25 @@
+{
+  "song_id": "pf_mt_003",
+  "title": "To Live Is to Die",
+  "composer": "Metallica",
+  "tempo": 118,
+  "time_signature": "4/4",
+  "difficulty": "proficient",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["E", "D", "A", "C", "G"],
+  "original_duration": "9:48",
+  "learning_time": "6 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 0, "duration": 2.03, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.25, "string": 4, "fret": 2, "duration": 0.25, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.50, "string": 3, "fret": 1, "duration": 0.25, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.75, "string": 2, "fret": 0, "duration": 0.25, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.00, "string": 1, "fret": 0, "duration": 0.25, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.25, "string": 2, "fret": 0, "duration": 0.25, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.50, "string": 3, "fret": 1, "duration": 0.25, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.75, "string": 4, "fret": 2, "duration": 0.25, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

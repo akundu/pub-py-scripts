@@ -1,0 +1,21 @@
+{
+  "song_id": "ex_rk_004",
+  "title": "Stairway to Heaven (Solo)",
+  "composer": "Led Zeppelin",
+  "tempo": 82,
+  "time_signature": "4/4",
+  "difficulty": "expert",
+  "license_status": "educational_use",
+  "genre": "rock",
+  "chords": ["Am", "G", "F", "C"],
+  "original_duration": "8:02",
+  "learning_time": "10 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 17, "duration": 2.93, "velocity": 0.7, "technique": "vibrato"},
+    {"time": 0.37, "string": 1, "fret": 20, "duration": 0.37, "velocity": 0.7, "technique": "bend"},
+    {"time": 0.74, "string": 1, "fret": 17, "duration": 0.37, "velocity": 0.7, "technique": "single_note"},
+    {"time": 1.11, "string": 2, "fret": 20, "duration": 0.37, "velocity": 0.7, "technique": "single_note"}
+  ]
+}

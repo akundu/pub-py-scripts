@@ -1,0 +1,1005 @@
+2026-02-08 19:15:39 [PID:83203] [analyze_credit_spread_intervals] [INFO] - Found 5 CSV file(s) matching date range in csv_exports/options/NDX
+2026-02-08 19:15:39 [PID:83203] [analyze_credit_spread_intervals] [INFO] - Date range filter: 2026-02-02 to 2026-02-06
+2026-02-08 19:15:39 [PID:83203] [analyze_credit_spread_intervals] [INFO] - Found 5 CSV file(s) from --csv-dir
+2026-02-08 19:15:39 [PID:83203] [analyze_credit_spread_intervals] [INFO] - Processing 5 file(s) sequentially
+2026-02-08 19:15:39 [PID:83203] [analyze_credit_spread_intervals] [INFO] - Loading from binary cache: .options_cache/27f2ddef1156dd73.pkl
+2026-02-08 19:15:39 [PID:83203] [analyze_credit_spread_intervals] [INFO] - Initializing database connection...
+Strategy: time_allocated_tiered (feature flags: none)
+
+====================================================================================================
+CREDIT SPREAD ANALYSIS - CALL & PUT OPTIONS
+====================================================================================================
+CSV Directory: csv_exports/options
+CSV Files: 5 file(s)
+Date Range: 2026-02-02 to 2026-02-06
+Option Type: both
+Underlying Ticker: NDX
+Percent Beyond Previous Close: 2.50%
+Output Timezone: US/Pacific
+Max Spread Width: $200.00
+Min Contract Price: $0.00
+Max Trading Hour: 15:00 PST
+Total Intervals Analyzed: 111
+Intervals with Valid Spreads: 85
+====================================================================================================
+
+OVERALL BEST SPREAD:
+  Timestamp: 2026-02-04 09:30:45 PST
+  Underlying: NDX
+  Option Type: PUT
+  Previous Close: $25338.62 (from 2026-02-03)
+  Current Day Close: $24891.24 (from 2026-02-04)
+  Price Change: -1.77%
+  Target Price: $24705.16
+  Short Strike: $24700.00
+  Long Strike: $24500.00
+  Short Premium: $83.40
+  Long Premium: $26.80
+  Spread Width: $200.00 (per share)
+  Net Credit (per share): $56.60
+  Net Credit (per contract): $5660.00
+  Max Loss (per share): $143.40
+  Max Loss (per contract): $14340.00
+  Risk/Reward: 0.39
+  Backtest: ✓ SUCCESS (EOD close did not breach spread)
+  Actual P&L (per share): $+56.60
+  Close Price Used: $24891.24
+
+ALL INTERVALS WITH VALID SPREADS:
+----------------------------------------------------------------------------------------------------
+
+1. Interval: 2026-02-04 09:30:45 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24500.00
+   Short Premium: $83.40, Long Premium: $26.80
+   Credit (per contract): $5660.00, Max Loss (per contract): $14340.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+56.60 per share
+   Total Valid Spreads: 171
+
+2. Interval: 2026-02-04 10:00:42 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24500.00
+   Short Premium: $60.60, Long Premium: $15.80
+   Credit (per contract): $4480.00, Max Loss (per contract): $15520.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+44.80 per share
+   Total Valid Spreads: 173
+
+3. Interval: 2026-02-04 09:15:33 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24640.00 / $24450.00
+   Short Premium: $42.30, Long Premium: $4.30
+   Credit (per contract): $3800.00, Max Loss (per contract): $15200.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+38.00 per share
+   Total Valid Spreads: 114
+
+4. Interval: 2026-02-04 09:45:40 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24500.00
+   Short Premium: $51.00, Long Premium: $14.20
+   Credit (per contract): $3680.00, Max Loss (per contract): $16320.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+36.80 per share
+   Total Valid Spreads: 165
+
+5. Interval: 2026-02-05 07:15:50 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24250.00 / $24060.00
+   Short Premium: $50.40, Long Premium: $19.40
+   Credit (per contract): $3100.00, Max Loss (per contract): $15900.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+31.00 per share
+   Total Valid Spreads: 435
+
+6. Interval: 2026-02-05 07:31:23 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24170.00 / $24020.00
+   Short Premium: $42.40, Long Premium: $12.00
+   Credit (per contract): $3040.00, Max Loss (per contract): $11960.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+30.40 per share
+   Total Valid Spreads: 401
+
+7. Interval: 2026-02-04 10:30:35 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24500.00
+   Short Premium: $33.00, Long Premium: $5.50
+   Credit (per contract): $2750.00, Max Loss (per contract): $17250.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+27.50 per share
+   Total Valid Spreads: 157
+
+8. Interval: 2026-02-03 11:01:44 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24890.00
+   Short Premium: $30.00, Long Premium: $4.30
+   Credit (per contract): $2570.00, Max Loss (per contract): $17430.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+25.70 per share
+   Total Valid Spreads: 310
+
+9. Interval: 2026-02-05 07:45:26 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24260.00 / $24070.00
+   Short Premium: $38.10, Long Premium: $13.00
+   Credit (per contract): $2510.00, Max Loss (per contract): $16490.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+25.10 per share
+   Total Valid Spreads: 387
+
+10. Interval: 2026-02-05 07:01:51 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24260.00 / $24070.00
+   Short Premium: $42.90, Long Premium: $18.70
+   Credit (per contract): $2420.00, Max Loss (per contract): $16580.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+24.20 per share
+   Total Valid Spreads: 412
+
+11. Interval: 2026-02-05 08:03:07 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24170.00 / $23980.00
+   Short Premium: $32.60, Long Premium: $8.50
+   Credit (per contract): $2410.00, Max Loss (per contract): $16590.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+24.10 per share
+   Total Valid Spreads: 414
+
+12. Interval: 2026-02-03 10:45:22 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24890.00
+   Short Premium: $25.20, Long Premium: $4.10
+   Credit (per contract): $2110.00, Max Loss (per contract): $17890.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+21.10 per share
+   Total Valid Spreads: 325
+
+13. Interval: 2026-02-03 10:30:51 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24890.00
+   Short Premium: $25.20, Long Premium: $5.00
+   Credit (per contract): $2020.00, Max Loss (per contract): $17980.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+20.20 per share
+   Total Valid Spreads: 327
+
+14. Interval: 2026-02-04 09:00:00 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24500.00
+   Short Premium: $24.00, Long Premium: $4.50
+   Credit (per contract): $1950.00, Max Loss (per contract): $18050.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+19.50 per share
+   Total Valid Spreads: 154
+
+15. Interval: 2026-02-03 09:30:18 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24900.00
+   Short Premium: $25.20, Long Premium: $6.90
+   Credit (per contract): $1830.00, Max Loss (per contract): $17170.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+18.30 per share
+   Total Valid Spreads: 330
+
+16. Interval: 2026-02-04 08:45:50 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24500.00
+   Short Premium: $24.60, Long Premium: $6.50
+   Credit (per contract): $1810.00, Max Loss (per contract): $18190.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+18.10 per share
+   Total Valid Spreads: 159
+
+17. Interval: 2026-02-04 10:15:31 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24500.00
+   Short Premium: $23.50, Long Premium: $5.80
+   Credit (per contract): $1770.00, Max Loss (per contract): $18230.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+17.70 per share
+   Total Valid Spreads: 148
+
+18. Interval: 2026-02-04 08:30:59 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24690.00 / $24500.00
+   Short Premium: $23.00, Long Premium: $5.90
+   Credit (per contract): $1710.00, Max Loss (per contract): $17290.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+17.10 per share
+   Total Valid Spreads: 162
+
+19. Interval: 2026-02-04 11:00:39 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24500.00
+   Short Premium: $18.30, Long Premium: $2.45
+   Credit (per contract): $1585.00, Max Loss (per contract): $18415.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+15.85 per share
+   Total Valid Spreads: 145
+
+20. Interval: 2026-02-05 06:47:54 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24240.00 / $24040.00
+   Short Premium: $24.60, Long Premium: $8.80
+   Credit (per contract): $1580.00, Max Loss (per contract): $18420.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+15.80 per share
+   Total Valid Spreads: 388
+
+21. Interval: 2026-02-03 10:15:34 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24890.00
+   Short Premium: $20.10, Long Premium: $4.50
+   Credit (per contract): $1560.00, Max Loss (per contract): $18440.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+15.60 per share
+   Total Valid Spreads: 308
+
+22. Interval: 2026-02-04 08:02:34 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24500.00
+   Short Premium: $21.30, Long Premium: $6.30
+   Credit (per contract): $1500.00, Max Loss (per contract): $18500.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+15.00 per share
+   Total Valid Spreads: 164
+
+23. Interval: 2026-02-03 11:15:04 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24910.00
+   Short Premium: $17.70, Long Premium: $2.90
+   Credit (per contract): $1480.00, Max Loss (per contract): $16520.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+14.80 per share
+   Total Valid Spreads: 298
+
+24. Interval: 2026-02-04 10:45:07 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24500.00
+   Short Premium: $14.80, Long Premium: $2.65
+   Credit (per contract): $1215.00, Max Loss (per contract): $18785.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+12.15 per share
+   Total Valid Spreads: 140
+
+25. Interval: 2026-02-05 06:41:25 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24260.00 / $24070.00
+   Short Premium: $23.40, Long Premium: $12.00
+   Credit (per contract): $1140.00, Max Loss (per contract): $17860.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+11.40 per share
+   Total Valid Spreads: 345
+
+26. Interval: 2026-02-04 07:30:31 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24650.00 / $24450.00
+   Short Premium: $13.90, Long Premium: $2.95
+   Credit (per contract): $1095.00, Max Loss (per contract): $18905.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+10.95 per share
+   Total Valid Spreads: 85
+
+27. Interval: 2026-02-03 11:30:17 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24890.00
+   Short Premium: $13.20, Long Premium: $2.30
+   Credit (per contract): $1090.00, Max Loss (per contract): $18910.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+10.90 per share
+   Total Valid Spreads: 289
+
+28. Interval: 2026-02-03 10:00:23 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24900.00
+   Short Premium: $13.80, Long Premium: $2.95
+   Credit (per contract): $1085.00, Max Loss (per contract): $17915.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+10.85 per share
+   Total Valid Spreads: 301
+
+29. Interval: 2026-02-03 07:15:50 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25070.00 / $24910.00
+   Short Premium: $13.30, Long Premium: $3.30
+   Credit (per contract): $1000.00, Max Loss (per contract): $15000.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+10.00 per share
+   Total Valid Spreads: 252
+
+30. Interval: 2026-02-04 08:16:26 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24500.00
+   Short Premium: $13.50, Long Premium: $3.70
+   Credit (per contract): $980.00, Max Loss (per contract): $19020.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+9.80 per share
+   Total Valid Spreads: 147
+
+31. Interval: 2026-02-05 08:15:32 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24250.00 / $24050.00
+   Short Premium: $14.80, Long Premium: $5.00
+   Credit (per contract): $980.00, Max Loss (per contract): $19020.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+9.80 per share
+   Total Valid Spreads: 354
+
+32. Interval: 2026-02-04 11:15:18 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24500.00
+   Short Premium: $10.50, Long Premium: $1.35
+   Credit (per contract): $915.00, Max Loss (per contract): $19085.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+9.15 per share
+   Total Valid Spreads: 139
+
+33. Interval: 2026-02-03 09:45:14 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24890.00
+   Short Premium: $12.30, Long Premium: $3.60
+   Credit (per contract): $870.00, Max Loss (per contract): $19130.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+8.70 per share
+   Total Valid Spreads: 262
+
+34. Interval: 2026-02-04 06:47:13 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24550.00
+   Short Premium: $14.00, Long Premium: $5.80
+   Credit (per contract): $820.00, Max Loss (per contract): $14180.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+8.20 per share
+   Total Valid Spreads: 144
+
+35. Interval: 2026-02-03 11:45:02 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24920.00
+   Short Premium: $8.90, Long Premium: $1.35
+   Credit (per contract): $755.00, Max Loss (per contract): $16245.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+7.55 per share
+   Total Valid Spreads: 247
+
+36. Interval: 2026-02-04 06:32:58 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24690.00 / $24500.00
+   Short Premium: $11.80, Long Premium: $4.40
+   Credit (per contract): $740.00, Max Loss (per contract): $18260.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+7.40 per share
+   Total Valid Spreads: 131
+
+37. Interval: 2026-02-03 12:00:30 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24890.00
+   Short Premium: $7.80, Long Premium: $1.00
+   Credit (per contract): $680.00, Max Loss (per contract): $19320.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+6.80 per share
+   Total Valid Spreads: 239
+
+38. Interval: 2026-02-04 07:46:08 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24500.00
+   Short Premium: $10.60, Long Premium: $3.80
+   Credit (per contract): $680.00, Max Loss (per contract): $19320.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+6.80 per share
+   Total Valid Spreads: 143
+
+39. Interval: 2026-02-05 08:31:32 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $23970.00 / $23800.00
+   Short Premium: $7.70, Long Premium: $1.50
+   Credit (per contract): $620.00, Max Loss (per contract): $16380.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+6.20 per share
+   Total Valid Spreads: 296
+
+40. Interval: 2026-02-04 07:00:54 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24500.00
+   Short Premium: $11.20, Long Premium: $5.10
+   Credit (per contract): $610.00, Max Loss (per contract): $19390.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+6.10 per share
+   Total Valid Spreads: 143
+
+41. Interval: 2026-02-04 07:17:57 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24690.00 / $24500.00
+   Short Premium: $9.50, Long Premium: $3.40
+   Credit (per contract): $610.00, Max Loss (per contract): $18390.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+6.10 per share
+   Total Valid Spreads: 126
+
+42. Interval: 2026-02-03 09:15:14 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25070.00 / $24870.00
+   Short Premium: $8.70, Long Premium: $3.00
+   Credit (per contract): $570.00, Max Loss (per contract): $19430.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+5.70 per share
+   Total Valid Spreads: 275
+
+43. Interval: 2026-02-03 07:01:03 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24890.00
+   Short Premium: $7.80, Long Premium: $2.40
+   Credit (per contract): $540.00, Max Loss (per contract): $19460.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+5.40 per share
+   Total Valid Spreads: 253
+
+44. Interval: 2026-02-03 09:00:12 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25080.00 / $24880.00
+   Short Premium: $6.20, Long Premium: $1.30
+   Credit (per contract): $490.00, Max Loss (per contract): $19510.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+4.90 per share
+   Total Valid Spreads: 225
+
+45. Interval: 2026-02-03 07:31:29 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25080.00 / $24880.00
+   Short Premium: $7.10, Long Premium: $2.25
+   Credit (per contract): $485.00, Max Loss (per contract): $19515.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+4.85 per share
+   Total Valid Spreads: 264
+
+46. Interval: 2026-02-05 09:02:25 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24240.00 / $24040.00
+   Short Premium: $6.00, Long Premium: $2.00
+   Credit (per contract): $400.00, Max Loss (per contract): $19600.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+4.00 per share
+   Total Valid Spreads: 283
+
+47. Interval: 2026-02-03 08:30:40 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24890.00
+   Short Premium: $4.90, Long Premium: $1.40
+   Credit (per contract): $350.00, Max Loss (per contract): $19650.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+3.50 per share
+   Total Valid Spreads: 252
+
+48. Interval: 2026-02-03 08:15:37 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24890.00
+   Short Premium: $4.80, Long Premium: $1.55
+   Credit (per contract): $325.00, Max Loss (per contract): $19675.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+3.25 per share
+   Total Valid Spreads: 260
+
+49. Interval: 2026-02-05 09:15:14 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24250.00 / $24060.00
+   Short Premium: $4.50, Long Premium: $1.35
+   Credit (per contract): $315.00, Max Loss (per contract): $18685.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+3.15 per share
+   Total Valid Spreads: 231
+
+50. Interval: 2026-02-03 08:01:07 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25070.00 / $24870.00
+   Short Premium: $4.20, Long Premium: $1.20
+   Credit (per contract): $300.00, Max Loss (per contract): $19700.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+3.00 per share
+   Total Valid Spreads: 243
+
+51. Interval: 2026-02-05 08:47:04 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24260.00 / $24060.00
+   Short Premium: $4.20, Long Premium: $1.70
+   Credit (per contract): $250.00, Max Loss (per contract): $19750.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+2.50 per share
+   Total Valid Spreads: 231
+
+52. Interval: 2026-02-03 08:45:09 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24890.00
+   Short Premium: $3.60, Long Premium: $1.25
+   Credit (per contract): $235.00, Max Loss (per contract): $19765.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+2.35 per share
+   Total Valid Spreads: 215
+
+53. Interval: 2026-02-03 06:45:04 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25080.00 / $24880.00
+   Short Premium: $3.30, Long Premium: $1.30
+   Credit (per contract): $200.00, Max Loss (per contract): $19800.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+2.00 per share
+   Total Valid Spreads: 212
+
+54. Interval: 2026-02-05 10:17:25 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24250.00 / $24060.00
+   Short Premium: $2.70, Long Premium: $0.95
+   Credit (per contract): $175.00, Max Loss (per contract): $18825.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+1.75 per share
+   Total Valid Spreads: 158
+
+55. Interval: 2026-02-05 09:45:23 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24260.00 / $24070.00
+   Short Premium: $2.70, Long Premium: $1.00
+   Credit (per contract): $170.00, Max Loss (per contract): $18830.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+1.70 per share
+   Total Valid Spreads: 149
+
+56. Interval: 2026-02-05 10:31:19 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24260.00 / $24070.00
+   Short Premium: $2.50, Long Premium: $0.85
+   Credit (per contract): $165.00, Max Loss (per contract): $18835.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+1.65 per share
+   Total Valid Spreads: 136
+
+57. Interval: 2026-02-05 10:00:45 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24250.00 / $24060.00
+   Short Premium: $2.55, Long Premium: $0.95
+   Credit (per contract): $160.00, Max Loss (per contract): $18840.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+1.60 per share
+   Total Valid Spreads: 161
+
+58. Interval: 2026-02-03 07:46:41 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24900.00
+   Short Premium: $2.75, Long Premium: $1.20
+   Credit (per contract): $155.00, Max Loss (per contract): $18845.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+1.55 per share
+   Total Valid Spreads: 195
+
+59. Interval: 2026-02-05 09:30:01 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24250.00 / $24060.00
+   Short Premium: $2.40, Long Premium: $1.00
+   Credit (per contract): $140.00, Max Loss (per contract): $18860.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+1.40 per share
+   Total Valid Spreads: 169
+
+60. Interval: 2026-02-02 06:42:40 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25552.39 (from 2026-01-30)
+   Current Day Close: $25738.61 (from 2026-02-02), Price Change: +0.73%
+   Best Spread: $24900.00 / $24700.00
+   Short Premium: $2.00, Long Premium: $0.95
+   Credit (per contract): $105.00, Max Loss (per contract): $19895.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+1.05 per share
+   Total Valid Spreads: 29
+
+61. Interval: 2026-02-05 06:41:25 PST
+   Underlying: NDX, Type: CALL, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $25560.00 / $25760.00
+   Short Premium: $1.85, Long Premium: $0.80
+   Credit (per contract): $105.00, Max Loss (per contract): $19895.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+1.05 per share
+   Total Valid Spreads: 68
+
+62. Interval: 2026-02-04 11:31:05 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24500.00
+   Short Premium: $1.70, Long Premium: $0.70
+   Credit (per contract): $100.00, Max Loss (per contract): $19900.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+1.00 per share
+   Total Valid Spreads: 50
+
+63. Interval: 2026-02-05 10:45:53 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24260.00 / $24060.00
+   Short Premium: $1.80, Long Premium: $0.90
+   Credit (per contract): $90.00, Max Loss (per contract): $19910.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.90 per share
+   Total Valid Spreads: 82
+
+64. Interval: 2026-02-03 06:32:28 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25070.00 / $24870.00
+   Short Premium: $1.65, Long Premium: $0.85
+   Credit (per contract): $80.00, Max Loss (per contract): $19920.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.80 per share
+   Total Valid Spreads: 160
+
+65. Interval: 2026-02-03 12:15:11 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $24900.00
+   Short Premium: $1.35, Long Premium: $0.60
+   Credit (per contract): $75.00, Max Loss (per contract): $18925.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.75 per share
+   Total Valid Spreads: 46
+
+66. Interval: 2026-02-05 06:47:54 PST
+   Underlying: NDX, Type: CALL, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $25560.00 / $25720.00
+   Short Premium: $1.80, Long Premium: $1.15
+   Credit (per contract): $65.00, Max Loss (per contract): $15935.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.65 per share
+   Total Valid Spreads: 50
+
+67. Interval: 2026-02-04 12:00:57 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24680.00 / $24500.00
+   Short Premium: $0.85, Long Premium: $0.25
+   Credit (per contract): $60.00, Max Loss (per contract): $17940.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.60 per share
+   Total Valid Spreads: 24
+
+68. Interval: 2026-02-04 11:45:55 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25338.62 (from 2026-02-03)
+   Current Day Close: $24891.24 (from 2026-02-04), Price Change: -1.77%
+   Best Spread: $24700.00 / $24500.00
+   Short Premium: $0.70, Long Premium: $0.25
+   Credit (per contract): $45.00, Max Loss (per contract): $19955.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.45 per share
+   Total Valid Spreads: 14
+
+69. Interval: 2026-02-05 07:01:51 PST
+   Underlying: NDX, Type: CALL, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $26000.00 / $26190.00
+   Short Premium: $0.40, Long Premium: $0.05
+   Credit (per contract): $35.00, Max Loss (per contract): $18965.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.35 per share
+   Total Valid Spreads: 2
+
+70. Interval: 2026-02-02 06:46:22 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25552.39 (from 2026-01-30)
+   Current Day Close: $25738.61 (from 2026-02-02), Price Change: +0.73%
+   Best Spread: $24910.00 / $24750.00
+   Short Premium: $1.15, Long Premium: $0.85
+   Credit (per contract): $30.00, Max Loss (per contract): $15970.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.30 per share
+   Total Valid Spreads: 10
+
+71. Interval: 2026-02-05 11:31:45 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24200.00 / $24000.00
+   Short Premium: $0.60, Long Premium: $0.40
+   Credit (per contract): $20.00, Max Loss (per contract): $19980.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.20 per share
+   Total Valid Spreads: 3
+
+72. Interval: 2026-02-02 07:00:02 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25552.39 (from 2026-01-30)
+   Current Day Close: $25738.61 (from 2026-02-02), Price Change: +0.73%
+   Best Spread: $24900.00 / $24700.00
+   Short Premium: $0.65, Long Premium: $0.50
+   Credit (per contract): $15.00, Max Loss (per contract): $19985.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.15 per share
+   Total Valid Spreads: 3
+
+73. Interval: 2026-02-05 11:01:59 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24240.00 / $24100.00
+   Short Premium: $0.50, Long Premium: $0.35
+   Credit (per contract): $15.00, Max Loss (per contract): $13985.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.15 per share
+   Total Valid Spreads: 12
+
+74. Interval: 2026-02-06 12:00:07 PST
+   Underlying: NDX, Type: CALL, Prev Close: $24548.69 (from 2026-02-05)
+   Current Day Close: $25075.77 (from 2026-02-06), Price Change: +2.15%
+   Best Spread: $25170.00 / $25300.00
+   Short Premium: $0.25, Long Premium: $0.10
+   Credit (per contract): $15.00, Max Loss (per contract): $12985.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.15 per share
+   Total Valid Spreads: 11
+
+75. Interval: 2026-02-06 11:46:49 PST
+   Underlying: NDX, Type: CALL, Prev Close: $24548.69 (from 2026-02-05)
+   Current Day Close: $25075.77 (from 2026-02-06), Price Change: +2.15%
+   Best Spread: $25170.00 / $25200.00
+   Short Premium: $0.40, Long Premium: $0.30
+   Credit (per contract): $10.00, Max Loss (per contract): $2990.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.10 per share
+   Total Valid Spreads: 18
+
+76. Interval: 2026-02-06 12:15:46 PST
+   Underlying: NDX, Type: CALL, Prev Close: $24548.69 (from 2026-02-05)
+   Current Day Close: $25075.77 (from 2026-02-06), Price Change: +2.15%
+   Best Spread: $25190.00 / $25260.00
+   Short Premium: $0.25, Long Premium: $0.15
+   Credit (per contract): $10.00, Max Loss (per contract): $6990.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.10 per share
+   Total Valid Spreads: 5
+
+77. Interval: 2026-02-06 12:30:20 PST
+   Underlying: NDX, Type: CALL, Prev Close: $24548.69 (from 2026-02-05)
+   Current Day Close: $25075.77 (from 2026-02-06), Price Change: +2.15%
+   Best Spread: $25180.00 / $25260.00
+   Short Premium: $0.20, Long Premium: $0.10
+   Credit (per contract): $10.00, Max Loss (per contract): $7990.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.10 per share
+   Total Valid Spreads: 5
+
+78. Interval: 2026-02-03 12:30:28 PST
+   Underlying: NDX, Type: PUT, Prev Close: $25738.61 (from 2026-02-02)
+   Current Day Close: $25338.62 (from 2026-02-03), Price Change: -1.55%
+   Best Spread: $25090.00 / $25000.00
+   Short Premium: $0.20, Long Premium: $0.15
+   Credit (per contract): $5.00, Max Loss (per contract): $8995.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.05 per share
+   Total Valid Spreads: 1
+
+79. Interval: 2026-02-05 11:15:36 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24200.00 / $24000.00
+   Short Premium: $0.20, Long Premium: $0.15
+   Credit (per contract): $5.00, Max Loss (per contract): $19995.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.05 per share
+   Total Valid Spreads: 1
+
+80. Interval: 2026-02-05 11:31:45 PST
+   Underlying: NDX, Type: CALL, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $25600.00 / $25700.00
+   Short Premium: $0.20, Long Premium: $0.15
+   Credit (per contract): $5.00, Max Loss (per contract): $9995.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.05 per share
+   Total Valid Spreads: 2
+
+81. Interval: 2026-02-05 11:45:02 PST
+   Underlying: NDX, Type: CALL, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $25600.00 / $25800.00
+   Short Premium: $0.20, Long Premium: $0.15
+   Credit (per contract): $5.00, Max Loss (per contract): $19995.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.05 per share
+   Total Valid Spreads: 1
+
+82. Interval: 2026-02-05 08:31:32 PST
+   Underlying: NDX, Type: CALL, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $26000.00 / $26200.00
+   Short Premium: $0.10, Long Premium: $0.05
+   Credit (per contract): $5.00, Max Loss (per contract): $19995.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.05 per share
+   Total Valid Spreads: 1
+
+83. Interval: 2026-02-06 12:45:56 PST
+   Underlying: NDX, Type: CALL, Prev Close: $24548.69 (from 2026-02-05)
+   Current Day Close: $25075.77 (from 2026-02-06), Price Change: +2.15%
+   Best Spread: $25200.00 / $25310.00
+   Short Premium: $0.10, Long Premium: $0.05
+   Credit (per contract): $5.00, Max Loss (per contract): $10995.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.05 per share
+   Total Valid Spreads: 1
+
+84. Interval: 2026-02-05 12:15:07 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24200.00 / $24000.00
+   Short Premium: $0.30, Long Premium: $0.25
+   Credit (per contract): $5.00, Max Loss (per contract): $19995.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.05 per share
+   Total Valid Spreads: 1
+
+85. Interval: 2026-02-05 12:31:20 PST
+   Underlying: NDX, Type: PUT, Prev Close: $24891.24 (from 2026-02-04)
+   Current Day Close: $24548.69 (from 2026-02-05), Price Change: -1.38%
+   Best Spread: $24100.00 / $24000.00
+   Short Premium: $0.15, Long Premium: $0.10
+   Credit (per contract): $5.00, Max Loss (per contract): $9995.00
+   Backtest: ✓ SUCCESS (EOD close did not breach spread)
+   Actual P&L: $+0.05 per share
+   Total Valid Spreads: 1
+
+====================================================================================================
+
+====================================================================================================
+MULTI-FILE TRADING STATISTICS
+====================================================================================================
+
+📁 FILE PROCESSING:
+  Total Files Processed: 5
+  Files with Valid Results: 5 (100.0%)
+
+📊 TRADING ACTIVITY:
+  Total Trades: 85
+  Unique Trading Days: 5
+  Average Trades per Day: 17.0
+
+✅ TRADE OUTCOMES:
+  Successful: 85 (100.0%)
+  Failed: 0 (0.0%)
+  Pending: 0 (0.0%)
+  Win Rate (excl. pending): 100.0% (85/85)
+
+💰 FINANCIAL PERFORMANCE:
+  Total Credits Collected: $79,560.00
+  Total Gains (wins only): $79,560.00
+  Total Losses (failures): $0.00
+  Net P&L: $79,560.00 ✓
+
+📊 PUT vs CALL BREAKDOWN:
+  Metric                    PUT                  CALL                
+  ------------------------- -------------------- --------------------
+  Trades                    74                   11                  
+  Total Credits             $         79,290.00 $            270.00
+  Total Gains               $         79,290.00 $            270.00
+  Total Losses              $              0.00 $              0.00
+  Net P&L                   $         79,290.00 $            270.00
+  Win Rate                               100.0%              100.0%
+
+📈 AVERAGES:
+  Average Credit per Trade: $936.00
+  Average Gain per Win: $936.00
+
+🎯 RISK METRICS:
+  Total Risk Deployed: $1,473,440.00
+  Return on Risk (ROI): +5.40%
+  Expectancy per Trade: $936.00
+
+🏆 BEST/WORST TRADES:
+  Best Trade: $5,660.00 credit on 2026-02-04 09:30 (put $24700.00/$24500.00)
+
+⏰ HOURLY PERFORMANCE SUMMARY:
+----------------------------------------------------------------------------------------------------
+Hour     Trades     Success      Failure      Pending      Win Rate     Net P&L        
+----------------------------------------------------------------------------------------------------
+06:00    10         10           0            0             100.0%      $    4,865.00
+07:00    14         14           0            0             100.0%      $   16,295.00
+08:00    13         13           0            0             100.0%      $   11,475.00
+09:00    12         12           0            0             100.0%      $   19,875.00
+10:00    12         12           0            0             100.0%      $   17,580.00
+11:00    14         14           0            0             100.0%      $    8,600.00
+12:00    10         10           0            0             100.0%      $      870.00
+----------------------------------------------------------------------------------------------------
+
+⏰ 10-MINUTE BLOCK BREAKDOWN (Top 3 Hours):
+----------------------------------------------------------------------------------------------------
+
+  Hour 07:00 - 14 trades | 14✓ / 0✗ (100.0% win rate) | Net P&L: $+16,295.00
+    Block        Trades   Success    Failure    Win Rate     Net P&L        
+    ------------ -------- ---------- ---------- ------------ ---------------
+    07:00-09     5        5          0           100.0%      $    3,620.00
+    07:10-19     3        3          0           100.0%      $    4,710.00
+    07:30-39     3        3          0           100.0%      $    4,620.00
+    07:40-49     3        3          0           100.0%      $    3,345.00
+
+  Hour 11:00 - 14 trades | 14✓ / 0✗ (100.0% win rate) | Net P&L: $+8,600.00
+    Block        Trades   Success    Failure    Win Rate     Net P&L        
+    ------------ -------- ---------- ---------- ------------ ---------------
+    11:00-09     3        3          0           100.0%      $    4,170.00
+    11:10-19     3        3          0           100.0%      $    2,400.00
+    11:30-39     4        4          0           100.0%      $    1,215.00
+    11:40-49     4        4          0           100.0%      $      815.00
+
+  Hour 08:00 - 13 trades | 13✓ / 0✗ (100.0% win rate) | Net P&L: $+11,475.00
+    Block        Trades   Success    Failure    Win Rate     Net P&L        
+    ------------ -------- ---------- ---------- ------------ ---------------
+    08:00-09     3        3          0           100.0%      $    4,210.00
+    08:10-19     3        3          0           100.0%      $    2,285.00
+    08:30-39     4        4          0           100.0%      $    2,685.00
+    08:40-49     3        3          0           100.0%      $    2,295.00
+
+====================================================================================================
+
+====================================================================================================
+Running TIME ALLOCATED TIERED Strategy via Strategy Framework...
+====================================================================================================
+
+STRATEGY RESULTS (time_allocated_tiered):
+  Total Trades: 6
+  Winning: 3, Losing: 3
+  Win Rate: 50.0%
+  Total Credit: $73,860.00
+  Total Max Loss: $932,000.00
+  Net P&L: $71,078.11
+  ROI: +7.63%
+
+====================================================================================================

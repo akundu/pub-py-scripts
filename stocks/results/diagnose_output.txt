@@ -1,0 +1,240 @@
+
+========================================================================================================================
+ 2026-01-26  |  Prev Close: 25,605  |  Actual Close: 25,713  (+108 / +0.42%)
+  MAs: 5d=25,393  10d=25,528  20d=25,511  50d=25,322
+  MA Trend: MA_BR  |  Price vs MA50: P50_AB
+========================================================================================================================
+
+  10:00 ET  |  Price: 25,707  |  Pred: [25,556 - 25,847]  Mid: 25,716  |  Err: -3 (-0.01%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=FLAT | IntraMove=UP | PriorDay=UP | Range=NORMAL | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_UP | FHRange=FH_W | OpEx=N | OD=OD_UP | GapFill=NG | Time=T_ERL | ORB=ORB_W | MATrend=MA_BR | PvsMA50=P50_AB
+
+  11:00 ET  |  Price: 25,751  |  Pred: [25,599 - 25,890]  Mid: 25,759  |  Err: -46 (-0.18%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=FLAT | IntraMove=UP | PriorDay=UP | Range=NORMAL | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_UP | FHRange=FH_W | OpEx=N | OD=OD_UP | GapFill=NG | Time=T_MID | ORB=ORB_A | MATrend=MA_BR | PvsMA50=P50_AB
+
+  12:00 ET  |  Price: 25,795  |  Pred: [25,643 - 25,934]  Mid: 25,803  |  Err: -90 (-0.35%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=FLAT | IntraMove=UP | PriorDay=UP | Range=NORMAL | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_UP | FHRange=FH_W | OpEx=N | OD=OD_UP | GapFill=NG | Time=T_MDY | ORB=ORB_A | MATrend=MA_BR | PvsMA50=P50_AB
+
+  13:00 ET  |  Price: 25,759  |  Pred: [25,607 - 25,898]  Mid: 25,767  |  Err: -54 (-0.21%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=FLAT | IntraMove=UP | PriorDay=UP | Range=NORMAL | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_UP | FHRange=FH_W | OpEx=N | OD=OD_UP | GapFill=NG | Time=T_MDY | ORB=ORB_A | MATrend=MA_BR | PvsMA50=P50_AB
+
+  14:00 ET  |  Price: 25,764  |  Pred: [25,612 - 25,903]  Mid: 25,772  |  Err: -59 (-0.23%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=FLAT | IntraMove=UP | PriorDay=UP | Range=NORMAL | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_UP | FHRange=FH_W | OpEx=N | OD=OD_UP | GapFill=NG | Time=T_AFT | ORB=ORB_A | MATrend=MA_BR | PvsMA50=P50_AB
+
+  15:00 ET  |  Price: 25,754  |  Pred: [25,602 - 25,893]  Mid: 25,762  |  Err: -49 (-0.19%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=FLAT | IntraMove=UP | PriorDay=UP | Range=NORMAL | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_UP | FHRange=FH_W | OpEx=N | OD=OD_UP | GapFill=NG | Time=T_AFT | ORB=ORB_A | MATrend=MA_BR | PvsMA50=P50_AB
+
+========================================================================================================================
+ 2026-01-27  |  Prev Close: 25,713  |  Actual Close: 25,940  (+227 / +0.88%)
+  MAs: 5d=25,430  10d=25,522  20d=25,514  50d=25,325
+  MA Trend: MA_BR  |  Price vs MA50: P50_AB
+========================================================================================================================
+
+  10:00 ET  |  Price: 25,926  |  Pred: [25,773 - 26,066]  Mid: 25,934  |  Err: +6 (+0.02%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_UP | IntraMove=UP | PriorDay=UP | Range=NORMAL | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_SU | FHRange=FH_N | OpEx=N | OD=OD_FL | GapFill=GU_UF | Time=T_ERL | ORB=ORB_A | MATrend=MA_BR | PvsMA50=P50_WA
+
+  11:00 ET  |  Price: 25,954  |  Pred: [25,801 - 26,095]  Mid: 25,962  |  Err: -23 (-0.09%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_UP | IntraMove=UP | PriorDay=UP | Range=NORMAL | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_SU | FHRange=FH_N | OpEx=N | OD=OD_FL | GapFill=GU_UF | Time=T_MID | ORB=ORB_A | MATrend=MA_BR | PvsMA50=P50_WA
+
+  12:00 ET  |  Price: 25,947  |  Pred: [25,794 - 26,088]  Mid: 25,956  |  Err: -16 (-0.06%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_UP | IntraMove=UP | PriorDay=UP | Range=NORMAL | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_SU | FHRange=FH_N | OpEx=N | OD=OD_FL | GapFill=GU_UF | Time=T_MDY | ORB=ORB_A | MATrend=MA_BR | PvsMA50=P50_WA
+
+  13:00 ET  |  Price: 25,923  |  Pred: [25,770 - 26,063]  Mid: 25,931  |  Err: +9 (+0.03%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_UP | IntraMove=UP | PriorDay=UP | Range=NORMAL | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_SU | FHRange=FH_N | OpEx=N | OD=OD_FL | GapFill=GU_UF | Time=T_MDY | ORB=ORB_W | MATrend=MA_BR | PvsMA50=P50_WA
+
+  14:00 ET  |  Price: 25,947  |  Pred: [25,794 - 26,087]  Mid: 25,955  |  Err: -15 (-0.06%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_UP | IntraMove=UP | PriorDay=UP | Range=NORMAL | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_SU | FHRange=FH_N | OpEx=N | OD=OD_FL | GapFill=GU_UF | Time=T_AFT | ORB=ORB_A | MATrend=MA_BR | PvsMA50=P50_WA
+
+  15:00 ET  |  Price: 25,962  |  Pred: [25,809 - 26,102]  Mid: 25,970  |  Err: -30 (-0.12%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_UP | IntraMove=UP | PriorDay=UP | Range=NORMAL | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_SU | FHRange=FH_N | OpEx=N | OD=OD_FL | GapFill=GU_UF | Time=T_AFT | ORB=ORB_A | MATrend=MA_BR | PvsMA50=P50_WA
+
+========================================================================================================================
+ 2026-01-28  |  Prev Close: 25,940  |  Actual Close: 26,023  (+83 / +0.32%)
+  MAs: 5d=25,621  10d=25,538  20d=25,529  50d=25,334
+  MA Trend: MA_SB  |  Price vs MA50: P50_WA
+========================================================================================================================
+
+  10:00 ET  |  Price: 26,127  |  Pred: [25,973 - 26,268]  Mid: 26,135  |  Err: -112 (-0.43%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_UP | IntraMove=FLAT | PriorDay=UP | Range=TIGHT | VIXChg=VX_UP | PriorPos=CL_HIGH | Mom5d=M5_SU | FHRange=FH_N | OpEx=N | OD=OD_UP | GapFill=GU_UF | Time=T_ERL | ORB=ORB_W | MATrend=MA_SB | PvsMA50=P50_WA
+
+  11:00 ET  |  Price: 26,052  |  Pred: [25,898 - 26,192]  Mid: 26,059  |  Err: -37 (-0.14%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_UP | IntraMove=DOWN | PriorDay=UP | Range=NORMAL | VIXChg=VX_UP | PriorPos=CL_HIGH | Mom5d=M5_SU | FHRange=FH_N | OpEx=N | OD=OD_UP | GapFill=GU_UF | Time=T_MID | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_WA
+
+  12:00 ET  |  Price: 26,007  |  Pred: [25,854 - 26,147]  Mid: 26,015  |  Err: +8 (+0.03%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_UP | IntraMove=DOWN | PriorDay=UP | Range=NORMAL | VIXChg=VX_UP | PriorPos=CL_HIGH | Mom5d=M5_SU | FHRange=FH_N | OpEx=N | OD=OD_UP | GapFill=GU_UF | Time=T_MDY | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_WA
+
+  13:00 ET  |  Price: 26,020  |  Pred: [25,867 - 26,161]  Mid: 26,028  |  Err: -5 (-0.02%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_UP | IntraMove=DOWN | PriorDay=UP | Range=NORMAL | VIXChg=VX_UP | PriorPos=CL_HIGH | Mom5d=M5_SU | FHRange=FH_N | OpEx=N | OD=OD_UP | GapFill=GU_UF | Time=T_MDY | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_WA
+
+  14:00 ET  |  Price: 26,026  |  Pred: [25,872 - 26,166]  Mid: 26,033  |  Err: -11 (-0.04%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_UP | IntraMove=DOWN | PriorDay=UP | Range=NORMAL | VIXChg=VX_UP | PriorPos=CL_HIGH | Mom5d=M5_SU | FHRange=FH_N | OpEx=N | OD=OD_UP | GapFill=GU_UF | Time=T_AFT | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_WA
+
+  15:00 ET  |  Price: 26,055  |  Pred: [25,901 - 26,196]  Mid: 26,063  |  Err: -40 (-0.15%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_UP | IntraMove=DOWN | PriorDay=UP | Range=NORMAL | VIXChg=VX_UP | PriorPos=CL_HIGH | Mom5d=M5_SU | FHRange=FH_N | OpEx=N | OD=OD_UP | GapFill=GU_UF | Time=T_AFT | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_WA
+
+========================================================================================================================
+ 2026-01-29  |  Prev Close: 26,023  |  Actual Close: 25,884  (-138 / -0.53%)
+  MAs: 5d=25,760  10d=25,566  20d=25,554  50d=25,354
+  MA Trend: MA_SB  |  Price vs MA50: P50_WA
+========================================================================================================================
+
+  10:00 ET  |  Price: 25,670  |  Pred: [25,523 - 25,809]  Mid: 25,678  |  Err: +206 (+0.80%)  |  MISS  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=FLAT | IntraMove=DOWN | PriorDay=UP | Range=V_WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_UP | FHRange=FH_W | OpEx=N | OD=OD_SD | GapFill=NG | Time=T_ERL | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_AB
+
+  11:00 ET  |  Price: 25,439  |  Pred: [25,293 - 25,577]  Mid: 25,447  |  Err: +437 (+1.69%)  |  MISS  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=FLAT | IntraMove=DOWN | PriorDay=UP | Range=V_WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_FL | FHRange=FH_W | OpEx=N | OD=OD_SD | GapFill=NG | Time=T_MID | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_AT
+
+  12:00 ET  |  Price: 25,624  |  Pred: [25,477 - 25,763]  Mid: 25,632  |  Err: +252 (+0.97%)  |  MISS  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=FLAT | IntraMove=DOWN | PriorDay=UP | Range=V_WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_FL | FHRange=FH_W | OpEx=N | OD=OD_SD | GapFill=NG | Time=T_MDY | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_AB
+
+  13:00 ET  |  Price: 25,687  |  Pred: [25,539 - 25,825]  Mid: 25,694  |  Err: +190 (+0.73%)  |  MISS  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=FLAT | IntraMove=DOWN | PriorDay=UP | Range=V_WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_UP | FHRange=FH_W | OpEx=N | OD=OD_SD | GapFill=NG | Time=T_MDY | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_AB
+
+  14:00 ET  |  Price: 25,722  |  Pred: [25,574 - 25,861]  Mid: 25,730  |  Err: +155 (+0.60%)  |  MISS  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=FLAT | IntraMove=DOWN | PriorDay=UP | Range=V_WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_UP | FHRange=FH_W | OpEx=N | OD=OD_SD | GapFill=NG | Time=T_AFT | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_AB
+
+  15:00 ET  |  Price: 25,733  |  Pred: [25,585 - 25,872]  Mid: 25,740  |  Err: +144 (+0.56%)  |  MISS  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=FLAT | IntraMove=DOWN | PriorDay=UP | Range=V_WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_UP | FHRange=FH_W | OpEx=N | OD=OD_SD | GapFill=NG | Time=T_AFT | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_AB
+
+========================================================================================================================
+ 2026-01-30  |  Prev Close: 25,884  |  Actual Close: 25,552  (-332 / -1.28%)
+  MAs: 5d=25,833  10d=25,607  20d=25,575  50d=25,372
+  MA Trend: MA_SB  |  Price vs MA50: P50_WA
+========================================================================================================================
+
+  10:00 ET  |  Price: 25,702  |  Pred: [25,554 - 25,843]  Mid: 25,710  |  Err: -158 (-0.62%)  |  MISS  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_DOWN | IntraMove=FLAT | PriorDay=DOWN | Range=TIGHT | VIXChg=VX_UP | PriorPos=CL_UPR | Mom5d=M5_FL | FHRange=FH_W | OpEx=N | OD=OD_UP | GapFill=GD_UF | Time=T_ERL | ORB=ORB_W | MATrend=MA_SB | PvsMA50=P50_AB
+
+  11:00 ET  |  Price: 25,721  |  Pred: [25,573 - 25,862]  Mid: 25,729  |  Err: -177 (-0.69%)  |  MISS  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_DOWN | IntraMove=FLAT | PriorDay=DOWN | Range=NORMAL | VIXChg=VX_UP | PriorPos=CL_UPR | Mom5d=M5_FL | FHRange=FH_W | OpEx=N | OD=OD_UP | GapFill=GD_UF | Time=T_MID | ORB=ORB_W | MATrend=MA_SB | PvsMA50=P50_AB
+
+  12:00 ET  |  Price: 25,602  |  Pred: [25,455 - 25,742]  Mid: 25,610  |  Err: -58 (-0.23%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_DOWN | IntraMove=DOWN | PriorDay=DOWN | Range=NORMAL | VIXChg=VX_UP | PriorPos=CL_UPR | Mom5d=M5_FL | FHRange=FH_W | OpEx=N | OD=OD_UP | GapFill=GD_UF | Time=T_MDY | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_AB
+
+  13:00 ET  |  Price: 25,568  |  Pred: [25,421 - 25,708]  Mid: 25,576  |  Err: -24 (-0.09%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_DOWN | IntraMove=DOWN | PriorDay=DOWN | Range=WIDE | VIXChg=VX_UP | PriorPos=CL_UPR | Mom5d=M5_FL | FHRange=FH_W | OpEx=N | OD=OD_UP | GapFill=GD_UF | Time=T_MDY | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_AB
+
+  14:00 ET  |  Price: 25,638  |  Pred: [25,491 - 25,779]  Mid: 25,646  |  Err: -94 (-0.37%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_DOWN | IntraMove=DOWN | PriorDay=DOWN | Range=WIDE | VIXChg=VX_UP | PriorPos=CL_UPR | Mom5d=M5_FL | FHRange=FH_W | OpEx=N | OD=OD_UP | GapFill=GD_UF | Time=T_AFT | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_AB
+
+  15:00 ET  |  Price: 25,542  |  Pred: [25,395 - 25,682]  Mid: 25,550  |  Err: +3 (+0.01%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=GAP_DOWN | IntraMove=DOWN | PriorDay=DOWN | Range=WIDE | VIXChg=VX_UP | PriorPos=CL_UPR | Mom5d=M5_FL | FHRange=FH_W | OpEx=N | OD=OD_UP | GapFill=GD_UF | Time=T_AFT | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_AB
+
+========================================================================================================================
+ 2026-02-02  |  Prev Close: 25,552  |  Actual Close: 25,739  (+186 / +0.73%)
+  MAs: 5d=25,822  10d=25,608  20d=25,590  50d=25,387
+  MA Trend: MA_SB  |  Price vs MA50: P50_AB
+========================================================================================================================
+
+  10:00 ET  |  Price: 25,682  |  Pred: [25,534 - 25,823]  Mid: 25,690  |  Err: +49 (+0.19%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_DOWN | IntraMove=UP | PriorDay=BIG_DOWN | Range=NORMAL | VIXChg=VX_DN | PriorPos=CL_LWR | Mom5d=M5_FL | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GD_F | Time=T_ERL | ORB=ORB_W | MATrend=MA_SB | PvsMA50=P50_AB
+
+  11:00 ET  |  Price: 25,705  |  Pred: [25,557 - 25,846]  Mid: 25,713  |  Err: +25 (+0.10%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_DOWN | IntraMove=UP | PriorDay=BIG_DOWN | Range=WIDE | VIXChg=VX_DN | PriorPos=CL_LWR | Mom5d=M5_FL | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GD_F | Time=T_MID | ORB=ORB_A | MATrend=MA_SB | PvsMA50=P50_AB
+
+  12:00 ET  |  Price: 25,804  |  Pred: [25,655 - 25,946]  Mid: 25,812  |  Err: -73 (-0.29%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_DOWN | IntraMove=UP | PriorDay=BIG_DOWN | Range=WIDE | VIXChg=VX_DN | PriorPos=CL_LWR | Mom5d=M5_FL | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GD_F | Time=T_MDY | ORB=ORB_A | MATrend=MA_SB | PvsMA50=P50_AB
+
+  13:00 ET  |  Price: 25,822  |  Pred: [25,673 - 25,964]  Mid: 25,830  |  Err: -91 (-0.35%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_DOWN | IntraMove=UP | PriorDay=BIG_DOWN | Range=WIDE | VIXChg=VX_DN | PriorPos=CL_LWR | Mom5d=M5_FL | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GD_F | Time=T_MDY | ORB=ORB_A | MATrend=MA_SB | PvsMA50=P50_AB
+
+  14:00 ET  |  Price: 25,829  |  Pred: [25,680 - 25,971]  Mid: 25,837  |  Err: -98 (-0.38%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_DOWN | IntraMove=UP | PriorDay=BIG_DOWN | Range=WIDE | VIXChg=VX_DN | PriorPos=CL_LWR | Mom5d=M5_FL | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GD_F | Time=T_AFT | ORB=ORB_A | MATrend=MA_SB | PvsMA50=P50_AB
+
+  15:00 ET  |  Price: 25,758  |  Pred: [25,609 - 25,899]  Mid: 25,766  |  Err: -27 (-0.10%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_DOWN | IntraMove=UP | PriorDay=BIG_DOWN | Range=WIDE | VIXChg=VX_DN | PriorPos=CL_LWR | Mom5d=M5_FL | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GD_F | Time=T_AFT | ORB=ORB_A | MATrend=MA_SB | PvsMA50=P50_AB
+
+========================================================================================================================
+ 2026-02-03  |  Prev Close: 25,739  |  Actual Close: 25,339  (-400 / -1.55%)
+  MAs: 5d=25,828  10d=25,629  20d=25,616  50d=25,411
+  MA Trend: MA_SB  |  Price vs MA50: P50_AB
+========================================================================================================================
+
+  10:00 ET  |  Price: 25,512  |  Pred: [25,364 - 25,650]  Mid: 25,519  |  Err: -180 (-0.71%)  |  MISS  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_UP | IntraMove=DOWN | PriorDay=UP | Range=WIDE | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_DN | FHRange=FH_W | OpEx=N | OD=OD_SD | GapFill=GU_F | Time=T_ERL | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_AT
+
+  11:00 ET  |  Price: 25,463  |  Pred: [25,316 - 25,601]  Mid: 25,470  |  Err: -131 (-0.52%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_UP | IntraMove=DOWN | PriorDay=UP | Range=V_WIDE | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_DN | FHRange=FH_W | OpEx=N | OD=OD_SD | GapFill=GU_F | Time=T_MID | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_AT
+
+  12:00 ET  |  Price: 25,384  |  Pred: [25,237 - 25,521]  Mid: 25,390  |  Err: -52 (-0.20%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_UP | IntraMove=DOWN | PriorDay=UP | Range=V_WIDE | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_SD | GapFill=GU_F | Time=T_MDY | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_AT
+
+  13:00 ET  |  Price: 25,264  |  Pred: [25,117 - 25,401]  Mid: 25,270  |  Err: +68 (+0.27%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_UP | IntraMove=DOWN | PriorDay=UP | Range=V_WIDE | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_SD | GapFill=GU_F | Time=T_MDY | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_BL
+
+  14:00 ET  |  Price: 25,122  |  Pred: [24,977 - 25,258]  Mid: 25,129  |  Err: +210 (+0.83%)  |  MISS  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_UP | IntraMove=DOWN | PriorDay=UP | Range=V_WIDE | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_SD | GapFill=GU_F | Time=T_AFT | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_BL
+
+  15:00 ET  |  Price: 25,185  |  Pred: [25,039 - 25,322]  Mid: 25,192  |  Err: +147 (+0.58%)  |  MISS  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_UP | IntraMove=DOWN | PriorDay=UP | Range=V_WIDE | VIXChg=VX_DN | PriorPos=CL_UPR | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_SD | GapFill=GU_F | Time=T_AFT | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_BL
+
+========================================================================================================================
+ 2026-02-04  |  Prev Close: 25,339  |  Actual Close: 24,891  (-447 / -1.77%)
+  MAs: 5d=25,707  10d=25,664  20d=25,613  50d=25,425
+  MA Trend: MA_SB  |  Price vs MA50: P50_AT
+========================================================================================================================
+
+  10:00 ET  |  Price: 25,031  |  Pred: [24,885 - 25,167]  Mid: 25,037  |  Err: -146 (-0.59%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_DOWN | IntraMove=DOWN | PriorDay=BIG_DOWN | Range=WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_FL | GapFill=GD_UF | Time=T_ERL | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_BL
+
+  11:00 ET  |  Price: 24,966  |  Pred: [24,821 - 25,102]  Mid: 24,972  |  Err: -81 (-0.33%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_DOWN | IntraMove=DOWN | PriorDay=BIG_DOWN | Range=WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_FL | GapFill=GD_UF | Time=T_MID | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_BL
+
+  12:00 ET  |  Price: 24,941  |  Pred: [24,796 - 25,077]  Mid: 24,947  |  Err: -56 (-0.22%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_DOWN | IntraMove=DOWN | PriorDay=BIG_DOWN | Range=V_WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_FL | GapFill=GD_UF | Time=T_MDY | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_BL
+
+  13:00 ET  |  Price: 24,755  |  Pred: [24,612 - 24,890]  Mid: 24,761  |  Err: +130 (+0.52%)  |  MISS  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_DOWN | IntraMove=DOWN | PriorDay=BIG_DOWN | Range=V_WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_FL | GapFill=GD_UF | Time=T_MDY | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_WB
+
+  14:00 ET  |  Price: 24,802  |  Pred: [24,657 - 24,936]  Mid: 24,808  |  Err: +84 (+0.34%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_DOWN | IntraMove=DOWN | PriorDay=BIG_DOWN | Range=V_WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_FL | GapFill=GD_UF | Time=T_AFT | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_WB
+
+  15:00 ET  |  Price: 24,965  |  Pred: [24,820 - 25,101]  Mid: 24,971  |  Err: -80 (-0.32%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=LOW | Gap=SLIGHT_DOWN | IntraMove=DOWN | PriorDay=BIG_DOWN | Range=V_WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_FL | GapFill=GD_UF | Time=T_AFT | ORB=ORB_B | MATrend=MA_SB | PvsMA50=P50_BL
+
+========================================================================================================================
+ 2026-02-05  |  Prev Close: 24,891  |  Actual Close: 24,549  (-343 / -1.38%)
+  MAs: 5d=25,481  10d=25,620  20d=25,576  50d=25,442
+  MA Trend: MA_BR  |  Price vs MA50: P50_WB
+========================================================================================================================
+
+  10:00 ET  |  Price: 24,593  |  Pred: [24,451 - 24,727]  Mid: 24,600  |  Err: -51 (-0.21%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=MEDIUM | Gap=GAP_DOWN | IntraMove=FLAT | PriorDay=BIG_DOWN | Range=WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GD_UF | Time=T_ERL | ORB=ORB_W | MATrend=MA_BR | PvsMA50=P50_WB
+
+  11:00 ET  |  Price: 24,494  |  Pred: [24,353 - 24,628]  Mid: 24,501  |  Err: +48 (+0.20%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=MEDIUM | Gap=GAP_DOWN | IntraMove=DOWN | PriorDay=BIG_DOWN | Range=V_WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GD_UF | Time=T_MID | ORB=ORB_B | MATrend=MA_BR | PvsMA50=P50_WB
+
+  12:00 ET  |  Price: 24,662  |  Pred: [24,520 - 24,796]  Mid: 24,669  |  Err: -120 (-0.49%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=MEDIUM | Gap=GAP_DOWN | IntraMove=FLAT | PriorDay=BIG_DOWN | Range=V_WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GD_UF | Time=T_MDY | ORB=ORB_W | MATrend=MA_BR | PvsMA50=P50_WB
+
+  13:00 ET  |  Price: 24,702  |  Pred: [24,559 - 24,837]  Mid: 24,709  |  Err: -160 (-0.65%)  |  MISS  |  FALLBACK (0 samples)
+    Features: VIX=MEDIUM | Gap=GAP_DOWN | IntraMove=UP | PriorDay=BIG_DOWN | Range=V_WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GD_UF | Time=T_MDY | ORB=ORB_W | MATrend=MA_BR | PvsMA50=P50_WB
+
+  14:00 ET  |  Price: 24,629  |  Pred: [24,487 - 24,764]  Mid: 24,636  |  Err: -87 (-0.36%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=MEDIUM | Gap=GAP_DOWN | IntraMove=FLAT | PriorDay=BIG_DOWN | Range=V_WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GD_UF | Time=T_AFT | ORB=ORB_W | MATrend=MA_BR | PvsMA50=P50_WB
+
+  15:00 ET  |  Price: 24,636  |  Pred: [24,493 - 24,770]  Mid: 24,643  |  Err: -94 (-0.38%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=MEDIUM | Gap=GAP_DOWN | IntraMove=FLAT | PriorDay=BIG_DOWN | Range=V_WIDE | VIXChg=VX_UP | PriorPos=CL_LWR | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GD_UF | Time=T_AFT | ORB=ORB_W | MATrend=MA_BR | PvsMA50=P50_WB
+
+========================================================================================================================
+ 2026-02-06  |  Prev Close: 24,549  |  Actual Close: 25,076  (+527 / +2.15%)
+  MAs: 5d=25,214  10d=25,524  20d=25,521  50d=25,448
+  MA Trend: MA_BR  |  Price vs MA50: P50_WB
+========================================================================================================================
+
+  10:00 ET  |  Price: 24,710  |  Pred: [24,566 - 24,844]  Mid: 24,716  |  Err: +359 (+1.43%)  |  MISS  |  FALLBACK (0 samples)
+    Features: VIX=MEDIUM | Gap=SLIGHT_UP | IntraMove=UP | PriorDay=BIG_DOWN | Range=WIDE | VIXChg=VX_DN | PriorPos=CL_LOW | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GU_UF | Time=T_ERL | ORB=ORB_W | MATrend=MA_BR | PvsMA50=P50_WB
+
+  11:00 ET  |  Price: 24,863  |  Pred: [24,718 - 24,998]  Mid: 24,870  |  Err: +206 (+0.82%)  |  MISS  |  FALLBACK (0 samples)
+    Features: VIX=MEDIUM | Gap=SLIGHT_UP | IntraMove=UP | PriorDay=BIG_DOWN | Range=WIDE | VIXChg=VX_DN | PriorPos=CL_LOW | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GU_UF | Time=T_MID | ORB=ORB_W | MATrend=MA_BR | PvsMA50=P50_WB
+
+  12:00 ET  |  Price: 24,934  |  Pred: [24,789 - 25,070]  Mid: 24,941  |  Err: +135 (+0.54%)  |  MISS  |  FALLBACK (0 samples)
+    Features: VIX=MEDIUM | Gap=SLIGHT_UP | IntraMove=UP | PriorDay=BIG_DOWN | Range=WIDE | VIXChg=VX_DN | PriorPos=CL_LOW | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GU_UF | Time=T_MDY | ORB=ORB_A | MATrend=MA_BR | PvsMA50=P50_WB
+
+  13:00 ET  |  Price: 25,033  |  Pred: [24,887 - 25,169]  Mid: 25,040  |  Err: +36 (+0.14%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=MEDIUM | Gap=SLIGHT_UP | IntraMove=UP | PriorDay=BIG_DOWN | Range=V_WIDE | VIXChg=VX_DN | PriorPos=CL_LOW | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GU_UF | Time=T_MDY | ORB=ORB_A | MATrend=MA_BR | PvsMA50=P50_BL
+
+  14:00 ET  |  Price: 25,007  |  Pred: [24,862 - 25,143]  Mid: 25,014  |  Err: +62 (+0.25%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=MEDIUM | Gap=SLIGHT_UP | IntraMove=UP | PriorDay=BIG_DOWN | Range=V_WIDE | VIXChg=VX_DN | PriorPos=CL_LOW | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GU_UF | Time=T_AFT | ORB=ORB_A | MATrend=MA_BR | PvsMA50=P50_BL
+
+  15:00 ET  |  Price: 24,995  |  Pred: [24,850 - 25,131]  Mid: 25,002  |  Err: +74 (+0.29%)  |  HIT  |  FALLBACK (0 samples)
+    Features: VIX=MEDIUM | Gap=SLIGHT_UP | IntraMove=UP | PriorDay=BIG_DOWN | Range=V_WIDE | VIXChg=VX_DN | PriorPos=CL_LOW | Mom5d=M5_SD | FHRange=FH_W | OpEx=N | OD=OD_SU | GapFill=GU_UF | Time=T_AFT | ORB=ORB_A | MATrend=MA_BR | PvsMA50=P50_BL

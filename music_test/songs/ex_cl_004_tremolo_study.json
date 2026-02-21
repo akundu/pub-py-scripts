@@ -1,0 +1,21 @@
+{
+  "song_id": "ex_cl_004",
+  "title": "Tremolo Study",
+  "composer": "Dionisio Aguado",
+  "tempo": 90,
+  "time_signature": "4/4",
+  "difficulty": "expert",
+  "license_status": "public_domain",
+  "genre": "classical",
+  "chords": ["Am", "E", "Dm", "G", "C"],
+  "original_duration": "3:00",
+  "learning_time": "8 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 0, "duration": 2.67, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.17, "string": 1, "fret": 0, "duration": 0.17, "velocity": 0.5, "technique": "tremolo"},
+    {"time": 0.34, "string": 1, "fret": 0, "duration": 0.17, "velocity": 0.5, "technique": "tremolo"},
+    {"time": 0.51, "string": 1, "fret": 0, "duration": 0.17, "velocity": 0.5, "technique": "tremolo"}
+  ]
+}

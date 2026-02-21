@@ -1,0 +1,29 @@
+{
+  "song_id": "bg_cl_004",
+  "title": "Jesu Joy of Man's Desiring (Simple)",
+  "composer": "Bach",
+  "tempo": 66,
+  "time_signature": "3/4",
+  "difficulty": "beginner",
+  "license_status": "public_domain",
+  "genre": "classical",
+  "chords": ["G", "C", "D", "Em"],
+  "original_duration": "2:30",
+  "learning_time": "2 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 3, "duration": 0.91, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.91, "string": 2, "fret": 0, "duration": 0.91, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 1.82, "string": 1, "fret": 0, "duration": 0.91, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 2.73, "string": 2, "fret": 1, "duration": 0.91, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 3.64, "string": 1, "fret": 3, "duration": 0.91, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 4.55, "string": 2, "fret": 0, "duration": 0.91, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 5.46, "string": 3, "fret": 0, "duration": 0.91, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 6.37, "string": 2, "fret": 3, "duration": 0.91, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 7.28, "string": 1, "fret": 2, "duration": 0.91, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 8.19, "string": 2, "fret": 0, "duration": 0.91, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 9.10, "string": 1, "fret": 0, "duration": 0.91, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 10.01, "string": 3, "fret": 0, "duration": 0.91, "velocity": 0.6, "technique": "fingerpick"}
+  ]
+}

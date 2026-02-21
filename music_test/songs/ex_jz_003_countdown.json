@@ -1,0 +1,21 @@
+{
+  "song_id": "ex_jz_003",
+  "title": "Countdown",
+  "composer": "John Coltrane",
+  "tempo": 290,
+  "time_signature": "4/4",
+  "difficulty": "expert",
+  "license_status": "educational_use",
+  "genre": "jazz",
+  "chords": ["Em7", "F7", "Bbmaj7", "Db7", "Gbmaj7", "A7", "Dmaj7", "Dm7", "Eb7", "Abmaj7", "B7", "Emaj7"],
+  "original_duration": "2:23",
+  "learning_time": "12 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 7, "duration": 0.83, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.02, "string": 4, "fret": 5, "duration": 0.83, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 7, "duration": 0.83, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.06, "string": 2, "fret": 5, "duration": 0.83, "velocity": 0.7, "technique": "strum"}
+  ]
+}

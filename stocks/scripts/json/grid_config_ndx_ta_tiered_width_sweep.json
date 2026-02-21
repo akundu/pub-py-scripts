@@ -1,0 +1,34 @@
+{
+  "description": "NDX time-allocated tiered strategy - grid search over tier spread widths with slope vs no-slope comparison",
+  "fixed_params": {
+    "csv_dir": "options_csv_output",
+    "underlying_ticker": "NDX",
+    "start_date": "2025-07-01",
+    "end_date": "2026-01-31",
+    "option_type": "both",
+    "min_spread_width": 5,
+    "max_spread_width": "200:200",
+    "output_timezone": "America/Los_Angeles",
+    "db_path": "$QUEST_DB_STRING"
+  },
+  "strategy": {
+    "strategy": "time_allocated_tiered",
+    "enabled": true,
+    "feature_flags": {},
+    "config_file": "scripts/json/time_allocated_tiered_config_ndx_permissive.json"
+  },
+  "grid_params": {
+    "strategy.config.slope_detection.skip_slope": [false, true],
+    "strategy.config.tiers.put.0.spread_width": {"min": 30, "max": 60, "step": 5},
+    "strategy.config.tiers.put.1.spread_width": {"min": 20, "max": 50, "step": 5},
+    "strategy.config.tiers.put.2.spread_width": {"min": 10, "max": 30, "step": 5},
+    "strategy.config.tiers.call.0.spread_width": {"min": 30, "max": 60, "step": 5},
+    "strategy.config.tiers.call.1.spread_width": {"min": 20, "max": 50, "step": 5},
+    "strategy.config.tiers.call.2.spread_width": {"min": 10, "max": 30, "step": 5}
+  },
+  "linked_params": {
+    "strategy.config.tiers.call.0.spread_width": "strategy.config.tiers.put.0.spread_width",
+    "strategy.config.tiers.call.1.spread_width": "strategy.config.tiers.put.1.spread_width",
+    "strategy.config.tiers.call.2.spread_width": "strategy.config.tiers.put.2.spread_width"
+  }
+}

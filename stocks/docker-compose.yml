@@ -1,0 +1,135 @@
+services:
+  # Database server for postgres (port 9003)
+  db-server-postgres:
+    build: .
+    command: >
+      sh -c "ulimit -n 65536 && python db_server.py --db-file \"postgresql://user:password@pgbouncer:5432/stock_data\" --port 9003 --log-level ERROR --heartbeat-interval 60 --workers 8 --heartbeat-interval 5 --worker-restart-timeout 5"
+    ports:
+      - "9003:9003"
+    volumes:
+      - ./data:/app/data:rw
+      - ./data/daily:/app/data/daily:rw
+      - ./data/hourly:/app/data/hourly:rw
+      - ./data/streaming:/app/data/streaming:rw
+      - ./data/streaming/raw:/app/data/streaming/raw:rw
+      - ./data/lists:/app/data/lists:rw
+    environment:
+      - POLYGON_API_KEY=${POLYGON_API_KEY}
+      - ALPACA_API_KEY=${ALPACA_API_KEY}
+      - ALPACA_API_SECRET=${ALPACA_API_SECRET}
+    networks:
+      - stock-network
+      - postgres_default
+    # depends_on:
+    #   pgbouncer:
+    #     condition: service_healthy
+    restart: unless-stopped
+
+  # Market data streaming service
+  stream-market-data:
+    build: .
+    command: >
+      python ux/stream_market_data.py 
+      --symbols-list data/lists/stocks_to_track.yaml 
+      --data-source polygon 
+      --polygon-market stocks 
+      --feed both 
+      --csv-data-dir data/streaming/raw/ 
+      --save-max-retries 30 
+      --only-log-updates 
+      --remote-db-server db-server-postgres:9003 
+      --max-symbols-per-connection 5
+    volumes:
+      - ./data/daily:/app/data/daily:rw
+      - ./data/hourly:/app/data/hourly:rw
+      - ./data/streaming/raw:/app/data/streaming/raw:rw
+      - ./data/lists:/app/data/lists:rw
+    environment:
+      - POLYGON_API_KEY=${POLYGON_API_KEY}
+      - ALPACA_API_KEY=${ALPACA_API_KEY}
+      - ALPACA_API_SECRET=${ALPACA_API_SECRET}
+    networks:
+      - stock-network
+    depends_on:
+      - db-server-postgres
+    restart: unless-stopped
+
+networks:
+  stock-network:
+    driver: bridge
+  postgres_default:
+    external: true
+
+volumes:
+  stock-data: 
+  postgres_data: 
+
+
+  # Database server for DuckDB (port 9002)
+  # db-server-duckdb:
+  #   build: .
+  #   command: >
+  #     sh -c "ulimit -n 65536 && 
+  #             python db_server.py --db-file data/stock_data.duckdb --port 9002 --log-level INFO --heartbeat-interval 60"
+  #   ports:
+  #     - "9002:9002"
+  #   volumes:
+  #     - ./data:/app/data:rw
+  #     - ./data/daily:/app/data/daily:rw
+  #     - ./data/hourly:/app/data/hourly:rw
+  #     - ./data/streaming:/app/data/streaming:rw
+  #     - ./data/streaming/raw:/app/data/streaming/raw:rw
+  #     - ./data/lists:/app/data/lists:rw
+  #   environment:
+  #     - POLYGON_API_KEY=${POLYGON_API_KEY}
+  #     - ALPACA_API_KEY=${ALPACA_API_KEY}
+  #     - ALPACA_API_SECRET=${ALPACA_API_SECRET}
+  #   networks:
+  #     - stock-network
+  #   restart: unless-stopped
+
+  # Database server for SQLite (port 9100)
+  # db-server-sqlite:
+  #   build: .
+  #   command: >
+  #     sh -c "ulimit -n 65536 && 
+  #             python db_server.py --db-file data/stock_data.db --port 9100 --log-level INFO --heartbeat-interval 60"
+  #   ports:
+  #     - "9100:9100"
+  #   volumes:
+  #     - ./data:/app/data:rw
+  #     - ./data/daily:/app/data/daily:rw
+  #     - ./data/hourly:/app/data/hourly:rw
+  #     - ./data/streaming:/app/data/streaming:rw
+  #     - ./data/streaming/raw:/app/data/streaming/raw:rw
+  #     - ./data/lists:/app/data/lists:rw
+  #   environment:
+  #     - POLYGON_API_KEY=${POLYGON_API_KEY}
+  #     - ALPACA_API_KEY=${ALPACA_API_KEY}
+  #     - ALPACA_API_SECRET=${ALPACA_API_SECRET}
+  #   networks:
+  #     - stock-network
+  #   restart: unless-stopped
+
+  # Database server for streaming (port 9000)
+  # db-server-streaming:
+  #   build: .
+  #   command: >
+  #     sh -c "ulimit -n 65536 && 
+  #             python db_server.py --db-file data/streaming/streaming.db --port 9000 --log-level ERROR --heartbeat-interval 60"
+  #   ports:
+  #     - "9000:9000"
+  #   volumes:
+  #     - ./data:/app/data:rw
+  #     - ./data/daily:/app/data/daily:rw
+  #     - ./data/hourly:/app/data/hourly:rw
+  #     - ./data/streaming:/app/data/streaming:rw
+  #     - ./data/streaming/raw:/app/data/streaming/raw:rw
+  #     - ./data/lists:/app/data/lists:rw
+  #   environment:
+  #     - POLYGON_API_KEY=${POLYGON_API_KEY}
+  #     - ALPACA_API_KEY=${ALPACA_API_KEY}
+  #     - ALPACA_API_SECRET=${ALPACA_API_SECRET}
+  #   networks:
+  #     - stock-network
+  #   restart: unless-stopped

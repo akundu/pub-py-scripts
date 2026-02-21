@@ -1,0 +1,22 @@
+Traceback (most recent call last):
+  File "/Volumes/RAID1 NVME SSD 2TB/akundu_programs_dev/programs/python/pythonv3/pub-py-scripts/stocks/tests/perm_application_analyzer.py", line 5, in <module>
+    import google.genai as genai
+  File "/Volumes/RAID1 NVME SSD 2TB/akundu_programs_dev/programs/python/pythonv3/pub-py-scripts/stocks/.venv/lib/python3.14/site-packages/google/genai/__init__.py", line 20, in <module>
+    from .client import Client
+  File "/Volumes/RAID1 NVME SSD 2TB/akundu_programs_dev/programs/python/pythonv3/pub-py-scripts/stocks/.venv/lib/python3.14/site-packages/google/genai/client.py", line 24, in <module>
+    from ._api_client import BaseApiClient
+  File "/Volumes/RAID1 NVME SSD 2TB/akundu_programs_dev/programs/python/pythonv3/pub-py-scripts/stocks/.venv/lib/python3.14/site-packages/google/genai/_api_client.py", line 45, in <module>
+    import google.auth.credentials
+  File "/Volumes/RAID1 NVME SSD 2TB/akundu_programs_dev/programs/python/pythonv3/pub-py-scripts/stocks/.venv/lib/python3.14/site-packages/google/auth/credentials.py", line 25, in <module>
+    from google.auth import metrics
+  File "/Volumes/RAID1 NVME SSD 2TB/akundu_programs_dev/programs/python/pythonv3/pub-py-scripts/stocks/.venv/lib/python3.14/site-packages/google/auth/metrics.py", line 19, in <module>
+    import platform
+  File "/opt/homebrew/Cellar/python@3.14/3.14.0_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/platform.py", line 520, in <module>
+    IOSVersionInfo = collections.namedtuple(
+        "IOSVersionInfo",
+        ["system", "release", "model", "is_simulator"]
+    )
+  File "/opt/homebrew/Cellar/python@3.14/3.14.0_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/collections/__init__.py", line 447, in namedtuple
+    __new__ = eval(code, namespace)
+  File "<string>", line 0, in <module>
+KeyboardInterrupt

@@ -1,0 +1,27 @@
+{
+  "song_id": "bg_jz_004",
+  "title": "Take Five (Intro)",
+  "composer": "Dave Brubeck",
+  "tempo": 85,
+  "time_signature": "5/4",
+  "difficulty": "beginner",
+  "license_status": "educational_use",
+  "genre": "jazz",
+  "chords": ["Ebm", "Bbm"],
+  "original_duration": "1:30",
+  "learning_time": "1 week",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 6, "duration": 3.53, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.02, "string": 2, "fret": 4, "duration": 3.53, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 3, "duration": 3.53, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.06, "string": 4, "fret": 4, "duration": 3.53, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.08, "string": 5, "fret": 6, "duration": 3.53, "velocity": 0.7, "technique": "strum"},
+    {"time": 3.53, "string": 1, "fret": 1, "duration": 3.53, "velocity": 0.7, "technique": "strum"},
+    {"time": 3.55, "string": 2, "fret": 2, "duration": 3.53, "velocity": 0.7, "technique": "strum"},
+    {"time": 3.57, "string": 3, "fret": 3, "duration": 3.53, "velocity": 0.7, "technique": "strum"},
+    {"time": 3.59, "string": 4, "fret": 3, "duration": 3.53, "velocity": 0.7, "technique": "strum"},
+    {"time": 3.61, "string": 5, "fret": 1, "duration": 3.53, "velocity": 0.7, "technique": "strum"}
+  ]
+}

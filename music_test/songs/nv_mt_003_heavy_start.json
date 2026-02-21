@@ -1,0 +1,23 @@
+{
+  "song_id": "nv_mt_003",
+  "title": "Heavy Start",
+  "composer": "Traditional",
+  "tempo": 85,
+  "time_signature": "4/4",
+  "difficulty": "novice",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["D5", "C5", "G5"],
+  "original_duration": "1:10",
+  "learning_time": "3 days",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 4, "fret": 2, "duration": 2.82, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 0.02, "string": 5, "fret": 0, "duration": 2.82, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 2.82, "string": 4, "fret": 0, "duration": 2.82, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 2.84, "string": 5, "fret": 3, "duration": 2.82, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 5.64, "string": 5, "fret": 5, "duration": 2.82, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 5.66, "string": 6, "fret": 3, "duration": 2.82, "velocity": 0.9, "technique": "power_chord"}
+  ]
+}

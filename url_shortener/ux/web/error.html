@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error - URL Shortener</title>
+    <link rel="stylesheet" href="../css/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>❌ Error</h1>
+            <p class="subtitle">Something went wrong</p>
+        </header>
+
+        <main>
+            <div class="error-card">
+                <div class="error-icon">⚠️</div>
+                <h2>Oops!</h2>
+                <p class="error-message">{{error_message}}</p>
+                
+                <div class="actions">
+                    <a href=".." class="btn btn-primary">
+                        ← Go Back Home
+                    </a>
+                </div>
+            </div>
+
+            <div class="info-box">
+                <h3>Common issues:</h3>
+                <ul>
+                    <li>Make sure the URL starts with <code>http://</code> or <code>https://</code></li>
+                    <li>Custom codes must be 4-20 characters (letters, numbers, hyphens, underscores)</li>
+                    <li>Custom code may already be taken - try a different one</li>
+                    <li>Reserved words cannot be used as custom codes</li>
+                </ul>
+            </div>
+        </main>
+
+        <footer>
+            <p>Built with FastAPI, QuestDB, and ❤️</p>
+        </footer>
+    </div>
+</body>
+</html>
+
+
+
+
+
+

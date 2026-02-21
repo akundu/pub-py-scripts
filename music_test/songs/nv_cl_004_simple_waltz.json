@@ -1,0 +1,26 @@
+{
+  "song_id": "nv_cl_004",
+  "title": "Simple Waltz",
+  "composer": "Traditional",
+  "tempo": 100,
+  "time_signature": "3/4",
+  "difficulty": "novice",
+  "license_status": "public_domain",
+  "genre": "classical",
+  "chords": ["C", "G", "Am"],
+  "original_duration": "1:30",
+  "learning_time": "2 days",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 3, "duration": 0.6, "velocity": 0.7, "technique": "fingerpick"},
+    {"time": 0.6, "string": 3, "fret": 0, "duration": 0.6, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.2, "string": 2, "fret": 1, "duration": 0.6, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.8, "string": 6, "fret": 3, "duration": 0.6, "velocity": 0.7, "technique": "fingerpick"},
+    {"time": 2.4, "string": 3, "fret": 0, "duration": 0.6, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.0, "string": 2, "fret": 3, "duration": 0.6, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.6, "string": 5, "fret": 0, "duration": 0.6, "velocity": 0.7, "technique": "fingerpick"},
+    {"time": 4.2, "string": 3, "fret": 2, "duration": 0.6, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.8, "string": 2, "fret": 1, "duration": 0.6, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

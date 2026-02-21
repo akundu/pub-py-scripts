@@ -1,0 +1,31 @@
+{
+  "song_id": "im_fk_003",
+  "title": "Fire and Rain",
+  "composer": "James Taylor",
+  "tempo": 76,
+  "time_signature": "4/4",
+  "difficulty": "intermediate",
+  "license_status": "educational_use",
+  "genre": "folk",
+  "chords": ["C", "Gm7", "F", "Bb", "A7sus4", "A7", "Dm7"],
+  "original_duration": "3:22",
+  "learning_time": "3 weeks",
+  "tuning": "standard",
+  "capo": 3,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 3, "duration": 3.16, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.39, "string": 3, "fret": 0, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.78, "string": 2, "fret": 1, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.17, "string": 1, "fret": 0, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.56, "string": 2, "fret": 1, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.95, "string": 3, "fret": 0, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.34, "string": 1, "fret": 0, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.73, "string": 2, "fret": 1, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.16, "string": 6, "fret": 3, "duration": 3.16, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 3.55, "string": 4, "fret": 3, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.94, "string": 3, "fret": 3, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.33, "string": 2, "fret": 3, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.72, "string": 1, "fret": 1, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 5.11, "string": 2, "fret": 3, "duration": 0.39, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

@@ -1,0 +1,211 @@
+# Cursor AI Rules for Stock Options Analysis Project
+
+## Testing and Verification
+- ALWAYS activate the virtual environment before running any tests: `source .venv/bin/activate`
+- Run tests after EVERY code change, no exceptions
+- Run linter checks (`read_lints`) for all modified files after edits
+- For critical changes (database, API, core logic), run integration tests
+- Verify functionality with end-to-end tests when modifying key scripts
+- If a test fails, fix the issue before proceeding
+- Document test results and verification steps taken
+
+## Python Best Practices
+- Use type hints for all function parameters and return values
+- Follow PEP 8 style guidelines (enforced by linters)
+- Use `from __future__ import annotations` for better type hint support
+- Prefer f-strings over .format() or % formatting
+- Use context managers (with statements) for file/resource handling
+- Handle exceptions explicitly; avoid bare `except:` clauses
+- Use dataclasses or Pydantic models for structured data
+- Prefer pathlib.Path over os.path for file operations
+- Use logging instead of print() for production code
+- Keep functions focused and single-purpose (max ~50 lines)
+- Add docstrings to all public functions, classes, and modules
+- Use list/dict comprehensions where they improve readability
+
+## Async/Await Patterns
+- Use `async`/`await` consistently in async functions
+- Don't mix blocking and non-blocking I/O in async functions
+- Use `asyncio.gather()` for concurrent operations
+- Handle async context managers properly with `async with`
+- Use `asyncio.run()` only at the entry point
+- Prefer `asyncio.create_task()` over `asyncio.ensure_future()`
+
+## Database Operations (QuestDB, PostgreSQL, TimescaleDB)
+- Always use connection pooling for database operations
+- Never commit SQL injection vulnerabilities; use parameterized queries
+- Close database connections properly (use context managers)
+- Handle database errors gracefully with appropriate error messages
+- Use transactions for multi-statement operations
+- Verify database queries return expected results before processing
+- Be mindful of QuestDB's specific SQL dialect and limitations
+- Use prepared statements for repeated queries
+- Add indexes for frequently queried columns
+- Monitor connection pool exhaustion
+
+## Redis Caching
+- Set appropriate TTL values for cached data
+- Use Redis keys with clear naming conventions (namespace:entity:id)
+- Handle cache misses gracefully
+- Implement cache invalidation strategies
+- Don't cache sensitive data without encryption
+- Use pipelining for multiple Redis operations
+- Monitor Redis memory usage
+- Implement cache warming for critical data
+
+## API and Network Operations
+- Always set reasonable timeouts for external API calls
+- Implement retry logic with exponential backoff for transient failures
+- Respect API rate limits (especially Polygon.io)
+- Handle network errors gracefully
+- Log all external API calls for debugging
+- Validate API responses before processing
+- Use environment variables for API keys and secrets
+- Never commit API keys or credentials to version control
+
+## Market Data and Financial Calculations
+- Be timezone-aware: market hours are in Eastern Time (America/New_York)
+- Handle market holidays and weekend closures appropriately
+- Use decimal.Decimal for precise financial calculations
+- Validate option strike prices and expiration dates
+- Handle missing or stale market data gracefully
+- Document assumptions about market data freshness
+- Be mindful of pre-market and after-hours trading periods
+- Timestamp all data with both UTC and local time
+
+## Docker and Deployment
+- Test Docker builds before committing Dockerfile changes
+- Keep Docker images small; use multi-stage builds
+- Don't run containers as root unless necessary
+- Use .dockerignore to exclude unnecessary files
+- Pin dependency versions in requirements files
+- Health check endpoints should be lightweight
+- Use Docker Compose for local development/testing
+- Document all environment variables required
+
+## GCP-Specific Guidelines
+- Use service accounts with minimal required permissions
+- Store secrets in Secret Manager, not in code or env files
+- Tag all GCP resources appropriately (project, environment, purpose)
+- Use Cloud Logging for centralized log management
+- Implement proper error reporting with Cloud Error Reporting
+- Use Cloud Monitoring for metrics and alerting
+- Consider costs when choosing instance types and services
+- Use regional resources for better performance and availability
+- Implement graceful shutdown handlers for Cloud Run services
+- Test locally with gcloud emulators when possible
+
+## WebSocket and Real-time Data
+- Implement reconnection logic for WebSocket connections
+- Handle connection drops gracefully
+- Use ping/pong frames to detect dead connections
+- Implement message queuing for high-throughput scenarios
+- Add circuit breakers for failing WebSocket connections
+- Log WebSocket connection state changes
+- Validate all incoming WebSocket messages
+
+## Error Handling and Logging
+- Use structured logging (JSON format for production)
+- Log at appropriate levels (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+- Include context in error messages (ticker, timestamp, operation)
+- Never swallow exceptions silently
+- Log stack traces for unexpected errors
+- Implement proper error boundaries
+- Use correlation IDs for request tracing
+- Monitor error rates and set up alerts
+
+## Performance and Optimization
+- Profile code before optimizing
+- Use multiprocessing for CPU-bound operations
+- Use asyncio for I/O-bound operations
+- Batch database operations when possible
+- Implement pagination for large result sets
+- Use generators for memory-efficient iteration
+- Cache expensive computations
+- Monitor memory usage for long-running processes
+- Use connection pooling for all network resources
+
+## Security
+- Validate and sanitize all user inputs
+- Use environment variables for sensitive configuration
+- Implement rate limiting on public endpoints
+- Use HTTPS for all external communications
+- Don't log sensitive data (passwords, API keys, PII)
+- Keep dependencies updated for security patches
+- Use principle of least privilege for all access
+- Implement authentication and authorization where needed
+
+## Project-Specific Guidelines
+- Options analysis: Always validate strike prices are reasonable
+- Volume filtering: Use min_volume parameter, not filter expressions
+- Timestamp filtering: Convert to Eastern Time with DST support
+- Market hours: Use common.market_hours module for time checks
+- Symbol loading: Use common.symbol_loader for consistent symbol handling
+- Cache warmup: Fire-and-forget pattern for non-critical operations
+- HTML reports: Regenerate when data schema changes
+- Covered calls: Use proper position sizing calculations
+
+## Code Organization
+- Keep related functionality in modules (common/, scripts/, server/)
+- Don't duplicate code; create reusable functions
+- Use dependency injection for testability
+- Keep business logic separate from presentation logic
+- Use factory patterns for complex object creation
+- Implement interfaces (Protocol classes) for loose coupling
+
+## Documentation
+- Update README files when adding new features
+- Keep MDs/ documentation current with code changes
+- Document breaking changes in commit messages
+- Add usage examples for new scripts/tools
+- Document environment variables and configuration options
+- Keep API documentation in sync with implementation
+- Add comments for non-obvious code sections
+
+## Version Control (Git)
+- Write clear, descriptive commit messages
+- Keep commits focused and atomic
+- Never commit secrets, API keys, or credentials
+- Use .gitignore to exclude generated files
+- Review changes before committing
+- Don't commit debug code or commented-out blocks
+- Tag releases with semantic versioning
+
+## Before Deployment Checklist
+- [ ] All tests pass
+- [ ] No linter errors
+- [ ] Dependencies are pinned to specific versions
+- [ ] Environment variables documented
+- [ ] Error handling implemented
+- [ ] Logging configured appropriately
+- [ ] Performance tested under expected load
+- [ ] Security review completed
+- [ ] Documentation updated
+- [ ] Rollback plan documented
+
+## When Making Changes
+1. Understand the full context before making changes. Ask questions to clarify anything you feel hasn't been said explicitly, but should be discussed.
+2. Run existing tests to establish baseline
+3. Make focused, incremental changes
+4. Test after each change (unit, integration, end-to-end)
+5. Check linter output and fix issues
+6. Verify the change solves the original problem
+7. Update documentation if needed
+8. Review the complete diff before considering it done
+
+## Red Flags to Watch For
+- Database queries without proper indexes
+- API calls without timeouts or retry logic
+- Hardcoded credentials or API keys
+- Missing error handling around I/O operations
+- Timezone-naive datetime operations for market data
+- Missing validation on user inputs or external data
+- Memory leaks in long-running processes
+- Race conditions in async code
+- Unclosed resources (files, connections, sockets)
+- Silent failures that could hide critical issues
+
+
+## ENV variables
+use "questdb://stock_user:stock_password@ms1.kundu.dev:8812/stock_data" as the --db-file or --db--path options when applicable
+

@@ -1,0 +1,103 @@
+Date range for historical fetch: 2026-02-10 to 2026-02-12
+Info: No --data-source specified; using yfinance for index tickers, polygon for others (same as fetch_symbol_data).
+Configuring workers to use QuestDB database at: questdb://stock_user:stock_password@lin1.kundu.dev:8812/stock_data
+Starting fetch at 2026-02-11 18:22:28 EST
+Using timezone: America/New_York
+Using 1 symbols provided via --symbols: NDX
+Fetching market data for 1 symbols using process pool...
+Enhanced features enabled: Volume=False, Comprehensive=False
+96173 Processing 1 symbols for database questdb://stock_user:stock_password@lin1.kundu.dev:8812/stock_data using process executor
+2026-02-11 15:22:30 [PID:96192] [questdb_db] [DEBUG] - Redis single-instance mode: redis://lin1.kundu.dev:6379
+[DEBUG] Attempting to fetch daily data for NDX using symbol: ^NDX from Yahoo Finance
+[DEBUG] Prices downloaded (daily) for NDX from Yahoo Finance: 1 rows
+  Date range: 2026-02-10 05:00:00+00:00 to 2026-02-10 05:00:00+00:00
+  Daily prices (open, high, low, close, volume):
+                                   open          high           low         close      volume  dividends  stock splits
+date                                                                                                                  
+2026-02-10 05:00:00+00:00  25314.230469  25363.119141  25113.429688  25127.640625  8513440000        0.0           0.0
+[DEBUG] Daily data for NDX merged (CSV disabled). Total rows: 1
+[DEBUG] After merge: new_daily_bars=1 rows, final_daily_bars=1 rows
+  Final data to save: 1 rows, date range: 2026-02-10 05:00:00 to 2026-02-10 05:00:00
+[DEBUG] Saving 1 daily records to database in 1 batch(es)...
+  Saving batch 1/1: 1 rows (dates: 2026-02-10 05:00:00 to 2026-02-10 05:00:00)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - Created connection pool with command_timeout=3600s
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [DB QUERY] daily data for NDX
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [DB QUERY] SQL: SELECT * FROM daily_prices WHERE ticker = $1 AND date >= $2 AND date < $3 ORDER BY date
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [DB QUERY] Params: ['NDX', datetime.datetime(2025, 1, 6, 0, 0), datetime.datetime(2026, 2, 10, 0, 0)]
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [DB QUERY] Fetched 282 rows from daily_prices for NDX
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - First insert result for daily_prices: INSERT 0 1
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] -   First record values: {'ticker': 'NDX', 'date': Timestamp('2026-02-10 00:00:00'), 'open': 25314.23046875, 'high': 25363.119140625, 'low': 25113.4296875, 'close': 25127.640625, 'volume': 8513440000, 'write_timestamp': Timestamp('2026-02-11 23:22:31.395175')}
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - Successfully inserted 1 records into daily_prices
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Key: stocks:daily_prices:NDX:2026-02-10 | date_str: 2026-02-10 | idx type: Timestamp
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - Created Redis single-instance client for loop 4676644416
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Stored in cache: stocks:daily_prices:NDX:2026-02-10 (rows: 1)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Cached daily data on write: stocks:daily_prices:NDX:2026-02-10 (rows: 1)
+  ✓ Successfully saved batch 1: 1 rows
+  Prices saved to DB (daily) for NDX:
+                             open          high           low         close      volume  dividends  stock splits
+date                                                                                                            
+2026-02-10 05:00:00  25314.230469  25363.119141  25113.429688  25127.640625  8513440000        0.0           0.0
+[DEBUG] Successfully saved 1 daily records to database for NDX (DB ticker: NDX)
+[DEBUG] Prices downloaded (hourly) for NDX from Yahoo Finance: 7 rows
+  Date range: 2026-02-10 14:30:00+00:00 to 2026-02-10 20:30:00+00:00
+  Hourly prices (open, high, low, close, volume):
+                                   open          high           low         close     volume  dividends  stock splits
+datetime                                                                                                             
+2026-02-10 14:30:00+00:00  25305.925781  25361.482422  25176.425781  25319.753906          0        0.0           0.0
+2026-02-10 15:30:00+00:00  25315.630859  25350.660156  25251.222656  25266.802734  168687910        0.0           0.0
+2026-02-10 16:30:00+00:00  25260.660156  25299.228516  25223.830078  25282.171875  135321506        0.0           0.0
+2026-02-10 17:30:00+00:00  25281.498047  25310.054688  25208.693359  25208.898438  100156924        0.0           0.0
+2026-02-10 18:30:00+00:00  25210.298828  25237.140625  25191.296875  25214.203125   93185621        0.0           0.0
+2026-02-10 19:30:00+00:00  25215.427734  25226.921875  25160.265625  25169.548828  118324651        0.0           0.0
+2026-02-10 20:30:00+00:00  25168.107422  25184.390625  25114.218750  25124.511719  123315509        0.0           0.0
+[DEBUG] Hourly data for NDX merged (CSV disabled). Total rows: 7
+[DEBUG] After merge: new_hourly_bars=7 rows, final_hourly_bars=7 rows
+  Final hourly data to save: 7 rows, date range: 2026-02-10 14:30:00 to 2026-02-10 20:30:00
+[DEBUG] Saving 7 hourly records to database in 1 batch(es)...
+  Saving hourly batch 1/1: 7 rows (dates: 2026-02-10 14:30:00 to 2026-02-10 20:30:00)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - First insert result for hourly_prices: INSERT 0 1
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] -   First record values: {'ticker': 'NDX', 'datetime': Timestamp('2026-02-10 14:00:00'), 'open': 25305.92578125, 'high': 25361.482421875, 'low': 25176.42578125, 'close': 25319.75390625, 'volume': 0, 'write_timestamp': Timestamp('2026-02-11 23:22:31.523775')}
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - Successfully inserted 7 records into hourly_prices
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] -   Sample datetime value saved: 2026-02-10 14:00:00 (type: <class 'pandas._libs.tslibs.timestamps.Timestamp'>, tzinfo: None)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - Verification query after insert: found 3 rows in hourly_prices for NDX around 2026-02-10 14:00:00
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Key: stocks:hourly_prices:NDX:2026-02-10T14:00:00 | dt_str: 2026-02-10T14:00:00 | idx type: Timestamp
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Stored in cache: stocks:hourly_prices:NDX:2026-02-10T14:00:00 (rows: 1)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Cached hourly data on write: stocks:hourly_prices:NDX:2026-02-10T14:00:00 (rows: 1)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Key: stocks:hourly_prices:NDX:2026-02-10T15:00:00 | dt_str: 2026-02-10T15:00:00 | idx type: Timestamp
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Stored in cache: stocks:hourly_prices:NDX:2026-02-10T15:00:00 (rows: 1)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Cached hourly data on write: stocks:hourly_prices:NDX:2026-02-10T15:00:00 (rows: 1)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Key: stocks:hourly_prices:NDX:2026-02-10T16:00:00 | dt_str: 2026-02-10T16:00:00 | idx type: Timestamp
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Stored in cache: stocks:hourly_prices:NDX:2026-02-10T16:00:00 (rows: 1)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Cached hourly data on write: stocks:hourly_prices:NDX:2026-02-10T16:00:00 (rows: 1)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Key: stocks:hourly_prices:NDX:2026-02-10T17:00:00 | dt_str: 2026-02-10T17:00:00 | idx type: Timestamp
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Stored in cache: stocks:hourly_prices:NDX:2026-02-10T17:00:00 (rows: 1)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Cached hourly data on write: stocks:hourly_prices:NDX:2026-02-10T17:00:00 (rows: 1)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Key: stocks:hourly_prices:NDX:2026-02-10T18:00:00 | dt_str: 2026-02-10T18:00:00 | idx type: Timestamp
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Stored in cache: stocks:hourly_prices:NDX:2026-02-10T18:00:00 (rows: 1)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Cached hourly data on write: stocks:hourly_prices:NDX:2026-02-10T18:00:00 (rows: 1)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Key: stocks:hourly_prices:NDX:2026-02-10T19:00:00 | dt_str: 2026-02-10T19:00:00 | idx type: Timestamp
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Stored in cache: stocks:hourly_prices:NDX:2026-02-10T19:00:00 (rows: 1)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Cached hourly data on write: stocks:hourly_prices:NDX:2026-02-10T19:00:00 (rows: 1)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Key: stocks:hourly_prices:NDX:2026-02-10T20:00:00 | dt_str: 2026-02-10T20:00:00 | idx type: Timestamp
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Stored in cache: stocks:hourly_prices:NDX:2026-02-10T20:00:00 (rows: 1)
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - [CACHE SET] Cached hourly data on write: stocks:hourly_prices:NDX:2026-02-10T20:00:00 (rows: 1)
+  ✓ Successfully saved hourly batch 1: 7 rows
+  Prices saved to DB (hourly) for NDX:
+                             open          high           low         close     volume  dividends  stock splits
+datetime                                                                                                       
+2026-02-10 14:30:00  25305.925781  25361.482422  25176.425781  25319.753906          0        0.0           0.0
+2026-02-10 15:30:00  25315.630859  25350.660156  25251.222656  25266.802734  168687910        0.0           0.0
+2026-02-10 16:30:00  25260.660156  25299.228516  25223.830078  25282.171875  135321506        0.0           0.0
+2026-02-10 17:30:00  25281.498047  25310.054688  25208.693359  25208.898438  100156924        0.0           0.0
+2026-02-10 18:30:00  25210.298828  25237.140625  25191.296875  25214.203125   93185621        0.0           0.0
+2026-02-10 19:30:00  25215.427734  25226.921875  25160.265625  25169.548828  118324651        0.0           0.0
+2026-02-10 20:30:00  25168.107422  25184.390625  25114.218750  25124.511719  123315509        0.0           0.0
+[DEBUG] Successfully saved 7 hourly records to database for NDX (DB ticker: NDX)
+Worker thread for NDX: Closing DB session...
+2026-02-11 15:22:31 [PID:96192] [questdb_db] [DEBUG] - Closed Redis client for loop 4676644416
+Worker thread for NDX: DB session closed.
+96173 Completed processing for database questdb://stock_user:stock_password@lin1.kundu.dev:8812/stock_data: 1 stock successes, 0 stock failures, 0 financial successes, 0 financial failures
+Database questdb://stock_user:stock_password@lin1.kundu.dev:8812/stock_data: 1 successes, 0 failures
+
+Market data fetching completed at 2026-02-11 18:22:31 EST
+Results: 1 successes, 0 failures out of 1 symbols.

@@ -1,0 +1,27 @@
+{
+  "song_id": "av_ct_001",
+  "title": "Ghost Riders in the Sky",
+  "composer": "Stan Jones",
+  "tempo": 155,
+  "time_signature": "4/4",
+  "difficulty": "advanced",
+  "license_status": "educational_use",
+  "genre": "country",
+  "chords": ["Am", "C", "F", "E", "Dm"],
+  "original_duration": "3:42",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 0, "duration": 1.55, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.02, "string": 2, "fret": 1, "duration": 1.55, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 2, "duration": 1.55, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.06, "string": 4, "fret": 2, "duration": 1.55, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.08, "string": 5, "fret": 0, "duration": 1.55, "velocity": 0.7, "technique": "strum"},
+    {"time": 1.55, "string": 1, "fret": 0, "duration": 1.55, "velocity": 0.7, "technique": "strum"},
+    {"time": 1.57, "string": 2, "fret": 1, "duration": 1.55, "velocity": 0.7, "technique": "strum"},
+    {"time": 1.59, "string": 3, "fret": 0, "duration": 1.55, "velocity": 0.7, "technique": "strum"},
+    {"time": 1.61, "string": 4, "fret": 2, "duration": 1.55, "velocity": 0.7, "technique": "strum"},
+    {"time": 1.63, "string": 5, "fret": 3, "duration": 1.55, "velocity": 0.7, "technique": "strum"}
+  ]
+}

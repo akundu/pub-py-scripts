@@ -1,0 +1,25 @@
+{
+  "song_id": "pf_bl_004",
+  "title": "Stormy Monday (Full)",
+  "composer": "T-Bone Walker",
+  "tempo": 72,
+  "time_signature": "4/4",
+  "difficulty": "proficient",
+  "license_status": "educational_use",
+  "genre": "blues",
+  "chords": ["G9", "C9", "G7", "D9", "Ab9"],
+  "original_duration": "4:00",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 3, "duration": 3.33, "velocity": 0.6, "technique": "single_note"},
+    {"time": 0.42, "string": 1, "fret": 6, "duration": 0.42, "velocity": 0.6, "technique": "bend"},
+    {"time": 0.84, "string": 1, "fret": 3, "duration": 0.42, "velocity": 0.6, "technique": "single_note"},
+    {"time": 1.26, "string": 2, "fret": 6, "duration": 0.42, "velocity": 0.6, "technique": "single_note"},
+    {"time": 1.68, "string": 2, "fret": 3, "duration": 0.42, "velocity": 0.6, "technique": "single_note"},
+    {"time": 2.10, "string": 3, "fret": 5, "duration": 0.42, "velocity": 0.6, "technique": "single_note"},
+    {"time": 2.52, "string": 3, "fret": 3, "duration": 0.42, "velocity": 0.6, "technique": "single_note"},
+    {"time": 2.94, "string": 4, "fret": 5, "duration": 0.42, "velocity": 0.6, "technique": "single_note"}
+  ]
+}

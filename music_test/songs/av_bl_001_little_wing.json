@@ -1,0 +1,25 @@
+{
+  "song_id": "av_bl_001",
+  "title": "Little Wing (Blues Style)",
+  "composer": "Jimi Hendrix",
+  "tempo": 66,
+  "time_signature": "4/4",
+  "difficulty": "advanced",
+  "license_status": "educational_use",
+  "genre": "blues",
+  "chords": ["Em", "G", "Am", "Em", "Bm", "Am", "Bb", "C", "D"],
+  "original_duration": "2:26",
+  "learning_time": "5 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 12, "duration": 3.64, "velocity": 0.6, "technique": "vibrato"},
+    {"time": 0.45, "string": 1, "fret": 15, "duration": 0.45, "velocity": 0.6, "technique": "bend"},
+    {"time": 0.90, "string": 1, "fret": 12, "duration": 0.45, "velocity": 0.6, "technique": "single_note"},
+    {"time": 1.35, "string": 2, "fret": 15, "duration": 0.45, "velocity": 0.6, "technique": "single_note"},
+    {"time": 1.80, "string": 2, "fret": 12, "duration": 0.45, "velocity": 0.6, "technique": "single_note"},
+    {"time": 2.25, "string": 3, "fret": 14, "duration": 0.45, "velocity": 0.6, "technique": "single_note"},
+    {"time": 2.70, "string": 3, "fret": 12, "duration": 0.45, "velocity": 0.6, "technique": "single_note"},
+    {"time": 3.15, "string": 4, "fret": 14, "duration": 0.45, "velocity": 0.6, "technique": "single_note"}
+  ]
+}

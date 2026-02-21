@@ -1,0 +1,25 @@
+{
+  "song_id": "av_mt_004",
+  "title": "Peace Sells",
+  "composer": "Megadeth",
+  "tempo": 115,
+  "time_signature": "4/4",
+  "difficulty": "advanced",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["E5", "A5", "D5", "F#5", "B5"],
+  "original_duration": "4:04",
+  "learning_time": "6 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 0, "duration": 1.04, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.26, "string": 6, "fret": 0, "duration": 0.26, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.52, "string": 6, "fret": 5, "duration": 0.26, "velocity": 0.9, "technique": "single_note"},
+    {"time": 0.78, "string": 6, "fret": 7, "duration": 0.26, "velocity": 0.9, "technique": "single_note"},
+    {"time": 1.04, "string": 5, "fret": 0, "duration": 1.04, "velocity": 0.9, "technique": "single_note"},
+    {"time": 1.30, "string": 5, "fret": 3, "duration": 0.26, "velocity": 0.9, "technique": "single_note"},
+    {"time": 1.56, "string": 5, "fret": 5, "duration": 0.26, "velocity": 0.9, "technique": "single_note"},
+    {"time": 1.82, "string": 5, "fret": 7, "duration": 0.26, "velocity": 0.9, "technique": "single_note"}
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "song_id": "im_bl_003",
+  "title": "Red House",
+  "composer": "Jimi Hendrix",
+  "tempo": 66,
+  "time_signature": "4/4",
+  "difficulty": "intermediate",
+  "license_status": "educational_use",
+  "genre": "blues",
+  "chords": ["B7", "E7", "F#7"],
+  "original_duration": "3:47",
+  "learning_time": "3 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 7, "duration": 1.82, "velocity": 0.7, "technique": "bend"},
+    {"time": 0.45, "string": 1, "fret": 7, "duration": 0.45, "velocity": 0.7, "technique": "vibrato"},
+    {"time": 0.90, "string": 2, "fret": 7, "duration": 0.45, "velocity": 0.7, "technique": "single_note"},
+    {"time": 1.35, "string": 1, "fret": 7, "duration": 0.45, "velocity": 0.7, "technique": "single_note"},
+    {"time": 1.82, "string": 2, "fret": 10, "duration": 1.82, "velocity": 0.7, "technique": "single_note"},
+    {"time": 2.27, "string": 2, "fret": 7, "duration": 0.45, "velocity": 0.7, "technique": "single_note"},
+    {"time": 2.72, "string": 3, "fret": 9, "duration": 0.45, "velocity": 0.7, "technique": "single_note"},
+    {"time": 3.17, "string": 3, "fret": 7, "duration": 0.45, "velocity": 0.7, "technique": "single_note"},
+    {"time": 3.64, "string": 1, "fret": 10, "duration": 1.82, "velocity": 0.7, "technique": "bend"},
+    {"time": 4.09, "string": 1, "fret": 7, "duration": 0.45, "velocity": 0.7, "technique": "single_note"},
+    {"time": 4.54, "string": 2, "fret": 10, "duration": 0.45, "velocity": 0.7, "technique": "single_note"},
+    {"time": 4.99, "string": 2, "fret": 7, "duration": 0.45, "velocity": 0.7, "technique": "single_note"}
+  ]
+}

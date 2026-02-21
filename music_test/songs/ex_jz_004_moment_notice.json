@@ -1,0 +1,21 @@
+{
+  "song_id": "ex_jz_004",
+  "title": "Moment's Notice",
+  "composer": "John Coltrane",
+  "tempo": 200,
+  "time_signature": "4/4",
+  "difficulty": "expert",
+  "license_status": "educational_use",
+  "genre": "jazz",
+  "chords": ["Em7", "A7", "Fm7", "Bb7", "Ebmaj7", "Abm7", "Db7", "Dmaj7", "Dm7", "G7", "Cmaj7"],
+  "original_duration": "9:11",
+  "learning_time": "12 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 7, "duration": 1.2, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.02, "string": 4, "fret": 5, "duration": 1.2, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 7, "duration": 1.2, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.06, "string": 2, "fret": 5, "duration": 1.2, "velocity": 0.7, "technique": "strum"}
+  ]
+}

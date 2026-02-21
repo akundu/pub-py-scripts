@@ -1,0 +1,21 @@
+{
+  "song_id": "pf_cl_003",
+  "title": "Study in E minor",
+  "composer": "Fernando Sor",
+  "tempo": 80,
+  "time_signature": "4/4",
+  "difficulty": "proficient",
+  "license_status": "public_domain",
+  "genre": "classical",
+  "chords": ["Em", "Am", "B7", "D", "G"],
+  "original_duration": "2:30",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 0, "duration": 3.0, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.38, "string": 3, "fret": 0, "duration": 0.38, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.76, "string": 2, "fret": 0, "duration": 0.38, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.14, "string": 1, "fret": 0, "duration": 0.38, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

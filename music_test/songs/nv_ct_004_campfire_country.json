@@ -1,0 +1,32 @@
+{
+  "song_id": "nv_ct_004",
+  "title": "Campfire Country",
+  "composer": "Traditional",
+  "tempo": 100,
+  "time_signature": "4/4",
+  "difficulty": "novice",
+  "license_status": "educational_use",
+  "genre": "country",
+  "chords": ["A", "D", "E"],
+  "original_duration": "1:20",
+  "learning_time": "2 days",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 0, "duration": 2.4, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.02, "string": 2, "fret": 2, "duration": 2.4, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 2, "duration": 2.4, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.06, "string": 4, "fret": 2, "duration": 2.4, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.08, "string": 5, "fret": 0, "duration": 2.4, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.4, "string": 1, "fret": 2, "duration": 2.4, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.42, "string": 2, "fret": 3, "duration": 2.4, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.44, "string": 3, "fret": 2, "duration": 2.4, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.46, "string": 4, "fret": 0, "duration": 2.4, "velocity": 0.7, "technique": "strum"},
+    {"time": 4.8, "string": 1, "fret": 0, "duration": 2.4, "velocity": 0.7, "technique": "strum"},
+    {"time": 4.82, "string": 2, "fret": 0, "duration": 2.4, "velocity": 0.7, "technique": "strum"},
+    {"time": 4.84, "string": 3, "fret": 1, "duration": 2.4, "velocity": 0.7, "technique": "strum"},
+    {"time": 4.86, "string": 4, "fret": 2, "duration": 2.4, "velocity": 0.7, "technique": "strum"},
+    {"time": 4.88, "string": 5, "fret": 2, "duration": 2.4, "velocity": 0.7, "technique": "strum"},
+    {"time": 4.90, "string": 6, "fret": 0, "duration": 2.4, "velocity": 0.7, "technique": "strum"}
+  ]
+}

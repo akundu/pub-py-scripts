@@ -1,0 +1,48 @@
+# URL Shortener – all service control from this file.
+# Redis and QuestDB URLs come from env (e.g. .envrc or .env); no Redis/QuestDB containers here.
+#
+# Usage:  docker compose up -d
+# Stop:   docker compose down
+
+services:
+  url-shortener:
+    image: python:3.11-slim
+    container_name: url-shortener
+    working_dir: /app
+    volumes:
+      - .:/app
+      - url-shortener-deps:/deps
+    command: >
+      sh -c "
+      [ -f /deps/venv/bin/python ] ||
+        (python3 -m venv /deps/venv && /deps/venv/bin/pip install --no-cache-dir -r requirements.txt);
+      exec /deps/venv/bin/python app.py
+      "
+    ports:
+      - "127.0.0.1:${APP_PORT:-9200}:9200"
+    environment:
+      - QUESTDB_URL=${QUESTDB_URL}
+      - WORKERS=${WORKERS:-1}
+      - QUESTDB_CREATE_TABLES=${QUESTDB_CREATE_TABLES}
+      - REDIS_URL=${REDIS_URL}
+      - BASE_URL=${BASE_URL:-http://localhost:9200}
+      - PATH_PREFIX=${PATH_PREFIX:-/u_s}
+      - HOST=0.0.0.0
+      - PORT=9200
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    networks:
+      - url-shortener-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9200/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  url-shortener-network:
+    driver: bridge
+
+volumes:
+  url-shortener-deps:

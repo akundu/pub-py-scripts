@@ -1,0 +1,21 @@
+{
+  "song_id": "av_cl_003",
+  "title": "Gran Vals",
+  "composer": "Francisco Tárrega",
+  "tempo": 95,
+  "time_signature": "3/4",
+  "difficulty": "advanced",
+  "license_status": "public_domain",
+  "genre": "classical",
+  "chords": ["E", "Am", "B7", "G#7", "C#m"],
+  "original_duration": "4:00",
+  "learning_time": "6 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 0, "duration": 1.89, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.32, "string": 3, "fret": 1, "duration": 0.32, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.64, "string": 2, "fret": 0, "duration": 0.32, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.96, "string": 1, "fret": 0, "duration": 0.32, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

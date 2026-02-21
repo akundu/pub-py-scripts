@@ -1,0 +1,58 @@
+# Example Configuration for Train/Test Split Backtesting
+# 
+# This configuration demonstrates how to use separate training and prediction periods
+# for proper model validation and avoiding data leakage.
+
+# Symbol configuration
+symbols:
+  - AAPL
+  - MSFT
+  - GOOGL
+
+# Strategy configuration
+strategy: markov_int
+
+# Training period (data used to build the model)
+training_start: "2020-01-01"
+training_end: "2023-12-31"
+
+# Prediction/backtest period (data used to test the model)
+start: "2024-01-01"
+end: "2024-10-31"
+
+# Strategy-specific parameters for MarkovInt
+interval_type: daily
+movement_threshold: 0.01  # 1% threshold for significant movement
+decay_factor: 0.95
+relevant_periods: 21
+min_training_periods: 30
+max_streak: 10
+
+# Backtest parameters
+capital: 100000.0
+commission: 1.0
+slippage: 0.1
+max_position_size: 100.0
+allow_shorting: false
+benchmark: SPY
+risk_free_rate: 2.0
+
+# Processing options
+workers: 4
+multiprocessing: true
+async_io: true
+chunk_size: 10
+
+# Data source
+data_source: database
+
+# Output options
+output_format: table
+output_dir: results
+
+# Notes:
+# - The training period (2020-2023) is completely separate from prediction period (2024)
+# - The strategy will be trained on 2020-2023 data only
+# - Predictions and trades will only occur in the 2024 period
+# - This prevents data leakage and provides realistic performance metrics
+

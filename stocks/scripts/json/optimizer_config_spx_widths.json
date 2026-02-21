@@ -1,0 +1,17 @@
+{
+  "fixed_params": {
+    "csv_path": "./options_csv_output/SPX/SPX_options_*.csv",
+    "db_path": "$QUEST_DB_STRING",
+    "underlying_ticker": "SPX",
+    "risk_cap": 100000,
+    "top_n": 5,
+    "min_contract_price": 0.25
+  },
+  "grid_params": {
+    "option_type": ["both"],
+    "percent_beyond_put": [0.005, 0.01],
+    "percent_beyond_call": [0.005],
+    "max_spread_width_put": [10, 15, 20, 30],
+    "max_spread_width_call": [10, 15, 20, 30, 40, 50]
+  }
+}

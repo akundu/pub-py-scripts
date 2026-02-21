@@ -1,0 +1,30 @@
+{
+  "song_id": "el_cl_003",
+  "title": "Bourrée in E minor",
+  "composer": "Bach",
+  "tempo": 70,
+  "time_signature": "2/2",
+  "difficulty": "elementary",
+  "license_status": "public_domain",
+  "genre": "classical",
+  "chords": ["Em", "Am", "B", "D"],
+  "original_duration": "2:00",
+  "learning_time": "3 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 4, "fret": 2, "duration": 0.43, "velocity": 0.7, "technique": "fingerpick"},
+    {"time": 0.43, "string": 4, "fret": 0, "duration": 0.43, "velocity": 0.7, "technique": "fingerpick"},
+    {"time": 0.86, "string": 5, "fret": 2, "duration": 0.86, "velocity": 0.7, "technique": "fingerpick"},
+    {"time": 1.72, "string": 4, "fret": 2, "duration": 0.43, "velocity": 0.7, "technique": "fingerpick"},
+    {"time": 2.15, "string": 4, "fret": 0, "duration": 0.43, "velocity": 0.7, "technique": "fingerpick"},
+    {"time": 2.58, "string": 3, "fret": 2, "duration": 0.43, "velocity": 0.7, "technique": "fingerpick"},
+    {"time": 3.01, "string": 4, "fret": 0, "duration": 0.43, "velocity": 0.7, "technique": "fingerpick"},
+    {"time": 3.44, "string": 4, "fret": 2, "duration": 0.43, "velocity": 0.7, "technique": "fingerpick"},
+    {"time": 3.87, "string": 3, "fret": 0, "duration": 0.86, "velocity": 0.7, "technique": "fingerpick"},
+    {"time": 4.73, "string": 2, "fret": 0, "duration": 0.43, "velocity": 0.7, "technique": "fingerpick"},
+    {"time": 5.16, "string": 3, "fret": 0, "duration": 0.43, "velocity": 0.7, "technique": "fingerpick"},
+    {"time": 5.59, "string": 2, "fret": 1, "duration": 0.43, "velocity": 0.7, "technique": "fingerpick"},
+    {"time": 6.02, "string": 2, "fret": 0, "duration": 0.43, "velocity": 0.7, "technique": "fingerpick"}
+  ]
+}

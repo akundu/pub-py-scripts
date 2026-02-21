@@ -1,0 +1,15 @@
+{
+  "fixed_params": {
+    "csv_path": "./options_csv_output/NDX/NDX_options_2025-12-*",
+    "db_path": "$QUEST_DB_STRING",
+    "underlying_ticker": "NDX",
+    "risk_cap": 100000,
+    "top_n": 5
+  },
+  "grid_params": {
+    "option_type": ["both", "put"],
+    "percent_beyond_put": [0.015, 0.02],
+    "percent_beyond_call": [0.02],
+    "max_spread_width": [40, 50]
+  }
+}

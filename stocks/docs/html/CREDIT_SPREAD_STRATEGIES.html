@@ -1,0 +1,1335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Credit Spread Analysis - Architecture &amp; Strategy Framework</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --accent-hover: #79c0ff;
+    --green: #3fb950;
+    --orange: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --code-bg: #1c2128;
+    --table-alt: #1c2128;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 0;
+  }
+  .wrapper {
+    display: flex;
+    min-height: 100vh;
+  }
+  /* Sidebar / Table of Contents */
+  .sidebar {
+    width: 280px;
+    min-width: 280px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    padding: 24px 16px;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    overflow-y: auto;
+    z-index: 10;
+  }
+  .sidebar h2 {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    color: var(--text-muted);
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .sidebar a {
+    display: block;
+    color: var(--text-muted);
+    text-decoration: none;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 14px;
+    transition: all 0.15s ease;
+  }
+  .sidebar a:hover {
+    color: var(--accent);
+    background: rgba(88,166,255,0.08);
+  }
+  .sidebar a.active {
+    color: var(--accent);
+    background: rgba(88,166,255,0.12);
+    font-weight: 600;
+  }
+  .sidebar .sub-link {
+    padding-left: 24px;
+    font-size: 13px;
+  }
+  /* Main content */
+  .content {
+    margin-left: 280px;
+    max-width: 960px;
+    padding: 40px 48px 80px;
+    flex: 1;
+  }
+  /* Headings */
+  h1 {
+    font-size: 32px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    color: var(--text);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 12px;
+  }
+  h2 {
+    font-size: 24px;
+    font-weight: 600;
+    margin-top: 48px;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+  }
+  h3 {
+    font-size: 20px;
+    font-weight: 600;
+    margin-top: 32px;
+    margin-bottom: 12px;
+    color: var(--text);
+  }
+  h4 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-top: 24px;
+    margin-bottom: 8px;
+    color: var(--accent);
+  }
+  /* Blockquote (mandate banner) */
+  blockquote {
+    background: rgba(210,153,34,0.1);
+    border-left: 4px solid var(--orange);
+    padding: 16px 20px;
+    margin: 16px 0 24px;
+    border-radius: 0 8px 8px 0;
+    color: var(--text);
+  }
+  blockquote strong {
+    color: var(--orange);
+  }
+  p {
+    margin-bottom: 16px;
+  }
+  strong { color: var(--text); }
+  a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  a:hover {
+    text-decoration: underline;
+    color: var(--accent-hover);
+  }
+  /* Lists */
+  ul, ol {
+    margin: 8px 0 16px 24px;
+  }
+  li {
+    margin-bottom: 4px;
+  }
+  /* Code */
+  code {
+    font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+    color: var(--accent-hover);
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    overflow-x: auto;
+    margin: 12px 0 20px;
+    position: relative;
+  }
+  pre code {
+    background: none;
+    padding: 0;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  /* Copy button */
+  .code-block {
+    position: relative;
+  }
+  .copy-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: inherit;
+    transition: all 0.15s;
+    opacity: 0;
+  }
+  .code-block:hover .copy-btn {
+    opacity: 1;
+  }
+  .copy-btn:hover {
+    background: var(--border);
+    color: var(--text);
+  }
+  .copy-btn.copied {
+    color: var(--green);
+    border-color: var(--green);
+  }
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0 20px;
+    font-size: 14px;
+  }
+  th {
+    background: var(--surface);
+    color: var(--text);
+    font-weight: 600;
+    text-align: left;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+  }
+  td {
+    padding: 8px 14px;
+    border: 1px solid var(--border);
+    vertical-align: top;
+  }
+  tr:nth-child(even) td {
+    background: var(--table-alt);
+  }
+  td code {
+    font-size: 12px;
+  }
+  /* Horizontal rule */
+  hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+  }
+  /* Syntax highlighting hints */
+  .kw { color: #ff7b72; }
+  .str { color: #a5d6ff; }
+  .comment { color: #8b949e; font-style: italic; }
+  .fn { color: #d2a8ff; }
+  .num { color: #79c0ff; }
+  /* ASCII diagram */
+  .diagram pre {
+    background: var(--surface);
+    border-color: var(--border);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .diagram pre code {
+    color: var(--green);
+  }
+  /* Section badges */
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+  .badge-green { background: rgba(63,185,80,0.15); color: var(--green); }
+  .badge-orange { background: rgba(210,153,34,0.15); color: var(--orange); }
+  .badge-purple { background: rgba(188,140,255,0.15); color: var(--purple); }
+  /* Responsive */
+  @media (max-width: 900px) {
+    .sidebar { display: none; }
+    .content { margin-left: 0; padding: 24px 20px 60px; }
+  }
+  /* Scroll margin for section anchors */
+  [id] { scroll-margin-top: 20px; }
+</style>
+</head>
+<body>
+<div class="wrapper">
+
+<!-- Sidebar -->
+<nav class="sidebar">
+  <h2>Navigation</h2>
+  <a href="#system-overview">System Overview</a>
+  <a href="#architecture">Architecture</a>
+  <a href="#architecture-data-flow" class="sub-link">Data Flow</a>
+  <a href="#architecture-directory" class="sub-link">Directory Structure</a>
+  <a href="#module-map">Module Map</a>
+  <a href="#analysis-modes">Analysis Modes</a>
+  <a href="#mode-price-movements" class="sub-link">Price Movements</a>
+  <a href="#mode-max-move" class="sub-link">Max Move</a>
+  <a href="#mode-risk-gradient" class="sub-link">Risk Gradient</a>
+  <a href="#daily-workflow-commands">Daily Workflow Commands</a>
+  <a href="#cmd-backtesting" class="sub-link">Backtesting</a>
+  <a href="#cmd-grid-search" class="sub-link">Grid Search</a>
+  <a href="#cmd-continuous" class="sub-link">Continuous Mode</a>
+  <a href="#strategy-framework">Strategy Framework</a>
+  <a href="#strategy-lifecycle" class="sub-link">Lifecycle</a>
+  <a href="#strategy-available" class="sub-link">Available Strategies</a>
+  <a href="#strategy-backward" class="sub-link">Backward Compat</a>
+  <a href="#grid-search">Grid Search</a>
+  <a href="#feature-flags">Feature Flags</a>
+  <a href="#configuration">Configuration</a>
+  <a href="#adding-strategy">Adding a New Strategy</a>
+  <a href="#weekly-data-generation">Weekly Data Generation</a>
+  <a href="#cmd-weekly-price" class="sub-link">Price Movements</a>
+  <a href="#cmd-weekly-grid" class="sub-link">Grid Search</a>
+  <a href="#cmd-weekly-delta" class="sub-link">Delta Grid</a>
+  <a href="#cmd-weekly-dynamic" class="sub-link">Dynamic Width</a>
+  <a href="#supporting-scripts">Supporting Scripts</a>
+  <a href="#change-log">Change Log</a>
+</nav>
+
+<!-- Main Content -->
+<main class="content">
+
+<h1>Credit Spread Analysis</h1>
+<p style="font-size:18px; color:var(--text-muted); margin-bottom:24px;">Architecture &amp; Strategy Framework</p>
+
+<blockquote>
+  <strong>MANDATE:</strong> This document MUST be updated with every code change to the credit
+  spread analysis system. When adding, modifying, or removing modules, commands,
+  strategies, or features, update the relevant sections below. This is the
+  single source of truth for the system architecture.
+</blockquote>
+
+<hr>
+
+<!-- SYSTEM OVERVIEW -->
+<h2 id="system-overview">System Overview</h2>
+
+<p>The credit spread analysis system backtests 0DTE (zero days to expiration)
+credit spread strategies on NDX and SPX options data. It reads CSV files
+containing options chain snapshots at 15-minute intervals and evaluates
+spread opportunities against historical price data stored in QuestDB.</p>
+
+<p><strong>Key capabilities:</strong></p>
+<ul>
+  <li>Single-run backtesting with configurable parameters</li>
+  <li>Grid search optimization across parameter combinations</li>
+  <li>Continuous live monitoring during market hours</li>
+  <li>Dynamic spread width calculation based on strike distance</li>
+  <li>Scale-in on breach (layered entry) strategy</li>
+  <li>Tiered investment (multi-tier concurrent positions) strategy</li>
+  <li>Delta-based filtering using Black-Scholes with VIX1D implied volatility</li>
+  <li>Rate limiting (sliding window and time-block based)</li>
+  <li>Binary caching for fast subsequent loads</li>
+  <li>Multiprocessing for parallel CSV processing</li>
+</ul>
+
+<p><strong>Main entry point:</strong> <code>scripts/analyze_credit_spread_intervals.py</code> (~1,505 lines)</p>
+
+<hr>
+
+<!-- ARCHITECTURE -->
+<h2 id="architecture">Architecture</h2>
+
+<h3 id="architecture-data-flow">High-Level Data Flow</h3>
+
+<div class="diagram">
+<pre><code>CSV Files (options_csv_output/TICKER/)
+    |
+    v
+data_loader.py --- load_data_cached() --- binary cache (.options_cache/)
+    |
+    v
+interval_analyzer.py --- analyze_interval() --- QuestDB (price data)
+    |                         |
+    |                    spread_builder.py --- build_credit_spreads()
+    |                         |
+    |                    backtest_engine.py --- calculate_spread_pnl()
+    |
+    v
+main() dispatcher
+    +-- Standard results --- metrics.py / output_formatter.py
+    +-- Grid search     --- grid_search.py --- parallel workers
+    +-- Continuous mode  --- continuous_runner.py
+    +-- Scale-in        --- scale_in_utils.py
+    +-- Tiered          --- tiered_investment_utils.py
+    +-- Strategy framework --- strategies/ package</code></pre>
+</div>
+
+<h3 id="architecture-directory">Directory Structure</h3>
+
+<div class="code-block">
+<pre><code>stocks/
++-- scripts/
+|   +-- analyze_credit_spread_intervals.py    # Main entry point (~1,520 lines)
+|   +-- analyze_price_movements.py            # Thin wrapper -> --mode price-movements
+|   +-- ndx_max_move_analysis.py              # Thin wrapper -> --mode max-move
+|   +-- ndx_risk_gradient_analysis.py         # Thin wrapper -> --mode risk-gradient
+|   +-- fetch_index_prices.py                 # Current index prices (separate)
+|   +-- ndx_daily_calculator.py               # Daily strike calculator (separate)
+|   +-- grid_config_*.json                    # Grid search configurations
+|   +-- scale_in_config_*.json                # Scale-in strategy configs
+|   +-- tiered_config_*.json                  # Tiered strategy configs
+|   +-- credit_spread_utils/                  # Utility modules package
+|       +-- __init__.py                       # Package init, exports all modules
+|       +-- arg_parser.py                     # CLI argument parsing (~800 lines)
+|       +-- backtest_engine.py                # P&amp;L calculation, profit targets
+|       +-- capital_utils.py                  # Capital lifecycle management
+|       +-- continuous_runner.py              # Continuous analysis mode
+|       +-- data_loader.py                    # CSV loading, binary caching
+|       +-- delta_utils.py                    # Delta calculation, BS model
+|       +-- dynamic_width_utils.py            # Dynamic spread width calculation
+|       +-- grid_search.py                    # Grid search optimization engine
+|       +-- interval_analyzer.py              # Core interval analysis
+|       +-- max_move_utils.py                 # Intraday extreme movement tables
+|       +-- metrics.py                        # Trading statistics, reporting
+|       +-- output_formatter.py               # Display and printing utilities
+|       +-- price_movement_utils.py           # Close-to-close / time-to-close movements
+|       +-- price_utils.py                    # Price fetching from QuestDB
+|       +-- rate_limiter.py                   # Sliding window rate limiting
+|       +-- risk_gradient_utils.py            # Risk gradient analysis + config gen
+|       +-- scale_in_utils.py                 # Scale-in on breach logic
+|       +-- spread_builder.py                 # Spread building, option pricing
+|       +-- tiered_investment_utils.py        # Tiered investment logic
+|       +-- time_block_rate_limiter.py        # Time-block rate limiting
+|       +-- timezone_utils.py                 # Timezone handling
+|       +-- strategies/                       # Strategy framework package
+|           +-- __init__.py                   # Imports concrete strategies
+|           +-- base.py                       # BaseStrategy ABC, StrategyConfig
+|           +-- registry.py                   # StrategyRegistry
+|           +-- single_entry.py               # SingleEntryStrategy (default)
+|           +-- scale_in_strategy.py          # ScaleInStrategy
+|           +-- tiered_strategy.py            # TieredStrategy
++-- docs/
+|   +-- CREDIT_SPREAD_STRATEGIES.md           # Source document
+|   +-- html/                                 # This HTML version
++-- common/
+|   +-- questdb_db.py                         # QuestDB database interface
+|   +-- logging_utils.py                      # Logging configuration
+|   +-- market_hours.py                       # Market hours awareness
++-- options_csv_output/                       # CSV data directory
+    +-- NDX/                                  # NDX_options_YYYY-MM-DD.csv
+    +-- SPX/                                  # SPX_options_YYYY-MM-DD.csv</code></pre>
+</div>
+
+<hr>
+
+<!-- MODULE MAP -->
+<h2 id="module-map">Module Map</h2>
+
+<table>
+<thead>
+<tr><th>Module</th><th>Key Functions / Classes</th><th>Purpose</th></tr>
+</thead>
+<tbody>
+<tr><td><code>analyze_credit_spread_intervals.py</code></td><td><code>main()</code>, <code>analyze_scale_in_trade()</code></td><td>Entry point, CLI dispatch, scale-in analysis</td></tr>
+<tr><td><code>arg_parser.py</code></td><td><code>parse_args()</code></td><td>CLI argument definitions with help text</td></tr>
+<tr><td><code>spread_builder.py</code></td><td><code>parse_percent_beyond()</code>, <code>parse_max_spread_width()</code>, <code>parse_min_premium_diff()</code>, <code>calculate_option_price()</code>, <code>build_credit_spreads()</code></td><td>Spread construction and option pricing</td></tr>
+<tr><td><code>backtest_engine.py</code></td><td><code>calculate_spread_pnl()</code>, <code>check_profit_target_hit()</code>, <code>find_option_at_timestamp()</code></td><td>P&amp;L calculation, profit target checking</td></tr>
+<tr><td><code>interval_analyzer.py</code></td><td><code>analyze_interval()</code>, <code>round_to_15_minutes()</code>, <code>parse_pst_timestamp()</code></td><td>Core 15-minute interval analysis</td></tr>
+<tr><td><code>metrics.py</code></td><td><code>compute_metrics()</code>, <code>filter_top_n_per_day()</code>, <code>print_trading_statistics()</code>, <code>print_hourly_summary()</code>, <code>print_10min_block_breakdown()</code>, <code>generate_hourly_histogram()</code></td><td>Statistics computation and reporting</td></tr>
+<tr><td><code>data_loader.py</code></td><td><code>find_csv_files_in_dir()</code>, <code>load_data_cached()</code>, <code>compute_cache_key()</code>, <code>clear_cache()</code>, <code>process_single_csv()</code>, <code>process_single_csv_sync()</code></td><td>CSV loading, binary caching, parallel processing</td></tr>
+<tr><td><code>grid_search.py</code></td><td><code>run_grid_search()</code>, <code>run_backtest_with_params()</code>, <code>_build_strategy_for_combo()</code></td><td>Grid search optimization engine</td></tr>
+<tr><td><code>output_formatter.py</code></td><td><code>format_best_current_option()</code>, <code>format_summary_line()</code>, <code>build_summary_parts()</code></td><td>Display and printing utilities</td></tr>
+<tr><td><code>continuous_runner.py</code></td><td><code>run_continuous_analysis()</code>, <code>_run_single_analysis_iteration()</code></td><td>Continuous live monitoring mode</td></tr>
+<tr><td><code>capital_utils.py</code></td><td><code>calculate_position_capital()</code>, <code>filter_results_by_capital_limit()</code></td><td>Capital lifecycle management</td></tr>
+<tr><td><code>price_utils.py</code></td><td><code>get_current_day_close_price()</code>, <code>get_previous_close_price()</code>, <code>get_previous_open_price()</code>, <code>get_current_day_open_price()</code>, <code>get_price_at_time()</code></td><td>Price fetching from QuestDB</td></tr>
+<tr><td><code>timezone_utils.py</code></td><td><code>resolve_timezone()</code>, <code>format_timestamp()</code>, <code>normalize_timestamp()</code></td><td>Timezone handling and conversion</td></tr>
+<tr><td><code>rate_limiter.py</code></td><td><code>SlidingWindowRateLimiter</code></td><td>Sliding window rate limiting</td></tr>
+<tr><td><code>time_block_rate_limiter.py</code></td><td><code>TimeBlockRateLimiter</code></td><td>Time-block based rate limiting</td></tr>
+<tr><td><code>dynamic_width_utils.py</code></td><td>Dynamic spread width calculation</td><td>Width based on strike distance</td></tr>
+<tr><td><code>scale_in_utils.py</code></td><td><code>ScaleInConfig</code>, <code>initialize_scale_in_trade()</code>, <code>calculate_layered_pnl()</code>, <code>process_price_update()</code>, <code>generate_scale_in_summary()</code>, <code>load_scale_in_config()</code></td><td>Scale-in on breach logic</td></tr>
+<tr><td><code>delta_utils.py</code></td><td><code>DeltaFilterConfig</code>, <code>parse_delta_range()</code>, <code>format_delta_filter_info()</code></td><td>Delta calculation, Black-Scholes</td></tr>
+<tr><td><code>tiered_investment_utils.py</code></td><td><code>TieredInvestmentConfig</code>, <code>initialize_tiered_trade()</code>, <code>calculate_all_tiers_pnl()</code>, <code>generate_tiered_summary()</code>, <code>load_tiered_config()</code></td><td>Tiered investment logic</td></tr>
+<tr><td><code>strategies/__init__.py</code></td><td>Package imports</td><td>Triggers auto-registration of strategies</td></tr>
+<tr><td><code>strategies/base.py</code></td><td><code>BaseStrategy</code>, <code>StrategyConfig</code>, <code>StrategyResult</code></td><td>Abstract base classes</td></tr>
+<tr><td><code>strategies/registry.py</code></td><td><code>StrategyRegistry</code></td><td>Strategy lookup by name</td></tr>
+<tr><td><code>strategies/single_entry.py</code></td><td><code>SingleEntryStrategy</code></td><td>Default best-spread-per-interval</td></tr>
+<tr><td><code>strategies/scale_in_strategy.py</code></td><td><code>ScaleInStrategy</code></td><td>Layered entry on breach</td></tr>
+<tr><td><code>strategies/tiered_strategy.py</code></td><td><code>TieredStrategy</code></td><td>Multi-tier position management</td></tr>
+<tr><td><code>price_movement_utils.py</code></td><td><code>load_ticker_data()</code>, <code>calculate_movements()</code>, <code>calculate_statistics()</code>, <code>print_statistics()</code>, <code>generate_histogram()</code>, <code>run_price_movement_analysis()</code></td><td>Close-to-close and time-to-close price movement analysis</td></tr>
+<tr><td><code>max_move_utils.py</code></td><td><code>load_csv_data()</code>, <code>get_available_dates()</code>, <code>get_day_close()</code>, <code>get_previous_close()</code>, <code>analyze_max_moves()</code>, <code>print_tables()</code>, <code>run_max_move_analysis()</code></td><td>Intraday extreme movement tables by 30-min time slots</td></tr>
+<tr><td><code>risk_gradient_utils.py</code></td><td><code>query_historical_max_movements()</code>, <code>generate_risk_gradient_values()</code>, <code>create_grid_config()</code>, <code>run_risk_gradient_analysis()</code></td><td>Risk gradient analysis with QuestDB + grid config generation</td></tr>
+</tbody>
+</table>
+
+<hr>
+
+<!-- ANALYSIS MODES -->
+<h2 id="analysis-modes">Analysis Modes (<code>--mode</code>)</h2>
+
+<p>The main entry point supports multiple analysis modes via the <code>--mode</code> argument.
+When <code>--mode</code> is not <code>credit-spread</code>, the existing validation (requiring
+<code>--percent-beyond</code>, etc.) is bypassed and mode-specific arguments are used.</p>
+
+<table>
+<thead>
+<tr><th>Mode</th><th>Description</th><th>Replaces</th></tr>
+</thead>
+<tbody>
+<tr><td><code>credit-spread</code></td><td>Default. Existing credit spread analysis.</td><td>(current default)</td></tr>
+<tr><td><code>price-movements</code></td><td>Close-to-close or time-to-close price movement statistics</td><td><code>analyze_price_movements.py</code></td></tr>
+<tr><td><code>max-move</code></td><td>Intraday extreme movement tables (30-min slots)</td><td><code>ndx_max_move_analysis.py</code></td></tr>
+<tr><td><code>risk-gradient</code></td><td>Risk gradient analysis from historical safe points</td><td><code>ndx_risk_gradient_analysis.py</code></td></tr>
+</tbody>
+</table>
+
+<h3 id="mode-price-movements">Price Movements Mode</h3>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code># Close-to-close analysis
+python scripts/analyze_credit_spread_intervals.py \
+    --mode price-movements --ticker I:NDX --no-plot
+
+# Time-to-close analysis (from 11:30 AM EST)
+python scripts/analyze_credit_spread_intervals.py \
+    --mode price-movements --ticker I:NDX --from-time 11:30 --pm-timezone EST --no-plot
+
+# Down days only
+python scripts/analyze_credit_spread_intervals.py \
+    --mode price-movements --ticker I:NDX --no-plot --day-direction down</code></pre>
+</div>
+
+<h3 id="mode-max-move">Max Move Mode</h3>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code># NDX 125-day analysis
+python scripts/analyze_credit_spread_intervals.py \
+    --mode max-move --ticker NDX --days 125
+
+# SPX 60-day analysis
+python scripts/analyze_credit_spread_intervals.py \
+    --mode max-move --ticker SPX --days 60</code></pre>
+</div>
+
+<h3 id="mode-risk-gradient">Risk Gradient Mode</h3>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code># Generate configs only
+python scripts/analyze_credit_spread_intervals.py \
+    --mode risk-gradient --ticker NDX --lookback-days 90 180 --generate-config-only
+
+# Full analysis with backtest
+python scripts/analyze_credit_spread_intervals.py \
+    --mode risk-gradient --ticker NDX --lookback-days 90 180 --run-backtest --processes 8</code></pre>
+</div>
+
+<hr>
+
+<!-- DAILY WORKFLOW COMMANDS -->
+<h2 id="daily-workflow-commands">Daily Workflow Commands</h2>
+
+<p>All commands run from the project root (<code>stocks/</code> directory).</p>
+
+<h3 id="cmd-backtesting">Backtesting (Historical Analysis)</h3>
+
+<h4>Standard backtest &mdash; NDX, configurable date range</h4>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>python scripts/analyze_credit_spread_intervals.py \
+    --csv-dir options_csv_output --ticker NDX \
+    --start-date 2025-11-01 --end-date 2026-02-07 \
+    --percent-beyond 0.005:0.015 --max-spread-width 20:30 \
+    --risk-cap 500000 --profit-target-pct 0.80 \
+    --min-trading-hour 6 --max-trading-hour 12 \
+    --output-timezone America/Los_Angeles --summary</code></pre>
+</div>
+
+<h4>Backtest with dynamic spread widths (Linear-500)</h4>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>python scripts/analyze_credit_spread_intervals.py \
+    --csv-dir options_csv_output --ticker NDX \
+    --start-date 2025-11-01 \
+    --percent-beyond 0.005:0.015 --max-spread-width 50 \
+    --dynamic-spread-width '{"mode":"linear","base_width":15,"slope_factor":500,"min_width":10,"max_width":50}' \
+    --risk-cap 500000 --profit-target-pct 0.80 --summary</code></pre>
+</div>
+
+<h4>Backtest with scale-in strategy</h4>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>python scripts/analyze_credit_spread_intervals.py \
+    --csv-dir options_csv_output --ticker NDX \
+    --start-date 2025-11-01 \
+    --percent-beyond 0.025:0.026 --max-spread-width 25 \
+    --scale-in-enabled --scale-in-config scripts/scale_in_config_ndx.json \
+    --risk-cap 500000 --summary</code></pre>
+</div>
+
+<h4>Backtest with tiered investment strategy</h4>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>python scripts/analyze_credit_spread_intervals.py \
+    --csv-dir options_csv_output --ticker NDX \
+    --start-date 2025-11-01 \
+    --percent-beyond 0.02 --max-spread-width 50 \
+    --tiered-enabled --tiered-config scripts/tiered_config_ndx.json \
+    --summary</code></pre>
+</div>
+
+<h4>Backtest with delta filtering (VIX1D-based IV)</h4>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>python scripts/analyze_credit_spread_intervals.py \
+    --csv-dir options_csv_output --ticker NDX \
+    --start-date 2025-11-01 \
+    --percent-beyond 0.005 --max-spread-width 50 \
+    --max-short-delta 0.15 --use-vix1d \
+    --option-type put --summary</code></pre>
+</div>
+
+<h3 id="cmd-grid-search">Grid Search (Parameter Optimization)</h3>
+
+<h4>Multi-timeframe grid search</h4>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code># 1-week window
+python scripts/analyze_credit_spread_intervals.py \
+    --grid-config scripts/grid_config_ndx_1wk_100pct.json \
+    --grid-output scripts/ndx_1wk_100pct_results.csv \
+    --grid-sort net_pnl --grid-top-n 20 --log-level WARNING
+
+# 2-week window
+python scripts/analyze_credit_spread_intervals.py \
+    --grid-config scripts/grid_config_ndx_2wk_100pct.json \
+    --grid-output scripts/ndx_2wk_100pct_results.csv \
+    --grid-sort net_pnl --grid-top-n 20 --log-level WARNING
+
+# 1-month, 3-month, 6-month: same pattern with corresponding grid configs</code></pre>
+</div>
+
+<h4>Delta grid search (NDX puts, delta 0.01-0.20)</h4>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>python scripts/analyze_credit_spread_intervals.py \
+    --grid-config scripts/ndx_optimal_puts_config.json \
+    --grid-output scripts/ndx_delta_puts_results.csv \
+    --grid-sort net_pnl --grid-top-n 20 --log-level WARNING --no-data-cache</code></pre>
+</div>
+
+<h4>Resume an interrupted grid search</h4>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>python scripts/analyze_credit_spread_intervals.py \
+    --grid-config scripts/grid_config_ndx_1mo_100pct.json \
+    --grid-output scripts/ndx_1mo_100pct_results.csv \
+    --grid-resume --grid-sort net_pnl --grid-top-n 20</code></pre>
+</div>
+
+<h4>Grid search with strategy framework</h4>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>python scripts/analyze_credit_spread_intervals.py \
+    --grid-config scripts/grid_config_with_strategy.json \
+    --grid-output scripts/strategy_grid_results.csv \
+    --grid-sort net_pnl --grid-top-n 20</code></pre>
+</div>
+
+<p>Grid config with strategy section:</p>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>{
+  "strategy": {"name": "tiered", "config_file": "tiered_config_ndx.json"},
+  "fixed_params": {
+    "csv_dir": "options_csv_output",
+    "underlying_ticker": "NDX",
+    "max_spread_width": "50",
+    "start_date": "2025-11-05",
+    "end_date": "2026-02-02"
+  },
+  "grid_params": {
+    "strategy.feature_flags.greedy_t3_first": [true, false],
+    "percent_beyond": [0.015, 0.020, 0.025]
+  }
+}</code></pre>
+</div>
+
+<h3 id="cmd-continuous">Continuous Mode (Live Monitoring)</h3>
+
+<h4>Live monitoring during market hours</h4>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>python scripts/analyze_credit_spread_intervals.py \
+    --csv-dir options_csv_output --ticker NDX \
+    --percent-beyond 0.005:0.015 --max-spread-width 20:30 \
+    --risk-cap 500000 --profit-target-pct 0.80 \
+    --continuous 10 --most-recent --best-only \
+    --curr-price --use-market-hours \
+    --output-timezone America/Los_Angeles</code></pre>
+</div>
+
+<h4>Continuous with auto-stop after N runs</h4>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>python scripts/analyze_credit_spread_intervals.py \
+    --csv-dir options_csv_output --ticker NDX \
+    --percent-beyond 0.005:0.015 --max-spread-width 20:30 \
+    --continuous 15 --most-recent --best-only \
+    --curr-price --use-market-hours \
+    --run-once-before-wait --continuous-max-runs 100</code></pre>
+</div>
+
+<hr>
+
+<!-- STRATEGY FRAMEWORK -->
+<h2 id="strategy-framework">Strategy Framework</h2>
+
+<h3>Overview</h3>
+
+<p>The strategy framework provides a pluggable architecture for credit spread entry
+and position management. It replaces hard-coded strategy logic with an abstract
+interface that allows multiple trading strategies to coexist under a single
+backtest and grid search engine.</p>
+
+<h3 id="strategy-lifecycle">Strategy Lifecycle</h3>
+
+<p>Every strategy follows the same lifecycle:</p>
+
+<div class="diagram">
+<pre><code>select_entries(day_results, prev_close, option_type, **kwargs)
+    -> List[Dict]  (positions)
+
+calculate_pnl(positions, close_price, **kwargs)
+    -> StrategyResult  (aggregated P&amp;L with per-position detail)</code></pre>
+</div>
+
+<ol>
+  <li><strong><code>select_entries()</code></strong> receives the interval analysis results for one trading
+   day and returns a list of position dictionaries.</li>
+  <li><strong><code>calculate_pnl()</code></strong> receives those positions along with the closing price
+   and returns a <code>StrategyResult</code> dataclass.</li>
+</ol>
+
+<h3>Auto-Registration</h3>
+
+<p>Concrete strategies register themselves at import time using the
+<code>@StrategyRegistry.register</code> class decorator:</p>
+
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>from .registry import StrategyRegistry
+
+@StrategyRegistry.register
+class MyStrategy(BaseStrategy):
+    @property
+    def name(self) -> str:
+        return "my_strategy"
+    ...</code></pre>
+</div>
+
+<h3>Core Data Classes</h3>
+
+<p><strong><code>StrategyConfig</code></strong> &mdash; holds <code>enabled</code> (bool) and <code>feature_flags</code> (dict).
+Provides <code>get_flag(name, default)</code>, <code>has_flag(name)</code>, <code>to_dict()</code>, <code>from_dict()</code>.</p>
+
+<p><strong><code>StrategyResult</code></strong> &mdash; returned by <code>calculate_pnl()</code>:</p>
+
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>strategy_name</code></td><td><code>str</code></td><td>Name of the strategy</td></tr>
+<tr><td><code>trading_date</code></td><td><code>Optional[datetime]</code></td><td>Date of the trading day</td></tr>
+<tr><td><code>option_type</code></td><td><code>str</code></td><td><code>"call"</code> or <code>"put"</code></td></tr>
+<tr><td><code>total_credit</code></td><td><code>float</code></td><td>Sum of all position credits</td></tr>
+<tr><td><code>total_max_loss</code></td><td><code>float</code></td><td>Sum of all position max losses</td></tr>
+<tr><td><code>total_pnl</code></td><td><code>Optional[float]</code></td><td>Net P&amp;L across all positions</td></tr>
+<tr><td><code>positions</code></td><td><code>List[Dict]</code></td><td>Per-position detail</td></tr>
+<tr><td><code>metadata</code></td><td><code>Dict[str, Any]</code></td><td>Optional additional data</td></tr>
+</tbody>
+</table>
+
+<h3 id="strategy-available">Available Strategies</h3>
+
+<h4>single_entry <span class="badge badge-green">DEFAULT</span></h4>
+<p>Selects the single best spread per interval based on highest net credit. No external config required.</p>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>python scripts/analyze_credit_spread_intervals.py \
+    --csv-dir options_csv_output --ticker NDX \
+    --percent-beyond 0.02 --max-spread-width 50 \
+    --strategy single_entry --option-type put --summary</code></pre>
+</div>
+
+<h4>scale_in <span class="badge badge-orange">LAYERED</span></h4>
+<p>Layered entry on breach. Positions enter in layers (L1/L2/L3) as the underlying
+price breaches previous layer strikes. Requires <code>config_file</code> pointing to a
+scale-in JSON configuration.</p>
+<p>Feature flags: <code>aggressive_l1</code> (placeholder for tighter L1 percent_beyond).</p>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>python scripts/analyze_credit_spread_intervals.py \
+    --csv-dir options_csv_output --ticker NDX \
+    --percent-beyond 0.02 --max-spread-width 50 \
+    --strategy scale_in \
+    --strategy-config '{"config_file": "scripts/scale_in_config_ndx.json"}' \
+    --option-type put --summary</code></pre>
+</div>
+
+<h4>tiered <span class="badge badge-purple">MULTI-TIER</span></h4>
+<p>Multi-tier position management. Multiple tiers activate simultaneously, each
+with its own percent_beyond, spread width, and contract count. Requires
+<code>config_file</code> pointing to a tiered investment JSON configuration.</p>
+<p>Feature flags: <code>greedy_t3_first</code> (reverse tier order), <code>wait_for_slope</code>
+(placeholder for slope-aware entry).</p>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>python scripts/analyze_credit_spread_intervals.py \
+    --csv-dir options_csv_output --ticker NDX \
+    --percent-beyond 0.02 --max-spread-width 50 \
+    --strategy tiered \
+    --strategy-config '{"config_file": "scripts/tiered_config_ndx.json"}' \
+    --option-type put --summary</code></pre>
+</div>
+
+<h3 id="strategy-backward">Backward Compatibility</h3>
+
+<p>Legacy CLI flags continue to work:</p>
+
+<table>
+<thead>
+<tr><th>Legacy Flag</th><th>Equivalent Strategy Framework Usage</th></tr>
+</thead>
+<tbody>
+<tr><td><code>--scale-in-enabled --scale-in-config file.json</code></td><td><code>--strategy scale_in --strategy-config '{"config_file": "file.json"}'</code></td></tr>
+<tr><td><code>--tiered-enabled --tiered-config file.json</code></td><td><code>--strategy tiered --strategy-config '{"config_file": "file.json"}'</code></td></tr>
+<tr><td><code>--scale-in-summary-only</code></td><td>Still works alongside <code>--strategy scale_in</code></td></tr>
+<tr><td><code>--tiered-summary-only</code></td><td>Still works alongside <code>--strategy tiered</code></td></tr>
+</tbody>
+</table>
+
+<hr>
+
+<!-- GRID SEARCH -->
+<h2 id="grid-search">Grid Search</h2>
+
+<p>The grid search engine (<code>grid_search.py</code>) runs parameter sweeps across any
+combination of backtest parameters. It supports:</p>
+<ul>
+  <li>Parallel execution via multiprocessing</li>
+  <li>Resume from existing results (skip computed combos)</li>
+  <li>Strategy parameterization including feature flags</li>
+  <li>CSV output for analysis</li>
+</ul>
+
+<h3>Grid Config Format</h3>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>{
+  "fixed_params": {
+    "csv_dir": "options_csv_output",
+    "underlying_ticker": "NDX",
+    "percent_beyond": "0.005",
+    "max_spread_width": "50",
+    "risk_cap": 5000,
+    "max_credit_width_ratio": 0.60,
+    "max_trading_hour": 15,
+    "min_trading_hour": 7,
+    "option_type": "put",
+    "use_vix1d": true,
+    "start_date": "2025-11-05",
+    "end_date": "2026-02-02"
+  },
+  "grid_params": {
+    "max_short_delta": [0.01, 0.02, 0.05, 0.10, 0.15, 0.20]
+  }
+}</code></pre>
+</div>
+
+<h3>Strategy-Aware Grid Search</h3>
+<p>Add a <code>"strategy"</code> section to enable strategy parameterization:</p>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>{
+  "strategy": {
+    "name": "tiered",
+    "config_file": "tiered_config_ndx.json"
+  },
+  "grid_params": {
+    "strategy.feature_flags.greedy_t3_first": [true, false],
+    "percent_beyond": [0.015, 0.020, 0.025]
+  }
+}</code></pre>
+</div>
+
+<p>Keys prefixed with <code>strategy.feature_flags.</code> are extracted per combo and merged
+into the strategy config's feature flags before creating the strategy instance.</p>
+
+<hr>
+
+<!-- FEATURE FLAGS -->
+<h2 id="feature-flags">Feature Flags Reference</h2>
+
+<table>
+<thead>
+<tr><th>Strategy</th><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>scale_in</code></td><td><code>aggressive_l1</code></td><td><code>bool</code></td><td><code>false</code></td><td>Placeholder for tighter L1 percent_beyond</td></tr>
+<tr><td><code>tiered</code></td><td><code>greedy_t3_first</code></td><td><code>bool</code></td><td><code>false</code></td><td>Reverse tier evaluation order (T3 first)</td></tr>
+<tr><td><code>tiered</code></td><td><code>wait_for_slope</code></td><td><code>bool</code></td><td><code>false</code></td><td>Placeholder for slope-aware entry logic</td></tr>
+</tbody>
+</table>
+
+<p>Feature flags are read via <code>StrategyConfig.get_flag()</code> and applied in each
+strategy's <code>apply_feature_flags()</code> method.</p>
+
+<hr>
+
+<!-- CONFIGURATION -->
+<h2 id="configuration">Configuration</h2>
+
+<h3>CLI Arguments</h3>
+<p>The strategy framework adds two arguments (in <code>arg_parser.py</code>):</p>
+<div class="code-block">
+<pre><code>--strategy {single_entry,scale_in,tiered}
+    Strategy to use. Default: None (legacy code paths).
+
+--strategy-config path/to/config.json
+    Path to JSON strategy configuration with feature flags.</code></pre>
+</div>
+
+<h3>JSON Strategy Config Schema</h3>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>{
+  "strategy": "tiered",
+  "enabled": true,
+  "feature_flags": {"greedy_t3_first": true},
+  "config_file": "tiered_config_ndx.json"
+}</code></pre>
+</div>
+
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>strategy</code></td><td><code>str</code></td><td>No</td><td>Strategy name (informational)</td></tr>
+<tr><td><code>enabled</code></td><td><code>bool</code></td><td>No</td><td>Enable/disable. Default: <code>true</code></td></tr>
+<tr><td><code>feature_flags</code></td><td><code>dict</code></td><td>No</td><td>Key-value pairs. Default: <code>{}</code></td></tr>
+<tr><td><code>config_file</code></td><td><code>str</code></td><td>Conditional</td><td>Path to strategy-specific config. Required for <code>scale_in</code> and <code>tiered</code></td></tr>
+</tbody>
+</table>
+
+<h3>Scale-In Config Fields</h3>
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>enabled</code></td><td><code>bool</code></td><td>Master enable switch</td></tr>
+<tr><td><code>total_capital</code></td><td><code>float</code></td><td>Total capital across all layers</td></tr>
+<tr><td><code>spread_width</code></td><td><code>float</code></td><td>Fixed spread width for all layers</td></tr>
+<tr><td><code>min_time_between_layers_minutes</code></td><td><code>int</code></td><td>Min gap between layer activations</td></tr>
+<tr><td><code>layers.{put|call}[].level</code></td><td><code>int</code></td><td>Layer number (1, 2, 3)</td></tr>
+<tr><td><code>layers.{put|call}[].percent_beyond</code></td><td><code>float</code></td><td>Percent beyond close</td></tr>
+<tr><td><code>layers.{put|call}[].capital_pct</code></td><td><code>float</code></td><td>Fraction of total_capital</td></tr>
+<tr><td><code>layers.{put|call}[].trigger</code></td><td><code>str</code></td><td><code>"entry"</code>, <code>"L1_breach"</code>, <code>"L2_breach"</code></td></tr>
+</tbody>
+</table>
+
+<h3>Tiered Config Fields</h3>
+<table>
+<thead>
+<tr><th>Field</th><th>Type</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>enabled</code></td><td><code>bool</code></td><td>Master enable switch</td></tr>
+<tr><td><code>tiers.{put|call}[].level</code></td><td><code>int</code></td><td>Tier number (1, 2, 3, ...)</td></tr>
+<tr><td><code>tiers.{put|call}[].percent_beyond</code></td><td><code>float</code></td><td>Percent beyond close</td></tr>
+<tr><td><code>tiers.{put|call}[].num_contracts</code></td><td><code>int</code></td><td>Contract count</td></tr>
+<tr><td><code>tiers.{put|call}[].spread_width</code></td><td><code>float</code></td><td>Spread width (strike distance)</td></tr>
+</tbody>
+</table>
+
+<hr>
+
+<!-- ADDING A NEW STRATEGY -->
+<h2 id="adding-strategy">Adding a New Strategy</h2>
+
+<h3>Step 1: Create the Strategy File</h3>
+<p>Create <code>scripts/credit_spread_utils/strategies/my_strategy.py</code>:</p>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>from typing import Any, Dict, List, Optional
+from .base import BaseStrategy, StrategyConfig, StrategyResult
+from .registry import StrategyRegistry
+
+@StrategyRegistry.register
+class MyStrategy(BaseStrategy):
+    @property
+    def name(self) -> str:
+        return "my_strategy"
+
+    def validate_config(self) -> bool:
+        return True
+
+    def select_entries(self, day_results, prev_close, option_type, **kw):
+        return []
+
+    def calculate_pnl(self, positions, close_price, **kw):
+        return StrategyResult(
+            strategy_name=self.name, option_type=kw.get('option_type', 'put'),
+            total_credit=0, total_max_loss=0, total_pnl=0, positions=[])
+
+    @classmethod
+    def from_json(cls, config_dict, logger=None):
+        config = StrategyConfig.from_dict(config_dict) if config_dict else StrategyConfig()
+        return cls(config=config, logger=logger)</code></pre>
+</div>
+
+<h3>Step 2: Import in <code>strategies/__init__.py</code></h3>
+<div class="code-block">
+<pre><code>from . import my_strategy</code></pre>
+</div>
+
+<h3>Step 3: Add to <code>arg_parser.py</code> choices</h3>
+<p>Update <code>--strategy</code> choices in <code>_add_strategy_args()</code>:</p>
+<div class="code-block">
+<pre><code>choices=['single_entry', 'scale_in', 'tiered', 'my_strategy'],</code></pre>
+</div>
+
+<h3>Step 4: Update this document</h3>
+<p>Add the strategy to the Available Strategies section and Feature Flags table.</p>
+
+<hr>
+
+<!-- WEEKLY DATA GENERATION -->
+<h2 id="weekly-data-generation">Weekly Data Generation Commands</h2>
+
+<p>These commands regenerate the analyses captured in <code>scripts/summarized_view.txt</code>.
+Run weekly (e.g., every Friday after close) from the project root (<code>stocks/</code>).</p>
+
+<h3>Date Setup</h3>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code># macOS date arithmetic for rolling windows
+END_DATE=$(date +%Y-%m-%d)
+START_1WK=$(date -v-7d +%Y-%m-%d)
+START_2WK=$(date -v-14d +%Y-%m-%d)
+START_1MO=$(date -v-1m +%Y-%m-%d)
+START_3MO=$(date -v-3m +%Y-%m-%d)
+START_6MO=$(date -v-6m +%Y-%m-%d)</code></pre>
+</div>
+
+<h3 id="cmd-weekly-price">1. Close-to-Close Price Movement Statistics</h3>
+<p>Produces percentile tables (P95/P97/P99/P100) for daily price movements.</p>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code># NDX - all days, down days only, up days only (using --mode)
+python scripts/analyze_credit_spread_intervals.py --mode price-movements --ticker I:NDX --no-plot
+python scripts/analyze_credit_spread_intervals.py --mode price-movements --ticker I:NDX --no-plot --day-direction down
+python scripts/analyze_credit_spread_intervals.py --mode price-movements --ticker I:NDX --no-plot --day-direction up
+
+# SPX - same set
+python scripts/analyze_credit_spread_intervals.py --mode price-movements --ticker I:SPX --no-plot
+python scripts/analyze_credit_spread_intervals.py --mode price-movements --ticker I:SPX --no-plot --day-direction down
+python scripts/analyze_credit_spread_intervals.py --mode price-movements --ticker I:SPX --no-plot --day-direction up
+
+# Legacy thin wrapper still works:
+# python scripts/analyze_price_movements.py --ticker I:NDX --no-plot</code></pre>
+</div>
+
+<h3>2. Last N Minutes to Close Analysis</h3>
+<p>Measures how much the index moves in the final 5-10 minutes before close.</p>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code># NDX - last 10 min and last 5 min
+python scripts/analyze_credit_spread_intervals.py --mode price-movements --ticker I:NDX --from-time 15:50 --pm-timezone EST --no-plot
+python scripts/analyze_credit_spread_intervals.py --mode price-movements --ticker I:NDX --from-time 15:55 --pm-timezone EST --no-plot
+
+# SPX - same
+python scripts/analyze_credit_spread_intervals.py --mode price-movements --ticker I:SPX --from-time 15:50 --pm-timezone EST --no-plot
+python scripts/analyze_credit_spread_intervals.py --mode price-movements --ticker I:SPX --from-time 15:55 --pm-timezone EST --no-plot
+
+# Legacy thin wrapper still works:
+# python scripts/analyze_price_movements.py --ticker I:NDX --from-time 15:50 --timezone EST --no-plot</code></pre>
+</div>
+
+<h3>3. Intraday Extreme Movement Tables (30-min slots)</h3>
+<p>Shows max upside/downside movement from each half-hour slot to close, split by
+days above vs below previous close. Produces P95-P100 tables.</p>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>python scripts/analyze_credit_spread_intervals.py --mode max-move --ticker NDX --days 125
+python scripts/analyze_credit_spread_intervals.py --mode max-move --ticker SPX --days 125
+
+# Legacy thin wrapper still works:
+# python scripts/ndx_max_move_analysis.py --ticker NDX --days 125</code></pre>
+</div>
+
+<h3>4. Risk Gradient Analysis</h3>
+<p>Starts from the &ldquo;zero risk&rdquo; point (100th percentile price movement) and tests
+shifting toward the money in steps to map the risk/reward gradient.</p>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>python scripts/analyze_credit_spread_intervals.py \
+    --mode risk-gradient --ticker NDX --lookback-days 90 180 --run-backtest --processes 8
+
+python scripts/analyze_credit_spread_intervals.py \
+    --mode risk-gradient --ticker SPX --lookback-days 90 180 --run-backtest --processes 8
+
+# Legacy thin wrapper still works:
+# python scripts/ndx_risk_gradient_analysis.py --ticker NDX --lookback-days 90 180 --run-backtest</code></pre>
+</div>
+
+<h3 id="cmd-weekly-grid">5. Multi-Timeframe Grid Search (Parameter Convergence)</h3>
+<p>Sweeps percent_beyond, max_spread_width, and trading hours across 5 rolling
+windows per ticker (1wk, 2wk, 1mo, 3mo, 6mo). Requires JSON config files.
+Example for NDX 1-month:</p>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code>cat &gt; /tmp/grid_ndx_1mo.json &lt;&lt; EOF
+{
+  "fixed_params": {
+    "csv_dir": "options_csv_output", "underlying_ticker": "NDX",
+    "risk_cap": 5000, "max_credit_width_ratio": 0.60,
+    "start_date": "$START_1MO", "end_date": "$END_DATE"
+  },
+  "grid_params": {
+    "percent_beyond": ["0.005","0.010","0.015","0.020","0.025","0.030","0.035"],
+    "max_spread_width": ["10","15","20","25","30"],
+    "min_trading_hour": [6,7,8,9],
+    "max_trading_hour": [11,12,13,14,15]
+  }
+}
+EOF
+python scripts/analyze_credit_spread_intervals.py \
+    --grid-config /tmp/grid_ndx_1mo.json \
+    --grid-output scripts/ndx_1mo_100pct_results.csv \
+    --grid-sort net_pnl --grid-top-n 20 --log-level WARNING</code></pre>
+</div>
+
+<p>Repeat with <code>START_1WK</code>/<code>START_2WK</code>/<code>START_3MO</code>/<code>START_6MO</code> and matching output
+filenames. Run same set for SPX.</p>
+
+<table>
+<thead>
+<tr><th>Ticker</th><th>Window</th><th>Start Date Var</th><th>Output File</th></tr>
+</thead>
+<tbody>
+<tr><td>NDX</td><td>1 week</td><td><code>$START_1WK</code></td><td><code>ndx_1wk_100pct_results.csv</code></td></tr>
+<tr><td>NDX</td><td>2 weeks</td><td><code>$START_2WK</code></td><td><code>ndx_2wk_100pct_results.csv</code></td></tr>
+<tr><td>NDX</td><td>1 month</td><td><code>$START_1MO</code></td><td><code>ndx_1mo_100pct_results.csv</code></td></tr>
+<tr><td>NDX</td><td>3 months</td><td><code>$START_3MO</code></td><td><code>ndx_3mo_100pct_results.csv</code></td></tr>
+<tr><td>NDX</td><td>6 months</td><td><code>$START_6MO</code></td><td><code>ndx_6mo_100pct_results.csv</code></td></tr>
+<tr><td>SPX</td><td>1 week</td><td><code>$START_1WK</code></td><td><code>spx_1wk_100pct_results.csv</code></td></tr>
+<tr><td>SPX</td><td>2 weeks</td><td><code>$START_2WK</code></td><td><code>spx_2wk_100pct_results.csv</code></td></tr>
+<tr><td>SPX</td><td>1 month</td><td><code>$START_1MO</code></td><td><code>spx_1mo_100pct_results.csv</code></td></tr>
+<tr><td>SPX</td><td>3 months</td><td><code>$START_3MO</code></td><td><code>spx_3mo_100pct_results.csv</code></td></tr>
+<tr><td>SPX</td><td>6 months</td><td><code>$START_6MO</code></td><td><code>spx_6mo_100pct_results.csv</code></td></tr>
+</tbody>
+</table>
+
+<h3 id="cmd-weekly-delta">6. Delta Grid Search</h3>
+<p>Sweeps delta 0.01-0.20 to find optimal delta filter per instrument and side.
+Four runs total (NDX calls, NDX puts, SPX calls, SPX puts).</p>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code># NDX Calls
+cat &gt; /tmp/grid_ndx_delta_calls.json &lt;&lt; EOF
+{
+  "fixed_params": {
+    "csv_dir": "options_csv_output", "underlying_ticker": "NDX",
+    "percent_beyond": "0.005", "max_spread_width": "50",
+    "risk_cap": 5000, "max_credit_width_ratio": 0.60,
+    "max_trading_hour": 15, "min_trading_hour": 7,
+    "option_type": "call", "use_vix1d": true,
+    "start_date": "$START_3MO", "end_date": "$END_DATE"
+  },
+  "grid_params": {
+    "max_short_delta": [0.01,0.02,0.03,0.04,0.05,0.06,0.07,0.08,0.09,0.10,
+                        0.11,0.12,0.13,0.14,0.15,0.16,0.17,0.18,0.19,0.20]
+  }
+}
+EOF
+python scripts/analyze_credit_spread_intervals.py \
+    --grid-config /tmp/grid_ndx_delta_calls.json \
+    --grid-output scripts/ndx_delta_calls_results.csv \
+    --grid-sort net_pnl --grid-top-n 20 --log-level WARNING --no-data-cache
+
+# NDX Puts  - same config but "option_type": "put"
+# SPX Calls - change "underlying_ticker": "SPX", "option_type": "call"
+# SPX Puts  - change "underlying_ticker": "SPX", "option_type": "put"</code></pre>
+</div>
+
+<table>
+<thead>
+<tr><th>Config</th><th>Output File</th></tr>
+</thead>
+<tbody>
+<tr><td>NDX + call</td><td><code>ndx_delta_calls_results.csv</code></td></tr>
+<tr><td>NDX + put</td><td><code>ndx_delta_puts_results.csv</code></td></tr>
+<tr><td>SPX + call</td><td><code>spx_delta_calls_results.csv</code></td></tr>
+<tr><td>SPX + put</td><td><code>spx_delta_puts_results.csv</code></td></tr>
+</tbody>
+</table>
+
+<h3 id="cmd-weekly-dynamic">7. Dynamic Spread Width Comparison</h3>
+<p>Compares fixed-width baseline vs Linear-500, Linear-1000, and Stepped configs.</p>
+<div class="code-block">
+<button class="copy-btn" onclick="copyCode(this)">Copy</button>
+<pre><code># Baseline (fixed width 20:30)
+python scripts/analyze_credit_spread_intervals.py \
+    --csv-dir options_csv_output --ticker NDX \
+    --start-date "$START_3MO" --end-date "$END_DATE" \
+    --percent-beyond 0.005:0.015 --max-spread-width 20:30 \
+    --risk-cap 300000 --profit-target-pct 0.80 \
+    --min-trading-hour 9 --max-trading-hour 12 --summary-only
+
+# Linear-500 (recommended)
+python scripts/analyze_credit_spread_intervals.py \
+    --csv-dir options_csv_output --ticker NDX \
+    --start-date "$START_3MO" --end-date "$END_DATE" \
+    --percent-beyond 0.005:0.015 --max-spread-width 50 \
+    --dynamic-spread-width '{"mode":"linear","base_width":15,"slope_factor":500,"min_width":10,"max_width":50}' \
+    --risk-cap 300000 --profit-target-pct 0.80 \
+    --min-trading-hour 9 --max-trading-hour 12 --summary-only
+
+# Linear-1000
+python scripts/analyze_credit_spread_intervals.py \
+    --csv-dir options_csv_output --ticker NDX \
+    --start-date "$START_3MO" --end-date "$END_DATE" \
+    --percent-beyond 0.005:0.015 --max-spread-width 50 \
+    --dynamic-spread-width '{"mode":"linear","base_width":15,"slope_factor":1000,"min_width":10,"max_width":50}' \
+    --risk-cap 300000 --profit-target-pct 0.80 \
+    --min-trading-hour 9 --max-trading-hour 12 --summary-only
+
+# Stepped
+python scripts/analyze_credit_spread_intervals.py \
+    --csv-dir options_csv_output --ticker NDX \
+    --start-date "$START_3MO" --end-date "$END_DATE" \
+    --percent-beyond 0.005:0.015 --max-spread-width 50 \
+    --dynamic-spread-width '{"mode":"stepped","steps":[{"threshold":0.01,"width":15},{"threshold":0.02,"width":25},{"threshold":0.03,"width":35}]}' \
+    --risk-cap 300000 --profit-target-pct 0.80 \
+    --min-trading-hour 9 --max-trading-hour 12 --summary-only</code></pre>
+</div>
+<p>Repeat all 4 for SPX (change <code>--ticker SPX</code>).</p>
+
+<h3>Summary of Weekly Runs</h3>
+<table>
+<thead>
+<tr><th>Category</th><th>NDX Runs</th><th>SPX Runs</th><th>Total</th></tr>
+</thead>
+<tbody>
+<tr><td>Price movement stats</td><td>3</td><td>3</td><td>6</td></tr>
+<tr><td>Last N min to close</td><td>2</td><td>2</td><td>4</td></tr>
+<tr><td>Intraday extremes</td><td>1</td><td>1</td><td>2</td></tr>
+<tr><td>Risk gradient</td><td>1</td><td>1</td><td>2</td></tr>
+<tr><td>Multi-timeframe grid</td><td>5</td><td>5</td><td>10</td></tr>
+<tr><td>Delta grid</td><td>2</td><td>2</td><td>4</td></tr>
+<tr><td>Dynamic width compare</td><td>4</td><td>4</td><td>8</td></tr>
+<tr><td><strong>Total</strong></td><td><strong>18</strong></td><td><strong>18</strong></td><td><strong>36</strong></td></tr>
+</tbody>
+</table>
+
+<hr>
+
+<!-- SUPPORTING SCRIPTS -->
+<h2 id="supporting-scripts">Supporting Scripts</h2>
+
+<p>These scripts complement the main analyzer. Scripts marked as <strong>thin wrappers</strong>
+delegate to <code>credit_spread_utils/</code> and can also be invoked via <code>--mode</code>.</p>
+
+<table>
+<thead>
+<tr><th>Script</th><th>Purpose</th><th>Status</th><th>Example</th></tr>
+</thead>
+<tbody>
+<tr><td><code>scripts/fetch_index_prices.py</code></td><td>Current index prices (Yahoo Finance)</td><td>Standalone</td><td><code>python scripts/fetch_index_prices.py --all</code></td></tr>
+<tr><td><code>scripts/analyze_price_movements.py</code></td><td>Close-to-close / time-to-close movements</td><td>Thin wrapper &rarr; <code>--mode price-movements</code></td><td><code>python scripts/analyze_price_movements.py --ticker I:NDX --no-plot</code></td></tr>
+<tr><td><code>scripts/ndx_max_move_analysis.py</code></td><td>Intraday extreme movement tables</td><td>Thin wrapper &rarr; <code>--mode max-move</code></td><td><code>python scripts/ndx_max_move_analysis.py --ticker NDX --days 125</code></td></tr>
+<tr><td><code>scripts/ndx_risk_gradient_analysis.py</code></td><td>Risk gradient analysis</td><td>Thin wrapper &rarr; <code>--mode risk-gradient</code></td><td><code>python scripts/ndx_risk_gradient_analysis.py --run-backtest</code></td></tr>
+<tr><td><code>scripts/ndx_daily_calculator.py</code></td><td>Daily strike level calculator for live trading</td><td>Standalone</td><td><code>python scripts/ndx_daily_calculator.py --fetch</code></td></tr>
+</tbody>
+</table>
+
+<hr>
+
+<!-- CHANGE LOG -->
+<h2 id="change-log">Change Log</h2>
+
+<p>Track all significant changes here. Format: <code>YYYY-MM-DD: Description</code>.</p>
+
+<ul>
+  <li><strong>2026-02-08</strong>: Consolidated 3 standalone analysis scripts into the main
+  analyzer via <code>--mode</code> argument. Created <code>price_movement_utils.py</code>,
+  <code>max_move_utils.py</code>, and <code>risk_gradient_utils.py</code> in <code>credit_spread_utils/</code>.
+  Original scripts (<code>analyze_price_movements.py</code>, <code>ndx_max_move_analysis.py</code>,
+  <code>ndx_risk_gradient_analysis.py</code>) converted to thin wrappers. Added
+  <code>--mode price-movements|max-move|risk-gradient</code> to <code>arg_parser.py</code>. Added
+  mode dispatch to <code>analyze_credit_spread_intervals.py</code>. Created tests for all
+  3 new utility modules (65 tests). Updated Weekly Data Generation Commands to
+  use <code>--mode</code> syntax. Updated Supporting Scripts table.</li>
+  <li><strong>2026-02-07</strong>: Modularization complete. Extracted 8 modules from monolithic
+  5,307-line file into <code>credit_spread_utils/</code> package. Created strategy
+  framework with <code>strategies/</code> subpackage (BaseStrategy ABC, StrategyRegistry,
+  SingleEntryStrategy, ScaleInStrategy, TieredStrategy). Wired strategy
+  framework into main pipeline and grid search. Main file reduced to 1,505
+  lines. Added daily workflow commands to arg_parser.py epilog. Created this
+  architecture document.</li>
+</ul>
+
+</main>
+</div>
+
+<script>
+function copyCode(btn) {
+  const pre = btn.parentElement.querySelector('pre');
+  const text = pre.textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = 'Copy';
+      btn.classList.remove('copied');
+    }, 2000);
+  });
+}
+
+// Highlight active sidebar link on scroll
+const sections = document.querySelectorAll('[id]');
+const navLinks = document.querySelectorAll('.sidebar a');
+
+window.addEventListener('scroll', () => {
+  let current = '';
+  sections.forEach(section => {
+    const sectionTop = section.offsetTop - 80;
+    if (window.scrollY >= sectionTop) {
+      current = section.getAttribute('id');
+    }
+  });
+  navLinks.forEach(link => {
+    link.classList.remove('active');
+    if (link.getAttribute('href') === '#' + current) {
+      link.classList.add('active');
+    }
+  });
+});
+</script>
+</body>
+</html>

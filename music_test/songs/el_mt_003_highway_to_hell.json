@@ -1,0 +1,27 @@
+{
+  "song_id": "el_mt_003",
+  "title": "Highway to Hell (Intro)",
+  "composer": "AC/DC",
+  "tempo": 116,
+  "time_signature": "4/4",
+  "difficulty": "elementary",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["A5", "D/F#", "G5", "D5"],
+  "original_duration": "3:00",
+  "learning_time": "2 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 4, "fret": 2, "duration": 1.03, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 0.02, "string": 5, "fret": 0, "duration": 1.03, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 1.03, "string": 4, "fret": 0, "duration": 0.52, "velocity": 0.8, "technique": "strum"},
+    {"time": 1.05, "string": 5, "fret": 0, "duration": 0.52, "velocity": 0.8, "technique": "strum"},
+    {"time": 1.07, "string": 6, "fret": 2, "duration": 0.52, "velocity": 0.8, "technique": "strum"},
+    {"time": 1.55, "string": 4, "fret": 0, "duration": 1.03, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 1.57, "string": 5, "fret": 2, "duration": 1.03, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 1.59, "string": 6, "fret": 3, "duration": 1.03, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 2.58, "string": 4, "fret": 2, "duration": 1.03, "velocity": 0.9, "technique": "power_chord"},
+    {"time": 2.60, "string": 5, "fret": 0, "duration": 1.03, "velocity": 0.9, "technique": "power_chord"}
+  ]
+}

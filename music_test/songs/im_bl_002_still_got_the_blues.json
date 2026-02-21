@@ -1,0 +1,29 @@
+{
+  "song_id": "im_bl_002",
+  "title": "Still Got the Blues",
+  "composer": "Gary Moore",
+  "tempo": 48,
+  "time_signature": "4/4",
+  "difficulty": "intermediate",
+  "license_status": "educational_use",
+  "genre": "blues",
+  "chords": ["Am", "Em", "Dm", "E7"],
+  "original_duration": "6:00",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 5, "duration": 2.5, "velocity": 0.6, "technique": "single_note"},
+    {"time": 0.63, "string": 1, "fret": 8, "duration": 0.63, "velocity": 0.6, "technique": "bend"},
+    {"time": 1.26, "string": 1, "fret": 5, "duration": 0.63, "velocity": 0.6, "technique": "single_note"},
+    {"time": 1.89, "string": 2, "fret": 8, "duration": 0.63, "velocity": 0.6, "technique": "single_note"},
+    {"time": 2.5, "string": 1, "fret": 5, "duration": 2.5, "velocity": 0.6, "technique": "single_note"},
+    {"time": 3.13, "string": 2, "fret": 5, "duration": 0.63, "velocity": 0.6, "technique": "single_note"},
+    {"time": 3.76, "string": 1, "fret": 8, "duration": 0.63, "velocity": 0.6, "technique": "vibrato"},
+    {"time": 4.39, "string": 1, "fret": 5, "duration": 0.63, "velocity": 0.6, "technique": "single_note"},
+    {"time": 5.0, "string": 2, "fret": 8, "duration": 2.5, "velocity": 0.6, "technique": "single_note"},
+    {"time": 5.63, "string": 2, "fret": 5, "duration": 0.63, "velocity": 0.6, "technique": "single_note"},
+    {"time": 6.26, "string": 3, "fret": 7, "duration": 0.63, "velocity": 0.6, "technique": "single_note"},
+    {"time": 6.89, "string": 3, "fret": 5, "duration": 0.63, "velocity": 0.6, "technique": "single_note"}
+  ]
+}

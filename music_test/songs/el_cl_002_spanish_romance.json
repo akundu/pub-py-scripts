@@ -1,0 +1,29 @@
+{
+  "song_id": "el_cl_002",
+  "title": "Spanish Romance (Intro)",
+  "composer": "Anonymous",
+  "tempo": 60,
+  "time_signature": "3/4",
+  "difficulty": "elementary",
+  "license_status": "public_domain",
+  "genre": "classical",
+  "chords": ["Em", "Am", "B7"],
+  "original_duration": "3:00",
+  "learning_time": "3 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 0, "duration": 3.0, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.5, "string": 3, "fret": 0, "duration": 0.5, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.0, "string": 2, "fret": 0, "duration": 0.5, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.5, "string": 1, "fret": 0, "duration": 0.5, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.0, "string": 2, "fret": 0, "duration": 0.5, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.5, "string": 3, "fret": 0, "duration": 0.5, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.0, "string": 6, "fret": 0, "duration": 3.0, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 3.5, "string": 3, "fret": 1, "duration": 0.5, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.0, "string": 2, "fret": 0, "duration": 0.5, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.5, "string": 1, "fret": 3, "duration": 0.5, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 5.0, "string": 2, "fret": 0, "duration": 0.5, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 5.5, "string": 3, "fret": 1, "duration": 0.5, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

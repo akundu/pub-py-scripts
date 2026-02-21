@@ -1,0 +1,31 @@
+{
+  "song_id": "im_fk_001",
+  "title": "Landslide",
+  "composer": "Fleetwood Mac",
+  "tempo": 82,
+  "time_signature": "4/4",
+  "difficulty": "intermediate",
+  "license_status": "educational_use",
+  "genre": "folk",
+  "chords": ["C", "G/B", "Am", "G/B", "Em", "D"],
+  "original_duration": "3:19",
+  "learning_time": "3 weeks",
+  "tuning": "standard",
+  "capo": 3,
+  "events": [
+    {"time": 0.0, "string": 5, "fret": 3, "duration": 2.93, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.37, "string": 3, "fret": 0, "duration": 0.37, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.74, "string": 2, "fret": 1, "duration": 0.37, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.11, "string": 1, "fret": 0, "duration": 0.37, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.48, "string": 2, "fret": 1, "duration": 0.37, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 1.85, "string": 3, "fret": 0, "duration": 0.37, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.22, "string": 1, "fret": 0, "duration": 0.37, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.59, "string": 2, "fret": 1, "duration": 0.37, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 2.93, "string": 5, "fret": 2, "duration": 2.93, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 3.30, "string": 3, "fret": 0, "duration": 0.37, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 3.67, "string": 2, "fret": 3, "duration": 0.37, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.04, "string": 1, "fret": 3, "duration": 0.37, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.41, "string": 2, "fret": 3, "duration": 0.37, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 4.78, "string": 3, "fret": 0, "duration": 0.37, "velocity": 0.5, "technique": "fingerpick"}
+  ]
+}

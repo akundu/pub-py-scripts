@@ -1,0 +1,20 @@
+2026-02-08 18:58:48 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Found 10 CSV file(s) matching date range in csv_exports/options/NDX
+2026-02-08 18:58:48 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Date range filter: 2026-01-22 to 2026-02-06
+2026-02-08 18:58:48 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Found 10 CSV file(s) from --csv-dir
+2026-02-08 18:58:48 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Processing 10 file(s) sequentially
+2026-02-08 18:58:48 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Reading: csv_exports/options/NDX/NDX_options_2026-01-22.csv
+2026-02-08 18:58:48 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Reading: csv_exports/options/NDX/NDX_options_2026-01-23.csv
+2026-02-08 18:58:49 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Reading: csv_exports/options/NDX/NDX_options_2026-01-26.csv
+2026-02-08 18:58:49 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Reading: csv_exports/options/NDX/NDX_options_2026-01-27.csv
+2026-02-08 18:58:49 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Reading: csv_exports/options/NDX/NDX_options_2026-01-28.csv
+2026-02-08 18:58:50 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Reading: csv_exports/options/NDX/NDX_options_2026-02-02.csv
+2026-02-08 18:58:50 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Reading: csv_exports/options/NDX/NDX_options_2026-02-03.csv
+2026-02-08 18:58:50 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Reading: csv_exports/options/NDX/NDX_options_2026-02-04.csv
+2026-02-08 18:58:51 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Reading: csv_exports/options/NDX/NDX_options_2026-02-05.csv
+2026-02-08 18:58:51 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Reading: csv_exports/options/NDX/NDX_options_2026-02-06.csv
+2026-02-08 18:58:51 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Combined 10 file(s) into 4213766 total rows
+2026-02-08 18:58:51 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Parsing timestamps...
+2026-02-08 19:10:11 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Filtering for 0DTE options...
+2026-02-08 19:10:15 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Filtered to 3699322/4213766 0DTE rows
+2026-02-08 19:10:47 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Saved binary cache: .options_cache/c864bb971b45e4a5.pkl (466.6 MB)
+2026-02-08 19:10:47 [PID:62762] [analyze_credit_spread_intervals] [INFO] - Initializing database connection...

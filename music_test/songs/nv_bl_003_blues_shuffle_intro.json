@@ -1,0 +1,33 @@
+{
+  "song_id": "nv_bl_003",
+  "title": "Blues Shuffle Intro",
+  "composer": "Traditional",
+  "tempo": 85,
+  "time_signature": "4/4",
+  "difficulty": "novice",
+  "license_status": "educational_use",
+  "genre": "blues",
+  "chords": ["E", "A", "B7"],
+  "original_duration": "1:00",
+  "learning_time": "3 days",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 0, "duration": 2.82, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.02, "string": 2, "fret": 0, "duration": 2.82, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.04, "string": 3, "fret": 1, "duration": 2.82, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.06, "string": 4, "fret": 2, "duration": 2.82, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.08, "string": 5, "fret": 2, "duration": 2.82, "velocity": 0.7, "technique": "strum"},
+    {"time": 0.10, "string": 6, "fret": 0, "duration": 2.82, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.82, "string": 1, "fret": 0, "duration": 2.82, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.84, "string": 2, "fret": 2, "duration": 2.82, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.86, "string": 3, "fret": 2, "duration": 2.82, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.88, "string": 4, "fret": 2, "duration": 2.82, "velocity": 0.7, "technique": "strum"},
+    {"time": 2.90, "string": 5, "fret": 0, "duration": 2.82, "velocity": 0.7, "technique": "strum"},
+    {"time": 5.64, "string": 1, "fret": 2, "duration": 2.82, "velocity": 0.7, "technique": "strum"},
+    {"time": 5.66, "string": 2, "fret": 0, "duration": 2.82, "velocity": 0.7, "technique": "strum"},
+    {"time": 5.68, "string": 3, "fret": 2, "duration": 2.82, "velocity": 0.7, "technique": "strum"},
+    {"time": 5.70, "string": 4, "fret": 1, "duration": 2.82, "velocity": 0.7, "technique": "strum"},
+    {"time": 5.72, "string": 5, "fret": 2, "duration": 2.82, "velocity": 0.7, "technique": "strum"}
+  ]
+}

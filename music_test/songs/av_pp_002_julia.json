@@ -1,0 +1,25 @@
+{
+  "song_id": "av_pp_002",
+  "title": "Julia",
+  "composer": "The Beatles",
+  "tempo": 96,
+  "time_signature": "4/4",
+  "difficulty": "advanced",
+  "license_status": "educational_use",
+  "genre": "pop",
+  "chords": ["D", "Bm7", "F#m", "Am9", "B7", "A", "Dmaj7"],
+  "original_duration": "2:57",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 4, "fret": 0, "duration": 2.5, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.31, "string": 3, "fret": 2, "duration": 0.31, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 0.62, "string": 2, "fret": 3, "duration": 0.31, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 0.93, "string": 1, "fret": 2, "duration": 0.31, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 1.24, "string": 2, "fret": 3, "duration": 0.31, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 1.55, "string": 3, "fret": 2, "duration": 0.31, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 1.86, "string": 1, "fret": 2, "duration": 0.31, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 2.17, "string": 2, "fret": 3, "duration": 0.31, "velocity": 0.4, "technique": "fingerpick"}
+  ]
+}

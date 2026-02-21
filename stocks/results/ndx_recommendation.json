@@ -1,0 +1,119 @@
+{
+  "ticker": "NDX",
+  "generated_at": "2026-01-26T04:00:02.390651",
+  "for_date": "2026-01-27",
+  "market_regime": {
+    "vix_current": null,
+    "vix_10d_avg": null,
+    "vix1d_current": null,
+    "regime": "MEDIUM",
+    "description": "Normal Volatility - balanced approach"
+  },
+  "convergence": {
+    "percent_beyond_put": {
+      "values": {
+        "6mo": 0.005,
+        "3mo": 0.005,
+        "1mo": 0.005,
+        "2wk": 0.005,
+        "1wk": 0.005
+      },
+      "confidence_score": 1.0,
+      "confidence_level": "HIGH",
+      "recommended": 0.005
+    },
+    "percent_beyond_call": {
+      "values": {
+        "6mo": 0.025,
+        "3mo": 0.025,
+        "1mo": 0.015,
+        "2wk": 0.015,
+        "1wk": 0.015
+      },
+      "confidence_score": 0.6499999999999999,
+      "confidence_level": "MEDIUM",
+      "recommended": 0.0185
+    },
+    "max_spread_width_put": {
+      "values": {
+        "6mo": 10,
+        "3mo": 10,
+        "1mo": 20,
+        "2wk": 20,
+        "1wk": 20
+      },
+      "confidence_score": 0.6499999999999999,
+      "confidence_level": "MEDIUM",
+      "recommended": 16
+    },
+    "max_spread_width_call": {
+      "values": {
+        "6mo": 10,
+        "3mo": 20,
+        "1mo": 20,
+        "2wk": 20,
+        "1wk": 30
+      },
+      "confidence_score": 0.7,
+      "confidence_level": "MEDIUM",
+      "recommended": 21
+    },
+    "min_trading_hour": {
+      "values": {
+        "6mo": 6,
+        "3mo": 6,
+        "1mo": 6,
+        "2wk": 6,
+        "1wk": 6
+      },
+      "confidence_score": 1.0,
+      "confidence_level": "HIGH",
+      "recommended": 6
+    },
+    "max_trading_hour": {
+      "values": {
+        "6mo": 11,
+        "3mo": 13,
+        "1mo": 13,
+        "2wk": 13,
+        "1wk": 7
+      },
+      "confidence_score": 0.7,
+      "confidence_level": "MEDIUM",
+      "recommended": 12
+    }
+  },
+  "recommendation": {
+    "percent_beyond_put": 0.005,
+    "percent_beyond_call": 0.0185,
+    "max_spread_width_put": 16,
+    "max_spread_width_call": 21,
+    "min_trading_hour": 6,
+    "max_trading_hour": 12,
+    "profit_target_pct": 80,
+    "risk_cap": 50000.0,
+    "max_live_capital": 300000.0,
+    "option_type": "both"
+  },
+  "confidence": {
+    "overall_score": 78.3,
+    "overall_level": "HIGH",
+    "high_count": 2,
+    "medium_count": 4,
+    "low_count": 0
+  },
+  "capital": {
+    "max_live_capital": 300000.0,
+    "risk_cap": 50000.0
+  },
+  "settings": {
+    "output_timezone": "PDT",
+    "windows_analyzed": [
+      "6mo",
+      "3mo",
+      "1mo",
+      "2wk",
+      "1wk"
+    ]
+  }
+}

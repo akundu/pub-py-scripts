@@ -1,0 +1,2 @@
+config,dte,percentile,spread_width,flow_mode,time_window,window_label,days_processed,days_with_spreads,total_opportunities,avg_opportunities_per_day,avg_roi,median_roi,min_roi,max_roi,avg_credit,avg_max_loss,total_profit_potential,consistency_score
+DTE1_p95_w30_neutral,1,95,30.0,neutral,09:30-16:00,Full Day,20,17,179010,10530.0,33020359259424.62,92.80205655526991,15.03067484662575,8.444249301319679e+17,15.258374448354843,14.741625551645157,1365700.8050000002,895050.0

@@ -1,0 +1,27 @@
+{
+  "song_id": "nv_cl_003",
+  "title": "Für Elise (Simple)",
+  "composer": "Beethoven",
+  "tempo": 90,
+  "time_signature": "3/4",
+  "difficulty": "novice",
+  "license_status": "public_domain",
+  "genre": "classical",
+  "chords": ["Am", "E"],
+  "original_duration": "1:00",
+  "learning_time": "3 days",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 1, "fret": 0, "duration": 0.67, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 0.67, "string": 2, "fret": 0, "duration": 0.67, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 1.34, "string": 1, "fret": 0, "duration": 0.67, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 2.01, "string": 2, "fret": 0, "duration": 0.67, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 2.68, "string": 1, "fret": 0, "duration": 0.67, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 3.35, "string": 2, "fret": 1, "duration": 0.67, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 4.02, "string": 1, "fret": 3, "duration": 0.67, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 4.69, "string": 1, "fret": 0, "duration": 0.67, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 5.36, "string": 2, "fret": 0, "duration": 0.67, "velocity": 0.6, "technique": "fingerpick"},
+    {"time": 6.03, "string": 3, "fret": 0, "duration": 0.67, "velocity": 0.6, "technique": "fingerpick"}
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "song_id": "bg_mt_002",
+  "title": "Enter Sandman (Intro)",
+  "composer": "Metallica",
+  "tempo": 123,
+  "time_signature": "4/4",
+  "difficulty": "beginner",
+  "license_status": "educational_use",
+  "genre": "metal",
+  "chords": ["Em", "G5", "F#5"],
+  "original_duration": "1:30",
+  "learning_time": "1 week",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 0, "duration": 0.49, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.49, "string": 6, "fret": 7, "duration": 0.49, "velocity": 0.8, "technique": "single_note"},
+    {"time": 0.98, "string": 5, "fret": 5, "duration": 0.49, "velocity": 0.8, "technique": "single_note"},
+    {"time": 1.47, "string": 6, "fret": 0, "duration": 0.49, "velocity": 0.8, "technique": "single_note"},
+    {"time": 1.96, "string": 6, "fret": 6, "duration": 0.49, "velocity": 0.8, "technique": "single_note"},
+    {"time": 2.45, "string": 5, "fret": 4, "duration": 0.49, "velocity": 0.8, "technique": "single_note"},
+    {"time": 2.94, "string": 6, "fret": 0, "duration": 0.49, "velocity": 0.8, "technique": "single_note"},
+    {"time": 3.43, "string": 6, "fret": 5, "duration": 0.49, "velocity": 0.8, "technique": "single_note"},
+    {"time": 3.92, "string": 5, "fret": 3, "duration": 0.49, "velocity": 0.8, "technique": "single_note"}
+  ]
+}

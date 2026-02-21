@@ -1,0 +1,21 @@
+{
+  "song_id": "pf_rk_003",
+  "title": "Free Bird (Intro)",
+  "composer": "Lynyrd Skynyrd",
+  "tempo": 60,
+  "time_signature": "4/4",
+  "difficulty": "proficient",
+  "license_status": "educational_use",
+  "genre": "rock",
+  "chords": ["G", "D/F#", "Em", "F", "C"],
+  "original_duration": "9:08",
+  "learning_time": "4 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 6, "fret": 3, "duration": 4.0, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.50, "string": 3, "fret": 0, "duration": 0.50, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 1.00, "string": 2, "fret": 3, "duration": 0.50, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 1.50, "string": 1, "fret": 3, "duration": 0.50, "velocity": 0.4, "technique": "fingerpick"}
+  ]
+}

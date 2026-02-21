@@ -1,0 +1,70 @@
+{
+  "enabled": true,
+  "total_capital": 35000,
+  "ticker": "I:NDX",
+  "equities_dir": "equities_output",
+  "carry_forward_decay": 0.5,
+  "direction_priority_split": 0.70,
+  "max_concurrent_exposure": null,
+
+  "hourly_windows": [
+    {"label": "6am", "start_hour_pst": 6, "end_hour_pst": 7, "end_minute_pst": 0, "budget_pct": 0.30, "start_minute_pst": 30},
+    {"label": "7am", "start_hour_pst": 7, "end_hour_pst": 8, "end_minute_pst": 0, "budget_pct": 0.35},
+    {"label": "8am", "start_hour_pst": 8, "end_hour_pst": 9, "end_minute_pst": 0, "budget_pct": 0.25},
+    {"label": "9am", "start_hour_pst": 9, "end_hour_pst": 9, "end_minute_pst": 30, "budget_pct": "remainder"}
+  ],
+
+  "tiers": {
+    "put": [
+      {"level": 3, "percent_beyond": 0.030, "spread_width": 55, "roi_threshold": 0.035, "max_cumulative_budget_pct": 0.65},
+      {"level": 2, "percent_beyond": 0.025, "spread_width": 50, "roi_threshold": 0.050, "max_cumulative_budget_pct": 0.95},
+      {"level": 1, "percent_beyond": 0.020, "spread_width": 30, "roi_threshold": 0.075, "max_cumulative_budget_pct": 1.00}
+    ],
+    "call": [
+      {"level": 3, "percent_beyond": 0.030, "spread_width": 55, "roi_threshold": 0.035, "max_cumulative_budget_pct": 0.65},
+      {"level": 2, "percent_beyond": 0.025, "spread_width": 50, "roi_threshold": 0.050, "max_cumulative_budget_pct": 0.95},
+      {"level": 1, "percent_beyond": 0.020, "spread_width": 30, "roi_threshold": 0.075, "max_cumulative_budget_pct": 1.00}
+    ]
+  },
+
+  "slope_detection": {
+    "lookback_bars": 5,
+    "flatten_ratio_threshold": 0.4,
+    "min_directional_move_pct": 0.0005,
+    "require_double_flatten": false,
+    "skip_slope": true
+  },
+
+  "profit_targets": {
+    "6am": 0.90,
+    "7am": 0.90,
+    "8am": 0.80,
+    "9am": 0.70
+  },
+
+  "close_predictor_integration": {
+    "enabled": true,
+    "band_level": "P98",
+    "dynamic_percent_beyond": false,
+    "per_window_band_levels": {
+      "6am": "P99",
+      "7am": "P99",
+      "8am": "P98",
+      "9am": "P97"
+    },
+    "confidence_roi_multipliers": {
+      "HIGH": 0.70,
+      "MEDIUM": 0.90,
+      "LOW": 1.10,
+      "VERY_LOW": 1.40
+    },
+    "budget_scale_clamp": [0.5, 1.5],
+    "time_of_day_penalties": {
+      "6am": 0.15,
+      "7am": 0.10,
+      "8am": 0.05,
+      "9am": 0.0
+    },
+    "band_strike_validation": true
+  }
+}

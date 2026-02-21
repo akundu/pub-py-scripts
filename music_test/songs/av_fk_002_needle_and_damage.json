@@ -1,0 +1,25 @@
+{
+  "song_id": "av_fk_002",
+  "title": "Needle and the Damage Done",
+  "composer": "Neil Young",
+  "tempo": 74,
+  "time_signature": "3/4",
+  "difficulty": "advanced",
+  "license_status": "educational_use",
+  "genre": "folk",
+  "chords": ["D", "C", "Dsus2", "Esus2", "E", "G"],
+  "original_duration": "2:01",
+  "learning_time": "3 weeks",
+  "tuning": "standard",
+  "capo": 0,
+  "events": [
+    {"time": 0.0, "string": 4, "fret": 0, "duration": 2.43, "velocity": 0.5, "technique": "fingerpick"},
+    {"time": 0.30, "string": 3, "fret": 2, "duration": 0.30, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 0.60, "string": 2, "fret": 3, "duration": 0.30, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 0.90, "string": 1, "fret": 2, "duration": 0.30, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 1.20, "string": 2, "fret": 3, "duration": 0.30, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 1.50, "string": 3, "fret": 2, "duration": 0.30, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 1.80, "string": 1, "fret": 2, "duration": 0.30, "velocity": 0.4, "technique": "fingerpick"},
+    {"time": 2.10, "string": 2, "fret": 3, "duration": 0.30, "velocity": 0.4, "technique": "fingerpick"}
+  ]
+}

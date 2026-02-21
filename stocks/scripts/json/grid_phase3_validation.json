@@ -1,0 +1,52 @@
+{
+  "phase": 3,
+  "name": "Full Backtest Validation",
+  "description": "Validate top strategies on complete 156-day dataset for production readiness",
+  "dataset": {
+    "start_date": "2024-06-01",
+    "end_date": "2026-02-12",
+    "days": 156,
+    "comment": "Full historical dataset for final validation"
+  },
+  "base_configs": "results/phase2_top_configs.json",
+  "base_config_comment": "Load top 20 configurations from Phase 2",
+  "fixed_params": {
+    "underlying_ticker": "NDX",
+    "multi_dte_dir": "options_csv_output_full",
+    "use_percentile_strikes": true,
+    "percentile_lookback_days": 182,
+    "use_mid_price": false,
+    "min_contract_price": 0.05,
+    "output_timezone": "America/Los_Angeles",
+    "max_loss_per_position": 30000,
+    "max_live_capital": 400000,
+    "processes": 10
+  },
+  "grid_params": {
+    "comment": "No grid - testing exact configs from Phase 2"
+  },
+  "grid_size": {
+    "total_configs": 20,
+    "breakdown": "20 top configurations from Phase 2"
+  },
+  "output": {
+    "file": "results/phase3_full_backtest.csv",
+    "summary_file": "results/phase3_summary.txt",
+    "report_file": "results/final_strategy_report.md",
+    "generate_report": true,
+    "generate_charts": true,
+    "chart_dir": "results/phase3_charts",
+    "export_top_configs": "results/production_strategies.json"
+  },
+  "expected_runtime": {
+    "estimate": "1-2 hours",
+    "with_processes": 10
+  },
+  "validation_metrics": {
+    "min_trades": 50,
+    "min_win_rate": 0.80,
+    "min_sharpe_ratio": 1.5,
+    "max_drawdown_threshold": 5000,
+    "comment": "Thresholds for production strategy qualification"
+  }
+}
