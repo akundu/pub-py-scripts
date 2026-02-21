@@ -531,6 +531,40 @@ class PredictionHistory:
 
             return []
 
+    def get_latest_date(self, ticker: str) -> Optional[str]:
+        """Get the most recent date with snapshots for a ticker.
+
+        Checks both in-memory cache and disk files.
+
+        Args:
+            ticker: Ticker symbol (e.g., 'NDX')
+
+        Returns:
+            Date string in YYYY-MM-DD format, or None if no snapshots exist
+        """
+        dates = set()
+
+        # Check in-memory keys
+        prefix = f"{ticker}:"
+        for key in self.history:
+            if key.startswith(prefix):
+                dates.add(key[len(prefix):])
+
+        # Check disk files
+        for file_path in self.storage_dir.glob(f"{ticker}_*.json"):
+            try:
+                parts = file_path.stem.split('_')
+                if len(parts) >= 4:
+                    date_str = f"{parts[1]}-{parts[2]}-{parts[3]}"
+                    dates.add(date_str)
+            except Exception:
+                continue
+
+        if not dates:
+            return None
+
+        return sorted(dates)[-1]
+
     def _read_snapshots_from_file(self, file_path: Path) -> List[Dict[str, Any]]:
         """Read snapshots from file (blocking operation, run in executor).
 

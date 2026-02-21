@@ -5122,6 +5122,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
 
             <div id="chartSection" style="display: none;">
                 <h2>Confidence Bands Visualization</h2>
+                <p id="chartDateLabel" style="color: #8b949e; margin: -8px 0 8px 0; font-size: 0.95em;"></p>
                 <div class="chart-container">
                     <canvas id="predictionChart"></canvas>
                 </div>
@@ -5674,11 +5675,19 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 if (data.error || !data.snapshots || data.snapshots.length === 0) {{
                     // No history yet - hide chart
                     document.getElementById('chartSection').style.display = 'none';
+                    document.getElementById('chartDateLabel').textContent = '';
                     return;
                 }}
 
-                // Show chart section
+                // Show chart section and trading date
                 document.getElementById('chartSection').style.display = 'block';
+                const chartDate = data.date || '';
+                const todayET = new Date().toLocaleDateString('en-CA', {{ timeZone: 'America/New_York' }});
+                if (chartDate && chartDate !== todayET) {{
+                    document.getElementById('chartDateLabel').textContent = `Trading date: ${{chartDate}} (most recent trading day)`;
+                }} else {{
+                    document.getElementById('chartDateLabel').textContent = `Trading date: ${{chartDate}}`;
+                }}
 
                 // Render the chart
                 renderBandConvergenceChart(data);
@@ -5700,6 +5709,8 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             // Prepare datasets from snapshots
             const snapshots = historyData.snapshots || [];
             const actualPrices = historyData.actual_prices || [];
+            const chartDate = historyData.date || '';
+            const dateLabel = chartDate ? ` — ${{chartDate}}` : '';
 
             if (snapshots.length === 0) {{
                 document.getElementById('chartSection').style.display = 'none';
@@ -5844,7 +5855,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                     plugins: {{
                         title: {{
                             display: true,
-                            text: `Band Convergence Throughout Trading Day (${{currentTicker}})`,
+                            text: `Band Convergence Throughout Trading Day (${{currentTicker}}${{dateLabel}})`,
                             color: '#c9d1d9',
                             font: {{ size: 16 }}
                         }},
@@ -9301,8 +9312,8 @@ async def handle_lazy_load_today_prediction(request: web.Request) -> web.Respons
         if cached is not None:
             cached_data, cache_timestamp = cached
             if isinstance(cached_data, dict) and 'error' not in cached_data:
-                # Still record snapshot for band convergence chart
-                if history is not None and cached_data.get('current_price', 0) > 0:
+                # Record snapshot for band convergence chart (only during market hours)
+                if history is not None and cached_data.get('current_price', 0) > 0 and is_market_hours():
                     date_str = datetime.now(ET_TZ).strftime('%Y-%m-%d')
                     await history.add_snapshot(ticker, date_str, cached_data)
                 return web.json_response({**cached_data, 'cache_timestamp': cache_timestamp})
@@ -9378,14 +9389,33 @@ async def handle_lazy_load_band_history(request: web.Request) -> web.Response:
     if not history:
         return web.json_response({'error': 'Prediction history not initialized'}, status=500)
 
-    # Get date parameter (default to today)
-    date_str = request.query.get('date', datetime.now(ET_TZ).strftime('%Y-%m-%d'))
+    # Get date parameter — default to most recent trading day
+    if 'date' in request.query:
+        date_str = request.query['date']
+    else:
+        # Walk backwards from today to find the most recent weekday (Mon-Fri)
+        now_et = datetime.now(ET_TZ)
+        candidate = now_et.date()
+        while candidate.weekday() >= 5:  # 5=Sat, 6=Sun
+            candidate -= timedelta(days=1)
+        # If market hasn't opened yet today (before 9:30 ET), use previous trading day
+        if candidate == now_et.date() and (now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 30)):
+            candidate -= timedelta(days=1)
+            while candidate.weekday() >= 5:
+                candidate -= timedelta(days=1)
+        date_str = candidate.strftime('%Y-%m-%d')
 
     # Fetch snapshots from history
     snapshots = await history.get_snapshots(ticker, date_str)
 
-    # Get actual price movements from realtime_data for the same day
-    # Timestamps in QuestDB are stored as naive UTC, so convert ET market hours to UTC
+    # If no snapshots for computed date, fall back to most recent date with data
+    if not snapshots and 'date' not in request.query:
+        latest_date = history.get_latest_date(ticker)
+        if latest_date and latest_date != date_str:
+            date_str = latest_date
+            snapshots = await history.get_snapshots(ticker, date_str)
+
+    # Get actual price movements — try QuestDB realtime_data first, fall back to equities CSV
     actual_prices = []
     try:
         db = request.app.get('db_instance')
@@ -9411,7 +9441,6 @@ async def handle_lazy_load_band_history(request: web.Request) -> web.Response:
                 if result_df is not None and not result_df.empty:
                     for _, row in result_df.iterrows():
                         ts = row['timestamp']
-                        # Tag naive UTC timestamps so JS can convert to PT
                         if hasattr(ts, 'tzinfo') and ts.tzinfo is None:
                             ts = ts.replace(tzinfo=timezone.utc)
                         actual_prices.append({
@@ -9419,9 +9448,29 @@ async def handle_lazy_load_band_history(request: web.Request) -> web.Response:
                             'price': float(row['price'])
                         })
             except Exception as e:
-                logger.warning(f"Could not fetch actual prices for {ticker} on {date_str}: {e}")
+                logger.warning(f"Could not fetch actual prices from QuestDB for {ticker} on {date_str}: {e}")
     except Exception as e:
-        logger.warning(f"Error fetching actual prices for {ticker} on {date_str}: {e}")
+        logger.warning(f"Error fetching actual prices from QuestDB for {ticker} on {date_str}: {e}")
+
+    # Fallback: load from equities CSV if QuestDB had no data
+    if not actual_prices:
+        try:
+            csv_path = Path(f"equities_output/I:{ticker}/I:{ticker}_equities_{date_str}.csv")
+            if csv_path.exists():
+                df = pd.read_csv(csv_path, parse_dates=['timestamp'])
+                for _, row in df.iterrows():
+                    price = float(row['close'])
+                    if price > 0:
+                        ts_str = str(row['timestamp'])
+                        if '+' not in ts_str and 'Z' not in ts_str:
+                            ts_str = ts_str + '+00:00'
+                        actual_prices.append({
+                            'timestamp': ts_str,
+                            'price': price
+                        })
+                logger.info(f"Loaded {len(actual_prices)} actual prices from CSV for {ticker} on {date_str}")
+        except Exception as e:
+            logger.warning(f"Could not load actual prices from CSV for {ticker} on {date_str}: {e}")
 
     result = {
         'ticker': ticker,
