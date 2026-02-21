@@ -1,0 +1,35 @@
+# Cache directories
+.cache/
+.options_cache/
+.prediction_cache/
+.prediction_history/
+scripts/.options_cache/
+
+# Large CSV exports (regenerated data)
+csv_exports/
+equities_output/
+options_csv_output/
+options_csv_output_full/
+
+# Large result files
+results/backtest_tight/all_trades.csv
+results/backtest_30k/all_trades.csv
+results/comprehensive_backtest/all_trades.csv
+results/comprehensive_backtest/precomputed_state.pkl
+
+# HTML outputs
+scripts/html_output_dir/
+
+# Log files
+*.log
+db_server.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Temporary files
+*.tmp
+.DS_Store

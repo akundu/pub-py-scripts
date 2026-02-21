@@ -1,0 +1,3 @@
+ticker,spread_type,min_roi_pct,max_spend,min_credit,min_volume,flow_mode,bands,dte_targets,enabled
+NDX,iron_condor,5.0,30000,100,5,neutral,P97:P98:P99,0:1:3:5,true
+NVDA,put_spread,4.0,5000,50,10,with_flow,P97:P99,1:3,true
