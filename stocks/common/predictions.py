@@ -691,7 +691,7 @@ def _serialize_unified_prediction(pred: Any) -> dict:
             return val.tolist()
         return val
 
-    return {
+    result = {
         'ticker': pred.ticker,
         'current_price': convert_value(pred.current_price),
         'prev_close': convert_value(pred.prev_close),
@@ -712,6 +712,15 @@ def _serialize_unified_prediction(pred: Any) -> dict:
         'training_approach': pred.training_approach,
         'similar_days': pred.similar_days,  # Already in dict format
     }
+
+    # Add ensemble_methods if present (for multi-day predictions and 0DTE comparison)
+    if hasattr(pred, 'ensemble_methods') and pred.ensemble_methods:
+        result['ensemble_methods'] = pred.ensemble_methods
+        # Add recommended_method field for easy access
+        recommended = next((m['method'] for m in pred.ensemble_methods if m.get('recommended')), None)
+        result['recommended_method'] = recommended
+
+    return result
 
 
 # ============================================================================
