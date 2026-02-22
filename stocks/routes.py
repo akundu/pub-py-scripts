@@ -59,6 +59,7 @@ def register_routes(app: web.Application) -> None:
         handle_lazy_load_today_prediction,
         handle_lazy_load_future_prediction,
         handle_lazy_load_band_history,
+        handle_lazy_load_historical_prediction,
         handle_prewarm_predictions,
         handle_range_percentiles_api,
         handle_range_percentiles_html,
@@ -127,6 +128,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/predictions/api/lazy/today/{ticker}", handle_lazy_load_today_prediction)
     app.router.add_get("/predictions/api/lazy/future/{ticker}/{days}", handle_lazy_load_future_prediction)
     app.router.add_get("/predictions/api/lazy/band_history/{ticker}", handle_lazy_load_band_history)
+    app.router.add_get("/predictions/api/lazy/historical/{ticker}/{date}", handle_lazy_load_historical_prediction)
     app.router.add_get("/predictions/{ticker}", handle_predictions_page)
 
     # Range percentiles endpoints

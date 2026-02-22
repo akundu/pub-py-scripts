@@ -767,6 +767,17 @@ async def fetch_today_prediction(ticker: str, cache: PredictionCache, force_refr
 
         # Only cache if we got a valid price — don't persist zeros to disk.
         if not (serialized.get('current_price') and serialized['current_price'] > 0):
+            # Outside market hours, refresh the existing cache entry's timestamp
+            # so "Last Updated" stays current even when live price is unavailable.
+            if not is_market_hours():
+                cached_with_ts = await cache.get_with_timestamp(cache_key)
+                if cached_with_ts is not None:
+                    cached_data, _ = cached_with_ts
+                    if isinstance(cached_data, dict) and cached_data.get('current_price', 0) > 0:
+                        cached_data['cache_timestamp'] = time.time()
+                        await cache.set(cache_key, cached_data)
+                        logger.info(f"Refreshed cache timestamp for {cache_key} (market closed, reusing last valid price)")
+                        return cached_data
             logger.warning(f"Prediction for {ticker} returned current_price={serialized.get('current_price')}; skipping cache write.")
             serialized['cache_timestamp'] = time.time()
             return serialized
@@ -949,3 +960,258 @@ async def fetch_all_predictions(ticker: str, cache: PredictionCache):
     except Exception as e:
         logger.error(f"Error fetching all predictions for {ticker}: {e}")
         return {'error': str(e)}
+
+
+# ============================================================================
+# Historical Prediction (past-date backtest for the predictions page)
+# ============================================================================
+
+def _compute_historical_predictions_sync(ticker: str, date_str: str, lookback: int) -> dict:
+    """Compute 0DTE prediction bands for a past trading day.
+
+    Trains models and generates predictions at each half-hour time slot,
+    producing the same data structure the live band convergence chart uses.
+
+    This is CPU-intensive and I/O-heavy (reads many CSVs); call via run_in_executor.
+
+    Returns:
+        dict with keys: snapshots, actual_close, actual_prices, latest_prediction
+        or dict with key: error
+    """
+    import pandas as pd
+    from zoneinfo import ZoneInfo
+
+    ET = ZoneInfo("America/New_York")
+    UTC = ZoneInfo("UTC")
+
+    try:
+        from scripts.close_predictor.prediction import (
+            _train_statistical,
+            make_unified_prediction,
+        )
+        from scripts.csv_prediction_backtest import (
+            load_csv_data,
+            get_available_dates,
+            get_day_close,
+            get_day_open,
+            get_previous_close,
+            get_first_hour_range,
+            get_opening_range,
+            get_price_at_time,
+            get_vix1d_at_time,
+            get_historical_context,
+            DayContext,
+        )
+        from scripts.percentile_range_backtest import (
+            collect_all_data,
+            get_price_at_slot,
+            TIME_SLOTS,
+            HOURS_TO_CLOSE,
+        )
+    except ImportError as e:
+        return {'error': f'Required prediction modules not available: {e}'}
+
+    # Load target day's CSV data
+    df = load_csv_data(ticker, date_str)
+    if df is None or df.empty:
+        return {'error': f'No CSV data available for {ticker} on {date_str}'}
+
+    actual_close = get_day_close(df)
+    prev_close = get_previous_close(ticker, date_str)
+    if prev_close is None:
+        return {'error': f'No previous close available for {ticker} before {date_str}'}
+
+    # Get all available dates and find target index
+    all_dates = get_available_dates(ticker, 2000)
+    try:
+        target_idx = all_dates.index(date_str)
+    except ValueError:
+        return {'error': f'Date {date_str} not found in available trading dates'}
+
+    if target_idx < 10:
+        return {'error': f'Not enough historical data before {date_str} for training'}
+
+    # Training window: lookback days before the target date
+    train_start = max(0, target_idx - lookback)
+    train_date_list = all_dates[train_start:target_idx]
+    train_dates_set = set(train_date_list)
+
+    # Train statistical/LightGBM model (uses dates strictly before date_str)
+    predictor = _train_statistical(ticker, date_str, lookback)
+
+    # Collect percentile data (include target date for realized_vol computation)
+    dates_for_pct = all_dates[train_start:target_idx + 1]
+    pct_df = collect_all_data(ticker, dates_for_pct)
+
+    if pct_df is None or pct_df.empty:
+        return {'error': f'Could not collect percentile data for {ticker}'}
+
+    # Extract realized vol for target date
+    current_vol = None
+    target_vol_rows = pct_df[pct_df['date'] == date_str]
+    if not target_vol_rows.empty and 'realized_vol' in target_vol_rows.columns:
+        vol_val = target_vol_rows.iloc[0]['realized_vol']
+        if not pd.isna(vol_val):
+            current_vol = float(vol_val)
+
+    # Build DayContext from historical data
+    hist_ctx = get_historical_context(ticker, date_str)
+    day_open = get_day_open(df)
+    vix1d = get_vix1d_at_time(date_str, df.iloc[0]['timestamp'].to_pydatetime())
+    fh_high, fh_low = get_first_hour_range(df)
+    or_high, or_low = get_opening_range(df)
+    price_945 = get_price_at_time(df, 9, 45)
+
+    day_ctx = DayContext(
+        prev_close=prev_close,
+        day_open=day_open,
+        vix1d=vix1d,
+        prev_day_close=hist_ctx.get('day_2', {}).get('close'),
+        prev_vix1d=hist_ctx.get('day_1', {}).get('vix1d'),
+        prev_day_high=hist_ctx.get('day_1', {}).get('high'),
+        prev_day_low=hist_ctx.get('day_1', {}).get('low'),
+        close_5days_ago=hist_ctx.get('day_5', {}).get('close'),
+        first_hour_high=fh_high,
+        first_hour_low=fh_low,
+        opening_range_high=or_high,
+        opening_range_low=or_low,
+        price_at_945=price_945,
+        ma5=hist_ctx.get('ma5'),
+        ma10=hist_ctx.get('ma10'),
+        ma20=hist_ctx.get('ma20'),
+        ma50=hist_ctx.get('ma50'),
+    )
+
+    # Generate predictions for each half-hour time slot
+    snapshots = []
+    latest_prediction = None
+
+    for hour_et, minute_et in TIME_SLOTS:
+        time_label = f"{hour_et}:{minute_et:02d}"
+
+        # Get current price at this slot
+        current_price = get_price_at_slot(df, hour_et, minute_et)
+        if current_price is None:
+            continue
+
+        # Create timezone-aware datetime for this slot
+        slot_dt = datetime(
+            int(date_str[:4]), int(date_str[5:7]), int(date_str[8:10]),
+            hour_et, minute_et, 0, tzinfo=ET
+        )
+        slot_utc = slot_dt.astimezone(UTC)
+
+        # Compute intraday high/low up to this slot from CSV data
+        before = df[df['timestamp'] <= slot_utc]
+        market_before = before[before['timestamp'].dt.hour >= 14]
+        if market_before.empty:
+            market_before = before
+        if market_before.empty:
+            continue
+
+        day_high = float(market_before['high'].max())
+        day_low = float(market_before['low'].min())
+
+        # Make unified prediction (same function used by live predictions)
+        pred = make_unified_prediction(
+            pct_df=pct_df,
+            predictor=predictor,
+            ticker=ticker,
+            current_price=current_price,
+            prev_close=prev_close,
+            current_time=slot_dt,
+            time_label=time_label,
+            day_ctx=day_ctx,
+            day_high=day_high,
+            day_low=day_low,
+            train_dates=train_dates_set,
+            current_vol=current_vol,
+            vol_scale=True,
+            data_source="csv_historical",
+        )
+
+        if pred is None:
+            continue
+
+        serialized = _serialize_unified_prediction(pred)
+
+        # Create snapshot matching PredictionHistory.add_snapshot shape
+        snapshot = {
+            'timestamp': slot_dt.isoformat(),
+            'time_label': time_label,
+            'current_price': float(current_price),
+            'hours_to_close': HOURS_TO_CLOSE.get(time_label, 0),
+            'combined_bands': serialized.get('combined_bands'),
+            'percentile_bands': serialized.get('percentile_bands'),
+            'statistical_bands': serialized.get('statistical_bands'),
+        }
+        snapshots.append(snapshot)
+        latest_prediction = serialized
+
+    if not snapshots:
+        return {'error': f'Could not generate any predictions for {ticker} on {date_str}'}
+
+    # Extract actual intraday prices from CSV for chart overlay
+    actual_prices = []
+    for _, row in df.iterrows():
+        price = float(row['close'])
+        if price > 0:
+            ts = row['timestamp']
+            ts_str = ts.isoformat() if hasattr(ts, 'isoformat') else str(ts)
+            if '+' not in ts_str and 'Z' not in ts_str:
+                ts_str = ts_str + '+00:00'
+            actual_prices.append({'timestamp': ts_str, 'price': price})
+
+    return {
+        'snapshots': snapshots,
+        'actual_close': float(actual_close),
+        'actual_prices': actual_prices,
+        'latest_prediction': latest_prediction,
+    }
+
+
+async def fetch_historical_prediction(
+    ticker: str, date_str: str, cache: 'PredictionCache', lookback: int = 250
+) -> dict:
+    """Fetch historical prediction for a past trading day.
+
+    Runs the expensive computation in a thread-pool executor and caches
+    the result indefinitely (historical data is immutable).
+
+    Returns a flat dict that merges the latest slot's prediction data
+    with chart data (snapshots, actual_prices) so the frontend can use
+    it for both summary/table rendering AND the convergence chart.
+    """
+    cache_key = f"historical_{ticker}_{date_str}_{lookback}"
+
+    # Check cache first — historical data never expires
+    cached = await cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Run CPU/IO-intensive computation in executor
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: _compute_historical_predictions_sync(ticker, date_str, lookback),
+    )
+
+    if 'error' in result:
+        return result
+
+    # Build response: spread latest prediction's fields + historical metadata
+    latest = result.get('latest_prediction') or {}
+    response = {
+        **latest,
+        'is_historical': True,
+        'date': date_str,
+        'actual_close': result['actual_close'],
+        'snapshots': result['snapshots'],
+        'actual_prices': result['actual_prices'],
+        'cache_timestamp': time.time(),
+    }
+
+    # Cache the result permanently (historical data is immutable)
+    await cache.set(cache_key, response)
+
+    return response

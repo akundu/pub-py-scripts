@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 from typing import Dict, Set, Any, Optional, Tuple
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import time
 import socket
 import re
@@ -114,6 +114,7 @@ try:
         fetch_today_prediction,
         fetch_future_prediction,
         fetch_all_predictions,
+        fetch_historical_prediction,
         PREDICTIONS_AVAILABLE,
         ET_TZ
     )
@@ -125,6 +126,7 @@ except ImportError as e:
     fetch_today_prediction = None
     fetch_future_prediction = None
     fetch_all_predictions = None
+    fetch_historical_prediction = None
     # Define ET_TZ fallback
     try:
         from zoneinfo import ZoneInfo
@@ -968,6 +970,7 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
         app.router.add_get("/predictions/api/lazy/today/{ticker}", handle_lazy_load_today_prediction)
         app.router.add_get("/predictions/api/lazy/future/{ticker}/{days}", handle_lazy_load_future_prediction)
         app.router.add_get("/predictions/api/lazy/band_history/{ticker}", handle_lazy_load_band_history)
+        app.router.add_get("/predictions/api/lazy/historical/{ticker}/{date}", handle_lazy_load_historical_prediction)
         app.router.add_get("/predictions/{ticker}", handle_predictions_page)
 
         # Add stock info HTML page endpoint (parameterized route must be after specific routes)
@@ -5103,6 +5106,14 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             </span>
         </div>
 
+        <div style="display:flex;align-items:center;gap:8px;margin:8px 0 0 0;padding:0 4px;">
+            <label for="histDateSelect" style="color:var(--text-secondary);font-size:13px;white-space:nowrap;">View Date:</label>
+            <select id="histDateSelect" onchange="onHistDateChange()"
+                style="padding:5px 8px;border-radius:6px;border:1px solid #444;background:#1a1f2e;color:#e6edf3;font-size:13px;min-width:180px;cursor:pointer;">
+                <option value="">Today (Live)</option>
+            </select>
+        </div>
+
         <div class="content">
             <div id="summarySection" class="summary-grid">
                 <div class="loading">
@@ -5170,6 +5181,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
         let wsConnection = null;
         let currentCacheTimestamp = null;  // Track current data timestamp for smart polling
         let vixWsConnection = null;  // Separate WebSocket for VIX1D live updates
+        let currentHistDate = null;  // null = today/live, 'YYYY-MM-DD' = historical
 
         // Format a price value with commas and 2 decimal places
         function fmtPrice(val) {{
@@ -5203,8 +5215,63 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             }});
         }}
 
+        // Populate historical dates dropdown (last 14 trading days)
+        function populateHistDates() {{
+            const select = document.getElementById('histDateSelect');
+            const today = new Date();
+            // Walk backwards skipping weekends
+            let d = new Date(today);
+            let count = 0;
+            while (count < 14) {{
+                d.setDate(d.getDate() - 1);
+                if (d.getDay() !== 0 && d.getDay() !== 6) {{
+                    const yyyy = d.getFullYear();
+                    const mm = String(d.getMonth() + 1).padStart(2, '0');
+                    const dd = String(d.getDate()).padStart(2, '0');
+                    const dateStr = `${{yyyy}}-${{mm}}-${{dd}}`;
+                    const label = d.toLocaleDateString('en-US', {{weekday:'short', month:'short', day:'numeric'}});
+                    const opt = document.createElement('option');
+                    opt.value = dateStr;
+                    opt.textContent = label;
+                    select.appendChild(opt);
+                    count++;
+                }}
+            }}
+        }}
+
+        // Handle historical date selection
+        function onHistDateChange() {{
+            const val = document.getElementById('histDateSelect').value;
+            currentHistDate = val || null;
+
+            if (currentHistDate) {{
+                // Switch to Today tab when viewing historical
+                currentDays = 0;
+                document.querySelectorAll('.tab:not(.tab-custom .tab)').forEach((tab, idx) => {{
+                    tab.classList.toggle('active', idx === 0);
+                }});
+                // Stop live features
+                if (autoRefreshInterval) {{
+                    clearInterval(autoRefreshInterval);
+                    autoRefreshInterval = null;
+                }}
+                if (wsConnection) {{ wsConnection.close(); wsConnection = null; }}
+                if (vixWsConnection) {{ vixWsConnection.close(); vixWsConnection = null; }}
+                document.getElementById('wsStatus').textContent = 'Historical Mode';
+                document.getElementById('wsStatus').className = 'connection-status disconnected';
+            }} else {{
+                // Re-enable live mode
+                setupAutoRefresh();
+                initWebSocket();
+                initVix1dWebSocket();
+            }}
+
+            loadPredictions();
+        }}
+
         // Initialize on page load
         document.addEventListener('DOMContentLoaded', function() {{
+            populateHistDates();
             loadPredictions();
             setupAutoRefresh();
             initWebSocket();
@@ -5242,8 +5309,18 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             if (!days && days !== 0) return;
             days = parseInt(days);
             if (isNaN(days) || days < 0) return;
-            if (days === currentDays) return;
+            if (days === currentDays && !currentHistDate) return;
             currentDays = days;
+
+            // When switching to a future tab, reset historical date
+            if (days > 0 && currentHistDate) {{
+                currentHistDate = null;
+                document.getElementById('histDateSelect').value = '';
+                // Re-enable live features
+                setupAutoRefresh();
+                initWebSocket();
+                initVix1dWebSocket();
+            }}
 
             // Update active state for fixed tabs; custom tab shows no active state
             const fixedDays = [0, 1, 2, 3, 5, 10];
@@ -5287,9 +5364,14 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 showLoading();
 
                 const lb = `?lookback=${{currentLookback}}`;
-                const endpoint = currentDays === 0
-                    ? `/predictions/api/lazy/today/${{currentTicker}}${{lb}}`
-                    : `/predictions/api/lazy/future/${{currentTicker}}/${{currentDays}}${{lb}}`;
+                let endpoint;
+                if (currentHistDate && currentDays === 0) {{
+                    endpoint = `/predictions/api/lazy/historical/${{currentTicker}}/${{currentHistDate}}${{lb}}`;
+                }} else if (currentDays === 0) {{
+                    endpoint = `/predictions/api/lazy/today/${{currentTicker}}${{lb}}`;
+                }} else {{
+                    endpoint = `/predictions/api/lazy/future/${{currentTicker}}/${{currentDays}}${{lb}}`;
+                }}
 
                 const response = await fetch(endpoint);
                 const data = await response.json();
@@ -5310,6 +5392,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
 
         // Check for updates in background (smart polling)
         async function checkForUpdates() {{
+            if (currentHistDate) return;  // No auto-refresh in historical mode
             try {{
                 const lb = `?lookback=${{currentLookback}}`;
                 const endpoint = currentDays === 0
@@ -5370,6 +5453,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
         // Update display for today's prediction
         function updateTodayDisplay() {{
             const data = predictionData;
+            const isHist = !!data.is_historical;
 
             // Show sections
             document.getElementById('strategySection').style.display = 'block';
@@ -5392,6 +5476,38 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 }}
             }}
 
+            // Historical mode: compute hit/miss badge for actual close
+            let actualCloseHTML = '';
+            if (isHist && data.actual_close != null) {{
+                const bands = data[`${{currentStrategy}}_bands`];
+                let badge = '';
+                if (bands) {{
+                    // Check if actual close is inside each band, pick the tightest hit
+                    for (const bname of ['P90', 'P95', 'P97', 'P98', 'P99', 'P100']) {{
+                        const b = bands[bname];
+                        if (b && data.actual_close >= b.lo_price && data.actual_close <= b.hi_price) {{
+                            badge = `<span style="color:#3fb950;font-size:12px;margin-left:4px;">Hit ${{bname}}</span>`;
+                            break;
+                        }}
+                    }}
+                    if (!badge) badge = '<span style="color:#f85149;font-size:12px;margin-left:4px;">Miss</span>';
+                }}
+                actualCloseHTML = `
+                    <div class="summary-item">
+                        <div class="summary-label">Actual Close</div>
+                        <div class="summary-value">$${{fmtPrice(data.actual_close)}}${{badge}}</div>
+                    </div>`;
+            }}
+
+            // Date display
+            const dateDisplay = isHist ? data.date : new Date().toLocaleDateString('en-CA');
+            const dateLabel = isHist ? 'Date (Historical)' : 'Date';
+
+            // Hours to close
+            const hoursHTML = isHist
+                ? `<div class="summary-value" style="font-size:13px;color:#8b949e;">N/A (Historical)</div>`
+                : `<div class="summary-value" id="summaryHoursToClose">${{getHoursToClose().toFixed(1)}} hrs</div>`;
+
             // Update summary
             const summaryHTML = `
                 <div class="summary-item">
@@ -5403,12 +5519,13 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                     <div class="summary-value">$${{fmtPrice(data.prev_close)}}</div>
                 </div>
                 <div class="summary-item">
-                    <div class="summary-label">Date</div>
-                    <div class="summary-value" style="font-size: 14px;">${{new Date().toLocaleDateString('en-CA')}}</div>
+                    <div class="summary-label">${{dateLabel}}</div>
+                    <div class="summary-value" style="font-size: 14px;">${{dateDisplay}}</div>
                 </div>
+                ${{actualCloseHTML}}
                 <div class="summary-item">
                     <div class="summary-label">Hours to Close</div>
-                    <div class="summary-value" id="summaryHoursToClose">${{getHoursToClose().toFixed(1)}} hrs</div>
+                    ${{hoursHTML}}
                 </div>
                 <div class="summary-item">
                     <div class="summary-label">VIX1D</div>
@@ -5666,8 +5783,26 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
 
         // Load and render band convergence chart
         async function loadBandHistory() {{
-            if (currentDays !== 0) return;  // Only for today's prediction
+            if (currentDays !== 0) return;  // Only for today/0DTE predictions
 
+            // Historical mode: snapshots and actual_prices are already in predictionData
+            if (predictionData && predictionData.is_historical && predictionData.snapshots) {{
+                if (predictionData.snapshots.length === 0) {{
+                    document.getElementById('chartSection').style.display = 'none';
+                    return;
+                }}
+                document.getElementById('chartSection').style.display = 'block';
+                document.getElementById('chartDateLabel').textContent = `Trading date: ${{predictionData.date}} (Historical backtest)`;
+                renderBandConvergenceChart({{
+                    snapshots: predictionData.snapshots,
+                    actual_prices: predictionData.actual_prices || [],
+                    date: predictionData.date,
+                    actual_close: predictionData.actual_close,
+                }});
+                return;
+            }}
+
+            // Live mode: fetch from band_history endpoint
             try {{
                 const response = await fetch(`/predictions/api/lazy/band_history/${{currentTicker}}`);
                 const data = await response.json();
@@ -5838,6 +5973,20 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 }});
             }}
 
+            // Historical mode: add actual close as a horizontal reference line
+            const actualClose = historyData.actual_close;
+            if (actualClose && actualClose > 0) {{
+                datasets.push({{
+                    label: 'Actual Close ($' + actualClose.toFixed(2) + ')',
+                    data: snapshots.map(() => actualClose),
+                    borderColor: 'rgba(255, 165, 0, 0.8)',
+                    borderWidth: 2,
+                    borderDash: [6, 4],
+                    pointRadius: 0,
+                    fill: false,
+                }});
+            }}
+
             // Create the chart
             bandChart = new Chart(ctx, {{
                 type: 'line',
@@ -5973,7 +6122,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                         </div>
                         <div class="detail-item">
                             <div class="detail-label">Hours to Close</div>
-                            <div class="detail-value" id="detailHoursToClose">${{getHoursToClose().toFixed(1)}} hrs</div>
+                            <div class="detail-value" id="detailHoursToClose">${{data.is_historical ? 'N/A (Historical)' : getHoursToClose().toFixed(1) + ' hrs'}}</div>
                         </div>
                         <div class="detail-item">
                             <div class="detail-label">Time</div>
@@ -6403,11 +6552,12 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
 
                 wsConnection.onclose = function() {{
                     console.log('WebSocket disconnected');
-                    document.getElementById('wsStatus').textContent = 'WebSocket: Disconnected';
-                    document.getElementById('wsStatus').className = 'connection-status disconnected';
-
-                    // Try to reconnect after 5 seconds
-                    setTimeout(initWebSocket, 5000);
+                    if (!currentHistDate) {{
+                        document.getElementById('wsStatus').textContent = 'WebSocket: Disconnected';
+                        document.getElementById('wsStatus').className = 'connection-status disconnected';
+                        // Try to reconnect after 5 seconds (only in live mode)
+                        setTimeout(initWebSocket, 5000);
+                    }}
                 }};
             }} catch (error) {{
                 console.error('Failed to initialize WebSocket:', error);
@@ -6441,8 +6591,8 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 }};
 
                 vixWsConnection.onclose = function() {{
-                    // Reconnect after 10 seconds
-                    setTimeout(initVix1dWebSocket, 10000);
+                    // Reconnect after 10 seconds (only in live mode)
+                    if (!currentHistDate) setTimeout(initVix1dWebSocket, 10000);
                 }};
 
                 vixWsConnection.onerror = function(e) {{
@@ -9479,6 +9629,50 @@ async def handle_lazy_load_band_history(request: web.Request) -> web.Response:
         'actual_prices': actual_prices,
         'count': len(snapshots)
     }
+
+    return web.json_response(result)
+
+
+async def handle_lazy_load_historical_prediction(request: web.Request) -> web.Response:
+    """Handle lazy load request for historical prediction (past-date backtest).
+
+    GET /predictions/api/lazy/historical/{ticker}/{date}
+
+    Computes prediction bands at each half-hour slot for a past trading day,
+    returning the same data shape the live convergence chart expects plus
+    the latest slot's full prediction for the summary/table sections.
+    """
+    ticker = request.match_info.get('ticker', 'NDX').upper()
+    date_str = request.match_info.get('date', '')
+
+    if ticker not in ['NDX', 'SPX']:
+        return web.json_response({'error': f'Invalid ticker: {ticker}'}, status=400)
+
+    # Validate date format
+    try:
+        parsed_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+    except ValueError:
+        return web.json_response({'error': f'Invalid date format: {date_str}. Use YYYY-MM-DD.'}, status=400)
+
+    # Reject future dates
+    from datetime import date as date_type
+    if parsed_date >= date_type.today():
+        return web.json_response({'error': 'Date must be in the past. Use the Today tab for live predictions.'}, status=400)
+
+    cache = request.app.get('prediction_cache')
+    if not cache:
+        return web.json_response({'error': 'Prediction cache not initialized'}, status=500)
+
+    try:
+        lookback = int(request.query.get('lookback', '250'))
+        lookback = max(30, min(1260, lookback))
+    except (ValueError, TypeError):
+        lookback = 250
+
+    if fetch_historical_prediction is None:
+        return web.json_response({'error': 'Historical predictions not available'}, status=500)
+
+    result = await fetch_historical_prediction(ticker, date_str, cache, lookback=lookback)
 
     return web.json_response(result)
 
