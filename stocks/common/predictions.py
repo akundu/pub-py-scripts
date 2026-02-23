@@ -944,14 +944,15 @@ async def fetch_future_prediction(ticker: str, days_ahead: int, cache: Predictio
         return {'error': str(e)}
 
 
-async def fetch_all_predictions(ticker: str, cache: PredictionCache):
+async def fetch_all_predictions(ticker: str, cache: PredictionCache, future_days=None):
     """Fetch predictions for all timeframes in parallel."""
     if not PREDICTIONS_AVAILABLE:
         return {'error': 'Predictions module not available'}
 
     try:
         # Fetch all predictions in parallel
-        future_days = [1, 2, 3, 5, 10]
+        if future_days is None:
+            future_days = [1, 2, 3, 5, 10]
         results = await asyncio.gather(
             fetch_today_prediction(ticker, cache),
             *[fetch_future_prediction(ticker, d, cache) for d in future_days],

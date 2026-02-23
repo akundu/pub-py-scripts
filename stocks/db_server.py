@@ -4444,6 +4444,42 @@ async def fetch_earnings_date(symbol: str) -> str:
         return "N/A"
 
 
+def compute_default_prediction_days() -> list:
+    """Compute smart default prediction day tabs based on current day of week.
+
+    Returns trading days: 1-day increments through upcoming Friday,
+    then milestones [5, 10, 20], plus trading days to next Friday.
+    All values are in trading days (weekdays only).
+    """
+    now = datetime.now(ET_TZ)
+    today_weekday = now.weekday()  # 0=Mon, 4=Fri
+
+    days = set()
+
+    # Trading days to this Friday (1-day increments)
+    # weekday 0(Mon)->4 to Fri, 1(Tue)->3, 2(Wed)->2, 3(Thu)->1, 4(Fri)->0
+    trading_days_to_friday = max(0, 4 - today_weekday)
+
+    for d in range(1, trading_days_to_friday + 1):
+        days.add(d)
+
+    # Trading days to NEXT Friday (skip if already at Friday with 0 remaining)
+    # Next Friday = trading_days_to_friday + 5 (a full trading week later)
+    if trading_days_to_friday > 0:
+        next_friday_trading = trading_days_to_friday + 5
+    else:
+        # It's Friday, next Friday is 5 trading days away
+        next_friday_trading = 5
+
+    days.add(next_friday_trading)
+
+    # Add milestones
+    for m in [5, 10, 20]:
+        days.add(m)
+
+    return sorted(days)
+
+
 def generate_predictions_html(ticker: str, params: dict) -> str:
     """Generate HTML page for prediction visualizations.
 
@@ -4457,6 +4493,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
     # Extract params
     force_refresh = not params.get('cache', True)
     refresh_interval = params.get('refresh_interval', 30)
+    day_tabs = params.get('day_tabs', compute_default_prediction_days())
 
     html = f'''<!DOCTYPE html>
 <html lang="en">
@@ -4692,6 +4729,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
 
         .tabs {{
             display: flex;
+            flex-wrap: wrap;
             gap: 5px;
             margin: 20px 0;
             border-bottom: 1px solid #30363d;
@@ -5093,11 +5131,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
 
         <div class="tabs">
             <button class="tab active" onclick="switchPredictionTab(0)">Today</button>
-            <button class="tab" onclick="switchPredictionTab(1)">1 Day</button>
-            <button class="tab" onclick="switchPredictionTab(2)">2 Days</button>
-            <button class="tab" onclick="switchPredictionTab(3)">3 Days</button>
-            <button class="tab" onclick="switchPredictionTab(5)">5 Days</button>
-            <button class="tab" onclick="switchPredictionTab(10)">10 Days</button>
+            {''.join(f'<button class="tab" onclick="switchPredictionTab({d})">{d} Day{"s" if d != 1 else ""}</button>' for d in day_tabs)}
             <span class="tab-custom">
                 <input type="number" id="customDaysInput" min="1" max="252" placeholder="N days"
                     style="width:70px;padding:4px 6px;border-radius:4px;border:1px solid #444;background:#1a1f2e;color:#e6edf3;font-size:13px;"
@@ -5182,6 +5216,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
         let currentCacheTimestamp = null;  // Track current data timestamp for smart polling
         let vixWsConnection = null;  // Separate WebSocket for VIX1D live updates
         let currentHistDate = null;  // null = today/live, 'YYYY-MM-DD' = historical
+        const dayTabs = [0, {', '.join(str(d) for d in day_tabs)}];
 
         // Format a price value with commas and 2 decimal places
         function fmtPrice(val) {{
@@ -5278,6 +5313,14 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             initVix1dWebSocket();
             // Keep hours-to-close countdown live
             setInterval(refreshHoursToClose, 30000);
+
+            // Pre-warm cache for all day tabs after 2s delay
+            setTimeout(() => {{
+                dayTabs.forEach(d => {{
+                    if (d === 0 || d === currentDays) return;  // Skip today (already loading) and current tab
+                    fetch(`/predictions/api/future/${{currentTicker}}?days_ahead=${{d}}&lookback=${{currentLookback}}`).catch(() => {{}});
+                }});
+            }}, 2000);
         }});
 
         // Switch ticker (NDX <-> SPX)
@@ -5290,8 +5333,10 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 btn.classList.toggle('active', btn.textContent === ticker);
             }});
 
-            // Update URL
-            window.history.pushState({{}}, '', `/predictions/${{ticker}}`);
+            // Update URL (preserve ?days= param if present)
+            const params = new URLSearchParams(window.location.search);
+            const newUrl = `/predictions/${{ticker}}` + (params.toString() ? '?' + params.toString() : '');
+            window.history.pushState({{}}, '', newUrl);
 
             // Reconnect WebSocket with new ticker
             if (wsConnection) {{
@@ -5323,9 +5368,8 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             }}
 
             // Update active state for fixed tabs; custom tab shows no active state
-            const fixedDays = [0, 1, 2, 3, 5, 10];
             document.querySelectorAll('.tab:not(.tab-custom .tab)').forEach((tab, idx) => {{
-                const tabDays = fixedDays[idx] !== undefined ? fixedDays[idx] : -1;
+                const tabDays = dayTabs[idx] !== undefined ? dayTabs[idx] : -1;
                 tab.classList.toggle('active', tabDays === days);
             }});
 
@@ -5512,7 +5556,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             const summaryHTML = `
                 <div class="summary-item">
                     <div class="summary-label">Current Price</div>
-                    <div class="summary-value">$${{fmtPrice(data.current_price)}}</div>
+                    <div class="summary-value" id="summaryLivePrice">$${{fmtPrice(data.current_price)}}</div>
                 </div>
                 <div class="summary-item">
                     <div class="summary-label">Previous Close</div>
@@ -5581,7 +5625,11 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             const summaryHTML = `
                 <div class="summary-item">
                     <div class="summary-label">Current Price</div>
-                    <div class="summary-value">$${{fmtPrice(data.current_price)}}</div>
+                    <div class="summary-value" id="summaryLivePrice">$${{fmtPrice(data.current_price)}}</div>
+                </div>
+                <div class="summary-item">
+                    <div class="summary-label">Reference Price</div>
+                    <div class="summary-value" style="font-size: 14px; color: #8b949e;">$${{fmtPrice(data.current_price)}}</div>
                 </div>
                 <div class="summary-item">
                     <div class="summary-label">Target Date (${{currentDays}}d)</div>
@@ -6532,12 +6580,11 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                         if (message.symbol === currentTicker && message.data) {{
                             const payload = message.data.payload;
                             if (payload && payload.length > 0 && payload[0].price) {{
-                                // Update current price in summary
-                                const priceElement = document.querySelector('.summary-item:first-child .summary-value');
+                                // Update current price in summary (by ID, works on both today and future tabs)
+                                const priceElement = document.getElementById('summaryLivePrice');
                                 if (priceElement) {{
                                     const price = payload[0].price;
                                     priceElement.textContent = `$${{fmtPrice(parseFloat(price))}}`;
-                                    console.log('Updated price:', price);
                                 }}
                             }}
                         }}
@@ -9415,12 +9462,27 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
     if ticker not in ['NDX', 'SPX']:
         return web.Response(text=f'Invalid ticker: {ticker}. Only NDX and SPX are supported.', status=400)
 
+    # Parse ?days= param for custom day tabs
+    days_param = request.query.get('days')
+    day_tabs = None
+    if days_param:
+        try:
+            day_tabs = sorted(set(
+                d for d in (int(x.strip()) for x in days_param.split(',') if x.strip())
+                if 1 <= d <= 252
+            ))
+        except (ValueError, TypeError):
+            pass  # Fall back to defaults
+    if not day_tabs:
+        day_tabs = compute_default_prediction_days()
+
     # Get query parameters
     params = {
         'date': request.query.get('date'),
         'days_ahead': request.query.get('days_ahead'),
         'cache': request.query.get('cache', 'true').lower() == 'true',
         'refresh_interval': int(request.query.get('refresh_interval', '30')),
+        'day_tabs': day_tabs,
     }
 
     # Generate HTML page
@@ -9688,6 +9750,20 @@ async def handle_prewarm_predictions(request: web.Request) -> web.Response:
     tickers_param = request.query.get('ticker', 'NDX,SPX')
     tickers = [t.strip().upper() for t in tickers_param.split(',')]
 
+    # Parse optional ?days= param for custom day set
+    days_param = request.query.get('days')
+    prewarm_days = None
+    if days_param:
+        try:
+            prewarm_days = sorted(set(
+                d for d in (int(x.strip()) for x in days_param.split(',') if x.strip())
+                if 1 <= d <= 252
+            ))
+        except (ValueError, TypeError):
+            pass
+    if not prewarm_days:
+        prewarm_days = compute_default_prediction_days()
+
     cache = request.app.get('prediction_cache')
     history = request.app.get('prediction_history')
 
@@ -9707,7 +9783,7 @@ async def handle_prewarm_predictions(request: web.Request) -> web.Response:
 
             # Fetch future predictions
             future_results = {}
-            for days in [1, 2, 3, 5, 10]:
+            for days in prewarm_days:
                 future_result = await fetch_future_prediction(ticker, days, cache, force_refresh=True)
                 future_results[f'{days}d'] = 'ok' if 'error' not in future_result else 'error'
 
