@@ -531,6 +531,7 @@ def format_as_html(results: list[dict], params: dict = None) -> str:
             <span><strong>Last Trading Day:</strong> {last_date}</span>
             <span class="ref-close" data-ticker="{ticker}"><strong>Close:</strong> {prev_close_fmt}</span>
             <span><strong>Data Points:</strong> {n_data} days</span>
+            <span class="price-basis" data-ticker="{ticker}" style="font-style:italic;opacity:0.85">$ prices based on previous close: {prev_close_fmt}</span>
         </div>
 """)
 
@@ -730,6 +731,7 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
         <div class="ticker-info-header">
             <span><strong>Last Trading Day:</strong> {last_date}</span>
             <span class="ref-close" data-ticker="{ticker}"><strong>Close:</strong> {prev_close_fmt}</span>
+            <span class="price-basis" data-ticker="{ticker}" style="font-style:italic;opacity:0.85">$ prices based on previous close: {prev_close_fmt}</span>
         </div>
 """)
 
@@ -1785,6 +1787,7 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
         <div class="hourly-info">
             <span class="ref-close" data-ticker="{ticker}"><strong>Reference Close:</strong> {prev_close_fmt}</span>
             <span><strong>Source:</strong> 5-min bar data</span>
+            <span class="price-basis" data-ticker="{ticker}" style="font-style:italic;opacity:0.85">$ prices based on previous close: {prev_close_fmt}</span>
         </div>
 """)
 

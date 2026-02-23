@@ -14188,7 +14188,14 @@ def _inject_range_percentiles_ws_script(html: str, tickers: list[str]) -> str:
         }});
 
         document.querySelectorAll('.ref-close[data-ticker="' + ticker + '"]').forEach(function(el) {{
-            el.innerHTML = '<strong>Current Price:</strong> $' + currentPrice.toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}}) + ' <span style="color:green;font-size:12px">(LIVE)</span>';
+            el.innerHTML = '<strong>Current Price:</strong> $' + currentPrice.toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}}) + ' <span style="color:#27ae60;font-size:12px">(LIVE)</span>';
+        }});
+
+        var fmt = '$' + currentPrice.toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
+        document.querySelectorAll('.price-basis[data-ticker="' + ticker + '"]').forEach(function(el) {{
+            el.innerHTML = '$ prices based on <strong style="color:#27ae60">live price: ' + fmt + '</strong> <span style="color:#27ae60;font-size:12px">(LIVE)</span>';
+            el.style.opacity = '1';
+            el.style.fontStyle = 'normal';
         }});
 
         updateChartsForTicker(ticker, currentPrice);
