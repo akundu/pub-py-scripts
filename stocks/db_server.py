@@ -14341,9 +14341,9 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
 
     try:
         window = int(request.query.get('window', DEFAULT_WINDOW))
-        if window < 1:
+        if window < 0:
             return web.Response(
-                text="<html><body><h1>Error: window must be at least 1</h1></body></html>",
+                text="<html><body><h1>Error: window must be at least 0</h1></body></html>",
                 content_type="text/html",
                 status=400
             )

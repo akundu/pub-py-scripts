@@ -369,16 +369,17 @@ async def compute_hourly_moves_to_close(
     if percentiles is None:
         percentiles = DEFAULT_PERCENTILES.copy()
 
-    db_symbol, _, is_index, _ = parse_symbol(ticker)
+    db_symbol, polygon_symbol, is_index, _ = parse_symbol(ticker)
     display_ticker = ticker.replace("I:", "") if ticker.startswith("I:") else ticker
 
     logger = get_logger("range_percentiles", level=log_level) if DB_AVAILABLE else None
 
     # --- Locate CSV directory ---
-    csv_dir = EQUITIES_OUTPUT_DIR / db_symbol
+    # CSV directories use Polygon-format names (e.g., "I:NDX" for indexes, "QQQ" for stocks)
+    csv_dir = EQUITIES_OUTPUT_DIR / polygon_symbol
     if not csv_dir.is_dir():
         raise ValueError(
-            f"No equities_output directory for {db_symbol}. "
+            f"No equities_output directory for {polygon_symbol}. "
             f"Intraday move-to-close analysis not available for this ticker."
         )
 
@@ -386,7 +387,7 @@ async def compute_hourly_moves_to_close(
     end_date = datetime.now(timezone.utc).date()
     start_date = end_date - timedelta(days=days)
 
-    pattern = str(csv_dir / f"{db_symbol}_equities_*.csv")
+    pattern = str(csv_dir / f"{polygon_symbol}_equities_*.csv")
     csv_files = sorted(_glob.glob(pattern))
     if not csv_files:
         raise ValueError(f"No CSV files found in {csv_dir}")
