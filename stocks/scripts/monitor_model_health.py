@@ -9,7 +9,8 @@ This script checks:
 
 Usage:
     python scripts/monitor_model_health.py
-    python scripts/monitor_model_health.py --alert-email your@email.com
+    python scripts/monitor_model_health.py --ticker NDX
+    python scripts/monitor_model_health.py --ticker SPX --alert-email your@email.com
 """
 
 import argparse
@@ -23,9 +24,10 @@ import pandas as pd
 class ModelHealthMonitor:
     """Monitor prediction model health."""
 
-    def __init__(self, project_dir: Path):
+    def __init__(self, project_dir: Path, ticker: str = "NDX"):
         self.project_dir = project_dir
-        self.prod_dir = project_dir / "models" / "production"
+        self.ticker = ticker
+        self.prod_dir = project_dir / "models" / "production" / ticker
         self.results_dir = project_dir / "results"
 
     def check_model_age(self) -> dict:
@@ -86,10 +88,11 @@ class ModelHealthMonitor:
         """Check if all required model files exist."""
 
         expected_files = [
-            'ensemble_1dte.pkl',
-            'ensemble_2dte.pkl',
-            'ensemble_5dte.pkl',
-            'ensemble_10dte.pkl',
+            'lgbm_1dte.pkl',
+            'lgbm_2dte.pkl',
+            'lgbm_5dte.pkl',
+            'lgbm_10dte.pkl',
+            'lgbm_20dte.pkl',
         ]
 
         missing_files = []
@@ -113,8 +116,8 @@ class ModelHealthMonitor:
     def check_recent_performance(self) -> dict:
         """Check recent prediction performance if logs available."""
 
-        # Look for most recent retraining results
-        retrain_dirs = sorted(self.results_dir.glob('auto_retrain_*'), reverse=True)
+        # Look for most recent retraining results (ticker-specific)
+        retrain_dirs = sorted(self.results_dir.glob(f'auto_retrain_{self.ticker}_*'), reverse=True)
 
         if not retrain_dirs:
             return {
@@ -218,10 +221,13 @@ class ModelHealthMonitor:
         if age_check.get('days_old', 0) > 25:
             return 'Retrain soon - models approaching 30-day threshold'
 
-        if perf_check.get('rmse', 0) > 4.0:
+        # Handle None values in performance checks
+        rmse = perf_check.get('rmse')
+        if rmse is not None and rmse > 4.0:
             return 'Retrain recommended - RMSE degraded'
 
-        if perf_check.get('hit_rate', 100) < 95.0:
+        hit_rate = perf_check.get('hit_rate')
+        if hit_rate is not None and hit_rate < 95.0:
             return 'Retrain recommended - hit rate too low'
 
         return 'No action needed - models healthy'
@@ -230,8 +236,9 @@ class ModelHealthMonitor:
         """Print formatted health report."""
 
         print("\n" + "=" * 80)
-        print("MODEL HEALTH CHECK")
+        print(f"MODEL HEALTH CHECK - {self.ticker}")
         print("=" * 80)
+        print(f"Ticker: {self.ticker}")
         print(f"Timestamp: {report['timestamp']}")
         print(f"Status: {report['overall_message']}")
         print()
@@ -288,6 +295,8 @@ class ModelHealthMonitor:
 
 def main():
     parser = argparse.ArgumentParser(description='Monitor prediction model health')
+    parser.add_argument('--ticker', type=str, default='NDX', choices=['NDX', 'SPX'],
+                        help='Ticker symbol to check (default: NDX)')
     parser.add_argument('--alert-email', type=str, help='Email address for alerts')
     parser.add_argument('--json', action='store_true', help='Output JSON format')
     args = parser.parse_args()
@@ -297,7 +306,7 @@ def main():
     project_dir = script_dir.parent
 
     # Run health check
-    monitor = ModelHealthMonitor(project_dir)
+    monitor = ModelHealthMonitor(project_dir, ticker=args.ticker)
     report = monitor.generate_report()
 
     if args.json:

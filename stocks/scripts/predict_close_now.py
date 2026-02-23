@@ -555,14 +555,35 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
             current_context = None
 
     # --- METHOD 3: Ensemble (LightGBM) ---
-    # Use production models (retrained monthly)
-    model_dir = Path(__file__).parent.parent / "models" / "production" / f"{ticker}_latest"
-    model_path = model_dir / f"lgbm_{days_ahead}dte.pkl"
+    # Use production models (retrained monthly by automated system)
+    # Priority order:
+    # 1. models/production/{ticker}/lgbm_Xdte.pkl (automated retraining - ticker-specific)
+    # 2. models/production/lgbm_Xdte.pkl (legacy single-ticker deployment)
+    # 3. models/production/{ticker}_latest/lgbm_Xdte.pkl (old manual deployment)
+    # 4. results/multi_day_backtest/models/lgbm_Xdte.pkl (backtest results)
 
-    # Fallback to old backtest models if production models don't exist
-    if not model_path.exists():
-        model_dir = Path(__file__).parent.parent / "results" / "multi_day_backtest" / "models"
-        model_path = model_dir / f"lgbm_{days_ahead}dte.pkl"
+    base_dir = Path(__file__).parent.parent
+
+    # Try new ticker-specific automated retraining location first
+    model_path = base_dir / "models" / "production" / ticker / f"lgbm_{days_ahead}dte.pkl"
+
+    if model_path.exists():
+        model_dir = base_dir / "models" / "production" / ticker
+    else:
+        # Fallback to legacy single-ticker location (backward compatibility)
+        model_path = base_dir / "models" / "production" / f"lgbm_{days_ahead}dte.pkl"
+
+        if model_path.exists():
+            model_dir = base_dir / "models" / "production"
+        else:
+            # Fallback to old ticker-specific location
+            model_dir = base_dir / "models" / "production" / f"{ticker}_latest"
+            model_path = model_dir / f"lgbm_{days_ahead}dte.pkl"
+
+            if not model_path.exists():
+                # Final fallback to backtest models
+                model_dir = base_dir / "results" / "multi_day_backtest" / "models"
+                model_path = model_dir / f"lgbm_{days_ahead}dte.pkl"
 
     if model_path.exists() and current_context:
         try:

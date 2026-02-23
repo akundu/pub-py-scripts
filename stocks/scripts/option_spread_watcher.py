@@ -165,6 +165,172 @@ def load_rules(rules_path: Path) -> Dict[str, "TickerRule"]:
     return rules
 
 
+def load_rules_from_grid(
+    grid_path: Path,
+    min_hour_et: Optional[int] = None,
+    max_hour_et: Optional[int] = None,
+    ticker_filter: Optional[str] = None,
+    use_time_bucket: bool = False,
+) -> Dict[str, "TickerRule"]:
+    """
+    Load rules from grid_analysis_tight.csv.
+
+    Args:
+        grid_path: Path to grid_analysis_tight.csv or grid_analysis_tight_successful.csv
+        min_hour_et: Optional minimum trading hour (ET, 0-23). Filters out rows with time_et < min_hour_et
+        max_hour_et: Optional maximum trading hour (ET, 0-23). Filters out rows with time_et > max_hour_et
+        ticker_filter: REQUIRED ticker (e.g., "NDX", "SPX") - grid CSV doesn't contain ticker column
+        use_time_bucket: If True, filter configs by time_bucket field to match current hour. Default: False
+
+    Returns:
+        Dict mapping ticker to TickerRule (aggregated from multiple grid rows)
+
+    Note:
+        - By default (use_time_bucket=False), ignores time_bucket field completely (executes at any time)
+        - When use_time_bucket=True, filters to configs whose time_bucket includes current hour
+        - Respects min_hour_et/max_hour_et if provided
+        - Multiple grid rows for same ticker are aggregated into one rule
+        - Uses top configurations by composite score (ROI + Sharpe)
+    """
+    if not grid_path.exists():
+        logger.error("Grid analysis file not found: %s", grid_path)
+        return {}
+
+    # Ticker is required since grid CSV doesn't have ticker column
+    if not ticker_filter:
+        # Try to infer from path (e.g., "NDX_grid_analysis.csv" or path contains "NDX")
+        path_str = str(grid_path).upper()
+        if "NDX" in path_str:
+            ticker_filter = "NDX"
+            logger.info("Inferred ticker=NDX from grid path")
+        elif "SPX" in path_str:
+            ticker_filter = "SPX"
+            logger.info("Inferred ticker=SPX from grid path")
+        else:
+            logger.error("Grid CSV has no ticker column and --ticker not specified. Cannot load rules.")
+            return {}
+
+    ticker = ticker_filter.upper()
+    rules: Dict[str, TickerRule] = {}
+
+    try:
+        import pandas as pd
+        df = pd.read_csv(grid_path)
+
+        logger.info("Loaded grid CSV: %d rows from %s", len(df), grid_path)
+
+        # Filter to successful configs first if column exists
+        if 'successful' in df.columns:
+            df = df[df['successful'] == True]
+            logger.info("Filtered to successful configs: %d rows", len(df))
+
+        if len(df) == 0:
+            logger.error("No rows after filtering - check grid file and success criteria")
+            return {}
+
+        # Filter by time_bucket if requested
+        if use_time_bucket:
+            from datetime import datetime
+            import pytz
+
+            # Get current hour in ET
+            et_tz = pytz.timezone('US/Eastern')
+            current_et = datetime.now(pytz.utc).astimezone(et_tz)
+            current_hour_et = current_et.hour
+
+            # Parse time_et column to get hour range for each bucket
+            # time_et format: "HH:MM" (end time of bucket)
+            df['hour_et_end'] = df['time_et'].str.split(':').str[0].astype(int)
+
+            # Time buckets are typically 30-min windows, so start = end - 0.5 hours
+            # We'll check if current hour falls within the bucket's time range
+            # For simplicity, match if current_hour == bucket's end hour or end hour - 1
+            df['time_bucket_match'] = df['hour_et_end'].apply(
+                lambda end_hour: current_hour_et == end_hour or current_hour_et == end_hour - 1
+            )
+
+            df = df[df['time_bucket_match']]
+            logger.info(
+                "Filtered by time_bucket to match current hour %d ET: %d rows remain",
+                current_hour_et, len(df)
+            )
+
+            if len(df) == 0:
+                logger.warning(
+                    "No configs match current time bucket (hour %d ET). "
+                    "Try running without --use-time-bucket or at a different time.",
+                    current_hour_et
+                )
+                return {}
+
+        # Filter by time constraints if provided
+        if min_hour_et is not None or max_hour_et is not None:
+            # Parse time_et column (format: "HH:MM")
+            df['hour_et'] = df['time_et'].str.split(':').str[0].astype(int)
+
+            if min_hour_et is not None:
+                df = df[df['hour_et'] >= min_hour_et]
+                logger.info("Filtered grid to min_hour_et >= %d: %d rows remain", min_hour_et, len(df))
+
+            if max_hour_et is not None:
+                df = df[df['hour_et'] <= max_hour_et]
+                logger.info("Filtered grid to max_hour_et <= %d: %d rows remain", max_hour_et, len(df))
+
+        if len(df) == 0:
+            logger.error("No rows after time filtering - check min/max hour constraints")
+            return {}
+
+        # Group by (dte, band, spread_type, flow_mode) and take top configs
+        # Create composite score: roi_pct + sharpe*10 (weight Sharpe heavily)
+        df['composite_score'] = df['roi_pct'] + df['sharpe'] * 10
+
+        # Use top 20% of configs or top 100, whichever is smaller
+        top_n = min(100, max(20, int(len(df) * 0.2)))
+        df_sorted = df.sort_values('composite_score', ascending=False).head(top_n)
+
+        logger.info("Using top %d configs (%.1f%% of successful) for aggregation", top_n, 100 * top_n / len(df))
+
+        # Collect DTEs, bands, spread_types from top configs
+        dte_targets = sorted(df_sorted['dte'].unique().tolist())
+        bands_set = set(df_sorted['band'].unique())
+
+        # Use most common spread_type and flow_mode from top configs
+        spread_type = df_sorted['spread_type'].mode()[0] if len(df_sorted) > 0 else "iron_condor"
+        flow_mode = df_sorted['flow_mode'].mode()[0] if len(df_sorted) > 0 else "neutral"
+
+        # Calculate avg metrics for min thresholds from top configs
+        avg_roi = df_sorted['roi_pct'].mean() if len(df_sorted) > 0 else 5.0
+        # Use avg_credit_30k normalized value, divide by typical n_contracts to get per-contract
+        avg_credit_30k = df_sorted['avg_credit_30k'].mean() if len(df_sorted) > 0 else 3000.0
+        avg_n_contracts = df_sorted['n_contracts'].mean() if len(df_sorted) > 0 else 3.0
+        avg_credit_per_contract = avg_credit_30k / avg_n_contracts
+        avg_max_risk = df_sorted['avg_max_risk'].mean() if len(df_sorted) > 0 else 10000.0
+
+        rules[ticker] = TickerRule(
+            ticker=ticker,
+            spread_type=spread_type,
+            min_roi_pct=max(4.0, avg_roi * 0.5),  # 50% of avg ROI (more permissive)
+            max_spend=30000,  # Use standard $30k capital limit
+            min_credit=max(50.0, avg_credit_per_contract * 0.5),  # 50% of avg credit per contract
+            min_volume=0,  # Grid doesn't track volume
+            flow_mode=flow_mode,
+            bands=sorted(list(bands_set)),
+            dte_targets=dte_targets,
+            enabled=True,
+        )
+
+        logger.info(
+            "Loaded grid rule for %s: DTEs=%s, bands=%s, spread=%s, flow=%s, min_roi=%.1f%%, max_spend=$%.0f",
+            ticker, dte_targets, list(bands_set), spread_type, flow_mode,
+            rules[ticker].min_roi_pct, rules[ticker].max_spend
+        )
+
+    except Exception as e:
+        logger.error("Error loading grid rules from %s: %s", grid_path, e, exc_info=True)
+
+    return rules
+
+
 # ─── File Discovery ───────────────────────────────────────────────────────────
 
 _file_mtimes: Dict[str, float] = {}
@@ -1215,6 +1381,29 @@ def main() -> None:
         help="Path to input_rules.csv",
     )
     parser.add_argument(
+        "--grid-rules", type=Path, default=None,
+        help="Load rules from grid_analysis_tight.csv instead of input_rules.csv. "
+             "Ignores time_bucket constraints (executes at any time). "
+             "Use with --min-hour/--max-hour to constrain by trading hours.",
+    )
+    parser.add_argument(
+        "--ticker", type=str, default=None,
+        help="When using --grid-rules, filter to this ticker (e.g., NDX, SPX)",
+    )
+    parser.add_argument(
+        "--min-hour", type=int, default=None, metavar="HOUR",
+        help="Minimum trading hour (ET, 0-23). Only applies when using --grid-rules.",
+    )
+    parser.add_argument(
+        "--max-hour", type=int, default=None, metavar="HOUR",
+        help="Maximum trading hour (ET, 0-23). Only applies when using --grid-rules.",
+    )
+    parser.add_argument(
+        "--use-time-bucket", action="store_true",
+        help="When using --grid-rules, filter configs by time_bucket field to match current time. "
+             "Default: False (ignores time_bucket, executes at any time).",
+    )
+    parser.add_argument(
         "--data-dir", type=Path, default=DEFAULT_DATA_DIR,
         help="Base directory containing per-ticker options CSV subdirectories",
     )
@@ -1345,14 +1534,27 @@ def main() -> None:
     while True:
         tick_start = time.monotonic()
 
-        # Hot-reload rules each tick (picks up edits to input_rules.csv immediately)
-        rules = load_rules(args.rules)
-        if not rules:
-            logger.warning("No enabled tickers in rules file. Sleeping %ds.", args.interval)
-            if args.once:
-                break
-            time.sleep(args.interval)
-            continue
+        # Load rules from grid CSV or standard input_rules.csv
+        if args.grid_rules:
+            rules = load_rules_from_grid(
+                args.grid_rules,
+                min_hour_et=args.min_hour,
+                max_hour_et=args.max_hour,
+                ticker_filter=args.ticker,
+                use_time_bucket=args.use_time_bucket,
+            )
+            if not rules:
+                logger.error("No rules loaded from grid file: %s", args.grid_rules)
+                sys.exit(1)
+        else:
+            # Hot-reload rules each tick (picks up edits to input_rules.csv immediately)
+            rules = load_rules(args.rules)
+            if not rules:
+                logger.warning("No enabled tickers in rules file. Sleeping %ds.", args.interval)
+                if args.once:
+                    break
+                time.sleep(args.interval)
+                continue
 
         tickers = list(rules.keys())
 

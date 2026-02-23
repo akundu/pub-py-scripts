@@ -12,6 +12,8 @@ import lightgbm as lgb
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 import pickle
+from datetime import datetime, timedelta
+from collections import deque
 
 from scripts.close_predictor.multi_day_features import MarketContext
 from scripts.close_predictor.models import UnifiedBand
@@ -199,6 +201,137 @@ class MultiDayLGBMPredictor:
 
         return bands
 
+    def get_prediction_confidence(
+        self,
+        context: MarketContext,
+        recent_errors: Optional[List[float]] = None,
+        feature_drift_score: Optional[float] = None,
+    ) -> float:
+        """Calculate prediction confidence score (0.0-1.0).
+
+        Combines multiple factors:
+        - Feature similarity to training data
+        - Recent prediction errors
+        - Feature drift from training distribution
+        - VIX regime match
+
+        Args:
+            context: Current market context
+            recent_errors: List of recent prediction errors (optional)
+            feature_drift_score: Pre-computed feature drift score (optional)
+
+        Returns:
+            Confidence score from 0.0 (no confidence) to 1.0 (high confidence)
+        """
+        if self.model is None:
+            return 0.0
+
+        confidence_components = []
+
+        # Component 1: Feature drift (if available)
+        if feature_drift_score is not None:
+            # Lower drift = higher confidence
+            # drift of 0.0 = 1.0 confidence, drift of 1.0 = 0.0 confidence
+            drift_confidence = max(0.0, 1.0 - feature_drift_score)
+            confidence_components.append(drift_confidence)
+
+        # Component 2: Recent error trend (if available)
+        if recent_errors and len(recent_errors) > 0:
+            # Compare recent errors to validation RMSE
+            val_rmse = self.training_stats.get('val_rmse', 3.0)
+            recent_rmse = np.sqrt(np.mean(np.array(recent_errors) ** 2))
+
+            # If recent errors are within 150% of validation RMSE, high confidence
+            error_ratio = recent_rmse / val_rmse if val_rmse > 0 else 2.0
+            error_confidence = max(0.0, min(1.0, 1.5 - error_ratio))
+            confidence_components.append(error_confidence)
+
+        # Component 3: VIX regime appropriateness
+        # Models trained in one VIX regime may not work well in another
+        vix_level = getattr(context, 'vix', None)
+        if vix_level is not None:
+            # Penalize extreme VIX (< 10 or > 30)
+            if vix_level < 10:
+                vix_confidence = 0.6  # Low VIX can be unpredictable
+            elif vix_level > 30:
+                vix_confidence = 0.5  # High VIX = high uncertainty
+            else:
+                # Normal range (10-30), higher confidence
+                vix_confidence = 1.0
+            confidence_components.append(vix_confidence)
+
+        # Combine components (average)
+        if confidence_components:
+            return float(np.mean(confidence_components))
+        else:
+            return 0.7  # Default moderate confidence if no components available
+
+    def monitor_feature_drift(
+        self,
+        current_context: MarketContext,
+        training_contexts: Optional[List[MarketContext]] = None,
+    ) -> float:
+        """Monitor feature drift from training distribution.
+
+        Compares current feature values to training distribution to detect
+        if we're predicting on data very different from training data.
+
+        Args:
+            current_context: Current market context
+            training_contexts: Historical training contexts (optional)
+
+        Returns:
+            Drift score from 0.0 (no drift) to 1.0+ (significant drift)
+        """
+        if self.model is None:
+            return 0.0
+
+        current_features = current_context.to_dict()
+
+        # If we don't have training contexts, use a simple heuristic
+        # based on feature importance and value ranges
+        if training_contexts is None or len(training_contexts) == 0:
+            # Check for extreme values in key features
+            drift_score = 0.0
+
+            # Check VIX (expect 5-40 range)
+            vix = current_features.get('vix', 15.0)
+            if vix < 8 or vix > 35:
+                drift_score += 0.3
+
+            # Check volume ratio (expect 0.5-2.0 range)
+            vol_ratio = current_features.get('volume_ratio', 1.0)
+            if vol_ratio < 0.3 or vol_ratio > 3.0:
+                drift_score += 0.2
+
+            return min(1.0, drift_score)
+
+        # Calculate drift using training data distribution
+        training_df = pd.DataFrame([ctx.to_dict() for ctx in training_contexts])
+
+        drift_scores = []
+        for feature_name in self.feature_names:
+            if feature_name not in current_features:
+                continue
+
+            current_val = current_features[feature_name]
+            if feature_name in training_df.columns:
+                train_mean = training_df[feature_name].mean()
+                train_std = training_df[feature_name].std()
+
+                if train_std > 0:
+                    # Z-score: how many standard deviations from training mean
+                    z_score = abs(current_val - train_mean) / train_std
+                    # Convert to 0-1 score (z > 3 = significant drift)
+                    feature_drift = min(1.0, z_score / 3.0)
+                    drift_scores.append(feature_drift)
+
+        if drift_scores:
+            # Use max drift (most drifted feature determines overall drift)
+            return float(np.max(drift_scores))
+        else:
+            return 0.0
+
     def save(self, filepath: Path):
         """Save model to disk."""
         model_data = {
@@ -227,9 +360,17 @@ class MultiDayLGBMPredictor:
 class MultiDayEnsemble:
     """Ensemble of LightGBM models for DTE 1-20."""
 
-    def __init__(self):
-        """Initialize ensemble."""
+    def __init__(self, error_tracking_window: int = 30):
+        """Initialize ensemble.
+
+        Args:
+            error_tracking_window: Number of recent predictions to track for error monitoring
+        """
         self.models: Dict[int, MultiDayLGBMPredictor] = {}
+        self.error_tracking_window = error_tracking_window
+        # Track recent errors for each DTE: {dte: deque of (actual, predicted) tuples}
+        self.recent_errors: Dict[int, deque] = {}
+        self.training_date: Optional[datetime] = None
 
     def train_all(
         self,
@@ -310,3 +451,144 @@ class MultiDayEnsemble:
             model = MultiDayLGBMPredictor.load(filepath)
             self.models[model.days_ahead] = model
             print(f"Loaded {model.days_ahead}DTE model from {filepath}")
+
+    def record_prediction_outcome(
+        self,
+        dte: int,
+        predicted_return: float,
+        actual_return: float,
+    ):
+        """Record prediction outcome for error tracking.
+
+        Args:
+            dte: Days ahead that was predicted
+            predicted_return: Model's predicted return %
+            actual_return: Actual realized return %
+        """
+        if dte not in self.recent_errors:
+            self.recent_errors[dte] = deque(maxlen=self.error_tracking_window)
+
+        error = abs(actual_return - predicted_return)
+        self.recent_errors[dte].append(error)
+
+    def get_recent_rmse(self, dte: int) -> Optional[float]:
+        """Get RMSE from recent predictions for a specific DTE.
+
+        Args:
+            dte: Days ahead
+
+        Returns:
+            Recent RMSE or None if insufficient data
+        """
+        if dte not in self.recent_errors or len(self.recent_errors[dte]) < 5:
+            return None
+
+        errors = list(self.recent_errors[dte])
+        return float(np.sqrt(np.mean(np.array(errors) ** 2)))
+
+    def needs_retraining(
+        self,
+        dte: int,
+        error_threshold_multiplier: float = 1.5,
+        days_since_training: Optional[int] = None,
+        max_days_without_retraining: int = 30,
+    ) -> Tuple[bool, str]:
+        """Detect if ensemble needs retraining for specific DTE.
+
+        Triggers retraining if:
+        1. Recent RMSE > training validation RMSE * threshold
+        2. More than max_days since last training
+
+        Args:
+            dte: Days ahead to check
+            error_threshold_multiplier: Multiplier for validation RMSE threshold
+            days_since_training: Days since last training (optional)
+            max_days_without_retraining: Max days before forced retraining
+
+        Returns:
+            (needs_retraining, reason)
+        """
+        if dte not in self.models:
+            return True, f"No model exists for {dte}DTE"
+
+        model = self.models[dte]
+
+        # Check 1: Error spike detection
+        recent_rmse = self.get_recent_rmse(dte)
+        if recent_rmse is not None:
+            val_rmse = model.training_stats.get('val_rmse', 0.0)
+            if val_rmse > 0:
+                error_ratio = recent_rmse / val_rmse
+                if error_ratio > error_threshold_multiplier:
+                    return True, (
+                        f"Recent RMSE ({recent_rmse:.2f}%) is {error_ratio:.1f}x "
+                        f"validation RMSE ({val_rmse:.2f}%)"
+                    )
+
+        # Check 2: Time-based retraining
+        if days_since_training is not None and days_since_training > max_days_without_retraining:
+            return True, f"Last trained {days_since_training} days ago (max: {max_days_without_retraining})"
+
+        return False, "Model performance is stable"
+
+    def get_prediction_confidence(
+        self,
+        dte: int,
+        context: MarketContext,
+        feature_drift_score: Optional[float] = None,
+    ) -> float:
+        """Get prediction confidence for specific DTE.
+
+        Args:
+            dte: Days ahead
+            context: Current market context
+            feature_drift_score: Pre-computed drift score (optional)
+
+        Returns:
+            Confidence score 0.0-1.0
+        """
+        if dte not in self.models:
+            return 0.0
+
+        model = self.models[dte]
+
+        # Get recent errors for this DTE
+        recent_errors_list = None
+        if dte in self.recent_errors and len(self.recent_errors[dte]) > 0:
+            recent_errors_list = list(self.recent_errors[dte])
+
+        return model.get_prediction_confidence(
+            context=context,
+            recent_errors=recent_errors_list,
+            feature_drift_score=feature_drift_score,
+        )
+
+    def get_ensemble_health_report(self) -> Dict:
+        """Generate health report for all ensemble models.
+
+        Returns:
+            Dict with health metrics for each DTE
+        """
+        report = {}
+
+        for dte in sorted(self.models.keys()):
+            model = self.models[dte]
+            recent_rmse = self.get_recent_rmse(dte)
+            val_rmse = model.training_stats.get('val_rmse', 0.0)
+
+            error_ratio = None
+            if recent_rmse is not None and val_rmse > 0:
+                error_ratio = recent_rmse / val_rmse
+
+            needs_retrain, reason = self.needs_retraining(dte)
+
+            report[dte] = {
+                'validation_rmse': val_rmse,
+                'recent_rmse': recent_rmse,
+                'error_ratio': error_ratio,
+                'needs_retraining': needs_retrain,
+                'reason': reason,
+                'n_samples_tracked': len(self.recent_errors.get(dte, [])),
+            }
+
+        return report

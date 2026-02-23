@@ -3,7 +3,13 @@
 # Automated Model Retraining Script
 # Runs monthly to retrain prediction models with fresh data
 #
-# Usage: ./scripts/retrain_models_auto.sh [--force] [--skip-deploy]
+# Usage:
+#   ./scripts/retrain_models_auto.sh [--ticker NDX|SPX] [--force] [--skip-deploy]
+#
+# Examples:
+#   ./scripts/retrain_models_auto.sh --ticker NDX
+#   ./scripts/retrain_models_auto.sh --ticker SPX --force
+#   ./scripts/retrain_models_auto.sh --ticker NDX --skip-deploy
 #
 
 set -e  # Exit on error
@@ -14,11 +20,16 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_DIR"
 
 # Parse arguments
+TICKER="NDX"  # Default to NDX for backward compatibility
 FORCE_RETRAIN=false
 SKIP_DEPLOY=false
 
-for arg in "$@"; do
-    case $arg in
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --ticker)
+            TICKER="$2"
+            shift 2
+            ;;
         --force)
             FORCE_RETRAIN=true
             shift
@@ -27,24 +38,35 @@ for arg in "$@"; do
             SKIP_DEPLOY=true
             shift
             ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Usage: $0 [--ticker NDX|SPX] [--force] [--skip-deploy]"
+            exit 1
+            ;;
     esac
 done
+
+# Validate ticker
+if [[ "$TICKER" != "NDX" && "$TICKER" != "SPX" ]]; then
+    echo "ERROR: Ticker must be NDX or SPX (got: $TICKER)"
+    exit 1
+fi
 
 # Generate timestamp
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 DATE_ONLY=$(date +%Y%m%d)
 
-# Setup directories
+# Setup directories (ticker-specific)
 LOG_DIR="logs/retraining"
-RESULT_DIR="results/auto_retrain_$DATE_ONLY"
-PROD_DIR="models/production"
-BACKUP_DIR="models/backup_$DATE_ONLY"
+RESULT_DIR="results/auto_retrain_${TICKER}_$DATE_ONLY"
+PROD_DIR="models/production/$TICKER"
+BACKUP_DIR="models/backup_${TICKER}_$DATE_ONLY"
 
 mkdir -p "$LOG_DIR"
-mkdir -p "models"
+mkdir -p "models/production"
 
 # Log file
-LOG_FILE="$LOG_DIR/retrain_$TIMESTAMP.log"
+LOG_FILE="$LOG_DIR/retrain_${TICKER}_$TIMESTAMP.log"
 
 # Logging function
 log() {
@@ -52,9 +74,10 @@ log() {
 }
 
 log "========================================================================"
-log "AUTOMATED MODEL RETRAINING - $TIMESTAMP"
+log "AUTOMATED MODEL RETRAINING - $TICKER - $TIMESTAMP"
 log "========================================================================"
 log "Project: $PROJECT_DIR"
+log "Ticker: $TICKER"
 log "Force retrain: $FORCE_RETRAIN"
 log "Skip deploy: $SKIP_DEPLOY"
 log ""
@@ -123,14 +146,14 @@ log ""
 # ============================================================================
 
 log "========================================================================"
-log "Step 3: Retraining Multi-Day Ensemble Models (1-20 DTE)"
+log "Step 3: Retraining Multi-Day Ensemble Models (1-20 DTE) for $TICKER"
 log "========================================================================"
 log "Training window: 250 days (1 year)"
 log "Validation: 30 days"
 log ""
 
 python scripts/backtest_multi_day.py \
-    --ticker NDX \
+    --ticker "$TICKER" \
     --train-days 250 \
     --test-days 30 \
     --max-dte 20 \
@@ -278,7 +301,7 @@ cat > "$PROD_DIR/metadata.json" << EOF
     "train_days": 250,
     "test_days": 30,
     "max_dte": 20,
-    "ticker": "NDX",
+    "ticker": "$TICKER",
     "validation_rmse": $(echo "$VALIDATION_RESULT" | grep "^RMSE=" | cut -d'=' -f2 | sed 's/%//'),
     "validation_hit_rate": $(echo "$VALIDATION_RESULT" | grep "^HIT_RATE=" | cut -d'=' -f2 | sed 's/%//'),
     "backup_location": "$BACKUP_DIR"
@@ -328,11 +351,12 @@ log ""
 # ============================================================================
 
 log "========================================================================"
-log "RETRAINING COMPLETE - SUCCESS"
+log "RETRAINING COMPLETE - SUCCESS ($TICKER)"
 log "========================================================================"
 log ""
 log "Summary:"
-log "  ✅ Models retrained: 1-20 DTE (8 DTEs)"
+log "  ✅ Ticker: $TICKER"
+log "  ✅ Models retrained: 1-20 DTE (20 models)"
 log "  ✅ Validation passed"
 log "  ✅ Deployed to production: $PROD_DIR"
 log "  ✅ Backup saved: $BACKUP_DIR"

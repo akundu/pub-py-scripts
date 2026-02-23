@@ -1616,3 +1616,210 @@ def format_multi_window_as_html(result: dict | list[dict], params: dict = None, 
 </html>""")
 
     return "".join(html_parts)
+
+
+def _direction_badge(direction: str) -> str:
+    """Return inline-styled direction badge HTML."""
+    if direction == "down":
+        return ('<div style="font-size:18px;font-weight:700;margin-bottom:25px;padding:14px 20px;'
+                'border-radius:8px;display:inline-block;box-shadow:0 2px 8px var(--shadow,rgba(0,0,0,0.1));'
+                'letter-spacing:0.5px;text-transform:uppercase;'
+                'background:linear-gradient(135deg,var(--down-bg,#ffe5e5) 0%,var(--down-bg,#ffe5e5) 100%);'
+                'color:var(--down-text,#c0392b);border-left:4px solid var(--down-text,#c0392b);">')
+    else:
+        return ('<div style="font-size:18px;font-weight:700;margin-bottom:25px;padding:14px 20px;'
+                'border-radius:8px;display:inline-block;box-shadow:0 2px 8px var(--shadow,rgba(0,0,0,0.1));'
+                'letter-spacing:0.5px;text-transform:uppercase;'
+                'background:linear-gradient(135deg,var(--up-bg,#e5ffe5) 0%,var(--up-bg,#e5ffe5) 100%);'
+                'color:var(--up-text,#27ae60);border-left:4px solid var(--up-text,#27ae60);">')
+
+
+def _render_slot_table(slots: dict, sorted_keys: list[str], percentiles: list[int],
+                       direction: str, title: str) -> str:
+    """Render a single DOWN or UP table for a set of slots."""
+    parts = []
+    dir_key = "when_down" if direction == "down" else "when_up"
+    count_key = "when_down_day_count" if direction == "down" else "when_up_day_count"
+    arrow = "⬇️" if direction == "down" else "⬆️"
+    sign = "" if direction == "down" else "+"
+
+    parts.append(f'\n        {_direction_badge(direction)}{arrow} {title}</div>\n')
+    parts.append('        <div class="table-wrap">\n            <table>\n                <thead>\n                    <tr>\n                        <th></th>\n')
+
+    for s in sorted_keys:
+        info = slots[s]
+        n = info.get(count_key, 0)
+        parts.append(f'                        <th colspan="2">{info["label_et"]}<br>'
+                     f'<small style="font-weight:normal;font-size:11px;opacity:0.8">'
+                     f'{info["label_pt"]} (n={n})</small></th>\n')
+
+    parts.append('                    </tr>\n                    <tr>\n                        <th></th>\n')
+    for _ in sorted_keys:
+        parts.append('                        <th>%</th>\n                        <th>$</th>\n')
+    parts.append('                    </tr>\n                </thead>\n                <tbody>\n')
+
+    for p in percentiles:
+        parts.append(f'                    <tr>\n                        <td>p{p}</td>\n')
+        for s in sorted_keys:
+            block = slots[s].get(dir_key)
+            if block:
+                pct = block["pct"][f"p{p}"]
+                price = block["price"][f"p{p}"]
+                parts.append(f'                        <td>{sign}{pct}%</td>\n')
+                parts.append(f'                        <td>${price:,.2f}</td>\n')
+            else:
+                parts.append('                        <td class="insuf">--</td>\n                        <td class="insuf">--</td>\n')
+        parts.append('                    </tr>\n')
+
+    parts.append('                </tbody>\n            </table>\n        </div>\n')
+    return "".join(parts)
+
+
+_HOURLY_SECTION_STYLE = """
+    <style>
+        .hourly-section {
+            background: var(--bg-secondary, white);
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px var(--shadow, rgba(0,0,0,0.1));
+            margin-bottom: 25px;
+        }
+        .hourly-section h2, .hourly-section h3 {
+            color: var(--text-primary, #333);
+            margin-top: 0;
+        }
+        .hourly-section h2 { font-size: 26px; }
+        .hourly-section h3 { font-size: 20px; margin-top: 35px; margin-bottom: 10px; }
+        .hourly-section .hourly-info {
+            color: var(--text-secondary, #666);
+            font-size: 15px;
+            margin-bottom: 18px;
+        }
+        .hourly-section .hourly-info span { margin-right: 25px; }
+        .hourly-section .table-wrap { overflow-x: auto; }
+        .hourly-section table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            font-size: 15px;
+            border: none;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 4px 12px var(--shadow, rgba(0,0,0,0.1));
+        }
+        .hourly-section th {
+            background: linear-gradient(180deg, #3d5a80 0%, #2c4259 100%);
+            color: #ffffff;
+            padding: 14px 12px;
+            text-align: center;
+            font-weight: 700;
+            font-size: 15px;
+            border-right: 1px solid rgba(255,255,255,0.15);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .hourly-section th:last-child { border-right: none; }
+        .hourly-section th:first-child { text-align: left; padding-left: 15px; }
+        .hourly-section td {
+            padding: 12px 10px;
+            text-align: center;
+            border-bottom: 1px solid var(--border-color, #ecf0f1);
+            border-right: 1px solid var(--border-color, #ecf0f1);
+            font-size: 15px;
+        }
+        .hourly-section td:last-child { border-right: none; }
+        .hourly-section tr:last-child td { border-bottom: none; }
+        .hourly-section td:first-child {
+            text-align: left;
+            font-weight: 700;
+            color: var(--text-tertiary, #7f8c8d);
+            padding-left: 15px;
+        }
+        .hourly-section tr:hover td { background: var(--table-hover, #f8f9fa); }
+        .hourly-section .insuf { color: var(--text-secondary, #666); font-style: italic; font-size: 14px; }
+    </style>
+"""
+
+
+def format_hourly_moves_as_html(hourly_data: dict) -> str:
+    """
+    Format intraday moves-to-close data as an HTML section.
+
+    Renders three tiers:
+      1. Half-hour slots (10:00 - 15:30 ET)
+      2. 10-min slots for last 30 min (15:30 - 15:50 ET) if available
+      3. 5-min slots for last 10 min (15:50 - 15:55 ET) if available
+
+    Args:
+        hourly_data: Result dict from compute_hourly_moves_to_close
+
+    Returns:
+        HTML string for the section (not a full page)
+    """
+    if not hourly_data or not hourly_data.get("slots"):
+        return ""
+
+    ticker = hourly_data["ticker"]
+    prev_close = hourly_data["previous_close"]
+    percentiles = hourly_data["percentiles"]
+    slots = hourly_data["slots"]
+    slots_10min = hourly_data.get("slots_10min", {})
+    slots_5min = hourly_data.get("slots_5min", {})
+    has_fine = hourly_data.get("has_fine_data", False)
+
+    try:
+        prev_close_fmt = f"${float(prev_close):,.2f}"
+    except (TypeError, ValueError):
+        prev_close_fmt = str(prev_close)
+
+    sorted_slots = sorted(slots.keys())
+    if not sorted_slots:
+        return ""
+
+    html_parts = [_HOURLY_SECTION_STYLE]
+
+    html_parts.append(f"""
+    <div class="hourly-section">
+        <h2>Intraday Move to Close - {ticker} (0DTE)</h2>
+        <div class="hourly-info">
+            <span><strong>Reference Close:</strong> {prev_close_fmt}</span>
+            <span><strong>Source:</strong> 5-min bar data</span>
+        </div>
+""")
+
+    # --- Tier 1: Half-hour tables ---
+    html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "down",
+                                          "DOWN MOVES TO CLOSE (per half-hour)"))
+    html_parts.append('        <div style="margin-top:30px"></div>\n')
+    html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "up",
+                                          "UP MOVES TO CLOSE (per half-hour)"))
+
+    # --- Tier 2: 10-min tables (last 30 min) ---
+    sorted_10 = sorted(slots_10min.keys())
+    if sorted_10:
+        html_parts.append('\n        <h3>Last 30 Minutes (10-min detail)</h3>\n')
+        html_parts.append(_render_slot_table(slots_10min, sorted_10, percentiles, "down",
+                                              "DOWN MOVES TO CLOSE (per 10-min)"))
+        html_parts.append('        <div style="margin-top:30px"></div>\n')
+        html_parts.append(_render_slot_table(slots_10min, sorted_10, percentiles, "up",
+                                              "UP MOVES TO CLOSE (per 10-min)"))
+
+    # --- Tier 3: 5-min tables (last 10 min) ---
+    sorted_5 = sorted(slots_5min.keys())
+    if sorted_5:
+        html_parts.append('\n        <h3>Last 10 Minutes (5-min detail)</h3>\n')
+        html_parts.append(_render_slot_table(slots_5min, sorted_5, percentiles, "down",
+                                              "DOWN MOVES TO CLOSE (per 5-min)"))
+        html_parts.append('        <div style="margin-top:30px"></div>\n')
+        html_parts.append(_render_slot_table(slots_5min, sorted_5, percentiles, "up",
+                                              "UP MOVES TO CLOSE (per 5-min)"))
+
+    if not has_fine:
+        html_parts.append("""
+        <div class="hourly-info" style="margin-top:20px;font-style:italic;">
+            Fine-grained data (10-min / 5-min) not available for this ticker.
+        </div>
+""")
+
+    html_parts.append('    </div>\n')
+    return "".join(html_parts)

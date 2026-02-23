@@ -283,6 +283,356 @@ async def compute_range_percentiles_multi(
     return results
 
 
+# --- Intraday moves-to-close for 0DTE analysis ---
+# Uses 5-min CSV data from equities_output/<db_ticker>/ directory.
+# Three tiers of granularity:
+#   1. Half-hour slots: 10:00 through 15:30 ET
+#   2. 10-min slots for last 30 min: 15:30, 15:40, 15:50 ET
+#   3. 5-min slots for last 10 min: 15:50, 15:55 ET
+
+EQUITIES_OUTPUT_DIR = PROJECT_ROOT / "equities_output"
+
+# Half-hour slot definitions (main grid)
+HALF_HOUR_SLOTS = [
+    "10:00", "10:30", "11:00", "11:30", "12:00", "12:30",
+    "13:00", "13:30", "14:00", "14:30", "15:00", "15:30",
+]
+
+# 10-min slots for last 30 min (3:30 PM - 4:00 PM ET)
+TEN_MIN_SLOTS = ["15:30", "15:40", "15:50"]
+
+# 5-min slots for last 10 min (3:50 PM - 4:00 PM ET)
+FIVE_MIN_SLOTS = ["15:50", "15:55"]
+
+def _et_label(hhmm: str) -> tuple[str, str]:
+    """Convert 'HH:MM' ET slot to (ET label, PT label)."""
+    h, m = int(hhmm.split(":")[0]), int(hhmm.split(":")[1])
+    # ET label
+    if h == 0:
+        et = f"12:{m:02d} AM ET"
+    elif h < 12:
+        et = f"{h}:{m:02d} AM ET"
+    elif h == 12:
+        et = f"12:{m:02d} PM ET"
+    else:
+        et = f"{h - 12}:{m:02d} PM ET"
+    # PT = ET - 3h
+    ph = (h - 3) % 24
+    if ph == 0:
+        pt = f"12:{m:02d} AM PT"
+    elif ph < 12:
+        pt = f"{ph}:{m:02d} AM PT"
+    elif ph == 12:
+        pt = f"12:{m:02d} PM PT"
+    else:
+        pt = f"{ph - 12}:{m:02d} PM PT"
+    return (et, pt)
+
+
+def _slot_minutes(hhmm: str) -> int:
+    """Convert 'HH:MM' to minutes since midnight for sorting."""
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
+
+
+async def compute_hourly_moves_to_close(
+    ticker: str,
+    days: int = CALENDAR_DAYS_6M,
+    percentiles: list[int] = None,
+    min_days: int = MIN_DAYS_DEFAULT,
+    min_direction_days: int = MIN_DIRECTION_DAYS_DEFAULT,
+    db_config: str = None,
+    enable_cache: bool = True,
+    ensure_tables: bool = False,
+    log_level: str = "WARNING",
+    override_close: float | None = None,
+) -> dict:
+    """
+    Compute intraday moves to close for 0DTE analysis using 5-min CSV data.
+
+    Reads 5-min bar CSVs from equities_output/<db_ticker>/ and computes:
+      - Half-hour slots (10:00 - 15:30 ET)
+      - 10-min slots for last 30 min (15:30, 15:40, 15:50 ET)
+      - 5-min slots for last 10 min (15:50, 15:55 ET)
+
+    For each slot, computes the percentile distribution of the move from that
+    slot's close price to the day's final close, split by up/down direction.
+
+    Returns:
+        Dict with keys: ticker, previous_close, percentiles,
+        slots (half-hour), slots_10min (last 30 min), slots_5min (last 10 min),
+        has_fine_data (bool).
+    """
+    import pandas as pd
+    import glob as _glob
+
+    if percentiles is None:
+        percentiles = DEFAULT_PERCENTILES.copy()
+
+    db_symbol, _, is_index, _ = parse_symbol(ticker)
+    display_ticker = ticker.replace("I:", "") if ticker.startswith("I:") else ticker
+
+    logger = get_logger("range_percentiles", level=log_level) if DB_AVAILABLE else None
+
+    # --- Locate CSV directory ---
+    csv_dir = EQUITIES_OUTPUT_DIR / db_symbol
+    if not csv_dir.is_dir():
+        raise ValueError(
+            f"No equities_output directory for {db_symbol}. "
+            f"Intraday move-to-close analysis not available for this ticker."
+        )
+
+    # --- Load CSV files within lookback window ---
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=days)
+
+    pattern = str(csv_dir / f"{db_symbol}_equities_*.csv")
+    csv_files = sorted(_glob.glob(pattern))
+    if not csv_files:
+        raise ValueError(f"No CSV files found in {csv_dir}")
+
+    try:
+        from zoneinfo import ZoneInfo
+        et_tz = ZoneInfo("America/New_York")
+    except ImportError:
+        import pytz
+        et_tz = pytz.timezone("America/New_York")
+
+    frames = []
+    for fpath in csv_files:
+        # Extract date from filename: <ticker>_equities_YYYY-MM-DD.csv
+        fname = Path(fpath).stem  # e.g. I:NDX_equities_2023-02-15
+        date_part = fname.rsplit("_", 1)[-1]  # 2023-02-15
+        try:
+            file_date = datetime.strptime(date_part, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if file_date < start_date or file_date > end_date:
+            continue
+
+        try:
+            df = pd.read_csv(fpath, parse_dates=["timestamp"])
+        except Exception:
+            continue
+        if df.empty or "close" not in df.columns:
+            continue
+        df["_file_date"] = file_date
+        frames.append(df)
+
+    if not frames:
+        raise ValueError(f"No CSV data within lookback period for {display_ticker}")
+
+    all_bars = pd.concat(frames, ignore_index=True)
+    all_bars["timestamp"] = pd.to_datetime(all_bars["timestamp"], utc=True)
+
+    # Convert to ET
+    all_bars["ts_et"] = all_bars["timestamp"].dt.tz_convert(et_tz)
+    all_bars["trading_date"] = all_bars["ts_et"].dt.date
+    all_bars["et_hour"] = all_bars["ts_et"].dt.hour
+    all_bars["et_minute"] = all_bars["ts_et"].dt.minute
+
+    # Get daily close: last bar of each trading day (the 4:00 PM bar or latest)
+    day_closes = {}
+    for td, grp in all_bars.groupby("trading_date"):
+        last_bar = grp.sort_values("timestamp").iloc[-1]
+        day_closes[td] = float(last_bar["close"])
+
+    # Determine previous_close for price level display
+    if override_close is not None:
+        previous_close = float(override_close)
+    else:
+        # Use most recent day's close
+        latest_date = max(day_closes.keys())
+        previous_close = day_closes[latest_date]
+
+    # --- Build records for each slot type ---
+    # For each bar, compute its half-hour bucket, 10-min bucket, 5-min bucket
+    records = []
+    for _, row in all_bars.iterrows():
+        td = row["trading_date"]
+        day_close = day_closes.get(td)
+        if day_close is None:
+            continue
+        price = float(row["close"])
+        if price <= 0:
+            continue
+        h = row["et_hour"]
+        m = row["et_minute"]
+
+        # Skip pre-market bars before 10:00 ET (first half-hour slot)
+        if h < 10:
+            continue
+        # Skip at/after close
+        if h >= 16:
+            continue
+
+        move_pct = (day_close - price) / price
+
+        # Half-hour bucket: floor to nearest 30 min
+        m30 = (m // 30) * 30
+        hh_slot = f"{h}:{m30:02d}"
+
+        # 10-min bucket (only for 15:30-15:59)
+        ten_slot = None
+        if h == 15 and m >= 30:
+            m10 = (m // 10) * 10
+            ten_slot = f"15:{m10:02d}"
+
+        # 5-min bucket (only for 15:50-15:59)
+        five_slot = None
+        if h == 15 and m >= 50:
+            m5 = (m // 5) * 5
+            five_slot = f"15:{m5:02d}"
+
+        records.append({
+            "trading_date": td,
+            "price": price,
+            "day_close": day_close,
+            "move_pct": move_pct,
+            "slot_30": hh_slot,
+            "slot_10": ten_slot,
+            "slot_5": five_slot,
+        })
+
+    if not records:
+        raise ValueError(f"No intraday records for {display_ticker}")
+
+    records_df = pd.DataFrame(records)
+
+    # --- Helper to build percentile blocks ---
+    def return_percentiles_from_series(return_series, ref_close: float, invert: bool = False) -> dict:
+        result = {}
+        for p in percentiles:
+            if invert:
+                q = float(return_series.quantile((100 - p) / 100.0))
+            else:
+                q = float(return_series.quantile(p / 100.0))
+            result[f"p{p}_pct"] = round(q * 100, 2)
+            result[f"p{p}_price"] = round(ref_close * (1 + q), 2)
+        return result
+
+    def build_block(returns_subset, n: int, invert: bool = False) -> dict | None:
+        if n < min_direction_days:
+            return None
+        r = return_percentiles_from_series(returns_subset, previous_close, invert=invert)
+        return {
+            "day_count": n,
+            "pct": {f"p{p}": r[f"p{p}_pct"] for p in percentiles},
+            "price": {f"p{p}": r[f"p{p}_price"] for p in percentiles},
+        }
+
+    def aggregate_slot(df_subset) -> dict | None:
+        """Aggregate multiple 5-min bars within a slot by taking the FIRST bar per trading day."""
+        if df_subset.empty:
+            return None
+        # One record per day: earliest bar in the slot
+        day_agg = df_subset.sort_values("trading_date").drop_duplicates(subset="trading_date", keep="first")
+        if len(day_agg) < min_days:
+            return None
+        moves = day_agg["move_pct"]
+        mask_up = moves > 0
+        mask_down = moves < 0
+        n_up = int(mask_up.sum())
+        n_down = int(mask_down.sum())
+        when_up = build_block(moves[mask_up], n_up, invert=False)
+        when_down = build_block(moves[mask_down], n_down, invert=True)
+        labels = _et_label(day_agg.name if hasattr(day_agg, "name") else "")
+        return {
+            "total_days": len(day_agg),
+            "when_up": when_up,
+            "when_up_day_count": n_up,
+            "when_down": when_down,
+            "when_down_day_count": n_down,
+        }
+
+    # --- Aggregate half-hour slots ---
+    slots_data = {}
+    for slot_key in HALF_HOUR_SLOTS:
+        subset = records_df[records_df["slot_30"] == slot_key]
+        if subset.empty:
+            continue
+        # One record per day: first bar in slot
+        day_agg = subset.sort_values("trading_date").drop_duplicates(subset="trading_date", keep="first")
+        if len(day_agg) < min_days:
+            continue
+        moves = day_agg["move_pct"]
+        mask_up = moves > 0
+        mask_down = moves < 0
+        n_up = int(mask_up.sum())
+        n_down = int(mask_down.sum())
+        labels = _et_label(slot_key)
+        slots_data[slot_key] = {
+            "label_et": labels[0],
+            "label_pt": labels[1],
+            "total_days": len(day_agg),
+            "when_up": build_block(moves[mask_up], n_up, invert=False),
+            "when_up_day_count": n_up,
+            "when_down": build_block(moves[mask_down], n_down, invert=True),
+            "when_down_day_count": n_down,
+        }
+
+    # --- Aggregate 10-min slots (last 30 min) ---
+    slots_10min = {}
+    for slot_key in TEN_MIN_SLOTS:
+        subset = records_df[records_df["slot_10"] == slot_key]
+        if subset.empty:
+            continue
+        day_agg = subset.sort_values("trading_date").drop_duplicates(subset="trading_date", keep="first")
+        if len(day_agg) < min_days:
+            continue
+        moves = day_agg["move_pct"]
+        mask_up = moves > 0
+        mask_down = moves < 0
+        n_up = int(mask_up.sum())
+        n_down = int(mask_down.sum())
+        labels = _et_label(slot_key)
+        slots_10min[slot_key] = {
+            "label_et": labels[0],
+            "label_pt": labels[1],
+            "total_days": len(day_agg),
+            "when_up": build_block(moves[mask_up], n_up, invert=False),
+            "when_up_day_count": n_up,
+            "when_down": build_block(moves[mask_down], n_down, invert=True),
+            "when_down_day_count": n_down,
+        }
+
+    # --- Aggregate 5-min slots (last 10 min) ---
+    slots_5min = {}
+    for slot_key in FIVE_MIN_SLOTS:
+        subset = records_df[records_df["slot_5"] == slot_key]
+        if subset.empty:
+            continue
+        day_agg = subset.sort_values("trading_date").drop_duplicates(subset="trading_date", keep="first")
+        if len(day_agg) < min_days:
+            continue
+        moves = day_agg["move_pct"]
+        mask_up = moves > 0
+        mask_down = moves < 0
+        n_up = int(mask_up.sum())
+        n_down = int(mask_down.sum())
+        labels = _et_label(slot_key)
+        slots_5min[slot_key] = {
+            "label_et": labels[0],
+            "label_pt": labels[1],
+            "total_days": len(day_agg),
+            "when_up": build_block(moves[mask_up], n_up, invert=False),
+            "when_up_day_count": n_up,
+            "when_down": build_block(moves[mask_down], n_down, invert=True),
+            "when_down_day_count": n_down,
+        }
+
+    return {
+        "ticker": display_ticker,
+        "previous_close": previous_close,
+        "lookback_calendar_days": days,
+        "percentiles": percentiles,
+        "slots": slots_data,
+        "slots_10min": slots_10min,
+        "slots_5min": slots_5min,
+        "has_fine_data": bool(slots_10min or slots_5min),
+    }
+
+
 async def compute_range_percentiles_multi_window(
     ticker: str,
     windows: list[int] | str,

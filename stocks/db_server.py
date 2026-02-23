@@ -14155,6 +14155,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             compute_range_percentiles_multi,
             compute_range_percentiles_multi_window,
             compute_range_percentiles_multi_window_batch,
+            compute_hourly_moves_to_close,
             parse_windows_arg,
             CALENDAR_DAYS_6M,
             DEFAULT_PERCENTILES,
@@ -14162,7 +14163,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             MIN_DIRECTION_DAYS_DEFAULT,
             DEFAULT_WINDOW,
         )
-        from common.range_percentiles_formatter import format_as_html, format_multi_window_as_html
+        from common.range_percentiles_formatter import format_as_html, format_multi_window_as_html, format_hourly_moves_as_html
     except ImportError as e:
         logger.error(f"Failed to import range_percentiles modules: {e}")
         return web.Response(
@@ -14252,6 +14253,53 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                 params={"tickers": tickers, "windows": windows, "days": days},
                 multi_ticker=len(tickers) > 1
             )
+
+            # If window 0 (0DTE) is included, compute and inject hourly moves-to-close
+            # per ticker, into each ticker's tab div (or before </body> for single ticker)
+            if 0 in windows:
+                is_multi = len(tickers) > 1
+                for ticker_name, _ in ticker_specs:
+                    try:
+                        hourly_data = await compute_hourly_moves_to_close(
+                            ticker=ticker_name,
+                            days=days,
+                            percentiles=percentiles,
+                            min_days=min_days,
+                            min_direction_days=min_direction_days,
+                            db_config=db_config,
+                            enable_cache=True,
+                            ensure_tables=False,
+                            log_level="WARNING",
+                        )
+                        hourly_html = format_hourly_moves_as_html(hourly_data)
+                        if not hourly_html:
+                            continue
+                        # Strip I: prefix for display ticker used in tab IDs
+                        display_t = ticker_name.replace("I:", "") if ticker_name.startswith("I:") else ticker_name
+                        if is_multi:
+                            # Inject into this ticker's tab: before its closing </div>
+                            tab_marker = f'id="tab_{display_t}">'
+                            # Find the tab div and inject before its last closing </div>
+                            tab_pos = html.find(tab_marker)
+                            if tab_pos >= 0:
+                                # Find the closing </div> for this tab
+                                # The tab content ends with "    </div>\n" before next tab or script
+                                content_start = tab_pos + len(tab_marker)
+                                # Find the next tab div or the script section
+                                next_tab = html.find('<div class="tab-content', content_start)
+                                script_pos = html.find('<script>', content_start)
+                                end_search = min(
+                                    next_tab if next_tab > 0 else len(html),
+                                    script_pos if script_pos > 0 else len(html),
+                                )
+                                # Find last </div> before end_search
+                                close_div_pos = html.rfind('</div>', content_start, end_search)
+                                if close_div_pos > 0:
+                                    html = html[:close_div_pos] + hourly_html + "\n" + html[close_div_pos:]
+                        else:
+                            html = html.replace("</body>", hourly_html + "\n</body>", 1)
+                    except Exception as he:
+                        logger.warning(f"Could not compute hourly moves for {ticker_name}: {he}")
 
             return web.Response(text=html, content_type="text/html")
 
@@ -14368,6 +14416,32 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                 "percentiles": percentiles,
             }
         )
+
+        # If window is 0 (0DTE), compute and inject hourly moves-to-close
+        if window == 0:
+            hourly_sections = []
+            for ticker_name, _ in ticker_specs:
+                try:
+                    hourly_data = await compute_hourly_moves_to_close(
+                        ticker=ticker_name,
+                        days=days,
+                        percentiles=percentiles,
+                        min_days=min_days,
+                        min_direction_days=min_direction_days,
+                        db_config=db_config,
+                        enable_cache=True,
+                        ensure_tables=False,
+                        log_level="WARNING",
+                    )
+                    hourly_html = format_hourly_moves_as_html(hourly_data)
+                    if hourly_html:
+                        hourly_sections.append(hourly_html)
+                except Exception as he:
+                    logger.warning(f"Could not compute hourly moves for {ticker_name}: {he}")
+
+            if hourly_sections:
+                hourly_combined = "\n".join(hourly_sections)
+                html = html.replace("</body>", hourly_combined + "\n</body>", 1)
 
         return web.Response(text=html, content_type="text/html")
 

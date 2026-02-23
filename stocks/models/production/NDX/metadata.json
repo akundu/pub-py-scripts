@@ -1,0 +1,11 @@
+{
+    "retrained_at": "20260223_030117",
+    "retrained_date": "20260223",
+    "train_days": 250,
+    "test_days": 30,
+    "max_dte": 20,
+    "ticker": "NDX",
+    "validation_rmse": 1.54,
+    "validation_hit_rate": 100.0,
+    "backup_location": "models/backup_NDX_20260223"
+}

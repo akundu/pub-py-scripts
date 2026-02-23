@@ -1,0 +1,217 @@
+=================================================================================
+CRON SETUP FOR MULTI-TICKER AUTOMATED RETRAINING
+=================================================================================
+
+This file contains cron entries for automated retraining of both NDX and SPX
+prediction models.
+
+IMPORTANT: Update the following before adding to crontab:
+  1. Replace /path/to/stocks with your actual project directory
+  2. Replace your@email.com with your actual email address
+  3. Ensure scripts are executable: chmod +x scripts/*.sh
+
+=================================================================================
+INSTALLATION
+=================================================================================
+
+1. Open your crontab editor:
+   crontab -e
+
+2. Copy the entries below (update paths and email)
+
+3. Save and exit
+
+4. Verify installation:
+   crontab -l
+
+=================================================================================
+CRON ENTRIES - COPY BELOW THIS LINE
+=================================================================================
+
+# Project directory (UPDATE THIS PATH)
+PROJECT_DIR=/Volumes/RAID1\ NVME\ SSD\ 2TB/akundu_programs_dev/programs/python/pythonv3/pub-py-scripts/stocks
+
+# =============================================================================
+# MONTHLY MODEL RETRAINING
+# =============================================================================
+# Runs on 1st Saturday of each month at 2:00 AM
+# Retrains both NDX and SPX models with fresh market data
+
+# NDX Retraining (1st Saturday at 2:00 AM)
+0 2 * * 6 [ $(date +\%d) -le 7 ] && cd "$PROJECT_DIR" && ./scripts/retrain_models_auto.sh --ticker NDX >> logs/retraining/cron_NDX.log 2>&1
+
+# SPX Retraining (1st Saturday at 3:00 AM - 1 hour after NDX)
+0 3 * * 6 [ $(date +\%d) -le 7 ] && cd "$PROJECT_DIR" && ./scripts/retrain_models_auto.sh --ticker SPX >> logs/retraining/cron_SPX.log 2>&1
+
+# =============================================================================
+# DAILY HEALTH MONITORING
+# =============================================================================
+# Checks model health every weekday at 6:00 AM
+# Sends email alert if models need attention
+
+# NDX Health Check (weekdays at 6:00 AM)
+0 6 * * 1-5 cd "$PROJECT_DIR" && python scripts/monitor_model_health.py --ticker NDX --alert-email your@email.com >> logs/health_checks/health_NDX.log 2>&1
+
+# SPX Health Check (weekdays at 6:05 AM)
+5 6 * * 1-5 cd "$PROJECT_DIR" && python scripts/monitor_model_health.py --ticker SPX --alert-email your@email.com >> logs/health_checks/health_SPX.log 2>&1
+
+# =============================================================================
+# OPTIONAL: CLEANUP JOBS
+# =============================================================================
+# Clean up old logs and backups (runs monthly on 2nd Sunday at 3:00 AM)
+
+# Clean old logs (keep last 90 days)
+0 3 * * 0 [ $(date +\%d) -ge 8 ] && [ $(date +\%d) -le 14 ] && find "$PROJECT_DIR/logs" -name "*.log" -mtime +90 -delete 2>&1 | logger -t model-cleanup
+
+# Clean old backups (keep last 3 months)
+0 3 * * 0 [ $(date +\%d) -ge 8 ] && [ $(date +\%d) -le 14 ] && find "$PROJECT_DIR/models" -name "backup_*" -type d -mtime +90 -exec rm -rf {} \; 2>&1 | logger -t model-cleanup
+
+=================================================================================
+END OF CRON ENTRIES
+=================================================================================
+
+=================================================================================
+SCHEDULE SUMMARY
+=================================================================================
+
+MONTHLY (1st Saturday):
+  2:00 AM - NDX model retraining
+  3:00 AM - SPX model retraining
+
+DAILY (Weekdays):
+  6:00 AM - NDX health check + email alert if needed
+  6:05 AM - SPX health check + email alert if needed
+
+MONTHLY (2nd Sunday):
+  3:00 AM - Cleanup old logs and backups
+
+=================================================================================
+WHAT EACH JOB DOES
+=================================================================================
+
+NDX/SPX RETRAINING:
+  • Checks if models are >25 days old (skips if recently retrained)
+  • Fetches latest 250 days of market data
+  • Trains 20 models (1-20 DTE) using LightGBM
+  • Validates performance (RMSE < 4%, hit rate ≥ 95%)
+  • Backs up old models before deployment
+  • Deploys new models ONLY if validation passes
+  • Logs everything to logs/retraining/retrain_{TICKER}_{timestamp}.log
+
+NDX/SPX HEALTH CHECK:
+  • Checks model age (warns if >25 days, critical if >40 days)
+  • Verifies all required model files exist
+  • Checks recent performance metrics (if available)
+  • Sends email alert if action needed
+  • Logs results to logs/health_checks/health_{TICKER}.log
+
+CLEANUP:
+  • Removes log files older than 90 days
+  • Removes model backups older than 90 days
+  • Keeps system disk usage under control
+
+=================================================================================
+MANUAL OPERATIONS
+=================================================================================
+
+Force retrain NDX (ignore 25-day threshold):
+  ./scripts/retrain_models_auto.sh --ticker NDX --force
+
+Force retrain SPX:
+  ./scripts/retrain_models_auto.sh --ticker SPX --force
+
+Check NDX health anytime:
+  python scripts/monitor_model_health.py --ticker NDX
+
+Check SPX health anytime:
+  python scripts/monitor_model_health.py --ticker SPX
+
+Check both tickers:
+  python scripts/monitor_model_health.py --ticker NDX && \
+  python scripts/monitor_model_health.py --ticker SPX
+
+Rollback NDX to backup (if new models perform poorly):
+  cp -r models/backup_NDX_YYYYMMDD/* models/production/NDX/
+
+Rollback SPX to backup:
+  cp -r models/backup_SPX_YYYYMMDD/* models/production/SPX/
+
+=================================================================================
+LOG LOCATIONS
+=================================================================================
+
+Retraining logs:
+  logs/retraining/retrain_NDX_{timestamp}.log
+  logs/retraining/retrain_SPX_{timestamp}.log
+  logs/retraining/cron_NDX.log (cron execution log)
+  logs/retraining/cron_SPX.log (cron execution log)
+
+Health check logs:
+  logs/health_checks/health_NDX.log
+  logs/health_checks/health_SPX.log
+
+Validation results:
+  results/auto_retrain_NDX_{date}/summary.csv
+  results/auto_retrain_SPX_{date}/summary.csv
+
+Production models:
+  models/production/NDX/lgbm_{1-20}dte.pkl
+  models/production/NDX/metadata.json
+  models/production/SPX/lgbm_{1-20}dte.pkl
+  models/production/SPX/metadata.json
+
+Backups:
+  models/backup_NDX_{date}/
+  models/backup_SPX_{date}/
+
+=================================================================================
+TROUBLESHOOTING
+=================================================================================
+
+Cron job not running?
+  1. Check cron service: pgrep cron (Linux) or launchctl list | grep cron (Mac)
+  2. Check cron logs: tail -f /var/log/syslog | grep CRON (Linux) or log stream --predicate 'process == "cron"' (Mac)
+  3. Verify paths are correct in crontab (use absolute paths)
+  4. Check script permissions: ls -l scripts/*.sh
+
+Email alerts not working?
+  1. Test mail command: echo "test" | mail -s "test" your@email.com
+  2. Check system mail is configured (sendmail, postfix, etc.)
+  3. Check spam folder for alerts
+
+Models not deploying after retraining?
+  1. Check retraining log: tail -100 logs/retraining/retrain_NDX_{latest}.log
+  2. Look for validation failures (RMSE > 4% or hit rate < 95%)
+  3. Check disk space: df -h
+  4. Verify Python dependencies: pip list | grep lightgbm
+
+Health check showing old models?
+  1. Check if retraining completed successfully
+  2. Verify models were deployed: ls -lh models/production/NDX/
+  3. Check metadata: cat models/production/NDX/metadata.json
+  4. Run manual retraining: ./scripts/retrain_models_auto.sh --ticker NDX --force
+
+=================================================================================
+VALIDATION THRESHOLDS
+=================================================================================
+
+Models are deployed ONLY if they meet these criteria:
+
+Performance Requirements:
+  • RMSE (prediction error) < 4.0%
+  • Hit rate (accuracy) ≥ 95%
+
+Age Thresholds:
+  • Normal: < 25 days (no action needed)
+  • Warning: 25-40 days (retraining recommended)
+  • Critical: > 40 days (retraining urgent)
+
+If validation fails:
+  • New models are NOT deployed
+  • Old models remain in production
+  • Email alert sent (if configured)
+  • Log contains failure reason
+
+=================================================================================
+END OF DOCUMENTATION
+=================================================================================

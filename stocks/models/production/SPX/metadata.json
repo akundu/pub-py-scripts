@@ -1,0 +1,11 @@
+{
+    "retrained_at": "20260223_030016",
+    "retrained_date": "20260223",
+    "train_days": 250,
+    "test_days": 30,
+    "max_dte": 20,
+    "ticker": "SPX",
+    "validation_rmse": 1.18,
+    "validation_hit_rate": 100.0,
+    "backup_location": "models/backup_SPX_20260223"
+}
