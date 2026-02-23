@@ -680,18 +680,91 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
     print(f"Current Price:      ${current_price:,.2f}")
     print(f"Target Date:        {target_date.strftime('%A, %B %d, %Y')} ({days_ahead} trading days)\n")
 
-    # Determine recommended method based on backtest results
-    # Conditional method is 37-39% TIGHTER than baseline with 97-99% hit rates
-    # Ensemble is 24-58% WIDER than baseline (too conservative)
-    recommended_method = "Conditional (Feature-Weighted)"
-    if conditional_bands:
-        recommended_bands = conditional_bands
-    elif ensemble_combined_bands:
-        recommended_method = "Ensemble Combined"
-        recommended_bands = ensemble_combined_bands
-    else:
+    # SMART FALLBACK: Determine recommended method using regime detection & confidence scoring
+    from scripts.close_predictor.regime_detector import RegimeDetector
+    from pathlib import Path
+
+    # Try to load regime state to check for regime changes
+    regime_status = None
+    regime_recommendation = None
+    fallback_reason = None
+
+    try:
+        model_dir = Path(__file__).parent.parent / "models" / "production"
+        cache_dir = Path(__file__).parent.parent / "models" / "regime_cache"
+
+        # Load metadata to get training RMSE
+        metadata_file = model_dir / ticker / "metadata.json"
+        if metadata_file.exists():
+            import json
+            with open(metadata_file, 'r') as f:
+                metadata = json.load(f)
+
+            # Create regime detector
+            detector = RegimeDetector.create_for_model(
+                ticker=ticker,
+                days_ahead=days_ahead,
+                model_metadata=metadata,
+                cache_dir=cache_dir,
+            )
+            regime_status = detector.get_status()
+            regime_recommendation = regime_status['recommended_method']
+
+            if regime_status.get('is_regime_changed'):
+                fallback_reason = regime_status.get('fallback_reason', 'Regime change detected')
+    except Exception as e:
+        print(f"⚠️  Could not load regime detector: {e}")
+        regime_recommendation = None
+
+    # Method selection with fallback hierarchy
+    if regime_recommendation == "baseline":
+        # Severe regime change - use baseline
         recommended_method = "Baseline (Simple Percentile)"
         recommended_bands = baseline_bands
+        print(f"⚠️  REGIME CHANGE DETECTED: Using baseline method")
+        print(f"   Reason: {fallback_reason}")
+
+    elif regime_recommendation == "conditional" or not ensemble_bands:
+        # Moderate regime change or no ensemble available - use conditional
+        recommended_method = "Conditional (Feature-Weighted)"
+        recommended_bands = conditional_bands if conditional_bands else baseline_bands
+        if fallback_reason:
+            print(f"ℹ️  Using conditional method (regime confidence)")
+            print(f"   Reason: {fallback_reason}")
+
+    elif ensemble_bands:
+        # Check model confidence if ensemble is available
+        try:
+            # Get confidence score
+            confidence_score = 0.8  # Default high confidence
+            if hasattr(loaded_predictor, 'get_prediction_confidence'):
+                confidence_score = loaded_predictor.get_prediction_confidence(
+                    context=current_context,
+                    recent_errors=None,  # Could track this in regime detector
+                )
+
+            # Use ensemble if confidence is high
+            if confidence_score >= 0.7:
+                recommended_method = "Ensemble Combined"
+                recommended_bands = ensemble_combined_bands if ensemble_combined_bands else conditional_bands
+                print(f"✓ Using ensemble method (confidence: {confidence_score:.1%})")
+            else:
+                # Low confidence - fallback to conditional
+                recommended_method = "Conditional (Feature-Weighted)"
+                recommended_bands = conditional_bands if conditional_bands else baseline_bands
+                print(f"ℹ️  Low model confidence ({confidence_score:.1%}) - using conditional method")
+        except Exception as e:
+            # Error checking confidence - use conditional
+            recommended_method = "Conditional (Feature-Weighted)"
+            recommended_bands = conditional_bands if conditional_bands else baseline_bands
+    else:
+        # Fallback to conditional or baseline
+        recommended_method = "Conditional (Feature-Weighted)"
+        if conditional_bands:
+            recommended_bands = conditional_bands
+        else:
+            recommended_method = "Baseline (Simple Percentile)"
+            recommended_bands = baseline_bands
 
     # Show all methods for comparison
     methods_to_show = [
@@ -765,38 +838,45 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
         risk_level=None,
     )
 
-    # Add all 4 ensemble methods as a dynamic attribute (for multi-day ensemble data display)
-    # Based on 180-day backtest: Conditional is 37-39% tighter than baseline with 97-99% hit rate
+    # Add all 4 ensemble methods with dynamic recommendation based on regime/confidence
+    # Mark the actually selected method as recommended
     pred.ensemble_methods = [
         {
             'method': 'Baseline (Percentile)',
             'description': 'Reference method - simple percentile distribution',
             'bands': bands_to_dict(baseline_bands),
-            'recommended': False,
+            'recommended': recommended_method == "Baseline (Simple Percentile)",
             'backtest_performance': 'Reference (100% hit rate)',
+            'fallback_reason': fallback_reason if recommended_method == "Baseline (Simple Percentile)" else None,
         },
         {
             'method': 'Conditional (Feature-Weighted)',
-            'description': '⭐ RECOMMENDED - Best balance of tight bands and reliability',
+            'description': '⭐ Best balance of tight bands and reliability',
             'bands': bands_to_dict(conditional_bands),
-            'recommended': True,
+            'recommended': recommended_method == "Conditional (Feature-Weighted)",
             'backtest_performance': '37-39% tighter bands, 97-99% hit rate',
+            'fallback_reason': fallback_reason if recommended_method == "Conditional (Feature-Weighted)" else None,
         },
         {
             'method': 'Ensemble (LightGBM)',
             'description': 'Machine learning - too conservative for trading',
             'bands': bands_to_dict(ensemble_bands),
-            'recommended': False,
+            'recommended': False,  # Never directly recommended (use Combined instead)
             'backtest_performance': '24-58% wider bands, 100% hit rate',
         },
         {
             'method': 'Ensemble Combined',
-            'description': 'Conservative blend of ensemble methods',
+            'description': 'Conservative blend - use when models are confident',
             'bands': bands_to_dict(ensemble_combined_bands),
-            'recommended': False,
+            'recommended': recommended_method == "Ensemble Combined",
             'backtest_performance': '24-58% wider bands, 100% hit rate',
+            'fallback_reason': None,
         },
     ]
+
+    # Add regime status to prediction for monitoring
+    if regime_status:
+        pred.regime_status = regime_status
 
     # Add additional fields expected by web UI (for compatibility with old format)
     mean_return = float(np.mean(n_day_returns_array))

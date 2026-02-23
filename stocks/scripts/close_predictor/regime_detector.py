@@ -1,405 +1,247 @@
 #!/usr/bin/env python3
 """
-Regime detection for multi-day prediction models.
+Regime detection for multi-day predictions.
 
-Detects when market regime has changed significantly enough that
-models should fall back to baseline/conditional methods instead of
-using potentially stale ensemble predictions.
+Monitors prediction accuracy over time to detect when market regime changes.
 """
 
-import sys
-from pathlib import Path
-
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
 import numpy as np
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from collections import deque
-
-from scripts.close_predictor.multi_day_features import MarketContext
+import json
+from pathlib import Path
+from datetime import datetime, date
+from typing import Dict, List, Optional
+from dataclasses import dataclass, asdict
 
 
 @dataclass
 class RegimeState:
-    """Current market regime state."""
-    vix_regime: str  # 'low', 'medium', 'high', 'extreme'
-    vix_level: float
-    vix_1d: Optional[float]
-    iv_rank: Optional[float]
-    volume_regime: str  # 'low', 'normal', 'high'
-    trend: str  # 'up', 'down', 'sideways'
-    is_stable: bool  # True if regime has been stable
-    confidence: float  # Confidence in current regime (0-1)
+    """Current regime state for a ticker/DTE combination."""
+    ticker: str
+    days_ahead: int
+    training_rmse: float = 0.0
+    training_mae: float = 0.0
+    recent_errors: List[float] = None
+    rolling_rmse: float = 0.0
+    rolling_mae: float = 0.0
+    is_regime_changed: bool = False
+    regime_change_confidence: float = 0.0
+    rmse_ratio: float = 1.0
+    last_updated: str = ""
+    regime_change_detected_at: Optional[str] = None
+    recommended_method: str = "ensemble"
+    fallback_reason: Optional[str] = None
 
+    def __post_init__(self):
+        if self.recent_errors is None:
+            self.recent_errors = []
+        if not self.last_updated:
+            self.last_updated = datetime.now().isoformat()
 
-@dataclass
-class RegimeChange:
-    """Information about a detected regime change."""
-    from_regime: RegimeState
-    to_regime: RegimeState
-    timestamp: datetime
-    severity: float  # 0.0-1.0, higher = more severe change
-    should_fallback: bool  # True if should use fallback methods
+    def to_dict(self) -> Dict:
+        return asdict(self)
 
 
 class RegimeDetector:
-    """Detects market regime changes for model selection."""
+    """Detects market regime changes by monitoring prediction accuracy."""
 
     def __init__(
         self,
-        stability_window: int = 5,
-        vix_change_threshold: float = 5.0,
-        volume_change_threshold: float = 0.5,
+        ticker: str,
+        days_ahead: int,
+        training_rmse: float,
+        training_mae: float = 0.0,
+        window_size: int = 30,
+        regime_change_threshold: float = 1.5,
+        cache_dir: Optional[Path] = None,
     ):
-        """Initialize regime detector.
+        self.ticker = ticker
+        self.days_ahead = days_ahead
+        self.window_size = window_size
+        self.regime_change_threshold = regime_change_threshold
+        self.cache_dir = cache_dir
 
-        Args:
-            stability_window: Number of days to consider for regime stability
-            vix_change_threshold: VIX change (absolute) to trigger regime change
-            volume_change_threshold: Volume ratio change to trigger regime change
-        """
-        self.stability_window = stability_window
-        self.vix_change_threshold = vix_change_threshold
-        self.volume_change_threshold = volume_change_threshold
-
-        # Track recent regime states
-        self.recent_states: deque = deque(maxlen=stability_window)
-        self.current_state: Optional[RegimeState] = None
-        self.last_change: Optional[RegimeChange] = None
-
-    def classify_vix_regime(self, vix: float) -> str:
-        """Classify VIX level into regime.
-
-        Args:
-            vix: VIX level
-
-        Returns:
-            Regime string: 'low', 'medium', 'high', 'extreme'
-        """
-        if vix < 12:
-            return 'low'
-        elif vix < 20:
-            return 'medium'
-        elif vix < 30:
-            return 'high'
-        else:
-            return 'extreme'
-
-    def classify_volume_regime(self, volume_ratio: float) -> str:
-        """Classify volume level into regime.
-
-        Args:
-            volume_ratio: Volume vs average
-
-        Returns:
-            Regime string: 'low', 'normal', 'high'
-        """
-        if volume_ratio < 0.7:
-            return 'low'
-        elif volume_ratio < 1.5:
-            return 'normal'
-        else:
-            return 'high'
-
-    def detect_trend(self, context: MarketContext) -> str:
-        """Detect price trend from context.
-
-        Args:
-            context: Market context
-
-        Returns:
-            Trend: 'up', 'down', 'sideways'
-        """
-        # Use price momentum features if available
-        momentum_5d = getattr(context, 'momentum_5d', None)
-        if momentum_5d is not None:
-            if momentum_5d > 1.5:
-                return 'up'
-            elif momentum_5d < -1.5:
-                return 'down'
-            else:
-                return 'sideways'
-
-        # Fallback to simple heuristic
-        return 'sideways'
-
-    def get_current_regime(self, context: MarketContext) -> RegimeState:
-        """Determine current market regime from context.
-
-        Args:
-            context: Current market context
-
-        Returns:
-            Current regime state
-        """
-        vix = getattr(context, 'vix', 15.0)
-        vix_1d = getattr(context, 'vix_1d', None) or getattr(context, 'vix1d', None)
-        iv_rank = getattr(context, 'iv_rank', None)
-        volume_ratio = getattr(context, 'volume_ratio', 1.0)
-
-        vix_regime = self.classify_vix_regime(vix)
-        volume_regime = self.classify_volume_regime(volume_ratio)
-        trend = self.detect_trend(context)
-
-        # Determine regime stability
-        is_stable = self._is_regime_stable(vix_regime, volume_regime)
-
-        # Calculate regime confidence
-        confidence = self._calculate_regime_confidence(context)
-
-        return RegimeState(
-            vix_regime=vix_regime,
-            vix_level=vix,
-            vix_1d=vix_1d,
-            iv_rank=iv_rank,
-            volume_regime=volume_regime,
-            trend=trend,
-            is_stable=is_stable,
-            confidence=confidence,
+        self.state = RegimeState(
+            ticker=ticker,
+            days_ahead=days_ahead,
+            training_rmse=training_rmse,
+            training_mae=training_mae,
+            recent_errors=[],
         )
 
-    def _is_regime_stable(self, current_vix_regime: str, current_volume_regime: str) -> bool:
-        """Check if regime has been stable recently.
+        if cache_dir:
+            self._load_state()
 
-        Args:
-            current_vix_regime: Current VIX regime
-            current_volume_regime: Current volume regime
-
-        Returns:
-            True if regime is stable
-        """
-        if len(self.recent_states) < self.stability_window:
-            return False
-
-        # Check if recent states are all the same regime
-        for state in self.recent_states:
-            if (state.vix_regime != current_vix_regime or
-                state.volume_regime != current_volume_regime):
-                return False
-
-        return True
-
-    def _calculate_regime_confidence(self, context: MarketContext) -> float:
-        """Calculate confidence in current regime classification.
-
-        Args:
-            context: Market context
-
-        Returns:
-            Confidence score 0.0-1.0
-        """
-        confidence_factors = []
-
-        # Factor 1: VIX clarity (extreme values = high confidence)
-        vix = getattr(context, 'vix', 15.0)
-        if vix < 10 or vix > 35:
-            confidence_factors.append(0.9)  # Very clear regime
-        elif 12 <= vix <= 18:
-            confidence_factors.append(0.8)  # Clear low/medium regime
-        else:
-            confidence_factors.append(0.6)  # Transitional zone
-
-        # Factor 2: Volume consistency
-        volume_ratio = getattr(context, 'volume_ratio', 1.0)
-        if 0.8 <= volume_ratio <= 1.2:
-            confidence_factors.append(0.9)  # Normal, stable volume
-        else:
-            confidence_factors.append(0.7)  # Unusual volume
-
-        # Factor 3: Stability
-        if len(self.recent_states) >= self.stability_window:
-            confidence_factors.append(0.9)  # Stable regime
-        else:
-            confidence_factors.append(0.5)  # New or changing regime
-
-        return float(np.mean(confidence_factors))
-
-    def detect_regime_change(
+    def add_prediction_error(
         self,
-        context: MarketContext,
-        timestamp: Optional[datetime] = None,
-    ) -> Optional[RegimeChange]:
-        """Detect if regime has changed significantly.
+        predicted_return: float,
+        actual_return: float,
+        prediction_date: Optional[date] = None,
+    ) -> Dict:
+        """Record prediction error and update regime state."""
+        error = predicted_return - actual_return
 
-        Args:
-            context: Current market context
-            timestamp: Current timestamp (optional)
+        self.state.recent_errors.append(error)
+        if len(self.state.recent_errors) > self.window_size:
+            self.state.recent_errors.pop(0)
 
-        Returns:
-            RegimeChange if change detected, None otherwise
-        """
-        new_regime = self.get_current_regime(context)
+        if len(self.state.recent_errors) >= 5:
+            errors_array = np.array(self.state.recent_errors)
+            self.state.rolling_rmse = float(np.sqrt(np.mean(errors_array ** 2)))
+            self.state.rolling_mae = float(np.mean(np.abs(errors_array)))
 
-        if self.current_state is None:
-            # First time - initialize
-            self.current_state = new_regime
-            self.recent_states.append(new_regime)
-            return None
+            if self.state.training_rmse > 0:
+                self.state.rmse_ratio = self.state.rolling_rmse / self.state.training_rmse
+            else:
+                self.state.rmse_ratio = 1.0
 
-        # Check for significant changes
-        vix_change = abs(new_regime.vix_level - self.current_state.vix_level)
-        regime_changed = (
-            new_regime.vix_regime != self.current_state.vix_regime or
-            new_regime.volume_regime != self.current_state.volume_regime
-        )
+            self._detect_regime_change()
 
-        # Calculate change severity
-        severity = 0.0
+        self.state.last_updated = datetime.now().isoformat()
 
-        if new_regime.vix_regime != self.current_state.vix_regime:
-            # VIX regime changed
-            severity += 0.5
+        if self.cache_dir:
+            self._save_state()
 
-        if vix_change > self.vix_change_threshold:
-            # Large VIX spike
-            severity += min(0.5, vix_change / 20.0)
+        return self.get_status()
 
-        if new_regime.volume_regime != self.current_state.volume_regime:
-            # Volume regime changed
-            severity += 0.3
+    def _detect_regime_change(self):
+        """Detect if regime has changed based on error metrics."""
+        rmse_degraded = self.state.rmse_ratio > self.regime_change_threshold
 
-        # Extreme regimes = higher severity
-        if new_regime.vix_regime == 'extreme':
-            severity += 0.4
+        mae_ratio = 1.0
+        if self.state.training_mae > 0:
+            mae_ratio = self.state.rolling_mae / self.state.training_mae
+        mae_degraded = mae_ratio > self.regime_change_threshold
 
-        severity = min(1.0, severity)
+        if rmse_degraded:
+            excess = (self.state.rmse_ratio - self.regime_change_threshold)
+            confidence = min(1.0, excess / self.regime_change_threshold)
 
-        # Determine if should fallback to baseline
-        should_fallback = severity > 0.5 or new_regime.vix_regime == 'extreme'
+            if mae_degraded:
+                confidence = min(1.0, confidence * 1.2)
 
-        if regime_changed or severity > 0.3:
-            change = RegimeChange(
-                from_regime=self.current_state,
-                to_regime=new_regime,
-                timestamp=timestamp or datetime.now(),
-                severity=severity,
-                should_fallback=should_fallback,
+            self.state.regime_change_confidence = confidence
+
+            if confidence >= 0.5:
+                if not self.state.is_regime_changed:
+                    self.state.regime_change_detected_at = datetime.now().isoformat()
+                self.state.is_regime_changed = True
+            else:
+                self.state.is_regime_changed = False
+        else:
+            self.state.is_regime_changed = False
+            self.state.regime_change_confidence = 0.0
+            self.state.regime_change_detected_at = None
+
+        self._update_recommendation()
+
+    def _update_recommendation(self):
+        """Update recommended prediction method based on regime state."""
+        if not self.state.is_regime_changed:
+            self.state.recommended_method = "ensemble"
+            self.state.fallback_reason = None
+
+        elif self.state.regime_change_confidence < 0.7:
+            self.state.recommended_method = "conditional"
+            self.state.fallback_reason = (
+                f"Rolling RMSE {self.state.rmse_ratio:.2f}x training baseline"
             )
 
-            # Update state
-            self.current_state = new_regime
-            self.recent_states.append(new_regime)
-            self.last_change = change
-
-            return change
-
-        # No significant change
-        self.recent_states.append(new_regime)
-        return None
-
-    def should_use_fallback(self, context: MarketContext) -> Tuple[bool, str]:
-        """Determine if should use fallback methods instead of ensemble.
-
-        Args:
-            context: Current market context
-
-        Returns:
-            (should_fallback, reason)
-        """
-        current_regime = self.get_current_regime(context)
-
-        # Extreme VIX = always fallback
-        if current_regime.vix_regime == 'extreme':
-            return True, f"Extreme VIX regime ({current_regime.vix_level:.1f})"
-
-        # Very low VIX can be unpredictable
-        if current_regime.vix_level < 10:
-            return True, f"Very low VIX ({current_regime.vix_level:.1f})"
-
-        # Recent regime change = fallback
-        if self.last_change and self.last_change.should_fallback:
-            return True, f"Recent regime change (severity: {self.last_change.severity:.2f})"
-
-        # Unstable regime = use caution
-        if not current_regime.is_stable:
-            return True, "Regime is unstable"
-
-        # Low confidence in regime = fallback
-        if current_regime.confidence < 0.6:
-            return True, f"Low regime confidence ({current_regime.confidence:.2f})"
-
-        return False, "Regime is stable, use ensemble"
-
-    def get_recommended_method(
-        self,
-        context: MarketContext,
-        ensemble_confidence: float,
-    ) -> Tuple[str, str]:
-        """Get recommended prediction method.
-
-        Args:
-            context: Current market context
-            ensemble_confidence: Ensemble model's confidence score
-
-        Returns:
-            (method, reason) where method is 'ensemble', 'conditional', or 'baseline'
-        """
-        should_fallback, regime_reason = self.should_use_fallback(context)
-
-        if should_fallback:
-            # Use baseline (most conservative)
-            return 'baseline', f"Regime fallback: {regime_reason}"
-
-        # Check ensemble confidence
-        if ensemble_confidence < 0.5:
-            return 'conditional', f"Low ensemble confidence ({ensemble_confidence:.2f})"
-        elif ensemble_confidence < 0.7:
-            return 'conditional', f"Moderate ensemble confidence ({ensemble_confidence:.2f})"
         else:
-            return 'ensemble', f"High confidence ({ensemble_confidence:.2f}), stable regime"
+            self.state.recommended_method = "baseline"
+            self.state.fallback_reason = (
+                f"Rolling RMSE {self.state.rmse_ratio:.2f}x training baseline "
+                f"(confidence: {self.state.regime_change_confidence:.1%})"
+            )
 
+    def get_status(self) -> Dict:
+        """Get current regime status with recommendations."""
+        return {
+            'ticker': self.state.ticker,
+            'days_ahead': self.state.days_ahead,
+            'is_regime_changed': self.state.is_regime_changed,
+            'confidence': self.state.regime_change_confidence,
+            'recommended_method': self.state.recommended_method,
+            'rmse_ratio': self.state.rmse_ratio,
+            'rolling_rmse': self.state.rolling_rmse,
+            'training_rmse': self.state.training_rmse,
+            'n_samples': len(self.state.recent_errors),
+            'fallback_reason': self.state.fallback_reason,
+            'last_updated': self.state.last_updated,
+        }
 
-def test_regime_detector():
-    """Test regime detector."""
-    from scripts.close_predictor.multi_day_features import MarketContext
+    def reset(self):
+        """Reset regime state (e.g., after model retraining)."""
+        self.state.recent_errors = []
+        self.state.rolling_rmse = 0.0
+        self.state.rolling_mae = 0.0
+        self.state.is_regime_changed = False
+        self.state.regime_change_confidence = 0.0
+        self.state.rmse_ratio = 1.0
+        self.state.regime_change_detected_at = None
+        self.state.recommended_method = "ensemble"
+        self.state.fallback_reason = None
+        self.state.last_updated = datetime.now().isoformat()
 
-    detector = RegimeDetector()
+        if self.cache_dir:
+            self._save_state()
 
-    # Test scenario 1: Stable low VIX
-    print("=" * 60)
-    print("Test 1: Stable low VIX regime")
-    print("=" * 60)
+    def _get_cache_path(self) -> Path:
+        return self.cache_dir / f"regime_{self.ticker}_{self.days_ahead}dte.json"
 
-    for i in range(10):
-        ctx = MarketContext(vix=14.0 + i * 0.2, volume_ratio=1.0)
-        change = detector.detect_regime_change(ctx)
+    def _save_state(self):
+        if not self.cache_dir:
+            return
 
-        if change:
-            print(f"Day {i}: REGIME CHANGE detected!")
-            print(f"  From: {change.from_regime.vix_regime} (VIX {change.from_regime.vix_level:.1f})")
-            print(f"  To: {change.to_regime.vix_regime} (VIX {change.to_regime.vix_level:.1f})")
-            print(f"  Severity: {change.severity:.2f}")
-            print(f"  Should fallback: {change.should_fallback}")
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = self._get_cache_path()
 
-        should_fallback, reason = detector.should_use_fallback(ctx)
-        method, method_reason = detector.get_recommended_method(ctx, ensemble_confidence=0.8)
+        with open(cache_file, 'w') as f:
+            json.dump(self.state.to_dict(), f, indent=2)
 
-        print(f"Day {i}: VIX={ctx.vix:.1f}, Regime={detector.current_state.vix_regime}")
-        print(f"  Use fallback: {should_fallback} ({reason})")
-        print(f"  Recommended: {method} ({method_reason})")
+    def _load_state(self) -> bool:
+        if not self.cache_dir:
+            return False
 
-    # Test scenario 2: VIX spike
-    print("\n" + "=" * 60)
-    print("Test 2: VIX spike from 15 to 25")
-    print("=" * 60)
+        cache_file = self._get_cache_path()
+        if not cache_file.exists():
+            return False
 
-    for i, vix in enumerate([15, 16, 18, 22, 25, 24, 23, 22, 20]):
-        ctx = MarketContext(vix=vix, volume_ratio=1.5 if vix > 20 else 1.0)
-        change = detector.detect_regime_change(ctx)
+        try:
+            with open(cache_file, 'r') as f:
+                data = json.load(f)
 
-        if change:
-            print(f"\nDay {i}: ⚠️  REGIME CHANGE!")
-            print(f"  {change.from_regime.vix_regime} → {change.to_regime.vix_regime}")
-            print(f"  Severity: {change.severity:.2f}, Should fallback: {change.should_fallback}")
+            self.state.recent_errors = data.get('recent_errors', [])
+            self.state.rolling_rmse = data.get('rolling_rmse', 0.0)
+            self.state.rolling_mae = data.get('rolling_mae', 0.0)
+            self.state.is_regime_changed = data.get('is_regime_changed', False)
+            self.state.regime_change_confidence = data.get('regime_change_confidence', 0.0)
+            self.state.rmse_ratio = data.get('rmse_ratio', 1.0)
+            self.state.recommended_method = data.get('recommended_method', 'ensemble')
+            self.state.fallback_reason = data.get('fallback_reason')
+            self.state.last_updated = data.get('last_updated', '')
+            self.state.regime_change_detected_at = data.get('regime_change_detected_at')
 
-        should_fallback, reason = detector.should_use_fallback(ctx)
-        method, method_reason = detector.get_recommended_method(ctx, ensemble_confidence=0.8)
+            return True
 
-        print(f"Day {i}: VIX={vix:.1f}, Method: {method}")
+        except Exception as e:
+            print(f"Warning: Could not load regime state: {e}")
+            return False
 
+    @classmethod
+    def create_for_model(
+        cls,
+        ticker: str,
+        days_ahead: int,
+        model_metadata: Dict,
+        cache_dir: Optional[Path] = None,
+    ) -> 'RegimeDetector':
+        training_rmse = model_metadata.get('validation_rmse', 3.0)
+        training_mae = model_metadata.get('validation_mae', 2.0)
 
-if __name__ == '__main__':
-    test_regime_detector()
+        return cls(
+            ticker=ticker,
+            days_ahead=days_ahead,
+            training_rmse=training_rmse,
+            training_mae=training_mae,
+            cache_dir=cache_dir,
+        )
