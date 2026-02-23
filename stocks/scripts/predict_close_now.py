@@ -456,6 +456,20 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
             pct_return = (end_close - start_close) / start_close * 100
             n_day_returns.append(pct_return)
 
+    # TIER 1 FEATURES: Load VIX and VIX1D data for improved predictions
+    print("Loading VIX and VIX1D data for TIER 1 features...")
+    vix_data_by_date = {}
+    vix1d_data_by_date = {}
+    for date_str in all_dates:
+        vix_df = load_csv_data('VIX', date_str)
+        if vix_df is not None and not vix_df.empty:
+            vix_data_by_date[date_str] = vix_df
+
+        vix1d_df = load_csv_data('VIX1D', date_str)
+        if vix1d_df is not None and not vix1d_df.empty:
+            vix1d_data_by_date[date_str] = vix1d_df
+    print(f"✓ Loaded VIX data for {len(vix_data_by_date)} days, VIX1D for {len(vix1d_data_by_date)} days")
+
     if len(n_day_returns) < 50:
         print(f"❌ Insufficient data for {days_ahead}-day prediction (need 50 samples, have {len(n_day_returns)})")
         return None
@@ -497,13 +511,57 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
         import pandas as pd
         price_history = pd.DataFrame(history_rows)
 
+        # Build VIX history for TIER 1 features
+        vix_history = None
+        if vix_data_by_date:
+            vix_rows = []
+            for d in history_dates:
+                if d in vix_data_by_date:
+                    vdf = vix_data_by_date[d]
+                    if not vdf.empty:
+                        vix_rows.append({'date': d, 'close': vdf.iloc[-1]['close']})
+            if vix_rows:
+                vix_history = pd.DataFrame(vix_rows)
+
+        # Build VIX1D history for TIER 1 features
+        vix1d_history = None
+        if vix1d_data_by_date:
+            vix1d_rows = []
+            for d in history_dates:
+                if d in vix1d_data_by_date:
+                    v1df = vix1d_data_by_date[d]
+                    if not v1df.empty:
+                        vix1d_rows.append({'date': d, 'close': v1df.iloc[-1]['close']})
+            if vix1d_rows:
+                vix1d_history = pd.DataFrame(vix1d_rows)
+
+        # Get IV data for TIER 1 features
+        iv_data = None
+        try:
+            from common.questdb_db import StockQuestDB
+            from common.financial_data import get_financial_info
+            db = StockQuestDB(db_config, logger=None)
+            fin_info = await get_financial_info(ticker, db, include_iv_analysis=True)
+            if fin_info:
+                iv_data = {
+                    'iv_rank': fin_info.get('iv_rank'),
+                    'iv_90d_rank': fin_info.get('iv_90d_rank'),
+                    'iv_30d': fin_info.get('iv_30d'),
+                    'iv_90d': fin_info.get('iv_90d'),
+                }
+                print(f"✓ Loaded IV data: rank={iv_data.get('iv_rank')}, 30d={iv_data.get('iv_30d')}%, 90d={iv_data.get('iv_90d')}%")
+        except Exception as e:
+            print(f"⚠️  Could not load IV data: {e}")
+
         try:
             current_context = compute_market_context(
                 ticker=ticker,
                 current_price=current_price,
                 current_date=current_date,
                 price_history=price_history,
-                vix_history=None,
+                vix_history=vix_history,
+                vix1d_history=vix1d_history,
+                iv_data=iv_data,
             )
 
             # Build historical contexts (use recent subset for performance)
@@ -513,7 +571,8 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
                 ticker=ticker,
                 all_dates=train_dates,
                 price_data_by_date=data_by_date,
-                vix_data_by_date=None,
+                vix_data_by_date=vix_data_by_date,
+                vix1d_data_by_date=vix1d_data_by_date,
                 lookback_days=60,
             )
 

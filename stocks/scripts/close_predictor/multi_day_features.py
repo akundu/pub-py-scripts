@@ -383,6 +383,7 @@ def compute_historical_contexts(
     all_dates: List[str],
     price_data_by_date: Dict[str, pd.DataFrame],
     vix_data_by_date: Optional[Dict[str, pd.DataFrame]] = None,
+    vix1d_data_by_date: Optional[Dict[str, pd.DataFrame]] = None,
     lookback_days: int = 60,
 ) -> List[MarketContext]:
     """Compute market context for each historical date.
@@ -392,6 +393,7 @@ def compute_historical_contexts(
         all_dates: List of dates (sorted ascending) as strings 'YYYY-MM-DD'
         price_data_by_date: Dict mapping date -> DataFrame for that date with OHLCV
         vix_data_by_date: Optional dict mapping date -> VIX data
+        vix1d_data_by_date: Optional dict mapping date -> VIX1D data (TIER 1 feature)
         lookback_days: Days of history needed for feature computation
 
     Returns:
@@ -441,12 +443,28 @@ def compute_historical_contexts(
             if vix_rows:
                 vix_history = pd.DataFrame(vix_rows)
 
+        # Build VIX1D history if available (TIER 1 feature)
+        vix1d_history = None
+        if vix1d_data_by_date:
+            vix1d_rows = []
+            for d in history_dates:
+                if d in vix1d_data_by_date:
+                    v1df = vix1d_data_by_date[d]
+                    if not v1df.empty:
+                        vix1d_rows.append({
+                            'date': d,
+                            'close': v1df.iloc[-1]['close'],
+                        })
+            if vix1d_rows:
+                vix1d_history = pd.DataFrame(vix1d_rows)
+
         ctx = compute_market_context(
             ticker=ticker,
             current_price=current_price,
             current_date=current_date,
             price_history=price_history,
             vix_history=vix_history,
+            vix1d_history=vix1d_history,
         )
         contexts.append(ctx)
 
