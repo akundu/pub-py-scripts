@@ -61,12 +61,21 @@ class DashboardData:
         data = {
             'timestamp': datetime.now().isoformat(),
             'market': market_context.to_dict() if market_context else {},
-            'opportunities': [opp.to_dict() for opp in opportunities[:10]],  # Top 10
+            'opportunities': [opp.to_dict() for opp in opportunities],  # All opportunities
             'positions': {
                 'open': [pos.to_dict() for pos in open_positions],
                 'summary': summary,
             },
             'alerts': self._get_recent_alerts(limit=20),
+            'data_sources': {
+                'grid_file': str(CONFIG.grid_file),
+                'chain_dirs': [
+                    'options_csv_output_full/{ticker}_options_{date}.csv',
+                    'options_csv_output/{ticker}_options_{date}.csv',
+                    'csv_exports/options/{ticker}/{date}.csv',
+                ],
+                'config_file': 'scripts/continuous/config.py',
+            },
         }
 
         return data
@@ -110,6 +119,7 @@ def generate_html_dashboard(data: Dict) -> str:
     opportunities = data.get('opportunities', [])
     positions = data.get('positions', {})
     alerts = data.get('alerts', [])
+    data_sources = data.get('data_sources', {})
 
     # Market context section
     vix_level = market.get('vix_level', 0)
@@ -128,7 +138,8 @@ def generate_html_dashboard(data: Dict) -> str:
 
     # Opportunities table
     opp_rows = ''
-    for i, opp in enumerate(opportunities[:5], 1):
+    total_opps = len(opportunities)
+    for i, opp in enumerate(opportunities, 1):
         in_window = '✓' if opp.get('is_in_entry_window') else ''
         quality = '✓' if opp.get('meets_quality_threshold') else ''
 
@@ -173,8 +184,11 @@ def generate_html_dashboard(data: Dict) -> str:
         elif trade_instruction:
             trade_legs_html = f'<div style="font-size:12px;margin-top:4px;">{trade_instruction}</div>'
 
+        # Rows beyond #5 get a class for hide/show toggling
+        extra_class = ' class="extra-opp"' if i > 5 else ''
+
         opp_rows += f"""
-        <tr>
+        <tr{extra_class}>
             <td>{i}</td>
             <td>{opp.get('dte')}D</td>
             <td>{opp.get('band')}</td>
@@ -186,9 +200,26 @@ def generate_html_dashboard(data: Dict) -> str:
             <td>{in_window}</td>
             <td>{quality}</td>
         </tr>
-        <tr>
+        <tr{extra_class}>
             <td colspan="10" style="padding:2px 10px 10px 30px; border-bottom: 2px solid #e5e7eb;">
                 {trade_legs_html or '<span style="color:#999;font-size:12px;">No strike data available</span>'}
+            </td>
+        </tr>
+        """
+
+    # Add expand/collapse button if there are more than 5 opportunities
+    extra_count = max(0, total_opps - 5)
+    expand_button = ''
+    if extra_count > 0:
+        expand_button = f"""
+        <tr id="expand-row">
+            <td colspan="10" style="text-align:center; padding:12px;">
+                <button id="expand-btn" onclick="toggleExtra()"
+                    style="background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                           color:white; border:none; padding:8px 24px; border-radius:6px;
+                           cursor:pointer; font-size:14px; font-weight:600;">
+                    Show {extra_count} More Opportunities ▼
+                </button>
             </td>
         </tr>
         """
@@ -336,6 +367,12 @@ def generate_html_dashboard(data: Dict) -> str:
                 color: #666;
                 font-size: 14px;
             }}
+            .extra-opp {{
+                display: none;
+            }}
+            .extra-opp.visible {{
+                display: table-row;
+            }}
         </style>
     </head>
     <body>
@@ -395,6 +432,7 @@ def generate_html_dashboard(data: Dict) -> str:
                     </thead>
                     <tbody>
                         {opp_rows or '<tr><td colspan="10" style="text-align:center;">No opportunities found</td></tr>'}
+                        {expand_button}
                     </tbody>
                 </table>
             </div>
@@ -449,7 +487,36 @@ def generate_html_dashboard(data: Dict) -> str:
                     {alert_lines or '<div style="text-align:center; color:#666;">No alerts</div>'}
                 </div>
             </div>
+
+            <div class="card" style="background:#f8f9fa; border:1px solid #e5e7eb;">
+                <h2 style="font-size:16px; color:#666;">Data Sources</h2>
+                <div style="font-family:'Courier New',monospace; font-size:13px; color:#555; line-height:1.8;">
+                    <div><strong>Grid file:</strong> {data_sources.get('grid_file', 'N/A')}</div>
+                    <div><strong>Option chains (priority order):</strong></div>
+                    {''.join(f'<div style="padding-left:20px;">{i+1}. {d}</div>' for i, d in enumerate(data_sources.get('chain_dirs', [])))}
+                    <div><strong>Config:</strong> {data_sources.get('config_file', 'N/A')}</div>
+                </div>
+            </div>
         </div>
+        <script>
+        function toggleExtra() {{
+            var rows = document.querySelectorAll('.extra-opp');
+            var btn = document.getElementById('expand-btn');
+            var showing = rows.length > 0 && rows[0].classList.contains('visible');
+            rows.forEach(function(r) {{
+                if (showing) {{
+                    r.classList.remove('visible');
+                }} else {{
+                    r.classList.add('visible');
+                }}
+            }});
+            if (showing) {{
+                btn.innerHTML = 'Show {extra_count} More Opportunities &#9660;';
+            }} else {{
+                btn.innerHTML = 'Hide Extra Opportunities &#9650;';
+            }}
+        }}
+        </script>
     </body>
     </html>
     """
