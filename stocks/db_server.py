@@ -14142,7 +14142,7 @@ def _inject_range_percentiles_ws_script(html: str, tickers: list[str]) -> str:
     import json as _json
     tickers_json = _json.dumps(tickers)
     ws_script = f"""<script>
-/* Live price updates via WebSocket */
+/* Live price updates via WebSocket — selective per section */
 (function() {{
     function isMarketOpen() {{
         var now = new Date();
@@ -14156,6 +14156,82 @@ def _inject_range_percentiles_ws_script(html: str, tickers: list[str]) -> str:
     var tickers = {tickers_json};
     var currentPrices = {{}};
     var wsConnections = {{}};
+    var liveMain = {{}};
+    var originalClose = {{}};
+
+    /* Parse original close prices from page on load */
+    function parseOriginalCloses() {{
+        document.querySelectorAll('.ref-close[data-section="main"]').forEach(function(el) {{
+            var ticker = el.dataset.ticker;
+            if (ticker && !originalClose[ticker]) {{
+                var text = el.textContent || '';
+                var match = text.match(/\\$([\\d,]+\\.\\d+)/);
+                if (match) {{
+                    originalClose[ticker] = parseFloat(match[1].replace(/,/g, ''));
+                }}
+            }}
+        }});
+    }}
+    parseOriginalCloses();
+
+    function fmtPrice(p) {{
+        return '$' + p.toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
+    }}
+
+    /* Toggle handler for "Use Live Prices" button */
+    window.toggleLiveMain = function(btn) {{
+        var ticker = btn.dataset.ticker;
+        liveMain[ticker] = !liveMain[ticker];
+        if (liveMain[ticker]) {{
+            btn.textContent = 'Use Previous Close';
+            btn.style.background = 'var(--up-bg, #e5ffe5)';
+            btn.style.borderColor = 'var(--up-text, #27ae60)';
+            if (currentPrices[ticker]) applyMainPrices(ticker, currentPrices[ticker], true);
+        }} else {{
+            btn.textContent = 'Use Live Prices';
+            btn.style.background = '';
+            btn.style.borderColor = '';
+            if (originalClose[ticker]) applyMainPrices(ticker, originalClose[ticker], false);
+        }}
+    }};
+
+    /* Update price cells, ref-close, price-basis for a given section */
+    function applySectionPrices(ticker, price, section, isLive) {{
+        var sel = '[data-ticker="' + ticker + '"][data-section="' + section + '"]';
+
+        document.querySelectorAll('.price-cell' + sel).forEach(function(el) {{
+            var pct = parseFloat(el.dataset.pct);
+            if (!isNaN(pct)) {{
+                el.textContent = fmtPrice(price * (1 + pct / 100));
+            }}
+        }});
+
+        var liveBadge = isLive ? ' <span style="color:#27ae60;font-size:12px">(LIVE)</span>' : '';
+
+        document.querySelectorAll('.ref-close' + sel).forEach(function(el) {{
+            var label = section === 'hourly' ? 'Reference Close' : (isLive ? 'Current Price' : 'Close');
+            el.innerHTML = '<strong>' + label + ':</strong> ' + fmtPrice(price) + liveBadge;
+        }});
+
+        var fmt = fmtPrice(price);
+        document.querySelectorAll('.price-basis' + sel).forEach(function(el) {{
+            if (isLive) {{
+                el.innerHTML = '$ prices based on <strong style="color:#27ae60">live price: ' + fmt + '</strong>' + liveBadge;
+                el.style.opacity = '1';
+                el.style.fontStyle = 'normal';
+            }} else {{
+                el.innerHTML = '$ prices based on previous close: ' + fmt;
+                el.style.opacity = '0.85';
+                el.style.fontStyle = 'italic';
+            }}
+        }});
+    }}
+
+    /* Apply prices to the main (multi-window / single-window) section + charts */
+    function applyMainPrices(ticker, price, isLive) {{
+        applySectionPrices(ticker, price, 'main', isLive);
+        updateChartsForTicker(ticker, price);
+    }}
 
     function connectWS(ticker) {{
         var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -14168,7 +14244,12 @@ def _inject_range_percentiles_ws_script(html: str, tickers: list[str]) -> str:
                 var price = parseFloat(msg.data.payload[0].price);
                 if (!isNaN(price) && price > 0) {{
                     currentPrices[ticker] = price;
-                    updatePricesForTicker(ticker, price);
+                    /* Always update hourly section */
+                    applySectionPrices(ticker, price, 'hourly', true);
+                    /* Only update main section if user toggled live on */
+                    if (liveMain[ticker]) {{
+                        applyMainPrices(ticker, price, true);
+                    }}
                 }}
             }}
         }};
@@ -14176,29 +14257,6 @@ def _inject_range_percentiles_ws_script(html: str, tickers: list[str]) -> str:
         ws.onclose = function() {{
             if (isMarketOpen()) setTimeout(function() {{ connectWS(ticker); }}, 5000);
         }};
-    }}
-
-    function updatePricesForTicker(ticker, currentPrice) {{
-        document.querySelectorAll('.price-cell[data-ticker="' + ticker + '"]').forEach(function(el) {{
-            var pct = parseFloat(el.dataset.pct);
-            if (!isNaN(pct)) {{
-                var newPrice = currentPrice * (1 + pct / 100);
-                el.textContent = '$' + newPrice.toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
-            }}
-        }});
-
-        document.querySelectorAll('.ref-close[data-ticker="' + ticker + '"]').forEach(function(el) {{
-            el.innerHTML = '<strong>Current Price:</strong> $' + currentPrice.toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}}) + ' <span style="color:#27ae60;font-size:12px">(LIVE)</span>';
-        }});
-
-        var fmt = '$' + currentPrice.toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
-        document.querySelectorAll('.price-basis[data-ticker="' + ticker + '"]').forEach(function(el) {{
-            el.innerHTML = '$ prices based on <strong style="color:#27ae60">live price: ' + fmt + '</strong> <span style="color:#27ae60;font-size:12px">(LIVE)</span>';
-            el.style.opacity = '1';
-            el.style.fontStyle = 'normal';
-        }});
-
-        updateChartsForTicker(ticker, currentPrice);
     }}
 
     function updateChartsForTicker(ticker, currentPrice) {{
