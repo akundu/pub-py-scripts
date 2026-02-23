@@ -529,7 +529,7 @@ def format_as_html(results: list[dict], params: dict = None) -> str:
         <div class="ticker-header">{ticker}</div>
         <div class="ticker-info">
             <span><strong>Last Trading Day:</strong> {last_date}</span>
-            <span><strong>Close:</strong> {prev_close_fmt}</span>
+            <span class="ref-close" data-ticker="{ticker}"><strong>Close:</strong> {prev_close_fmt}</span>
             <span><strong>Data Points:</strong> {n_data} days</span>
         </div>
 """)
@@ -563,7 +563,7 @@ def format_as_html(results: list[dict], params: dict = None) -> str:
                 html_parts.append(f'''                        <td>
                             <div class="percentile-cell">
                                 <div class="percentile-pct">{pct}%</div>
-                                <div class="percentile-price">${price:,.2f}</div>
+                                <div class="percentile-price price-cell" data-pct="{pct}" data-ticker="{ticker}">${price:,.2f}</div>
                             </div>
                         </td>
 ''')
@@ -602,7 +602,7 @@ def format_as_html(results: list[dict], params: dict = None) -> str:
                 html_parts.append(f'''                        <td>
                             <div class="percentile-cell">
                                 <div class="percentile-pct">+{pct}%</div>
-                                <div class="percentile-price">${price:,.2f}</div>
+                                <div class="percentile-price price-cell" data-pct="{pct}" data-ticker="{ticker}">${price:,.2f}</div>
                             </div>
                         </td>
 ''')
@@ -729,7 +729,7 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
     html_parts.append(f"""
         <div class="ticker-info-header">
             <span><strong>Last Trading Day:</strong> {last_date}</span>
-            <span><strong>Close:</strong> {prev_close_fmt}</span>
+            <span class="ref-close" data-ticker="{ticker}"><strong>Close:</strong> {prev_close_fmt}</span>
         </div>
 """)
 
@@ -789,7 +789,7 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
                 pct = when_down["pct"][f"p{p}"]
                 price = when_down["price"][f"p{p}"]
                 html_parts.append(f'                            <td>{pct}%</td>\n')
-                html_parts.append(f'                            <td>${price:,.2f}</td>\n')
+                html_parts.append(f'                            <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}">${price:,.2f}</td>\n')
             else:
                 html_parts.append(f'                            <td class="insufficient">--</td>\n')
                 html_parts.append(f'                            <td class="insufficient">--</td>\n')
@@ -856,7 +856,7 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
                 pct = when_up["pct"][f"p{p}"]
                 price = when_up["price"][f"p{p}"]
                 html_parts.append(f'                            <td>+{pct}%</td>\n')
-                html_parts.append(f'                            <td>${price:,.2f}</td>\n')
+                html_parts.append(f'                            <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}">${price:,.2f}</td>\n')
             else:
                 html_parts.append(f'                            <td class="insufficient">--</td>\n')
                 html_parts.append(f'                            <td class="insufficient">--</td>\n')
@@ -1372,12 +1372,13 @@ def format_multi_window_as_html(result: dict | list[dict], params: dict = None, 
         }}
 
         // Initialize all charts
+        const chartInstances = {{}};
         Object.keys(chartDataAll).forEach(function(tickerId) {{
             const chartDataDown = chartDataAll[tickerId].down;
             const chartDataUp = chartDataAll[tickerId].up;
 
             // Initialize DOWN chart
-            new Chart(document.getElementById('chartDown_' + tickerId), {{
+            chartInstances[tickerId + '_down'] = new Chart(document.getElementById('chartDown_' + tickerId), {{
                 type: 'line',
                 data: chartDataDown,
                 options: {{
@@ -1447,7 +1448,7 @@ def format_multi_window_as_html(result: dict | list[dict], params: dict = None, 
             }});
 
             // Initialize UP chart
-            new Chart(document.getElementById('chartUp_' + tickerId), {{
+            chartInstances[tickerId + '_up'] = new Chart(document.getElementById('chartUp_' + tickerId), {{
                 type: 'line',
                 data: chartDataUp,
                 options: {{
@@ -1635,7 +1636,7 @@ def _direction_badge(direction: str) -> str:
 
 
 def _render_slot_table(slots: dict, sorted_keys: list[str], percentiles: list[int],
-                       direction: str, title: str) -> str:
+                       direction: str, title: str, ticker: str = "") -> str:
     """Render a single DOWN or UP table for a set of slots."""
     parts = []
     dir_key = "when_down" if direction == "down" else "when_up"
@@ -1666,7 +1667,7 @@ def _render_slot_table(slots: dict, sorted_keys: list[str], percentiles: list[in
                 pct = block["pct"][f"p{p}"]
                 price = block["price"][f"p{p}"]
                 parts.append(f'                        <td>{sign}{pct}%</td>\n')
-                parts.append(f'                        <td>${price:,.2f}</td>\n')
+                parts.append(f'                        <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}">${price:,.2f}</td>\n')
             else:
                 parts.append('                        <td class="insuf">--</td>\n                        <td class="insuf">--</td>\n')
         parts.append('                    </tr>\n')
@@ -1782,37 +1783,37 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
     <div class="hourly-section">
         <h2>Intraday Move to Close - {ticker} (0DTE)</h2>
         <div class="hourly-info">
-            <span><strong>Reference Close:</strong> {prev_close_fmt}</span>
+            <span class="ref-close" data-ticker="{ticker}"><strong>Reference Close:</strong> {prev_close_fmt}</span>
             <span><strong>Source:</strong> 5-min bar data</span>
         </div>
 """)
 
     # --- Tier 1: Half-hour tables ---
     html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "down",
-                                          "DOWN MOVES TO CLOSE (per half-hour)"))
+                                          "DOWN MOVES TO CLOSE (per half-hour)", ticker=ticker))
     html_parts.append('        <div style="margin-top:30px"></div>\n')
     html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "up",
-                                          "UP MOVES TO CLOSE (per half-hour)"))
+                                          "UP MOVES TO CLOSE (per half-hour)", ticker=ticker))
 
     # --- Tier 2: 10-min tables (last 30 min) ---
     sorted_10 = sorted(slots_10min.keys())
     if sorted_10:
         html_parts.append('\n        <h3>Last 30 Minutes (10-min detail)</h3>\n')
         html_parts.append(_render_slot_table(slots_10min, sorted_10, percentiles, "down",
-                                              "DOWN MOVES TO CLOSE (per 10-min)"))
+                                              "DOWN MOVES TO CLOSE (per 10-min)", ticker=ticker))
         html_parts.append('        <div style="margin-top:30px"></div>\n')
         html_parts.append(_render_slot_table(slots_10min, sorted_10, percentiles, "up",
-                                              "UP MOVES TO CLOSE (per 10-min)"))
+                                              "UP MOVES TO CLOSE (per 10-min)", ticker=ticker))
 
     # --- Tier 3: 5-min tables (last 10 min) ---
     sorted_5 = sorted(slots_5min.keys())
     if sorted_5:
         html_parts.append('\n        <h3>Last 10 Minutes (5-min detail)</h3>\n')
         html_parts.append(_render_slot_table(slots_5min, sorted_5, percentiles, "down",
-                                              "DOWN MOVES TO CLOSE (per 5-min)"))
+                                              "DOWN MOVES TO CLOSE (per 5-min)", ticker=ticker))
         html_parts.append('        <div style="margin-top:30px"></div>\n')
         html_parts.append(_render_slot_table(slots_5min, sorted_5, percentiles, "up",
-                                              "UP MOVES TO CLOSE (per 5-min)"))
+                                              "UP MOVES TO CLOSE (per 5-min)", ticker=ticker))
 
     if not has_fine:
         html_parts.append("""

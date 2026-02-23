@@ -14137,6 +14137,102 @@ async def handle_range_percentiles_api(request: web.Request) -> web.Response:
         )
 
 
+def _inject_range_percentiles_ws_script(html: str, tickers: list[str]) -> str:
+    """Inject WebSocket live-price update script into range_percentiles HTML."""
+    import json as _json
+    tickers_json = _json.dumps(tickers)
+    ws_script = f"""<script>
+/* Live price updates via WebSocket */
+(function() {{
+    function isMarketOpen() {{
+        var now = new Date();
+        var et = new Date(now.toLocaleString('en-US', {{timeZone: 'America/New_York'}}));
+        var day = et.getDay();
+        if (day === 0 || day === 6) return false;
+        var mins = et.getHours() * 60 + et.getMinutes();
+        return mins >= 570 && mins < 960;
+    }}
+
+    var tickers = {tickers_json};
+    var currentPrices = {{}};
+    var wsConnections = {{}};
+
+    function connectWS(ticker) {{
+        var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        var ws = new WebSocket(proto + '//' + location.host + '/ws?symbol=' + ticker);
+        wsConnections[ticker] = ws;
+
+        ws.onmessage = function(event) {{
+            var msg = JSON.parse(event.data);
+            if (msg.symbol === ticker && msg.data && msg.data.payload && msg.data.payload.length > 0) {{
+                var price = parseFloat(msg.data.payload[0].price);
+                if (!isNaN(price) && price > 0) {{
+                    currentPrices[ticker] = price;
+                    updatePricesForTicker(ticker, price);
+                }}
+            }}
+        }};
+
+        ws.onclose = function() {{
+            if (isMarketOpen()) setTimeout(function() {{ connectWS(ticker); }}, 5000);
+        }};
+    }}
+
+    function updatePricesForTicker(ticker, currentPrice) {{
+        document.querySelectorAll('.price-cell[data-ticker="' + ticker + '"]').forEach(function(el) {{
+            var pct = parseFloat(el.dataset.pct);
+            if (!isNaN(pct)) {{
+                var newPrice = currentPrice * (1 + pct / 100);
+                el.textContent = '$' + newPrice.toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
+            }}
+        }});
+
+        document.querySelectorAll('.ref-close[data-ticker="' + ticker + '"]').forEach(function(el) {{
+            el.innerHTML = '<strong>Current Price:</strong> $' + currentPrice.toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}}) + ' <span style="color:green;font-size:12px">(LIVE)</span>';
+        }});
+
+        updateChartsForTicker(ticker, currentPrice);
+    }}
+
+    function updateChartsForTicker(ticker, currentPrice) {{
+        if (typeof chartInstances === 'undefined' || typeof chartDataAll === 'undefined') return;
+        var tickerId = ticker.replace(/:/g, '_').replace(/\\./g, '_');
+
+        ['down', 'up'].forEach(function(dir) {{
+            var key = tickerId + '_' + dir;
+            var chart = chartInstances[key];
+            var data = chartDataAll[tickerId] && chartDataAll[tickerId][dir];
+            if (!chart || !data) return;
+
+            data.priceRange.referenceClose = currentPrice;
+
+            var allPcts = data.datasets.reduce(function(acc, ds) {{
+                return acc.concat(ds.data.filter(function(v) {{ return v !== null; }}));
+            }}, []);
+            if (allPcts.length) {{
+                var minPct = Math.min.apply(null, allPcts);
+                var maxPct = Math.max.apply(null, allPcts);
+                var range = maxPct - minPct;
+                chart.options.scales.yPrice.min = currentPrice * (1 + (minPct - range * 0.1) / 100);
+                chart.options.scales.yPrice.max = currentPrice * (1 + (maxPct + range * 0.1) / 100);
+            }}
+
+            chart.update();
+        }});
+    }}
+
+    if (isMarketOpen()) {{
+        tickers.forEach(connectWS);
+    }}
+
+    window.addEventListener('beforeunload', function() {{
+        Object.keys(wsConnections).forEach(function(k) {{ wsConnections[k].close(); }});
+    }});
+}})();
+</script>"""
+    return html.replace("</body>", ws_script + "\n</body>", 1)
+
+
 async def handle_range_percentiles_html(request: web.Request) -> web.Response:
     """
     Handle HTML page request for range percentiles analysis.
@@ -14301,6 +14397,9 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                     except Exception as he:
                         logger.warning(f"Could not compute hourly moves for {ticker_name}: {he}")
 
+            # Inject WebSocket live-price script
+            html = _inject_range_percentiles_ws_script(html, tickers)
+
             return web.Response(text=html, content_type="text/html")
 
         except Exception as e:
@@ -14442,6 +14541,9 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             if hourly_sections:
                 hourly_combined = "\n".join(hourly_sections)
                 html = html.replace("</body>", hourly_combined + "\n</body>", 1)
+
+        # Inject WebSocket live-price script
+        html = _inject_range_percentiles_ws_script(html, tickers)
 
         return web.Response(text=html, content_type="text/html")
 
