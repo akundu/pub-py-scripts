@@ -3,16 +3,64 @@
 # Automated Model Retraining Script
 # Runs monthly to retrain prediction models with fresh data
 #
-# Usage:
-#   ./scripts/retrain_models_auto.sh [--ticker NDX|SPX] [--force] [--skip-deploy]
-#
-# Examples:
-#   ./scripts/retrain_models_auto.sh --ticker NDX
-#   ./scripts/retrain_models_auto.sh --ticker SPX --force
-#   ./scripts/retrain_models_auto.sh --ticker NDX --skip-deploy
-#
 
 set -e  # Exit on error
+
+# ============================================================================
+# Help Screen
+# ============================================================================
+
+show_help() {
+    cat << 'HELPEOF'
+USAGE
+    ./scripts/retrain_models_auto.sh [OPTIONS]
+
+DESCRIPTION
+    Automated retraining pipeline for multi-day ensemble (LightGBM) prediction
+    models (1-20 DTE). Retrains models on recent market data, validates quality,
+    and optionally deploys to production.
+
+    By default, retraining is skipped if existing models are less than 25 days
+    old. Use --force to override this check.
+
+OPTIONS
+    --ticker TICKER   Ticker to retrain: NDX or SPX (default: NDX)
+    --train-days N    Number of trading days for training window (default: 250)
+                      Typical values: 120 (6 months), 250 (1 year), 500 (2 years)
+    --force           Force retraining even if models are recent (<25 days old)
+    --skip-deploy     Train and validate but do not deploy to production.
+                      Models are saved to the results directory for manual review.
+    -h, --help        Show this help message and exit
+
+EXAMPLES
+    # Retrain NDX with default 250-day window
+    ./scripts/retrain_models_auto.sh --ticker NDX
+
+    # Force retrain SPX with a 120-day window
+    ./scripts/retrain_models_auto.sh --ticker SPX --train-days 120 --force
+
+    # Dry run: retrain but don't deploy
+    ./scripts/retrain_models_auto.sh --ticker NDX --force --skip-deploy
+
+    # Use a longer 500-day (2-year) training window
+    ./scripts/retrain_models_auto.sh --ticker NDX --train-days 500
+
+WORKFLOW
+    1. Check if retraining is needed (skip if models <25 days old)
+    2. Backup current production models
+    3. Retrain ensemble models (1-20 DTE) using backtest_multi_day.py
+    4. Validate retrained models (RMSE < 4%, hit rate >= 95%)
+    5. Deploy to production (unless --skip-deploy)
+    6. Run performance analysis
+    7. Clean up old backups and results
+
+OUTPUT
+    Logs:    logs/retraining/retrain_<TICKER>_<timestamp>.log
+    Results: results/auto_retrain_<TICKER>_<date>/
+    Models:  models/production/<TICKER>/
+HELPEOF
+    exit 0
+}
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,13 +69,21 @@ cd "$PROJECT_DIR"
 
 # Parse arguments
 TICKER="NDX"  # Default to NDX for backward compatibility
+TRAIN_DAYS=250
 FORCE_RETRAIN=false
 SKIP_DEPLOY=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -h|--help)
+            show_help
+            ;;
         --ticker)
             TICKER="$2"
+            shift 2
+            ;;
+        --train-days)
+            TRAIN_DAYS="$2"
             shift 2
             ;;
         --force)
@@ -40,11 +96,17 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--ticker NDX|SPX] [--force] [--skip-deploy]"
+            echo "Run '$0 --help' for usage information."
             exit 1
             ;;
     esac
 done
+
+# Validate train-days is a positive integer
+if ! [[ "$TRAIN_DAYS" =~ ^[0-9]+$ ]] || [ "$TRAIN_DAYS" -lt 30 ]; then
+    echo "ERROR: --train-days must be a positive integer >= 30 (got: $TRAIN_DAYS)"
+    exit 1
+fi
 
 # Validate ticker
 if [[ "$TICKER" != "NDX" && "$TICKER" != "SPX" ]]; then
@@ -78,6 +140,7 @@ log "AUTOMATED MODEL RETRAINING - $TICKER - $TIMESTAMP"
 log "========================================================================"
 log "Project: $PROJECT_DIR"
 log "Ticker: $TICKER"
+log "Train days: $TRAIN_DAYS"
 log "Force retrain: $FORCE_RETRAIN"
 log "Skip deploy: $SKIP_DEPLOY"
 log ""
@@ -148,13 +211,13 @@ log ""
 log "========================================================================"
 log "Step 3: Retraining Multi-Day Ensemble Models (1-20 DTE) for $TICKER"
 log "========================================================================"
-log "Training window: 250 days (1 year)"
+log "Training window: $TRAIN_DAYS days"
 log "Validation: 30 days"
 log ""
 
 python scripts/backtest_multi_day.py \
     --ticker "$TICKER" \
-    --train-days 250 \
+    --train-days "$TRAIN_DAYS" \
     --test-days 30 \
     --max-dte 20 \
     --train-lgbm \
@@ -298,7 +361,7 @@ cat > "$PROD_DIR/metadata.json" << EOF
 {
     "retrained_at": "$TIMESTAMP",
     "retrained_date": "$DATE_ONLY",
-    "train_days": 250,
+    "train_days": $TRAIN_DAYS,
     "test_days": 30,
     "max_dte": 20,
     "ticker": "$TICKER",
@@ -322,7 +385,7 @@ log "========================================================================"
 log ""
 
 python scripts/analyze_performance_close_prices.py \
-    --train-days 250 \
+    --train-days "$TRAIN_DAYS" \
     2>&1 | tee -a "$LOG_FILE" | head -100
 
 log ""

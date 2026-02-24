@@ -80,7 +80,7 @@ You now have **fully automated model management**:
 
 ### 📅 **Monthly Retraining** (1st Saturday @ 2 AM)
 - Automatically retrains all models (1-20 DTE)
-- Uses last 250 days (1 year) of data
+- Uses last 250 days (1 year) of data by default (configurable via `--train-days`)
 - Validates on last 30 days
 - Deploys to production if quality checks pass
 - Backs up old models
@@ -137,11 +137,18 @@ RECOMMENDATION: No action needed - models healthy
 
 ### Manual Retraining
 ```bash
+# Show full help screen with all options
+./scripts/retrain_models_auto.sh --help
+
 # Force retrain (skip age check)
 ./scripts/retrain_models_auto.sh --force
 
 # Retrain but don't deploy (test first)
 ./scripts/retrain_models_auto.sh --force --skip-deploy
+
+# Use a custom training window (default: 250 days / ~1 year)
+./scripts/retrain_models_auto.sh --force --train-days 120   # 6 months
+./scripts/retrain_models_auto.sh --force --train-days 500   # 2 years
 ```
 
 ---
@@ -379,7 +386,9 @@ cd "$PROJECT_DIR" && python scripts/analyze_performance_close_prices.py --train-
 - Backups prevent data loss
 
 **Manual override available anytime:**
+- Show help: `./scripts/retrain_models_auto.sh --help`
 - Force retrain: `./scripts/retrain_models_auto.sh --force`
+- Custom window: `./scripts/retrain_models_auto.sh --force --train-days 120`
 - Check health: `python scripts/monitor_model_health.py`
 - Analyze: `python scripts/analyze_performance_close_prices.py`
 
