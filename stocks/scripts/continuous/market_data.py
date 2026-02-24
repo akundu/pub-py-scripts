@@ -4,9 +4,11 @@ Market Data Fetcher for Continuous Mode
 """
 
 import sys
+import time as _time
+import asyncio
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from dataclasses import dataclass, asdict
 import pytz
 
@@ -16,6 +18,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from common.stock_db import get_stock_db
 from common.financial_data import get_financial_info
 from scripts.regime_strategy_selector import detect_vix_regime
+
+# ---------------------------------------------------------------------------
+# Price / VIX cache  (60-second TTL)
+# ---------------------------------------------------------------------------
+_price_cache: Dict[str, Tuple[float, float, float]] = {}   # ticker -> (price, change_pct, timestamp)
+_CACHE_TTL = 60  # seconds
 
 
 @dataclass
@@ -53,6 +61,75 @@ class MarketContext:
         return asdict(self)
 
 
+def _fetch_price(ticker: str) -> Tuple[float, float]:
+    """
+    Fetch live price and change% for *ticker*.
+
+    Priority: cache → yfinance → stock_db → hardcoded default.
+    Returns (current_price, change_pct).
+    """
+    cache_key = f"price_{ticker}"
+    cached = _price_cache.get(cache_key)
+    if cached and (_time.time() - cached[2]) < _CACHE_TTL:
+        return cached[0], cached[1]
+
+    # --- Primary: yfinance ---
+    try:
+        import yfinance as yf
+        yf_ticker = "^NDX" if ticker.upper() == "NDX" else ticker
+        info = yf.Ticker(yf_ticker).fast_info
+        current_price = float(info["lastPrice"])
+        prev_close = float(info["previousClose"])
+        change_pct = ((current_price - prev_close) / prev_close) * 100.0 if prev_close else 0.0
+        _price_cache[cache_key] = (current_price, change_pct, _time.time())
+        print(f"[market_data] Live NDX price via yfinance: ${current_price:,.2f} ({change_pct:+.2f}%)")
+        return current_price, change_pct
+    except Exception as e:
+        print(f"[market_data] yfinance price fetch failed: {e}")
+
+    # --- Fallback: stock_db ---
+    try:
+        db = get_stock_db("questdb")
+        loop = asyncio.new_event_loop()
+        price = loop.run_until_complete(db.get_latest_price(ticker))
+        loop.close()
+        if price is not None:
+            _price_cache[cache_key] = (price, 0.0, _time.time())
+            print(f"[market_data] NDX price via stock_db: ${price:,.2f}")
+            return price, 0.0
+    except Exception as e:
+        print(f"[market_data] stock_db price fetch failed: {e}")
+
+    # --- Last resort ---
+    print("[market_data] Using hardcoded default price $20,000")
+    return 20000.0, 0.0
+
+
+def _fetch_vix() -> float:
+    """
+    Fetch live VIX level.
+
+    Priority: cache → yfinance → hardcoded default.
+    """
+    cache_key = "vix"
+    cached = _price_cache.get(cache_key)
+    if cached and (_time.time() - cached[2]) < _CACHE_TTL:
+        return cached[0]
+
+    try:
+        import yfinance as yf
+        info = yf.Ticker("^VIX").fast_info
+        vix = float(info["lastPrice"])
+        _price_cache[cache_key] = (vix, 0.0, _time.time())
+        print(f"[market_data] Live VIX via yfinance: {vix:.2f}")
+        return vix
+    except Exception as e:
+        print(f"[market_data] yfinance VIX fetch failed: {e}")
+
+    print("[market_data] Using hardcoded default VIX 15.0")
+    return 15.0
+
+
 def get_current_market_context(
     ticker: str = 'NDX',
     trend: str = 'sideways'
@@ -71,55 +148,20 @@ def get_current_market_context(
     pst = pytz.timezone('America/Los_Angeles')
     now_pst = now.astimezone(pst)
 
-    # Get current price
-    # TODO: Integrate with live data feed
-    # For now, using fallback values - update with actual data source
-    try:
-        # Placeholder: Fetch from your data source
-        # Example: polygon.io, IB API, broker feed, etc.
-        current_price = 20000.0  # Update with live price
-        price_change_pct = 0.5  # Update with actual change
-        current_volume = 1000000
-        avg_volume = 950000
-        volume_ratio = current_volume / avg_volume
+    # Get current price (cached for 60s)
+    current_price, price_change_pct = _fetch_price(ticker)
+    current_volume = 0
+    avg_volume = 0
+    volume_ratio = 1.0
 
-        print(f"Note: Using placeholder price data. Update market_data.py with live data source.")
-
-    except Exception as e:
-        print(f"Warning: Could not fetch price data: {e}")
-        current_price = 20000.0
-        price_change_pct = 0.0
-        current_volume = 0
-        avg_volume = 0
-        volume_ratio = 1.0
-
-    # Get VIX
-    # TODO: Integrate with live VIX feed
-    try:
-        # Placeholder: Fetch from your data source
-        vix_level = 14.5  # Update with live VIX
-
-        print(f"Note: Using placeholder VIX={vix_level}. Update market_data.py with live data source.")
-
-    except Exception as e:
-        print(f"Warning: Could not fetch VIX: {e}")
-        vix_level = 15.0
+    # Get VIX (cached for 60s)
+    vix_level = _fetch_vix()
 
     vix_regime = detect_vix_regime(vix_level)
 
-    # Get IV metrics
-    # TODO: Integrate with IV data source
-    try:
-        # Placeholder: Fetch from your data source
-        iv_rank = None  # Update with live IV rank
-        iv_percentile = None  # Update with live IV percentile
-
-        print(f"Note: Using placeholder IV data. Update market_data.py with live data source.")
-
-    except Exception as e:
-        print(f"Warning: Could not fetch IV metrics: {e}")
-        iv_rank = None
-        iv_percentile = None
+    # IV metrics (not yet wired to a live source)
+    iv_rank = None
+    iv_percentile = None
 
     # Check if market hours (6:30 AM - 1:00 PM PST)
     current_hour = now_pst.hour
@@ -135,7 +177,7 @@ def get_current_market_context(
         iv_rank=iv_rank,
         iv_percentile=iv_percentile,
         current_volume=current_volume,
-        avg_volume_20d=int(avg_volume),
+        avg_volume_20d=int(avg_volume) if avg_volume else 0,
         volume_ratio=volume_ratio,
         is_market_hours=is_market_hours,
         current_hour_pst=current_hour,

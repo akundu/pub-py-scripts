@@ -14,8 +14,8 @@ import sys
 import time
 import argparse
 from pathlib import Path
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, date
+from typing import Optional, List
 
 # Add parent to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -51,6 +51,7 @@ class ContinuousMode:
         self.last_position_check_time = None
 
         self.current_market_context: Optional[MarketContext] = None
+        self.last_opportunities: List = []  # cached from latest scan
         self.is_running = False
 
     def update_market_data(self):
@@ -90,8 +91,10 @@ class ContinuousMode:
             # Scan opportunities
             opportunities = scan_opportunities(
                 self.current_market_context,
-                top_n=self.config.regime_top_n_configs
+                top_n=self.config.regime_top_n_configs,
+                target_date=date.today(),
             )
+            self.last_opportunities = opportunities
 
             # Filter to actionable
             actionable = filter_actionable_opportunities(
@@ -137,9 +140,39 @@ class ContinuousMode:
             ALERTS.send_alert(f"Error checking positions: {e}", AlertLevel.ERROR)
 
     def update_dashboard(self):
-        """Update dashboard data file."""
+        """Update dashboard data file with already-scanned data."""
         try:
-            self.dashboard_data.save_to_file()
+            # Build the data dict from what we already have so the JSON
+            # file matches exactly what was logged to the console.
+            market_dict = (
+                self.current_market_context.to_dict()
+                if self.current_market_context else {}
+            )
+            opp_dicts = [opp.to_dict() for opp in self.last_opportunities]
+            open_positions = self.tracker.get_open_positions()
+            summary = self.tracker.get_summary()
+
+            data = {
+                'timestamp': datetime.now().isoformat(),
+                'market': market_dict,
+                'opportunities': opp_dicts,
+                'positions': {
+                    'open': [pos.to_dict() for pos in open_positions],
+                    'summary': summary,
+                },
+                'alerts': self.dashboard_data._get_recent_alerts(limit=20),
+                'data_sources': {
+                    'grid_file': str(self.config.grid_file),
+                    'chain_dirs': [
+                        'options_csv_output_full/{ticker}_options_{date}.csv',
+                        'options_csv_output/{ticker}_options_{date}.csv',
+                        'csv_exports/options/{ticker}/{date}.csv',
+                    ],
+                    'config_file': 'scripts/continuous/config.py',
+                },
+            }
+
+            self.dashboard_data.save_to_file(data)
         except Exception as e:
             ALERTS.send_alert(f"Error updating dashboard: {e}", AlertLevel.ERROR)
 

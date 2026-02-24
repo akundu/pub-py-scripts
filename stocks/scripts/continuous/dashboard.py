@@ -7,6 +7,7 @@ Simple Flask-based dashboard to monitor regime, opportunities, and positions.
 
 import sys
 import json
+import time as _time
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List
@@ -93,9 +94,18 @@ class DashboardData:
             print(f"Error reading alerts: {e}")
             return []
 
-    def save_to_file(self):
-        """Save current data to JSON file for dashboard."""
-        data = self.get_current_data()
+    def save_to_file(self, data: Dict = None):
+        """Save dashboard data to JSON file.
+
+        Args:
+            data: Pre-built dashboard data dict.  When *None* (legacy
+                  behaviour) the method will call get_current_data() which
+                  triggers a full re-scan.  Prefer passing data directly
+                  from the continuous_mode cycle so the dashboard matches
+                  the console output.
+        """
+        if data is None:
+            data = self.get_current_data()
 
         try:
             CONFIG.dashboard_data.parent.mkdir(parents=True, exist_ok=True)
@@ -567,8 +577,31 @@ def start_dashboard_server():
 
     @app.route('/')
     def index():
-        """Dashboard home page."""
-        data = dashboard_data.get_current_data()
+        """Dashboard home page.
+
+        Reads from dashboard_data.json written by continuous_mode.py so
+        that the dashboard shows the SAME data logged to console without
+        triggering a duplicate scan.  Falls back to a live scan when the
+        JSON file is missing (standalone dashboard mode).
+        """
+        data = None
+
+        # Try reading the JSON file that continuous_mode writes every cycle
+        if CONFIG.dashboard_data.exists():
+            try:
+                import os
+                age = _time.time() - os.path.getmtime(str(CONFIG.dashboard_data))
+                # Only use cached file if it's less than 5 minutes old
+                if age < 300:
+                    with open(CONFIG.dashboard_data, 'r') as f:
+                        data = json.load(f)
+            except (json.JSONDecodeError, Exception):
+                data = None
+
+        # Fallback: live scan (standalone mode or stale/missing file)
+        if data is None:
+            data = dashboard_data.get_current_data()
+
         html = generate_html_dashboard(data)
         return render_template_string(html)
 
