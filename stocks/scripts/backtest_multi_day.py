@@ -174,6 +174,8 @@ def conditional_prediction(
     n_day_returns: List[float],
     historical_contexts: List[MarketContext],
     historical_vols: Optional[List[float]] = None,
+    effective_days_ahead: Optional[float] = None,
+    intraday_vol_factor: float = 1.0,
 ) -> Dict[str, UnifiedBand]:
     """Conditional: Feature-weighted distribution."""
     return predict_with_conditional_distribution(
@@ -187,6 +189,8 @@ def conditional_prediction(
         use_weighting=True,
         use_regime_filter=True,
         use_vol_scaling=True,
+        effective_days_ahead=effective_days_ahead,
+        intraday_vol_factor=intraday_vol_factor,
     )
 
 
@@ -299,6 +303,10 @@ def main():
     parser.add_argument('--step-size', type=int, default=30, help='Days between retraining in walk-forward mode')
     parser.add_argument('--output-dir', type=Path, default=Path('results/multi_day_backtest'),
                         help='Output directory')
+    parser.add_argument('--no-time-decay', action='store_true',
+                        help='Disable time decay factor (old behavior)')
+    parser.add_argument('--no-intraday-vol', action='store_true',
+                        help='Disable intraday volatility scaling (old behavior)')
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -516,10 +524,43 @@ def main():
                     'baseline', test_date, dte, current_context
                 ))
 
+                # Compute time-aware factors
+                effective_days_ahead = float(dte)
+                intraday_vol_factor = 1.0
+
+                if not args.no_time_decay or not args.no_intraday_vol:
+                    # For backtesting, simulate market close time (16:00 ET)
+                    # This means hours_to_close = 0, so effective_days = dte - 1
+                    if not args.no_time_decay:
+                        # At market close, one full day has passed
+                        effective_days_ahead = max(0.5, float(dte) - 1.0)
+
+                    # Compute intraday volatility factor
+                    if not args.no_intraday_vol:
+                        test_df = data_by_date[test_date]
+                        if 'high' in test_df.columns and 'low' in test_df.columns:
+                            today_high = test_df['high'].max()
+                            today_low = test_df['low'].min()
+
+                            # Get previous close for range calculation
+                            test_idx = all_dates.index(test_date)
+                            if test_idx > 0:
+                                prev_date = all_dates[test_idx - 1]
+                                if prev_date in data_by_date:
+                                    prev_close = data_by_date[prev_date].iloc[-1]['close']
+                                    if prev_close > 0:
+                                        intraday_range_pct = (today_high - today_low) / prev_close * 100
+
+                                        if intraday_range_pct > 2.0:
+                                            intraday_vol_factor = 1.0 + (intraday_range_pct - 1.5) / 10.0
+                                            intraday_vol_factor = min(1.5, intraday_vol_factor)
+
                 # Conditional prediction
                 conditional_bands = conditional_prediction(
                     current_price, current_context, train_returns,
-                    train_contexts_list, train_vols
+                    train_contexts_list, train_vols,
+                    effective_days_ahead=effective_days_ahead if not args.no_time_decay else None,
+                    intraday_vol_factor=intraday_vol_factor if not args.no_intraday_vol else 1.0,
                 )
                 results.append(evaluate_prediction(
                     conditional_bands, actual_close, current_price,

@@ -140,6 +140,8 @@ class MultiDayLGBMPredictor:
         current_price: float,
         n_simulations: int = 1000,
         add_noise_std: float = 2.0,
+        effective_days_ahead: Optional[float] = None,
+        intraday_vol_factor: float = 1.0,
     ) -> Dict[str, UnifiedBand]:
         """Predict full distribution using model + noise.
 
@@ -151,6 +153,8 @@ class MultiDayLGBMPredictor:
             current_price: Current price
             n_simulations: Number of Monte Carlo samples
             add_noise_std: Noise std dev to add (% return)
+            effective_days_ahead: Adjusted days ahead accounting for time decay (default: self.days_ahead)
+            intraday_vol_factor: Scaling factor for intraday volatility (default: 1.0)
 
         Returns:
             Dict of percentile bands
@@ -169,6 +173,14 @@ class MultiDayLGBMPredictor:
 
         # Generate simulated returns
         simulated_returns = np.random.normal(mean_return, total_std, n_simulations)
+
+        # Apply time decay and intraday volatility scaling
+        if effective_days_ahead is not None and self.days_ahead > 0 and effective_days_ahead != self.days_ahead:
+            time_decay_factor = effective_days_ahead / self.days_ahead
+            simulated_returns = simulated_returns * time_decay_factor
+
+        if intraday_vol_factor != 1.0:
+            simulated_returns = simulated_returns * intraday_vol_factor
 
         # Build percentile bands
         band_defs = {

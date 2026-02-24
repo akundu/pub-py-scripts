@@ -366,7 +366,7 @@ async def predict_future_close(ticker: str, days_ahead: int, current_price: floa
     }
 
 
-async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: int, db_config: Optional[str]) -> Optional['UnifiedPrediction']:
+async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: int, db_config: Optional[str], use_time_decay: bool = True, use_intraday_vol: bool = True) -> Optional['UnifiedPrediction']:
     """Multi-day ahead prediction using Ensemble Combined method (RECOMMENDED).
 
     Computes predictions using all 4 methods and displays comparison:
@@ -380,6 +380,8 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
         days_ahead: Number of trading days ahead to predict
         lookback: Number of historical days to analyze
         db_config: QuestDB connection string
+        use_time_decay: Enable time decay factor (default True)
+        use_intraday_vol: Enable intraday volatility scaling (default True)
 
     Returns:
         UnifiedPrediction with ensemble_combined bands as primary prediction
@@ -594,6 +596,70 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
                     if ctx_idx < len(historical_contexts):
                         train_vols.append(historical_contexts[ctx_idx].realized_vol_5d)
 
+            # Compute time decay and intraday volatility factors
+            effective_days_ahead = float(days_ahead)
+            intraday_vol_factor = 1.0
+
+            if use_time_decay or use_intraday_vol:
+                from scripts.close_predictor.models import ET_TZ
+                current_time = datetime.now(ET_TZ)
+                market_open_hour = 9
+                market_open_minute = 30
+                market_close_hour = 16
+                market_close_minute = 0
+
+                # Compute hours remaining in trading day
+                hours_to_close = 0.0
+                if current_time.hour < market_open_hour or (current_time.hour == market_open_hour and current_time.minute < market_open_minute):
+                    # Before market open - full day ahead
+                    hours_to_close = 6.5
+                elif current_time.hour < market_close_hour or (current_time.hour == market_close_hour and current_time.minute == 0):
+                    # During market hours
+                    hours_to_close = (market_close_hour - current_time.hour) + (market_close_minute - current_time.minute) / 60.0
+                else:
+                    # After market close
+                    hours_to_close = 0.0
+
+                # Apply time decay if enabled
+                if use_time_decay:
+                    # As trading day progresses, effective DTE decreases
+                    # Example: 5-day prediction at 3:50 PM → ~4.03 effective days
+                    fraction_of_day_remaining = hours_to_close / 6.5 if hours_to_close > 0 else 0.0
+                    effective_days_ahead = days_ahead - (1.0 - fraction_of_day_remaining)
+                    # Don't go below 0.5 days (minimum uncertainty)
+                    effective_days_ahead = max(0.5, effective_days_ahead)
+                    print(f"Time decay: {hours_to_close:.2f} hours to close → effective DTE = {effective_days_ahead:.2f} (vs {days_ahead} nominal)")
+
+                # Apply intraday volatility scaling if enabled
+                if use_intraday_vol:
+                    # Get today's high/low from latest data
+                    today_high = current_price
+                    today_low = current_price
+                    prev_close_price = None
+
+                    # Try to get from history_rows if available
+                    if history_rows:
+                        latest_row = history_rows[-1]
+                        today_high = max(latest_row.get('high', current_price), current_price)
+                        today_low = min(latest_row.get('low', current_price), current_price)
+
+                        # Get previous close for intraday range calculation
+                        if len(history_rows) >= 2:
+                            prev_close_price = history_rows[-2]['close']
+
+                    if prev_close_price and prev_close_price > 0:
+                        intraday_range_pct = (today_high - today_low) / prev_close_price * 100
+
+                        # Scale volatility factor based on intraday range
+                        # Normal day: 0.5-1.5% range → factor = 1.0
+                        # Volatile day: 3%+ range → factor = 1.3-1.5
+                        if intraday_range_pct > 2.0:
+                            intraday_vol_factor = 1.0 + (intraday_range_pct - 1.5) / 10.0
+                            intraday_vol_factor = min(1.5, intraday_vol_factor)  # Cap at 1.5x
+                            print(f"Intraday vol: range={intraday_range_pct:.2f}% → vol factor = {intraday_vol_factor:.2f}x")
+                        else:
+                            print(f"Intraday vol: range={intraday_range_pct:.2f}% (normal) → vol factor = 1.00x")
+
             # Conditional prediction
             if len(train_returns) >= 50 and len(train_returns) == len(historical_contexts[:len(train_returns)]):
                 conditional_bands = predict_with_conditional_distribution(
@@ -607,6 +673,8 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
                     use_weighting=True,
                     use_regime_filter=True,
                     use_vol_scaling=True,
+                    effective_days_ahead=effective_days_ahead,
+                    intraday_vol_factor=intraday_vol_factor,
                 )
 
         except Exception as e:
@@ -647,7 +715,12 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
     if model_path.exists() and current_context:
         try:
             predictor = MultiDayLGBMPredictor.load(model_path)
-            ensemble_bands = predictor.predict_distribution(current_context, current_price)
+            ensemble_bands = predictor.predict_distribution(
+                current_context,
+                current_price,
+                effective_days_ahead=effective_days_ahead if use_time_decay else None,
+                intraday_vol_factor=intraday_vol_factor if use_intraday_vol else 1.0,
+            )
             print(f"✓ Loaded ensemble model from: {model_dir}")
         except Exception as e:
             print(f"⚠️  Ensemble model loading failed: {e}")
@@ -900,7 +973,7 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
     return pred
 
 
-async def predict_close(ticker='NDX', lookback=250, force_retrain=False, similar_days_count=10, db_config=None, days_ahead=0, target_date=None):
+async def predict_close(ticker='NDX', lookback=250, force_retrain=False, similar_days_count=10, db_config=None, days_ahead=0, target_date=None, use_time_decay=True, use_intraday_vol=True):
     """Make a prediction for today's close (or future date) using LIVE QuestDB data.
 
     Args:
@@ -911,6 +984,8 @@ async def predict_close(ticker='NDX', lookback=250, force_retrain=False, similar
         db_config: QuestDB connection string
         days_ahead: Number of trading days ahead to predict (0 = today)
         target_date: Specific future date to predict (date object or YYYY-MM-DD string)
+        use_time_decay: Enable time decay factor for multi-day predictions (default True)
+        use_intraday_vol: Enable intraday volatility scaling for multi-day predictions (default True)
 
     Returns:
         UnifiedPrediction object with percentile_bands, statistical_bands, combined_bands
@@ -931,7 +1006,7 @@ async def predict_close(ticker='NDX', lookback=250, force_retrain=False, similar
 
     # For multi-day ahead predictions, use historical N-day return distribution
     if days_ahead > 0:
-        return await _predict_future_close_unified(ticker, days_ahead, lookback, db_config)
+        return await _predict_future_close_unified(ticker, days_ahead, lookback, db_config, use_time_decay, use_intraday_vol)
 
     print(f"\n{'='*80}")
     print(f"PREDICT TODAY'S CLOSE - {ticker} (LIVE DATA)")
@@ -1697,6 +1772,10 @@ Output:
                              'More days = more stable model but slower; fewer days = more recent-biased.')
     parser.add_argument('--db', type=str, default=None, metavar='CONNECTION_STRING',
                         help='QuestDB connection string. Default: QUEST_DB_STRING, QUESTDB_CONNECTION_STRING, or QUESTDB_URL env.')
+    parser.add_argument('--no-time-decay', action='store_true', dest='no_time_decay',
+                        help='Disable time decay factor for multi-day predictions (old behavior)')
+    parser.add_argument('--no-intraday-vol', action='store_true', dest='no_intraday_vol',
+                        help='Disable intraday volatility scaling for multi-day predictions (old behavior)')
 
     args = parser.parse_args()
 
@@ -1760,6 +1839,8 @@ Output:
                 similar_days_count=args.similar_days,
                 db_config=db_config,
                 days_ahead=days_ahead,
+                use_time_decay=not args.no_time_decay,
+                use_intraday_vol=not args.no_intraday_vol,
             )
         else:
             # Today's prediction (default behavior)
@@ -1770,6 +1851,8 @@ Output:
                 similar_days_count=args.similar_days,
                 db_config=db_config,
                 days_ahead=0,
+                use_time_decay=not args.no_time_decay,
+                use_intraday_vol=not args.no_intraday_vol,
             )
 
     asyncio.run(main())

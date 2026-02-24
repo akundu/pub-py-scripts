@@ -179,12 +179,14 @@ def predict_with_conditional_distribution(
     use_weighting: bool = True,
     use_regime_filter: bool = True,
     use_vol_scaling: bool = True,
+    effective_days_ahead: Optional[float] = None,
+    intraday_vol_factor: float = 1.0,
 ) -> Dict[str, UnifiedBand]:
     """Build percentile bands using conditional distribution.
 
     Args:
         ticker: Ticker symbol
-        days_ahead: Number of trading days ahead
+        days_ahead: Number of trading days ahead (nominal)
         current_price: Current price
         current_context: Current market conditions
         n_day_returns: Historical N-day returns
@@ -193,6 +195,8 @@ def predict_with_conditional_distribution(
         use_weighting: Whether to weight samples by similarity
         use_regime_filter: Whether to filter by volatility regime
         use_vol_scaling: Whether to scale by volatility ratio
+        effective_days_ahead: Adjusted days ahead accounting for time decay (default: days_ahead)
+        intraday_vol_factor: Scaling factor for intraday volatility (default: 1.0)
 
     Returns:
         Dict of percentile bands (P95, P97, P98, P99, P100)
@@ -234,7 +238,17 @@ def predict_with_conditional_distribution(
             min_samples=30,
         )
 
-    # Step 4: Build percentile bands
+    # Step 4: Apply time decay and intraday volatility scaling
+    if effective_days_ahead is not None and effective_days_ahead != days_ahead and days_ahead > 0:
+        # Scale returns by time remaining factor
+        time_decay_factor = effective_days_ahead / days_ahead
+        returns = returns * time_decay_factor
+
+    if intraday_vol_factor != 1.0:
+        # Scale returns by intraday volatility
+        returns = returns * intraday_vol_factor
+
+    # Step 5: Build percentile bands
     bands = map_percentile_to_bands(returns, current_price)
 
     return bands
