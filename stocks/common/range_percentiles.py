@@ -191,8 +191,9 @@ async def compute_range_percentiles(
         if len(df) > lookback:
             df = df.iloc[-lookback:]
 
-        # Window must be >= 1 for close-to-close returns (shift(0) is meaningless)
-        calc_window = max(window, 1)
+        # Window=N means "N days from now": 0D = end of today, 1D = end of tomorrow, etc.
+        # Since we measure from yesterday's close, shift = window + 1
+        calc_window = window + 1
 
         min_required = calc_window + 1
         if len(df) < min_required:
@@ -818,8 +819,9 @@ async def compute_range_percentiles_multi_window(
         skipped_windows = []
 
         for window in window_list:
-            # Window=0 (0DTE): use 1-day returns (prev close → today's close)
-            calc_window = max(window, 1)
+            # Window=N means "N days from now": 0D = end of today, 1D = end of tomorrow, etc.
+            # Since we measure from yesterday's close, shift = window + 1
+            calc_window = window + 1
 
             # Check if we have enough data for this window
             min_required = calc_window + 1
