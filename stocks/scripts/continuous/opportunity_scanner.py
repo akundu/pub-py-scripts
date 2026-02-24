@@ -104,6 +104,10 @@ def scan_opportunities(
     # Load grid
     df = pd.read_csv(grid_file)
 
+    # If grid has a 'successful' column, keep only successful configs
+    if 'successful' in df.columns:
+        df = df[df['successful'] == True]
+
     # Filter by regime (with VIX dynamics if available)
     vix_direction = getattr(market_context, 'vix_direction', 'stable')
     vix_velocity = getattr(market_context, 'vix_velocity', 0.0)

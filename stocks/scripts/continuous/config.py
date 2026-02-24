@@ -13,7 +13,7 @@ class ContinuousConfig:
     """Configuration for continuous trading mode."""
 
     # Paths
-    grid_file: Path = Path('results/backtest_tight/grid_trading_ready.csv')
+    grid_file: Path = Path('results/backtest_tight/grid_analysis_tight.csv')
     positions_file: Path = Path('data/continuous/positions.json')
     alerts_log: Path = Path('logs/continuous/alerts.log')
     dashboard_data: Path = Path('data/continuous/dashboard_data.json')
@@ -25,7 +25,7 @@ class ContinuousConfig:
     # Regime Detection
     default_ticker: str = 'NDX'
     default_trend: str = 'sideways'  # up/down/sideways
-    regime_top_n_configs: int = 20
+    regime_top_n_configs: int = 50
 
     # Opportunity Filtering
     min_composite_score: float = 50.0  # Minimum trade score
