@@ -16,19 +16,55 @@ def map_statistical_to_bands(
     prediction,
     current_price: float,
 ) -> Dict[str, UnifiedBand]:
-    """Convert StatisticalClosePredictor P5/P10/P90/P95 to P95-P100 bands via tail extrapolation.
+    """Convert StatisticalClosePredictor percentiles to P95-P100 bands.
 
-    The statistical model outputs P10 (low) and P90 (high).  We derive:
-      P5/P95 tail step  = (P90 - P10) / 2  (half-width of the 80% CI)
-      Then extend outward by multiples of the tail step for wider bands.
+    If the prediction includes full percentile distribution, uses actual percentiles.
+    Otherwise, falls back to tail extrapolation from P10/P90.
 
-    Mapping:
-      P90 band  -> (P10, P90) directly           (for reference, not in unified output)
-      P95 band  -> extend by 1x tail step
-      P98 band  -> extend by 2x tail steps
-      P99 band  -> extend by 3x tail steps
-      P100 band -> extend by 4x tail steps
+    Band definitions match percentile model:
+      P95 band  -> 2.5th to 97.5th percentile
+      P97 band  -> 1.5th to 98.5th percentile
+      P98 band  -> 1.0th to 99.0th percentile
+      P99 band  -> 0.5th to 99.5th percentile
+      P100 band -> min to max (0.0th to 100.0th percentile)
     """
+    # Check if full percentile distribution is available
+    if hasattr(prediction, 'percentile_moves') and prediction.percentile_moves:
+        # Use actual percentiles (NEW APPROACH - accurate!)
+        band_defs = {
+            "P95": (2.5, 97.5),
+            "P97": (1.5, 98.5),
+            "P98": (1.0, 99.0),
+            "P99": (0.5, 99.5),
+            "P100": (0.0, 100.0),
+        }
+
+        bands = {}
+        percentiles = prediction.percentile_moves
+
+        for name, (lo_p, hi_p) in band_defs.items():
+            # Get closest available percentiles
+            lo_pct = percentiles.get(lo_p, percentiles.get(int(lo_p), 0.0))
+            hi_pct = percentiles.get(hi_p, percentiles.get(int(hi_p), 0.0))
+
+            lo_price = current_price * (1 + lo_pct)
+            hi_price = current_price * (1 + hi_pct)
+            width_pts = hi_price - lo_price
+            width_pct = (hi_price - lo_price) / current_price * 100.0 if current_price else 0.0
+
+            bands[name] = UnifiedBand(
+                name=name,
+                lo_price=lo_price,
+                hi_price=hi_price,
+                lo_pct=lo_pct * 100.0,
+                hi_pct=hi_pct * 100.0,
+                width_pts=width_pts,
+                width_pct=width_pct,
+                source="statistical",
+            )
+        return bands
+
+    # Fallback: Use old extrapolation method if percentiles not available
     lo_base_pct = prediction.predicted_move_low_pct / 100.0   # P10 move as decimal
     hi_base_pct = prediction.predicted_move_high_pct / 100.0   # P90 move as decimal
 

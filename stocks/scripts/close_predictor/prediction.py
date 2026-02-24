@@ -122,6 +122,27 @@ def _train_statistical(
     return predictor
 
 
+def compute_static_percentile_prediction(
+    pct_df: pd.DataFrame,
+    prev_close: float,
+    train_dates: set,
+) -> Optional[Dict[str, UnifiedBand]]:
+    """Compute static close-to-close percentile bands (no time/vol/direction filtering).
+
+    Uses all historical prev_close-to-day_close returns and applies them
+    against prev_close. This produces bands that do not change throughout the day.
+    """
+    # Use one record per date (deduplicate time slots) — take the first slot per date
+    daily = pct_df[pct_df['date'].isin(train_dates)].drop_duplicates(subset='date')
+    if len(daily) < 10:
+        return None
+
+    # Compute prev_close → day_close returns
+    moves = ((daily['day_close'] - daily['prev_close']) / daily['prev_close'] * 100).values
+
+    return map_percentile_to_bands(moves, prev_close)
+
+
 def compute_percentile_prediction(
     pct_df: pd.DataFrame,
     time_label: str,
@@ -298,8 +319,11 @@ def make_unified_prediction(
         current_price, prev_close, day_open, day_high, day_low,
     )
 
-    # Percentile model
-    pct_bands = compute_percentile_prediction(
+    # Percentile model — static close-to-close (does not change throughout the day)
+    pct_bands = compute_static_percentile_prediction(pct_df, prev_close, train_dates)
+
+    # Time-aware percentile model (used for combined bands only)
+    time_aware_pct_bands = compute_percentile_prediction(
         pct_df, time_label, above, current_price, current_vol, train_dates, vol_scale,
         reversal_blend=reversal_blend,
         intraday_vol_factor=intraday_vol_factor,
@@ -312,7 +336,7 @@ def make_unified_prediction(
     )
 
     # Need at least one model
-    if pct_bands is None and stat_bands is None:
+    if pct_bands is None and time_aware_pct_bands is None and stat_bands is None:
         return None
 
     if pct_bands is None:
@@ -320,7 +344,9 @@ def make_unified_prediction(
     if stat_bands is None:
         stat_bands = {}
 
-    combined = combine_bands(pct_bands, stat_bands, current_price)
+    # Combined uses time-aware percentile (more adaptive) blended with statistical
+    combined_pct = time_aware_pct_bands if time_aware_pct_bands else pct_bands
+    combined = combine_bands(combined_pct, stat_bands, current_price)
 
     # Apply opening gap adjustment if enabled and early in trading day
     gap_adjustment_applied = False
@@ -333,8 +359,7 @@ def make_unified_prediction(
         # Convert current_time to hour (9.5 = 9:30 AM, etc.)
         hour = current_time.hour + current_time.minute / 60.0
 
-        # Adjust all band sets
-        pct_bands = adjust_unified_bands_for_gap(pct_bands, current_price, prev_close, hour)
+        # Adjust statistical and combined bands (not static percentile — it stays fixed)
         stat_bands = adjust_unified_bands_for_gap(stat_bands, current_price, prev_close, hour)
         combined = adjust_unified_bands_for_gap(combined, current_price, prev_close, hour)
 
@@ -344,6 +369,29 @@ def make_unified_prediction(
         if gap_analysis.is_significant:
             gap_adjustment_applied = True
             print(f"  Opening gap adjustment: {get_gap_summary(current_price, prev_close, hour)}")
+
+    # Apply late-day volatility buffer (2:30 PM onwards)
+    late_day_adjustment_applied = False
+    if hours_left <= 1.5:  # 1.5 hours or less to close (2:30 PM onwards)
+        from scripts.close_predictor.late_day_buffer import (
+            adjust_bands_for_late_day,
+            get_late_day_summary,
+            get_late_day_multiplier,
+        )
+
+        # Convert current_time to hour
+        hour = current_time.hour + current_time.minute / 60.0
+
+        # Get multiplier to check if adjustment will be applied
+        multiplier = get_late_day_multiplier(hour)
+
+        if multiplier > 1.0:
+            # Adjust statistical and combined bands (not static percentile — it stays fixed)
+            stat_bands = adjust_bands_for_late_day(stat_bands, hour)
+            combined = adjust_bands_for_late_day(combined, hour)
+
+            late_day_adjustment_applied = True
+            print(f"  Late-day buffer: {get_late_day_summary(hour)}")
 
     confidence = stat_pred.confidence.value if stat_pred else None
     risk_level = stat_pred.recommended_risk_level if stat_pred else None

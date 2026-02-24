@@ -533,6 +533,10 @@ class ClosePrediction:
     model_type: str = 'statistical'  # 'statistical', 'lightgbm', 'xgboost', 'ensemble'
     match_type: str = 'UNKNOWN'      # 'EXACT', 'FALLBACK', 'ML'
 
+    # Full percentile distribution (optional - for better band mapping)
+    # If provided, bands.py will use these directly instead of extrapolating
+    percentile_moves: Optional[Dict[float, float]] = None  # {percentile: move_pct}
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -992,7 +996,9 @@ class StatisticalClosePredictor:
         self.min_samples = min_samples
 
         # Percentiles to compute
-        self.percentile_levels = [5, 10, 25, 50, 75, 90, 95]
+        # Include percentiles needed for P95/P97/P98/P99/P100 bands
+        # P95 band uses 2.5-97.5, P97 uses 1.5-98.5, P98 uses 1-99, P99 uses 0.5-99.5, P100 uses 0-100
+        self.percentile_levels = [0, 0.5, 1, 1.5, 2, 2.5, 3, 5, 10, 25, 50, 75, 90, 95, 97, 97.5, 98, 98.5, 99, 99.5, 100]
 
     def fit(self, df: pd.DataFrame) -> 'StatisticalClosePredictor':
         """
@@ -1550,6 +1556,7 @@ class StatisticalClosePredictor:
             put_safe_below_pct=round(((current_price - put_safe) / current_price) * 100, 3),
             call_safe_above_pct=round(((call_safe - current_price) / current_price) * 100, 3),
             prediction_method="statistical",
+            percentile_moves=percentiles,  # Pass full percentile distribution for accurate band mapping
         )
 
     def _calculate_confidence(
@@ -1737,7 +1744,7 @@ class StatisticalClosePredictor:
         self.sample_counts = data['sample_counts']
         self.is_fitted = data['is_fitted']
         self.min_samples = data.get('min_samples', 10)
-        self.percentile_levels = data.get('percentile_levels', [5, 10, 25, 50, 75, 90, 95])
+        self.percentile_levels = data.get('percentile_levels', [0, 0.5, 1, 1.5, 2, 2.5, 3, 5, 10, 25, 50, 75, 90, 95, 97, 97.5, 98, 98.5, 99, 99.5, 100])
 
         return self
 
