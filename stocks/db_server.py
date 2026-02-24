@@ -5225,7 +5225,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
         let bandChart = null;
         let bandHistoryData = null;  // stored so chart can re-render on toggle
         // Chart overlay toggles: combined always shown, others togglable
-        let chartOverlays = { combined: true, statistical: false, percentile: false };
+        let chartOverlays = {{ combined: true, statistical: false, percentile: false }};
         let autoRefreshInterval = null;
         let wsConnection = null;
         let currentCacheTimestamp = null;  // Track current data timestamp for smart polling
