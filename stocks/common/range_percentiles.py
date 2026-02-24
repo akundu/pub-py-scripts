@@ -24,13 +24,47 @@ try:
 except ImportError:
     DB_AVAILABLE = False
 
-# Constants
-CALENDAR_DAYS_6M = 182
+# Constants — default 120 trading days
+DEFAULT_LOOKBACK = 120  # trading days (~6 months)
 DEFAULT_PERCENTILES = [75, 90, 95, 98, 99, 100]
 MIN_DAYS_DEFAULT = 30
 MIN_DIRECTION_DAYS_DEFAULT = 5
 DEFAULT_WINDOW = 0  # window=0 represents today (0DTE)
-DEFAULT_MULTI_WINDOWS = [0, 2, 4, 9, 14, 19]  # 0DTE, 2DTE, 4DTE, 9DTE, 14DTE, 19DTE
+
+
+def compute_default_windows() -> list:
+    """Compute smart default windows based on current day of week.
+
+    Returns: [0] + 1-day increments to this Friday, 5, day increments
+    to next Friday, then 10 and 20. All values are trading days.
+    """
+    now = datetime.now(timezone.utc)
+    today_weekday = now.weekday()  # 0=Mon, 4=Fri
+
+    days = {0}  # Always include 0DTE
+
+    # Trading days to this Friday (1-day increments)
+    trading_days_to_friday = max(0, 4 - today_weekday)
+    for d in range(1, trading_days_to_friday + 1):
+        days.add(d)
+
+    # Always include 5
+    days.add(5)
+
+    # Trading days to next Friday
+    if trading_days_to_friday > 0:
+        next_friday_trading = trading_days_to_friday + 5
+    else:
+        next_friday_trading = 5
+    # Day increments from this Friday+1 to next Friday
+    for d in range(trading_days_to_friday + 1, next_friday_trading + 1):
+        days.add(d)
+
+    # Add milestones
+    days.add(10)
+    days.add(20)
+
+    return sorted(days)
 
 
 def parse_windows_arg(windows_arg: str | list[int]) -> list[int]:
@@ -49,8 +83,8 @@ def parse_windows_arg(windows_arg: str | list[int]) -> list[int]:
         window=N → N days ahead
 
     Examples:
-        >>> parse_windows_arg('*')
-        [0, 2, 4, 9, 14, 19]
+        >>> parse_windows_arg('*')  # Dynamic based on weekday
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20]
         >>> parse_windows_arg('0,1,5')
         [0, 1, 5]
         >>> parse_windows_arg([5, 1, 0])
@@ -60,7 +94,7 @@ def parse_windows_arg(windows_arg: str | list[int]) -> list[int]:
         ValueError: If any window value is less than 0
     """
     if windows_arg == '*':
-        return DEFAULT_MULTI_WINDOWS.copy()
+        return compute_default_windows()
 
     if isinstance(windows_arg, str):
         windows = sorted(set([int(w.strip()) for w in windows_arg.split(',') if w.strip()]))
@@ -77,7 +111,7 @@ def parse_windows_arg(windows_arg: str | list[int]) -> list[int]:
 
 async def compute_range_percentiles(
     ticker: str,
-    days: int = CALENDAR_DAYS_6M,
+    lookback: int = DEFAULT_LOOKBACK,
     percentiles: list[int] = None,
     min_days: int = MIN_DAYS_DEFAULT,
     min_direction_days: int = MIN_DIRECTION_DAYS_DEFAULT,
@@ -93,7 +127,7 @@ async def compute_range_percentiles(
 
     Args:
         ticker: Ticker symbol (e.g., 'SPX', 'I:NDX')
-        days: Calendar days to look back
+        lookback: Trading days to look back
         percentiles: List of percentiles to compute (default: [75, 90, 95, 98, 99, 100])
         min_days: Minimum days required to compute percentiles
         min_direction_days: Minimum days in each up/down subset to show that set
@@ -107,7 +141,7 @@ async def compute_range_percentiles(
     Returns:
         Dict with percentile data including:
         - ticker, db_ticker, last_trading_day, previous_close
-        - lookback_calendar_days, lookback_days, window
+        - lookback_trading_days, lookback_days, window
         - percentiles, when_up, when_down
         - when_up_day_count, when_down_day_count
     """
@@ -130,7 +164,9 @@ async def compute_range_percentiles(
 
     try:
         end_date = datetime.now(timezone.utc).date()
-        start_date = end_date - timedelta(days=days)
+        # Convert trading days to calendar days (factor of 7/5 + buffer for holidays)
+        calendar_days = int(lookback * 7 / 5) + 10
+        start_date = end_date - timedelta(days=calendar_days)
         start_str = start_date.isoformat()
         end_str = end_date.isoformat()
 
@@ -150,6 +186,10 @@ async def compute_range_percentiles(
         df = df.sort_index()
         if hasattr(df.index, "tz") and df.index.tz is not None:
             df.index = df.index.tz_localize(None)
+
+        # Trim to exactly `lookback` trading days
+        if len(df) > lookback:
+            df = df.iloc[-lookback:]
 
         min_required = window + 1
         if len(df) < min_required:
@@ -222,7 +262,7 @@ async def compute_range_percentiles(
             "last_trading_day": last_date_str,
             "previous_close": previous_close,
             "close_override": override_close is not None,
-            "lookback_calendar_days": days,
+            "lookback_trading_days": lookback,
             "lookback_days": len(df),
             "window": window,
             "percentiles": percentiles,
@@ -241,7 +281,7 @@ async def compute_range_percentiles(
 
 async def compute_range_percentiles_multi(
     ticker_specs: list[tuple[str, float | None]],
-    days: int = CALENDAR_DAYS_6M,
+    lookback: int = DEFAULT_LOOKBACK,
     percentiles: list[int] = None,
     min_days: int = MIN_DAYS_DEFAULT,
     min_direction_days: int = MIN_DIRECTION_DAYS_DEFAULT,
@@ -268,7 +308,7 @@ async def compute_range_percentiles_multi(
     for ticker, override_close in ticker_specs:
         out = await compute_range_percentiles(
             ticker=ticker,
-            days=days,
+            lookback=lookback,
             percentiles=percentiles,
             min_days=min_days,
             min_direction_days=min_direction_days,
@@ -337,7 +377,7 @@ def _slot_minutes(hhmm: str) -> int:
 
 async def compute_hourly_moves_to_close(
     ticker: str,
-    days: int = CALENDAR_DAYS_6M,
+    lookback: int = DEFAULT_LOOKBACK,
     percentiles: list[int] = None,
     min_days: int = MIN_DAYS_DEFAULT,
     min_direction_days: int = MIN_DIRECTION_DAYS_DEFAULT,
@@ -385,7 +425,9 @@ async def compute_hourly_moves_to_close(
 
     # --- Load CSV files within lookback window ---
     end_date = datetime.now(timezone.utc).date()
-    start_date = end_date - timedelta(days=days)
+    # Convert trading days to calendar days (factor of 7/5 + buffer for holidays)
+    calendar_days = int(lookback * 7 / 5) + 10
+    start_date = end_date - timedelta(days=calendar_days)
 
     pattern = str(csv_dir / f"{polygon_symbol}_equities_*.csv")
     csv_files = sorted(_glob.glob(pattern))
@@ -625,7 +667,7 @@ async def compute_hourly_moves_to_close(
     return {
         "ticker": display_ticker,
         "previous_close": previous_close,
-        "lookback_calendar_days": days,
+        "lookback_trading_days": lookback,
         "percentiles": percentiles,
         "slots": slots_data,
         "slots_10min": slots_10min,
@@ -637,7 +679,7 @@ async def compute_hourly_moves_to_close(
 async def compute_range_percentiles_multi_window(
     ticker: str,
     windows: list[int] | str,
-    days: int = CALENDAR_DAYS_6M,
+    lookback: int = DEFAULT_LOOKBACK,
     percentiles: list[int] = None,
     min_days: int = MIN_DAYS_DEFAULT,
     min_direction_days: int = MIN_DIRECTION_DAYS_DEFAULT,
@@ -653,7 +695,7 @@ async def compute_range_percentiles_multi_window(
     Args:
         ticker: Ticker symbol (e.g., 'SPX', 'I:NDX')
         windows: List of window sizes, or '*' for default [1,3,5,10,15,20]
-        days: Calendar days to look back
+        lookback: Trading days to look back
         percentiles: List of percentiles to compute (default: [75, 90, 95, 98, 99, 100])
         min_days: Minimum days required to compute percentiles
         min_direction_days: Minimum days in each up/down subset to show that set
@@ -670,7 +712,7 @@ async def compute_range_percentiles_multi_window(
             "metadata": {
                 "last_trading_day": "2026-02-15",
                 "previous_close": 21500.0,
-                "lookback_calendar_days": 182,
+                "lookback_trading_days": 120,
                 "percentiles": [75, 90, 95, 98, 99, 100],
                 "window_list": [1, 3, 5, 10, 15, 20],
                 "skipped_windows": [...]  # windows with insufficient data
@@ -709,7 +751,9 @@ async def compute_range_percentiles_multi_window(
 
     try:
         end_date = datetime.now(timezone.utc).date()
-        start_date = end_date - timedelta(days=days)
+        # Convert trading days to calendar days (factor of 7/5 + buffer for holidays)
+        calendar_days = int(lookback * 7 / 5) + 10
+        start_date = end_date - timedelta(days=calendar_days)
         start_str = start_date.isoformat()
         end_str = end_date.isoformat()
 
@@ -730,6 +774,10 @@ async def compute_range_percentiles_multi_window(
         df = df.sort_index()
         if hasattr(df.index, "tz") and df.index.tz is not None:
             df.index = df.index.tz_localize(None)
+
+        # Trim to exactly `lookback` trading days
+        if len(df) > lookback:
+            df = df.iloc[-lookback:]
 
         # Get metadata from last row
         last_row = df.iloc[-1]
@@ -830,7 +878,7 @@ async def compute_range_percentiles_multi_window(
                 "last_trading_day": last_date_str,
                 "previous_close": previous_close,
                 "close_override": override_close is not None,
-                "lookback_calendar_days": days,
+                "lookback_trading_days": lookback,
                 "lookback_days": len(df),
                 "percentiles": percentiles,
                 "window_list": [w for w in window_list if w not in skipped_windows],
@@ -849,7 +897,7 @@ async def compute_range_percentiles_multi_window(
 async def compute_range_percentiles_multi_window_batch(
     ticker_specs: list[tuple[str, float | None]],
     windows: list[int] | str,
-    days: int = CALENDAR_DAYS_6M,
+    lookback: int = DEFAULT_LOOKBACK,
     percentiles: list[int] = None,
     min_days: int = MIN_DAYS_DEFAULT,
     min_direction_days: int = MIN_DIRECTION_DAYS_DEFAULT,
@@ -877,7 +925,7 @@ async def compute_range_percentiles_multi_window_batch(
         out = await compute_range_percentiles_multi_window(
             ticker=ticker,
             windows=windows,
-            days=days,
+            lookback=lookback,
             percentiles=percentiles,
             min_days=min_days,
             min_direction_days=min_direction_days,

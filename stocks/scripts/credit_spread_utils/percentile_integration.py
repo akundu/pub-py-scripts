@@ -34,17 +34,17 @@ class PercentileSpreadIntegrator:
 
     def __init__(
         self,
-        percentile_lookback_days: int = 182,
+        lookback: int = 120,
         db_config: Optional[str] = None
     ):
         """
         Initialize integrator.
 
         Args:
-            percentile_lookback_days: Days to look back for percentile calculation
+            lookback: Trading days to look back for percentile calculation
             db_config: QuestDB connection string
         """
-        self.percentile_selector = PercentileStrikeSelector(percentile_lookback_days)
+        self.percentile_selector = PercentileStrikeSelector(lookback)
         self.momentum_detector = MomentumDetector()
         self.entry_timing = EntryTimingOptimizer()
         self.exit_manager = ExitStrategyManager()

@@ -29,14 +29,14 @@ Strategy = Literal['neutral', 'with_flow', 'counter_flow']
 class PercentileStrikeSelector:
     """Convert percentile boundaries into strike prices."""
 
-    def __init__(self, percentile_lookback_days: int = 182):
+    def __init__(self, lookback: int = 120):
         """
         Initialize percentile strike selector.
 
         Args:
-            percentile_lookback_days: Days to look back for percentile calculation (default: 182 = ~6 months)
+            lookback: Trading days to look back for percentile calculation (default: 120 ~ 6 months)
         """
-        self.percentile_lookback_days = percentile_lookback_days
+        self.lookback = lookback
         self._cache: Dict[tuple, Dict] = {}  # Cache percentile data
 
     def dte_to_window(self, dte: int) -> int:
@@ -102,7 +102,7 @@ class PercentileStrikeSelector:
         result = await compute_range_percentiles_multi_window(
             ticker=ticker,
             windows=[window],
-            days=self.percentile_lookback_days,
+            lookback=self.lookback,
             percentiles=percentiles,
             db_config=db_config,
             enable_cache=enable_cache,

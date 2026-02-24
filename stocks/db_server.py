@@ -5120,7 +5120,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
 
                 <div class="control-group">
                     <label for="lookbackInput" style="color:var(--text-secondary);font-size:13px;">Training days:</label>
-                    <input type="number" id="lookbackInput" min="30" max="1260" value="250"
+                    <input type="number" id="lookbackInput" min="30" max="1260" value="120"
                         style="width:60px;padding:3px 6px;border-radius:4px;border:1px solid #444;background:#1a1f2e;color:#e6edf3;font-size:13px;"
                         onchange="onLookbackChange()">
                 </div>
@@ -5207,7 +5207,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
         // State
         let currentTicker = '{ticker}';
         let currentDays = 0;  // 0 = today, any positive int = N days ahead
-        let currentLookback = 250;  // training days (30-1260)
+        let currentLookback = 120;  // training days (30-1260)
         let currentStrategy = 'combined';
         let predictionData = null;
         let bandChart = null;
@@ -9512,10 +9512,10 @@ async def handle_lazy_load_today_prediction(request: web.Request) -> web.Respons
     force_refresh = request.query.get('cache', 'true').lower() == 'false'
 
     try:
-        lookback = int(request.query.get('lookback', '250'))
+        lookback = int(request.query.get('lookback', '120'))
         lookback = max(30, min(1260, lookback))
     except (ValueError, TypeError):
-        lookback = 250
+        lookback = 120
 
     # Fast path: serve from cache immediately to avoid expensive recomputation
     cache_key = f"today_{ticker}_{lookback}"
@@ -9562,10 +9562,10 @@ async def handle_lazy_load_future_prediction(request: web.Request) -> web.Respon
     force_refresh = request.query.get('cache', 'true').lower() == 'false'
 
     try:
-        lookback = int(request.query.get('lookback', '250'))
+        lookback = int(request.query.get('lookback', '120'))
         lookback = max(30, min(1260, lookback))
     except (ValueError, TypeError):
-        lookback = 250
+        lookback = 120
 
     # Fast path: serve from cache immediately (regardless of age) to avoid
     # expensive recomputation. Prewarm cron handles keeping cache fresh.
@@ -9726,10 +9726,10 @@ async def handle_lazy_load_historical_prediction(request: web.Request) -> web.Re
         return web.json_response({'error': 'Prediction cache not initialized'}, status=500)
 
     try:
-        lookback = int(request.query.get('lookback', '250'))
+        lookback = int(request.query.get('lookback', '120'))
         lookback = max(30, min(1260, lookback))
     except (ValueError, TypeError):
-        lookback = 250
+        lookback = 120
 
     if fetch_historical_prediction is None:
         return web.json_response({'error': 'Historical predictions not available'}, status=500)
@@ -14099,7 +14099,7 @@ async def handle_range_percentiles_api(request: web.Request) -> web.Response:
     Query params:
         ?tickers=NDX,SPX,AAPL (comma-separated, default: NDX)
         ?window=5 (trading days window, default: 1)
-        ?days=182 (calendar days lookback, default: 182)
+        ?lookback=120 (trading days lookback, default: 120)
         ?percentiles=75,90,95,98,99,100 (comma-separated, default: 75,90,95,98,99,100)
         ?min_days=30 (minimum days required, default: 30)
         ?min_direction_days=5 (minimum days per direction, default: 5)
@@ -14109,7 +14109,7 @@ async def handle_range_percentiles_api(request: web.Request) -> web.Response:
     try:
         from common.range_percentiles import (
             compute_range_percentiles_multi,
-            CALENDAR_DAYS_6M,
+            DEFAULT_LOOKBACK,
             DEFAULT_PERCENTILES,
             MIN_DAYS_DEFAULT,
             MIN_DIRECTION_DAYS_DEFAULT,
@@ -14141,10 +14141,10 @@ async def handle_range_percentiles_api(request: web.Request) -> web.Response:
         )
 
     try:
-        days = int(request.query.get('days', CALENDAR_DAYS_6M))
+        lookback = int(request.query.get('lookback', DEFAULT_LOOKBACK))
     except ValueError:
         return web.json_response(
-            {"error": "Invalid days parameter"},
+            {"error": "Invalid lookback parameter"},
             status=400
         )
 
@@ -14192,7 +14192,7 @@ async def handle_range_percentiles_api(request: web.Request) -> web.Response:
     try:
         results = await compute_range_percentiles_multi(
             ticker_specs=ticker_specs,
-            days=days,
+            lookback=lookback,
             percentiles=percentiles,
             min_days=min_days,
             min_direction_days=min_direction_days,
@@ -14394,7 +14394,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             compute_range_percentiles_multi_window_batch,
             compute_hourly_moves_to_close,
             parse_windows_arg,
-            CALENDAR_DAYS_6M,
+            DEFAULT_LOOKBACK,
             DEFAULT_PERCENTILES,
             MIN_DAYS_DEFAULT,
             MIN_DIRECTION_DAYS_DEFAULT,
@@ -14430,9 +14430,9 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
 
         # Parse other common parameters
         try:
-            days = int(request.query.get('days', CALENDAR_DAYS_6M))
+            lookback = int(request.query.get('lookback', DEFAULT_LOOKBACK))
         except ValueError:
-            days = CALENDAR_DAYS_6M
+            lookback = DEFAULT_LOOKBACK
 
         # Parse percentiles
         percentiles_str = request.query.get('percentiles', '')
@@ -14475,7 +14475,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             results = await compute_range_percentiles_multi_window_batch(
                 ticker_specs=ticker_specs,
                 windows=windows,
-                days=days,
+                lookback=lookback,
                 percentiles=percentiles,
                 min_days=min_days,
                 min_direction_days=min_direction_days,
@@ -14487,7 +14487,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
 
             html = format_multi_window_as_html(
                 results,
-                params={"tickers": tickers, "windows": windows, "days": days},
+                params={"tickers": tickers, "windows": windows, "lookback": lookback},
                 multi_ticker=len(tickers) > 1
             )
 
@@ -14499,7 +14499,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                     try:
                         hourly_data = await compute_hourly_moves_to_close(
                             ticker=ticker_name,
-                            days=days,
+                            lookback=lookback,
                             percentiles=percentiles,
                             min_days=min_days,
                             min_direction_days=min_direction_days,
@@ -14595,9 +14595,9 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
         )
 
     try:
-        days = int(request.query.get('days', CALENDAR_DAYS_6M))
+        lookback = int(request.query.get('lookback', DEFAULT_LOOKBACK))
     except ValueError:
-        days = CALENDAR_DAYS_6M
+        lookback = DEFAULT_LOOKBACK
 
     # Parse percentiles
     percentiles_str = request.query.get('percentiles', '')
@@ -14636,7 +14636,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
     try:
         results = await compute_range_percentiles_multi(
             ticker_specs=ticker_specs,
-            days=days,
+            lookback=lookback,
             percentiles=percentiles,
             min_days=min_days,
             min_direction_days=min_direction_days,
@@ -14652,7 +14652,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             params={
                 "tickers": tickers,
                 "window": window,
-                "days": days,
+                "lookback": lookback,
                 "percentiles": percentiles,
             }
         )
@@ -14664,7 +14664,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                 try:
                     hourly_data = await compute_hourly_moves_to_close(
                         ticker=ticker_name,
-                        days=days,
+                        lookback=lookback,
                         percentiles=percentiles,
                         min_days=min_days,
                         min_direction_days=min_direction_days,
@@ -14730,7 +14730,7 @@ async def handle_range_percentiles_multi_window_api(request: web.Request) -> web
     Query params:
         ?ticker=NDX (single ticker only)
         ?windows=* or ?windows=1,5,10,20
-        ?days=182
+        ?lookback=120
         ?percentiles=75,90,95,98,99,100
         ?min_days=30
         ?min_direction_days=5
@@ -14741,7 +14741,7 @@ async def handle_range_percentiles_multi_window_api(request: web.Request) -> web
         from common.range_percentiles import (
             compute_range_percentiles_multi_window,
             parse_windows_arg,
-            CALENDAR_DAYS_6M,
+            DEFAULT_LOOKBACK,
             DEFAULT_PERCENTILES,
             MIN_DAYS_DEFAULT,
             MIN_DIRECTION_DAYS_DEFAULT,
@@ -14768,9 +14768,9 @@ async def handle_range_percentiles_multi_window_api(request: web.Request) -> web
 
     # Parse other parameters
     try:
-        days = int(request.query.get('days', CALENDAR_DAYS_6M))
+        lookback = int(request.query.get('lookback', DEFAULT_LOOKBACK))
     except ValueError:
-        days = CALENDAR_DAYS_6M
+        lookback = DEFAULT_LOOKBACK
 
     # Parse percentiles
     percentiles_str = request.query.get('percentiles', '')
@@ -14809,7 +14809,7 @@ async def handle_range_percentiles_multi_window_api(request: web.Request) -> web
         result = await compute_range_percentiles_multi_window(
             ticker=ticker,
             windows=windows,
-            days=days,
+            lookback=lookback,
             percentiles=percentiles,
             min_days=min_days,
             min_direction_days=min_direction_days,

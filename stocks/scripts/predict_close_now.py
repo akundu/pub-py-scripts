@@ -233,7 +233,7 @@ def clear_old_caches(ticker: str, current_training_date: str, lookback: int):
         print(f"⚠️  Failed to clear old caches: {e}")
 
 
-async def predict_future_close(ticker: str, days_ahead: int, current_price: float, lookback: int = 250):
+async def predict_future_close(ticker: str, days_ahead: int, current_price: float, lookback: int = 120):
     """Predict close price N trading days in the future using historical patterns.
 
     Args:
@@ -438,6 +438,16 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
         print(f"❌ Not enough data. Need {lookback} days, have {len(all_dates)}")
         return None
 
+    # Get the previous close (last CSV close) as static reference for baseline bands
+    prev_close_for_baseline = None
+    if all_dates:
+        last_csv_df = load_csv_data(ticker, all_dates[-1])
+        if last_csv_df is not None and not last_csv_df.empty:
+            prev_close_for_baseline = last_csv_df.iloc[-1]['close']
+            print(f"✓ Previous close (last CSV): ${prev_close_for_baseline:,.2f} (date: {all_dates[-1]})")
+    if prev_close_for_baseline is None:
+        prev_close_for_baseline = current_price  # Fallback
+
     # Calculate N-day returns from historical data
     n_day_returns = []
     data_by_date = {}
@@ -482,8 +492,8 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
     # Compute target date
     target_date = get_nth_trading_day(date.today(), days_ahead)
 
-    # --- METHOD 1: Baseline (simple percentile) ---
-    baseline_bands = map_percentile_to_bands(n_day_returns_array, current_price)
+    # --- METHOD 1: Baseline (simple percentile) --- uses prev_close as static reference
+    baseline_bands = map_percentile_to_bands(n_day_returns_array, prev_close_for_baseline)
 
     # --- METHOD 2 & 4: Conditional + Ensemble Combined (requires market context) ---
     conditional_bands = {}
@@ -872,8 +882,8 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
                       f"(±{b.width_pts/2:>6,.0f} pts, ±{b.width_pct/2:>5.2f}%)")
         print()
 
-    # Get prev_close for context
-    prev_close = current_price
+    # Use last CSV close as prev_close (static reference)
+    prev_close = prev_close_for_baseline
 
     # Return UnifiedPrediction with Ensemble Combined as primary
     # Fall back to conditional, then baseline if ensemble_combined not available
@@ -973,7 +983,7 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
     return pred
 
 
-async def predict_close(ticker='NDX', lookback=250, force_retrain=False, similar_days_count=10, db_config=None, days_ahead=0, target_date=None, use_time_decay=True, use_intraday_vol=True):
+async def predict_close(ticker='NDX', lookback=120, force_retrain=False, similar_days_count=10, db_config=None, days_ahead=0, target_date=None, use_time_decay=True, use_intraday_vol=True):
     """Make a prediction for today's close (or future date) using LIVE QuestDB data.
 
     Args:
@@ -1346,6 +1356,9 @@ async def predict_close(ticker='NDX', lookback=250, force_retrain=False, similar
         return
 
     unique_dates = sorted(pct_df['date'].unique())
+    # Constrain percentile training to match lookback window
+    if len(unique_dates) > lookback:
+        unique_dates = unique_dates[-lookback:]
     pct_train_dates = set(unique_dates)
     train_dates_sorted = unique_dates
 
@@ -1767,8 +1780,8 @@ Output:
                         help='Predict close N trading days ahead (e.g., 5 for next Friday)')
     parser.add_argument('--target-date', type=str, metavar='YYYY-MM-DD',
                         help='Predict close for specific future date (e.g., 2026-02-20)')
-    parser.add_argument('--lookback', type=int, default=250, metavar='N',
-                        help='Number of historical trading days to use for training (default: 250, ~1 year). '
+    parser.add_argument('--lookback', type=int, default=120, metavar='N',
+                        help='Number of historical trading days to use for training (default: 120, ~6 months). '
                              'More days = more stable model but slower; fewer days = more recent-biased.')
     parser.add_argument('--db', type=str, default=None, metavar='CONNECTION_STRING',
                         help='QuestDB connection string. Default: QUEST_DB_STRING, QUESTDB_CONNECTION_STRING, or QUESTDB_URL env.')

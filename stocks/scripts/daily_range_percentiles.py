@@ -10,7 +10,7 @@ Uses QuestDB daily data; supports I:SPX, I:NDX, SPX, AAPL, etc.
 Usage:
     python scripts/daily_range_percentiles.py --ticker SPX
     python scripts/daily_range_percentiles.py --ticker I:NDX:25000 SPX:5000   # manual close per ticker
-    python scripts/daily_range_percentiles.py --ticker I:NDX SPX AAPL --days 63
+    python scripts/daily_range_percentiles.py --ticker I:NDX SPX AAPL --lookback 63
     python scripts/daily_range_percentiles.py --ticker SPX --window 5  # 5-day window
 """
 
@@ -30,7 +30,7 @@ from common.range_percentiles import (
     compute_range_percentiles_multi,
     compute_range_percentiles_multi_window_batch,
     parse_windows_arg,
-    CALENDAR_DAYS_6M,
+    DEFAULT_LOOKBACK,
     DEFAULT_PERCENTILES,
     MIN_DAYS_DEFAULT,
     MIN_DIRECTION_DAYS_DEFAULT,
@@ -86,10 +86,10 @@ def parse_args() -> argparse.Namespace:
         help="Ticker(s), optionally with manual close: SYMBOL or SYMBOL:CLOSE (e.g. SPX I:NDX:25000 SPX:5000).",
     )
     parser.add_argument(
-        "--days",
+        "--lookback",
         type=int,
-        default=CALENDAR_DAYS_6M,
-        help=f"Number of calendar days to look back (default: {CALENDAR_DAYS_6M} ~ 6 months).",
+        default=DEFAULT_LOOKBACK,
+        help=f"Number of trading days to look back (default: {DEFAULT_LOOKBACK} ~ 6 months).",
     )
     parser.add_argument(
         "--window",
@@ -187,7 +187,7 @@ def main() -> int:
                 compute_range_percentiles_multi_window_batch(
                     ticker_specs=ticker_specs,
                     windows=windows,
-                    days=args.days,
+                    lookback=args.lookback,
                     percentiles=args.percentiles,
                     min_days=args.min_days,
                     min_direction_days=args.min_direction_days,
@@ -211,7 +211,7 @@ def main() -> int:
             results = asyncio.run(
                 compute_range_percentiles_multi(
                     ticker_specs=ticker_specs,
-                    days=args.days,
+                    lookback=args.lookback,
                     percentiles=args.percentiles,
                     min_days=args.min_days,
                     min_direction_days=args.min_direction_days,

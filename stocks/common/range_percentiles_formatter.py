@@ -16,7 +16,7 @@ def format_as_text_table(out: dict) -> str:
     display_ticker = out["ticker"]
     last_date_str = out["last_trading_day"]
     previous_close = out["previous_close"]
-    days = out["lookback_calendar_days"]
+    days = out["lookback_trading_days"]
     n_data = out["lookback_days"]
     percentiles = out["percentiles"]
     when_up = out.get("when_up")
@@ -37,7 +37,7 @@ def format_as_text_table(out: dict) -> str:
     close_note = " (manual)" if out.get("close_override") else ""
     window_note = f"  window: {window}d" if window > 1 else ""
     lines = [
-        f"{display_ticker}  last: {last_date_str}  close: {prev_close_short}{close_note}  ({days} calendar days, {n_data} trading days){window_note}",
+        f"{display_ticker}  last: {last_date_str}  close: {prev_close_short}{close_note}  ({days} trading days, {n_data} actual){window_note}",
         "",
     ]
 
@@ -80,7 +80,7 @@ def format_multi_window_as_text_table(out: dict) -> str:
     metadata = out["metadata"]
     last_date_str = metadata["last_trading_day"]
     previous_close = metadata["previous_close"]
-    days = metadata["lookback_calendar_days"]
+    days = metadata["lookback_trading_days"]
     n_data = metadata.get("lookback_days", "N/A")
     percentiles = metadata["percentiles"]
     window_list = metadata["window_list"]
@@ -95,7 +95,7 @@ def format_multi_window_as_text_table(out: dict) -> str:
     close_note = " (manual)" if metadata.get("close_override") else ""
 
     lines = [
-        f"{display_ticker}  last: {last_date_str}  close: {prev_close_short}{close_note}  ({days} calendar days, {n_data} trading days)",
+        f"{display_ticker}  last: {last_date_str}  close: {prev_close_short}{close_note}  ({days} trading days, {n_data} actual)",
         f"Multi-window analysis: {len(window_list)} windows",
         "",
     ]
@@ -211,7 +211,7 @@ def format_as_html(results: list[dict], params: dict = None) -> str:
 
     params = params or {}
     window = results[0].get("window", 1)
-    days = results[0].get("lookback_calendar_days", "N/A")
+    days = results[0].get("lookback_trading_days", "N/A")
     n_data = results[0].get("lookback_days", "N/A")
 
     # Build HTML
@@ -495,7 +495,7 @@ def format_as_html(results: list[dict], params: dict = None) -> str:
 
     today_str = _date.today().strftime('%Y-%m-%d')
     html_parts.append(f'            <span><strong>Window:</strong> {window} trading day{"s" if window != 1 else ""}</span>')
-    html_parts.append(f'            <span><strong>Lookback:</strong> {days} calendar days ({n_data} trading days)</span>')
+    html_parts.append(f'            <span><strong>Lookback:</strong> {days} trading days ({n_data} actual)</span>')
     html_parts.append(f'            <span><strong>Updated:</strong> {today_str}</span>')
 
     if params.get("tickers"):
@@ -991,7 +991,7 @@ def format_multi_window_as_html(result: dict | list[dict], params: dict = None, 
 
     # Get common metadata from first result
     first_result = results[0]
-    days = first_result["metadata"]["lookback_calendar_days"]
+    days = first_result["metadata"]["lookback_trading_days"]
     n_data = first_result["metadata"].get("lookback_days", "N/A")
     window_list = first_result["metadata"]["window_list"]
     percentiles = first_result["metadata"]["percentiles"]
@@ -1323,7 +1323,7 @@ def format_multi_window_as_html(result: dict | list[dict], params: dict = None, 
         <h1>📊 Multi-Window Range Percentiles</h1>
         <div class="params">
             <span><strong>Windows:</strong> """ + ", ".join([f"{w}d" for w in window_list]) + """</span>
-            <span><strong>Lookback:</strong> """ + str(days) + """ calendar days (""" + str(n_data) + """ trading days)</span>
+            <span><strong>Lookback:</strong> """ + str(days) + """ trading days (""" + str(n_data) + """ actual)</span>
             <span><strong>Updated:</strong> """ + _date.today().strftime('%Y-%m-%d') + """</span>
         </div>
     </div>
