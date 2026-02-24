@@ -286,6 +286,7 @@ def make_unified_prediction(
     vol_scale: bool = True,
     data_source: str = "csv",
     intraday_vol_factor: float = 1.0,
+    use_gap_adjustment: bool = True,
 ) -> Optional[UnifiedPrediction]:
     """Produce a unified prediction combining both models."""
     above = current_price >= prev_close
@@ -320,6 +321,29 @@ def make_unified_prediction(
         stat_bands = {}
 
     combined = combine_bands(pct_bands, stat_bands, current_price)
+
+    # Apply opening gap adjustment if enabled and early in trading day
+    gap_adjustment_applied = False
+    if use_gap_adjustment and hours_left >= 4.0:  # Only in first ~2.5 hours
+        from scripts.close_predictor.opening_gap_model import (
+            adjust_unified_bands_for_gap,
+            get_gap_summary,
+        )
+
+        # Convert current_time to hour (9.5 = 9:30 AM, etc.)
+        hour = current_time.hour + current_time.minute / 60.0
+
+        # Adjust all band sets
+        pct_bands = adjust_unified_bands_for_gap(pct_bands, current_price, prev_close, hour)
+        stat_bands = adjust_unified_bands_for_gap(stat_bands, current_price, prev_close, hour)
+        combined = adjust_unified_bands_for_gap(combined, current_price, prev_close, hour)
+
+        # Check if adjustment was actually applied (gap is significant)
+        from scripts.close_predictor.opening_gap_model import detect_opening_gap
+        gap_analysis = detect_opening_gap(current_price, prev_close)
+        if gap_analysis.is_significant:
+            gap_adjustment_applied = True
+            print(f"  Opening gap adjustment: {get_gap_summary(current_price, prev_close, hour)}")
 
     confidence = stat_pred.confidence.value if stat_pred else None
     risk_level = stat_pred.recommended_risk_level if stat_pred else None
