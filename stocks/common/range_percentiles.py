@@ -191,14 +191,17 @@ async def compute_range_percentiles(
         if len(df) > lookback:
             df = df.iloc[-lookback:]
 
-        min_required = window + 1
+        # Window must be >= 1 for close-to-close returns (shift(0) is meaningless)
+        calc_window = max(window, 1)
+
+        min_required = calc_window + 1
         if len(df) < min_required:
             raise ValueError(
                 f"Need at least {min_required} days of data for window={window}; got {len(df)}. "
                 f"Check ticker and date range."
             )
 
-        prev_close_series = df["close"].shift(window)
+        prev_close_series = df["close"].shift(calc_window)
         valid = prev_close_series.notna() & df["close"].notna()
         df = df.loc[valid]
         prev_close_series = prev_close_series.loc[df.index]
@@ -815,9 +818,13 @@ async def compute_range_percentiles_multi_window(
         skipped_windows = []
 
         for window in window_list:
-            # For window=0 (same-day/0DTE), use 1-day moves as minimum meaningful period
-            # (can't have 0-day historical moves - need at least 1 trading day)
-            calc_window = max(window, 1)
+            # Window=0 (0DTE) has no meaningful close-to-close return;
+            # 0DTE is handled by the hourly moves-to-close section instead.
+            if window == 0:
+                skipped_windows.append(window)
+                continue
+
+            calc_window = window
 
             # Check if we have enough data for this window
             min_required = calc_window + 1

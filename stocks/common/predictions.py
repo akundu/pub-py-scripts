@@ -727,7 +727,7 @@ def _serialize_unified_prediction(pred: Any) -> dict:
 # Data Fetching Functions
 # ============================================================================
 
-async def fetch_today_prediction(ticker: str, cache: PredictionCache, force_refresh: bool = False, history: Optional[PredictionHistory] = None, lookback: int = 250):
+async def fetch_today_prediction(ticker: str, cache: PredictionCache, force_refresh: bool = False, history: Optional[PredictionHistory] = None, lookback: int = 120):
     """Fetch today's prediction, using cache if available and not stale.
 
     Cache TTL:
@@ -810,7 +810,7 @@ async def fetch_today_prediction(ticker: str, cache: PredictionCache, force_refr
         return {'error': str(e)}
 
 
-async def fetch_future_prediction(ticker: str, days_ahead: int, cache: PredictionCache, force_refresh: bool = False, lookback: int = 250):
+async def fetch_future_prediction(ticker: str, days_ahead: int, cache: PredictionCache, force_refresh: bool = False, lookback: int = 120):
     """Fetch future prediction for N days ahead, using cache if available."""
     if not PREDICTIONS_AVAILABLE:
         return {'error': 'Predictions module not available'}
@@ -1181,7 +1181,7 @@ def _compute_historical_predictions_sync(ticker: str, date_str: str, lookback: i
 
 
 async def fetch_historical_prediction(
-    ticker: str, date_str: str, cache: 'PredictionCache', lookback: int = 250
+    ticker: str, date_str: str, cache: 'PredictionCache', lookback: int = 120
 ) -> dict:
     """Fetch historical prediction for a past trading day.
 
