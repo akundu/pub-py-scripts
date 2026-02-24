@@ -818,13 +818,8 @@ async def compute_range_percentiles_multi_window(
         skipped_windows = []
 
         for window in window_list:
-            # Window=0 (0DTE) has no meaningful close-to-close return;
-            # 0DTE is handled by the hourly moves-to-close section instead.
-            if window == 0:
-                skipped_windows.append(window)
-                continue
-
-            calc_window = window
+            # Window=0 (0DTE): use 1-day returns (prev close → today's close)
+            calc_window = max(window, 1)
 
             # Check if we have enough data for this window
             min_required = calc_window + 1

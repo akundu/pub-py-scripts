@@ -5163,6 +5163,18 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                     <button class="strategy-btn" onclick="switchStrategy('percentile')">Percentile Model</button>
                     <button class="strategy-btn" onclick="switchStrategy('statistical')">LightGBM Model</button>
                 </div>
+                <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <span style="color:var(--text-secondary);font-size:13px;">Chart overlays:</span>
+                    <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-size:13px;color:#58a6ff;">
+                        <input type="checkbox" checked disabled> Combined
+                    </label>
+                    <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-size:13px;color:#f0883e;">
+                        <input type="checkbox" id="overlayStatistical" onchange="toggleChartOverlay('statistical', this.checked)"> LightGBM (ML)
+                    </label>
+                    <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-size:13px;color:#a371f7;">
+                        <input type="checkbox" id="overlayPercentile" onchange="toggleChartOverlay('percentile', this.checked)"> Percentile (Historical)
+                    </label>
+                </div>
             </div>
 
             <div id="chartSection" style="display: none;">
@@ -5208,9 +5220,12 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
         let currentTicker = '{ticker}';
         let currentDays = 0;  // 0 = today, any positive int = N days ahead
         let currentLookback = 120;  // training days (30-1260)
-        let currentStrategy = 'combined';
+        let currentStrategy = 'combined';  // used for band table display
         let predictionData = null;
         let bandChart = null;
+        let bandHistoryData = null;  // stored so chart can re-render on toggle
+        // Chart overlay toggles: combined always shown, others togglable
+        let chartOverlays = { combined: true, statistical: false, percentile: false };
         let autoRefreshInterval = null;
         let wsConnection = null;
         let currentCacheTimestamp = null;  // Track current data timestamp for smart polling
@@ -5391,6 +5406,12 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
 
             // Update display with new strategy
             updatePredictionDisplay();
+        }}
+
+        // Toggle chart overlay for a model and re-render
+        function toggleChartOverlay(model, enabled) {{
+            chartOverlays[model] = enabled;
+            if (bandHistoryData) renderBandConvergenceChart(bandHistoryData);
         }}
 
         // Handle lookback input change
@@ -5841,12 +5862,13 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 }}
                 document.getElementById('chartSection').style.display = 'block';
                 document.getElementById('chartDateLabel').textContent = `Trading date: ${{predictionData.date}} (Historical backtest)`;
-                renderBandConvergenceChart({{
+                bandHistoryData = {{
                     snapshots: predictionData.snapshots,
                     actual_prices: predictionData.actual_prices || [],
                     date: predictionData.date,
                     actual_close: predictionData.actual_close,
-                }});
+                }};
+                renderBandConvergenceChart(bandHistoryData);
                 return;
             }}
 
@@ -5873,6 +5895,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 }}
 
                 // Render the chart
+                bandHistoryData = data;
                 renderBandConvergenceChart(data);
             }} catch (error) {{
                 console.error('Error loading band history:', error);
@@ -5906,81 +5929,55 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 return date.toLocaleTimeString('en-US', {{ hour: '2-digit', minute: '2-digit', timeZone: 'America/Los_Angeles' }});
             }});
 
-            // Get bands from the selected strategy
-            const bandKey = `${{currentStrategy}}_bands`;
-
             // Prepare datasets for each band level
             const datasets = [];
             function validPrice(p) {{ return (typeof p === 'number' && p > 0) ? p : null; }}
 
-            // P95 bands (lightest)
-            const p95Upper = snapshots.map(s => validPrice(s[bandKey]?.P95?.hi_price));
-            const p95Lower = snapshots.map(s => validPrice(s[bandKey]?.P95?.lo_price));
+            // Color schemes per model
+            const modelColors = {{
+                combined:    {{ r: 88, g: 166, b: 255, label: 'Combined' }},     // blue
+                statistical: {{ r: 240, g: 136, b: 62, label: 'LightGBM' }},     // orange
+                percentile:  {{ r: 163, g: 113, b: 247, label: 'Percentile' }},   // purple
+            }};
 
-            datasets.push({{
-                label: 'P95 Upper',
-                data: p95Upper,
-                borderColor: 'rgba(88, 166, 255, 0.3)',
-                backgroundColor: 'rgba(88, 166, 255, 0.1)',
-                fill: '+1',
-                borderWidth: 1,
-                pointRadius: 0,
-            }});
-            datasets.push({{
-                label: 'P95 Lower',
-                data: p95Lower,
-                borderColor: 'rgba(88, 166, 255, 0.3)',
-                backgroundColor: 'rgba(88, 166, 255, 0.1)',
-                fill: false,
-                borderWidth: 1,
-                pointRadius: 0,
-            }});
+            // Band levels: outer to inner (P95 lightest, P99 darkest)
+            const bandLevels = [
+                {{ name: 'P95', borderAlpha: 0.3, fillAlpha: 0.06, width: 1 }},
+                {{ name: 'P98', borderAlpha: 0.5, fillAlpha: 0.08, width: 1.5 }},
+                {{ name: 'P99', borderAlpha: 0.8, fillAlpha: 0.1,  width: 2 }},
+            ];
 
-            // P98 bands (medium)
-            const p98Upper = snapshots.map(s => validPrice(s[bandKey]?.P98?.hi_price));
-            const p98Lower = snapshots.map(s => validPrice(s[bandKey]?.P98?.lo_price));
+            // Add band datasets for each enabled model overlay
+            const overlayOrder = ['combined', 'statistical', 'percentile'];
+            for (const model of overlayOrder) {{
+                if (!chartOverlays[model]) continue;
+                const bandKey = `${{model}}_bands`;
+                const c = modelColors[model];
 
-            datasets.push({{
-                label: 'P98 Upper',
-                data: p98Upper,
-                borderColor: 'rgba(88, 166, 255, 0.5)',
-                backgroundColor: 'rgba(88, 166, 255, 0.15)',
-                fill: '+1',
-                borderWidth: 2,
-                pointRadius: 0,
-            }});
-            datasets.push({{
-                label: 'P98 Lower',
-                data: p98Lower,
-                borderColor: 'rgba(88, 166, 255, 0.5)',
-                backgroundColor: 'rgba(88, 166, 255, 0.15)',
-                fill: false,
-                borderWidth: 2,
-                pointRadius: 0,
-            }});
+                for (const level of bandLevels) {{
+                    const upper = snapshots.map(s => validPrice(s[bandKey]?.[level.name]?.hi_price));
+                    const lower = snapshots.map(s => validPrice(s[bandKey]?.[level.name]?.lo_price));
 
-            // P99 bands (darkest)
-            const p99Upper = snapshots.map(s => validPrice(s[bandKey]?.P99?.hi_price));
-            const p99Lower = snapshots.map(s => validPrice(s[bandKey]?.P99?.lo_price));
-
-            datasets.push({{
-                label: 'P99 Upper',
-                data: p99Upper,
-                borderColor: 'rgba(88, 166, 255, 0.8)',
-                backgroundColor: 'rgba(88, 166, 255, 0.2)',
-                fill: '+1',
-                borderWidth: 2,
-                pointRadius: 0,
-            }});
-            datasets.push({{
-                label: 'P99 Lower',
-                data: p99Lower,
-                borderColor: 'rgba(88, 166, 255, 0.8)',
-                backgroundColor: 'rgba(88, 166, 255, 0.2)',
-                fill: false,
-                borderWidth: 2,
-                pointRadius: 0,
-            }});
+                    datasets.push({{
+                        label: `${{c.label}} ${{level.name}} Upper`,
+                        data: upper,
+                        borderColor: `rgba(${{c.r}}, ${{c.g}}, ${{c.b}}, ${{level.borderAlpha}})`,
+                        backgroundColor: `rgba(${{c.r}}, ${{c.g}}, ${{c.b}}, ${{level.fillAlpha}})`,
+                        fill: '+1',
+                        borderWidth: level.width,
+                        pointRadius: 0,
+                    }});
+                    datasets.push({{
+                        label: `${{c.label}} ${{level.name}} Lower`,
+                        data: lower,
+                        borderColor: `rgba(${{c.r}}, ${{c.g}}, ${{c.b}}, ${{level.borderAlpha}})`,
+                        backgroundColor: `rgba(${{c.r}}, ${{c.g}}, ${{c.b}}, ${{level.fillAlpha}})`,
+                        fill: false,
+                        borderWidth: level.width,
+                        pointRadius: 0,
+                    }});
+                }}
+            }}
 
             // Add actual price line — align to snapshot grid by nearest timestamp
             if (actualPrices.length > 0) {{
@@ -6059,7 +6056,26 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                         legend: {{
                             display: true,
                             position: 'top',
-                            labels: {{ color: '#c9d1d9' }}
+                            labels: {{
+                                color: '#c9d1d9',
+                                filter: function(item) {{
+                                    // Only show one legend entry per model + Actual Price/Close
+                                    const lbl = item.text || '';
+                                    if (lbl.startsWith('Actual')) return true;
+                                    // Show only the P99 Upper entry as the model representative
+                                    return lbl.includes('P99 Upper');
+                                }},
+                                generateLabels: function(chart) {{
+                                    const orig = Chart.defaults.plugins.legend.labels.generateLabels(chart);
+                                    return orig.map(item => {{
+                                        // Shorten "Combined P99 Upper" → "Combined"
+                                        if (item.text && item.text.includes('P99 Upper')) {{
+                                            item.text = item.text.replace(' P99 Upper', '');
+                                        }}
+                                        return item;
+                                    }});
+                                }}
+                            }}
                         }},
                         tooltip: {{
                             mode: 'index',
