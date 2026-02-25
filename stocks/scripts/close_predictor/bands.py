@@ -5,11 +5,34 @@ Converts raw model outputs (percentile moves, statistical P10/P90) into
 unified P95-P100 bands and combines them via wider-range selection.
 """
 
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
 
 from .models import UnifiedBand, UNIFIED_BAND_NAMES
+
+
+def weighted_percentile(values: np.ndarray, weights: np.ndarray, percentile: float) -> float:
+    """Compute weighted percentile using linear interpolation.
+
+    Args:
+        values: Array of values
+        weights: Array of corresponding weights (must be positive)
+        percentile: Percentile to compute (0-100)
+
+    Returns:
+        Weighted percentile value
+    """
+    sorter = np.argsort(values)
+    sorted_values = values[sorter]
+    sorted_weights = weights[sorter]
+
+    # Cumulative weight, normalized to 0-100
+    cumulative = np.cumsum(sorted_weights)
+    # Center each sample's weight range (midpoint)
+    cumulative_pct = (cumulative - sorted_weights / 2) / cumulative[-1] * 100.0
+
+    return float(np.interp(percentile, cumulative_pct, sorted_values))
 
 
 def map_statistical_to_bands(
@@ -108,8 +131,16 @@ def map_statistical_to_bands(
 def map_percentile_to_bands(
     moves: np.ndarray,
     current_price: float,
+    weights: Optional[np.ndarray] = None,
 ) -> Dict[str, UnifiedBand]:
-    """Compute P95/P97/P98/P99/P100 bands from percentile-range model's move distribution."""
+    """Compute P95/P97/P98/P99/P100 bands from percentile-range model's move distribution.
+
+    Args:
+        moves: Array of historical return percentages
+        current_price: Current price for band computation
+        weights: Optional array of weights for weighted percentile computation.
+                 If provided, uses weighted_percentile instead of np.percentile.
+    """
     band_defs = {
         "P95": (2.5, 97.5),
         "P97": (1.5, 98.5),
@@ -117,10 +148,15 @@ def map_percentile_to_bands(
         "P99": (0.5, 99.5),
         "P100": (0.0, 100.0),
     }
+    use_weighted = weights is not None and len(weights) == len(moves)
     bands = {}
     for name, (lo_p, hi_p) in band_defs.items():
-        lo_pct = np.percentile(moves, lo_p) / 100.0   # move % -> decimal
-        hi_pct = np.percentile(moves, hi_p) / 100.0
+        if use_weighted:
+            lo_pct = weighted_percentile(moves, weights, lo_p) / 100.0
+            hi_pct = weighted_percentile(moves, weights, hi_p) / 100.0
+        else:
+            lo_pct = np.percentile(moves, lo_p) / 100.0   # move % -> decimal
+            hi_pct = np.percentile(moves, hi_p) / 100.0
         lo_price = current_price * (1 + lo_pct)
         hi_price = current_price * (1 + hi_pct)
         width_pts = hi_price - lo_price

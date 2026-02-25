@@ -31,7 +31,7 @@ def weight_historical_samples(
     current_context: MarketContext,
     min_samples: int = 30,
     top_k: Optional[int] = None,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, np.ndarray]:
     """Weight historical N-day returns by similarity to current market conditions.
 
     Args:
@@ -42,11 +42,12 @@ def weight_historical_samples(
         top_k: If set, only use top K most similar samples
 
     Returns:
-        Weighted array of returns (may repeat samples based on weights)
+        Tuple of (returns array, weights array) for weighted percentile computation
     """
     if len(n_day_returns) != len(historical_contexts):
         # Fallback: return unweighted
-        return np.array(n_day_returns)
+        arr = np.array(n_day_returns)
+        return arr, np.ones(len(arr))
 
     # Compute similarity scores
     samples = []
@@ -65,27 +66,15 @@ def weight_historical_samples(
     if len(samples) < min_samples:
         samples = samples[:min_samples] if len(samples) >= min_samples else samples
 
-    # Create weighted array by repeating samples proportional to weight
-    # Normalize weights to sum to 1.0
-    total_weight = sum(s.weight for s in samples)
-    if total_weight == 0:
-        return np.array([s.return_pct for s in samples])
+    returns = np.array([s.return_pct for s in samples])
+    weights = np.array([s.weight for s in samples])
 
-    # Use multinomial resampling to create weighted distribution
-    # Each sample gets floor(weight/total * N) + probabilistic extra
-    target_size = max(len(samples), 100)  # Want at least 100 effective samples
-    weighted_returns = []
+    # Ensure no zero weights
+    total = weights.sum()
+    if total == 0:
+        weights = np.ones(len(returns))
 
-    for s in samples:
-        prob = s.weight / total_weight
-        count = int(prob * target_size)
-        weighted_returns.extend([s.return_pct] * count)
-
-    # Fill remaining with highest-weight samples
-    while len(weighted_returns) < target_size and samples:
-        weighted_returns.append(samples[0].return_pct)
-
-    return np.array(weighted_returns)
+    return returns, weights
 
 
 def segment_by_volatility_regime(
@@ -218,6 +207,7 @@ def predict_with_conditional_distribution(
         )
 
     # Step 3: Weight by similarity if enabled
+    weights = None
     if use_weighting:
         # Rebuild contexts list to match filtered returns
         if use_regime_filter:
@@ -231,7 +221,7 @@ def predict_with_conditional_distribution(
         else:
             filtered_contexts = historical_contexts
 
-        returns = weight_historical_samples(
+        returns, weights = weight_historical_samples(
             list(returns),
             filtered_contexts[:len(returns)],
             current_context,
@@ -248,8 +238,8 @@ def predict_with_conditional_distribution(
         # Scale returns by intraday volatility
         returns = returns * intraday_vol_factor
 
-    # Step 5: Build percentile bands
-    bands = map_percentile_to_bands(returns, current_price)
+    # Step 5: Build percentile bands (pass weights for proper weighted percentiles)
+    bands = map_percentile_to_bands(returns, current_price, weights=weights)
 
     return bands
 
