@@ -55,7 +55,7 @@ STALE_MINUTES = 30        # Files older than this are marked stale and skipped
 MAX_CREDIT_WIDTH_RATIO = 0.80  # Reused from spread_builder
 MAX_IC_LEGS = 20          # Max put/call spreads to combine into iron condors
 PREDICTION_CACHE_MINUTES = 15  # How long to reuse a cached band-strike prediction
-PREDICT_SUPPORTED_TICKERS = {"NDX", "SPX"}  # Tickers with predict_close_now support
+PREDICT_SUPPORTED_TICKERS = {"NDX", "SPX"}  # Tickers with predict_close support
 
 # Prediction cache: {(ticker, dte): (band_strikes_dict, fetch_timestamp_sec)}
 # band_strikes_dict format: {band_name: {"put_strike": float, "call_strike": float}}
@@ -453,7 +453,7 @@ def _build_leg(
 ) -> List[Dict]:
     """Build single-leg strictly-OTM spreads using spread_builder.build_credit_spreads().
 
-    target_strike: if provided (from predict_close_now percentile band), used as the
+    target_strike: if provided (from predict_close percentile band), used as the
       strike cutoff — puts with short_strike <= target_strike, calls >= target_strike.
       When None, falls back to percent_beyond=(0,0) which selects all strictly OTM strikes.
 
@@ -751,7 +751,7 @@ def process_expiry(job: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     # --- Build spreads — once per percentile band ---
     # band_strikes: {band_name: {"put_strike": float, "call_strike": float}}
-    # These come from predict_close_now combined_bands; if absent (unsupported ticker
+    # These come from predict_close combined_bands; if absent (unsupported ticker
     # or prediction failed), we fall back to all-OTM strike selection (target=None).
     band_strikes_all: Dict[str, Dict[str, float]] = job.get("band_strikes", {})
     bands: List[str] = rule_dict.get("bands") or ["N/A"]
@@ -817,7 +817,7 @@ def fetch_prices(tickers: List[str], db_config: Optional[str]) -> Dict[str, Opti
 async def _fetch_band_strikes_async(
     ticker: str, bands: List[str], db_config: Optional[str], days_ahead: int = 0
 ) -> Dict[str, Dict[str, float]]:
-    """Call predict_close_now.predict_close() and extract per-band strike targets.
+    """Call predict_close.predict_close() and extract per-band strike targets.
 
     Args:
         ticker: Ticker symbol (NDX, SPX)
@@ -834,7 +834,7 @@ async def _fetch_band_strikes_async(
         return {}
     try:
         import contextlib, io as _io
-        from scripts.predict_close_now import predict_close
+        from scripts.predict_close import predict_close
         _buf = _io.StringIO()
         with contextlib.redirect_stdout(_buf):
             pred = await predict_close(ticker=ticker, db_config=db_config, days_ahead=days_ahead)
@@ -860,7 +860,7 @@ async def _fetch_band_strikes_async(
         )
         return result
     except Exception as e:
-        logger.warning("predict_close_now failed for %s (%dDTE): %s", ticker, days_ahead, e)
+        logger.warning("predict_close failed for %s (%dDTE): %s", ticker, days_ahead, e)
         return {}
 
 
@@ -873,7 +873,7 @@ def fetch_band_strikes(
 ) -> Dict[Tuple[str, int], Dict[str, Dict[str, float]]]:
     """Fetch predicted band strike targets for all (ticker, dte) pairs, with caching.
 
-    Calls predict_close_now.predict_close(days_ahead=dte) for each unique (ticker, dte).
+    Calls predict_close.predict_close(days_ahead=dte) for each unique (ticker, dte).
     Results are cached per (ticker, dte) for PREDICTION_CACHE_MINUTES.
     Unsupported tickers (not NDX/SPX) get an empty dict → fall back to all-OTM selection.
 
@@ -1210,7 +1210,7 @@ def _make_job(
         "top_k": 3,
         "project_root": project_root,
         "stale_minutes": stale_minutes,
-        # Predicted band strikes from predict_close_now — may be {} if unavailable.
+        # Predicted band strikes from predict_close — may be {} if unavailable.
         # Format: {band_name: {"put_strike": lo_price, "call_strike": hi_price}}
         "band_strikes": band_strikes or {},
     }
@@ -1476,7 +1476,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--prediction-interval", type=int, default=PREDICTION_CACHE_MINUTES, metavar="MINUTES",
-        help="How often (in minutes) to recompute the predict_close_now percentile bands "
+        help="How often (in minutes) to recompute the predict_close percentile bands "
              f"(default: {PREDICTION_CACHE_MINUTES}). Set lower for more frequent refreshes.",
     )
     parser.add_argument(
@@ -1594,7 +1594,7 @@ def main() -> None:
 
         logger.debug("Unique DTEs for prediction: %s", sorted(dte_set))
 
-        # Fetch predicted band strikes per (ticker, dte) from predict_close_now (percentile_bands only).
+        # Fetch predicted band strikes per (ticker, dte) from predict_close (percentile_bands only).
         # Cached for --prediction-interval minutes so the model isn't retrained every tick.
         # Only NDX/SPX are supported; other tickers get {} → fall back to all-OTM selection.
         band_strikes_by_dte = fetch_band_strikes(

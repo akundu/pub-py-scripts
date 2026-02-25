@@ -258,7 +258,7 @@ Comparing P97 band width (% of underlying price):
 
 ### Next Steps
 
-1. **Integrate into `predict_close_now.py`:**
+1. **Integrate into `predict_close.py`:**
    - Load conditional/ensemble models
    - Return ensemble_combined bands for days_ahead > 0
 

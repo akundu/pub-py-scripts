@@ -57,7 +57,7 @@ LGBM_BAND_WIDTH_SCALE = 10.0  # Very conservative (3.33x)
 
 1. **Test current performance**:
 ```bash
-python backtest_band_accuracy.py NDX --days 60
+python scripts/backtest_band_accuracy.py NDX --days 60
 ```
 
 Note the hit rates and widths.
@@ -74,8 +74,8 @@ Note the hit rates and widths.
 3. **Make changes and retest**:
 ```bash
 # Edit models.py and bands.py with new values
-python predict_close_now.py NDX --retrain
-python backtest_band_accuracy.py NDX --days 60
+python scripts/predict_close.py NDX --retrain
+python scripts/backtest_band_accuracy.py NDX --days 60
 ```
 
 4. **Iterate until you achieve**:
@@ -110,7 +110,7 @@ extension_factor = 2.0  # Up from 0.5
 Even with optimized LightGBM settings, the **Combined Prediction** is most reliable:
 
 ```python
-# From predict_close_now.py output:
+# From predict_close.py output:
 
 LightGBM Model:     P95 = 0.40% width (optimized)
 Percentile Model:   P95 = 1.65% width (historical)
@@ -134,10 +134,10 @@ Combined:           P95 = 1.65% width (takes wider range)
 
 # 2. Test with live prediction
 export QUEST_DB_STRING="questdb://stock_user:stock_password@lin1.kundu.dev:8812/stock_data"
-python predict_close_now.py NDX --retrain
+python scripts/predict_close.py NDX --retrain
 
 # 3. Backtest accuracy
-python backtest_band_accuracy.py NDX --days 60
+python scripts/backtest_band_accuracy.py NDX --days 60
 
 # 4. Check hit rates match targets
 #    P95: 80-95%

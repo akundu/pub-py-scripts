@@ -40,11 +40,12 @@ STAT_FEATURE_CONFIG = {
 
 # LightGBM predictor configuration
 USE_LGBM_PREDICTOR = True           # Enable LightGBM (set False for legacy behavior)
+USE_SIMPLE_LGBM = False             # Use SimpleLGBM (median + residuals) instead of quantile regression
 LGBM_N_ESTIMATORS = 150             # Number of boosting rounds
 LGBM_LEARNING_RATE = 0.05           # Conservative for small dataset
 LGBM_MAX_DEPTH = 6                  # Allow 2-3 feature interactions
 LGBM_MIN_CHILD_SAMPLES = 20         # ~1% of training data
-LGBM_BAND_WIDTH_SCALE = 7.0         # Scale factor for band width (7.0 = wider for 0DTE options)
+LGBM_BAND_WIDTH_SCALE = 45.0        # Scale factor for band width (empirically calibrated for 95%+ hit rate)
 
 # Dynamic volatility scaling
 ENABLE_DYNAMIC_VOL_SCALING = True   # Adapt bands to realized volatility

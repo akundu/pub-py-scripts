@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-2-Week Hourly Backtest for predict_close_now.py
+2-Week Hourly Backtest for predict_close.py
 ================================================
 
 WHAT THIS SCRIPT PREDICTS
@@ -129,7 +129,7 @@ PROFILES = [RiskProfile.AGGRESSIVE, RiskProfile.MODERATE, RiskProfile.CONSERVATI
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="2-week hourly backtest for predict_close_now.py"
+        description="2-week hourly backtest for predict_close.py"
     )
     p.add_argument("ticker", help="Ticker symbol, e.g. NDX, SPX")
     p.add_argument("--days", type=int, default=10,

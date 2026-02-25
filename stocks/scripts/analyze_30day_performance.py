@@ -142,7 +142,7 @@ def main():
     print(f"✓ Loaded {len(predictions)} prediction snapshots")
 
     if not predictions:
-        print("\n❌ No prediction history found. Run predict_close_now.py first!")
+        print("\n❌ No prediction history found. Run predict_close.py first!")
         return
 
     # Load actual prices

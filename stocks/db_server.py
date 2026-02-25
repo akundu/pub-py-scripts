@@ -905,7 +905,7 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
 
     # Register all routes using centralized route registration
     try:
-        from routes import register_routes
+        from scripts.routes import register_routes
         register_routes(app)
     except ImportError:
         # Fallback to inline registration if routes module not available
@@ -15855,7 +15855,7 @@ def main_server_runner():
 
         # Register all routes using centralized route registration
         try:
-            from routes import register_routes
+            from scripts.routes import register_routes
             register_routes(app)
         except ImportError:
             # Fallback to inline registration if routes module not available

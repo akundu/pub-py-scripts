@@ -19,7 +19,7 @@ from common.market_hours import is_market_hours
 
 # Try to import prediction modules
 try:
-    from scripts.predict_close_now import predict_close, predict_future_close
+    from scripts.predict_close import predict_close, predict_future_close
     from scripts.close_predictor.models import UnifiedPrediction, UnifiedBand, ET_TZ
     PREDICTIONS_AVAILABLE = True
 except ImportError as e:
