@@ -18,6 +18,6 @@ echo "start date $start_date"
 echo "end date $end_date"
 
 python3 scripts/options_chain_download.py SPX NDX --zero-dte-date-start $start_date  --zero-dte-date-end $end_date  --max-connections 30 --num-processes 2  --interval 5min --format-chain-csv --output-dir options_csv_output/
-python3 scripts/equities_download.py I:VIX1D I:VIX SPY QQQ I:NDX I:SPX  --start $start_date  --end $end_date --output-dir ./equities_output 
-python3 scripts/options_chain_download.py SPX NDX --track-from $start_date --track-end $end_date --track-days 30  --interval-minutes 15 --chunk-days 7 --max-connections 20 --num-processes 12      --window-workers 5      --skip-existing --format-chain-csv --output-dir ./options_csv_output_full/
+python3 scripts/equities_download.py I:VIX1D I:VIX SPY TQQQ QQQ I:NDX I:SPX  --start $start_date  --end $end_date --output-dir ./equities_output 
+python3 scripts/options_chain_download.py SPX NDX TQQQ --track-from $start_date --track-end $end_date --track-days 30  --interval-minutes 15 --chunk-days 7 --max-connections 20 --num-processes 12      --window-workers 5      --skip-existing --format-chain-csv --output-dir ./options_csv_output_full/
 

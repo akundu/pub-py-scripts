@@ -2071,7 +2071,8 @@ class StockDataService:
                 if self.logger.isEnabledFor(logging.DEBUG):
                     self.logger.debug(f"[CACHE SET] Key: {cache_key} | dt_str: {dt_str} | idx type: {type(idx).__name__}")
             
-            row_df = pd.DataFrame([row]).set_index(pd.Index([idx]))
+            date_col_name = 'date' if interval == 'daily' else 'datetime'
+            row_df = pd.DataFrame([row]).set_index(pd.Index([idx], name=date_col_name))
             await self.cache.set(cache_key, row_df)
             self.logger.debug(f"[CACHE SET] Cached {interval} data on write: {cache_key} (rows: 1)")
     
@@ -2131,8 +2132,11 @@ class StockDataService:
                             normalized_dfs.append(df)
                     result_df = pd.concat(normalized_dfs)
                     result_df = result_df.sort_index()
+                    # Ensure index name is preserved for downstream reset_index()
+                    if isinstance(result_df.index, pd.DatetimeIndex) and result_df.index.name is None:
+                        result_df.index.name = 'date' if interval == 'daily' else 'datetime'
                     return result_df
-            
+
             # Cache miss or no cached data - fetch from DB
             self.logger.debug(f"[DB] Cache miss for {ticker} {interval} (no date constraints), fetching from database")
             df = await self.daily_price_repo.get(ticker, start_date, end_date, interval)
@@ -2178,10 +2182,11 @@ class StockDataService:
                                 dt_str = dt_str[:13] + ':00:00'
                         cache_key = CacheKeyGenerator.hourly_price(ticker, dt_str)
                     
-                    row_df = pd.DataFrame([row]).set_index(pd.Index([idx]))
+                    date_col_name = 'date' if interval == 'daily' else 'datetime'
+                    row_df = pd.DataFrame([row]).set_index(pd.Index([idx], name=date_col_name))
                     await self.cache.set(cache_key, row_df)
             return df
-        
+
         # Generate list of time points to fetch
         cache_keys = []
         
@@ -2297,8 +2302,11 @@ class StockDataService:
                                     if interval == 'hourly':
                                         end_dt = end_dt + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
                                     result_df = result_df[result_df.index <= end_dt]
+                        # Ensure index name is preserved for downstream reset_index()
+                        if isinstance(result_df.index, pd.DatetimeIndex) and result_df.index.name is None:
+                            result_df.index.name = 'date' if interval == 'daily' else 'datetime'
                         return result_df
-        
+
         # Determine which time points need DB fetch
         missing_keys = [k for k in cache_keys if k not in cached_data]
         if missing_keys:
@@ -2361,7 +2369,8 @@ class StockDataService:
                         # Only cache if not already in cached_data (shouldn't happen for missing_keys, but double-check)
                         if cache_key not in cached_data:
                             # New data not in cache - cache it
-                            row_df = pd.DataFrame([row]).set_index(pd.Index([idx]))
+                            date_col_name = 'date' if interval == 'daily' else 'datetime'
+                            row_df = pd.DataFrame([row]).set_index(pd.Index([idx], name=date_col_name))
                             await self.cache.set(cache_key, row_df)
                             cached_data[cache_key] = row_df
                         # If cache_key is in cached_data but was in missing_keys, it means we got it from cache
@@ -2391,13 +2400,16 @@ class StockDataService:
                 
                 if normalized_dfs:
                     df = pd.concat(normalized_dfs).sort_index()
+                    # Ensure index name is preserved for downstream reset_index()
+                    if isinstance(df.index, pd.DatetimeIndex) and df.index.name is None:
+                        df.index.name = 'date' if interval == 'daily' else 'datetime'
                 else:
                     df = pd.DataFrame()
             else:
                 df = pd.DataFrame()
         else:
             df = pd.DataFrame()
-        
+
         return df
     
     def _generate_hourly_cache_keys_for_range(

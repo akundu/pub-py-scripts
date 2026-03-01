@@ -189,3 +189,39 @@ stocks/
   docs/                             # Architecture docs
   common/                           # Shared DB/logging utilities
 ```
+
+## Modular Backtesting Framework
+
+The `scripts/backtesting/` directory contains a composable backtesting framework for options strategies. See `scripts/backtesting/BACKTESTING.md` for the full guide.
+
+### Quick Start
+
+```bash
+# Run a backtest
+python -m scripts.backtesting.runner --config scripts/backtesting/configs/credit_spread_0dte_ndx.yaml
+
+# Dry run
+python -m scripts.backtesting.runner --config scripts/backtesting/configs/credit_spread_0dte_ndx.yaml --dry-run
+
+# Grid sweep
+python -m scripts.backtesting.runner --config scripts/backtesting/configs/grid_sweep_comprehensive.yaml
+```
+
+### Key Components
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| Engine | `scripts/backtesting/engine.py` | Central orchestrator |
+| Config | `scripts/backtesting/config.py` | YAML/JSON config loading |
+| Providers | `scripts/backtesting/providers/` | Data sources (CSV, QuestDB) |
+| Signals | `scripts/backtesting/signals/` | Prediction models |
+| Instruments | `scripts/backtesting/instruments/` | Credit spread, iron condor, etc. |
+| Strategies | `scripts/backtesting/strategies/` | Trading logic |
+| Constraints | `scripts/backtesting/constraints/` | Budget, timing, exit rules |
+| Results | `scripts/backtesting/results/` | Metrics, reporting |
+
+### Running Backtesting Tests
+
+```bash
+python -m pytest tests/test_backtesting_config.py tests/test_backtesting_constraints.py tests/test_backtesting_exit_rules.py tests/test_backtesting_instruments.py tests/test_backtesting_collector.py -v
+```

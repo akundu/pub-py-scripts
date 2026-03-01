@@ -854,6 +854,7 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
     conditional_bands = {}
     ensemble_bands = {}
     ensemble_combined_bands = {}
+    directional = None
 
     # Compute current market context
     current_date = datetime.strptime(current_date_str, '%Y-%m-%d').date() if current_date_str else date.today()
@@ -1041,6 +1042,22 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
                     effective_days_ahead=effective_days_ahead,
                     intraday_vol_factor=intraday_vol_factor,
                 )
+
+            # Directional momentum analysis (asymmetric bands)
+            if len(train_returns) >= 20:
+                try:
+                    from scripts.close_predictor.directional_analysis import compute_directional_analysis
+                    directional = compute_directional_analysis(
+                        current_context=current_context,
+                        current_price=current_price,
+                        n_day_returns=np.array(train_returns),
+                        historical_contexts=historical_contexts[:len(train_returns)],
+                        days_ahead=days_ahead,
+                        weights=None,
+                    )
+                except Exception as e:
+                    print(f"⚠️  Directional analysis failed: {e}")
+                    directional = None
 
         except Exception as e:
             print(f"⚠️  Conditional prediction failed: {e}")
@@ -1315,6 +1332,10 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
     # Add regime status to prediction for monitoring
     if regime_status:
         pred.regime_status = regime_status
+
+    # Add directional analysis
+    if directional:
+        pred.directional_analysis = directional
 
     # Add additional fields expected by web UI (for compatibility with old format)
     mean_return = float(np.mean(n_day_returns_array))

@@ -398,6 +398,53 @@ def make_unified_prediction(
     vix1d = day_ctx.vix1d
     sample_size = stat_pred.sample_size if stat_pred else None
 
+    # Simplified 0DTE directional analysis using intraday momentum
+    directional = None
+    try:
+        daily = pct_df[pct_df['date'].isin(train_dates)].drop_duplicates(subset='date')
+        if len(daily) >= 20:
+            moves = ((daily['day_close'] - daily['prev_close']) / daily['prev_close'] * 100).values
+            from .directional_analysis import (
+                MomentumState, DirectionalProbability,
+                compute_asymmetric_bands,
+            )
+            # For 0DTE, use above_prev as simplified momentum signal
+            up_count = int((moves > 0).sum())
+            down_count = int((moves < 0).sum())
+            total = len(moves)
+            p_up = up_count / total if total > 0 else 0.5
+            p_down = down_count / total if total > 0 else 0.5
+            # Skew probability by current intraday direction
+            if above:
+                p_up = min(1.0, p_up * 1.1)
+                p_down = 1.0 - p_up
+            else:
+                p_down = min(1.0, p_down * 1.1)
+                p_up = 1.0 - p_down
+            dir_prob = DirectionalProbability(
+                p_up=round(p_up, 4), p_down=round(p_down, 4),
+                up_count=up_count, down_count=down_count,
+                total_samples=total,
+                confidence="medium" if total >= 30 else "low",
+                mean_reversion_prob=0.5,
+            )
+            momentum = MomentumState(
+                trend_label="up" if above else "down",
+                consecutive_days=0,
+                return_5d=0.0,
+                is_extended_streak=False,
+            )
+            from .directional_analysis import DirectionalAnalysis
+            asym_bands = compute_asymmetric_bands(moves, current_price, dir_prob)
+            directional = DirectionalAnalysis(
+                momentum_state=momentum,
+                direction_probability=dir_prob,
+                asymmetric_bands=asym_bands,
+            )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).debug(f"0DTE directional analysis skipped: {e}")
+
     return UnifiedPrediction(
         ticker=ticker,
         current_price=current_price,
@@ -416,4 +463,5 @@ def make_unified_prediction(
         reversal_blend=reversal_blend,
         intraday_vol_factor=intraday_vol_factor,
         data_source=data_source,
+        directional_analysis=directional,
     )

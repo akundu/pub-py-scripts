@@ -377,7 +377,10 @@ class DatabaseClient:
                             # Iterate from the end (most recent first) since data might be sorted ascending
                             prev_close = None
                             for row in reversed(rows):
-                                date_str = row.get("date", "")
+                                # The date column may be named "date" or "index" depending on
+                                # the database backend (QuestDB returns it as "index" after
+                                # DataFrame reset_index when the original index name is lost)
+                                date_str = row.get("date", "") or row.get("index", "")
                                 close_val = row.get("close", 0)
                                 
                                 if not close_val or close_val == 0:

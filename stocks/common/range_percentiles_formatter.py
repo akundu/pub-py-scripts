@@ -877,7 +877,183 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
             <div class="chart-container">
                 <canvas id="chartUp_{ticker_id}"></canvas>
             </div>
-        </div>
+""")
+
+    # Momentum Conditional section (if any window has momentum_conditional data)
+    has_momentum = any(
+        windows_data.get(str(w), {}).get("momentum_conditional")
+        for w in window_list
+    )
+    if has_momentum:
+        # Get filter info from first available momentum_conditional
+        sample_mc = None
+        for w in window_list:
+            mc = windows_data.get(str(w), {}).get("momentum_conditional")
+            if mc:
+                sample_mc = mc
+                break
+
+        filt = sample_mc["filter"] if sample_mc else {}
+        dir_label = filt.get("direction", "any").upper()
+        consec_min = filt.get("consecutive_days_min", 1)
+        auto_detected = filt.get("auto_detected", False)
+
+        current_streak = metadata.get("current_streak", 0)
+        streak_dir = "UP" if current_streak > 0 else "DOWN" if current_streak < 0 else "FLAT"
+        streak_color = "#22c55e" if current_streak > 0 else "#ef4444" if current_streak < 0 else "#8b949e"
+        streak_abs = abs(current_streak)
+
+        auto_note = " (auto-detected from current streak)" if auto_detected else ""
+
+        html_parts.append(f"""
+            <h2>🧭 Momentum-Conditional Analysis</h2>
+            <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 15px; flex-wrap: wrap;">
+                <div style="background: var(--card-bg, #f8f9fa); border: 1px solid var(--border-color, #dee2e6); border-radius: 8px; padding: 10px 18px; display: flex; align-items: center; gap: 10px;">
+                    <span style="font-size: 13px; opacity: 0.7;">Current Streak:</span>
+                    <span style="font-size: 20px; font-weight: bold; color: {streak_color};">
+                        {"▲" if current_streak > 0 else "▼" if current_streak < 0 else "●"} {streak_abs} day{"s" if streak_abs != 1 else ""} {streak_dir}
+                    </span>
+                </div>
+                <div style="font-size: 13px; opacity: 0.7;">
+                    Filter: <strong>{dir_label}</strong> streaks of <strong>{consec_min}+</strong> consecutive days{auto_note}
+                </div>
+            </div>
+""")
+
+        # Summary row: continuation rates across windows
+        html_parts.append("""
+            <div style="display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 20px;">
+""")
+        for window in window_list:
+            mc = windows_data.get(str(window), {}).get("momentum_conditional")
+            if not mc:
+                continue
+            cont_rate = mc.get("continuation_rate", 0)
+            matching = mc.get("matching_days", 0)
+            cont_count = mc.get("when_continued_day_count", 0)
+            rev_count = mc.get("when_reversed_day_count", 0)
+            rate_pct = f"{cont_rate * 100:.1f}"
+            bar_color = "#3fb950" if cont_rate > 0.55 else "#f85149" if cont_rate < 0.45 else "#d29922"
+            html_parts.append(f"""
+                <div style="background: var(--card-bg, #f8f9fa); border: 1px solid var(--border-color, #dee2e6); border-radius: 8px; padding: 12px 18px; min-width: 140px; text-align: center;">
+                    <div style="font-size: 12px; opacity: 0.7; margin-bottom: 4px;">{window}D Window</div>
+                    <div style="font-size: 22px; font-weight: bold; color: {bar_color};">{rate_pct}%</div>
+                    <div style="font-size: 11px; opacity: 0.6;">continuation</div>
+                    <div style="margin-top: 6px; height: 6px; background: var(--border-color, #dee2e6); border-radius: 3px; overflow: hidden;">
+                        <div style="width: {rate_pct}%; height: 100%; background: {bar_color}; border-radius: 3px;"></div>
+                    </div>
+                    <div style="font-size: 10px; opacity: 0.5; margin-top: 4px;">{matching} matching days ({cont_count}C / {rev_count}R)</div>
+                </div>
+""")
+        html_parts.append("            </div>\n")
+
+        # CONTINUED moves table
+        html_parts.append(f"""
+            <div class="direction-header" style="background: linear-gradient(135deg, #238636, #2ea043); color: white; padding: 8px 16px; border-radius: 6px 6px 0 0; font-weight: bold;">
+                ▶ CONTINUED (streak continued in same direction)
+            </div>
+            <div class="table-section">
+                <table>
+                    <thead>
+                        <tr>
+                            <th></th>
+""")
+        for window in window_list:
+            mc = windows_data.get(str(window), {}).get("momentum_conditional")
+            if mc and mc.get("when_continued"):
+                n = mc["when_continued_day_count"]
+                html_parts.append(f'                            <th colspan="2">{window}d<br><small style="font-weight:normal;font-size:11px;opacity:0.8">n={n}</small></th>\n')
+            else:
+                html_parts.append(f'                            <th colspan="2">{window}d</th>\n')
+        html_parts.append("""                        </tr>
+                        <tr>
+                            <th></th>
+""")
+        for _ in window_list:
+            html_parts.append('                            <th>%</th>\n')
+            html_parts.append('                            <th>$</th>\n')
+        html_parts.append("""                        </tr>
+                    </thead>
+                    <tbody>
+""")
+        for p in percentiles:
+            html_parts.append(f'                        <tr>\n')
+            html_parts.append(f'                            <td>p{p}</td>\n')
+            for window in window_list:
+                mc = windows_data.get(str(window), {}).get("momentum_conditional")
+                if mc and mc.get("when_continued"):
+                    wc = mc["when_continued"]
+                    pct = wc["pct"].get(f"p{p}", "--")
+                    price = wc["price"].get(f"p{p}", "--")
+                    if isinstance(pct, (int, float)):
+                        html_parts.append(f'                            <td>{pct:+.2f}%</td>\n')
+                        html_parts.append(f'                            <td>${price:,.2f}</td>\n')
+                    else:
+                        html_parts.append(f'                            <td class="insufficient">--</td>\n')
+                        html_parts.append(f'                            <td class="insufficient">--</td>\n')
+                else:
+                    html_parts.append(f'                            <td class="insufficient">--</td>\n')
+                    html_parts.append(f'                            <td class="insufficient">--</td>\n')
+            html_parts.append(f'                        </tr>\n')
+        html_parts.append("""                    </tbody>
+                </table>
+            </div>
+""")
+
+        # REVERSED moves table
+        html_parts.append(f"""
+            <div class="direction-header" style="background: linear-gradient(135deg, #da3633, #f85149); color: white; padding: 8px 16px; border-radius: 6px 6px 0 0; font-weight: bold;">
+                ◀ REVERSED (streak broke — moved opposite direction)
+            </div>
+            <div class="table-section">
+                <table>
+                    <thead>
+                        <tr>
+                            <th></th>
+""")
+        for window in window_list:
+            mc = windows_data.get(str(window), {}).get("momentum_conditional")
+            if mc and mc.get("when_reversed"):
+                n = mc["when_reversed_day_count"]
+                html_parts.append(f'                            <th colspan="2">{window}d<br><small style="font-weight:normal;font-size:11px;opacity:0.8">n={n}</small></th>\n')
+            else:
+                html_parts.append(f'                            <th colspan="2">{window}d</th>\n')
+        html_parts.append("""                        </tr>
+                        <tr>
+                            <th></th>
+""")
+        for _ in window_list:
+            html_parts.append('                            <th>%</th>\n')
+            html_parts.append('                            <th>$</th>\n')
+        html_parts.append("""                        </tr>
+                    </thead>
+                    <tbody>
+""")
+        for p in percentiles:
+            html_parts.append(f'                        <tr>\n')
+            html_parts.append(f'                            <td>p{p}</td>\n')
+            for window in window_list:
+                mc = windows_data.get(str(window), {}).get("momentum_conditional")
+                if mc and mc.get("when_reversed"):
+                    wr = mc["when_reversed"]
+                    pct = wr["pct"].get(f"p{p}", "--")
+                    price = wr["price"].get(f"p{p}", "--")
+                    if isinstance(pct, (int, float)):
+                        html_parts.append(f'                            <td>{pct:+.2f}%</td>\n')
+                        html_parts.append(f'                            <td>${price:,.2f}</td>\n')
+                    else:
+                        html_parts.append(f'                            <td class="insufficient">--</td>\n')
+                        html_parts.append(f'                            <td class="insufficient">--</td>\n')
+                else:
+                    html_parts.append(f'                            <td class="insufficient">--</td>\n')
+                    html_parts.append(f'                            <td class="insufficient">--</td>\n')
+            html_parts.append(f'                        </tr>\n')
+        html_parts.append("""                    </tbody>
+                </table>
+            </div>
+""")
+
+    html_parts.append("""        </div>
 """)
 
     return ("".join(html_parts), chart_data_down, chart_data_up)

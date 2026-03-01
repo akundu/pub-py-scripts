@@ -720,6 +720,28 @@ def _serialize_unified_prediction(pred: Any) -> dict:
         recommended = next((m['method'] for m in pred.ensemble_methods if m.get('recommended')), None)
         result['recommended_method'] = recommended
 
+    # Add directional analysis if present
+    if hasattr(pred, 'directional_analysis') and pred.directional_analysis:
+        da = pred.directional_analysis
+        result['directional_analysis'] = {
+            'momentum_state': {
+                'trend_label': da.momentum_state.trend_label,
+                'consecutive_days': da.momentum_state.consecutive_days,
+                'return_5d': da.momentum_state.return_5d,
+                'is_extended_streak': da.momentum_state.is_extended_streak,
+            },
+            'direction_probability': {
+                'p_up': da.direction_probability.p_up,
+                'p_down': da.direction_probability.p_down,
+                'up_count': da.direction_probability.up_count,
+                'down_count': da.direction_probability.down_count,
+                'total_samples': da.direction_probability.total_samples,
+                'confidence': da.direction_probability.confidence,
+                'mean_reversion_prob': da.direction_probability.mean_reversion_prob,
+            },
+            'asymmetric_bands': serialize_band_dict(da.asymmetric_bands),
+        }
+
     return result
 
 

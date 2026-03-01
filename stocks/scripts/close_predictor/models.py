@@ -3,7 +3,7 @@ Constants and data classes for the Unified Close Predictor.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 ET_TZ = ZoneInfo("America/New_York")
@@ -94,3 +94,4 @@ class UnifiedPrediction:
     data_source: str = "csv"
     training_approach: Optional[str] = None
     similar_days: Optional[List[Dict]] = None  # List of similar historical days
+    directional_analysis: Optional[Any] = None  # DirectionalAnalysis from directional_analysis.py

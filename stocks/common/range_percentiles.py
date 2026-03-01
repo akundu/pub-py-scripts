@@ -680,6 +680,27 @@ async def compute_hourly_moves_to_close(
     }
 
 
+def _compute_consecutive_days_series(daily_returns: 'pd.Series') -> 'pd.Series':
+    """Compute signed consecutive up/down day streaks from daily returns.
+
+    Returns a Series where positive values = consecutive up days,
+    negative values = consecutive down days.
+    """
+    import pandas as pd
+    sign = daily_returns.apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+    consecutive = pd.Series(0, index=sign.index, dtype=int)
+    prev = 0
+    for i, s in enumerate(sign.values):
+        if s == 0:
+            prev = 0
+        elif i == 0 or sign.values[i - 1] * s <= 0:
+            prev = s
+        else:
+            prev = prev + s
+        consecutive.iloc[i] = prev
+    return consecutive
+
+
 async def compute_range_percentiles_multi_window(
     ticker: str,
     windows: list[int] | str,
@@ -692,6 +713,7 @@ async def compute_range_percentiles_multi_window(
     ensure_tables: bool = False,
     log_level: str = "WARNING",
     override_close: float | None = None,
+    momentum_filter: dict | None = None,
 ) -> dict:
     """
     Compute range percentiles for multiple window sizes (single ticker).
@@ -814,6 +836,20 @@ async def compute_range_percentiles_multi_window(
                 "price": {f"p{p}": r[f"p{p}_price"] for p in percentiles},
             }
 
+        # Auto-detect current momentum streak for momentum-conditional analysis
+        daily_returns = df["close"].pct_change()
+        consec_series = _compute_consecutive_days_series(daily_returns)
+        current_streak = int(consec_series.iloc[-1]) if len(consec_series) > 0 else 0
+
+        if momentum_filter is None and abs(current_streak) >= 2:
+            # Auto-detect: use the current streak as the filter
+            auto_direction = "up" if current_streak > 0 else "down"
+            momentum_filter = {
+                "consecutive_days_min": min(abs(current_streak), 3),
+                "direction": auto_direction,
+                "auto_detected": True,
+            }
+
         # Compute percentiles for each window
         windows_data = {}
         skipped_windows = []
@@ -859,7 +895,7 @@ async def compute_range_percentiles_multi_window(
             when_up = build_block_full(return_pct.loc[mask_up], n_up, invert=False)
             when_down = build_block_full(return_pct.loc[mask_down], n_down, invert=True)
 
-            windows_data[str(window)] = {
+            window_result = {
                 "window": window,
                 "lookback_days": len(df_window),
                 "when_up": when_up,
@@ -868,6 +904,65 @@ async def compute_range_percentiles_multi_window(
                 "when_down_day_count": n_down,
             }
 
+            # Momentum-conditional filtering (optional)
+            if momentum_filter:
+                consec_min = momentum_filter.get("consecutive_days_min", 1)
+                direction = momentum_filter.get("direction", "any")
+
+                # Compute consecutive days series from daily returns
+                daily_returns = df["close"].pct_change()
+                consec_series = _compute_consecutive_days_series(daily_returns)
+
+                # Align consecutive days with the window's valid indices
+                consec_at_start = consec_series.shift(calc_window).loc[df_window.index]
+                consec_valid = consec_at_start.notna()
+
+                if direction == "up":
+                    momentum_mask = consec_valid & (consec_at_start >= consec_min)
+                elif direction == "down":
+                    momentum_mask = consec_valid & (consec_at_start <= -consec_min)
+                else:  # "any"
+                    momentum_mask = consec_valid & (consec_at_start.abs() >= consec_min)
+
+                n_matching = int(momentum_mask.sum())
+                if n_matching >= min_direction_days:
+                    matched_returns = return_pct.loc[momentum_mask]
+                    # Split into continued vs reversed
+                    if direction == "up" or (direction == "any" and consec_min > 0):
+                        continued_mask = matched_returns > 0
+                    elif direction == "down":
+                        continued_mask = matched_returns < 0
+                    else:
+                        # For "any", continued = same sign as the streak
+                        streak_sign = consec_at_start.loc[momentum_mask]
+                        continued_mask = (matched_returns > 0) & (streak_sign > 0) | \
+                                         (matched_returns < 0) & (streak_sign < 0)
+
+                    n_continued = int(continued_mask.sum())
+                    n_reversed = n_matching - n_continued
+
+                    when_continued = build_block_full(
+                        matched_returns.loc[continued_mask], n_continued, invert=False,
+                    ) if n_continued >= min_direction_days else None
+                    when_reversed = build_block_full(
+                        matched_returns.loc[~continued_mask], n_reversed, invert=True,
+                    ) if n_reversed >= min_direction_days else None
+
+                    window_result["momentum_conditional"] = {
+                        "filter": {
+                            "consecutive_days_min": consec_min,
+                            "direction": direction,
+                        },
+                        "matching_days": n_matching,
+                        "when_continued": when_continued,
+                        "when_continued_day_count": n_continued,
+                        "when_reversed": when_reversed,
+                        "when_reversed_day_count": n_reversed,
+                        "continuation_rate": round(n_continued / n_matching, 3) if n_matching > 0 else 0.0,
+                    }
+
+            windows_data[str(window)] = window_result
+
         if not windows_data:
             raise ValueError(
                 f"No valid windows computed. All {len(window_list)} windows skipped. "
@@ -875,20 +970,25 @@ async def compute_range_percentiles_multi_window(
             )
 
         # Build result structure
+        metadata = {
+            "last_trading_day": last_date_str,
+            "previous_close": previous_close,
+            "close_override": override_close is not None,
+            "lookback_trading_days": lookback,
+            "lookback_days": len(df),
+            "percentiles": percentiles,
+            "window_list": [w for w in window_list if w not in skipped_windows],
+            "skipped_windows": skipped_windows,
+            "min_direction_days": min_direction_days,
+            "current_streak": current_streak,
+        }
+        if momentum_filter:
+            metadata["momentum_filter"] = momentum_filter
+
         result = {
             "ticker": display_ticker,
             "db_ticker": db_symbol,
-            "metadata": {
-                "last_trading_day": last_date_str,
-                "previous_close": previous_close,
-                "close_override": override_close is not None,
-                "lookback_trading_days": lookback,
-                "lookback_days": len(df),
-                "percentiles": percentiles,
-                "window_list": [w for w in window_list if w not in skipped_windows],
-                "skipped_windows": skipped_windows,
-                "min_direction_days": min_direction_days,
-            },
+            "metadata": metadata,
             "windows": windows_data,
         }
 
@@ -909,6 +1009,7 @@ async def compute_range_percentiles_multi_window_batch(
     enable_cache: bool = True,
     ensure_tables: bool = False,
     log_level: str = "WARNING",
+    momentum_filter: dict | None = None,
 ) -> list[dict]:
     """
     Compute multi-window percentiles for multiple tickers.
@@ -916,6 +1017,7 @@ async def compute_range_percentiles_multi_window_batch(
     Args:
         ticker_specs: List of (ticker, optional_override_close) tuples
         windows: List of window sizes, or '*' for default
+        momentum_filter: Optional dict with 'consecutive_days_min' and 'direction'
         (other args same as compute_range_percentiles_multi_window)
 
     Returns:
@@ -938,6 +1040,7 @@ async def compute_range_percentiles_multi_window_batch(
             ensure_tables=ensure_tables,
             log_level=log_level,
             override_close=override_close,
+            momentum_filter=momentum_filter,
         )
         results.append(out)
     return results

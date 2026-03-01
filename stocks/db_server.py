@@ -4445,36 +4445,45 @@ async def fetch_earnings_date(symbol: str) -> str:
 
 
 def compute_default_prediction_days() -> list:
-    """Compute smart default prediction day tabs based on current day of week.
+    """Compute default prediction day tabs based on current day of week.
 
-    Returns trading days: 1-day increments through upcoming Friday,
-    then milestones [5, 10, 20], plus trading days to next Friday.
-    All values are in trading days (weekdays only).
+    Returns trading days (weekdays only):
+    - 0 (today / 0DTE)
+    - 1-day increments through this Friday (minimum 5 trading days)
+    - The Friday after this Friday
+    - Milestones: 10, 20 trading days
+
+    Examples:
+      Mon: [0, 1, 2, 3, 4, 9, 10, 20]
+      Tue: [0, 1, 2, 3, 8, 10, 20]
+      Wed: [0, 1, 2, 7, 10, 20]
+      Thu: [0, 1, 2, 3, 4, 5, 6, 10, 20]  (1-day to 5 since Fri < 5D away)
+      Fri: [0, 1, 2, 3, 4, 5, 10, 20]     (1-day to 5 since Fri = 0D away)
     """
     now = datetime.now(ET_TZ)
     today_weekday = now.weekday()  # 0=Mon, 4=Fri
 
-    days = set()
+    days = {0}  # Always include today (0DTE)
 
-    # Trading days to this Friday (1-day increments)
-    # weekday 0(Mon)->4 to Fri, 1(Tue)->3, 2(Wed)->2, 3(Thu)->1, 4(Fri)->0
+    # Trading days to this Friday
+    # weekday 0(Mon)->4, 1(Tue)->3, 2(Wed)->2, 3(Thu)->1, 4(Fri)->0
     trading_days_to_friday = max(0, 4 - today_weekday)
 
+    # 1-day increments to this Friday
     for d in range(1, trading_days_to_friday + 1):
         days.add(d)
 
-    # Trading days to NEXT Friday (skip if already at Friday with 0 remaining)
-    # Next Friday = trading_days_to_friday + 5 (a full trading week later)
-    if trading_days_to_friday > 0:
-        next_friday_trading = trading_days_to_friday + 5
-    else:
-        # It's Friday, next Friday is 5 trading days away
-        next_friday_trading = 5
+    # The Friday after this Friday
+    next_friday = trading_days_to_friday + 5 if trading_days_to_friday > 0 else 5
+    days.add(next_friday)
 
-    days.add(next_friday_trading)
+    # Ensure at least 1-day increments through 5D when this Friday is close
+    if trading_days_to_friday < 5:
+        for d in range(1, 6):
+            days.add(d)
 
     # Add milestones
-    for m in [5, 10, 20]:
+    for m in [10, 20]:
         days.add(m)
 
     return sorted(days)
@@ -5131,7 +5140,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
 
         <div class="tabs">
             <button class="tab active" onclick="switchPredictionTab(0)">Today</button>
-            {''.join(f'<button class="tab" onclick="switchPredictionTab({d})">{d} Day{"s" if d != 1 else ""}</button>' for d in day_tabs)}
+            {''.join(f'<button class="tab" onclick="switchPredictionTab({d})">{d} Day{"s" if d != 1 else ""}</button>' for d in day_tabs if d > 0)}
             <span class="tab-custom">
                 <input type="number" id="customDaysInput" min="1" max="252" placeholder="N days"
                     style="width:70px;padding:4px 6px;border-radius:4px;border:1px solid #444;background:#1a1f2e;color:#e6edf3;font-size:13px;"
@@ -5231,7 +5240,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
         let currentCacheTimestamp = null;  // Track current data timestamp for smart polling
         let vixWsConnection = null;  // Separate WebSocket for VIX1D live updates
         let currentHistDate = null;  // null = today/live, 'YYYY-MM-DD' = historical
-        const dayTabs = [0, {', '.join(str(d) for d in day_tabs)}];
+        const dayTabs = [{', '.join(str(d) for d in day_tabs)}];
 
         // Format a price value with commas and 2 decimal places
         function fmtPrice(val) {{
@@ -6389,6 +6398,170 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 }}
                 html += `
                         </div>
+                    </div>
+                `;
+            }}
+
+            // Directional Momentum Analysis Section
+            if (data.directional_analysis) {{
+                const da = data.directional_analysis;
+                const ms = da.momentum_state;
+                const dp = da.direction_probability;
+                const ab = da.asymmetric_bands;
+
+                // Trend label styling
+                const trendColors = {{
+                    'strong_up': '#3fb950',
+                    'up': '#56d364',
+                    'neutral': '#8b949e',
+                    'down': '#f0883e',
+                    'strong_down': '#f85149',
+                }};
+                const trendEmoji = {{
+                    'strong_up': '🚀',
+                    'up': '📈',
+                    'neutral': '➡️',
+                    'down': '📉',
+                    'strong_down': '💥',
+                }};
+                const trendColor = trendColors[ms.trend_label] || '#8b949e';
+                const trendIcon = trendEmoji[ms.trend_label] || '';
+
+                // Directional probability bar
+                const pUpPct = (dp.p_up * 100).toFixed(1);
+                const pDownPct = (dp.p_down * 100).toFixed(1);
+                const meanRevPct = (dp.mean_reversion_prob * 100).toFixed(1);
+                const confBadgeColor = dp.confidence === 'high' ? '#3fb950' : dp.confidence === 'medium' ? '#d29922' : '#f85149';
+
+                html += `
+                    <div class="detail-section">
+                        <h3>🧭 Directional Momentum Analysis</h3>
+
+                        <div class="recommendation-box" style="margin-bottom: 15px;">
+                            <h4>Momentum State</h4>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; margin-top: 10px;">
+                                <div>
+                                    <div style="color: #8b949e; font-size: 12px; margin-bottom: 5px;">Trend</div>
+                                    <div style="color: ${{trendColor}}; font-size: 18px; font-weight: bold;">
+                                        ${{trendIcon}} ${{ms.trend_label.replace('_', ' ').toUpperCase()}}
+                                    </div>
+                                </div>
+                                <div>
+                                    <div style="color: #8b949e; font-size: 12px; margin-bottom: 5px;">Consecutive Days</div>
+                                    <div style="color: ${{ms.consecutive_days >= 0 ? '#3fb950' : '#f85149'}}; font-size: 18px; font-weight: bold;">
+                                        ${{ms.consecutive_days > 0 ? '+' : ''}}${{ms.consecutive_days}}
+                                    </div>
+                                </div>
+                                <div>
+                                    <div style="color: #8b949e; font-size: 12px; margin-bottom: 5px;">5-Day Return</div>
+                                    <div style="color: ${{ms.return_5d >= 0 ? '#3fb950' : '#f85149'}}; font-size: 18px; font-weight: bold;">
+                                        ${{ms.return_5d >= 0 ? '+' : ''}}${{(ms.return_5d * 100).toFixed(2)}}%
+                                    </div>
+                                </div>
+                            </div>
+                            ${{ms.is_extended_streak ? '<div style="margin-top: 10px; padding: 6px 12px; background: #1c1e24; border-left: 3px solid ' + trendColor + '; border-radius: 4px; font-size: 12px; color: ' + trendColor + ';">⚠️ Extended streak detected (' + Math.abs(ms.consecutive_days) + ' consecutive days)</div>' : ''}}
+                        </div>
+
+                        <div class="recommendation-box" style="margin-bottom: 15px;">
+                            <h4>Direction Probability</h4>
+                            <div style="margin-top: 10px;">
+                                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
+                                    <span style="color: #3fb950; font-weight: bold; width: 80px;">▲ UP ${{pUpPct}}%</span>
+                                    <div style="flex: 1; height: 24px; background: #21262d; border-radius: 4px; overflow: hidden; display: flex;">
+                                        <div style="width: ${{pUpPct}}%; background: linear-gradient(90deg, #238636, #3fb950); transition: width 0.3s;"></div>
+                                        <div style="width: ${{pDownPct}}%; background: linear-gradient(90deg, #f85149, #da3633); transition: width 0.3s;"></div>
+                                    </div>
+                                    <span style="color: #f85149; font-weight: bold; width: 80px; text-align: right;">${{pDownPct}}% ▼</span>
+                                </div>
+                                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; margin-top: 15px;">
+                                    <div>
+                                        <div style="color: #8b949e; font-size: 12px;">Samples</div>
+                                        <div style="font-size: 14px; font-weight: bold;">${{dp.total_samples}}
+                                            <span style="font-size: 11px; padding: 2px 6px; border-radius: 3px; background: ${{confBadgeColor}}22; color: ${{confBadgeColor}}; margin-left: 6px;">${{dp.confidence}}</span>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <div style="color: #8b949e; font-size: 12px;">Up / Down Count</div>
+                                        <div style="font-size: 14px;"><span style="color: #3fb950;">${{dp.up_count}}</span> / <span style="color: #f85149;">${{dp.down_count}}</span></div>
+                                    </div>
+                                    <div>
+                                        <div style="color: #8b949e; font-size: 12px;">Mean Reversion Prob</div>
+                                        <div style="font-size: 14px; font-weight: bold; color: ${{dp.mean_reversion_prob > 0.5 ? '#d29922' : '#8b949e'}};">${{meanRevPct}}%</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                `;
+
+                // Asymmetric bands table
+                if (ab && Object.keys(ab).length > 0) {{
+                    html += `
+                        <div class="recommendation-box">
+                            <h4>📐 Asymmetric Prediction Bands</h4>
+                            <p style="color: #8b949e; font-size: 12px; margin-bottom: 10px;">
+                                Bands skewed by directional probability — wider in the likely direction
+                            </p>
+                            <div style="overflow-x: auto;">
+                                <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                                    <thead>
+                                        <tr style="background: #161b22; border-bottom: 1px solid #30363d;">
+                                            <th style="padding: 8px; text-align: left;">Band</th>
+                                            <th style="padding: 8px; text-align: right;">Lower</th>
+                                            <th style="padding: 8px; text-align: right;">Upper</th>
+                                            <th style="padding: 8px; text-align: right;">Width</th>
+                                            <th style="padding: 8px; text-align: center;">Skew</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                    `;
+                    const bandOrder = ['P95', 'P97', 'P98', 'P99', 'P100'];
+                    bandOrder.forEach(bname => {{
+                        const b = ab[bname];
+                        if (!b) return;
+                        const upperExt = Math.abs(b.hi_pct);
+                        const lowerExt = Math.abs(b.lo_pct);
+                        const skewRatio = lowerExt > 0 ? (upperExt / lowerExt) : 1;
+                        let skewLabel, skewColor;
+                        if (skewRatio > 1.15) {{
+                            skewLabel = '▲ Up-skewed';
+                            skewColor = '#3fb950';
+                        }} else if (skewRatio < 0.87) {{
+                            skewLabel = '▼ Down-skewed';
+                            skewColor = '#f85149';
+                        }} else {{
+                            skewLabel = '● Symmetric';
+                            skewColor = '#8b949e';
+                        }}
+                        html += `
+                                        <tr style="border-bottom: 1px solid #21262d;">
+                                            <td style="padding: 8px; font-weight: bold;">${{bname}}</td>
+                                            <td style="padding: 8px; text-align: right; color: #f85149;">
+                                                ${{b.lo_pct.toFixed(2)}}%<br>
+                                                <span style="font-size: 11px; color: #8b949e;">$${{fmtPrice(b.lo_price)}}</span>
+                                            </td>
+                                            <td style="padding: 8px; text-align: right; color: #3fb950;">
+                                                +${{b.hi_pct.toFixed(2)}}%<br>
+                                                <span style="font-size: 11px; color: #8b949e;">$${{fmtPrice(b.hi_price)}}</span>
+                                            </td>
+                                            <td style="padding: 8px; text-align: right;">
+                                                ${{b.width_pct.toFixed(2)}}%<br>
+                                                <span style="font-size: 11px; color: #8b949e;">$${{fmtPrice(b.width_pts)}}</span>
+                                            </td>
+                                            <td style="padding: 8px; text-align: center; color: ${{skewColor}}; font-size: 12px;">
+                                                ${{skewLabel}}
+                                            </td>
+                                        </tr>
+                        `;
+                    }});
+                    html += `
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    `;
+                }}
+
+                html += `
                     </div>
                 `;
             }}
@@ -14484,6 +14657,20 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
 
         db_config = db_instance.db_config
 
+        # Parse optional momentum filter parameters
+        momentum_filter = None
+        consec_min_str = request.query.get('consecutive_days_min', '')
+        momentum_dir = request.query.get('momentum_direction', '')
+        if consec_min_str or momentum_dir:
+            try:
+                consec_min = int(consec_min_str) if consec_min_str else 1
+            except ValueError:
+                consec_min = 1
+            momentum_filter = {
+                "consecutive_days_min": consec_min,
+                "direction": momentum_dir if momentum_dir in ('up', 'down', 'any') else "any",
+            }
+
         try:
             # Support multiple tickers
             ticker_specs = [(t, None) for t in tickers]
@@ -14499,6 +14686,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                 enable_cache=True,
                 ensure_tables=False,
                 log_level="WARNING",
+                momentum_filter=momentum_filter,
             )
 
             html = format_multi_window_as_html(
@@ -14750,6 +14938,8 @@ async def handle_range_percentiles_multi_window_api(request: web.Request) -> web
         ?percentiles=75,90,95,98,99,100
         ?min_days=30
         ?min_direction_days=5
+        ?consecutive_days_min=3 (optional: minimum streak length for momentum filter)
+        ?momentum_direction=up|down|any (optional: streak direction filter)
 
     Returns JSON with multi-window data structure.
     """
@@ -14821,6 +15011,25 @@ async def handle_range_percentiles_multi_window_api(request: web.Request) -> web
 
     db_config = db_instance.db_config
 
+    # Parse optional momentum filter parameters
+    momentum_filter = None
+    consec_min_str = request.query.get('consecutive_days_min', '')
+    momentum_dir = request.query.get('momentum_direction', '')
+    if consec_min_str or momentum_dir:
+        try:
+            consec_min = int(consec_min_str) if consec_min_str else 1
+        except ValueError:
+            consec_min = 1
+        if momentum_dir not in ('up', 'down', 'any', ''):
+            return web.json_response(
+                {"error": "momentum_direction must be 'up', 'down', or 'any'"},
+                status=400,
+            )
+        momentum_filter = {
+            "consecutive_days_min": consec_min,
+            "direction": momentum_dir if momentum_dir else "any",
+        }
+
     try:
         result = await compute_range_percentiles_multi_window(
             ticker=ticker,
@@ -14833,6 +15042,7 @@ async def handle_range_percentiles_multi_window_api(request: web.Request) -> web
             enable_cache=True,
             ensure_tables=False,
             log_level="WARNING",
+            momentum_filter=momentum_filter,
         )
         return web.json_response(result)
 
