@@ -44,6 +44,13 @@ def parse_args():
     parser.add_argument('--no-map-similar-variants', action='store_true',
                         help='Disable mapping of similar chord variants (Em/Em7/Emin) to one form')
 
+    # --- Skill level ---
+    from lib.skill_levels import ALL_SKILL_NAMES
+    parser.add_argument('--skill-level', choices=ALL_SKILL_NAMES,
+                        help='Skill level preset: adjusts confidence, chord window, decay, and hysteresis. '
+                             'beginner/elementary/novice → forgiving, intermediate/proficient → balanced, '
+                             'advanced/expert → precise')
+
     # --- Device / timing ---
     parser.add_argument('--list-devices', action='store_true', help='List available audio input devices and exit')
     parser.add_argument('--device', type=int, help='Audio input device ID (use --list-devices to see available devices)')
@@ -61,6 +68,18 @@ def parse_args():
                         help='Use raw frequencies without filtering (for --frequencies-only/--notes-only)')
 
     args = parser.parse_args()
+
+    # Apply skill level preset (explicit CLI flags override preset values)
+    if args.skill_level:
+        from lib.skill_levels import get_skill_preset, resolve_skill_level
+        args.skill_level = resolve_skill_level(args.skill_level)
+        preset = get_skill_preset(args.skill_level)
+        # Only apply preset values for params the user didn't explicitly set on CLI
+        # We detect this by comparing to parser defaults
+        for key, preset_val in preset.items():
+            arg_key = key.replace('-', '_')
+            if parser.get_default(arg_key) == getattr(args, arg_key):
+                setattr(args, arg_key, preset_val)
 
     # Derived flags
     args.multi_pitch = not args.single_pitch
@@ -145,6 +164,8 @@ def main():
     chord_window = args.chord_window
     chord_window_confidence = args.chord_window_confidence
     print("📊 Configuration:")
+    if args.skill_level:
+        print(f"  Skill Level: {args.skill_level}")
     print(f"  Instrument: {args.instrument} ({instrument_name})")
     print(f"  Frequency Range: {low_freq}-{high_freq} Hz" + (" (Custom)" if args.low_freq and args.high_freq else ""))
     print(f"  Silence Threshold: {args.silence_threshold}")
@@ -215,6 +236,9 @@ def main():
         'song_info': song_info,
         'song_influence': args.song_influence,
         'map_similar_variants': not args.no_map_similar_variants,
+        'decay_rate': getattr(args, 'decay_rate', 2.3),
+        'hysteresis_bonus': getattr(args, 'hysteresis_bonus', 0.15),
+        'skill_level': getattr(args, 'skill_level', None),
         # Frequencies/notes-only mode params
         'sensitivity': args.sensitivity,
         'multi_pitch': args.multi_pitch,

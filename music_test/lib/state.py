@@ -62,6 +62,12 @@ class AudioProcessingState:
             self.high_freq = getattr(config, 'high_freq', None) or preset['high_freq']
             self.instrument_name = getattr(config, 'instrument_name', None) or preset['name']
     
+    def _config_get(self, key, default):
+        """Get a config value, handling both dict and argparse-style configs."""
+        if hasattr(self.config, 'get'):
+            return self.config.get(key, default)
+        return getattr(self.config, key, default)
+
     def reset(self):
         """Reset state to initial values."""
         self.audio_buffer = np.zeros(get_buffer_size(), dtype=np.float32)
@@ -232,7 +238,7 @@ class AudioProcessingState:
         # --- Exponential temporal weighting ---
         # Decay factor: detections from 0.3s ago get ~50% weight
         # This makes recent detections much more influential
-        DECAY_RATE = 2.3  # ln(2)/0.3 ≈ 2.3 for half-life of 0.3s
+        DECAY_RATE = self._config_get('decay_rate', 2.3)
         now = time.time()
 
         chord_scores = defaultdict(lambda: {
@@ -261,7 +267,7 @@ class AudioProcessingState:
         # If we've been showing a chord stably, give it a small bonus
         # to prevent unnecessary switching on close scores.
         # Only apply if stability >= 2 (chord has been shown for 2+ windows)
-        HYSTERESIS_BONUS = 0.15  # 15% bonus for current stable chord
+        HYSTERESIS_BONUS = self._config_get('hysteresis_bonus', 0.15)
         if self.last_chord and self.chord_stability >= 2:
             if self.last_chord in chord_scores:
                 chord_scores[self.last_chord]['weighted_confidence'] *= (1.0 + HYSTERESIS_BONUS)

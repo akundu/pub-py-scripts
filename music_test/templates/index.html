@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Chord Detector</title>
-    <link rel="stylesheet" href="static/css/style.css?v=6">
+    <link rel="stylesheet" href="static/css/style.css?v=7">
 </head>
 <body>
     <div class="container">
@@ -54,6 +54,15 @@
                             Map similar chord variants
                         </label>
                         <span class="song-influence-hint">(works with or without a song; reduces jumping between Em / Em7 / Emin)</span>
+                    </div>
+                </div>
+                <div class="control-row skill-level-row">
+                    <label class="song-label">Skill Level:</label>
+                    <div class="skill-level-buttons">
+                        <button class="btn btn-skill" data-skill="beginner">Beginner</button>
+                        <button class="btn btn-skill active" data-skill="intermediate">Intermediate</button>
+                        <button class="btn btn-skill" data-skill="advanced">Advanced</button>
+                        <span id="skillSuggestion" class="skill-suggestion hidden"></span>
                     </div>
                 </div>
             </section>
@@ -262,7 +271,7 @@
 
     <script src="static/js/audio_handler.js?v=2"></script>
     <script src="static/js/visualizations.js?v=2"></script>
-    <script src="static/js/main.js?v=9"></script>
+    <script src="static/js/main.js?v=10"></script>
 </body>
 </html>
 

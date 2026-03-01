@@ -845,3 +845,47 @@ header h1 {
     }
 }
 
+/* Skill Level Buttons */
+.skill-level-row {
+    align-items: center;
+}
+
+.skill-level-buttons {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.btn-skill {
+    padding: 6px 16px;
+    border: 2px solid #555;
+    border-radius: 20px;
+    background: transparent;
+    color: #ccc;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: all 0.2s;
+}
+
+.btn-skill:hover {
+    border-color: #4a90d9;
+    color: #fff;
+}
+
+.btn-skill.active {
+    background: #4a90d9;
+    border-color: #4a90d9;
+    color: #fff;
+}
+
+.skill-suggestion {
+    font-size: 0.8rem;
+    color: #aaa;
+    margin-left: 8px;
+    font-style: italic;
+}
+
+.skill-suggestion.hidden {
+    display: none;
+}
+

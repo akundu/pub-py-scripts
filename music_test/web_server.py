@@ -133,7 +133,7 @@ class ConnectionState:
             return None
 
         from collections import defaultdict
-        DECAY_RATE = 2.3  # half-life ~0.3s
+        DECAY_RATE = self.config.get('decay_rate', 2.3)
         now = time.time()
 
         chord_scores = defaultdict(lambda: {
@@ -157,7 +157,7 @@ class ConnectionState:
                 chord_scores[chord]['best_detection'] = detection
 
         # Hysteresis bonus for current stable chord
-        HYSTERESIS_BONUS = 0.15
+        HYSTERESIS_BONUS = self.config.get('hysteresis_bonus', 0.15)
         if self.last_chord and self.chord_stability >= 2:
             if self.last_chord in chord_scores:
                 chord_scores[self.last_chord]['weighted_confidence'] *= (1.0 + HYSTERESIS_BONUS)
@@ -224,8 +224,23 @@ def parse_config_from_query(query_params: dict) -> dict:
         'multi_pitch': query_params.get('multi_pitch', 'true').lower() == 'true',
         'show_fft': query_params.get('show_fft', 'false').lower() == 'true',
         'raw_frequencies': query_params.get('raw_frequencies', 'false').lower() == 'true',
+        'decay_rate': float(query_params.get('decay_rate', 2.3)),
+        'hysteresis_bonus': float(query_params.get('hysteresis_bonus', 0.15)),
     }
-    
+
+    # Apply skill level preset (explicit params above override preset values)
+    skill_level = query_params.get('skill_level')
+    if skill_level:
+        from lib.skill_levels import get_skill_preset, resolve_skill_level, ALL_SKILL_NAMES
+        if skill_level in ALL_SKILL_NAMES:
+            canonical = resolve_skill_level(skill_level)
+            preset = get_skill_preset(canonical)
+            for key, value in preset.items():
+                # Only apply preset value if the user didn't explicitly set it
+                if key not in query_params:
+                    config[key] = value
+            config['skill_level'] = canonical
+
     # Get instrument settings
     if query_params.get('low_freq') and query_params.get('high_freq'):
         config['low_freq'] = int(query_params.get('low_freq'))
@@ -366,15 +381,24 @@ async def websocket_endpoint(websocket: WebSocket):
                                         config['song_chords'] = song_chords
                                         config['song_info'] = song_info
                                         
+                                        # Suggest skill level based on song difficulty
+                                        suggested_skill = None
+                                        if song_info.get('difficulty'):
+                                            from lib.skill_levels import suggest_skill_for_song
+                                            suggested_skill = suggest_skill_for_song(song_info['difficulty'])
+
                                         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🎵 Song set: {song_info['title']} by {song_info['composer']}")
                                         print(f"   Chords: {', '.join(song_chords)}")
-                                        
-                                        await websocket.send_json({
+
+                                        response = {
                                             "type": "song_loaded",
                                             "song_id": song_id,
                                             "song_info": song_info,
                                             "chords": song_chords
-                                        })
+                                        }
+                                        if suggested_skill:
+                                            response["suggested_skill"] = suggested_skill
+                                        await websocket.send_json(response)
                                     except Exception as e:
                                         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ Error loading song: {e}")
                                         await websocket.send_json({

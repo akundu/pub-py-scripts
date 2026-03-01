@@ -5,6 +5,50 @@ let mediaStream = null;
 let isRecording = false;
 let config = {};
 let currentSongId = null;
+let currentSkillLevel = 'intermediate';
+
+// Map all 7 difficulty/skill names to the 3 canonical levels
+const SKILL_NAME_MAP = {
+  beginner: 'beginner',
+  elementary: 'beginner',
+  novice: 'beginner',
+  intermediate: 'intermediate',
+  proficient: 'intermediate',
+  advanced: 'advanced',
+  expert: 'advanced',
+};
+
+function resolveSkillLevel(name) {
+  return SKILL_NAME_MAP[name] || 'intermediate';
+}
+
+// Skill level presets (mirrors server-side lib/skill_levels.py)
+const SKILL_PRESETS = {
+  beginner: {
+    confidence_threshold: 0.30,
+    chord_window: 0.6,
+    chord_window_confidence: 0.30,
+    song_influence: 0.85,
+    decay_rate: 1.2,
+    hysteresis_bonus: 0.30,
+  },
+  intermediate: {
+    confidence_threshold: 0.45,
+    chord_window: 0.3,
+    chord_window_confidence: 0.45,
+    song_influence: 0.70,
+    decay_rate: 2.3,
+    hysteresis_bonus: 0.15,
+  },
+  advanced: {
+    confidence_threshold: 0.55,
+    chord_window: 0.15,
+    chord_window_confidence: 0.50,
+    song_influence: 0.50,
+    decay_rate: 3.5,
+    hysteresis_bonus: 0.05,
+  },
+};
 
 // Helper function to get timestamp for logging
 function getTimestamp() {
@@ -80,12 +124,23 @@ function getConfigFromURL() {
     single_pitch: false,
     show_fft: false,
     raw_frequencies: false,
+    decay_rate: 2.3,
+    hysteresis_bonus: 0.15,
   };
 
   const config = { ...defaultConfig };
 
+  // Apply skill_level preset first (URL params override afterward)
+  const skillParam = params.get('skill_level');
+  if (skillParam && SKILL_NAME_MAP[skillParam]) {
+    const resolved = resolveSkillLevel(skillParam);
+    Object.assign(config, SKILL_PRESETS[resolved]);
+    currentSkillLevel = resolved;
+  }
+
   // Override with URL parameters and track source
   for (const [key, value] of params.entries()) {
+    if (key === 'skill_level') continue; // already handled above
     if (key in defaultConfig) {
       configSource[key] = 'url';
       if (key === 'map_similar_variants' || (typeof defaultConfig[key] === 'boolean')) {
@@ -186,6 +241,11 @@ function initializeSettings() {
   const mapVariantsModalEl = document.getElementById('mapSimilarVariants');
   if (mapVariantsLiveEl) mapVariantsLiveEl.checked = config.map_similar_variants !== false;
   if (mapVariantsModalEl) mapVariantsModalEl.checked = config.map_similar_variants !== false;
+
+  // Sync skill level buttons
+  document.querySelectorAll('.btn-skill').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.skill === currentSkillLevel);
+  });
 
   logAllSettings();
 }
@@ -589,11 +649,21 @@ function handleWebSocketMessage(data) {
   if (data.type === 'song_loaded') {
     logWithTimestamp(`🎵 Song loaded: ${data.song_info.title} by ${data.song_info.composer}`);
     logWithTimestamp(`   Chords: ${data.chords.join(', ')}`);
+    // Show skill level suggestion based on song difficulty
+    const suggestionEl = document.getElementById('skillSuggestion');
+    if (data.suggested_skill && suggestionEl) {
+      const label = data.suggested_skill.charAt(0).toUpperCase() + data.suggested_skill.slice(1);
+      suggestionEl.textContent = `Suggested: ${label}`;
+      suggestionEl.classList.remove('hidden');
+      logWithTimestamp(`   Suggested skill: ${data.suggested_skill}`);
+    }
     return;
   }
 
   if (data.type === 'song_cleared') {
     logWithTimestamp('🎵 Song cleared - using raw detection only');
+    const suggestionEl = document.getElementById('skillSuggestion');
+    if (suggestionEl) suggestionEl.classList.add('hidden');
     return;
   }
 
@@ -1085,6 +1155,8 @@ settingsForm.addEventListener('submit', (e) => {
     single_pitch: false,
     show_fft: false,
     raw_frequencies: false,
+    decay_rate: 2.3,
+    hysteresis_bonus: 0.15,
   };
 
   // Merge with defaults to ensure all values are set
@@ -1210,6 +1282,68 @@ function configItem(label, value, source, isBoolean = false) {
     </div>
   `;
 }
+
+// --- Skill Level ---
+function applySkillLevel(level) {
+  const preset = SKILL_PRESETS[level];
+  if (!preset) return;
+
+  currentSkillLevel = level;
+
+  // Apply preset values to config
+  Object.assign(config, preset);
+
+  // Update UI sliders to match preset
+  const sliderMap = {
+    confidence_threshold: { slider: 'confidenceThreshold', display: 'confidenceValue' },
+    chord_window: { slider: 'chordWindow', display: 'chordWindowValue' },
+    chord_window_confidence: { slider: 'chordWindowConfidence', display: 'chordWindowConfidenceValue' },
+    song_influence: { slider: 'songInfluence', display: 'songInfluenceValue' },
+  };
+
+  for (const [key, ids] of Object.entries(sliderMap)) {
+    const el = document.getElementById(ids.slider);
+    const valEl = document.getElementById(ids.display);
+    if (el) el.value = preset[key];
+    if (valEl) valEl.textContent = typeof preset[key] === 'number' && key !== 'chord_window' ? preset[key].toFixed(2) : preset[key];
+  }
+
+  // Sync live song influence slider
+  const liveSlider = document.getElementById('songInfluenceLive');
+  const liveVal = document.getElementById('songInfluenceLiveValue');
+  if (liveSlider) liveSlider.value = preset.song_influence;
+  if (liveVal) liveVal.textContent = preset.song_influence.toFixed(2);
+
+  // Update active button
+  document.querySelectorAll('.btn-skill').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.skill === level);
+  });
+
+  // Send config update via WebSocket
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'config_update', config: preset }));
+  }
+
+  logWithTimestamp(`🎯 Skill level set to: ${level}`);
+}
+
+// Skill level button handlers
+document.querySelectorAll('.btn-skill').forEach(btn => {
+  btn.addEventListener('click', () => {
+    applySkillLevel(btn.dataset.skill);
+  });
+});
+
+// Deselect skill buttons when user manually adjusts a skill-related slider
+['confidenceThreshold', 'chordWindow', 'chordWindowConfidence'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) {
+    el.addEventListener('input', () => {
+      currentSkillLevel = null;
+      document.querySelectorAll('.btn-skill').forEach(btn => btn.classList.remove('active'));
+    });
+  }
+});
 
 // Event listeners
 document.getElementById('startBtn').addEventListener('click', startRecording);
