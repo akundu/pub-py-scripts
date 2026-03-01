@@ -58,6 +58,8 @@ class ConnectionState:
         # Song context for chord constraint
         self.song_chords = config.get('song_chords', [])
         self.song_info = config.get('song_info', None)
+        self.chord_timeline = []
+        self.playback_start_time = None  # Set when first song chord is detected (auto mode)
     
     def update_buffer(self, new_samples, chunk_size):
         """Update circular audio buffer with new samples."""
@@ -226,6 +228,8 @@ def parse_config_from_query(query_params: dict) -> dict:
         'raw_frequencies': query_params.get('raw_frequencies', 'false').lower() == 'true',
         'decay_rate': float(query_params.get('decay_rate', 2.3)),
         'hysteresis_bonus': float(query_params.get('hysteresis_bonus', 0.15)),
+        'timing_tolerance': float(query_params.get('timing_tolerance', 0.75)),
+        'timeline_sync': query_params.get('timeline_sync', 'auto'),  # auto, manual, off
     }
 
     # Apply skill level preset (explicit params above override preset values)
@@ -380,7 +384,13 @@ async def websocket_endpoint(websocket: WebSocket):
                                         state.song_info = song_info
                                         config['song_chords'] = song_chords
                                         config['song_info'] = song_info
-                                        
+
+                                        # Compute chord timeline and reset playback tracking
+                                        chord_timeline = loader.get_chord_timeline(song_id)
+                                        state.chord_timeline = chord_timeline
+                                        state.playback_start_time = None
+                                        config['chord_timeline'] = chord_timeline
+
                                         # Suggest skill level based on song difficulty
                                         suggested_skill = None
                                         if song_info.get('difficulty'):
@@ -389,12 +399,15 @@ async def websocket_endpoint(websocket: WebSocket):
 
                                         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🎵 Song set: {song_info['title']} by {song_info['composer']}")
                                         print(f"   Chords: {', '.join(song_chords)}")
+                                        if chord_timeline:
+                                            print(f"   Timeline: {len(chord_timeline)} segments")
 
                                         response = {
                                             "type": "song_loaded",
                                             "song_id": song_id,
                                             "song_info": song_info,
-                                            "chords": song_chords
+                                            "chords": song_chords,
+                                            "chord_timeline": chord_timeline
                                         }
                                         if suggested_skill:
                                             response["suggested_skill"] = suggested_skill
@@ -409,8 +422,11 @@ async def websocket_endpoint(websocket: WebSocket):
                                     # Clear song selection
                                     state.song_chords = []
                                     state.song_info = None
+                                    state.chord_timeline = []
+                                    state.playback_start_time = None
                                     config['song_chords'] = []
                                     config['song_info'] = None
+                                    config['chord_timeline'] = []
                                     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🎵 Song cleared")
                                     await websocket.send_json({
                                         "type": "song_cleared"
@@ -509,6 +525,48 @@ async def websocket_endpoint(websocket: WebSocket):
                                     smoothed_result['stability'] = state.update_chord_stability(constrained['final_chord'])
                                 else:
                                     smoothed_result['song_constrained'] = False
+
+                                # Timeline matching: boost confidence when detected chord matches expected chord at current time
+                                timeline_sync = config.get('timeline_sync', 'auto')
+                                if state.chord_timeline and timeline_sync != 'off':
+                                    from lib.song_loader import SongLoader
+                                    detected = smoothed_result.get('final_chord') or smoothed_result.get('chord')
+
+                                    # Determine playback_time based on sync mode
+                                    playback_time = None
+                                    if timeline_sync == 'manual':
+                                        playback_time = config.get('playback_time')
+                                    elif timeline_sync == 'auto':
+                                        # Auto-start: begin counting when first song chord (or close match) is detected
+                                        if state.playback_start_time is None:
+                                            match_type = smoothed_result.get('match_type', 'none')
+                                            is_song_chord = detected and (
+                                                detected in state.song_chords
+                                                or match_type in ('exact', 'related', 'partial')
+                                            )
+                                            if is_song_chord:
+                                                state.playback_start_time = time.time()
+                                                playback_time = 0.0
+                                        else:
+                                            playback_time = time.time() - state.playback_start_time
+
+                                    if playback_time is not None:
+                                        tolerance = config.get('timing_tolerance', 0.75)
+                                        expected = SongLoader.get_expected_chord_at_time(
+                                            state.chord_timeline, playback_time, tolerance
+                                        )
+                                        smoothed_result['playback_time'] = round(playback_time, 2)
+                                        if expected:
+                                            smoothed_result['expected_chord'] = expected
+                                            if detected == expected:
+                                                smoothed_result['timeline_match'] = True
+                                                if 'final_confidence' in smoothed_result:
+                                                    smoothed_result['final_confidence'] = min(1.0, smoothed_result['final_confidence'] + 0.15)
+                                                else:
+                                                    smoothed_result['confidence'] = min(1.0, smoothed_result['confidence'] + 0.15)
+                                            else:
+                                                smoothed_result['timeline_match'] = False
+
                                 # Map similar variants (Em/Em7/Emin -> one form) when no song; works with or without song
                                 if not state.song_chords and config.get('map_similar_variants', True):
                                     from lib.music_understanding import normalize_chord_variant

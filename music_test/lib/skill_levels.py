@@ -15,6 +15,7 @@ SKILL_LEVELS = {
         'song_influence': 0.85,
         'decay_rate': 1.2,
         'hysteresis_bonus': 0.30,
+        'timing_tolerance': 1.5,
     },
     'intermediate': {
         'confidence_threshold': 0.45,
@@ -23,6 +24,7 @@ SKILL_LEVELS = {
         'song_influence': 0.70,
         'decay_rate': 2.3,
         'hysteresis_bonus': 0.15,
+        'timing_tolerance': 0.75,
     },
     'advanced': {
         'confidence_threshold': 0.55,
@@ -31,6 +33,7 @@ SKILL_LEVELS = {
         'song_influence': 0.50,
         'decay_rate': 3.5,
         'hysteresis_bonus': 0.05,
+        'timing_tolerance': 0.25,
     },
 }
 

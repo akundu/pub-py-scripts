@@ -238,6 +238,8 @@ def main():
         'map_similar_variants': not args.no_map_similar_variants,
         'decay_rate': getattr(args, 'decay_rate', 2.3),
         'hysteresis_bonus': getattr(args, 'hysteresis_bonus', 0.15),
+        'timing_tolerance': getattr(args, 'timing_tolerance', 0.75),
+        'timeline_sync': getattr(args, 'timeline_sync', 'auto'),
         'skill_level': getattr(args, 'skill_level', None),
         # Frequencies/notes-only mode params
         'sensitivity': args.sensitivity,

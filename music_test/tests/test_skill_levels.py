@@ -56,6 +56,19 @@ class TestSkillPresets:
         assert a['decay_rate'] > i['decay_rate']
         assert a['hysteresis_bonus'] < i['hysteresis_bonus']
 
+    def test_timing_tolerance_present_in_all_presets(self):
+        for level in SKILL_LEVELS:
+            assert 'timing_tolerance' in SKILL_LEVELS[level], f"{level} missing timing_tolerance"
+
+    def test_intermediate_timing_tolerance_default(self):
+        assert get_skill_preset('intermediate')['timing_tolerance'] == 0.75
+
+    def test_timing_tolerance_decreases_with_skill(self):
+        b = get_skill_preset('beginner')['timing_tolerance']
+        i = get_skill_preset('intermediate')['timing_tolerance']
+        a = get_skill_preset('advanced')['timing_tolerance']
+        assert b > i > a
+
     def test_get_skill_preset_accepts_aliases(self):
         """All 7 difficulty names should be accepted by get_skill_preset."""
         for name in ALL_SKILL_NAMES:
