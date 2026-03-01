@@ -1,0 +1,51 @@
+infra:
+  ticker: NDX
+  start_date: "2025-12-01"
+  end_date: "2026-02-28"
+  num_processes: 8
+  output_dir: results/grid_intraday
+
+providers:
+  - name: csv_equity
+    role: equity
+    params:
+      csv_dir: equities_output
+  - name: csv_options
+    role: options
+    params:
+      csv_dir: options_csv_output
+      dte_buckets: [0]
+
+strategy:
+  name: zero_dte_credit_spread
+  params:
+    option_types: [put, call]
+    percent_beyond: "0.03:0.05"
+    instruments: [credit_spread]
+    entry_strategy: interval
+    interval_minutes: 15
+    num_contracts: 1
+    max_loss_estimate: 10000
+
+constraints:
+  budget:
+    daily_budget: 100000
+  exit_rules:
+    profit_target_pct: 0.50
+    mode: first_triggered
+
+report:
+  formats: [console]
+  metrics: [win_rate, roi]
+  grid_sweep:
+    param_grid:
+      constraints.trading_hours.entry_start:
+        - "09:45"
+        - "10:00"
+        - "10:30"
+      constraints.trading_hours.entry_end:
+        - "14:00"
+        - "14:30"
+        - "15:00"
+    batch_size: 50
+    save_intermediate: false

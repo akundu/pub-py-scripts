@@ -1,0 +1,45 @@
+infra:
+  ticker: NDX
+  start_date: "2025-12-01"
+  end_date: "2026-02-28"
+  num_processes: 8
+  output_dir: results/ndx_scale_in
+
+providers:
+  - name: csv_equity
+    role: equity
+    params:
+      csv_dir: equities_output
+  - name: csv_options
+    role: options
+    params:
+      csv_dir: options_csv_output
+      dte_buckets: [0]
+
+strategy:
+  name: scale_in_credit_spread
+  params:
+    option_types: [put, call]
+    percent_beyond: "0.03:0.05"
+    num_contracts: 1
+    scale_in_levels: 3
+    scale_in_trigger_pct: 0.005
+    max_loss_estimate: 10000
+
+constraints:
+  budget:
+    max_spend_per_transaction: 15000
+    daily_budget: 100000
+  trading_hours:
+    entry_start: "09:45"
+    entry_end: "15:00"
+    forced_exit_time: "15:45"
+  exit_rules:
+    profit_target_pct: 0.50
+    stop_loss_pct: 2.0
+    time_exit: "15:30"
+    mode: first_triggered
+
+report:
+  formats: [console]
+  metrics: [win_rate, roi, profit_factor]

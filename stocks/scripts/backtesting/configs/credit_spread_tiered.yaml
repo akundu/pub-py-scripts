@@ -1,0 +1,43 @@
+infra:
+  ticker: NDX
+  start_date: "2025-12-01"
+  end_date: "2026-02-28"
+  num_processes: 8
+  output_dir: results/ndx_tiered
+
+providers:
+  - name: csv_equity
+    role: equity
+    params:
+      csv_dir: equities_output
+  - name: csv_options
+    role: options
+    params:
+      csv_dir: options_csv_output
+      dte_buckets: [0]
+
+strategy:
+  name: tiered_credit_spread
+  params:
+    option_types: [put, call]
+    num_contracts: 3
+    max_loss_estimate: 30000
+    tiers:
+      - percent_beyond: "0.02:0.02"
+        allocation_pct: 0.4
+      - percent_beyond: "0.03:0.03"
+        allocation_pct: 0.35
+      - percent_beyond: "0.05:0.05"
+        allocation_pct: 0.25
+
+constraints:
+  budget:
+    daily_budget: 150000
+  exit_rules:
+    profit_target_pct: 0.50
+    stop_loss_pct: 2.0
+    mode: first_triggered
+
+report:
+  formats: [console]
+  metrics: [win_rate, roi, profit_factor]
