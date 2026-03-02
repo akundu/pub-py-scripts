@@ -87,6 +87,7 @@ scripts/backtesting/
             tiered.py                  # TieredStrategy -- simultaneous multi-percentile
             time_allocated.py          # TimeAllocatedStrategy -- hourly window budgets
             gate_filtered.py           # GateFilteredStrategy -- prediction-gated entries
+            tqqq_momentum_scalper.py   # TQQQMomentumScalperStrategy -- ORB + consecutive-day + gap fade
 
     constraints/
         base.py                        # Constraint ABC + ConstraintChain + ConstraintContext
@@ -127,6 +128,7 @@ scripts/backtesting/
         credit_spread_gate.yaml
         grid_sweep_comprehensive.yaml
         grid_sweep_intraday.yaml
+        tqqq_momentum_scalper.yaml     # TQQQ 0DTE momentum scalper (ORB + streaks + gaps)
 
     utils/
         compare_results.py             # Cross-run comparison CLI
@@ -160,8 +162,9 @@ BacktestStrategy (ABC)
     ├── MultiDayDTEStrategy    # 1-20 day DTE, multi-day tracking
     ├── ScaleInStrategy        # Layered entries on price breach
     ├── TieredStrategy         # Simultaneous multi-percentile entries
-    ├── TimeAllocatedStrategy  # Hourly window-based entries
-    └── GateFilteredStrategy   # Prediction-gated entries
+    ├── TimeAllocatedStrategy          # Hourly window-based entries
+    ├── GateFilteredStrategy           # Prediction-gated entries
+    └── TQQQMomentumScalperStrategy    # ORB + consecutive-day + gap fade (TQQQ)
 
 Constraint (ABC)
 ├── MaxSpendPerTransaction     # Per-position capital cap
@@ -480,3 +483,57 @@ The framework wraps these existing modules via providers/signals/instruments:
 | `tests/test_backtesting_exit_rules.py` | All exit rules + CompositeExit |
 | `tests/test_backtesting_instruments.py` | P&L calculations + InstrumentFactory |
 | `tests/test_backtesting_collector.py` | ResultCollector + StandardMetrics |
+
+## TQQQ Momentum Scalper Strategy
+
+A short-term credit spread strategy for TQQQ using three data-driven signals.
+See `results/TQQQ_MOMENTUM_SCALPER_ANALYSIS.md` for the full analysis with all backtest results.
+
+### Signals
+
+1. **Opening Range Breakout (ORB)**: After the first 30 min (9:30-10:00 ET), if price breaks only one side of the opening range, sell credit spreads on the opposite side. Entry at 10:30 ET. Historically 65-73% directional accuracy on TQQQ.
+
+2. **Consecutive Day Mean Reversion**: After 3+ consecutive down days, sell put credit spreads (bounce). After 4+ consecutive up days, sell call credit spreads (exhaustion). Entry at 9:30 ET. 100% win rate in backtest (20 trades).
+
+3. **Gap Fade**: When the overnight gap is small (<0.5%), fade it. Entry at 9:30 ET. ~73% fill rate on small gaps.
+
+### Key Results (1-year backtest, 2025-03-01 to 2026-02-28)
+
+| Config | Trades | Win Rate | Net P&L | ROI | Sharpe | Max DD |
+|--------|--------|----------|---------|-----|--------|--------|
+| Combined (best) | 87 | 94.2% | $92,108 | 188% | 24.2 | $825 |
+| ORB only | 50 | 92.0% | $51,088 | 186% | 22.5 | $825 |
+| Consecutive (3-day, 2% OTM) | 20 | 100% | $22,660 | 196% | 27.1 | $0 |
+| Gap fade (0.5% threshold) | 17 | 94.1% | $18,820 | 192% | 26.2 | $400 |
+
+### Quick Start
+
+```bash
+# Single run
+python -m scripts.backtesting.runner --config scripts/backtesting/configs/tqqq_momentum_scalper.yaml
+
+# 90-day run
+python -m scripts.backtesting.runner --config scripts/backtesting/configs/tqqq_momentum_scalper.yaml \
+    --start-date 2025-11-17 --end-date 2026-02-28
+
+# Full parameter sweep (54 configs, 8 parallel workers, ~17 min)
+python run_tqqq_momentum_sweep.py
+```
+
+### Strategy Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `signal_mode` | `combined` | `orb`, `consecutive`, `gap_fade`, or `combined` |
+| `percent_beyond` | `"0.02:0.02"` | OTM distance (put_pct:call_pct) |
+| `min_width` / `max_width` | `1` / `2` | Spread width in dollars |
+| `num_contracts` | `10` | Contracts per trade |
+| `min_consecutive_down` | `3` | Red days before put signal fires |
+| `min_consecutive_up` | `4` | Green days before call signal fires |
+| `max_gap_pct` | `0.005` | Max gap size to fade (0.5%) |
+
+### Data Requirements
+
+- **Options**: `options_csv_output_full/TQQQ/` (uses full chain, not 0DTE-only dir)
+- **Equities**: `equities_output/TQQQ/` (5-minute OHLCV bars)
+- **DTE filter**: `[0, 1]` in YAML config

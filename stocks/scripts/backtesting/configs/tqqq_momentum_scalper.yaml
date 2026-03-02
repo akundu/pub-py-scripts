@@ -1,0 +1,55 @@
+infra:
+  ticker: TQQQ
+  start_date: "2025-03-01"
+  end_date: "2026-02-28"
+  lookback_days: 30
+  output_dir: results/tqqq_momentum_scalper
+
+providers:
+  - name: csv_equity
+    role: equity
+    params:
+      csv_dir: equities_output
+  - name: csv_options
+    role: options
+    params:
+      csv_dir: options_csv_output_full
+      dte_buckets: [0, 1]
+
+strategy:
+  name: tqqq_momentum_scalper
+  params:
+    # Signal mode: "orb", "consecutive", "gap_fade", or "combined"
+    signal_mode: combined
+    option_types: [put, call]
+    # How far OTM to place spreads (put_pct:call_pct)
+    percent_beyond: "0.02:0.02"
+    # Spread width in dollars
+    min_width: 1
+    max_width: 2
+    num_contracts: 10
+    max_loss_estimate: 10000
+    # Consecutive-day thresholds
+    min_consecutive_down: 3
+    min_consecutive_up: 4
+    # Gap fade threshold (max gap size to fade)
+    max_gap_pct: 0.005
+    instruments: [credit_spread]
+
+constraints:
+  budget:
+    max_spend_per_transaction: 10000
+    daily_budget: 50000
+  trading_hours:
+    entry_start: "09:30"
+    entry_end: "15:00"
+    forced_exit_time: "15:45"
+  exit_rules:
+    profit_target_pct: 0.50
+    stop_loss_pct: 2.0
+    time_exit: "15:30"
+    mode: first_triggered
+
+report:
+  formats: [console, csv]
+  metrics: [win_rate, roi, sharpe, max_drawdown, profit_factor]

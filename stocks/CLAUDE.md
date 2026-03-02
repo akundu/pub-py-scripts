@@ -225,3 +225,25 @@ python -m scripts.backtesting.runner --config scripts/backtesting/configs/grid_s
 ```bash
 python -m pytest tests/test_backtesting_config.py tests/test_backtesting_constraints.py tests/test_backtesting_exit_rules.py tests/test_backtesting_instruments.py tests/test_backtesting_collector.py -v
 ```
+
+### TQQQ Momentum Scalper Strategy
+
+A short-term 0DTE credit spread strategy for TQQQ using three signals: Opening Range Breakout (ORB), consecutive-day mean reversion, and small gap fade. See `results/TQQQ_MOMENTUM_SCALPER_ANALYSIS.md` for the full analysis.
+
+```bash
+# Single run
+python -m scripts.backtesting.runner --config scripts/backtesting/configs/tqqq_momentum_scalper.yaml
+
+# Parameter sweep (54 configs, multiprocessed)
+python run_tqqq_momentum_sweep.py
+```
+
+**Key files:**
+- Strategy: `scripts/backtesting/strategies/credit_spread/tqqq_momentum_scalper.py`
+- Config: `scripts/backtesting/configs/tqqq_momentum_scalper.yaml`
+- Sweep runner: `run_tqqq_momentum_sweep.py`
+- Full analysis: `results/TQQQ_MOMENTUM_SCALPER_ANALYSIS.md`
+
+**Best config (1-year backtest):** combined mode, 2% OTM, 10 contracts = 87 trades, 94% win rate, $92K net P&L, 188% ROI.
+
+**Data:** Uses `options_csv_output_full/TQQQ/` (full chain with 0-1 DTE) and `equities_output/TQQQ/` (5-min bars).
