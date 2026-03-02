@@ -121,6 +121,7 @@ Examples:
     import scripts.backtesting.strategies.credit_spread.tiered  # noqa: F401
     import scripts.backtesting.strategies.credit_spread.time_allocated  # noqa: F401
     import scripts.backtesting.strategies.credit_spread.gate_filtered  # noqa: F401
+    import scripts.backtesting.strategies.credit_spread.percentile_entry  # noqa: F401
 
     # Check for grid sweep mode
     if config.report.grid_sweep:

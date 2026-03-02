@@ -1,0 +1,66 @@
+infra:
+  ticker: NDX
+  start_date: "2025-09-01"
+  end_date: "2026-02-28"
+  lookback_days: 180
+  num_processes: 8
+  output_dir: results/percentile_entry_grid
+
+providers:
+  - name: csv_equity
+    role: equity
+    params:
+      csv_dir: equities_output
+  - name: csv_options
+    role: options
+    params:
+      csv_dir: options_csv_output_full
+      dte_buckets: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+strategy:
+  name: percentile_entry_credit_spread
+  params:
+    dte: 0
+    percentile: 95
+    lookback: 120
+    option_types: [put, call]
+    spread_width: 50
+    interval_minutes: 10
+    entry_start_utc: "13:00"
+    entry_end_utc: "17:00"
+    num_contracts: 1
+    max_loss_estimate: 10000
+    profit_target_0dte: 0.75
+    profit_target_multiday: 0.50
+    min_roi_per_day: 0.025
+    stop_loss_multiplier: 3.0
+    roll_enabled: true
+    roll_check_start_utc: "18:00"
+    early_itm_check_utc: "14:00"
+    max_move_cap: 150
+    roll_min_dte: 3
+    roll_max_dte: 10
+    max_roll_width: 50
+    max_rolls: 2
+
+constraints:
+  budget:
+    max_spend_per_transaction: 30000
+    daily_budget: 150000
+  trading_hours:
+    entry_start: "13:00"
+    entry_end: "17:00"
+  exit_rules:
+    profit_target_pct: 0.75
+    stop_loss_pct: 3.0
+
+report:
+  formats: [console, csv]
+  metrics: [win_rate, roi, sharpe, max_drawdown, profit_factor]
+  grid_sweep:
+    param_grid:
+      strategy.params.dte: [0, 2, 5, 10]
+      strategy.params.percentile: [90, 95, 98, 99]
+      constraints.exit_rules.profit_target_pct: [0.25, 0.50, 0.75]
+    batch_size: 100
+    save_intermediate: true

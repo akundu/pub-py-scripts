@@ -52,6 +52,8 @@ class CreditSpreadInstrument(Instrument):
         use_mid = signal.get("use_mid", True)
         num_contracts = signal.get("num_contracts", 1)
 
+        percentile_target_strike = signal.get("percentile_target_strike")
+
         spreads = build_credit_spreads(
             options_df=options_data,
             option_type=option_type,
@@ -60,6 +62,7 @@ class CreditSpreadInstrument(Instrument):
             min_width=min_width,
             max_width=max_width,
             use_mid=use_mid,
+            percentile_target_strike=percentile_target_strike,
         )
 
         if not spreads:
