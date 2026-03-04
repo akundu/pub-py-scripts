@@ -96,10 +96,11 @@ def map_statistical_to_bands(
     # Use half the P10-P90 spread as the symmetric step size
     half_spread = (hi_base_pct - lo_base_pct) / 2.0
 
-    # Multipliers for each band level beyond the P90 base
+    # Multipliers for each band level beyond the P10/P90 base
+    # The base P10/P90 = 80% coverage, so P80 uses mult=0.0 (the base itself)
     band_multipliers = {
-        "P80": -0.5,
-        "P90": 0.0,
+        "P80": 0.0,
+        "P90": 0.5,
         "P95": 1.0,
         "P97": 1.5,
         "P98": 2.0,
