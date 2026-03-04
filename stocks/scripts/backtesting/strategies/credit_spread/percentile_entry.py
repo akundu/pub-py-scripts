@@ -7,6 +7,7 @@ further-dated expirations when the P95 remaining-move threatens the short strike
 """
 
 import copy
+import math
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -80,10 +81,19 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
         sg = PercentileRangeSignal()
         percentile = params.get("percentile", 95)
         dte = params.get("dte", 0)
+        roll_percentile = params.get("roll_percentile", min(percentile, 90))
+        # Include roll percentile + roll DTE windows so strikes are precomputed
+        percentiles_needed = sorted(set([percentile, roll_percentile]))
+        roll_min_dte = params.get("roll_min_dte", 3)
+        roll_max_dte = params.get("roll_max_dte", 10)
+        dte_windows = sorted(set(
+            ([dte] if isinstance(dte, int) else dte)
+            + [roll_min_dte, min(5, roll_max_dte), roll_max_dte]
+        ))
         sg.setup(self.provider.equity if hasattr(self.provider, 'equity') else self.provider, {
             "lookback": params.get("lookback", 120),
-            "percentiles": [percentile],
-            "dte_windows": [dte] if isinstance(dte, int) else dte,
+            "percentiles": percentiles_needed,
+            "dte_windows": dte_windows,
         })
         self.attach_signal_generator("percentile_range", sg)
 
@@ -126,10 +136,14 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
             if cache_key not in self._position_cache:
                 # Build spread once
                 instrument = self.get_instrument(instrument_name)
-                # Pre-filter options near the target strike to speed up spread builder
+                # Pre-filter options by DTE and near the target strike to speed up spread builder
                 # For puts: short at target, long further OTM (lower) → need [target - width, target]
                 # For calls: short at target, long further OTM (higher) → need [target, target + width]
                 options_data = day_context.options_data
+                # Filter to matching DTE options only
+                target_dte = signal.get("dte", self.config.params.get("dte", 0))
+                if options_data is not None and "dte" in options_data.columns:
+                    options_data = options_data[options_data["dte"] == target_dte]
                 if options_data is not None and target_strike is not None and "strike" in options_data.columns:
                     spread_width = self.config.params.get("spread_width", 50)
                     margin = spread_width + 5
@@ -165,9 +179,31 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
             if min_credit > 0 and template.initial_credit < min_credit:
                 continue
 
+            # Credit-per-point filter: reject if credit/width ratio too low
+            # e.g., min_credit_per_point=0.04 → need $2.00 credit on a 50pt spread
+            min_credit_per_point = self.config.params.get("min_credit_per_point", 0)
+            if min_credit_per_point > 0:
+                width = template.metadata.get("width", 1)
+                if width > 0 and template.initial_credit / width < min_credit_per_point:
+                    continue
+
             # Clone the position with this entry's timestamp
             position = copy.copy(template)
             position.entry_time = timestamp
+
+            # Auto-size num_contracts so total credit >= min_total_credit
+            min_total_credit = self.config.params.get("min_total_credit", 0)
+            if min_total_credit > 0 and position.initial_credit > 0:
+                credit_per_contract = position.initial_credit * 100
+                needed = max(1, math.ceil(min_total_credit / credit_per_contract))
+                # Cap at max_contracts to prevent blowup losses
+                max_contracts = self.config.params.get("max_contracts", 0)
+                if max_contracts > 0:
+                    needed = min(needed, max_contracts)
+                if needed != position.num_contracts:
+                    max_loss_per_contract = position.max_loss / max(1, position.num_contracts)
+                    position.num_contracts = needed
+                    position.max_loss = max_loss_per_contract * needed
 
             self.constraints.notify_opened(position.max_loss, timestamp)
             self._daily_capital_used += position.max_loss
@@ -246,6 +282,7 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
                     "min_width": max(5, spread_width // 2),
                     "dte": dte,
                     "entry_date": day_context.trading_date,
+                    "use_mid": params.get("use_mid", True),
                 }
                 if target_strike is not None:
                     signal["percentile_target_strike"] = target_strike
@@ -442,10 +479,12 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
         percentile = params.get("percentile", 95)
 
         # Recompute strike target from signal data
+        # Roll uses a (potentially) more conservative percentile
+        roll_percentile = params.get("roll_percentile", min(percentile, 90))
         pct_data = day_context.signals.get("percentile_range", {})
         strikes_by_dte = pct_data.get("strikes", {})
         dte_strikes = strikes_by_dte.get(new_dte, strikes_by_dte.get(0, {}))
-        pct_strikes = dte_strikes.get(percentile, {})
+        pct_strikes = dte_strikes.get(roll_percentile, dte_strikes.get(percentile, {}))
         target_strike = pct_strikes.get(position.option_type)
 
         new_signal = {
@@ -457,6 +496,7 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
             "max_loss": params.get("max_loss_estimate", 10000),
             "max_width": (max_roll_width, max_roll_width),
             "min_width": max(5, max_roll_width // 2),
+            "use_mid": params.get("use_mid", True),
         }
         if target_strike is not None:
             new_signal["percentile_target_strike"] = target_strike

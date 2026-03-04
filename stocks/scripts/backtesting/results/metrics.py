@@ -57,7 +57,8 @@ class StandardMetrics:
         testable = wins + losses
         win_rate = (wins / testable * 100) if testable > 0 else 0.0
         net_pnl = total_gains - total_losses
-        roi = (net_pnl / total_risk * 100) if total_risk > 0 else 0.0
+        # ROI = credit received / total capital at risk (max loss if both legs breached)
+        roi = (total_credits / total_risk * 100) if total_risk > 0 else 0.0
 
         if total_losses > 0:
             profit_factor = total_gains / total_losses

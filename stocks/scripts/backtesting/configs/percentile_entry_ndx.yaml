@@ -36,6 +36,9 @@ strategy:
     min_roi_per_day: 0.025         # 2.5% ROI per day minimum
     # Minimum credit filter
     min_credit: 0.75               # Reject spreads with credit < $0.75/contract
+    min_total_credit: 0            # Min total credit per trade ($); auto-sizes num_contracts. 0=disabled, 5000=$5K
+    min_credit_per_point: 0        # Min credit/spread_width ratio; 0.04=$2.00 per 50pt spread. 0=disabled
+    max_contracts: 0               # Max contracts per trade; caps auto-sizing blowup. 0=unlimited
     # Stop loss
     stop_loss_multiplier: 3.0      # 3x premium
     # Rolling
@@ -43,6 +46,7 @@ strategy:
     roll_check_start_utc: "18:00"  # 11am PST — start checking for rolls
     early_itm_check_utc: "14:00"   # 7am PST — if ITM, roll immediately
     max_move_cap: 150              # Cap P95 move at 150pts
+    roll_percentile: 90              # Percentile for rolled positions (default: min(percentile, 90))
     roll_min_dte: 3
     roll_max_dte: 10
     max_roll_width: 50
