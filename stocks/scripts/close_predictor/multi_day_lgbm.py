@@ -184,6 +184,8 @@ class MultiDayLGBMPredictor:
 
         # Build percentile bands
         band_defs = {
+            'P80':  (10.0, 90.0),
+            'P90':  (5.0, 95.0),
             'P95':  (2.5, 97.5),
             'P97':  (1.5, 98.5),
             'P98':  (1.0, 99.0),

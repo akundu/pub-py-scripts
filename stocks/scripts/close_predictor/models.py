@@ -10,7 +10,7 @@ ET_TZ = ZoneInfo("America/New_York")
 UTC_TZ = ZoneInfo("UTC")
 
 # Band levels used for the unified output (P95+)
-UNIFIED_BAND_NAMES = ["P95", "P97", "P98", "P99", "P100"]
+UNIFIED_BAND_NAMES = ["P80", "P90", "P95", "P97", "P98", "P99", "P100"]
 
 # Number of 5-minute bars in a full trading day (9:30-16:00 ET = 6.5h x 12 = 78)
 FULL_DAY_BARS = 78

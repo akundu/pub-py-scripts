@@ -42,6 +42,9 @@ except ImportError:
     NUMPY_AVAILABLE = False
     np = None
 
+# Tickers supported by the close-price prediction system
+PREDICTION_TICKERS = {'NDX', 'SPX', 'TQQQ'}
+
 # Try to import Redis for Pub/Sub
 try:
     import redis.asyncio as redis
@@ -5117,6 +5120,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             <div class="ticker-selector">
                 <button class="ticker-btn {'active' if ticker == 'NDX' else ''}" onclick="switchTicker('NDX')">NDX</button>
                 <button class="ticker-btn {'active' if ticker == 'SPX' else ''}" onclick="switchTicker('SPX')">SPX</button>
+                <button class="ticker-btn {'active' if ticker == 'TQQQ' else ''}" onclick="switchTicker('TQQQ')">TQQQ</button>
             </div>
 
             <div class="controls">
@@ -5557,7 +5561,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 let badge = '';
                 if (bands) {{
                     // Check if actual close is inside each band, pick the tightest hit
-                    for (const bname of ['P90', 'P95', 'P97', 'P98', 'P99', 'P100']) {{
+                    for (const bname of ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100']) {{
                         const b = bands[bname];
                         if (b && data.actual_close >= b.lo_price && data.actual_close <= b.hi_price) {{
                             badge = `<span style="color:#3fb950;font-size:12px;margin-left:4px;">Hit ${{bname}}</span>`;
@@ -5796,7 +5800,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             if (!predictionData || !predictionData.ensemble_methods) return;
 
             const methods = predictionData.ensemble_methods;
-            const bandNames = ['P95', 'P97', 'P98', 'P99'];
+            const bandNames = ['P80', 'P90', 'P95', 'P97', 'P98', 'P99'];
 
             // Hide the standard bands table
             const bandsTable = document.getElementById('bandsTable');
@@ -5949,8 +5953,10 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 percentile:  {{ r: 163, g: 113, b: 247, label: 'Percentile' }},   // purple
             }};
 
-            // Band levels: outer to inner (P95 lightest, P99 darkest)
+            // Band levels: outer to inner (P80 lightest, P99 darkest)
             const bandLevels = [
+                {{ name: 'P80', borderAlpha: 0.15, fillAlpha: 0.03, width: 1 }},
+                {{ name: 'P90', borderAlpha: 0.2, fillAlpha: 0.04, width: 1 }},
                 {{ name: 'P95', borderAlpha: 0.3, fillAlpha: 0.06, width: 1 }},
                 {{ name: 'P98', borderAlpha: 0.5, fillAlpha: 0.08, width: 1.5 }},
                 {{ name: 'P99', borderAlpha: 0.8, fillAlpha: 0.1,  width: 2 }},
@@ -6230,7 +6236,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                         </p>
                         <ul class="band-list">
                 `;
-                ['P95', 'P97', 'P98', 'P99', 'P100'].forEach(bandName => {{
+                ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100'].forEach(bandName => {{
                     if (data.statistical_bands[bandName]) {{
                         const band = data.statistical_bands[bandName];
                         html += `
@@ -6260,7 +6266,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                         </p>
                         <ul class="band-list">
                 `;
-                ['P95', 'P97', 'P98', 'P99', 'P100'].forEach(bandName => {{
+                ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100'].forEach(bandName => {{
                     if (data.percentile_bands[bandName]) {{
                         const band = data.percentile_bands[bandName];
                         html += `
@@ -6290,7 +6296,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                         </p>
                         <ul class="band-list">
                 `;
-                ['P95', 'P97', 'P98', 'P99', 'P100'].forEach(bandName => {{
+                ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100'].forEach(bandName => {{
                     if (data.combined_bands[bandName]) {{
                         const band = data.combined_bands[bandName];
                         const midpoint = (band.lo_price + band.hi_price) / 2;
@@ -6514,7 +6520,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                                     </thead>
                                     <tbody>
                     `;
-                    const bandOrder = ['P95', 'P97', 'P98', 'P99', 'P100'];
+                    const bandOrder = ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100'];
                     bandOrder.forEach(bname => {{
                         const b = ab[bname];
                         if (!b) return;
@@ -9648,8 +9654,8 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
     ticker = request.match_info.get('ticker', 'NDX').upper()
 
     # Validate ticker
-    if ticker not in ['NDX', 'SPX']:
-        return web.Response(text=f'Invalid ticker: {ticker}. Only NDX and SPX are supported.', status=400)
+    if ticker not in PREDICTION_TICKERS:
+        return web.Response(text=f'Invalid ticker: {ticker}. Supported: {", ".join(sorted(PREDICTION_TICKERS))}', status=400)
 
     # Parse ?days= param for custom day tabs
     days_param = request.query.get('days')
@@ -9689,7 +9695,7 @@ async def handle_lazy_load_today_prediction(request: web.Request) -> web.Respons
     """
     ticker = request.match_info.get('ticker', 'NDX').upper()
 
-    if ticker not in ['NDX', 'SPX']:
+    if ticker not in PREDICTION_TICKERS:
         return web.json_response({'error': f'Invalid ticker: {ticker}'}, status=400)
 
     cache = request.app.get('prediction_cache')
@@ -9734,7 +9740,7 @@ async def handle_lazy_load_future_prediction(request: web.Request) -> web.Respon
     ticker = request.match_info.get('ticker', 'NDX').upper()
     days_str = request.match_info.get('days', '3')
 
-    if ticker not in ['NDX', 'SPX']:
+    if ticker not in PREDICTION_TICKERS:
         return web.json_response({'error': f'Invalid ticker: {ticker}'}, status=400)
 
     try:
@@ -9783,7 +9789,7 @@ async def handle_lazy_load_band_history(request: web.Request) -> web.Response:
     """
     ticker = request.match_info.get('ticker', 'NDX').upper()
 
-    if ticker not in ['NDX', 'SPX']:
+    if ticker not in PREDICTION_TICKERS:
         return web.json_response({'error': f'Invalid ticker: {ticker}'}, status=400)
 
     history = request.app.get('prediction_history')
@@ -9896,7 +9902,7 @@ async def handle_lazy_load_historical_prediction(request: web.Request) -> web.Re
     ticker = request.match_info.get('ticker', 'NDX').upper()
     date_str = request.match_info.get('date', '')
 
-    if ticker not in ['NDX', 'SPX']:
+    if ticker not in PREDICTION_TICKERS:
         return web.json_response({'error': f'Invalid ticker: {ticker}'}, status=400)
 
     # Validate date format
@@ -9936,7 +9942,7 @@ async def handle_prewarm_predictions(request: web.Request) -> web.Response:
     This endpoint should be called by a cron job every 5 minutes to keep the cache fresh.
     Returns JSON with status of each ticker.
     """
-    tickers_param = request.query.get('ticker', 'NDX,SPX')
+    tickers_param = request.query.get('ticker', ','.join(sorted(PREDICTION_TICKERS)))
     tickers = [t.strip().upper() for t in tickers_param.split(',')]
 
     # Parse optional ?days= param for custom day set
@@ -9962,7 +9968,7 @@ async def handle_prewarm_predictions(request: web.Request) -> web.Response:
     results = {}
 
     for ticker in tickers:
-        if ticker not in ['NDX', 'SPX']:
+        if ticker not in PREDICTION_TICKERS:
             results[ticker] = {'status': 'error', 'message': 'Invalid ticker'}
             continue
 

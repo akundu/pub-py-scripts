@@ -1109,7 +1109,7 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
 
     # --- METHOD 4: Ensemble Combined (conservative blend) ---
     if conditional_bands and ensemble_bands:
-        for band_name in ['P95', 'P97', 'P98', 'P99', 'P100']:
+        for band_name in ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100']:
             if band_name in conditional_bands and band_name in ensemble_bands:
                 cb = conditional_bands[band_name]
                 eb = ensemble_bands[band_name]
@@ -1247,7 +1247,7 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
         print(f"{description}")
         print(f"{'='*80}")
 
-        for band_name in ['P95', 'P97', 'P98', 'P99']:
+        for band_name in ['P80', 'P90', 'P95', 'P97', 'P98', 'P99']:
             if band_name in bands:
                 b = bands[band_name]
                 print(f"{band_name:6}  ${b.lo_price:>10,.2f} - ${b.hi_price:>10,.2f}   "
@@ -1890,7 +1890,7 @@ async def predict_close(ticker='NDX', lookback=120, force_retrain=False, similar
         print("1. LightGBM MODEL (ML-based quantile regression)")
         print(f"{'-'*80}")
 
-        for band_name in ['P95', 'P97', 'P98', 'P99', 'P100']:
+        for band_name in ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100']:
             if band_name in pred.statistical_bands:
                 band = pred.statistical_bands[band_name]
                 print(f"  {band_name}: ${band.lo_price:,.2f} - ${band.hi_price:,.2f}  ({band.width_pct:.2f}% width)")
@@ -1901,7 +1901,7 @@ async def predict_close(ticker='NDX', lookback=120, force_retrain=False, similar
         print("2. PERCENTILE MODEL (Historical distribution)")
         print(f"{'-'*80}")
 
-        for band_name in ['P95', 'P97', 'P98', 'P99', 'P100']:
+        for band_name in ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100']:
             if band_name in pred.percentile_bands:
                 band = pred.percentile_bands[band_name]
                 print(f"  {band_name}: ${band.lo_price:,.2f} - ${band.hi_price:,.2f}  ({band.width_pct:.2f}% width)")
@@ -1914,7 +1914,7 @@ async def predict_close(ticker='NDX', lookback=120, force_retrain=False, similar
         print("   *** USE THIS FOR TRADING - MOST CONSERVATIVE ***")
         print(f"{'-'*80}")
 
-        for band_name in ['P95', 'P97', 'P98', 'P99', 'P100']:
+        for band_name in ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100']:
             if band_name in pred.combined_bands:
                 band = pred.combined_bands[band_name]
                 midpoint = (band.lo_price + band.hi_price) / 2
