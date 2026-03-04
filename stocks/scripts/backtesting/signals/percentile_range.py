@@ -69,6 +69,13 @@ class PercentileRangeSignal(SignalGenerator):
         except Exception:
             return
 
+        if not all_dates:
+            # Graceful fallback: provider may return fewer dates than lookback
+            # (e.g., live mode with only recent CSV data + today's realtime)
+            self._preloaded = True
+            self._ticker = ticker
+            return
+
         self._daily_closes = {}
         self._intraday_moves = {}
 
@@ -190,7 +197,8 @@ class PercentileRangeSignal(SignalGenerator):
 
         result = {}
         for dte in self._dte_windows:
-            window = max(1, dte) if dte > 0 else 1
+            # DTE=0 → 1-day returns, DTE=1 → 2-day returns, DTE=2 → 3-day, etc.
+            window = dte + 1
             if len(closes) <= window:
                 continue
 

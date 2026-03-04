@@ -247,3 +247,57 @@ python run_tqqq_momentum_sweep.py
 **Best config (1-year backtest):** combined mode, 2% OTM, 10 contracts = 87 trades, 94% win rate, $92K net P&L, 188% ROI.
 
 **Data:** Uses `options_csv_output_full/TQQQ/` (full chain with 0-1 DTE) and `equities_output/TQQQ/` (5-min bars).
+
+## Live Paper Trading Platform
+
+The `scripts/live_trading/` directory contains a live paper trading platform that runs strategies during market hours. It reuses the backtesting framework's abstractions (`DataProvider`, `SignalGenerator`, `Constraint`, `ExitRule`, `Instrument`) with live data from QuestDB and `csv_exports/options/`.
+
+### Quick Start
+
+```bash
+# Run live paper trading
+python -m scripts.live_trading.runner --config scripts/live_trading/configs/ndx_credit_spread_paper.yaml
+
+# Dry run (no QuestDB needed)
+python -m scripts.live_trading.runner --config scripts/live_trading/configs/ndx_credit_spread_paper.yaml --dry-run
+
+# Performance report
+python -m scripts.live_trading.runner --performance --days 30
+
+# Show open positions
+python -m scripts.live_trading.runner --positions
+
+# Show recent journal entries
+python -m scripts.live_trading.runner --journal --days 7
+```
+
+### Key Components
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| Engine | `scripts/live_trading/engine.py` | Main orchestrator + tick loop |
+| Config | `scripts/live_trading/config.py` | YAML config with `live:` section |
+| Executor | `scripts/live_trading/executor.py` | `PaperExecutor` (instant fill), `LiveExecutor` (stub) |
+| Position Store | `scripts/live_trading/position_store.py` | JSON-backed persistent positions |
+| Trade Journal | `scripts/live_trading/trade_journal.py` | JSONL decision log |
+| Providers | `scripts/live_trading/providers/` | `realtime_equity` (QuestDB), `realtime_options` (CSV snapshots) |
+| Strategies | `scripts/live_trading/strategies/` | `NDXCreditSpreadLiveStrategy` (playbook) |
+| Runner | `scripts/live_trading/runner.py` | CLI entry point |
+| Config YAML | `scripts/live_trading/configs/` | Trading configurations |
+
+### Running Live Trading Tests
+
+```bash
+python -m pytest tests/test_live_trading.py -v
+```
+
+### Architecture
+
+The `LiveEngine` runs a tick loop during market hours:
+1. Fetch current price from QuestDB `realtime_data`
+2. Check exit rules on all open positions (every tick)
+3. Generate new entry signals at configured intervals
+4. Route orders through `OrderExecutor` (paper fills instantly)
+5. Persist positions to JSON, decisions to JSONL journal
+
+Positions survive restarts via JSON persistence. The `OrderExecutor` ABC is designed for future exchange connectivity (IBKR/TDA) but only `PaperExecutor` is implemented now.

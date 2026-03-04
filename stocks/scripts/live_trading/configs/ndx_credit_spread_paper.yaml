@@ -1,0 +1,91 @@
+# NDX Credit Spread Paper Trading Configuration
+# Maps NDX_CREDIT_SPREAD_PLAYBOOK.md to live execution
+#
+# Usage:
+#   python -m scripts.live_trading.runner --config scripts/live_trading/configs/ndx_credit_spread_paper.yaml
+#   python -m scripts.live_trading.runner --config scripts/live_trading/configs/ndx_credit_spread_paper.yaml --dry-run
+
+infra:
+  ticker: NDX
+  lookback_days: 250
+  output_dir: results/live_trading
+  log_level: INFO
+
+providers:
+  - name: realtime_equity
+    role: equity
+    params:
+      csv_dir: equities_output
+      # questdb_string from QUEST_DB_STRING env var
+  - name: realtime_options
+    role: options
+    params:
+      csv_dir: csv_exports/options
+      fallback_csv_dir: options_csv_output
+      dte_buckets: [0, 1, 2, 3, 5, 10]
+
+strategy:
+  name: ndx_credit_spread_live
+  params:
+    # Core playbook parameters
+    percentile: 80
+    dte: 2
+    dte_priorities: [2, 5, 10]
+    spread_width: 50
+    num_contracts: 1
+    option_types: ["put", "call"]
+
+    # Entry window (UTC)
+    entry_start_utc: "13:00"   # 6:00 AM PST
+    entry_end_utc: "17:00"     # 10:00 AM PST
+    interval_minutes: 10
+
+    # Exit rules
+    profit_target_pct: 0.95
+    stop_loss_multiplier: 3.0
+
+    # Rolling
+    roll_enabled: true
+    max_rolls: 2
+    roll_check_start_utc: "18:00"   # 11:00 AM PST
+    early_itm_check_utc: "14:00"    # 7:00 AM PST
+    max_move_cap: 150
+    roll_min_dte: 3
+    roll_max_dte: 10
+    roll_percentile: 80
+    max_roll_width: 50
+
+    # Signal generator
+    lookback: 180
+
+    # Pricing
+    use_mid: false
+
+    # Risk management
+    max_loss_estimate: 5000
+    max_positions: 10
+
+constraints:
+  budget:
+    daily_budget: 50000
+    max_spend_per_transaction: 5000
+  trading_hours:
+    entry_start: "13:00"
+    entry_end: "17:00"
+  exit_rules:
+    profit_target_pct: 0.95
+    stop_loss_pct: 3.0
+
+report:
+  formats: ["console"]
+  metrics: ["win_rate", "roi", "sharpe", "max_drawdown", "profit_factor"]
+
+live:
+  mode: paper
+  tick_interval_seconds: 10
+  signal_check_interval_seconds: 60
+  position_check_interval_seconds: 30
+  position_db_path: data/live_trading/positions.json
+  journal_path: data/live_trading/journal.jsonl
+  max_positions: 10
+  session_start_behavior: resume
