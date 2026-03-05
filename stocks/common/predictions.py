@@ -796,6 +796,10 @@ async def fetch_today_prediction(ticker: str, cache: PredictionCache, force_refr
         # Serialize the prediction
         serialized = _serialize_unified_prediction(pred)
 
+        if serialized is None:
+            logger.warning(f"predict_close returned None for {ticker} (no data or QuestDB unavailable)")
+            return {'error': f'No prediction available for {ticker}', 'ticker': ticker}
+
         # Only cache if we got a valid price — don't persist zeros to disk.
         if not (serialized.get('current_price') and serialized['current_price'] > 0):
             # Outside market hours, refresh the existing cache entry's timestamp
@@ -941,6 +945,10 @@ async def fetch_future_prediction(ticker: str, days_ahead: int, cache: Predictio
             return convert_value(d)
 
         serialized = convert_dict(result)
+
+        if serialized is None:
+            logger.warning(f"predict_close returned None for {ticker}+{days_ahead}d")
+            return {'error': f'No prediction available for {ticker} +{days_ahead}d', 'ticker': ticker}
 
         # Override current_price with the live price from today's prediction.
         # _predict_future_close_unified may fall back to yesterday's CSV close
