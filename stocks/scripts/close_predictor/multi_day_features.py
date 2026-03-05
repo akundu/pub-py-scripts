@@ -69,6 +69,8 @@ class MarketContext:
     is_opex_week: bool = False               # Options expiration week
     days_to_month_end: int = 15              # Trading days until month end
     month: int = 1                           # 1-12
+    target_day_of_week: int = -1             # Target close day: 0=Mon, 4=Fri, -1=unknown
+    days_to_friday: int = -1                 # Trading days from target to Friday, -1=unknown
 
     # Derived features
     is_overbought: bool = False              # position_vs_sma20 > 3%
@@ -119,6 +121,8 @@ class MarketContext:
             'is_opex_week': 1.0 if self.is_opex_week else 0.0,
             'days_to_month_end': float(self.days_to_month_end),
             'month': float(self.month),
+            'target_day_of_week': float(self.target_day_of_week),
+            'days_to_friday': float(self.days_to_friday),
             # Derived features
             'is_overbought': 1.0 if self.is_overbought else 0.0,
             'is_oversold': 1.0 if self.is_oversold else 0.0,
@@ -378,6 +382,86 @@ def compute_market_context(
     return ctx
 
 
+def _add_trading_days(start_date: date, trading_days: int, trading_calendar: Optional[List[str]] = None) -> date:
+    """Add N trading days to a date.
+
+    Args:
+        start_date: Starting date
+        trading_days: Number of trading days to add (must be >= 0)
+        trading_calendar: Optional sorted list of trading dates ('YYYY-MM-DD').
+                         If provided, uses exact calendar. Otherwise approximates
+                         by skipping weekends.
+
+    Returns:
+        Target date after adding trading_days
+    """
+    if trading_days <= 0:
+        return start_date
+
+    if trading_calendar:
+        # Use exact trading calendar
+        start_str = start_date.isoformat()
+        # Find the index of start_date or the next available date
+        cal_idx = None
+        for i, d in enumerate(trading_calendar):
+            if d >= start_str:
+                cal_idx = i
+                break
+        if cal_idx is None:
+            # start_date is past the end of the calendar; fall through to approximation
+            pass
+        else:
+            target_idx = cal_idx + trading_days
+            if target_idx < len(trading_calendar):
+                return datetime.strptime(trading_calendar[target_idx], '%Y-%m-%d').date()
+            # Not enough dates in calendar; fall through to approximation
+
+    # Approximation: skip weekends
+    current = start_date
+    remaining = trading_days
+    while remaining > 0:
+        current += timedelta(days=1)
+        if current.weekday() < 5:  # Mon-Fri
+            remaining -= 1
+    return current
+
+
+def _resolve_target_date(current_date: date, days_ahead: int,
+                         trading_calendar: Optional[List[str]] = None) -> date:
+    """Resolve the target close date for a given DTE.
+
+    Args:
+        current_date: The source/prediction date
+        days_ahead: Number of trading days ahead (DTE)
+        trading_calendar: Optional sorted list of trading dates
+
+    Returns:
+        The target close date
+    """
+    return _add_trading_days(current_date, days_ahead, trading_calendar)
+
+
+def set_target_day_features(ctx: MarketContext, current_date: date, days_ahead: int,
+                            trading_calendar: Optional[List[str]] = None) -> None:
+    """Set target_day_of_week and days_to_friday on a MarketContext in-place.
+
+    Args:
+        ctx: MarketContext to update
+        current_date: The source date (prediction date)
+        days_ahead: Number of trading days ahead (DTE)
+        trading_calendar: Optional sorted list of trading dates ('YYYY-MM-DD')
+    """
+    target_date = _resolve_target_date(current_date, days_ahead, trading_calendar)
+    ctx.target_day_of_week = target_date.weekday()  # 0=Mon, 4=Fri
+
+    # Days to Friday from target date (trading days)
+    target_dow = target_date.weekday()
+    if target_dow <= 4:  # Mon(0)-Fri(4)
+        ctx.days_to_friday = 4 - target_dow  # Fri=0, Thu=1, ..., Mon=4
+    else:
+        ctx.days_to_friday = 0  # Shouldn't happen for trading days
+
+
 def compute_historical_contexts(
     ticker: str,
     all_dates: List[str],
@@ -488,8 +572,14 @@ def compute_feature_similarity(ctx1: MarketContext, ctx2: MarketContext) -> floa
     mom_diff = abs(ctx1.return_5d - ctx2.return_5d)
     mom_sim = 1.0 / (1.0 + mom_diff / 3.0)  # decay over 3% difference
 
-    # Calendar similarity (day of week matters less for multi-day)
-    cal_sim = 1.0 if ctx1.day_of_week == ctx2.day_of_week else 0.8
+    # Calendar similarity: weight target day (70%) higher than source day (30%)
+    # when target_day_of_week is available
+    if ctx1.target_day_of_week >= 0 and ctx2.target_day_of_week >= 0:
+        target_match = 1.0 if ctx1.target_day_of_week == ctx2.target_day_of_week else 0.7
+        source_match = 1.0 if ctx1.day_of_week == ctx2.day_of_week else 0.8
+        cal_sim = 0.70 * target_match + 0.30 * source_match
+    else:
+        cal_sim = 1.0 if ctx1.day_of_week == ctx2.day_of_week else 0.8
 
     # Weighted combination
     similarity = (

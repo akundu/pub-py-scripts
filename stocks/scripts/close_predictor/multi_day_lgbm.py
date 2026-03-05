@@ -15,7 +15,7 @@ import pickle
 from datetime import datetime, timedelta
 from collections import deque
 
-from scripts.close_predictor.multi_day_features import MarketContext
+from scripts.close_predictor.multi_day_features import MarketContext, set_target_day_features
 from scripts.close_predictor.models import UnifiedBand
 
 
@@ -405,18 +405,23 @@ class MultiDayEnsemble:
             Dict mapping dte -> training stats
         """
         stats = {}
+        from copy import copy
+        from datetime import datetime as _dt
 
         for dte in range(1, max_dte + 1):
             if dte not in returns_by_dte:
                 continue
 
-            # Build training data
+            # Build training data with target-day features set per DTE
             contexts = []
             forward_returns = []
 
             for date in all_dates:
                 if date in contexts_by_date and date in returns_by_dte[dte]:
-                    contexts.append(contexts_by_date[date])
+                    ctx = copy(contexts_by_date[date])
+                    current_date = _dt.strptime(date, '%Y-%m-%d').date()
+                    set_target_day_features(ctx, current_date, dte, all_dates)
+                    contexts.append(ctx)
                     forward_returns.append(returns_by_dte[dte][date])
 
             if len(contexts) < 100:

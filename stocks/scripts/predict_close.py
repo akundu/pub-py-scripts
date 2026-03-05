@@ -932,6 +932,10 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
                 iv_data=iv_data,
             )
 
+            # Set target day features on current context
+            from scripts.close_predictor.multi_day_features import set_target_day_features
+            set_target_day_features(current_context, current_date, days_ahead, all_dates)
+
             # Build historical contexts (use recent subset for performance)
             from scripts.close_predictor.multi_day_features import compute_historical_contexts
             train_dates = all_dates[max(0, len(all_dates) - lookback):len(all_dates) - days_ahead]
@@ -943,6 +947,13 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
                 vix1d_data_by_date=vix1d_data_by_date,
                 lookback_days=60,
             )
+
+            # Set target day features on historical contexts
+            from datetime import datetime as _dt_parse
+            for hi, hd in enumerate(train_dates):
+                if hi < len(historical_contexts):
+                    hdate = _dt_parse.strptime(hd, '%Y-%m-%d').date()
+                    set_target_day_features(historical_contexts[hi], hdate, days_ahead, all_dates)
 
             # Get historical vols and returns for those dates
             train_returns = []

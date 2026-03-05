@@ -942,6 +942,44 @@ async def fetch_future_prediction(ticker: str, days_ahead: int, cache: Predictio
 
         serialized = convert_dict(result)
 
+        # Override current_price with the live price from today's prediction.
+        # _predict_future_close_unified may fall back to yesterday's CSV close
+        # when QuestDB returns None (market closed), but today's cached prediction
+        # has the correct live/last-traded price.
+        if current_price and current_price > 0:
+            old_price = serialized.get('current_price', 0)
+            if old_price and old_price > 0 and abs(current_price - old_price) / old_price > 0.001:
+                logger.info(
+                    f"Overriding current_price for {ticker}+{days_ahead}d: "
+                    f"${old_price:,.2f} -> ${current_price:,.2f} (from today's prediction)"
+                )
+                serialized['current_price'] = current_price
+                # Recalculate expected_price using the live price
+                mean_return = serialized.get('mean_return')
+                if mean_return is not None:
+                    serialized['expected_price'] = current_price * (1 + mean_return / 100)
+                # Recalculate band prices relative to live price
+                for method_key in ('ensemble_methods',):
+                    methods = serialized.get(method_key, [])
+                    if isinstance(methods, list):
+                        for method in methods:
+                            bands = method.get('bands', {})
+                            if isinstance(bands, dict):
+                                for band_name, band in bands.items():
+                                    if isinstance(band, dict) and 'lo_pct' in band and 'hi_pct' in band:
+                                        band['lo_price'] = current_price * (1 + band['lo_pct'] / 100)
+                                        band['hi_price'] = current_price * (1 + band['hi_pct'] / 100)
+                                        band['width_pts'] = band['hi_price'] - band['lo_price']
+                # Also update primary bands (percentile_bands, combined_bands, statistical_bands)
+                for band_key in ('percentile_bands', 'combined_bands', 'statistical_bands'):
+                    bands = serialized.get(band_key, {})
+                    if isinstance(bands, dict):
+                        for band_name, band in bands.items():
+                            if isinstance(band, dict) and 'lo_pct' in band and 'hi_pct' in band:
+                                band['lo_price'] = current_price * (1 + band['lo_pct'] / 100)
+                                band['hi_price'] = current_price * (1 + band['hi_pct'] / 100)
+                                band['width_pts'] = band['hi_price'] - band['lo_price']
+
         # Debug: Log what fields are in serialized data
         logger.info(f"Serialized future prediction fields for {ticker}+{days_ahead}d: {list(serialized.keys())}")
         logger.info(f"  target_date_str={serialized.get('target_date_str')}, expected_price={serialized.get('expected_price')}, mean_return={serialized.get('mean_return')}, std_return={serialized.get('std_return')}")
