@@ -101,8 +101,12 @@ def load_csv_data(ticker: str, date_str: str) -> Optional[pd.DataFrame]:
     csv_dir = EQUITIES_OUTPUT_DIR / db_ticker
     csv_file = csv_dir / f"{db_ticker}_equities_{date_str}.csv"
 
+    # Fallback for ETFs (e.g. TQQQ) that don't use the I: prefix
     if not csv_file.exists():
-        return None
+        plain_ticker = ticker.replace("I:", "")
+        csv_file = EQUITIES_OUTPUT_DIR / plain_ticker / f"{plain_ticker}_equities_{date_str}.csv"
+        if not csv_file.exists():
+            return None
 
     df = pd.read_csv(csv_file, parse_dates=['timestamp'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
@@ -118,11 +122,18 @@ def get_available_dates(ticker: str, num_days: int = 5) -> List[str]:
         db_ticker = ticker
 
     csv_dir = EQUITIES_OUTPUT_DIR / db_ticker
+    file_prefix = db_ticker
+
+    # Fallback for ETFs (e.g. TQQQ) that don't use the I: prefix
     if not csv_dir.exists():
-        return []
+        plain_ticker = ticker.replace("I:", "")
+        csv_dir = EQUITIES_OUTPUT_DIR / plain_ticker
+        file_prefix = plain_ticker
+        if not csv_dir.exists():
+            return []
 
     dates = []
-    for f in sorted(csv_dir.glob(f"{db_ticker}_equities_*.csv")):
+    for f in sorted(csv_dir.glob(f"{file_prefix}_equities_*.csv")):
         date_str = f.stem.split("_")[-1]
         dates.append(date_str)
 
@@ -137,10 +148,19 @@ def get_previous_close(ticker: str, current_date: str) -> Optional[float]:
         db_ticker = ticker
 
     csv_dir = EQUITIES_OUTPUT_DIR / db_ticker
+    file_prefix = db_ticker
+
+    # Fallback for ETFs (e.g. TQQQ) that don't use the I: prefix
+    if not csv_dir.exists():
+        plain_ticker = ticker.replace("I:", "")
+        csv_dir = EQUITIES_OUTPUT_DIR / plain_ticker
+        file_prefix = plain_ticker
+        if not csv_dir.exists():
+            return None
 
     # Get all available dates
     all_dates = []
-    for f in sorted(csv_dir.glob(f"{db_ticker}_equities_*.csv")):
+    for f in sorted(csv_dir.glob(f"{file_prefix}_equities_*.csv")):
         date_str = f.stem.split("_")[-1]
         all_dates.append(date_str)
 
@@ -293,10 +313,17 @@ def build_training_data(ticker: str, end_date: str, lookback_days: int = 90) -> 
         db_ticker = ticker
 
     csv_dir = EQUITIES_OUTPUT_DIR / db_ticker
+    file_prefix = db_ticker
+
+    # Fallback for ETFs (e.g. TQQQ) that don't use the I: prefix
+    if not csv_dir.exists():
+        plain_ticker = ticker.replace("I:", "")
+        csv_dir = EQUITIES_OUTPUT_DIR / plain_ticker
+        file_prefix = plain_ticker
 
     # Get all available dates before end_date
     all_dates = []
-    for f in sorted(csv_dir.glob(f"{db_ticker}_equities_*.csv")):
+    for f in sorted(csv_dir.glob(f"{file_prefix}_equities_*.csv")):
         date_str = f.stem.split("_")[-1]
         if date_str < end_date:
             all_dates.append(date_str)
