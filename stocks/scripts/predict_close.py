@@ -2102,7 +2102,8 @@ async def predict_close(ticker='NDX', lookback=120, force_retrain=False, similar
 
 def _build_predict_parser(parser):
     """Add predict-mode arguments to a parser."""
-    parser.add_argument('ticker', nargs='?', default='NDX', choices=['NDX', 'SPX', 'TQQQ'],
+    from common.prediction_config import get_prediction_tickers
+    parser.add_argument('ticker', nargs='?', default='NDX', choices=get_prediction_tickers(),
                         help='Ticker symbol to predict (default: NDX)')
     parser.add_argument('--retrain', '--force-retrain',
                         action='store_true', dest='force_retrain',
@@ -2125,7 +2126,8 @@ def _build_predict_parser(parser):
 
 def _build_train_parser(parser):
     """Add train-mode arguments to a parser."""
-    parser.add_argument('ticker', nargs='?', default='NDX', choices=['NDX', 'SPX', 'TQQQ'],
+    from common.prediction_config import get_prediction_tickers
+    parser.add_argument('ticker', nargs='?', default='NDX', choices=get_prediction_tickers(),
                         help='Ticker symbol to train (default: NDX)')
     parser.add_argument('--lookback', type=int, default=120, metavar='N',
                         help='0DTE training lookback in trading days (default: 120)')

@@ -43,7 +43,8 @@ except ImportError:
     np = None
 
 # Tickers supported by the close-price prediction system
-PREDICTION_TICKERS = {'NDX', 'SPX', 'TQQQ'}
+from common.prediction_config import get_prediction_tickers
+PREDICTION_TICKERS = set(get_prediction_tickers())
 
 # Try to import Redis for Pub/Sub
 try:

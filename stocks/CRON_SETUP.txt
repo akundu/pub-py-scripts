@@ -72,8 +72,9 @@ PROJECT_DIR=/Volumes/RAID1\ NVME\ SSD\ 2TB/akundu_programs_dev/programs/python/p
 
 # Refresh prediction cache every weekday at 5:30 AM (before market open)
 # This pre-computes predictions so the web interface is fast
+# Tickers are loaded dynamically from data/lists/prediction_tickers.yaml
 # Uncomment if you're using the web prediction interface
-# 30 5 * * 1-5 cd "$PROJECT_DIR" && curl -s http://localhost:8000/predictions/api/prewarm?ticker=NDX,SPX > /dev/null
+# 30 5 * * 1-5 cd "$PROJECT_DIR" && TICKERS=$(python3 -c "from common.prediction_config import get_prediction_tickers; print(','.join(get_prediction_tickers()))") && curl -s "http://localhost:8000/predictions/api/prewarm?ticker=$TICKERS" > /dev/null
 
 # ============================================================================
 # SCHEDULE SUMMARY

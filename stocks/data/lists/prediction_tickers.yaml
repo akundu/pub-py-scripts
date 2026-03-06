@@ -1,0 +1,6 @@
+type: prediction_tickers
+description: Tickers with close-price prediction models (0DTE + multi-day)
+symbols:
+- NDX
+- SPX
+- TQQQ

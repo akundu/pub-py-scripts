@@ -24,7 +24,9 @@ DESCRIPTION
     old. Use --force to override this check.
 
 OPTIONS
-    --ticker TICKER   Ticker to retrain: NDX or SPX (default: NDX)
+    --ticker TICKER   Ticker to retrain (default: NDX). Must be in
+                      data/lists/prediction_tickers.yaml
+    --all             Retrain all tickers in prediction_tickers.yaml
     --train-days N    Number of trading days for training window (default: 250)
                       Typical values: 120 (6 months), 250 (1 year), 500 (2 years)
     --force           Force retraining even if models are recent (<25 days old)
@@ -38,6 +40,9 @@ EXAMPLES
 
     # Force retrain SPX with a 120-day window
     ./scripts/retrain_models_auto.sh --ticker SPX --train-days 120 --force
+
+    # Retrain ALL configured prediction tickers
+    ./scripts/retrain_models_auto.sh --all --force
 
     # Dry run: retrain but don't deploy
     ./scripts/retrain_models_auto.sh --ticker NDX --force --skip-deploy
@@ -82,6 +87,10 @@ while [[ $# -gt 0 ]]; do
             TICKER="$2"
             shift 2
             ;;
+        --all)
+            RETRAIN_ALL=true
+            shift
+            ;;
         --train-days)
             TRAIN_DAYS="$2"
             shift 2
@@ -108,9 +117,37 @@ if ! [[ "$TRAIN_DAYS" =~ ^[0-9]+$ ]] || [ "$TRAIN_DAYS" -lt 30 ]; then
     exit 1
 fi
 
-# Validate ticker
-if [[ "$TICKER" != "NDX" && "$TICKER" != "SPX" ]]; then
-    echo "ERROR: Ticker must be NDX or SPX (got: $TICKER)"
+# Handle --all: loop over all configured prediction tickers
+RETRAIN_ALL=${RETRAIN_ALL:-false}
+if [ "$RETRAIN_ALL" = true ]; then
+    ALL_TICKERS=$(python3 -c "from common.prediction_config import get_prediction_tickers; print(' '.join(get_prediction_tickers()))" 2>/dev/null)
+    if [ -z "$ALL_TICKERS" ]; then
+        echo "ERROR: Could not load tickers from prediction config"
+        exit 1
+    fi
+    echo "Retraining all prediction tickers: $ALL_TICKERS"
+    for T in $ALL_TICKERS; do
+        echo "======== Retraining $T ========"
+        EXTRA_ARGS=""
+        [ "$FORCE_RETRAIN" = true ] && EXTRA_ARGS="$EXTRA_ARGS --force"
+        [ "$SKIP_DEPLOY" = true ] && EXTRA_ARGS="$EXTRA_ARGS --skip-deploy"
+        "$0" --ticker "$T" --train-days "$TRAIN_DAYS" $EXTRA_ARGS
+    done
+    exit 0
+fi
+
+# Validate ticker against configured prediction tickers
+VALID_TICKERS=$(python3 -c "from common.prediction_config import get_prediction_tickers; print(' '.join(get_prediction_tickers()))" 2>/dev/null || echo "NDX SPX")
+TICKER_VALID=false
+for VT in $VALID_TICKERS; do
+    if [ "$TICKER" = "$VT" ]; then
+        TICKER_VALID=true
+        break
+    fi
+done
+if [ "$TICKER_VALID" = false ]; then
+    echo "ERROR: Ticker '$TICKER' not in prediction config (valid: $VALID_TICKERS)"
+    echo "Add it with: python scripts/manage_prediction_tickers.py add $TICKER"
     exit 1
 fi
 
