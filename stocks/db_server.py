@@ -5119,9 +5119,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             <p style="color: var(--text-secondary);">Predict today's closing price and future forecasts using ML models</p>
 
             <div class="ticker-selector">
-                <button class="ticker-btn {'active' if ticker == 'NDX' else ''}" onclick="switchTicker('NDX')">NDX</button>
-                <button class="ticker-btn {'active' if ticker == 'SPX' else ''}" onclick="switchTicker('SPX')">SPX</button>
-                <button class="ticker-btn {'active' if ticker == 'TQQQ' else ''}" onclick="switchTicker('TQQQ')">TQQQ</button>
+                {''.join(f"""<button class="ticker-btn {'active' if ticker == t else ''}" onclick="switchTicker('{t}')">{t}</button>""" for t in sorted(PREDICTION_TICKERS))}
             </div>
 
             <div class="controls">

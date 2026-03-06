@@ -1444,8 +1444,12 @@ async def predict_close(ticker='NDX', lookback=120, force_retrain=False, similar
             current_time_utc = current_data.get('timestamp')
             data_source = current_data.get('source', 'QuestDB')
 
-            # Convert to ET
+            # Convert to ET (handle tz-naive timestamps from QuestDB)
             if current_time_utc:
+                if hasattr(current_time_utc, 'to_pydatetime'):
+                    current_time_utc = current_time_utc.to_pydatetime()
+                if hasattr(current_time_utc, 'tzinfo') and current_time_utc.tzinfo is None:
+                    current_time_utc = current_time_utc.replace(tzinfo=timezone.utc)
                 current_time = current_time_utc.astimezone(ET_TZ)
                 current_date = current_time.date()
             else:
