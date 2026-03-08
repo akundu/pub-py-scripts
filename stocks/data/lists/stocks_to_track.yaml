@@ -639,8 +639,13 @@ symbols:
 - 'I:SPX'
 - 'I:NDX'
 - 'I:VIX1D'
+- 'I:RUT'
+- 'I:DJX'
 - NDX
 - QQQ
 - SPY
 - SPX
+- RUT
+- DJX
 #- SPX
+#
