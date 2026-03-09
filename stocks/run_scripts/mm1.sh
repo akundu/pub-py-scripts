@@ -9,5 +9,4 @@ git pull origin; while true ; do rm out; ulimit -n 65536; date; time python fetc
 git pull origin; ulimit -n 65536; python  scripts/polygon_realtime_streamer.py --types all --feed quotes --db-path $QUEST_DB_STRING --symbols-per-connection 30 --log-level ERROR --batch-interval 1
 
 
-git pull origin; python  scripts/polygon_realtime_streamer.py --symbols I:VIX I:VIX1D I:SPX I:NDX --feed quotes --redis-url redis://lin1_a.kundu.dev:6379 --symbols-per-connection 20 --batch-interval 1 --feed both --poll-only --poll-interval 5 --db-path $QUEST_DB_STRING --use-market-hours
-
+git pull origin; python  scripts/polygon_realtime_streamer.py --symbols I:VIX I:VIX1D I:SPX I:NDX I:DJX I:RUT --feed quotes --redis-url redis://lin1_a.kundu.dev:6379 --symbols-per-connection 20 --batch-interval 1 --feed both --poll-only --poll-interval 5 --db-path $QUEST_DB_STRING --use-market-hours
