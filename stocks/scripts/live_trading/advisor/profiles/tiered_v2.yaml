@@ -139,3 +139,15 @@ strategy_defaults:
   roll_proximity_pct: 0.005
   contract_sizing: max_budget
   max_credit_width_ratio: 0.80
+
+theta_params:
+  0dte:
+    ahead: 0.35
+    min_decay: 0.60
+    cut_behind: 0.50
+    cut_min_time: 0.70
+  multi_day:
+    ahead: 0.25
+    min_decay: 0.50
+    cut_behind: 0.40
+    cut_min_time: 0.60

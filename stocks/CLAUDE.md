@@ -418,3 +418,22 @@ python -m pytest tests/test_live_advisor.py -v
 ### Reference Implementation
 
 See `results/tiered_portfolio/report.html` for the canonical example of a well-structured backtest report.
+
+## Strategy Documentation
+
+**Every backtest strategy MUST have a documentation file in `docs/strategies/`.** When creating or documenting a new strategy, create `docs/strategies/<strategy_name>.md` with:
+
+1. **Overview**: What the strategy does in 2-3 sentences
+2. **Strategy Logic**: How signals are generated, tier/config breakdown tables
+3. **Exit Rules**: Roll timing, proximity thresholds, profit targets, stop losses
+4. **Risk Management**: Budget, position sizing, rate limits
+5. **Commands**: Exact CLI commands for live advisor and backtesting
+6. **Results**: Output directory, report location, latest backtest metrics
+7. **Key Files**: Table mapping files to their purpose
+
+### Existing Strategy Docs
+
+| Strategy | Doc |
+|----------|-----|
+| Tiered Portfolio v2 (NDX) | `docs/strategies/tiered_portfolio_v2.md` |
+| TQQQ Momentum Scalper | `results/TQQQ_MOMENTUM_SCALPER_ANALYSIS.md` |

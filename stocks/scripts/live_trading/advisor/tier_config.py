@@ -1,84 +1,87 @@
 """Shared tier definitions for tiered portfolio v2.
 
-Used by both run_tiered_backtest_v2.py and the live advisor so that
-tier definitions, risk limits, and theta params are a single source of truth.
+All constants are derived from the canonical YAML profile
+(profiles/tiered_v2.yaml) so that the backtest runner, live advisor,
+and HTML report all use a single source of truth.
 """
+
+from pathlib import Path
+
+import yaml
+
+# ---------------------------------------------------------------------------
+# Load canonical profile YAML
+# ---------------------------------------------------------------------------
+_PROFILE_PATH = Path(__file__).resolve().parent / "profiles" / "tiered_v2.yaml"
+with open(_PROFILE_PATH, "r") as _f:
+    _PROFILE = yaml.safe_load(_f)
 
 # ---------------------------------------------------------------------------
 # Risk limits
 # ---------------------------------------------------------------------------
-MAX_RISK_PER_TRADE = 50_000
-DAILY_BUDGET = 500_000
+_risk = _PROFILE.get("risk", {})
+MAX_RISK_PER_TRADE = _risk.get("max_risk_per_trade", 50_000)
+DAILY_BUDGET = _risk.get("daily_budget", 500_000)
 
 # ---------------------------------------------------------------------------
 # Rate limiting
 # ---------------------------------------------------------------------------
-MAX_TRADES_PER_WINDOW = 2       # max trades per rolling window
-TRADE_WINDOW_MINUTES = 10       # rolling window size in minutes
+MAX_TRADES_PER_WINDOW = _risk.get("max_trades_per_window", 2)
+TRADE_WINDOW_MINUTES = _risk.get("trade_window_minutes", 10)
 
 # ---------------------------------------------------------------------------
 # Tier definitions (priority-ordered)
 # ---------------------------------------------------------------------------
-# Priority order: 0DTE first (highest ROI/risk), then ascending DTE, EOD last
-# Rule: DTE < 3 requires >= P90 (except rolls which can target any DTE).
-TIERS = [
-    # Intraday tiers
-    {"dte": 0,  "percentile": 95, "spread_width": 50, "directional": "pursuit",     "eod_threshold": None, "label": "dte0_p95",      "entry_start": "14:30", "entry_end": "17:30", "priority": 1},
-    {"dte": 1,  "percentile": 90, "spread_width": 50, "directional": "pursuit",     "eod_threshold": None, "label": "dte1_p90",      "entry_start": "14:30", "entry_end": "17:30", "priority": 2},
-    {"dte": 2,  "percentile": 90, "spread_width": 50, "directional": "pursuit",     "eod_threshold": None, "label": "dte2_p90",      "entry_start": "14:30", "entry_end": "17:30", "priority": 3},
-    {"dte": 3,  "percentile": 80, "spread_width": 30, "directional": "pursuit",     "eod_threshold": None, "label": "dte3_p80",      "entry_start": "14:30", "entry_end": "17:30", "priority": 4},
-    {"dte": 5,  "percentile": 75, "spread_width": 30, "directional": "pursuit",     "eod_threshold": None, "label": "dte5_p75",      "entry_start": "14:30", "entry_end": "17:30", "priority": 5},
-    {"dte": 10, "percentile": 90, "spread_width": 50, "directional": "pursuit",     "eod_threshold": None, "label": "dte10_p90",     "entry_start": "14:30", "entry_end": "17:30", "priority": 6},
-    # EOD tiers (all >= P90, evaluated at 3:45 PM ET)
-    {"dte": 1,  "percentile": 90, "spread_width": 50, "directional": "pursuit_eod", "eod_threshold": 0.01, "label": "dte1_p90_eod",  "entry_start": "14:30", "entry_end": "20:00", "priority": 7},
-    {"dte": 2,  "percentile": 90, "spread_width": 50, "directional": "pursuit_eod", "eod_threshold": 0.01, "label": "dte2_p90_eod",  "entry_start": "14:30", "entry_end": "20:00", "priority": 8},
-    {"dte": 3,  "percentile": 90, "spread_width": 50, "directional": "pursuit_eod", "eod_threshold": 0.01, "label": "dte3_p90_eod",  "entry_start": "14:30", "entry_end": "20:00", "priority": 9},
-]
+TIERS = []
+for _t in _PROFILE.get("tiers", []):
+    TIERS.append({
+        "dte": _t["dte"],
+        "percentile": _t["percentile"],
+        "spread_width": _t["spread_width"],
+        "directional": _t["directional"],
+        "eod_threshold": _t.get("eod_threshold"),
+        "label": _t["label"],
+        "entry_start": _t.get("entry_start", "14:30"),
+        "entry_end": _t.get("entry_end", "17:30"),
+        "priority": _t["priority"],
+    })
 
 # ---------------------------------------------------------------------------
 # Theta decay exit params (by DTE)
 # ---------------------------------------------------------------------------
+_theta = _PROFILE.get("theta_params", {})
+_theta_0dte = _theta.get("0dte", {})
+_theta_multi = _theta.get("multi_day", {})
+
 THETA_PARAMS_0DTE = {
-    "ahead": 0.35,
-    "min_decay": 0.60,
-    "cut_behind": 0.50,
-    "cut_min_time": 0.70,
+    "ahead": _theta_0dte.get("ahead", 0.35),
+    "min_decay": _theta_0dte.get("min_decay", 0.60),
+    "cut_behind": _theta_0dte.get("cut_behind", 0.50),
+    "cut_min_time": _theta_0dte.get("cut_min_time", 0.70),
 }
 
 THETA_PARAMS_MULTI_DAY = {
-    "ahead": 0.25,
-    "min_decay": 0.50,
-    "cut_behind": 0.40,
-    "cut_min_time": 0.60,
+    "ahead": _theta_multi.get("ahead", 0.25),
+    "min_decay": _theta_multi.get("min_decay", 0.50),
+    "cut_behind": _theta_multi.get("cut_behind", 0.40),
+    "cut_min_time": _theta_multi.get("cut_min_time", 0.60),
 }
 
 # ---------------------------------------------------------------------------
 # Strategy params shared between backtest and live advisor
 # ---------------------------------------------------------------------------
-STRATEGY_DEFAULTS = {
-    "lookback": 120,
-    "option_types": ["put", "call"],
-    "interval_minutes": 10,
-    "num_contracts": 1,
-    "profit_target_0dte": 0.75,
-    "profit_target_multiday": 0.50,
-    "min_roi_per_day": 0.025,
-    "min_credit": 0.75,
-    "min_total_credit": 0,
-    "min_credit_per_point": 0,
-    "max_contracts": 0,
-    "use_mid": False,
-    "min_volume": 2,
-    "stop_loss_multiplier": 0,
-    "roll_enabled": True,
-    "max_rolls": 2,
-    "roll_check_start_utc": "18:00",
-    "roll_proximity_pct": 0.005,
-    "contract_sizing": "max_budget",
-}
+STRATEGY_DEFAULTS = dict(_PROFILE.get("strategy_defaults", {}))
+
+# ---------------------------------------------------------------------------
+# Exit rules
+# ---------------------------------------------------------------------------
+EXIT_RULES = dict(_PROFILE.get("exit_rules", {}))
+
+# ---------------------------------------------------------------------------
+# Backtest info
+# ---------------------------------------------------------------------------
+BACKTEST_ID = _PROFILE.get("name", "tiered_portfolio_v2")
 
 # Unique DTE and percentile values across all tiers
 ALL_DTES = sorted(set(t["dte"] for t in TIERS))
 ALL_PERCENTILES = sorted(set(t["percentile"] for t in TIERS))
-
-BACKTEST_ID = "tiered_portfolio_v2"

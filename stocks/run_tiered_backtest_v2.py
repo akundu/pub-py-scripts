@@ -50,7 +50,7 @@ BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = BASE_DIR / "results" / "tiered_portfolio_v2"
 CHART_DIR = OUTPUT_DIR / "charts"
 
-# Import shared tier definitions (single source of truth)
+# Import shared tier definitions — all derived from profiles/tiered_v2.yaml
 sys.path.insert(0, str(BASE_DIR))
 from scripts.live_trading.advisor.tier_config import (
     TIERS,
@@ -59,6 +59,9 @@ from scripts.live_trading.advisor.tier_config import (
     MAX_TRADES_PER_WINDOW,
     TRADE_WINDOW_MINUTES,
     STRATEGY_DEFAULTS,
+    THETA_PARAMS_0DTE,
+    THETA_PARAMS_MULTI_DAY,
+    EXIT_RULES,
 )
 
 
@@ -67,48 +70,49 @@ from scripts.live_trading.advisor.tier_config import (
 # ---------------------------------------------------------------------------
 
 def _tier_config(tier: dict) -> dict:
-    """Build config dict for a single tier."""
-    dte = tier["dte"]
+    """Build config dict for a single tier.
 
-    if dte == 0:
-        theta_ahead, theta_min_decay = 0.35, 0.60
-        theta_cut_behind, theta_cut_min_time = 0.50, 0.70
-    else:
-        theta_ahead, theta_min_decay = 0.25, 0.50
-        theta_cut_behind, theta_cut_min_time = 0.40, 0.60
+    Strategy params are read from STRATEGY_DEFAULTS (which comes from
+    profiles/tiered_v2.yaml) so that backtest, live advisor, and report
+    all use the same source.
+    """
+    dte = tier["dte"]
+    sd = STRATEGY_DEFAULTS  # shorthand
+
+    theta = THETA_PARAMS_0DTE if dte == 0 else THETA_PARAMS_MULTI_DAY
 
     strategy_params = {
         "dte": dte,
         "percentile": tier["percentile"],
-        "lookback": 120,
-        "option_types": ["put", "call"],
+        "lookback": sd.get("lookback", 120),
+        "option_types": sd.get("option_types", ["put", "call"]),
         "spread_width": tier["spread_width"],
-        "interval_minutes": 10,
+        "interval_minutes": sd.get("interval_minutes", 10),
         "entry_start_utc": tier["entry_start"],
         "entry_end_utc": tier["entry_end"],
-        "num_contracts": 1,
+        "num_contracts": sd.get("num_contracts", 1),
         "max_loss_estimate": MAX_RISK_PER_TRADE,
-        "profit_target_0dte": 0.75,
-        "profit_target_multiday": 0.50,
-        "min_roi_per_day": 0.025,
-        "min_credit": 0.75,
-        "min_total_credit": 0,
-        "min_credit_per_point": 0,
-        "max_contracts": 0,
-        "use_mid": False,
-        "min_volume": 2,
-        "stop_loss_multiplier": 0,
-        "roll_enabled": True,
-        "max_rolls": 2,
-        "roll_check_start_utc": "18:00",
-        "roll_proximity_pct": 0.005,
+        "profit_target_0dte": sd.get("profit_target_0dte", 0.75),
+        "profit_target_multiday": sd.get("profit_target_multiday", 0.50),
+        "min_roi_per_day": sd.get("min_roi_per_day", 0.025),
+        "min_credit": sd.get("min_credit", 0.75),
+        "min_total_credit": sd.get("min_total_credit", 0),
+        "min_credit_per_point": sd.get("min_credit_per_point", 0),
+        "max_contracts": sd.get("max_contracts", 0),
+        "use_mid": sd.get("use_mid", False),
+        "min_volume": sd.get("min_volume", 2),
+        "stop_loss_multiplier": sd.get("stop_loss_multiplier", 0),
+        "roll_enabled": sd.get("roll_enabled", True),
+        "max_rolls": sd.get("max_rolls", 2),
+        "roll_check_start_utc": sd.get("roll_check_start_utc", "18:00"),
+        "roll_proximity_pct": sd.get("roll_proximity_pct", 0.005),
         "directional_entry": tier["directional"],
-        "contract_sizing": "max_budget",
+        "contract_sizing": sd.get("contract_sizing", "max_budget"),
         "_exit_mode": "theta",
-        "_theta_ahead": theta_ahead,
-        "_theta_min_decay": theta_min_decay,
-        "_theta_cut_behind": theta_cut_behind,
-        "_theta_cut_min_time": theta_cut_min_time,
+        "_theta_ahead": theta["ahead"],
+        "_theta_min_decay": theta["min_decay"],
+        "_theta_cut_behind": theta["cut_behind"],
+        "_theta_cut_min_time": theta["cut_min_time"],
     }
 
     if tier["eod_threshold"] is not None:
@@ -397,13 +401,18 @@ def simulate_portfolio(trades: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_metrics(df: pd.DataFrame) -> dict:
-    """Compute summary metrics for a group of trades."""
+    """Compute summary metrics for a group of trades.
+
+    ROI = total_credits / total_max_risk (credit collected vs risk taken).
+    ROI/Day = ROI / (DTE + 1), normalized for the capital allocation window.
+    """
     if len(df) == 0:
         return {
             "trades": 0, "wins": 0, "losses": 0, "win_rate": 0,
             "net_pnl": 0, "avg_pnl": 0, "total_credits": 0,
             "total_gains": 0, "total_losses": 0,
-            "roi": 0, "sharpe": 0, "max_drawdown": 0, "profit_factor": 0,
+            "roi": 0, "roi_per_day": 0, "avg_dte_window": 0,
+            "sharpe": 0, "max_drawdown": 0, "profit_factor": 0,
         }
 
     pnl = df["pnl"].values
@@ -424,7 +433,18 @@ def compute_metrics(df: pd.DataFrame) -> dict:
     else:
         total_risk = total_credits if total_credits > 0 else 1
 
+    # ROI = credit / max_risk (premium yield as % of risk)
     roi = (total_credits / total_risk * 100) if total_risk > 0 else 0
+
+    # Average DTE window = dte_config + 1 (entry day counts)
+    # e.g. DTE 0 → 1 day, DTE 2 → 3 days, DTE 5 → 6 days
+    if "dte_config" in df.columns:
+        avg_dte_window = float(df["dte_config"].mean()) + 1
+    else:
+        avg_dte_window = 1
+
+    # ROI/Day = ROI normalized by the DTE window (not actual hold time)
+    roi_per_day = roi / avg_dte_window
 
     if total_trades > 1 and pnl.std() > 0:
         sharpe = (pnl.mean() / pnl.std(ddof=1)) * np.sqrt(252)
@@ -449,6 +469,8 @@ def compute_metrics(df: pd.DataFrame) -> dict:
         "total_gains": total_gains,
         "total_losses": total_losses,
         "roi": roi,
+        "roi_per_day": roi_per_day,
+        "avg_dte_window": avg_dte_window,
         "sharpe": sharpe,
         "max_drawdown": max_dd,
         "profit_factor": pf,
@@ -460,15 +482,15 @@ def compute_metrics(df: pd.DataFrame) -> dict:
 # ---------------------------------------------------------------------------
 
 def print_tier_summary(trades: pd.DataFrame, label: str = "ALL TRADES"):
-    """Print per-tier metrics table."""
+    """Print per-tier metrics table with ROI and ROI/Day."""
     print()
-    print("=" * 140)
+    print("=" * 170)
     print(f"  PER-TIER METRICS ({label})")
-    print("=" * 140)
+    print("=" * 170)
     header = (f"  {'Pri':>3} {'Tier':>18} {'DTE':>4} {'Pctl':>5} {'Width':>5} {'Trades':>7} {'Wins':>5} {'Losses':>6} {'WR%':>7} "
-              f"{'Net P&L':>12} {'Avg P&L':>10} {'Sharpe':>7} {'MaxDD':>10} {'PF':>8}")
+              f"{'Net P&L':>12} {'Avg P&L':>10} {'ROI%':>7} {'ROI/D%':>7} {'Window':>7} {'Sharpe':>7} {'MaxDD':>10} {'PF':>8}")
     print(header)
-    print("  " + "-" * 136)
+    print("  " + "-" * 166)
 
     rows = []
     for t in TIERS:
@@ -476,19 +498,19 @@ def print_tier_summary(trades: pd.DataFrame, label: str = "ALL TRADES"):
         m = compute_metrics(df_tier)
         pf_str = f"{m['profit_factor']:.2f}" if m['profit_factor'] < 1000 else "inf"
         print(f"  {t['priority']:>3} {t['label']:>18} {t['dte']:>4} P{t['percentile']:>3} {t['spread_width']:>3}pt {m['trades']:>7} {m['wins']:>5} {m['losses']:>6} {m['win_rate']:>6.1f}% "
-              f"${m['net_pnl']:>10,.0f} ${m['avg_pnl']:>8,.0f} {m['sharpe']:>6.2f} ${m['max_drawdown']:>8,.0f} {pf_str:>8}")
+              f"${m['net_pnl']:>10,.0f} ${m['avg_pnl']:>8,.0f} {m['roi']:>6.1f}% {m['roi_per_day']:>6.1f}% {m['avg_dte_window']:>6.2f}d {m['sharpe']:>6.2f} ${m['max_drawdown']:>8,.0f} {pf_str:>8}")
         m["tier"] = t["label"]
         m["dte"] = t["dte"]
         m["percentile"] = t["percentile"]
         m["priority"] = t["priority"]
         rows.append(m)
 
-    print("  " + "-" * 136)
+    print("  " + "-" * 166)
     m = compute_metrics(trades)
     pf_str = f"{m['profit_factor']:.2f}" if m['profit_factor'] < 1000 else "inf"
     print(f"  {'':>3} {'COMBINED':>18} {'all':>4} {'all':>5} {'mix':>5} {m['trades']:>7} {m['wins']:>5} {m['losses']:>6} {m['win_rate']:>6.1f}% "
-          f"${m['net_pnl']:>10,.0f} ${m['avg_pnl']:>8,.0f} {m['sharpe']:>6.2f} ${m['max_drawdown']:>8,.0f} {pf_str:>8}")
-    print("=" * 140)
+          f"${m['net_pnl']:>10,.0f} ${m['avg_pnl']:>8,.0f} {m['roi']:>6.1f}% {m['roi_per_day']:>6.1f}% {m['avg_dte_window']:>6.2f}d {m['sharpe']:>6.2f} ${m['max_drawdown']:>8,.0f} {pf_str:>8}")
+    print("=" * 170)
     return pd.DataFrame(rows)
 
 
@@ -974,7 +996,9 @@ def generate_html_report(all_trades: pd.DataFrame, portfolio_trades: pd.DataFram
         <td>{tm['trades']}</td><td>{tm['wins']}</td><td>{tm['losses']}</td>
         <td>{tm['win_rate']:.1f}%</td>
         <td class="{'positive' if tm['net_pnl']>=0 else 'negative'}">${tm['net_pnl']:,.0f}</td>
-        <td>${tm['avg_pnl']:,.0f}</td><td>{tm['sharpe']:.2f}</td>
+        <td>${tm['avg_pnl']:,.0f}</td>
+        <td>{tm['roi']:.1f}%</td><td>{tm['roi_per_day']:.1f}%</td><td>{tm['avg_dte_window']:.2f}d</td>
+        <td>{tm['sharpe']:.2f}</td>
         <td class="{'negative' if tm['max_drawdown']>0 else ''}">${tm['max_drawdown']:,.0f}</td>
         <td>{pf_str}</td>
       </tr>\n"""
@@ -986,7 +1010,9 @@ def generate_html_report(all_trades: pd.DataFrame, portfolio_trades: pd.DataFram
         <td>{m['trades']}</td><td>{m['wins']}</td><td>{m['losses']}</td>
         <td>{m['win_rate']:.1f}%</td>
         <td class="positive">${m['net_pnl']:,.0f}</td>
-        <td>${m['avg_pnl']:,.0f}</td><td>{m['sharpe']:.2f}</td>
+        <td>${m['avg_pnl']:,.0f}</td>
+        <td>{m['roi']:.1f}%</td><td>{m['roi_per_day']:.1f}%</td><td>{m['avg_dte_window']:.1f}d</td>
+        <td>{m['sharpe']:.2f}</td>
         <td class="negative">${m['max_drawdown']:,.0f}</td>
         <td>{pf_str_c}</td>
       </tr>"""
@@ -1087,6 +1113,8 @@ def generate_html_report(all_trades: pd.DataFrame, portfolio_trades: pd.DataFram
   <div class="kpi"><div class="value">{m['trades']}</div><div class="label">Trades (Portfolio)</div></div>
   <div class="kpi"><div class="value">{m['win_rate']:.1f}%</div><div class="label">Win Rate</div></div>
   <div class="kpi"><div class="value">${m['net_pnl']/1e6:.2f}M</div><div class="label">Net P&amp;L</div></div>
+  <div class="kpi"><div class="value">{m['roi']:.1f}%</div><div class="label">ROI (Credit/Risk)</div></div>
+  <div class="kpi"><div class="value">{m['roi_per_day']:.1f}%</div><div class="label">ROI / Day</div></div>
   <div class="kpi"><div class="value">{m['sharpe']:.2f}</div><div class="label">Sharpe</div></div>
   <div class="kpi"><div class="value">{pf_str_c}</div><div class="label">Profit Factor</div></div>
   <div class="kpi"><div class="value warn">${m['max_drawdown']:,.0f}</div><div class="label">Max Drawdown</div></div>
@@ -1170,7 +1198,8 @@ def generate_html_report(all_trades: pd.DataFrame, portfolio_trades: pd.DataFram
     <thead><tr>
       <th>Tier</th><th>Pri</th><th>DTE</th><th>Pctl</th><th>Width</th>
       <th>Trades</th><th>Wins</th><th>Losses</th><th>WR%</th>
-      <th>Net P&amp;L</th><th>Avg P&amp;L</th><th>Sharpe</th><th>Max DD</th><th>PF</th>
+      <th>Net P&amp;L</th><th>Avg P&amp;L</th><th>ROI%</th><th>ROI/Day</th><th>Window</th>
+      <th>Sharpe</th><th>Max DD</th><th>PF</th>
     </tr></thead>
     <tbody>
 {tier_rows_html}
@@ -1296,10 +1325,10 @@ def generate_html_report(all_trades: pd.DataFrame, portfolio_trades: pd.DataFram
       <tr><td>Stop Loss</td><td>Disabled</td></tr>
       <tr><td>Rolling</td><td>Enabled ({roll_time_display}, {roll_proximity_pct_display} proximity, max {max_rolls} rolls, ratio up to 1.0)</td></tr>
       <tr><td>Exit Mode</td><td>Theta Decay</td></tr>
-      <tr><td>0DTE Theta</td><td>ahead=0.35, min=0.60, cut=0.50, time=0.70</td></tr>
-      <tr><td>Multi-DTE Theta</td><td>ahead=0.25, min=0.50, cut=0.40, time=0.60</td></tr>
-      <tr><td>EOD Threshold</td><td>1.0% (current price vs prev close)</td></tr>
-      <tr><td>Lookback</td><td>120 days</td></tr>
+      <tr><td>0DTE Theta</td><td>ahead={THETA_PARAMS_0DTE['ahead']}, min={THETA_PARAMS_0DTE['min_decay']}, cut={THETA_PARAMS_0DTE['cut_behind']}, time={THETA_PARAMS_0DTE['cut_min_time']}</td></tr>
+      <tr><td>Multi-DTE Theta</td><td>ahead={THETA_PARAMS_MULTI_DAY['ahead']}, min={THETA_PARAMS_MULTI_DAY['min_decay']}, cut={THETA_PARAMS_MULTI_DAY['cut_behind']}, time={THETA_PARAMS_MULTI_DAY['cut_min_time']}</td></tr>
+      <tr><td>EOD Threshold</td><td>{[t['eod_threshold'] for t in TIERS if t.get('eod_threshold')][0]*100 if any(t.get('eod_threshold') for t in TIERS) else 0:.1f}% (current price vs prev close)</td></tr>
+      <tr><td>Lookback</td><td>{STRATEGY_DEFAULTS.get('lookback', 120)} days</td></tr>
     </tbody>
   </table>
 </div>
