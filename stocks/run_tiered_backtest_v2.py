@@ -971,7 +971,7 @@ def generate_html_report(all_trades: pd.DataFrame, portfolio_trades: pd.DataFram
     loss_dates = portfolio_trades[portfolio_trades["pnl"] < 0]["entry_dt"].dt.date.unique()
 
     now = datetime.now()
-    today_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    today_str = now.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     today_date = now.strftime("%Y-%m-%d")
     report_name = f"report_tiered_portfolio_v2_{today_date}.html"
 
