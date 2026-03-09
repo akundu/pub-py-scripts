@@ -12,10 +12,18 @@ This replaces the previously hardcoded ticker lists in `db_server.py`, `predict_
 
 | Program | How It Uses Config |
 |---------|--------------------|
-| `db_server.py` | `PREDICTION_TICKERS` set for `/predictions/api/prewarm` |
+| `db_server.py` | `PREDICTION_TICKERS` set — auto-reloads every 60s (no restart needed) |
 | `scripts/predict_close.py` | Valid ticker choices for `predict` and `train` commands |
 | `scripts/retrain_models_auto.sh` | Ticker validation and `--all` flag |
 | `CRON_SETUP.txt` | Dynamic prewarm URL |
+
+### Auto-Reload in db_server
+
+`db_server.py` uses a `_LivePredictionTickers` set that automatically re-reads the YAML file every 60 seconds. When you add or remove a ticker via `manage_prediction_tickers.py`, the change takes effect in the running server within one minute — no restart required. This applies to:
+
+- Prediction page ticker buttons (`/predictions/{ticker}`)
+- Ticker validation on all `/predictions/api/` endpoints
+- Default ticker list for `/predictions/api/prewarm`
 
 ## Managing Tickers
 
@@ -45,7 +53,9 @@ python scripts/manage_prediction_tickers.py add QQQ --train
 python scripts/manage_prediction_tickers.py add QQQ --train --max-dte 20
 ```
 
-**Prerequisites**: The ticker needs equity CSV data in `equities_output/<TICKER>/`. Options data in `options_csv_output/` or `options_csv_output_full/` is needed for credit spread strategies but not for close-price prediction.
+**Prerequisites**: The ticker needs equity CSV data in `equities_output/<TICKER>/` and current price data in QuestDB (realtime or daily). Options data in `options_csv_output/` or `options_csv_output_full/` is needed for credit spread strategies but not for close-price prediction.
+
+The new ticker will appear in the db_server prediction UI within 60 seconds (no restart needed).
 
 ### Remove a Ticker
 
