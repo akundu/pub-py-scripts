@@ -36,6 +36,8 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
         super().__init__(*args, **kwargs)
         self._multi_day_positions: List[Dict] = []
         self._roll_trigger: Optional[RollTriggerExit] = None
+        self._eod_direction: Optional[str] = None   # "call" or "put"
+        self._eod_skip_next_day: bool = True         # True on first day (no prior signal)
 
     @property
     def name(self) -> str:
@@ -89,6 +91,7 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
         dte_windows = sorted(set(
             ([dte] if isinstance(dte, int) else dte)
             + [roll_min_dte, min(5, roll_max_dte), roll_max_dte]
+            + list(range(roll_min_dte, roll_max_dte + 1))
         ))
         sg.setup(self.provider.equity if hasattr(self.provider, 'equity') else self.provider, {
             "lookback": params.get("lookback", 120),
@@ -205,6 +208,21 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
                     position.num_contracts = needed
                     position.max_loss = max_loss_per_contract * needed
 
+            # Max-budget contract sizing: fill up to max_loss_estimate budget per trade
+            contract_sizing = self.config.params.get("contract_sizing", "fixed")
+            if contract_sizing == "max_budget":
+                max_spend = self.config.params.get("max_loss_estimate", 10000)
+                if position.max_loss > 0:
+                    max_loss_per_contract = position.max_loss / max(1, position.num_contracts)
+                    if max_loss_per_contract > 0:
+                        affordable = int(max_spend / max_loss_per_contract)
+                        affordable = max(1, affordable)
+                        max_cap = self.config.params.get("max_contracts", 0)
+                        if max_cap > 0:
+                            affordable = min(affordable, max_cap)
+                        position.num_contracts = affordable
+                        position.max_loss = max_loss_per_contract * affordable
+
             self.constraints.notify_opened(position.max_loss, timestamp)
             self._daily_capital_used += position.max_loss
             self._open_positions.append(position)
@@ -214,6 +232,39 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
             })
 
         return positions
+
+    def _compute_eod_signal(self, equity_bars, prev_close: float) -> None:
+        """Compute end-of-day momentum signal for the NEXT trading day.
+
+        Compares today's last bar close to prev_close. If the absolute move
+        exceeds pursuit_eod_threshold, locks direction for tomorrow:
+          - price went up   -> sell calls (pursuit: chase the move)
+          - price went down -> sell puts
+        If below threshold, skip trading tomorrow entirely.
+        """
+        if equity_bars is None or equity_bars.empty:
+            self._eod_skip_next_day = True
+            self._eod_direction = None
+            return
+
+        threshold = self.config.params.get("pursuit_eod_threshold", 0.0125)
+        today_close = float(equity_bars["close"].iloc[-1])
+
+        if prev_close <= 0:
+            self._eod_skip_next_day = True
+            self._eod_direction = None
+            return
+
+        pct_change = (today_close - prev_close) / prev_close
+
+        if abs(pct_change) < threshold:
+            self._eod_skip_next_day = True
+            self._eod_direction = None
+        else:
+            self._eod_skip_next_day = False
+            # Price went up -> sell calls (pursuit: chase the move upward)
+            # Price went down -> sell puts (pursuit: chase the move downward)
+            self._eod_direction = "call" if pct_change > 0 else "put"
 
     def generate_signals(self, day_context: DayContext) -> List[Dict]:
         params = self.config.params
@@ -248,6 +299,20 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
         if "timestamp" not in bars.columns:
             return signals
 
+        # pursuit_eod: use direction locked at previous day's close
+        directional_mode = params.get("directional_entry", "both")
+        if directional_mode == "pursuit_eod":
+            # Consume stored EOD direction from previous day
+            if self._eod_skip_next_day or self._eod_direction is None:
+                # No signal for today -- still compute tomorrow's signal before returning
+                self._compute_eod_signal(bars, day_context.prev_close)
+                return signals
+            eod_locked_types = [self._eod_direction]
+            eod_locked_types = [t for t in eod_locked_types if t in option_types]
+            if not eod_locked_types:
+                self._compute_eod_signal(bars, day_context.prev_close)
+                return signals
+
         # Iterate bars at interval spacing within entry window
         last_signal_time = None
         for _, bar in bars.iterrows():
@@ -269,13 +334,42 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
                 if elapsed < interval_minutes:
                     continue
 
-            for opt_type in option_types:
+            # Directional filtering: only enter the side matching current price direction
+            # "momentum" = price above prev_close → sell puts (bullish), below → sell calls (bearish)
+            # "contrarian" = opposite of momentum (price up → sell calls, price down → sell puts)
+            # "pursuit" = same side selection as contrarian (price up → sell calls just out of reach)
+            # "pursuit_eod" = direction locked at previous day's close (pre-computed above)
+            # "contrarian_double" = both sides, but 2 contracts on contrarian side
+            # "both" or None = enter both sides (default)
+            contract_override = {}  # opt_type -> num_contracts override
+            if directional_mode == "pursuit_eod":
+                # Direction already locked before bar loop
+                active_types = list(eod_locked_types)
+            elif directional_mode in ("momentum", "contrarian", "pursuit"):
+                current_price = float(bar["close"])
+                price_above_close = current_price > day_context.prev_close
+                if directional_mode == "momentum":
+                    active_types = ["put"] if price_above_close else ["call"]
+                else:  # contrarian or pursuit
+                    active_types = ["call"] if price_above_close else ["put"]
+                active_types = [t for t in active_types if t in option_types]
+            elif directional_mode == "contrarian_double":
+                # Enter both sides, but double the contrarian side
+                active_types = list(option_types)
+                current_price = float(bar["close"])
+                price_above_close = current_price > day_context.prev_close
+                contrarian_side = "call" if price_above_close else "put"
+                contract_override[contrarian_side] = num_contracts * 2
+            else:
+                active_types = option_types
+
+            for opt_type in active_types:
                 target_strike = pct_strikes.get(opt_type)
                 signal = {
                     "option_type": opt_type,
                     "percent_beyond": (0.0, 0.0),
                     "instrument": "credit_spread",
-                    "num_contracts": num_contracts,
+                    "num_contracts": contract_override.get(opt_type, num_contracts),
                     "timestamp": ts,
                     "max_loss": params.get("max_loss_estimate", 10000),
                     "max_width": (spread_width, spread_width),
@@ -283,12 +377,17 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
                     "dte": dte,
                     "entry_date": day_context.trading_date,
                     "use_mid": params.get("use_mid", True),
+                    "min_volume": params.get("min_volume", None),
                 }
                 if target_strike is not None:
                     signal["percentile_target_strike"] = target_strike
                 signals.append(signal)
 
             last_signal_time = ts
+
+        # pursuit_eod: compute EOD signal for tomorrow after processing today's bars
+        if directional_mode == "pursuit_eod":
+            self._compute_eod_signal(bars, day_context.prev_close)
 
         return signals
 
@@ -397,7 +496,11 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
     def _check_intraday_exits(
         self, pos_dict: Dict, bars, day_context: DayContext
     ) -> Any:
-        """Check exit rules at every bar in the day. Returns first triggered ExitSignal."""
+        """Check exit rules at every bar in the day. Returns first triggered ExitSignal.
+
+        Only checks bars at or after the position's entry time to avoid
+        phantom exits that appear to trigger before entry.
+        """
         if self.exit_manager is None:
             return None
 
@@ -407,16 +510,26 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
             "short_strike": position.short_strike,
             "long_strike": position.long_strike,
             "initial_credit": position.initial_credit,
+            "num_contracts": position.num_contracts,
             "roll_count": pos_dict.get("roll_count", 0),
             "dte": pos_dict.get("dte", 0),
             "entry_date": pos_dict.get("entry_date"),
         }
 
+        # Only check bars at or after entry time
+        entry_time = position.entry_time
+
         for _, bar in bars.iterrows():
             if "close" not in bar.index:
                 continue
-            current_price = float(bar["close"])
             current_time = bar.get("timestamp", datetime.now())
+
+            # Skip bars before this position was entered
+            if entry_time is not None and hasattr(current_time, "__ge__"):
+                if current_time < entry_time:
+                    continue
+
+            current_price = float(bar["close"])
 
             signal = self.exit_manager.should_exit(
                 pos_as_dict, current_price, current_time, day_context
@@ -487,6 +600,40 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
         pct_strikes = dte_strikes.get(roll_percentile, dte_strikes.get(percentile, {}))
         target_strike = pct_strikes.get(position.option_type)
 
+        # Ensure target strike is sufficiently OTM from current price
+        # In crash scenarios, percentile target may be near/ITM relative to current price.
+        # The spread builder rejects spreads with credit/width > 80%, so we need to push
+        # the target far enough OTM that the credit ratio stays reasonable.
+        current_price = exit_signal.exit_price
+        min_otm_pct = 0.01  # At least 1% OTM for roll replacements
+        if target_strike is not None:
+            if position.option_type == "put":
+                max_target = current_price * (1 - min_otm_pct)
+                if target_strike > max_target:
+                    target_strike = max_target
+            else:  # call
+                min_target = current_price * (1 + min_otm_pct)
+                if target_strike < min_target:
+                    target_strike = min_target
+        else:
+            # No target from signal data — compute a safe OTM target
+            if position.option_type == "put":
+                target_strike = current_price * (1 - min_otm_pct)
+            else:
+                target_strike = current_price * (1 + min_otm_pct)
+
+        # Standard entry ratio is 0.80; for rolls, progressively relax to save capital
+        roll_ratio_start = params.get("roll_credit_width_ratio", 0.95)
+        roll_ratio_attempts = [roll_ratio_start]
+        # Add 50% relaxation increments up to 1.0 (no constraint)
+        gap = 1.0 - roll_ratio_start
+        if gap > 0.001:
+            roll_ratio_attempts.append(min(1.0, roll_ratio_start + gap * 0.5))
+        roll_ratio_attempts.append(1.0)  # final attempt: no constraint
+        # Deduplicate while preserving order
+        seen = set()
+        roll_ratio_attempts = [x for x in roll_ratio_attempts if not (x in seen or seen.add(x))]
+
         new_signal = {
             "option_type": position.option_type,
             "percent_beyond": (0.0, 0.0),
@@ -497,6 +644,8 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
             "max_width": (max_roll_width, max_roll_width),
             "min_width": max(5, max_roll_width // 2),
             "use_mid": params.get("use_mid", True),
+            "min_volume": params.get("min_volume", None),
+            "max_credit_width_ratio": roll_ratio_start,
         }
         if target_strike is not None:
             new_signal["percentile_target_strike"] = target_strike
@@ -504,16 +653,61 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
         if day_context.options_data is None or day_context.options_data.empty:
             return (closed_result, None)
 
-        # Filter options for new DTE
-        options = day_context.options_data
-        if "dte" in options.columns:
-            options = options[
-                (options["dte"] >= new_dte - 1) & (options["dte"] <= new_dte + 1)
-            ]
+        # Filter options for new DTE — try exact range first, then progressively widen
+        all_options = day_context.options_data
+        new_position = None
 
-        new_position = instrument.build_position(
-            options, new_signal, day_context.prev_close
-        )
+        # Try progressively wider DTE ranges, spread widths, and credit/width ratios
+        width_attempts = [
+            (max_roll_width, max_roll_width),
+            (int(max_roll_width * 1.5), int(max_roll_width * 1.5)),
+            (max_roll_width * 2, max_roll_width * 2),
+        ]
+
+        # Extended DTE search: target DTE, then widen, then up to 10 trading days
+        roll_max_dte_search = params.get("roll_max_dte", 10)
+        dte_ranges = [
+            (new_dte - 1, new_dte + 1),
+            (max(1, new_dte - 2), new_dte + 3),
+            (1, roll_max_dte_search),
+            (1, 999),  # any DTE available
+        ]
+
+        if "dte" in all_options.columns:
+            for ratio in roll_ratio_attempts:
+                new_signal["max_credit_width_ratio"] = ratio
+                for max_w in width_attempts:
+                    new_signal["max_width"] = max_w
+                    new_signal["min_width"] = max(5, max_w[0] // 10)
+                    for dte_range in dte_ranges:
+                        options = all_options[
+                            (all_options["dte"] >= dte_range[0])
+                            & (all_options["dte"] <= dte_range[1])
+                        ]
+                        if options.empty:
+                            continue
+                        new_position = instrument.build_position(
+                            options, new_signal, day_context.prev_close
+                        )
+                        if new_position is not None:
+                            break
+                    if new_position is not None:
+                        break
+                if new_position is not None:
+                    break
+        else:
+            for ratio in roll_ratio_attempts:
+                new_signal["max_credit_width_ratio"] = ratio
+                for max_w in width_attempts:
+                    new_signal["max_width"] = max_w
+                    new_signal["min_width"] = max(5, max_w[0] // 10)
+                    new_position = instrument.build_position(
+                        all_options, new_signal, day_context.prev_close
+                    )
+                    if new_position is not None:
+                        break
+                if new_position is not None:
+                    break
 
         if new_position is None:
             return (closed_result, None)

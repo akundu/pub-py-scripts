@@ -301,3 +301,120 @@ The `LiveEngine` runs a tick loop during market hours:
 5. Persist positions to JSON, decisions to JSONL journal
 
 Positions survive restarts via JSON persistence. The `OrderExecutor` ABC is designed for future exchange connectivity (IBKR/TDA) but only `PaperExecutor` is implemented now.
+
+## Live Advisor — Profile-Based System
+
+The `scripts/live_trading/advisor/` package provides a **generic, profile-based** live trading advisor. Any backtest configuration can be run as a live advisor by defining a YAML profile.
+
+### Quick Start
+
+```bash
+# List available profiles
+python run_live_advisor.py --list-profiles
+
+# Run the 9-tier NDX advisor (current production config)
+python run_live_advisor.py --profile tiered_v2
+
+# Dry run (no QuestDB needed)
+python run_live_advisor.py --profile tiered_v2 --dry-run
+
+# Single-tier profile
+python run_live_advisor.py --profile single_p90_dte2 --dry-run
+
+# Override ticker
+python run_live_advisor.py --profile tiered_v2 --ticker SPX
+
+# Load from arbitrary YAML path
+python run_live_advisor.py --profile ./my_custom_profile.yaml
+
+# Legacy entry point (backwards compat, loads tiered_v2)
+python run_live_advisor_v2.py --dry-run
+```
+
+### Key Components
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| Profile Loader | `scripts/live_trading/advisor/profile_loader.py` | `AdvisorProfile` dataclass + YAML loader + validator |
+| Direction Modes | `scripts/live_trading/advisor/direction_modes.py` | Pluggable directional logic (pursuit, pursuit_eod, etc.) |
+| Tier Evaluator | `scripts/live_trading/advisor/tier_evaluator.py` | Evaluates all tiers, accepts `AdvisorProfile` |
+| Display | `scripts/live_trading/advisor/advisor_display.py` | Terminal UI, reads all config from profile |
+| Position Tracker | `scripts/live_trading/advisor/position_tracker.py` | JSON-backed positions, profile-keyed dirs |
+| Tier Config | `scripts/live_trading/advisor/tier_config.py` | Legacy constants (still used by `run_tiered_backtest_v2.py`) |
+| Profiles | `scripts/live_trading/advisor/profiles/*.yaml` | Profile definitions |
+| Runner | `run_live_advisor.py` | Generic CLI entry point |
+
+### Profile YAML Format
+
+Profiles live in `scripts/live_trading/advisor/profiles/<name>.yaml`. Each profile defines:
+- `name`, `ticker` — identity
+- `risk` — max_risk_per_trade, daily_budget, rate limits
+- `providers` — equity/options data source dirs
+- `signal` — signal generator name + params
+- `tiers` — ordered list with label, priority, directional mode, DTE, percentile, etc.
+- `exit_rules` — roll timing, proximity thresholds, 0DTE warnings
+- `strategy_defaults` — min_credit, use_mid, contract_sizing, etc.
+
+### Adding a New Profile
+
+1. Create `scripts/live_trading/advisor/profiles/<name>.yaml` (use `tiered_v2.yaml` as template)
+2. Define tiers with directional modes (`pursuit`, `pursuit_eod`, or register new ones in `direction_modes.py`)
+3. Test: `python run_live_advisor.py --profile <name> --dry-run`
+
+### Tiered Portfolio v2 Backtest
+
+The canonical backtest runner is `run_tiered_backtest_v2.py`. It uses `tier_config.py` for tier definitions and runs all 9 tiers in parallel.
+
+```bash
+python run_tiered_backtest_v2.py            # Full run (9 tiers, ~10 min)
+python run_tiered_backtest_v2.py --analyze  # Re-analyze only (skip backtests)
+```
+
+**Results**: `results/tiered_portfolio_v2/` — per-tier CSVs, portfolio simulation, charts, and HTML report.
+
+### Timing Parameters — CRITICAL
+
+**All roll/exit timing is unified at 18:00 UTC (11:00 AM PST / 2:00 PM ET).**
+
+When changing timing parameters, you MUST update all locations listed in `docs/TIMING_CHANGE_GUIDELINES.md`. This includes exit rule defaults, YAML configs, profile loader defaults, tier_config.py, backtest runner, and tests.
+
+### Running Advisor Tests
+
+```bash
+python -m pytest tests/test_live_advisor.py -v
+```
+
+## Backtest HTML Report Requirements
+
+**Every backtest run (sweep, tiered portfolio, single config, etc.) MUST produce an HTML report** saved alongside the results. This applies to all `run_*.py` sweep scripts and any new backtest runners.
+
+### Report Standards
+
+1. **Filename**: Use a unique, descriptive name with the date: `report_{description}_{YYYY-MM-DD}.html`
+   - Examples: `report_tiered_portfolio_2026-03-08.html`, `report_comprehensive_sweep_2026-03-10.html`
+   - Saved in the same output directory as the backtest results (e.g., `results/tiered_portfolio/`)
+
+2. **Structure** (follow the template in `results/tiered_portfolio/report.html`):
+   - **Hero banner**: Strategy name, subtitle, date range
+   - **KPI strip**: Key metrics at a glance (trades, win rate, net P&L, Sharpe, max drawdown, profit factor)
+   - **Strategy overview**: Tier/config cards explaining the setup and rationale
+   - **Per-config/tier performance table**: Full metrics with combined row
+   - **Charts with narrative**: Each chart accompanied by plain-English explanation of what it shows and why it matters
+   - **Monthly breakdown**: Table + chart showing regime sensitivity
+   - **Drawdown analysis**: Chart + narrative, include caveats about backtest limitations
+   - **Daily P&L distribution**: Histogram with mean/median statistics
+   - **Key takeaways**: Numbered insights synthesized from the results
+   - **Methodology table**: All config parameters used
+
+3. **Styling**: Dark theme (background `#0d1117`), GitHub-inspired, responsive. Use the CSS from the template report.
+
+4. **Charts**: Reference as relative paths (`charts/*.png`) so the report is self-contained within its output directory.
+
+5. **Narrative quality**: Each chart section must include 2-4 sentences explaining:
+   - What the chart shows
+   - What the key patterns/outliers are
+   - Why it matters for the strategy
+
+### Reference Implementation
+
+See `results/tiered_portfolio/report.html` for the canonical example of a well-structured backtest report.

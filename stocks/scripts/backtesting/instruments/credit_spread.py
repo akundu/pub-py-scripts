@@ -54,6 +54,9 @@ class CreditSpreadInstrument(Instrument):
 
         percentile_target_strike = signal.get("percentile_target_strike")
 
+        max_credit_width_ratio = signal.get("max_credit_width_ratio", 0.80)
+        min_volume = signal.get("min_volume", None)
+
         spreads = build_credit_spreads(
             options_df=options_data,
             option_type=option_type,
@@ -63,6 +66,8 @@ class CreditSpreadInstrument(Instrument):
             max_width=max_width,
             use_mid=use_mid,
             percentile_target_strike=percentile_target_strike,
+            max_credit_width_ratio=max_credit_width_ratio,
+            min_volume=min_volume,
         )
 
         if not spreads:

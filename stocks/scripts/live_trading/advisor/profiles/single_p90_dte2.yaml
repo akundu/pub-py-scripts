@@ -1,0 +1,47 @@
+name: single_p90_dte2
+ticker: NDX
+
+risk:
+  max_risk_per_trade: 50000
+  daily_budget: 100000
+  max_trades_per_window: 1
+  trade_window_minutes: 15
+
+providers:
+  equity:
+    csv_dir: equities_output
+  options:
+    csv_dir: csv_exports/options
+    fallback_csv_dir: options_csv_output_full
+    dte_buckets: [1, 2, 3]
+
+signal:
+  name: percentile_range
+  params:
+    lookback: 120
+    percentiles: [90]
+    dte_windows: [2]
+
+instrument: credit_spread
+
+tiers:
+  - label: dte2_p90
+    priority: 1
+    dte: 2
+    percentile: 90
+    spread_width: 50
+    directional: pursuit
+    entry_start: "14:30"
+    entry_end: "17:30"
+
+exit_rules:
+  roll_enabled: false
+  max_move_cap: 150
+  zero_dte_proximity_warn: 0.005
+
+strategy_defaults:
+  use_mid: false
+  min_volume: 2
+  min_credit: 0.75
+  contract_sizing: max_budget
+  max_credit_width_ratio: 0.80
