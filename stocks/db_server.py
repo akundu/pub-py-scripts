@@ -43,8 +43,36 @@ except ImportError:
     np = None
 
 # Tickers supported by the close-price prediction system
+# Reloads from data/lists/prediction_tickers.yaml on each access so that
+# adding a ticker via manage_prediction_tickers.py takes effect without restart.
 from common.prediction_config import get_prediction_tickers
-PREDICTION_TICKERS = set(get_prediction_tickers())
+
+class _LivePredictionTickers(set):
+    """Set that reloads from YAML every 60 seconds."""
+    _cache_time = 0
+    _TTL = 60  # seconds
+
+    def _refresh(self):
+        import time as _t
+        now = _t.time()
+        if now - self._cache_time > self._TTL:
+            super().clear()
+            super().update(get_prediction_tickers())
+            self._cache_time = now
+
+    def __contains__(self, item):
+        self._refresh()
+        return super().__contains__(item)
+
+    def __iter__(self):
+        self._refresh()
+        return super().__iter__()
+
+    def __len__(self):
+        self._refresh()
+        return super().__len__()
+
+PREDICTION_TICKERS = _LivePredictionTickers(get_prediction_tickers())
 
 # Try to import Redis for Pub/Sub
 try:
