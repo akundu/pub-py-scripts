@@ -254,49 +254,57 @@ def run_single(args):
             config_path.unlink()
 
 
-def run_all_backtests(ticker: str = "NDX"):
-    """Execute all tier configs in parallel for a single ticker."""
-    configs = [(f"{ticker}_{t['label']}", _tier_config(t, ticker)) for t in TIERS]
+def run_all_backtests(tickers_to_run: list):
+    """Execute all tier×ticker configs in a single parallel pool.
 
-    tp = TICKER_PARAMS.get(ticker, {})
-    start = tp.get("backtest_start", "2024-01-02")
-    end = tp.get("backtest_end", "2026-03-06")
+    All tickers run concurrently — e.g., NDX DTE0, SPX DTE0, RUT DTE0 all
+    execute at the same time instead of waiting for one ticker to finish.
+    """
+    configs = []
+    for ticker in tickers_to_run:
+        for t in TIERS:
+            configs.append((f"{ticker}_{t['label']}", _tier_config(t, ticker)))
 
     print("=" * 110)
-    print(f"Tiered Multi-DTE Portfolio Backtest v2 — {ticker}")
+    print("Tiered Multi-DTE Portfolio Backtest v2 — Multi-Ticker")
     print("=" * 110)
+    for ticker in tickers_to_run:
+        tp = TICKER_PARAMS.get(ticker, {})
+        start = tp.get("backtest_start", "2024-01-02")
+        end = tp.get("backtest_end", "2026-03-06")
+        print(f"\n  {ticker}: {start} to {end}")
+        for t in TIERS:
+            mode = t["directional"]
+            if t["eod_threshold"]:
+                mode += f" ({t['eod_threshold']*100:.1f}% threshold)"
+            sw = get_spread_width(t, ticker)
+            print(f"    P{t['priority']} {t['label']:>16}  DTE={t['dte']:<3} P{t['percentile']:<3} {sw}pt  {mode}")
     print()
-    for t in TIERS:
-        mode = t["directional"]
-        if t["eod_threshold"]:
-            mode += f" ({t['eod_threshold']*100:.1f}% threshold)"
-        sw = get_spread_width(t, ticker)
-        print(f"  P{t['priority']} {t['label']:>16}  DTE={t['dte']:<3} P{t['percentile']:<3} {sw}pt  {mode}")
-    print()
-    print(f"Risk: ${MAX_RISK_PER_TRADE:,}/trade, ${DAILY_BUDGET:,}/day unified budget")
-    print(f"Period:   {start} to {end}")
-    print(f"Configs:  {len(configs)}")
+    n_workers = min(16, len(configs))
+    print(f"Total configs: {len(configs)} ({len(tickers_to_run)} tickers × {len(TIERS)} tiers)")
+    print(f"Running with Pool({n_workers})...")
     print("=" * 110)
-    print()
-    print(f"Running {len(configs)} configs for {ticker} with Pool(8)...")
     print()
 
-    with Pool(processes=min(8, len(configs))) as pool:
+    with Pool(processes=n_workers) as pool:
         results = pool.map(run_single, configs)
 
     results_dict = dict(results)
 
-    print()
-    print(f"{'Pri':>3} {'Tier':>18} {'Trades':>8} {'Wins':>6} {'WR%':>7} {'Net P&L':>12} {'Sharpe':>8} {'ROI%':>8}")
-    print("-" * 75)
-    for t in TIERS:
-        key = f"{ticker}_{t['label']}"
-        r = results_dict.get(key, {})
-        if "error" in r:
-            print(f"  {t['priority']:>1} {t['label']:>16}  ERROR")
-        else:
-            print(f"  {t['priority']:>1} {t['label']:>16} {r['total_trades']:>8} {r['wins']:>6} {r['win_rate']:>6.1f}% "
-                  f"${r['net_pnl']:>10,.0f} {r['sharpe']:>7.2f} {r['roi']:>6.1f}%")
+    # Print per-ticker summary
+    for ticker in tickers_to_run:
+        print(f"\n--- {ticker} Results ---")
+        print(f"{'Pri':>3} {'Tier':>18} {'Trades':>8} {'Wins':>6} {'WR%':>7} {'Net P&L':>12} {'Sharpe':>8} {'ROI%':>8}")
+        print("-" * 75)
+        for t in TIERS:
+            key = f"{ticker}_{t['label']}"
+            r = results_dict.get(key, {})
+            if "error" in r:
+                print(f"  {t['priority']:>1} {t['label']:>16}  ERROR")
+            else:
+                print(f"  {t['priority']:>1} {t['label']:>16} {r['total_trades']:>8} {r['wins']:>6} {r['win_rate']:>6.1f}% "
+                      f"${r['net_pnl']:>10,.0f} {r['sharpe']:>7.2f} {r['roi']:>6.1f}%")
+
     print()
     return results_dict
 
@@ -1341,21 +1349,17 @@ function switchTab(ticker) {{
 # Main
 # ---------------------------------------------------------------------------
 
-def _process_ticker(ticker: str, run_backtests: bool = True) -> dict:
-    """Run full pipeline for a single ticker: backtest, load, simulate, charts."""
+def _analyze_ticker(ticker: str) -> dict:
+    """Load, simulate, chart, and summarize results for a single ticker."""
     print(f"\n{'='*80}")
-    print(f"  Processing {ticker}")
+    print(f"  Analyzing {ticker}")
     print(f"{'='*80}")
 
     ticker_output = OUTPUT_DIR / ticker
     ticker_chart_dir = ticker_output / "charts"
     ticker_output.mkdir(parents=True, exist_ok=True)
 
-    # Phase 1: Run backtests
-    if run_backtests:
-        run_all_backtests(ticker)
-
-    # Phase 2: Load trades
+    # Load trades
     print(f"\nLoading {ticker} trades data...")
     all_trades = load_all_trades(ticker)
     if len(all_trades) == 0:
@@ -1377,7 +1381,7 @@ def _process_ticker(ticker: str, run_backtests: bool = True) -> dict:
     loss_df = print_loss_analysis(portfolio_trades)
     daily_pnl = print_daily_stats(portfolio_trades)
 
-    # Save CSVs to per-ticker dir
+    # Save CSVs
     save_csvs(all_trades, portfolio_trades, tier_summary_raw, tier_summary_port, monthly_df, hour_summary)
 
     # Charts
@@ -1433,10 +1437,16 @@ Examples:
     tickers_to_run = args.tickers if args.tickers else TICKERS
     print(f"Tickers: {', '.join(tickers_to_run)}")
 
-    # Process each ticker
+    # Phase 1: Run all backtests in a single pool (all tickers × tiers concurrently)
+    if not args.analyze:
+        run_all_backtests(tickers_to_run)
+    else:
+        print("Skipping backtests (--analyze mode)")
+
+    # Phase 2-3: Analyze each ticker (load, simulate, chart)
     ticker_data = {}
     for ticker in tickers_to_run:
-        result = _process_ticker(ticker, run_backtests=not args.analyze)
+        result = _analyze_ticker(ticker)
         if result is not None:
             ticker_data[ticker] = result
 

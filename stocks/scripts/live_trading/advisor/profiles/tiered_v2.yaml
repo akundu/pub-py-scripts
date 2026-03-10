@@ -22,7 +22,7 @@ ticker_params:
     spread_width_map: {50: 10, 30: 5}
     max_move_cap: 17
     min_credit: 0.50
-    backtest_start: "2025-02-01"
+    backtest_start: "2024-09-09"
     backtest_end: "2026-03-06"
 
 risk:
