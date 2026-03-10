@@ -76,7 +76,7 @@ class TierDef:
 @dataclass
 class AdvisorProfile:
     name: str
-    ticker: str
+    ticker: str  # active ticker (default_ticker or --ticker override)
     risk: RiskConfig
     providers: ProviderConfig
     signal: SignalConfig
@@ -84,6 +84,8 @@ class AdvisorProfile:
     tiers: List[TierDef]
     exit_rules: ExitRuleConfig
     strategy_defaults: Dict[str, Any]
+    tickers: List[str] = field(default_factory=list)
+    ticker_params: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     @property
     def all_dtes(self) -> List[int]:
@@ -194,9 +196,22 @@ def load_profile(name_or_path: str) -> AdvisorProfile:
     name = raw.get("name")
     if not name:
         raise ValueError(f"Profile missing 'name': {path}")
-    ticker = raw.get("ticker")
-    if not ticker:
-        raise ValueError(f"Profile missing 'ticker': {path}")
+
+    # Support both single 'ticker' and multi-ticker 'tickers'/'default_ticker'
+    tickers_list = raw.get("tickers", [])
+    default_ticker = raw.get("default_ticker")
+    single_ticker = raw.get("ticker")
+
+    if tickers_list:
+        ticker = default_ticker or tickers_list[0]
+    elif single_ticker:
+        ticker = single_ticker
+        tickers_list = [single_ticker]
+    else:
+        raise ValueError(f"Profile missing 'ticker' or 'tickers': {path}")
+
+    ticker_params = raw.get("ticker_params", {})
+
     tiers_raw = raw.get("tiers")
     if not tiers_raw:
         raise ValueError(f"Profile missing 'tiers': {path}")
@@ -220,9 +235,11 @@ def load_profile(name_or_path: str) -> AdvisorProfile:
         tiers=tiers,
         exit_rules=exit_rules,
         strategy_defaults=strategy_defaults,
+        tickers=tickers_list,
+        ticker_params=ticker_params,
     )
 
-    logger.info(f"Loaded profile '{name}': {ticker}, {len(tiers)} tiers")
+    logger.info(f"Loaded profile '{name}': {ticker} (tickers: {tickers_list}), {len(tiers)} tiers")
     return profile
 
 
@@ -293,9 +310,11 @@ def from_tier_config() -> AdvisorProfile:
             eod_threshold=t["eod_threshold"],
         ))
 
+    from .tier_config import TICKERS as _TICKERS, DEFAULT_TICKER, TICKER_PARAMS as _TP
+
     return AdvisorProfile(
         name="tiered_portfolio_v2",
-        ticker="NDX",
+        ticker=DEFAULT_TICKER,
         risk=risk,
         providers=providers,
         signal=signal,
@@ -303,4 +322,6 @@ def from_tier_config() -> AdvisorProfile:
         tiers=tiers,
         exit_rules=exit_rules,
         strategy_defaults=STRATEGY_DEFAULTS,
+        tickers=_TICKERS,
+        ticker_params=_TP,
     )

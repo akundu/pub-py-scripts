@@ -21,3 +21,12 @@ python3 scripts/options_chain_download.py SPX NDX RUT --zero-dte-date-start $sta
 python3 scripts/equities_download.py I:VIX1D I:VIX SPY DJX I:DJX TQQQ QQQ I:NDX I:SPX I:RUT  --start $start_date  --end $end_date --output-dir ./equities_output 
 python3 scripts/options_chain_download.py SPX NDX DJX TQQQ RUT --track-from $start_date --track-end $end_date --track-days 30  --interval-minutes 15 --chunk-days 7 --max-connections 20 --num-processes 12      --window-workers 5      --skip-existing --format-chain-csv --output-dir ./options_csv_output_full/
 
+
+PROJECT_DIR="/Volumes/RAID1 NVME SSD 2TB/akundu_programs_dev/programs/python/pythonv3/pub-py-scripts/stocks"
+TICKERS="NDX,SPX,TQQQ,RUT,DJX"
+
+rm -f .cache/lgbm_model_*.pkl .cache/percentile_model_*.pkl
+./scripts/retrain_models_auto.sh --all --force
+python scripts/analyze_performance_close_prices.py --train-days 250 --all
+python scripts/monitor_model_health.py --all
+find "./logs" -name "*.log" -mtime +90 -delete

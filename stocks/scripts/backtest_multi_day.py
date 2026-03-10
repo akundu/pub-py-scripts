@@ -301,14 +301,16 @@ def main():
     parser.add_argument('--train-lgbm', action='store_true', help='Train LGBM models')
     parser.add_argument('--walk-forward', action='store_true', help='Use walk-forward validation with rolling retraining')
     parser.add_argument('--step-size', type=int, default=30, help='Days between retraining in walk-forward mode')
-    parser.add_argument('--output-dir', type=Path, default=Path('results/multi_day_backtest'),
-                        help='Output directory')
+    parser.add_argument('--output-dir', type=Path, default=None,
+                        help='Output directory (default: results/multi_day_backtest_{TICKER})')
     parser.add_argument('--no-time-decay', action='store_true',
                         help='Disable time decay factor (old behavior)')
     parser.add_argument('--no-intraday-vol', action='store_true',
                         help='Disable intraday volatility scaling (old behavior)')
     args = parser.parse_args()
 
+    if args.output_dir is None:
+        args.output_dir = Path(f'results/multi_day_backtest_{args.ticker}')
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'='*80}")

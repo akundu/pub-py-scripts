@@ -242,7 +242,7 @@ def compute_market_context(
             vol_5d = volumes[-5:]
             x = np.arange(len(vol_5d))
             # Simple linear regression slope
-            if len(vol_5d) > 1 and np.std(x) > 0:
+            if len(vol_5d) > 1 and np.std(x) > 0 and np.std(vol_5d) > 0:
                 slope = np.corrcoef(x, vol_5d)[0, 1] * (np.std(vol_5d) / np.std(x))
                 # Normalize by average volume
                 if vol_20d_avg > 0:

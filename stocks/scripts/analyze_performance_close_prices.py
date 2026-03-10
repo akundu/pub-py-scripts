@@ -21,6 +21,9 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.prediction_config import get_prediction_tickers
+
 
 def calculate_roi_score(hit_rate: float, width_pct: float, baseline_width_pct: float) -> float:
     """
@@ -350,6 +353,12 @@ Examples:
   # Standard analysis with default training window (125 days / 6 months)
   python scripts/analyze_performance_close_prices.py
 
+  # Analysis for a specific ticker
+  python scripts/analyze_performance_close_prices.py --ticker SPX
+
+  # Analysis for all configured prediction tickers
+  python scripts/analyze_performance_close_prices.py --all
+
   # Analysis with 1-year training window
   python scripts/analyze_performance_close_prices.py --train-days 250
 
@@ -362,6 +371,19 @@ Examples:
   # Full analysis with all options
   python scripts/analyze_performance_close_prices.py --train-days 250 --show-intraday --compare-windows
         """
+    )
+
+    parser.add_argument(
+        '--ticker',
+        type=str,
+        default='NDX',
+        help='Ticker symbol to analyze (default: NDX)'
+    )
+
+    parser.add_argument(
+        '--all',
+        action='store_true',
+        help='Analyze all tickers in prediction_tickers.yaml'
     )
 
     parser.add_argument(
@@ -385,35 +407,15 @@ Examples:
 
     args = parser.parse_args()
 
-    base_dir = Path(__file__).parent.parent
-
-    # Header
-    print(f"\n{'='*110}")
-    print("CLOSE PRICE PREDICTION PERFORMANCE ANALYSIS")
-    print(f"{'='*110}")
-    print(f"Training Window: {args.train_days} days ({args.train_days/21:.1f} months)")
-    print(f"Analysis Type: {'Full Day' if args.show_intraday else 'Afternoon Focus'}")
-    print(f"{'='*110}")
-
-    # Analyze multi-day predictions
-    multi_day_csv = base_dir / "results" / "multi_day_phase3" / "summary.csv"
-    if multi_day_csv.exists():
-        print("\n📊 ANALYZING MULTI-DAY PREDICTIONS (1-20 DTE)...")
-        multi_day_results = analyze_multi_day_performance(str(multi_day_csv), args.train_days)
+    if args.all:
+        tickers = get_prediction_tickers()
     else:
-        print(f"❌ Multi-day results not found: {multi_day_csv}")
-        print("   Run: python scripts/backtest_multi_day.py --ticker NDX --test-days 180")
+        tickers = [args.ticker.upper()]
 
-    # Analyze 0DTE predictions
-    dte0_csv = base_dir / "results" / "comprehensive_backtest" / "0dte_summary_NDX.csv"
-    if dte0_csv.exists():
-        print("\n\n📊 ANALYZING 0DTE PREDICTIONS (SAME-DAY)...")
-        dte0_results = analyze_0dte_performance(str(dte0_csv), args.show_intraday)
-    else:
-        print(f"❌ 0DTE results not found: {dte0_csv}")
-        print("   0DTE backtest data not available")
+    for ticker in tickers:
+        _analyze_ticker(ticker, args)
 
-    # Training window comparison
+    # Training window comparison (ticker-independent, only print once)
     if args.compare_windows:
         compare_training_windows()
 
@@ -421,6 +423,7 @@ Examples:
     print(f"\n{'='*110}")
     print("ANALYSIS COMPLETE")
     print(f"{'='*110}")
+    print(f"Tickers analyzed: {', '.join(tickers)}")
     print("\n📄 Documentation:")
     print("   - Detailed analysis: MODEL_PERFORMANCE_EVIDENCE.md")
     print("   - Method comparison: ENSEMBLE_VS_CONDITIONAL_EXPLAINED.md")
@@ -433,6 +436,64 @@ Examples:
     print("   4. Optimal training window: 250 days (1 year) for most predictions")
     print("   5. Conditional benefits MORE from larger training windows")
     print()
+
+
+def _analyze_ticker(ticker: str, args):
+    """Run analysis for a single ticker."""
+    base_dir = Path(__file__).parent.parent
+
+    # Header
+    print(f"\n{'='*110}")
+    print(f"CLOSE PRICE PREDICTION PERFORMANCE ANALYSIS - {ticker}")
+    print(f"{'='*110}")
+    print(f"Training Window: {args.train_days} days ({args.train_days/21:.1f} months)")
+    print(f"Analysis Type: {'Full Day' if args.show_intraday else 'Afternoon Focus'}")
+    print(f"{'='*110}")
+
+    # Analyze multi-day predictions
+    # Try ticker-specific result dirs first, then fall back to generic
+    multi_day_candidates = [
+        base_dir / "results" / f"multi_day_backtest_{ticker}" / "summary.csv",
+        base_dir / "results" / f"multi_day_phase3_{ticker}" / "summary.csv",
+        base_dir / "results" / "multi_day_phase3" / f"summary_{ticker}.csv",
+        base_dir / "results" / f"auto_retrain_{ticker}" / "summary.csv",
+    ]
+    # Fall back to the generic (non-ticker-specific) paths only for NDX
+    if ticker == "NDX":
+        multi_day_candidates.extend([
+            base_dir / "results" / "multi_day_phase3" / "summary.csv",
+            base_dir / "results" / "multi_day_backtest" / "summary.csv",
+        ])
+    # Also check the most recent auto_retrain dir for this ticker
+    retrain_dirs = sorted(
+        (base_dir / "results").glob(f"auto_retrain_{ticker}_*"), reverse=True
+    )
+    for rd in retrain_dirs[:1]:
+        multi_day_candidates.insert(0, rd / "summary.csv")
+
+    multi_day_csv = None
+    for candidate in multi_day_candidates:
+        if candidate.exists():
+            multi_day_csv = candidate
+            break
+
+    if multi_day_csv:
+        print(f"\n📊 ANALYZING MULTI-DAY PREDICTIONS (1-20 DTE) for {ticker}...")
+        print(f"   Source: {multi_day_csv}")
+        analyze_multi_day_performance(str(multi_day_csv), args.train_days)
+    else:
+        print(f"❌ Multi-day results not found for {ticker}")
+        print(f"   Run: python scripts/backtest_multi_day.py --ticker {ticker} --test-days 180")
+        print(f"   Or:  ./scripts/retrain_models_auto.sh --ticker {ticker} --force")
+
+    # Analyze 0DTE predictions
+    dte0_csv = base_dir / "results" / "comprehensive_backtest" / f"0dte_summary_{ticker}.csv"
+    if dte0_csv.exists():
+        print(f"\n\n📊 ANALYZING 0DTE PREDICTIONS (SAME-DAY) for {ticker}...")
+        analyze_0dte_performance(str(dte0_csv), args.show_intraday)
+    else:
+        print(f"❌ 0DTE results not found for {ticker}: {dte0_csv}")
+        print(f"   0DTE backtest data not available for {ticker}")
 
 
 if __name__ == "__main__":

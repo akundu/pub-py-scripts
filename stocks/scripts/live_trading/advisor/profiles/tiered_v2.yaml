@@ -1,5 +1,29 @@
 name: tiered_portfolio_v2
-ticker: NDX
+tickers: [NDX, SPX, RUT]
+default_ticker: NDX
+
+# Per-ticker parameters: spread widths are scaled to match each index's
+# price level.  spread_width_map translates the NDX-native tier widths
+# (50pt, 30pt) to the appropriate value for each ticker.
+ticker_params:
+  NDX:
+    spread_width_map: {50: 50, 30: 30}
+    max_move_cap: 150
+    min_credit: 0.75
+    backtest_start: "2024-01-02"
+    backtest_end: "2026-03-06"
+  SPX:
+    spread_width_map: {50: 15, 30: 10}
+    max_move_cap: 45
+    min_credit: 0.75
+    backtest_start: "2024-01-02"
+    backtest_end: "2026-03-06"
+  RUT:
+    spread_width_map: {50: 10, 30: 5}
+    max_move_cap: 17
+    min_credit: 0.50
+    backtest_start: "2025-02-01"
+    backtest_end: "2026-03-06"
 
 risk:
   max_risk_per_trade: 50000

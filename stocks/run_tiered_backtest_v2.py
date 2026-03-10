@@ -1,35 +1,15 @@
 #!/usr/bin/env python3
-"""Tiered Multi-DTE Portfolio Backtest v2 — Priority-Ordered, Unified Budget.
+"""Tiered Multi-DTE Portfolio Backtest v2 — Multi-Ticker, Priority-Ordered.
 
-Runs 9 DTE tiers with optimized percentile/directional/spread-width settings,
-then replays all trades through a priority-ordered portfolio simulator with
-a unified $500K/day budget and $50K/trade risk cap.
-
-Tiers (priority order for capital allocation):
-  1. DTE 0  | P95  | 50pt  | pursuit (intraday)
-  2. DTE 1  | P90  | 50pt  | pursuit (intraday)
-  3. DTE 2  | P90  | 50pt  | pursuit (intraday)
-  4. DTE 3  | P80  | 30pt  | pursuit (intraday)
-  5. DTE 5  | P75  | 30pt  | pursuit (intraday)
-  6. DTE 10 | P90  | 50pt  | pursuit (intraday)
-  7. DTE 1  | P90  | 50pt  | pursuit_eod (1.0% threshold at 3:45pm ET)
-  8. DTE 2  | P90  | 50pt  | pursuit_eod (1.0% threshold at 3:45pm ET)
-  9. DTE 3  | P90  | 50pt  | pursuit_eod (1.0% threshold at 3:45pm ET)
-
-Rule: DTE < 3 requires >= P90 (except rolls which can target any DTE).
-
-Shared rules: no stop loss, theta decay exit, $50K/trade, $500K/day unified,
-rolling enabled (check at 18:00 UTC / 11:00am PST / 2:00pm ET, 0.5% proximity).
-
-Entry windows:
-  Intraday: 14:30-17:30 UTC (9:30 AM - 12:30 PM ET)
-  EOD:      19:45-20:00 UTC (3:45-4:00 PM ET)
-
-Period: 2024-09-01 to 2026-03-05 (1.5 years)
+Runs 9 DTE tiers for each configured ticker (NDX, SPX, RUT) with per-ticker
+spread widths and parameters from profiles/tiered_v2.yaml (single source of
+truth).  Results are combined into a single tabbed HTML report.
 
 Usage:
-  python run_tiered_backtest_v2.py            # Full run
-  python run_tiered_backtest_v2.py --analyze  # Skip backtests, re-analyze only
+  python run_tiered_backtest_v2.py                   # All tickers
+  python run_tiered_backtest_v2.py --ticker NDX      # Single ticker
+  python run_tiered_backtest_v2.py --analyze         # Skip backtests
+  python run_tiered_backtest_v2.py --ticker SPX --analyze
 """
 
 import argparse
@@ -54,6 +34,9 @@ CHART_DIR = OUTPUT_DIR / "charts"
 sys.path.insert(0, str(BASE_DIR))
 from scripts.live_trading.advisor.tier_config import (
     TIERS,
+    TICKERS,
+    DEFAULT_TICKER,
+    TICKER_PARAMS,
     MAX_RISK_PER_TRADE,
     DAILY_BUDGET,
     MAX_TRADES_PER_WINDOW,
@@ -62,6 +45,8 @@ from scripts.live_trading.advisor.tier_config import (
     THETA_PARAMS_0DTE,
     THETA_PARAMS_MULTI_DAY,
     EXIT_RULES,
+    get_spread_width,
+    get_ticker_param,
 )
 
 
@@ -69,24 +54,33 @@ from scripts.live_trading.advisor.tier_config import (
 # Phase 1: Config + Execution
 # ---------------------------------------------------------------------------
 
-def _tier_config(tier: dict) -> dict:
-    """Build config dict for a single tier.
+def _tier_config(tier: dict, ticker: str = "NDX") -> dict:
+    """Build config dict for a single tier + ticker.
 
     Strategy params are read from STRATEGY_DEFAULTS (which comes from
     profiles/tiered_v2.yaml) so that backtest, live advisor, and report
-    all use the same source.
+    all use the same source.  Spread widths and other numeric params are
+    resolved per-ticker via TICKER_PARAMS.
     """
     dte = tier["dte"]
     sd = STRATEGY_DEFAULTS  # shorthand
+    tp = TICKER_PARAMS.get(ticker, {})
 
     theta = THETA_PARAMS_0DTE if dte == 0 else THETA_PARAMS_MULTI_DAY
+
+    # Resolve per-ticker overrides
+    actual_spread_width = get_spread_width(tier, ticker)
+    actual_min_credit = tp.get("min_credit", sd.get("min_credit", 0.75))
+    actual_max_move_cap = tp.get("max_move_cap", 150)
+    start_date = tp.get("backtest_start", "2024-01-02")
+    end_date = tp.get("backtest_end", "2026-03-06")
 
     strategy_params = {
         "dte": dte,
         "percentile": tier["percentile"],
         "lookback": sd.get("lookback", 120),
         "option_types": sd.get("option_types", ["put", "call"]),
-        "spread_width": tier["spread_width"],
+        "spread_width": actual_spread_width,
         "interval_minutes": sd.get("interval_minutes", 10),
         "entry_start_utc": tier["entry_start"],
         "entry_end_utc": tier["entry_end"],
@@ -95,7 +89,7 @@ def _tier_config(tier: dict) -> dict:
         "profit_target_0dte": sd.get("profit_target_0dte", 0.75),
         "profit_target_multiday": sd.get("profit_target_multiday", 0.50),
         "min_roi_per_day": sd.get("min_roi_per_day", 0.025),
-        "min_credit": sd.get("min_credit", 0.75),
+        "min_credit": actual_min_credit,
         "min_total_credit": sd.get("min_total_credit", 0),
         "min_credit_per_point": sd.get("min_credit_per_point", 0),
         "max_contracts": sd.get("max_contracts", 0),
@@ -120,12 +114,12 @@ def _tier_config(tier: dict) -> dict:
 
     return {
         "infra": {
-            "ticker": "NDX",
-            "start_date": "2024-09-01",
-            "end_date": "2026-03-05",
+            "ticker": ticker,
+            "start_date": start_date,
+            "end_date": end_date,
             "lookback_days": 180,
             "num_processes": 1,
-            "output_dir": f"results/tiered_portfolio_v2/{tier['label']}",
+            "output_dir": f"results/tiered_portfolio_v2/{ticker}/{tier['label']}",
         },
         "providers": [
             {"name": "csv_equity", "role": "equity", "params": {"csv_dir": "equities_output"}},
@@ -260,29 +254,31 @@ def run_single(args):
             config_path.unlink()
 
 
-def run_all_backtests():
-    """Execute all tier configs in parallel."""
-    configs = [(t["label"], _tier_config(t)) for t in TIERS]
+def run_all_backtests(ticker: str = "NDX"):
+    """Execute all tier configs in parallel for a single ticker."""
+    configs = [(f"{ticker}_{t['label']}", _tier_config(t, ticker)) for t in TIERS]
+
+    tp = TICKER_PARAMS.get(ticker, {})
+    start = tp.get("backtest_start", "2024-01-02")
+    end = tp.get("backtest_end", "2026-03-06")
 
     print("=" * 110)
-    print("Tiered Multi-DTE Portfolio Backtest v2 — Priority-Ordered, Unified Budget")
+    print(f"Tiered Multi-DTE Portfolio Backtest v2 — {ticker}")
     print("=" * 110)
     print()
     for t in TIERS:
         mode = t["directional"]
         if t["eod_threshold"]:
             mode += f" ({t['eod_threshold']*100:.1f}% threshold)"
-        print(f"  P{t['priority']} {t['label']:>16}  DTE={t['dte']:<3} P{t['percentile']:<3} {t['spread_width']}pt  {mode}")
+        sw = get_spread_width(t, ticker)
+        print(f"  P{t['priority']} {t['label']:>16}  DTE={t['dte']:<3} P{t['percentile']:<3} {sw}pt  {mode}")
     print()
     print(f"Risk: ${MAX_RISK_PER_TRADE:,}/trade, ${DAILY_BUDGET:,}/day unified budget")
-    print(f"Intraday: 14:30-17:30 UTC (9:30am-12:30pm ET)")
-    print(f"EOD:      19:45-20:00 UTC (3:45-4:00pm ET)")
-    print(f"Rolling:  enabled (check 18:00 UTC / 11:00am PST / 2:00pm ET, 0.5% proximity)")
-    print(f"Period:   2024-09-01 to 2026-03-05 (1.5 years)")
+    print(f"Period:   {start} to {end}")
     print(f"Configs:  {len(configs)}")
     print("=" * 110)
     print()
-    print(f"Running {len(configs)} configs with Pool(8)...")
+    print(f"Running {len(configs)} configs for {ticker} with Pool(8)...")
     print()
 
     with Pool(processes=min(8, len(configs))) as pool:
@@ -294,7 +290,8 @@ def run_all_backtests():
     print(f"{'Pri':>3} {'Tier':>18} {'Trades':>8} {'Wins':>6} {'WR%':>7} {'Net P&L':>12} {'Sharpe':>8} {'ROI%':>8}")
     print("-" * 75)
     for t in TIERS:
-        r = results_dict.get(t["label"], {})
+        key = f"{ticker}_{t['label']}"
+        r = results_dict.get(key, {})
         if "error" in r:
             print(f"  {t['priority']:>1} {t['label']:>16}  ERROR")
         else:
@@ -308,26 +305,28 @@ def run_all_backtests():
 # Phase 2: Post-processing
 # ---------------------------------------------------------------------------
 
-def load_all_trades() -> pd.DataFrame:
-    """Load trades.csv from each tier, add metadata columns."""
+def load_all_trades(ticker: str = "NDX") -> pd.DataFrame:
+    """Load trades.csv from each tier for a given ticker, add metadata columns."""
     frames = []
+    ticker_dir = OUTPUT_DIR / ticker
     for t in TIERS:
-        trades_path = OUTPUT_DIR / t["label"] / "trades.csv"
+        trades_path = ticker_dir / t["label"] / "trades.csv"
         if not trades_path.exists():
             print(f"  WARNING: {trades_path} not found, skipping {t['label']}")
             continue
         df = pd.read_csv(trades_path)
+        df["ticker"] = ticker
         df["dte_tier"] = t["label"]
         df["dte_config"] = t["dte"]
         df["percentile"] = t["percentile"]
-        df["spread_width"] = t["spread_width"]
+        df["spread_width"] = get_spread_width(t, ticker)
         df["priority"] = t["priority"]
         df["tier_type"] = "eod" if "eod" in t["label"] else "intraday"
         frames.append(df)
 
     if not frames:
-        print("ERROR: No trades.csv files found. Run backtests first.")
-        sys.exit(1)
+        print(f"WARNING: No trades.csv files found for {ticker}.")
+        return pd.DataFrame()
 
     trades = pd.concat(frames, ignore_index=True)
 
@@ -697,8 +696,9 @@ TIER_COLORS = {
 }
 
 
-def chart_cumulative_pnl(trades: pd.DataFrame, suffix=""):
+def chart_cumulative_pnl(trades: pd.DataFrame, suffix="", ticker="NDX", chart_dir=None):
     """Cumulative P&L per tier + combined."""
+    chart_dir = chart_dir or CHART_DIR
     fig, ax = plt.subplots(figsize=(16, 8))
 
     for t in TIERS:
@@ -716,7 +716,7 @@ def chart_cumulative_pnl(trades: pd.DataFrame, suffix=""):
     ax.plot(combined["exit_dt"].values, combined["pnl"].cumsum().values,
             label="COMBINED", color="black", linewidth=3, alpha=0.9)
 
-    ax.set_title(f"Cumulative P&L: Tiered Portfolio{suffix}", fontsize=14, fontweight="bold")
+    ax.set_title(f"Cumulative P&L: {ticker} Tiered Portfolio{suffix}", fontsize=14, fontweight="bold")
     ax.set_xlabel("Date")
     ax.set_ylabel("Cumulative P&L ($)")
     ax.legend(loc="upper left", fontsize=8, ncol=2)
@@ -725,13 +725,14 @@ def chart_cumulative_pnl(trades: pd.DataFrame, suffix=""):
     fig.autofmt_xdate()
     plt.tight_layout()
     fname = f"cumulative_pnl{'_portfolio' if suffix else ''}.png"
-    fig.savefig(CHART_DIR / fname, dpi=150)
+    fig.savefig(chart_dir / fname, dpi=150)
     plt.close(fig)
     return fname
 
 
-def chart_monthly_pnl(trades: pd.DataFrame):
+def chart_monthly_pnl(trades: pd.DataFrame, ticker="NDX", chart_dir=None):
     """Stacked monthly bars: intraday vs EOD."""
+    chart_dir = chart_dir or CHART_DIR
     months = sorted(trades["exit_month"].dropna().unique())
     month_strs = [str(m) for m in months]
 
@@ -751,18 +752,19 @@ def chart_monthly_pnl(trades: pd.DataFrame):
 
     ax.set_xticks(x)
     ax.set_xticklabels(month_strs, rotation=45, ha="right")
-    ax.set_title("Monthly P&L: Intraday vs EOD", fontsize=14, fontweight="bold")
+    ax.set_title(f"{ticker} Monthly P&L: Intraday vs EOD", fontsize=14, fontweight="bold")
     ax.set_ylabel("P&L ($)")
     ax.legend()
     ax.grid(True, axis="y", alpha=0.3)
     ax.axhline(y=0, color="black", linewidth=0.5)
     plt.tight_layout()
-    fig.savefig(CHART_DIR / "monthly_pnl_intraday_vs_eod.png", dpi=150)
+    fig.savefig(chart_dir / "monthly_pnl_intraday_vs_eod.png", dpi=150)
     plt.close(fig)
 
 
-def chart_drawdown(trades: pd.DataFrame):
+def chart_drawdown(trades: pd.DataFrame, ticker="NDX", chart_dir=None):
     """Portfolio drawdown over time."""
+    chart_dir = chart_dir or CHART_DIR
     combined = trades.sort_values("exit_dt")
     cum_pnl = combined["pnl"].cumsum().values
     peak = np.maximum.accumulate(cum_pnl)
@@ -771,18 +773,19 @@ def chart_drawdown(trades: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(16, 5))
     ax.fill_between(combined["exit_dt"].values, 0, -dd, color="#e74c3c", alpha=0.5)
     ax.plot(combined["exit_dt"].values, -dd, color="#c0392b", linewidth=1)
-    ax.set_title("Portfolio Drawdown", fontsize=14, fontweight="bold")
+    ax.set_title(f"{ticker} Portfolio Drawdown", fontsize=14, fontweight="bold")
     ax.set_xlabel("Date")
     ax.set_ylabel("Drawdown ($)")
     ax.grid(True, alpha=0.3)
     fig.autofmt_xdate()
     plt.tight_layout()
-    fig.savefig(CHART_DIR / "portfolio_drawdown.png", dpi=150)
+    fig.savefig(chart_dir / "portfolio_drawdown.png", dpi=150)
     plt.close(fig)
 
 
-def chart_tier_summary(trades: pd.DataFrame):
+def chart_tier_summary(trades: pd.DataFrame, ticker="NDX", chart_dir=None):
     """Per-tier bar charts: P&L, trade count, win rate."""
+    chart_dir = chart_dir or CHART_DIR
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     labels = [t["label"] for t in TIERS]
     colors = [TIER_COLORS.get(l, "gray") for l in labels]
@@ -810,14 +813,15 @@ def chart_tier_summary(trades: pd.DataFrame):
             ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
                     fmt.format(val), ha="center", va="bottom", fontsize=7)
 
-    plt.suptitle("Tier Summary", fontsize=14, fontweight="bold", y=1.02)
+    plt.suptitle(f"{ticker} Tier Summary", fontsize=14, fontweight="bold", y=1.02)
     plt.tight_layout()
-    fig.savefig(CHART_DIR / "tier_summary.png", dpi=150, bbox_inches="tight")
+    fig.savefig(chart_dir / "tier_summary.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
-def chart_daily_histogram(trades: pd.DataFrame):
+def chart_daily_histogram(trades: pd.DataFrame, ticker="NDX", chart_dir=None):
     """Daily P&L distribution histogram."""
+    chart_dir = chart_dir or CHART_DIR
     daily = trades.groupby("exit_date")["pnl"].sum()
 
     fig, ax = plt.subplots(figsize=(14, 6))
@@ -827,18 +831,19 @@ def chart_daily_histogram(trades: pd.DataFrame):
                label=f"Mean: ${daily.mean():,.0f}")
     ax.axvline(x=daily.median(), color="green", linewidth=1.5, linestyle="--",
                label=f"Median: ${daily.median():,.0f}")
-    ax.set_title("Daily P&L Distribution (Portfolio)", fontsize=14, fontweight="bold")
+    ax.set_title(f"{ticker} Daily P&L Distribution (Portfolio)", fontsize=14, fontweight="bold")
     ax.set_xlabel("Daily P&L ($)")
     ax.set_ylabel("Frequency")
     ax.legend()
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    fig.savefig(CHART_DIR / "daily_pnl_histogram.png", dpi=150)
+    fig.savefig(chart_dir / "daily_pnl_histogram.png", dpi=150)
     plt.close(fig)
 
 
-def chart_weekly_pnl(trades: pd.DataFrame):
+def chart_weekly_pnl(trades: pd.DataFrame, ticker="NDX", chart_dir=None):
     """Weekly P&L bar chart with $50K target line."""
+    chart_dir = chart_dir or CHART_DIR
     daily = trades.groupby("exit_date")["pnl"].sum()
     daily.index = pd.to_datetime(daily.index)
     weekly = daily.resample("W").sum()
@@ -849,43 +854,44 @@ def chart_weekly_pnl(trades: pd.DataFrame):
     ax.axhline(y=50000, color="blue", linewidth=1.5, linestyle="--", label="$50K target")
     ax.axhline(y=0, color="black", linewidth=0.5)
 
-    ax.set_title("Weekly P&L (green = >= $50K, orange = $0-$50K, red = negative)", fontsize=13, fontweight="bold")
+    ax.set_title(f"{ticker} Weekly P&L (green = >= $50K, orange = $0-$50K, red = negative)", fontsize=13, fontweight="bold")
     ax.set_xlabel("Week")
     ax.set_ylabel("Weekly P&L ($)")
     ax.legend()
     ax.grid(True, axis="y", alpha=0.3)
 
-    # Label every 4th week
     tick_positions = list(range(0, len(weekly), 4))
     tick_labels = [str(weekly.index[i].date()) for i in tick_positions if i < len(weekly)]
     ax.set_xticks(tick_positions[:len(tick_labels)])
     ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=8)
 
     plt.tight_layout()
-    fig.savefig(CHART_DIR / "weekly_pnl.png", dpi=150)
+    fig.savefig(chart_dir / "weekly_pnl.png", dpi=150)
     plt.close(fig)
 
 
-def generate_all_charts(all_trades: pd.DataFrame, portfolio_trades: pd.DataFrame):
-    """Generate all charts."""
-    CHART_DIR.mkdir(parents=True, exist_ok=True)
+def generate_all_charts(all_trades: pd.DataFrame, portfolio_trades: pd.DataFrame,
+                        ticker: str = "NDX", chart_dir: Path = None):
+    """Generate all charts for a single ticker."""
+    chart_dir = chart_dir or CHART_DIR
+    chart_dir.mkdir(parents=True, exist_ok=True)
 
     charts = [
-        ("cumulative_pnl (raw)", lambda: chart_cumulative_pnl(all_trades)),
-        ("cumulative_pnl_portfolio", lambda: chart_cumulative_pnl(portfolio_trades, " (Budget-Constrained)")),
-        ("monthly_pnl", lambda: chart_monthly_pnl(portfolio_trades)),
-        ("portfolio_drawdown", lambda: chart_drawdown(portfolio_trades)),
-        ("tier_summary", lambda: chart_tier_summary(portfolio_trades)),
-        ("daily_pnl_histogram", lambda: chart_daily_histogram(portfolio_trades)),
-        ("weekly_pnl", lambda: chart_weekly_pnl(portfolio_trades)),
+        ("cumulative_pnl (raw)", lambda: chart_cumulative_pnl(all_trades, ticker=ticker, chart_dir=chart_dir)),
+        ("cumulative_pnl_portfolio", lambda: chart_cumulative_pnl(portfolio_trades, " (Budget-Constrained)", ticker=ticker, chart_dir=chart_dir)),
+        ("monthly_pnl", lambda: chart_monthly_pnl(portfolio_trades, ticker=ticker, chart_dir=chart_dir)),
+        ("portfolio_drawdown", lambda: chart_drawdown(portfolio_trades, ticker=ticker, chart_dir=chart_dir)),
+        ("tier_summary", lambda: chart_tier_summary(portfolio_trades, ticker=ticker, chart_dir=chart_dir)),
+        ("daily_pnl_histogram", lambda: chart_daily_histogram(portfolio_trades, ticker=ticker, chart_dir=chart_dir)),
+        ("weekly_pnl", lambda: chart_weekly_pnl(portfolio_trades, ticker=ticker, chart_dir=chart_dir)),
     ]
 
-    print(f"\nGenerating {len(charts)} charts...")
+    print(f"\nGenerating {len(charts)} charts for {ticker}...")
     for i, (name, func) in enumerate(charts, 1):
         func()
         print(f"  [{i}/{len(charts)}] {name}.png")
 
-    print(f"\nAll charts saved to {CHART_DIR}/")
+    print(f"\nAll charts saved to {chart_dir}/")
 
 
 # ---------------------------------------------------------------------------
@@ -954,45 +960,41 @@ def _utc_to_display(utc_str: str) -> str:
     return f"{_fmt(et_h, utc_m)} ET / {_fmt(pst_h, utc_m)} PST"
 
 
-def generate_html_report(all_trades: pd.DataFrame, portfolio_trades: pd.DataFrame,
-                         tier_summary_port: pd.DataFrame, monthly_df: pd.DataFrame,
-                         loss_df: pd.DataFrame, daily_pnl: pd.Series):
-    """Generate comprehensive HTML report."""
+def _build_ticker_tab_html(ticker: str, all_trades: pd.DataFrame,
+                           portfolio_trades: pd.DataFrame, monthly_df: pd.DataFrame,
+                           loss_df: pd.DataFrame, daily_pnl: pd.Series) -> str:
+    """Build the HTML content for a single ticker tab."""
     m = compute_metrics(portfolio_trades)
     m_raw = compute_metrics(all_trades)
 
     # Weekly stats
     weekly = daily_pnl.groupby(pd.Grouper(freq="W")).sum()
     weeks_above_50k = int((weekly >= 50000).sum())
-    total_weeks = len(weekly)
+    total_weeks = max(len(weekly), 1)
 
-    # Loss days
-    n_loss_trades = int((portfolio_trades["pnl"] < 0).sum())
-    loss_dates = portfolio_trades[portfolio_trades["pnl"] < 0]["entry_dt"].dt.date.unique()
+    tp = TICKER_PARAMS.get(ticker, {})
+    actual_min_credit = tp.get("min_credit", STRATEGY_DEFAULTS.get("min_credit", 0.75))
+    actual_max_move_cap = tp.get("max_move_cap", 150)
+    start_date = tp.get("backtest_start", "2024-01-02")
+    end_date = tp.get("backtest_end", "2026-03-06")
 
-    now = datetime.now()
-    today_str = now.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-    today_date = now.strftime("%Y-%m-%d")
-    report_name = f"report_tiered_portfolio_v2_{today_date}.html"
-
-    # Derive display strings from the same config used by calculations
     roll_check_utc = STRATEGY_DEFAULTS["roll_check_start_utc"]
     roll_time_display = _utc_to_display(roll_check_utc)
     roll_proximity = STRATEGY_DEFAULTS["roll_proximity_pct"]
     roll_proximity_pct_display = f"{roll_proximity * 100:.1f}%"
     max_rolls = STRATEGY_DEFAULTS["max_rolls"]
-    min_credit = STRATEGY_DEFAULTS["min_credit"]
 
-    # Build tier rows for tables
+    # Per-tier table rows
     tier_rows_html = ""
     for t in TIERS:
         df_t = portfolio_trades[portfolio_trades["dte_tier"] == t["label"]]
         tm = compute_metrics(df_t)
         color = TIER_COLORS.get(t["label"], "#888")
+        sw = get_spread_width(t, ticker)
         pf_str = f"{tm['profit_factor']:.2f}" if tm['profit_factor'] < 1000 else "&infin;"
         tier_rows_html += f"""      <tr>
         <td><span class="tier-dot" style="background:{color};"></span>{t['label']}</td>
-        <td>{t['priority']}</td><td>{t['dte']}</td><td>P{t['percentile']}</td><td>{t['spread_width']}pt</td>
+        <td>{t['priority']}</td><td>{t['dte']}</td><td>P{t['percentile']}</td><td>{sw}pt</td>
         <td>{tm['trades']}</td><td>{tm['wins']}</td><td>{tm['losses']}</td>
         <td>{tm['win_rate']:.1f}%</td>
         <td class="{'positive' if tm['net_pnl']>=0 else 'negative'}">${tm['net_pnl']:,.0f}</td>
@@ -1003,7 +1005,6 @@ def generate_html_report(all_trades: pd.DataFrame, portfolio_trades: pd.DataFram
         <td>{pf_str}</td>
       </tr>\n"""
 
-    # Combined row
     pf_str_c = f"{m['profit_factor']:.2f}" if m['profit_factor'] < 1000 else "&infin;"
     tier_rows_html += f"""      <tr class="combined-row">
         <td>COMBINED</td><td></td><td>all</td><td>all</td><td>mix</td>
@@ -1028,7 +1029,7 @@ def generate_html_report(all_trades: pd.DataFrame, portfolio_trades: pd.DataFram
         <td>{int(row['trades'])}</td><td>{row['win_rate']:.1f}%</td>
       </tr>\n"""
 
-    # Loss analysis rows
+    # Loss rows
     loss_rows_html = ""
     if len(loss_df) > 0:
         for dt, row in loss_df.iterrows():
@@ -1038,12 +1039,165 @@ def generate_html_report(all_trades: pd.DataFrame, portfolio_trades: pd.DataFram
         <td>{row['tiers']}</td><td>{row['option_types']}</td>
       </tr>\n"""
 
+    # Roll analysis
+    roll_html = ""
+    if "roll_count" in portfolio_trades.columns:
+        roll_html = _build_roll_analysis_html(portfolio_trades)
+    else:
+        roll_html = "<p style='color: var(--muted);'>No roll data available.</p>"
+
+    chart_prefix = f"{ticker}/charts"
+
+    return f"""
+<div class="kpi-strip">
+  <div class="kpi"><div class="value">{m['trades']}</div><div class="label">Trades (Portfolio)</div></div>
+  <div class="kpi"><div class="value">{m['win_rate']:.1f}%</div><div class="label">Win Rate</div></div>
+  <div class="kpi"><div class="value">${m['net_pnl']/1e6:.2f}M</div><div class="label">Net P&amp;L</div></div>
+  <div class="kpi"><div class="value">{m['roi']:.1f}%</div><div class="label">ROI (Credit/Risk)</div></div>
+  <div class="kpi"><div class="value">{m['roi_per_day']:.1f}%</div><div class="label">ROI / Day</div></div>
+  <div class="kpi"><div class="value">{m['sharpe']:.2f}</div><div class="label">Sharpe</div></div>
+  <div class="kpi"><div class="value">{pf_str_c}</div><div class="label">Profit Factor</div></div>
+  <div class="kpi"><div class="value warn">${m['max_drawdown']:,.0f}</div><div class="label">Max Drawdown</div></div>
+  <div class="kpi"><div class="value">{weeks_above_50k}/{total_weeks}</div><div class="label">Weeks &ge; $50K</div></div>
+  <div class="kpi"><div class="value">{m_raw['trades']}</div><div class="label">Raw Trades (Pre-Budget)</div></div>
+</div>
+
+<div class="section">
+  <h2>{ticker} Per-Tier Performance</h2>
+  <div class="narrative">
+    Period: <strong>{start_date}</strong> to <strong>{end_date}</strong>.
+    Spread widths scaled for {ticker} (max_move_cap: {actual_max_move_cap}pt, min_credit: ${actual_min_credit}).
+  </div>
+  <table>
+    <thead><tr>
+      <th>Tier</th><th>Pri</th><th>DTE</th><th>Pctl</th><th>Width</th>
+      <th>Trades</th><th>Wins</th><th>Losses</th><th>WR%</th>
+      <th>Net P&amp;L</th><th>Avg P&amp;L</th><th>ROI%</th><th>ROI/Day</th><th>Window</th>
+      <th>Sharpe</th><th>Max DD</th><th>PF</th>
+    </tr></thead>
+    <tbody>
+{tier_rows_html}
+    </tbody>
+  </table>
+  <div class="chart-container" style="margin-top: 24px;"><img src="{chart_prefix}/tier_summary.png" alt="{ticker} Tier Summary"></div>
+</div>
+
+<div class="section">
+  <h2>{ticker} Cumulative P&amp;L</h2>
+  <div class="chart-container"><img src="{chart_prefix}/cumulative_pnl_portfolio.png" alt="{ticker} Cumulative P&L"></div>
+</div>
+
+<div class="section">
+  <h2>{ticker} Monthly P&amp;L Breakdown</h2>
+  <div class="chart-container"><img src="{chart_prefix}/monthly_pnl_intraday_vs_eod.png" alt="{ticker} Monthly P&L"></div>
+  <table>
+    <thead><tr><th>Month</th><th>Intraday</th><th>EOD</th><th>Combined</th><th>Trades</th><th>WR%</th></tr></thead>
+    <tbody>
+{monthly_rows_html}
+    </tbody>
+  </table>
+</div>
+
+<div class="section">
+  <h2>{ticker} Portfolio Drawdown</h2>
+  <div class="chart-container"><img src="{chart_prefix}/portfolio_drawdown.png" alt="{ticker} Drawdown"></div>
+</div>
+
+<div class="section">
+  <h2>{ticker} Weekly P&amp;L</h2>
+  <div class="narrative">
+    <strong>{weeks_above_50k} of {total_weeks} weeks</strong> ({weeks_above_50k/total_weeks*100:.1f}%) met the $50K target.
+    Average weekly P&amp;L: <strong>${weekly.mean():,.0f}</strong>.
+  </div>
+  <div class="chart-container"><img src="{chart_prefix}/weekly_pnl.png" alt="{ticker} Weekly P&L"></div>
+</div>
+
+<div class="section">
+  <h2>{ticker} Daily P&amp;L Distribution</h2>
+  <div class="chart-container"><img src="{chart_prefix}/daily_pnl_histogram.png" alt="{ticker} Daily P&L Distribution"></div>
+</div>
+
+<div class="section">
+  <h2>{ticker} Loss Analysis</h2>
+  {"<p style='color: var(--green); font-size: 1.2em; text-align: center; padding: 40px;'>Zero losing trades!</p>" if len(loss_df) == 0 else f'''
+  <table>
+    <thead><tr><th>Date</th><th>Trades</th><th>Total Loss</th><th>Tiers</th><th>Direction</th></tr></thead>
+    <tbody>
+{loss_rows_html}
+    </tbody>
+  </table>'''}
+</div>
+
+<div class="section">
+  <h2>{ticker} Roll Analysis</h2>
+  {roll_html}
+</div>
+
+<div class="section">
+  <h2>{ticker} Configuration</h2>
+  <table style="max-width: 650px;">
+    <thead><tr><th>Parameter</th><th>Value</th></tr></thead>
+    <tbody>
+      <tr><td>Ticker</td><td>{ticker}</td></tr>
+      <tr><td>Period</td><td>{start_date} to {end_date}</td></tr>
+      <tr><td>Spread Widths</td><td>{', '.join(f"{get_spread_width(t, ticker)}pt" for t in TIERS[:3])} (P90+), {', '.join(f"{get_spread_width(t, ticker)}pt" for t in TIERS[3:5])} (&lt;P90)</td></tr>
+      <tr><td>Max Move Cap</td><td>{actual_max_move_cap} pts</td></tr>
+      <tr><td>Min Credit</td><td>${actual_min_credit}</td></tr>
+      <tr><td>Risk Per Trade</td><td>${MAX_RISK_PER_TRADE:,}</td></tr>
+      <tr><td>Daily Budget</td><td>${DAILY_BUDGET:,}</td></tr>
+      <tr><td>Rolling</td><td>Enabled ({roll_time_display}, {roll_proximity_pct_display} proximity, max {max_rolls})</td></tr>
+      <tr><td>Exit Mode</td><td>Theta Decay</td></tr>
+    </tbody>
+  </table>
+</div>"""
+
+
+def generate_html_report(ticker_data: dict):
+    """Generate comprehensive tabbed HTML report for all tickers.
+
+    ticker_data: dict of ticker -> {
+        'all_trades': DataFrame, 'portfolio_trades': DataFrame,
+        'monthly_df': DataFrame, 'loss_df': DataFrame, 'daily_pnl': Series,
+    }
+    """
+    now = datetime.now()
+    today_str = now.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    today_date = now.strftime("%Y-%m-%d")
+    report_name = f"report_tiered_portfolio_v2_{today_date}.html"
+
+    active_tickers = [t for t in TICKERS if t in ticker_data]
+
+    # Build tab buttons and tab content
+    tab_buttons = ""
+    tab_contents = ""
+    for i, ticker in enumerate(active_tickers):
+        active_class = " active" if i == 0 else ""
+        d = ticker_data[ticker]
+        m = compute_metrics(d["portfolio_trades"])
+
+        # Tab button with key metric
+        pnl_str = f"${m['net_pnl']/1e6:.1f}M" if abs(m['net_pnl']) >= 1e6 else f"${m['net_pnl']/1e3:.0f}K"
+        tab_buttons += f'    <button class="tab-btn{active_class}" onclick="switchTab(\'{ticker}\')" id="tab-btn-{ticker}">{ticker} <span class="tab-metric">{pnl_str} | {m["win_rate"]:.0f}%</span></button>\n'
+
+        # Tab content
+        display = "block" if i == 0 else "none"
+        tab_content = _build_ticker_tab_html(
+            ticker, d["all_trades"], d["portfolio_trades"],
+            d["monthly_df"], d["loss_df"], d["daily_pnl"],
+        )
+        tab_contents += f'  <div class="tab-content" id="tab-{ticker}" style="display:{display};">\n{tab_content}\n  </div>\n'
+
+    # Summary KPI across all tickers
+    all_portfolio = pd.concat([d["portfolio_trades"] for d in ticker_data.values()], ignore_index=True)
+    m_all = compute_metrics(all_portfolio)
+    pf_all = f"{m_all['profit_factor']:.2f}" if m_all['profit_factor'] < 1000 else "&infin;"
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Tiered Portfolio v2 — {today_str}</title>
+<title>Tiered Portfolio v2 — Multi-Ticker — {today_str}</title>
 <style>
   :root {{
     --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3;
@@ -1069,8 +1223,6 @@ def generate_html_report(all_trades: pd.DataFrame, portfolio_trades: pd.DataFram
   .section h2 {{ font-size: 1.5em; font-weight: 600; border-bottom: 2px solid var(--accent); padding-bottom: 8px; display: inline-block; margin-bottom: 8px; }}
   .section .narrative {{ color: var(--muted); font-size: 1.0em; margin: 12px 0 24px 0; max-width: 950px; line-height: 1.7; }}
   .section .narrative strong {{ color: var(--text); }}
-  .highlight {{ color: var(--green); font-weight: 600; }}
-  .warn-text {{ color: var(--orange); font-weight: 600; }}
   .chart-container {{ background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; overflow: hidden; }}
   .chart-container img {{ width: 100%; height: auto; border-radius: 8px; display: block; }}
   table {{ width: 100%; border-collapse: collapse; font-size: 0.88em; background: var(--card); border-radius: 12px; overflow: hidden; border: 1px solid var(--border); }}
@@ -1086,255 +1238,88 @@ def generate_html_report(all_trades: pd.DataFrame, portfolio_trades: pd.DataFram
   .tier-dot {{ display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }}
   .callout {{ background: rgba(88, 166, 255, 0.06); border: 1px solid rgba(88, 166, 255, 0.2); border-left: 4px solid var(--accent); border-radius: 8px; padding: 16px 20px; margin: 16px 0; font-size: 0.95em; color: var(--muted); }}
   .callout strong {{ color: var(--text); }}
-  .callout.warning {{ background: rgba(210, 153, 34, 0.06); border-color: rgba(210, 153, 34, 0.2); border-left-color: var(--orange); }}
   .footer {{ text-align: center; padding: 32px; color: var(--muted); font-size: 0.85em; border-top: 1px solid var(--border); margin-top: 48px; }}
-  .tier-cards {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; margin-bottom: 24px; }}
-  .tier-card {{ background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; border-left: 4px solid; }}
-  .tier-card h3 {{ font-size: 1.0em; margin-bottom: 6px; }}
-  .tier-card .detail {{ font-size: 0.85em; color: var(--muted); line-height: 1.5; }}
-  .tier-card .detail span {{ color: var(--text); font-weight: 500; }}
-  @media (max-width: 800px) {{ .kpi-strip {{ grid-template-columns: repeat(2, 1fr); }} .hero {{ padding: 40px 20px; }} .hero h1 {{ font-size: 1.6em; }} }}
+  /* Tab styles */
+  .tab-bar {{ display: flex; gap: 4px; margin-bottom: 32px; border-bottom: 2px solid var(--border); padding-bottom: 0; }}
+  .tab-btn {{ background: var(--card); border: 1px solid var(--border); border-bottom: none; border-radius: 8px 8px 0 0;
+    padding: 12px 24px; color: var(--muted); font-size: 1.1em; font-weight: 600; cursor: pointer;
+    transition: all 0.2s; }}
+  .tab-btn:hover {{ background: #1c2333; color: var(--text); }}
+  .tab-btn.active {{ background: var(--accent); color: #fff; border-color: var(--accent); }}
+  .tab-metric {{ font-size: 0.75em; font-weight: 400; opacity: 0.8; margin-left: 6px; }}
+  .tab-content {{ display: none; }}
+  @media (max-width: 800px) {{ .kpi-strip {{ grid-template-columns: repeat(2, 1fr); }} .hero {{ padding: 40px 20px; }} .hero h1 {{ font-size: 1.6em; }} .tab-btn {{ padding: 8px 12px; font-size: 0.9em; }} }}
 </style>
+<script>
+function switchTab(ticker) {{
+  document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + ticker).style.display = 'block';
+  document.getElementById('tab-btn-' + ticker).classList.add('active');
+}}
+</script>
 </head>
 <body>
 
 <div class="hero">
   <h1>Tiered Multi-DTE Portfolio Backtest v2</h1>
   <div class="subtitle">
-    9 DTE tiers with priority-ordered capital allocation, unified $500K/day budget,
-    tiered spread widths, rolling enabled, 1.5-year backtest period.
+    9 DTE tiers &times; {len(active_tickers)} tickers ({', '.join(active_tickers)}) with priority-ordered capital allocation,
+    unified $500K/day budget, tiered spread widths, rolling enabled.
   </div>
-  <div class="date">Period: Sep 1, 2024 &ndash; Mar 5, 2026 &nbsp;|&nbsp; Generated: {today_str}</div>
+  <div class="date">Generated: {today_str}</div>
 </div>
 
 <div class="container">
 
-<div class="kpi-strip">
-  <div class="kpi"><div class="value">{m['trades']}</div><div class="label">Trades (Portfolio)</div></div>
-  <div class="kpi"><div class="value">{m['win_rate']:.1f}%</div><div class="label">Win Rate</div></div>
-  <div class="kpi"><div class="value">${m['net_pnl']/1e6:.2f}M</div><div class="label">Net P&amp;L</div></div>
-  <div class="kpi"><div class="value">{m['roi']:.1f}%</div><div class="label">ROI (Credit/Risk)</div></div>
-  <div class="kpi"><div class="value">{m['roi_per_day']:.1f}%</div><div class="label">ROI / Day</div></div>
-  <div class="kpi"><div class="value">{m['sharpe']:.2f}</div><div class="label">Sharpe</div></div>
-  <div class="kpi"><div class="value">{pf_str_c}</div><div class="label">Profit Factor</div></div>
-  <div class="kpi"><div class="value warn">${m['max_drawdown']:,.0f}</div><div class="label">Max Drawdown</div></div>
-  <div class="kpi"><div class="value">{weeks_above_50k}/{total_weeks}</div><div class="label">Weeks &ge; $50K</div></div>
-  <div class="kpi"><div class="value">{m_raw['trades']}</div><div class="label">Raw Trades (Pre-Budget)</div></div>
-</div>
-
-<!-- Strategy Overview -->
+<!-- Cross-ticker summary KPIs -->
 <div class="section">
-  <h2>Strategy Overview</h2>
-  <div class="narrative">
-    This v2 backtest runs <strong>9 independent DTE tiers</strong> (6 intraday + 3 EOD), then replays all trades
-    through a <strong>priority-ordered portfolio simulator</strong> with a unified <strong>$500K/day budget</strong>
-    and <strong>$50K/trade risk cap</strong>. A <strong>rate limit of {MAX_TRADES_PER_WINDOW} trades per {TRADE_WINDOW_MINUTES}-minute window</strong>
-    prevents over-concentration. Capital is allocated by priority: 0DTE first (highest ROI/risk ratio),
-    then ascending DTE, with EOD trades evaluated last. Trades exceeding the daily budget or rate limit are rejected.
-    <br><br>
-    <strong>Risk rule:</strong> DTE &lt; 3 requires <strong>P90 minimum percentile</strong> (rolls exempt) to limit short-term exposure.
-    <strong>Tiered spread widths</strong> scale with percentile: P90+ uses 50pt spreads, below P90 uses 30pt.
-    <strong>Rolling</strong> is enabled with progressive relaxation (ratio 0.95&rarr;1.0, width 1x&rarr;2x, DTE up to 10d).
-    Entry window is <strong>9:30 AM &ndash; 12:30 PM ET</strong> for intraday and <strong>3:45 PM ET</strong> for EOD.
-    <strong>Pricing:</strong> Bid/ask (not mid), <strong>min volume:</strong> 2 contracts.
+  <h2>All Tickers Combined</h2>
+  <div class="kpi-strip">
+    <div class="kpi"><div class="value">{m_all['trades']}</div><div class="label">Total Trades</div></div>
+    <div class="kpi"><div class="value">{m_all['win_rate']:.1f}%</div><div class="label">Win Rate</div></div>
+    <div class="kpi"><div class="value">${m_all['net_pnl']/1e6:.2f}M</div><div class="label">Net P&amp;L</div></div>
+    <div class="kpi"><div class="value">{m_all['roi']:.1f}%</div><div class="label">ROI</div></div>
+    <div class="kpi"><div class="value">{m_all['sharpe']:.2f}</div><div class="label">Sharpe</div></div>
+    <div class="kpi"><div class="value">{pf_all}</div><div class="label">Profit Factor</div></div>
+    <div class="kpi"><div class="value warn">${m_all['max_drawdown']:,.0f}</div><div class="label">Max Drawdown</div></div>
+    <div class="kpi"><div class="value">{len(active_tickers)}</div><div class="label">Tickers</div></div>
   </div>
 
-  <div class="tier-cards">
-    <div class="tier-card" style="border-left-color: {TIER_COLORS['dte0_p95']};">
-      <h3><span class="tier-dot" style="background:{TIER_COLORS['dte0_p95']};"></span>P1: DTE 0 / P95 / 50pt</h3>
-      <div class="detail"><span>Mode:</span> pursuit (intraday)<br><span>Rationale:</span> Highest ROI/risk. 95.7% WR in sweep, $15.8M P&L. First priority for capital.</div>
-    </div>
-    <div class="tier-card" style="border-left-color: {TIER_COLORS['dte1_p90']};">
-      <h3><span class="tier-dot" style="background:{TIER_COLORS['dte1_p90']};"></span>P2: DTE 1 / P90 / 50pt</h3>
-      <div class="detail"><span>Mode:</span> pursuit (intraday)<br><span>Rationale:</span> P90 minimum enforced for DTE &lt; 3 (risk management rule). 50pt spread with tighter strikes reduces short-term exposure.</div>
-    </div>
-    <div class="tier-card" style="border-left-color: {TIER_COLORS['dte2_p90']};">
-      <h3><span class="tier-dot" style="background:{TIER_COLORS['dte2_p90']};"></span>P3: DTE 2 / P90 / 50pt</h3>
-      <div class="detail"><span>Mode:</span> pursuit (intraday)<br><span>Rationale:</span> P90 minimum enforced for DTE &lt; 3 (risk management rule). 50pt spread matches DTE 1 tier for consistency.</div>
-    </div>
-    <div class="tier-card" style="border-left-color: {TIER_COLORS['dte3_p80']};">
-      <h3><span class="tier-dot" style="background:{TIER_COLORS['dte3_p80']};"></span>P4: DTE 3 / P80 / 30pt</h3>
-      <div class="detail"><span>Mode:</span> pursuit (intraday)<br><span>Rationale:</span> 99.3% WR, $22.7M in sweep. Only 3 losses in 404 trades.</div>
-    </div>
-    <div class="tier-card" style="border-left-color: {TIER_COLORS['dte5_p75']};">
-      <h3><span class="tier-dot" style="background:{TIER_COLORS['dte5_p75']};"></span>P5: DTE 5 / P75 / 30pt</h3>
-      <div class="detail"><span>Mode:</span> pursuit (intraday)<br><span>Rationale:</span> 100% WR across all sweep configs. More trades than P80 (204 vs 150).</div>
-    </div>
-    <div class="tier-card" style="border-left-color: {TIER_COLORS['dte10_p90']};">
-      <h3><span class="tier-dot" style="background:{TIER_COLORS['dte10_p90']};"></span>P6: DTE 10 / P90 / 50pt</h3>
-      <div class="detail"><span>Mode:</span> pursuit (intraday)<br><span>Rationale:</span> 100% WR, 61 trades, 15.71 Sharpe. Sparse but highly reliable.</div>
-    </div>
-    <div class="tier-card" style="border-left-color: {TIER_COLORS['dte1_p90_eod']};">
-      <h3><span class="tier-dot" style="background:{TIER_COLORS['dte1_p90_eod']};"></span>P7: DTE 1 / P90 / EOD</h3>
-      <div class="detail"><span>Mode:</span> pursuit_eod (1.0% threshold)<br><span>Rationale:</span> 100% WR in EOD sweep. Enters at 3:45 PM ET when day's move exceeds 1%.</div>
-    </div>
-    <div class="tier-card" style="border-left-color: {TIER_COLORS['dte2_p90_eod']};">
-      <h3><span class="tier-dot" style="background:{TIER_COLORS['dte2_p90_eod']};"></span>P8: DTE 2 / P90 / EOD</h3>
-      <div class="detail"><span>Mode:</span> pursuit_eod (1.0% threshold)<br><span>Rationale:</span> EOD momentum layer for DTE 2. Selective high-conviction trades.</div>
-    </div>
-    <div class="tier-card" style="border-left-color: {TIER_COLORS['dte3_p90_eod']};">
-      <h3><span class="tier-dot" style="background:{TIER_COLORS['dte3_p90_eod']};"></span>P9: DTE 3 / P90 / EOD</h3>
-      <div class="detail"><span>Mode:</span> pursuit_eod (1.0% threshold)<br><span>Rationale:</span> EOD momentum layer for DTE 3. Extends portfolio into end-of-day entries.</div>
-    </div>
-  </div>
+  <!-- Per-ticker summary table -->
+  <table style="max-width: 900px;">
+    <thead><tr><th>Ticker</th><th>Period</th><th>Trades</th><th>WR%</th><th>Net P&amp;L</th><th>ROI%</th><th>ROI/Day</th><th>Sharpe</th><th>Max DD</th></tr></thead>
+    <tbody>"""
 
-  <div class="callout">
-    <strong>Budget simulation:</strong> All 9 tiers run independently, producing {m_raw['trades']} raw trades.
-    These are then replayed chronologically with priority ordering, a unified $500K/day budget,
-    and a rate limit of {MAX_TRADES_PER_WINDOW} trades per {TRADE_WINDOW_MINUTES}-minute window,
-    yielding {m['trades']} accepted trades ({m_raw['trades'] - m['trades']} rejected due to budget/rate-limit constraints).
-  </div>
-</div>
+    for ticker in active_tickers:
+        d = ticker_data[ticker]
+        tm = compute_metrics(d["portfolio_trades"])
+        tp = TICKER_PARAMS.get(ticker, {})
+        html += f"""
+      <tr>
+        <td>{ticker}</td>
+        <td>{tp.get('backtest_start', '?')} &ndash; {tp.get('backtest_end', '?')}</td>
+        <td>{tm['trades']}</td><td>{tm['win_rate']:.1f}%</td>
+        <td class="{'positive' if tm['net_pnl']>=0 else 'negative'}">${tm['net_pnl']:,.0f}</td>
+        <td>{tm['roi']:.1f}%</td><td>{tm['roi_per_day']:.1f}%</td>
+        <td>{tm['sharpe']:.2f}</td>
+        <td class="{'negative' if tm['max_drawdown']>0 else ''}">${tm['max_drawdown']:,.0f}</td>
+      </tr>"""
 
-<!-- Per-Tier Performance -->
-<div class="section">
-  <h2>Per-Tier Performance (Portfolio-Constrained)</h2>
-  <div class="narrative">
-    After applying the unified $500K/day budget with priority ordering, each tier's contribution
-    reflects what would actually be traded. Higher-priority tiers (0DTE, 1DTE) get first access
-    to capital, while lower-priority and EOD tiers fill in remaining budget.
-  </div>
-  <table>
-    <thead><tr>
-      <th>Tier</th><th>Pri</th><th>DTE</th><th>Pctl</th><th>Width</th>
-      <th>Trades</th><th>Wins</th><th>Losses</th><th>WR%</th>
-      <th>Net P&amp;L</th><th>Avg P&amp;L</th><th>ROI%</th><th>ROI/Day</th><th>Window</th>
-      <th>Sharpe</th><th>Max DD</th><th>PF</th>
-    </tr></thead>
-    <tbody>
-{tier_rows_html}
-    </tbody>
-  </table>
-  <div class="chart-container" style="margin-top: 24px;"><img src="charts/tier_summary.png" alt="Tier Summary"></div>
-</div>
-
-<!-- Cumulative P&L -->
-<div class="section">
-  <h2>Cumulative P&amp;L</h2>
-  <div class="narrative">
-    The portfolio cumulative P&amp;L shows the combined equity curve across all accepted trades.
-    Intraday tiers (solid lines) provide the bulk of returns, while EOD tiers (dashed lines) add
-    selective high-conviction trades. The bold black line represents the unified portfolio.
-  </div>
-  <div class="chart-container"><img src="charts/cumulative_pnl_portfolio.png" alt="Cumulative P&L"></div>
-</div>
-
-<!-- Monthly Breakdown -->
-<div class="section">
-  <h2>Monthly P&amp;L Breakdown</h2>
-  <div class="narrative">
-    Monthly view separating intraday and EOD contributions. Months with zero or minimal P&amp;L
-    indicate low-volatility regimes where entry thresholds were rarely met. The wider entry window
-    (9:30 AM &ndash; 12:30 PM ET) and additional DTE tiers (3, 5, 10) should help fill gaps
-    compared to the v1 backtest.
-  </div>
-  <div class="chart-container"><img src="charts/monthly_pnl_intraday_vs_eod.png" alt="Monthly P&L"></div>
-  <table>
-    <thead><tr><th>Month</th><th>Intraday</th><th>EOD</th><th>Combined</th><th>Trades</th><th>WR%</th></tr></thead>
-    <tbody>
-{monthly_rows_html}
+    html += f"""
     </tbody>
   </table>
 </div>
 
-<!-- Drawdown -->
-<div class="section">
-  <h2>Portfolio Drawdown</h2>
-  <div class="narrative">
-    The drawdown chart shows peak-to-trough declines in the portfolio equity curve.
-    With rolling enabled and momentum-confirmed roll checks at {roll_time_display}, positions
-    threatening to breach strikes can be rolled forward rather than taking full max-loss.
-  </div>
-  <div class="chart-container"><img src="charts/portfolio_drawdown.png" alt="Drawdown"></div>
+<!-- Ticker tabs -->
+<div class="tab-bar">
+{tab_buttons}
 </div>
 
-<!-- Weekly P&L -->
-<div class="section">
-  <h2>Weekly P&amp;L vs $50K Target</h2>
-  <div class="narrative">
-    Each bar represents one week's total P&amp;L. Green bars meet the $50K/week target,
-    orange bars are positive but below target, and red bars are negative weeks.
-    <strong>{weeks_above_50k} of {total_weeks} weeks</strong> ({weeks_above_50k/total_weeks*100:.1f}%) met the $50K target.
-    Average weekly P&amp;L: <strong>${weekly.mean():,.0f}</strong>.
-  </div>
-  <div class="chart-container"><img src="charts/weekly_pnl.png" alt="Weekly P&L"></div>
-</div>
-
-<!-- Daily Distribution -->
-<div class="section">
-  <h2>Daily P&amp;L Distribution</h2>
-  <div class="narrative">
-    The histogram shows the distribution of daily portfolio P&amp;L across all trading days.
-    A right-skewed distribution with the majority of days positive is the ideal shape for
-    a premium-selling strategy. The gap between mean and median indicates occasional
-    large winning days pulling the average higher.
-  </div>
-  <div class="chart-container"><img src="charts/daily_pnl_histogram.png" alt="Daily P&L Distribution"></div>
-</div>
-
-<!-- Loss Analysis -->
-<div class="section">
-  <h2>Loss Analysis</h2>
-  <div class="narrative">
-    Detailed breakdown of every losing trade: which dates, which tiers, and what direction.
-    Prior sweep analysis showed losses concentrate on <strong>0DTE and 1DTE</strong>, on
-    big directional move days, and are often amplified by same-strike re-entry at consecutive
-    intervals. Rolling and the tighter entry window should mitigate some of these.
-  </div>
-  {"<p style='color: var(--green); font-size: 1.2em; text-align: center; padding: 40px;'>Zero losing trades in portfolio!</p>" if len(loss_df) == 0 else f'''
-  <table>
-    <thead><tr><th>Date</th><th>Trades</th><th>Total Loss</th><th>Tiers</th><th>Direction</th></tr></thead>
-    <tbody>
-{loss_rows_html}
-    </tbody>
-  </table>'''}
-</div>
-
-<!-- Roll Analysis -->
-<div class="section">
-  <h2>Roll Analysis</h2>
-  <div class="narrative">
-    Rolling is a defensive mechanism: when a position goes ITM, it is closed at a loss and a new
-    OTM position is opened at a further DTE. The roll uses progressively relaxed constraints
-    (credit/width ratio 0.95 &rarr; 1.0, widths up to 2x, DTE search up to 10 days) to maximize
-    the chance of finding a replacement spread. The table below shows the net impact of rolling
-    on the portfolio.
-  </div>
-  {_build_roll_analysis_html(portfolio_trades)}
-</div>
-
-<!-- Methodology -->
-<div class="section">
-  <h2>Methodology &amp; Configuration</h2>
-  <table style="max-width: 650px;">
-    <thead><tr><th>Parameter</th><th>Value</th></tr></thead>
-    <tbody>
-      <tr><td>Ticker</td><td>NDX (European, cash-settled)</td></tr>
-      <tr><td>Period</td><td>2024-09-01 to 2026-03-05</td></tr>
-      <tr><td>Pricing</td><td>Bid/Ask (sell at bid, buy at ask)</td></tr>
-      <tr><td>Min Volume</td><td>2 contracts</td></tr>
-      <tr><td>Intraday Entry</td><td>14:30-17:30 UTC (9:30 AM - 12:30 PM ET)</td></tr>
-      <tr><td>EOD Entry</td><td>19:45-20:00 UTC (3:45-4:00 PM ET)</td></tr>
-      <tr><td>Risk Per Trade</td><td>${MAX_RISK_PER_TRADE:,}</td></tr>
-      <tr><td>Daily Budget</td><td>${DAILY_BUDGET:,} (unified, priority-ordered)</td></tr>
-      <tr><td>Rate Limit</td><td>{MAX_TRADES_PER_WINDOW} trades per {TRADE_WINDOW_MINUTES}-min window</td></tr>
-      <tr><td>DTE &lt; 3 Rule</td><td>P90 minimum percentile (rolls exempt)</td></tr>
-      <tr><td>Spread Widths</td><td>P90+: 50pt, &lt;P90: 30pt</td></tr>
-      <tr><td>Min Credit</td><td>${min_credit}</td></tr>
-      <tr><td>Contract Sizing</td><td>max_budget</td></tr>
-      <tr><td>Stop Loss</td><td>Disabled</td></tr>
-      <tr><td>Rolling</td><td>Enabled ({roll_time_display}, {roll_proximity_pct_display} proximity, max {max_rolls} rolls, ratio up to 1.0)</td></tr>
-      <tr><td>Exit Mode</td><td>Theta Decay</td></tr>
-      <tr><td>0DTE Theta</td><td>ahead={THETA_PARAMS_0DTE['ahead']}, min={THETA_PARAMS_0DTE['min_decay']}, cut={THETA_PARAMS_0DTE['cut_behind']}, time={THETA_PARAMS_0DTE['cut_min_time']}</td></tr>
-      <tr><td>Multi-DTE Theta</td><td>ahead={THETA_PARAMS_MULTI_DAY['ahead']}, min={THETA_PARAMS_MULTI_DAY['min_decay']}, cut={THETA_PARAMS_MULTI_DAY['cut_behind']}, time={THETA_PARAMS_MULTI_DAY['cut_min_time']}</td></tr>
-      <tr><td>EOD Threshold</td><td>{[t['eod_threshold'] for t in TIERS if t.get('eod_threshold')][0]*100 if any(t.get('eod_threshold') for t in TIERS) else 0:.1f}% (current price vs prev close)</td></tr>
-      <tr><td>Lookback</td><td>{STRATEGY_DEFAULTS.get('lookback', 120)} days</td></tr>
-    </tbody>
-  </table>
-</div>
+{tab_contents}
 
 </div>
-<div class="footer">Tiered Portfolio v2 &mdash; NDX Credit Spreads &mdash; Generated {today_str}</div>
+<div class="footer">Tiered Portfolio v2 &mdash; {', '.join(active_tickers)} Credit Spreads &mdash; Generated {today_str}</div>
 </body>
 </html>"""
 
@@ -1342,7 +1327,6 @@ def generate_html_report(all_trades: pd.DataFrame, portfolio_trades: pd.DataFram
     with open(report_path, "w") as f:
         f.write(html)
 
-    # Create index.html symlink for easy browser access
     index_path = OUTPUT_DIR / "index.html"
     if index_path.exists() or index_path.is_symlink():
         index_path.unlink()
@@ -1357,34 +1341,81 @@ def generate_html_report(all_trades: pd.DataFrame, portfolio_trades: pd.DataFram
 # Main
 # ---------------------------------------------------------------------------
 
+def _process_ticker(ticker: str, run_backtests: bool = True) -> dict:
+    """Run full pipeline for a single ticker: backtest, load, simulate, charts."""
+    print(f"\n{'='*80}")
+    print(f"  Processing {ticker}")
+    print(f"{'='*80}")
+
+    ticker_output = OUTPUT_DIR / ticker
+    ticker_chart_dir = ticker_output / "charts"
+    ticker_output.mkdir(parents=True, exist_ok=True)
+
+    # Phase 1: Run backtests
+    if run_backtests:
+        run_all_backtests(ticker)
+
+    # Phase 2: Load trades
+    print(f"\nLoading {ticker} trades data...")
+    all_trades = load_all_trades(ticker)
+    if len(all_trades) == 0:
+        print(f"  No trades found for {ticker}, skipping.")
+        return None
+    print(f"  Loaded {len(all_trades)} raw trades across {all_trades['dte_tier'].nunique()} tiers")
+
+    # Portfolio simulation
+    print(f"\nRunning {ticker} portfolio simulation...")
+    portfolio_trades, rejected_trades = simulate_portfolio(all_trades)
+
+    # Tables
+    print(f"\n--- {ticker} RAW RESULTS ---")
+    tier_summary_raw = print_tier_summary(all_trades, f"{ticker} RAW")
+    print(f"\n--- {ticker} PORTFOLIO RESULTS ---")
+    tier_summary_port = print_tier_summary(portfolio_trades, f"{ticker} PORTFOLIO")
+    monthly_df = print_monthly_breakdown(portfolio_trades)
+    hour_summary = print_hour_summary(portfolio_trades)
+    loss_df = print_loss_analysis(portfolio_trades)
+    daily_pnl = print_daily_stats(portfolio_trades)
+
+    # Save CSVs to per-ticker dir
+    save_csvs(all_trades, portfolio_trades, tier_summary_raw, tier_summary_port, monthly_df, hour_summary)
+
+    # Charts
+    generate_all_charts(all_trades, portfolio_trades, ticker=ticker, chart_dir=ticker_chart_dir)
+
+    return {
+        "all_trades": all_trades,
+        "portfolio_trades": portfolio_trades,
+        "monthly_df": monthly_df,
+        "loss_df": loss_df,
+        "daily_pnl": daily_pnl,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='''
-Tiered Multi-DTE Portfolio Backtest v2 — Priority-Ordered, Unified Budget.
+Tiered Multi-DTE Portfolio Backtest v2 — Multi-Ticker.
 
-Runs 9 DTE tiers (6 intraday + 3 EOD) with optimized settings, then replays
-trades through a priority-ordered portfolio simulator ($500K/day, $50K/trade).
+Runs 9 DTE tiers (6 intraday + 3 EOD) for each configured ticker (NDX, SPX,
+RUT) with per-ticker spread widths and parameters.  Results are combined into
+a single tabbed HTML report.
 
-Intraday tiers (priority 1-6):
-  DTE 0  | P95 | 50pt | pursuit       DTE 3  | P80 | 30pt | pursuit
-  DTE 1  | P80 | 30pt | pursuit       DTE 5  | P75 | 30pt | pursuit
-  DTE 2  | P75 | 30pt | pursuit       DTE 10 | P90 | 50pt | pursuit
-
-EOD tiers (priority 7-9, enter at 3:45 PM ET):
-  DTE 1  | P90 | 50pt | pursuit_eod (1.0%)
-  DTE 2  | P90 | 50pt | pursuit_eod (1.0%)
-  DTE 3  | P90 | 50pt | pursuit_eod (1.0%)
-
-Rolling enabled, no stop loss, theta decay exit.
-Period: 2024-09-01 to 2026-03-05 (1.5 years).
+All configuration comes from profiles/tiered_v2.yaml (single source of truth).
         ''',
         epilog='''
 Examples:
   %(prog)s
-      Full run: backtests + portfolio sim + analysis + charts + HTML report
+      Full run: all tickers, backtests + analysis + charts + HTML report
 
   %(prog)s --analyze
       Skip backtests, re-analyze existing trades.csv files
+
+  %(prog)s --ticker NDX
+      Run only NDX (skip SPX, RUT)
+
+  %(prog)s --ticker NDX --ticker SPX
+      Run NDX and SPX only
 
   %(prog)s --help
       Show this help message
@@ -1393,45 +1424,28 @@ Examples:
     )
     parser.add_argument("--analyze", action="store_true",
                         help="Skip backtests, only run analysis on existing results")
+    parser.add_argument("--ticker", action="append", dest="tickers",
+                        help="Run specific ticker(s) only (can be repeated). Default: all from config.")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Phase 1: Run backtests
-    if not args.analyze:
-        run_all_backtests()
-    else:
-        print("Skipping backtests (--analyze mode)")
+    tickers_to_run = args.tickers if args.tickers else TICKERS
+    print(f"Tickers: {', '.join(tickers_to_run)}")
 
-    # Phase 2: Load trades
-    print("\nLoading trades data...")
-    all_trades = load_all_trades()
-    print(f"  Loaded {len(all_trades)} raw trades across {all_trades['dte_tier'].nunique()} tiers")
+    # Process each ticker
+    ticker_data = {}
+    for ticker in tickers_to_run:
+        result = _process_ticker(ticker, run_backtests=not args.analyze)
+        if result is not None:
+            ticker_data[ticker] = result
 
-    # Portfolio simulation
-    print("\nRunning portfolio simulation (priority-ordered, $500K/day)...")
-    portfolio_trades, rejected_trades = simulate_portfolio(all_trades)
+    if not ticker_data:
+        print("ERROR: No trade data found for any ticker.")
+        sys.exit(1)
 
-    # Tables — raw (unconstrained)
-    print("\n--- RAW RESULTS (all trades, no budget constraint) ---")
-    tier_summary_raw = print_tier_summary(all_trades, "RAW / UNCONSTRAINED")
-
-    # Tables — portfolio (budget-constrained)
-    print("\n--- PORTFOLIO RESULTS (budget-constrained, priority-ordered) ---")
-    tier_summary_port = print_tier_summary(portfolio_trades, "PORTFOLIO / $500K DAY")
-    monthly_df = print_monthly_breakdown(portfolio_trades)
-    hour_summary = print_hour_summary(portfolio_trades)
-    loss_df = print_loss_analysis(portfolio_trades)
-    daily_pnl = print_daily_stats(portfolio_trades)
-
-    # Save CSVs
-    save_csvs(all_trades, portfolio_trades, tier_summary_raw, tier_summary_port, monthly_df, hour_summary)
-
-    # Phase 3: Charts
-    generate_all_charts(all_trades, portfolio_trades)
-
-    # Phase 4: HTML report
-    generate_html_report(all_trades, portfolio_trades, tier_summary_port, monthly_df, loss_df, daily_pnl)
+    # Phase 4: Combined HTML report
+    generate_html_report(ticker_data)
 
     # Open report
     report_path = list(OUTPUT_DIR.glob("report_*.html"))

@@ -117,7 +117,7 @@ if ! [[ "$TRAIN_DAYS" =~ ^[0-9]+$ ]] || [ "$TRAIN_DAYS" -lt 30 ]; then
     exit 1
 fi
 
-# Handle --all: loop over all configured prediction tickers
+# Handle --all: run all configured prediction tickers in parallel
 RETRAIN_ALL=${RETRAIN_ALL:-false}
 if [ "$RETRAIN_ALL" = true ]; then
     ALL_TICKERS=$(python3 -c "from common.prediction_config import get_prediction_tickers; print(' '.join(get_prediction_tickers()))" 2>/dev/null)
@@ -125,15 +125,69 @@ if [ "$RETRAIN_ALL" = true ]; then
         echo "ERROR: Could not load tickers from prediction config"
         exit 1
     fi
-    echo "Retraining all prediction tickers: $ALL_TICKERS"
-    for T in $ALL_TICKERS; do
-        echo "======== Retraining $T ========"
-        EXTRA_ARGS=""
-        [ "$FORCE_RETRAIN" = true ] && EXTRA_ARGS="$EXTRA_ARGS --force"
-        [ "$SKIP_DEPLOY" = true ] && EXTRA_ARGS="$EXTRA_ARGS --skip-deploy"
-        "$0" --ticker "$T" --train-days "$TRAIN_DAYS" $EXTRA_ARGS
+
+    # Max parallelism = number of cores - 2 (minimum 1)
+    NUM_CORES=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
+    MAX_PARALLEL=$(( NUM_CORES - 2 ))
+    [ "$MAX_PARALLEL" -lt 1 ] && MAX_PARALLEL=1
+
+    TICKER_COUNT=$(echo "$ALL_TICKERS" | wc -w | tr -d ' ')
+    echo "Retraining all prediction tickers in parallel: $ALL_TICKERS"
+    echo "Parallelism: up to $MAX_PARALLEL concurrent jobs ($NUM_CORES cores detected)"
+    echo ""
+
+    EXTRA_ARGS=""
+    [ "$FORCE_RETRAIN" = true ] && EXTRA_ARGS="$EXTRA_ARGS --force"
+    [ "$SKIP_DEPLOY" = true ] && EXTRA_ARGS="$EXTRA_ARGS --skip-deploy"
+
+    # Launch all tickers in parallel, capped at MAX_PARALLEL
+    PIDS=()
+    TICKER_ARRAY=($ALL_TICKERS)
+    RUNNING=0
+    FAILED_TICKERS=""
+
+    for T in "${TICKER_ARRAY[@]}"; do
+        # Wait if we've hit the parallel limit
+        while [ "$RUNNING" -ge "$MAX_PARALLEL" ]; do
+            # Wait for any child to finish
+            wait -n 2>/dev/null
+            # Recount running jobs
+            RUNNING=0
+            for PID in "${PIDS[@]}"; do
+                if kill -0 "$PID" 2>/dev/null; then
+                    RUNNING=$((RUNNING + 1))
+                fi
+            done
+        done
+
+        echo "======== Launching $T (parallel) ========"
+        "$0" --ticker "$T" --train-days "$TRAIN_DAYS" $EXTRA_ARGS &
+        PIDS+=($!)
+        RUNNING=$((RUNNING + 1))
     done
-    exit 0
+
+    # Wait for all jobs and collect exit codes
+    ALL_OK=true
+    for i in "${!TICKER_ARRAY[@]}"; do
+        T="${TICKER_ARRAY[$i]}"
+        PID="${PIDS[$i]}"
+        if ! wait "$PID"; then
+            echo "======== FAILED: $T (PID $PID) ========"
+            FAILED_TICKERS="$FAILED_TICKERS $T"
+            ALL_OK=false
+        else
+            echo "======== DONE: $T ========"
+        fi
+    done
+
+    echo ""
+    if [ "$ALL_OK" = true ]; then
+        echo "All $TICKER_COUNT tickers retrained successfully."
+        exit 0
+    else
+        echo "ERROR: Failed tickers:$FAILED_TICKERS"
+        exit 1
+    fi
 fi
 
 # Validate ticker against configured prediction tickers

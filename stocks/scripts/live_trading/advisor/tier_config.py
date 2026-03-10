@@ -17,6 +17,15 @@ with open(_PROFILE_PATH, "r") as _f:
     _PROFILE = yaml.safe_load(_f)
 
 # ---------------------------------------------------------------------------
+# Tickers
+# ---------------------------------------------------------------------------
+TICKERS = _PROFILE.get("tickers", [_PROFILE.get("default_ticker", "NDX")])
+DEFAULT_TICKER = _PROFILE.get("default_ticker", TICKERS[0])
+
+# Per-ticker parameters (spread widths, max_move_cap, backtest dates, etc.)
+TICKER_PARAMS = _PROFILE.get("ticker_params", {})
+
+# ---------------------------------------------------------------------------
 # Risk limits
 # ---------------------------------------------------------------------------
 _risk = _PROFILE.get("risk", {})
@@ -76,6 +85,28 @@ STRATEGY_DEFAULTS = dict(_PROFILE.get("strategy_defaults", {}))
 # Exit rules
 # ---------------------------------------------------------------------------
 EXIT_RULES = dict(_PROFILE.get("exit_rules", {}))
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def get_spread_width(tier: dict, ticker: str) -> int:
+    """Resolve the actual spread width for a tier + ticker combination.
+
+    The tier's spread_width is defined in NDX-native units (50pt, 30pt).
+    TICKER_PARAMS[ticker].spread_width_map translates to ticker-appropriate values.
+    """
+    tp = TICKER_PARAMS.get(ticker, {})
+    width_map = tp.get("spread_width_map", {})
+    # YAML loads dict keys as ints, so try both int and str
+    native_width = tier["spread_width"]
+    return width_map.get(native_width, width_map.get(str(native_width), native_width))
+
+
+def get_ticker_param(ticker: str, key: str, default=None):
+    """Get a per-ticker parameter, falling back to default."""
+    return TICKER_PARAMS.get(ticker, {}).get(key, default)
+
 
 # ---------------------------------------------------------------------------
 # Backtest info
