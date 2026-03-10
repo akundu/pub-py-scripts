@@ -38,3 +38,6 @@ __pycache__/
 # Temporary files
 *.tmp
 .DS_Store
+
+#model files
+*.pkl
