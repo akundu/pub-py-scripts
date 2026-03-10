@@ -239,6 +239,64 @@ def volume_adjusted_contracts(requested: int, min_leg_volume: int,
 
 
 # ---------------------------------------------------------------------------
+# Phase 3.5: Common date alignment
+# ---------------------------------------------------------------------------
+
+def _align_to_common_dates(all_trades: pd.DataFrame) -> pd.DataFrame:
+    """Restrict trades to dates where ALL tickers have data.
+
+    When combining across multiple tickers, always use the shortest overlapping
+    period so cross-ticker comparisons are fair. A ticker with 2+ years of data
+    should not be compared against one with 6 months — the extra months would
+    have no competition and skew the results.
+    """
+    if all_trades.empty:
+        return all_trades
+
+    tickers = sorted(all_trades["ticker"].unique())
+    if len(tickers) <= 1:
+        return all_trades
+
+    # Find the latest start date and earliest end date across all tickers
+    latest_start = None
+    earliest_end = None
+    for ticker in tickers:
+        t_dates = all_trades[all_trades["ticker"] == ticker]["entry_date"]
+        t_min = t_dates.min()
+        t_max = t_dates.max()
+        if latest_start is None or t_min > latest_start:
+            latest_start = t_min
+        if earliest_end is None or t_max < earliest_end:
+            earliest_end = t_max
+
+    before_count = len(all_trades)
+    filtered = all_trades[
+        (all_trades["entry_date"] >= latest_start) &
+        (all_trades["entry_date"] <= earliest_end)
+    ].copy()
+    after_count = len(filtered)
+
+    dropped = before_count - after_count
+    print(f"\n  Common date alignment: {latest_start} to {earliest_end}")
+    print(f"    Tickers: {', '.join(tickers)}")
+    if dropped > 0:
+        print(f"    Dropped {dropped:,} trades outside common range "
+              f"({before_count:,} -> {after_count:,})")
+    else:
+        print(f"    All {after_count:,} trades within common range (no trades dropped)")
+
+    # Show per-ticker impact
+    for ticker in tickers:
+        orig = len(all_trades[all_trades["ticker"] == ticker])
+        kept = len(filtered[filtered["ticker"] == ticker])
+        d = orig - kept
+        if d > 0:
+            print(f"    {ticker}: {orig:,} -> {kept:,} (-{d:,})")
+
+    return filtered
+
+
+# ---------------------------------------------------------------------------
 # Phase 4: Cross-ticker portfolio simulation
 # ---------------------------------------------------------------------------
 
@@ -814,6 +872,13 @@ def generate_v3_html_report(accepted: pd.DataFrame, rejected: pd.DataFrame,
     pf = total_gains / total_losses_val if total_losses_val > 0 else float("inf")
     pf_str = f"{pf:.2f}" if pf < 1000 else "&infin;"
 
+    # Common date range
+    if total_trades > 0:
+        common_start = str(accepted["entry_date"].min())
+        common_end = str(accepted["entry_date"].max())
+    else:
+        common_start = common_end = "N/A"
+
     # Selection stats
     total_slots = len(sel_df) if not sel_df.empty else 0
     ticker_wins = sel_df["winner"].value_counts().to_dict() if not sel_df.empty else {}
@@ -947,6 +1012,8 @@ def generate_v3_html_report(accepted: pd.DataFrame, rejected: pd.DataFrame,
     Compares NDX, SPX, RUT at each 10-minute interval and picks the best opportunity
     based on credit/risk, volume adequacy, and bid-ask tightness. Unified $500K/day budget.
     Volume-adjusted contract sizing ensures realistic fills.
+    <br>Common date range: <strong>{common_start}</strong> to <strong>{common_end}</strong>
+    (aligned to shortest overlapping period across all tickers).
   </div>
   <div class="date">Generated: {today_str}</div>
 </div>
@@ -1070,6 +1137,7 @@ def generate_v3_html_report(accepted: pd.DataFrame, rejected: pd.DataFrame,
     <thead><tr><th>Parameter</th><th>Value</th></tr></thead>
     <tbody>
       <tr><td>Tickers</td><td>NDX, SPX, RUT</td></tr>
+      <tr><td>Common Period</td><td>{common_start} to {common_end} (aligned to all tickers)</td></tr>
       <tr><td>Daily Budget</td><td>${DAILY_BUDGET:,} (unified across tickers)</td></tr>
       <tr><td>Max Risk/Trade</td><td>${MAX_RISK_PER_TRADE:,}</td></tr>
       <tr><td>Volume Fill %</td><td>25% (max fraction of available volume)</td></tr>
@@ -1187,6 +1255,11 @@ Examples:
 
     all_trades = pd.concat(all_enriched, ignore_index=True)
     print(f"\nTotal enriched trades across all tickers: {len(all_trades):,}")
+
+    # Align to common date range: only keep dates where ALL tickers have data.
+    # When combining across multiple tickers/algos, always use the shortest
+    # overlapping period so comparisons are fair.
+    all_trades = _align_to_common_dates(all_trades)
 
     # Phase 3: Cross-ticker portfolio simulation
     print("\nPhase 3: Cross-ticker portfolio simulation...")
