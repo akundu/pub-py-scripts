@@ -1308,8 +1308,8 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
     # Mark the actually selected method as recommended
     pred.ensemble_methods = [
         {
-            'method': 'Baseline (Percentile)',
-            'description': 'Reference method - simple percentile distribution',
+            'method': 'Empirical Continuous',
+            'description': 'Reference method - all returns combined (symmetric distribution)',
             'bands': bands_to_dict(baseline_bands),
             'recommended': recommended_method == "Baseline (Simple Percentile)",
             'backtest_performance': 'Reference (100% hit rate)',
@@ -1864,11 +1864,18 @@ async def predict_close(ticker='NDX', lookback=120, force_retrain=False, similar
 
     pred.ensemble_methods = [
         {
-            'method': 'Percentile (Historical)',
-            'description': 'Historical percentile distribution',
+            'method': 'Directional Percentile',
+            'description': 'Direction-split historical distribution (up/down computed separately)',
             'bands': bands_to_dict_0dte(pred.percentile_bands),
             'recommended': False,
             'backtest_performance': 'Baseline reference',
+        },
+        {
+            'method': 'Empirical Continuous',
+            'description': 'All historical returns combined (symmetric distribution)',
+            'bands': bands_to_dict_0dte(pred.empirical_continuous_bands),
+            'recommended': False,
+            'backtest_performance': 'Alternative baseline',
         },
         {
             'method': 'LightGBM (Statistical)',
@@ -1910,10 +1917,10 @@ async def predict_close(ticker='NDX', lookback=120, force_retrain=False, similar
                 band = pred.statistical_bands[band_name]
                 print(f"  {band_name}: ${band.lo_price:,.2f} - ${band.hi_price:,.2f}  ({band.width_pct:.2f}% width)")
 
-    # 2. Percentile Model (Historical)
+    # 2. Directional Percentile Model
     if pred.percentile_bands:
         print(f"\n{'-'*80}")
-        print("2. PERCENTILE MODEL (Historical distribution)")
+        print("2. DIRECTIONAL PERCENTILE (Up/down days split)")
         print(f"{'-'*80}")
 
         for band_name in ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100']:
@@ -1921,10 +1928,21 @@ async def predict_close(ticker='NDX', lookback=120, force_retrain=False, similar
                 band = pred.percentile_bands[band_name]
                 print(f"  {band_name}: ${band.lo_price:,.2f} - ${band.hi_price:,.2f}  ({band.width_pct:.2f}% width)")
 
-    # 3. Combined (Wider of both)
+    # 3. Empirical Continuous Model
+    if pred.empirical_continuous_bands:
+        print(f"\n{'-'*80}")
+        print("3. EMPIRICAL CONTINUOUS (All moves combined, symmetric)")
+        print(f"{'-'*80}")
+
+        for band_name in ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100']:
+            if band_name in pred.empirical_continuous_bands:
+                band = pred.empirical_continuous_bands[band_name]
+                print(f"  {band_name}: ${band.lo_price:,.2f} - ${band.hi_price:,.2f}  ({band.width_pct:.2f}% width)")
+
+    # 4. Combined (Wider of both)
     if pred.combined_bands:
         print(f"\n{'-'*80}")
-        print("3. COMBINED PREDICTION (Wider range from both models)")
+        print("4. COMBINED PREDICTION (Wider range from both models)")
         print(f"{'-'*80}")
         print("   *** USE THIS FOR TRADING - MOST CONSERVATIVE ***")
         print(f"{'-'*80}")

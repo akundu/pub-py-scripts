@@ -138,11 +138,31 @@ class TestMapPercentileToBands(unittest.TestCase):
         self.assertGreater(b_wide["P95"].width_pts, b_narrow["P95"].width_pts)
 
     def test_source_label(self):
-        """All bands should have source='percentile'."""
+        """All bands should have source='empirical_continuous'."""
         moves = np.random.normal(0, 1, 200)
         bands = map_percentile_to_bands(moves, 20000)
         for band in bands.values():
+            self.assertEqual(band.source, "empirical_continuous")
+
+    def test_directional_source_label(self):
+        """Directional percentile bands should have source='percentile'."""
+        from scripts.close_predictor.bands import map_directional_percentile_to_bands
+        down_moves = np.array([-0.5, -1.0, -1.5, -2.0, -0.3, -0.8, -1.2, -0.7, -1.8, -0.4])
+        up_moves = np.array([0.5, 1.0, 1.5, 2.0, 0.3, 0.8, 1.2, 0.7, 1.8, 0.4])
+        bands = map_directional_percentile_to_bands(down_moves, up_moves, 20000)
+        for band in bands.values():
             self.assertEqual(band.source, "percentile")
+
+    def test_directional_asymmetric_bands(self):
+        """Directional bands should be asymmetric when up/down distributions differ."""
+        from scripts.close_predictor.bands import map_directional_percentile_to_bands
+        # Skewed: small down moves, large up moves
+        down_moves = np.array([-0.2, -0.3, -0.1, -0.4, -0.15, -0.25, -0.35, -0.1, -0.2, -0.3])
+        up_moves = np.array([1.0, 2.0, 3.0, 1.5, 2.5, 1.8, 2.2, 1.3, 2.8, 3.5])
+        bands = map_directional_percentile_to_bands(down_moves, up_moves, 20000)
+        p95 = bands["P95"]
+        # High side should be larger magnitude than low side
+        self.assertGreater(abs(p95.hi_pct), abs(p95.lo_pct))
 
     def test_negative_moves(self):
         """Negative-shifted moves should produce bands below current price."""

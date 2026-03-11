@@ -23,7 +23,7 @@ from .models import (
     VOL_LOOKBACK_DAYS,
     VOL_BASELINE_DAYS,
 )
-from .bands import map_statistical_to_bands, map_percentile_to_bands, combine_bands
+from .bands import map_statistical_to_bands, map_percentile_to_bands, map_directional_percentile_to_bands, combine_bands
 from .features import detect_reversal_strength
 
 from scripts.percentile_range_backtest import (
@@ -122,23 +122,61 @@ def _train_statistical(
     return predictor
 
 
+def _get_daily_moves(
+    pct_df: pd.DataFrame,
+    train_dates: set,
+) -> Optional[np.ndarray]:
+    """Extract one prev_close→day_close return per date from pct_df.
+
+    Returns array of return percentages, or None if insufficient data.
+    """
+    daily = pct_df[pct_df['date'].isin(train_dates)].drop_duplicates(subset='date')
+    if len(daily) < 10:
+        return None
+    return ((daily['day_close'] - daily['prev_close']) / daily['prev_close'] * 100).values
+
+
 def compute_static_percentile_prediction(
     pct_df: pd.DataFrame,
     prev_close: float,
     train_dates: set,
 ) -> Optional[Dict[str, UnifiedBand]]:
-    """Compute static close-to-close percentile bands (no time/vol/direction filtering).
+    """Compute static percentile bands using direction-split approach.
 
-    Uses all historical prev_close-to-day_close returns and applies them
-    against prev_close. This produces bands that do not change throughout the day.
+    Splits historical returns into up-days and down-days, computing each band
+    boundary from the appropriate direction's distribution (matching the
+    /range_percentiles endpoint). Falls back to all-moves-combined if either
+    direction has fewer than 5 samples.
     """
-    # Use one record per date (deduplicate time slots) — take the first slot per date
-    daily = pct_df[pct_df['date'].isin(train_dates)].drop_duplicates(subset='date')
-    if len(daily) < 10:
+    moves = _get_daily_moves(pct_df, train_dates)
+    if moves is None:
         return None
 
-    # Compute prev_close → day_close returns
-    moves = ((daily['day_close'] - daily['prev_close']) / daily['prev_close'] * 100).values
+    up_moves = moves[moves > 0]
+    down_moves = moves[moves <= 0]
+
+    # Need sufficient samples in each direction for meaningful directional percentiles
+    if len(up_moves) >= 5 and len(down_moves) >= 5:
+        return map_directional_percentile_to_bands(down_moves, up_moves, prev_close)
+
+    # Fallback: use all-moves-combined (empirical continuous) approach
+    return map_percentile_to_bands(moves, prev_close)
+
+
+def compute_empirical_continuous_prediction(
+    pct_df: pd.DataFrame,
+    prev_close: float,
+    train_dates: set,
+) -> Optional[Dict[str, UnifiedBand]]:
+    """Compute static bands using all-moves-combined symmetric percentiles.
+
+    This is the original "baseline percentile" approach: takes all historical
+    prev_close→day_close returns and computes symmetric percentiles (e.g.,
+    P95 = 2.5th to 97.5th percentile of all moves regardless of direction).
+    """
+    moves = _get_daily_moves(pct_df, train_dates)
+    if moves is None:
+        return None
 
     return map_percentile_to_bands(moves, prev_close)
 
@@ -319,8 +357,11 @@ def make_unified_prediction(
         current_price, prev_close, day_open, day_high, day_low,
     )
 
-    # Percentile model — static close-to-close (does not change throughout the day)
+    # Percentile model — static close-to-close (direction-split, does not change throughout the day)
     pct_bands = compute_static_percentile_prediction(pct_df, prev_close, train_dates)
+
+    # Empirical continuous model — old all-moves-combined approach (for comparison)
+    empc_bands = compute_empirical_continuous_prediction(pct_df, prev_close, train_dates)
 
     # Time-aware percentile model (used for combined bands only)
     time_aware_pct_bands = compute_percentile_prediction(
@@ -455,6 +496,7 @@ def make_unified_prediction(
         percentile_bands=pct_bands,
         statistical_bands=stat_bands,
         combined_bands=combined,
+        empirical_continuous_bands=empc_bands if empc_bands else {},
         confidence=confidence,
         risk_level=risk_level,
         vix1d=vix1d,

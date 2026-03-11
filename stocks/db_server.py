@@ -6283,13 +6283,13 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 `;
             }}
 
-            // Percentile Model
+            // Percentile Model (Directional)
             if (data.percentile_bands) {{
                 html += `
                     <div class="model-card">
-                        <h4>2️⃣ Percentile Model (Historical)</h4>
+                        <h4>2️⃣ Baseline (Directional Percentile)</h4>
                         <p style="color: #8b949e; font-size: 13px; margin-bottom: 15px;">
-                            Pure historical distribution with time-of-day filters
+                            Direction-split: up/down days computed separately (matches range percentiles)
                         </p>
                         <ul class="band-list">
                 `;
@@ -6313,11 +6313,41 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 `;
             }}
 
+            // Empirical Continuous Model
+            if (data.empirical_continuous_bands) {{
+                html += `
+                    <div class="model-card">
+                        <h4>3️⃣ Empirical Continuous</h4>
+                        <p style="color: #8b949e; font-size: 13px; margin-bottom: 15px;">
+                            All historical returns combined (symmetric distribution, no direction split)
+                        </p>
+                        <ul class="band-list">
+                `;
+                ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100'].forEach(bandName => {{
+                    if (data.empirical_continuous_bands[bandName]) {{
+                        const band = data.empirical_continuous_bands[bandName];
+                        html += `
+                            <li>
+                                <span class="band-name">${{bandName}}:</span>
+                                <span class="price-range">
+                                    $${{fmtPrice(band.lo_price)}} - $${{fmtPrice(band.hi_price)}}
+                                </span>
+                                <div class="width-info">Width: ${{band.width_pct.toFixed(2)}}%</div>
+                            </li>
+                        `;
+                    }}
+                }});
+                html += `
+                        </ul>
+                    </div>
+                `;
+            }}
+
             // Combined Model (Recommended)
             if (data.combined_bands) {{
                 html += `
                     <div class="model-card model-recommended">
-                        <h4>3️⃣ Combined Prediction ⭐ RECOMMENDED</h4>
+                        <h4>4️⃣ Combined Prediction ⭐ RECOMMENDED</h4>
                         <p style="color: #8b949e; font-size: 13px; margin-bottom: 15px;">
                             <strong style="color: #3fb950;">Most conservative approach</strong> - wider range from both models
                         </p>

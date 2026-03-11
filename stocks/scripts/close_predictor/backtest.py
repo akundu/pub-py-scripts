@@ -8,7 +8,7 @@ from typing import List
 from .models import ET_TZ, UNIFIED_BAND_NAMES, _intraday_vol_cache
 from .bands import combine_bands
 from .features import detect_reversal_strength, get_intraday_vol_factor
-from .prediction import _train_statistical, compute_percentile_prediction, compute_statistical_prediction
+from .prediction import _train_statistical, compute_percentile_prediction, compute_statistical_prediction, compute_empirical_continuous_prediction
 from .display import print_backtest_results
 
 from scripts.percentile_range_backtest import (
@@ -175,12 +175,17 @@ def run_backtest(
                 ticker, test_date, time_label, test_df, train_dates_sorted,
             )
 
-            # --- Percentile model bands ---
+            # --- Percentile model bands (direction-split) ---
             pct_bands = compute_percentile_prediction(
                 pct_df, time_label, above, current_price, current_vol,
                 pct_train_dates, vol_scale,
                 reversal_blend=reversal_blend,
                 intraday_vol_factor=ivol_factor,
+            )
+
+            # --- Empirical continuous bands (all-moves-combined, old baseline) ---
+            empc_bands = compute_empirical_continuous_prediction(
+                pct_df, prev_close_val, pct_train_dates,
             )
 
             # --- Statistical model bands ---
@@ -196,6 +201,8 @@ def run_backtest(
                 pct_bands = {}
             if stat_bands is None:
                 stat_bands = {}
+            if empc_bands is None:
+                empc_bands = {}
 
             combined = combine_bands(pct_bands, stat_bands, current_price)
 
@@ -210,7 +217,7 @@ def run_backtest(
             }
 
             for bn in UNIFIED_BAND_NAMES:
-                # Percentile
+                # Percentile (direction-split)
                 pb = pct_bands.get(bn)
                 if pb:
                     result[f'pct_{bn}_hit'] = pb.lo_price <= actual_close <= pb.hi_price
@@ -218,6 +225,15 @@ def run_backtest(
                 else:
                     result[f'pct_{bn}_hit'] = False
                     result[f'pct_{bn}_width'] = 0
+
+                # Empirical Continuous (all-moves-combined)
+                eb = empc_bands.get(bn)
+                if eb:
+                    result[f'empc_{bn}_hit'] = eb.lo_price <= actual_close <= eb.hi_price
+                    result[f'empc_{bn}_width'] = eb.width_pct
+                else:
+                    result[f'empc_{bn}_hit'] = False
+                    result[f'empc_{bn}_width'] = 0
 
                 # Statistical
                 sb = stat_bands.get(bn)

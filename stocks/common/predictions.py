@@ -458,6 +458,7 @@ class PredictionHistory:
                 'combined_bands': prediction.get('combined_bands'),
                 'percentile_bands': prediction.get('percentile_bands'),
                 'statistical_bands': prediction.get('statistical_bands'),
+                'empirical_continuous_bands': prediction.get('empirical_continuous_bands'),
             }
 
             # Add to in-memory history
@@ -701,6 +702,7 @@ def _serialize_unified_prediction(pred: Any) -> dict:
         'percentile_bands': serialize_band_dict(pred.percentile_bands),
         'statistical_bands': serialize_band_dict(pred.statistical_bands),
         'combined_bands': serialize_band_dict(pred.combined_bands),
+        'empirical_continuous_bands': serialize_band_dict(getattr(pred, 'empirical_continuous_bands', {})),
         'confidence': pred.confidence,
         'risk_level': convert_value(pred.risk_level),
         'vix1d': convert_value(pred.vix1d),
@@ -978,8 +980,8 @@ async def fetch_future_prediction(ticker: str, days_ahead: int, cache: Predictio
                                         band['lo_price'] = current_price * (1 + band['lo_pct'] / 100)
                                         band['hi_price'] = current_price * (1 + band['hi_pct'] / 100)
                                         band['width_pts'] = band['hi_price'] - band['lo_price']
-                # Also update primary bands (percentile_bands, combined_bands, statistical_bands)
-                for band_key in ('percentile_bands', 'combined_bands', 'statistical_bands'):
+                # Also update primary bands (percentile_bands, combined_bands, statistical_bands, empirical_continuous_bands)
+                for band_key in ('percentile_bands', 'combined_bands', 'statistical_bands', 'empirical_continuous_bands'):
                     bands = serialized.get(band_key, {})
                     if isinstance(bands, dict):
                         for band_name, band in bands.items():
@@ -1222,6 +1224,7 @@ def _compute_historical_predictions_sync(ticker: str, date_str: str, lookback: i
             'combined_bands': serialized.get('combined_bands'),
             'percentile_bands': serialized.get('percentile_bands'),
             'statistical_bands': serialized.get('statistical_bands'),
+            'empirical_continuous_bands': serialized.get('empirical_continuous_bands'),
         }
         snapshots.append(snapshot)
         latest_prediction = serialized

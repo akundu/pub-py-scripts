@@ -82,6 +82,7 @@ class UnifiedPrediction:
     percentile_bands: Dict[str, UnifiedBand]
     statistical_bands: Dict[str, UnifiedBand]
     combined_bands: Dict[str, UnifiedBand]
+    empirical_continuous_bands: Dict[str, UnifiedBand] = field(default_factory=dict)
 
     # Metadata
     confidence: Optional[str] = None

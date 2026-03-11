@@ -138,7 +138,10 @@ def map_percentile_to_bands(
     current_price: float,
     weights: Optional[np.ndarray] = None,
 ) -> Dict[str, UnifiedBand]:
-    """Compute P95/P97/P98/P99/P100 bands from percentile-range model's move distribution.
+    """Compute bands from all-moves-combined distribution (empirical continuous).
+
+    Uses symmetric percentiles on the full distribution of moves (up and down
+    combined). For example, P95 = 2.5th to 97.5th percentile of all moves.
 
     Args:
         moves: Array of historical return percentages
@@ -164,6 +167,68 @@ def map_percentile_to_bands(
         else:
             lo_pct = np.percentile(moves, lo_p) / 100.0   # move % -> decimal
             hi_pct = np.percentile(moves, hi_p) / 100.0
+        lo_price = current_price * (1 + lo_pct)
+        hi_price = current_price * (1 + hi_pct)
+        width_pts = hi_price - lo_price
+        width_pct = (hi_price - lo_price) / current_price * 100.0 if current_price else 0.0
+
+        bands[name] = UnifiedBand(
+            name=name,
+            lo_price=lo_price,
+            hi_price=hi_price,
+            lo_pct=lo_pct * 100.0,
+            hi_pct=hi_pct * 100.0,
+            width_pts=width_pts,
+            width_pct=width_pct,
+            source="empirical_continuous",
+        )
+    return bands
+
+
+def map_directional_percentile_to_bands(
+    down_moves: np.ndarray,
+    up_moves: np.ndarray,
+    current_price: float,
+) -> Dict[str, UnifiedBand]:
+    """Compute bands from direction-split distributions (matching /range_percentiles).
+
+    Splits historical moves into up-days and down-days, computing each band
+    boundary from the appropriate direction's distribution:
+      - Low boundary = percentile of down-day returns (captures tail risk on down side)
+      - High boundary = percentile of up-day returns (captures tail risk on up side)
+
+    For P_X band:
+      - Low = quantile((100-X)/100) of down-day moves (inverted: P95 → 5th pctile of down moves)
+      - High = quantile(X/100) of up-day moves (P95 → 95th pctile of up moves)
+
+    Args:
+        down_moves: Array of return percentages for down days (negative values)
+        up_moves: Array of return percentages for up days (positive values)
+        current_price: Current/prev_close price for band computation
+    """
+    # Band level → the "coverage" percentile
+    band_levels = {
+        "P80": 80,
+        "P90": 90,
+        "P95": 95,
+        "P97": 97,
+        "P98": 98,
+        "P99": 99,
+        "P100": 100,
+    }
+
+    bands = {}
+    for name, level in band_levels.items():
+        if level == 100:
+            # P100 = full range: min of down moves to max of up moves
+            lo_pct = float(np.min(down_moves)) / 100.0 if len(down_moves) > 0 else 0.0
+            hi_pct = float(np.max(up_moves)) / 100.0 if len(up_moves) > 0 else 0.0
+        else:
+            # Down side: quantile((100 - level) / 100) — inverted so P95 → 5th pctile
+            lo_pct = float(np.percentile(down_moves, (100 - level))) / 100.0
+            # Up side: quantile(level / 100)
+            hi_pct = float(np.percentile(up_moves, level)) / 100.0
+
         lo_price = current_price * (1 + lo_pct)
         hi_price = current_price * (1 + hi_pct)
         width_pts = hi_price - lo_price

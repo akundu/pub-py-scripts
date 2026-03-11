@@ -76,7 +76,7 @@ def print_backtest_results(
 
         # --- Accuracy table ---
         col_w = 8
-        model_labels = ["Pctl", "Stat", "Comb"]
+        model_labels = ["Pctl", "EmpC", "Stat", "Comb"]
         band_names_display = UNIFIED_BAND_NAMES
 
         # Header
@@ -109,7 +109,7 @@ def print_backtest_results(
             hrs = HOURS_TO_CLOSE.get(tl, 0)
             row = f"{_hrs_label(hrs):<8} {tl:<6} {n:>3}"
             for bn in band_names_display:
-                for model_key in ["pct", "stat", "comb"]:
+                for model_key in ["pct", "empc", "stat", "comb"]:
                     hits = sum(1 for r in slot if r.get(f'{model_key}_{bn}_hit', False))
                     acc = hits / n * 100 if n > 0 else 0
                     row += f" {acc:>{col_w - 1}.0f}%"
@@ -133,7 +133,7 @@ def print_backtest_results(
     row = "  "
     for bn in UNIFIED_BAND_NAMES:
         row += f"  {bn}: "
-        for model_key, label in [("pct", "Pctl"), ("stat", "Stat"), ("comb", "Comb")]:
+        for model_key, label in [("pct", "Pctl"), ("empc", "EmpC"), ("stat", "Stat"), ("comb", "Comb")]:
             hits = sum(1 for r in results if r.get(f'{model_key}_{bn}_hit', False))
             acc = hits / total * 100
             row += f"{label}={acc:.0f}% "

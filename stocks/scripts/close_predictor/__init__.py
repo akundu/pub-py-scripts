@@ -17,6 +17,7 @@ from .models import (
 from .bands import (
     map_statistical_to_bands,
     map_percentile_to_bands,
+    map_directional_percentile_to_bands,
     combine_bands,
 )
 from .features import (
@@ -30,6 +31,7 @@ from .prediction import (
     make_unified_prediction,
     compute_percentile_prediction,
     compute_statistical_prediction,
+    compute_empirical_continuous_prediction,
 )
 from .display import (
     print_live_display,
