@@ -45,7 +45,7 @@ LGBM_N_ESTIMATORS = 150             # Number of boosting rounds
 LGBM_LEARNING_RATE = 0.05           # Conservative for small dataset
 LGBM_MAX_DEPTH = 6                  # Allow 2-3 feature interactions
 LGBM_MIN_CHILD_SAMPLES = 20         # ~1% of training data
-LGBM_BAND_WIDTH_SCALE = 45.0        # Scale factor for band width (empirically calibrated for 95%+ hit rate)
+LGBM_BAND_WIDTH_SCALE = 1.5          # Scale factor for band width (reduced from 45.0 — v2 uses 7 direct quantiles + percentile_moves)
 
 # Dynamic volatility scaling
 ENABLE_DYNAMIC_VOL_SCALING = True   # Adapt bands to realized volatility

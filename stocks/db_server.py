@@ -6259,7 +6259,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                     <div class="model-card">
                         <h4>1️⃣ LightGBM Model (ML-based)</h4>
                         <p style="color: #8b949e; font-size: 13px; margin-bottom: 15px;">
-                            Machine learning quantile regression with 21 features
+                            LightGBM v2: 7-quantile regression with 27 features, 250-day training
                         </p>
                         <ul class="band-list">
                 `;

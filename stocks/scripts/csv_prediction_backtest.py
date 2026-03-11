@@ -305,7 +305,7 @@ def compute_moving_averages(sorted_dates: List[str], date_to_close: Dict[str, fl
     return result
 
 
-def build_training_data(ticker: str, end_date: str, lookback_days: int = 90) -> pd.DataFrame:
+def build_training_data(ticker: str, end_date: str, lookback_days: int = 250) -> pd.DataFrame:
     """Build training data from historical CSV files with all features."""
     if not ticker.startswith("I:"):
         db_ticker = f"I:{ticker}"
@@ -369,6 +369,21 @@ def build_training_data(ticker: str, end_date: str, lookback_days: int = 90) -> 
     date_to_close = {d: daily_stats[d]['close'] for d in daily_stats if d in daily_stats}
     sorted_dates = sorted(date_to_close.keys())
 
+    # Pre-compute realized vol for each date (5-day and 20-day trailing windows)
+    date_to_realized_vol = {}
+    for idx, d in enumerate(sorted_dates):
+        for window, key in [(5, 'realized_vol_5d'), (20, 'realized_vol_20d')]:
+            if idx >= window:
+                window_closes = [date_to_close[sorted_dates[j]] for j in range(idx - window, idx)]
+                returns = [(window_closes[k+1] - window_closes[k]) / window_closes[k]
+                           for k in range(len(window_closes) - 1) if window_closes[k] != 0]
+                if returns:
+                    date_to_realized_vol.setdefault(d, {})[key] = float(np.std(returns) * np.sqrt(252) * 100)
+                else:
+                    date_to_realized_vol.setdefault(d, {})[key] = 15.0
+            else:
+                date_to_realized_vol.setdefault(d, {})[key] = 15.0
+
     # Pre-compute moving averages for each date
     date_to_mas = {}
     for idx, d in enumerate(sorted_dates):
@@ -412,26 +427,51 @@ def build_training_data(ticker: str, end_date: str, lookback_days: int = 90) -> 
         dt = datetime.strptime(date_str, "%Y-%m-%d")
         day_of_week = dt.weekday()
 
-        # Sample at each 15-minute interval during market hours
-        for _, row in df.iterrows():
+        # Realized vol for this date
+        rvols = date_to_realized_vol.get(date_str, {})
+
+        # Sample at each 5-minute bar during market hours
+        for bar_idx, (_, row) in enumerate(df.iterrows()):
             ts = row['timestamp'].to_pydatetime()
             hour_utc = ts.hour
             minute = ts.minute
 
-            # Only use data during market hours and at 15-min boundaries
-            if 14 <= hour_utc <= 20 and minute in [0, 15, 30, 45]:
+            # Only use data during market hours (all 5-min bars)
+            if 14 <= hour_utc <= 20:
                 ts_et = ts.astimezone(ET_TZ)
                 hour_et = ts_et.hour
+                minute_et = ts_et.minute
 
-                if 9 <= hour_et <= 15:  # 9:30 AM to 3:45 PM
+                if 9 <= hour_et <= 15:  # 9:30 AM to 3:55 PM
+                    hour_decimal = hour_et + minute_et / 60.0
+
                     # Get intraday high/low up to this point
-                    before = df[df['timestamp'] <= ts]
+                    before = df.iloc[:bar_idx + 1]
                     current_high = before['high'].max()
                     current_low = before['low'].min()
 
+                    # Gap fill percentage
+                    gap_pct = (stats['open'] - prev_stats['close']) / prev_stats['close'] if prev_stats['close'] != 0 else 0
+                    if abs(gap_pct) > 0.001:
+                        gap_fill_pct = min(1.0, max(0.0,
+                            (row['close'] - stats['open']) / (prev_stats['close'] - stats['open'])
+                        )) if (prev_stats['close'] - stats['open']) != 0 else 0.0
+                    else:
+                        gap_fill_pct = 0.0
+
+                    # Bar momentum (last 3 bars trend)
+                    if bar_idx >= 3:
+                        recent = df.iloc[max(0, bar_idx - 3):bar_idx + 1]
+                        bar_momentum = (recent['close'].iloc[-1] - recent['close'].iloc[0]) / recent['close'].iloc[0] if recent['close'].iloc[0] != 0 else 0.0
+                    else:
+                        bar_momentum = 0.0
+
+                    # Cumulative intraday range (expanding)
+                    cum_range = (current_high - current_low) / current_high if current_high != 0 else 0.0
+
                     records.append({
                         'date': date_str,
-                        'hour_et': hour_et + minute / 60,
+                        'hour_et': hour_decimal,
                         'hour_price': row['close'],
                         'day_open': stats['open'],
                         'day_close': stats['close'],
@@ -456,6 +496,12 @@ def build_training_data(ticker: str, end_date: str, lookback_days: int = 90) -> 
                         'ma10': mas.get('ma10'),
                         'ma20': mas.get('ma20'),
                         'ma50': mas.get('ma50'),
+                        # New features for LightGBM v2
+                        'realized_vol_5d': rvols.get('realized_vol_5d', 15.0),
+                        'realized_vol_20d': rvols.get('realized_vol_20d', 15.0),
+                        'gap_fill_pct': gap_fill_pct,
+                        'bar_momentum_3': bar_momentum,
+                        'cumulative_intraday_range': cum_range,
                     })
 
     return pd.DataFrame(records)

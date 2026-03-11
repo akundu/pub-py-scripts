@@ -1749,7 +1749,7 @@ class StatisticalClosePredictor:
         return self
 
 
-# LightGBM continuous feature set (21 features, no discretization)
+# LightGBM continuous feature set (27 features, no discretization)
 LGBM_FEATURE_NAMES = [
     'hour_from_open', 'time_to_close', 'vix1d', 'overnight_gap_pct',
     'intraday_move_pct', 'price_vs_prev_close', 'day_of_week',
@@ -1758,6 +1758,10 @@ LGBM_FEATURE_NAMES = [
     'is_opex_week', 'opening_drive_pct', 'range_position',
     'ma5_deviation', 'ma10_deviation', 'ma20_deviation',
     'ma50_deviation', 'ma_trend_slope',
+    # v2 features
+    'realized_vol_5d', 'realized_vol_20d', 'gap_fill_pct',
+    'bar_momentum_3', 'cumulative_intraday_range',
+    'time_to_close_squared',
 ]
 
 
@@ -2168,16 +2172,19 @@ class MLClosePredictor:
 
 class LGBMClosePredictor:
     """
-    LightGBM quantile regression predictor.
+    LightGBM quantile regression predictor (v2).
 
-    Replaces statistical bucketing with continuous feature regression to avoid
-    feature space explosion. Predicts P10/P50/P90 percentiles directly using
-    all 21 features without discretization.
+    Trains 7 quantile models (P5/P10/P25/P50/P75/P90/P95) directly using
+    27 continuous features. Produces a full percentile_moves distribution
+    that map_statistical_to_bands() uses for accurate band computation
+    without extrapolation.
 
-    Expected improvements:
-    - 100% ML predictions (vs 100% FALLBACK with statistical bucketing)
-    - 85-95% hit rate within bands (vs 73% with fallback)
-    - All 21 features utilized (vs only 3 with bucketing)
+    v2 improvements over v1:
+    - 7 quantiles (was 3) → actual percentiles, no tail extrapolation
+    - 250-day training (was 90) + 5-min intervals (was 15-min) → ~10x more samples
+    - 27 features (was 21): +realized_vol_5d/20d, gap_fill_pct, bar_momentum,
+      cumulative_intraday_range, time_to_close_squared
+    - band_width_scale reduced from 45.0 to 1.5 (direct quantiles are accurate)
     """
 
     def __init__(
@@ -2273,8 +2280,12 @@ class LGBMClosePredictor:
 
         self.logger.info(f"Training LGBMClosePredictor on {len(X_train)} samples, validating on {len(X_val)}")
 
-        # Train quantile models (P10, P50, P90)
-        quantiles = {'p10': 0.1, 'p50': 0.5, 'p90': 0.9}
+        # Train quantile models (7 quantiles for direct band computation)
+        quantiles = {
+            'p5': 0.05, 'p10': 0.10, 'p25': 0.25,
+            'p50': 0.50,
+            'p75': 0.75, 'p90': 0.90, 'p95': 0.95,
+        }
 
         for name, alpha in quantiles.items():
             model = lgb.LGBMRegressor(
@@ -2399,6 +2410,14 @@ class LGBMClosePredictor:
         # MA trend slope
         features['ma_trend_slope'] = ((ma5 - ma20) / ma20).fillna(0)
 
+        # v2 features
+        features['realized_vol_5d'] = df['realized_vol_5d'].fillna(15.0) if 'realized_vol_5d' in df.columns else pd.Series([15.0] * len(df))
+        features['realized_vol_20d'] = df['realized_vol_20d'].fillna(15.0) if 'realized_vol_20d' in df.columns else pd.Series([15.0] * len(df))
+        features['gap_fill_pct'] = df['gap_fill_pct'].fillna(0.0) if 'gap_fill_pct' in df.columns else pd.Series([0.0] * len(df))
+        features['bar_momentum_3'] = df['bar_momentum_3'].fillna(0.0) if 'bar_momentum_3' in df.columns else pd.Series([0.0] * len(df))
+        features['cumulative_intraday_range'] = df['cumulative_intraday_range'].fillna(0.0) if 'cumulative_intraday_range' in df.columns else pd.Series([0.0] * len(df))
+        features['time_to_close_squared'] = features['time_to_close'] ** 2
+
         return features.values
 
     def _context_to_features(self, context: PredictionContext) -> Dict[str, float]:
@@ -2460,6 +2479,14 @@ class LGBMClosePredictor:
         else:
             features['ma_trend_slope'] = 0.0
 
+        # v2 features
+        features['realized_vol_5d'] = getattr(context, 'realized_vol_5d', None) or (context.realized_vol if context.realized_vol else 15.0)
+        features['realized_vol_20d'] = getattr(context, 'realized_vol_20d', None) or (context.historical_avg_vol if context.historical_avg_vol else 15.0)
+        features['gap_fill_pct'] = getattr(context, 'gap_fill_pct', 0.0) or 0.0
+        features['bar_momentum_3'] = getattr(context, 'bar_momentum_3', 0.0) or 0.0
+        features['cumulative_intraday_range'] = context.intraday_range_pct if context.intraday_range_pct else 0.0
+        features['time_to_close_squared'] = features['time_to_close'] ** 2
+
         return features
 
     def _compute_vol_factor(self, context: PredictionContext) -> float:
@@ -2502,24 +2529,56 @@ class LGBMClosePredictor:
         feat_dict = self._context_to_features(context)
         X = np.array([[feat_dict[name] for name in LGBM_FEATURE_NAMES]])
 
-        # Predict quantiles
-        pred_p10_move = self.quantile_models['p10'].predict(X)[0]
-        pred_p50_move = self.quantile_models['p50'].predict(X)[0]
-        pred_p90_move = self.quantile_models['p90'].predict(X)[0]
+        # Predict all 7 quantiles
+        raw_predictions = {}
+        for name, model in self.quantile_models.items():
+            raw_predictions[name] = model.predict(X)[0]
 
-        # Apply band width calibration (widen bands to match empirical distribution)
-        # This corrects for quantile regression under-estimating uncertainty
+        pred_p50_move = raw_predictions['p50']
+
+        # Apply band width calibration (widen bands around median)
         if self.band_width_scale != 1.0:
-            pred_p10_move = pred_p50_move + (pred_p10_move - pred_p50_move) * self.band_width_scale
-            pred_p90_move = pred_p50_move + (pred_p90_move - pred_p50_move) * self.band_width_scale
+            for name in raw_predictions:
+                if name != 'p50':
+                    raw_predictions[name] = pred_p50_move + (raw_predictions[name] - pred_p50_move) * self.band_width_scale
 
         # Apply dynamic volatility scaling
         if hasattr(context, 'realized_vol') and context.realized_vol:
             vol_factor = self._compute_vol_factor(context)
+            for name in raw_predictions:
+                if name != 'p50':
+                    raw_predictions[name] = pred_p50_move + (raw_predictions[name] - pred_p50_move) * vol_factor
 
-            # Scale bands around midpoint (preserve median, widen/narrow uncertainty)
-            pred_p10_move = pred_p50_move + (pred_p10_move - pred_p50_move) * vol_factor
-            pred_p90_move = pred_p50_move + (pred_p90_move - pred_p50_move) * vol_factor
+        # Ensure monotonicity: p5 <= p10 <= p25 <= p50 <= p75 <= p90 <= p95
+        ordered_keys = ['p5', 'p10', 'p25', 'p50', 'p75', 'p90', 'p95']
+        for i in range(1, len(ordered_keys)):
+            raw_predictions[ordered_keys[i]] = max(
+                raw_predictions[ordered_keys[i]],
+                raw_predictions[ordered_keys[i-1]]
+            )
+
+        pred_p10_move = raw_predictions['p10']
+        pred_p90_move = raw_predictions['p90']
+
+        # Build full percentile_moves dict for band mapping
+        # Maps percentile float -> predicted move as decimal fraction
+        percentile_moves = {
+            0.0: raw_predictions['p5'] * 2 - raw_predictions['p10'],   # extrapolate P0 (min)
+            0.5: raw_predictions['p5'] * 1.5 - raw_predictions['p10'] * 0.5,  # P0.5
+            1.0: raw_predictions['p5'] * 1.2 - raw_predictions['p10'] * 0.2,  # P1
+            1.5: raw_predictions['p5'] * 1.1 - raw_predictions['p10'] * 0.1,  # P1.5
+            2.5: raw_predictions['p5'],      # P2.5
+            5.0: raw_predictions['p10'],     # P5
+            10.0: raw_predictions['p25'],    # P10
+            50.0: raw_predictions['p50'],    # P50
+            90.0: raw_predictions['p75'],    # P90
+            95.0: raw_predictions['p90'],    # P95
+            97.5: raw_predictions['p95'],    # P97.5
+            98.5: raw_predictions['p95'] * 1.1 - raw_predictions['p90'] * 0.1,  # P98.5
+            99.0: raw_predictions['p95'] * 1.2 - raw_predictions['p90'] * 0.2,  # P99
+            99.5: raw_predictions['p95'] * 1.5 - raw_predictions['p90'] * 0.5,  # P99.5
+            100.0: raw_predictions['p95'] * 2 - raw_predictions['p90'],  # P100 (max)
+        }
 
         # Convert to prices
         pred_close_low = context.current_price * (1 + pred_p10_move)
@@ -2550,7 +2609,7 @@ class LGBMClosePredictor:
             risk_level = 3
 
         # Risk rationale
-        rationale_parts = [f"LightGBM quantile regression ({self.train_samples} samples)"]
+        rationale_parts = [f"LightGBM v2 quantile regression ({self.train_samples} samples, 7 quantiles)"]
         if band_width < 0.01:
             rationale_parts.append("tight predicted range")
         rationale_parts.append(f"{vix_regime.value} VIX")
@@ -2575,6 +2634,7 @@ class LGBMClosePredictor:
             prediction_method="lightgbm",
             model_type='lightgbm',
             match_type='ML',
+            percentile_moves=percentile_moves,
         )
 
 

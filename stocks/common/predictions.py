@@ -811,6 +811,14 @@ async def fetch_today_prediction(ticker: str, cache: PredictionCache, force_refr
                 if cached_with_ts is not None:
                     cached_data, _ = cached_with_ts
                     if isinstance(cached_data, dict) and cached_data.get('current_price', 0) > 0:
+                        # Merge fresh band data into cached entry (handles new fields
+                        # like empirical_continuous_bands added after cache was written)
+                        for band_key in ('percentile_bands', 'statistical_bands',
+                                         'combined_bands', 'empirical_continuous_bands',
+                                         'ensemble_methods', 'directional_analysis'):
+                            fresh_val = serialized.get(band_key)
+                            if fresh_val and band_key not in cached_data:
+                                cached_data[band_key] = fresh_val
                         cached_data['cache_timestamp'] = time.time()
                         await cache.set(cache_key, cached_data)
                         logger.info(f"Refreshed cache timestamp for {cache_key} (market closed, reusing last valid price)")
