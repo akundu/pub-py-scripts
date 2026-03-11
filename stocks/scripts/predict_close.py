@@ -847,8 +847,17 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
     # Compute target date
     target_date = get_nth_trading_day(date.today(), days_ahead)
 
-    # --- METHOD 1: Baseline (simple percentile) --- uses prev_close as static reference
+    # --- METHOD 1a: Baseline empirical continuous (all returns combined) ---
     baseline_bands = map_percentile_to_bands(n_day_returns_array, prev_close_for_baseline)
+
+    # --- METHOD 1b: Directional percentile (up/down split) ---
+    from scripts.close_predictor.bands import map_directional_percentile_to_bands
+    up_returns = n_day_returns_array[n_day_returns_array > 0]
+    down_returns = n_day_returns_array[n_day_returns_array <= 0]
+    if len(up_returns) >= 5 and len(down_returns) >= 5:
+        directional_pct_bands = map_directional_percentile_to_bands(down_returns, up_returns, prev_close_for_baseline)
+    else:
+        directional_pct_bands = baseline_bands  # fallback
 
     # --- METHOD 2 & 4: Conditional + Ensemble Combined (requires market context) ---
     conditional_bands = {}
@@ -1297,16 +1306,24 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
         hours_to_close=0.0,  # N/A for multi-day
         time_label=f"{days_ahead}DTE",
         above_prev=current_price >= prev_close,
-        percentile_bands=primary_bands,  # Use ensemble_combined as primary
+        percentile_bands=directional_pct_bands if directional_pct_bands else primary_bands,
         statistical_bands=ensemble_bands if ensemble_bands else {},
         combined_bands=primary_bands,
+        empirical_continuous_bands=baseline_bands if baseline_bands else {},
         confidence="HIGH" if ensemble_combined_bands else "MEDIUM",
         risk_level=None,
     )
 
-    # Add all 4 ensemble methods with dynamic recommendation based on regime/confidence
+    # Add all 5 ensemble methods with dynamic recommendation based on regime/confidence
     # Mark the actually selected method as recommended
     pred.ensemble_methods = [
+        {
+            'method': 'Directional Percentile',
+            'description': 'Direction-split: up/down N-day returns computed separately',
+            'bands': bands_to_dict(directional_pct_bands),
+            'recommended': False,
+            'backtest_performance': 'Baseline reference (asymmetric)',
+        },
         {
             'method': 'Empirical Continuous',
             'description': 'Reference method - all returns combined (symmetric distribution)',
