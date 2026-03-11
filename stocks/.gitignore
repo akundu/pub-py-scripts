@@ -18,6 +18,7 @@ results/
 models/backup_*/
 models/production/*_20*/
 models/production/*_latest/
+models/production/*/*.json
 models/
 
 # Claude Code local config
