@@ -90,7 +90,7 @@ def _find_nearest_time_label(hour_et: int, minute_et: int) -> str:
 
 def run_demo_loop(
     ticker: str,
-    lookback: int = 250,
+    lookback: int = 180,
     interval: int = 30,
     vol_scale: bool = True,
 ):
@@ -226,7 +226,7 @@ def run_demo_loop(
 
 async def run_live_loop(
     ticker: str,
-    lookback: int = 250,
+    lookback: int = 180,
     interval: int = 30,
     vol_scale: bool = True,
 ):

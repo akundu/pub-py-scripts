@@ -5160,7 +5160,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
 
                 <div class="control-group">
                     <label for="lookbackInput" style="color:var(--text-secondary);font-size:13px;">Training days:</label>
-                    <input type="number" id="lookbackInput" min="30" max="1260" value="120"
+                    <input type="number" id="lookbackInput" min="30" max="1260" value="180"
                         style="width:60px;padding:3px 6px;border-radius:4px;border:1px solid #444;background:#1a1f2e;color:#e6edf3;font-size:13px;"
                         onchange="onLookbackChange()">
                 </div>
@@ -5259,7 +5259,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
         // State
         let currentTicker = '{ticker}';
         let currentDays = 0;  // 0 = today, any positive int = N days ahead
-        let currentLookback = 120;  // training days (30-1260)
+        let currentLookback = 180;  // training days (30-1260)
         let currentStrategy = 'combined';  // used for band table display
         let predictionData = null;
         let bandChart = null;
@@ -9707,6 +9707,8 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
     GET /predictions/{ticker}
 
     Returns an HTML page with prediction visualizations for NDX or SPX.
+    Use ?format=json, ?content-type=json, or Accept: application/json to get JSON
+    (same data as the page: today, future for day_tabs, band_history).
     """
     ticker = request.match_info.get('ticker', 'NDX').upper()
 
@@ -9737,10 +9739,111 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
         'day_tabs': day_tabs,
     }
 
+    if _wants_json_response(request):
+        cache = request.app.get('prediction_cache')
+        history = request.app.get('prediction_history')
+        if not cache:
+            return web.json_response({'error': 'Prediction cache not initialized'}, status=500)
+        try:
+            lookback = int(request.query.get('lookback', '180'))
+            lookback = max(30, min(1260, lookback))
+        except (ValueError, TypeError):
+            lookback = 180
+        force_refresh = not params['cache']
+        today_result = await fetch_today_prediction(
+            ticker, cache, force_refresh=force_refresh, history=history, lookback=lookback
+        )
+        future_results = {}
+        for days in day_tabs:
+            future_results[str(days)] = await fetch_future_prediction(
+                ticker, days, cache, force_refresh=force_refresh, lookback=lookback
+            )
+        band_history_date = request.query.get('date')
+        if not band_history_date and history:
+            now_et = datetime.now(ET_TZ)
+            candidate = now_et.date()
+            while candidate.weekday() >= 5:
+                candidate -= timedelta(days=1)
+            if candidate == now_et.date() and (now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 30)):
+                candidate -= timedelta(days=1)
+                while candidate.weekday() >= 5:
+                    candidate -= timedelta(days=1)
+            band_history_date = candidate.strftime('%Y-%m-%d')
+        snapshots = []
+        if history and band_history_date:
+            snapshots = await history.get_snapshots(ticker, band_history_date)
+        band_history = {
+            'ticker': ticker,
+            'date': band_history_date or '',
+            'snapshots': snapshots,
+            'count': len(snapshots),
+        }
+        return web.json_response({
+            'ticker': ticker,
+            'today': today_result,
+            'future': future_results,
+            'band_history': band_history,
+            'params': {'day_tabs': day_tabs, 'lookback': lookback},
+        })
+
     # Generate HTML page
     html = generate_predictions_html(ticker, params)
 
     return web.Response(text=html, content_type='text/html')
+
+
+async def handle_predictions_api_index(request: web.Request) -> web.Response:
+    """Return JSON listing all prediction JSON APIs and how to use them.
+
+    GET /predictions/api
+
+    The HTML page at /predictions/{ticker} loads data from these endpoints.
+    Use them to get the same data as JSON for automation or custom UIs.
+    """
+    base = str(request.url.origin())
+    tickers = sorted(PREDICTION_TICKERS)
+    return web.json_response({
+        "description": "JSON APIs for close-price prediction data (same as /predictions/{ticker} page).",
+        "tickers": tickers,
+        "endpoints": [
+            {
+                "path": "/predictions/api/lazy/today/{ticker}",
+                "method": "GET",
+                "description": "Today's prediction bands and current price.",
+                "query": "?lookback=180&cache=true",
+                "example": f"{base.rstrip('/')}/predictions/api/lazy/today/NDX?lookback=180",
+            },
+            {
+                "path": "/predictions/api/lazy/future/{ticker}/{days}",
+                "method": "GET",
+                "description": "N-day-ahead forecast prediction data.",
+                "query": "?lookback=180&cache=true",
+                "example": f"{base.rstrip('/')}/predictions/api/lazy/future/NDX/3?lookback=180",
+            },
+            {
+                "path": "/predictions/api/lazy/band_history/{ticker}",
+                "method": "GET",
+                "description": "Time-series of band snapshots for convergence chart.",
+                "query": "?date=YYYY-MM-DD (default: latest trading day)",
+                "example": f"{base.rstrip('/')}/predictions/api/lazy/band_history/NDX",
+            },
+            {
+                "path": "/predictions/api/lazy/historical/{ticker}/{date}",
+                "method": "GET",
+                "description": "Historical prediction bands for a past date (backtest shape).",
+                "query": "?lookback=180",
+                "example": f"{base.rstrip('/')}/predictions/api/lazy/historical/NDX/2025-03-01",
+            },
+            {
+                "path": "/predictions/api/prewarm",
+                "method": "GET",
+                "description": "Pre-warm cache (e.g. cron every 5 min).",
+                "query": "?ticker=NDX,SPX&days=1,3,5",
+                "example": f"{base.rstrip('/')}/predictions/api/prewarm?ticker=NDX,SPX",
+            },
+        ],
+        "usage": "Use the example URLs with your server base. For today/future, add &cache=false to force refresh. Band history and historical return the same structures the HTML charts consume.",
+    })
 
 
 async def handle_lazy_load_today_prediction(request: web.Request) -> web.Response:
@@ -9764,10 +9867,10 @@ async def handle_lazy_load_today_prediction(request: web.Request) -> web.Respons
     force_refresh = request.query.get('cache', 'true').lower() == 'false'
 
     try:
-        lookback = int(request.query.get('lookback', '120'))
+        lookback = int(request.query.get('lookback', '180'))
         lookback = max(30, min(1260, lookback))
     except (ValueError, TypeError):
-        lookback = 120
+        lookback = 180
 
     # Fast path: serve from cache immediately to avoid expensive recomputation
     cache_key = f"today_{ticker}_{lookback}"
@@ -9814,10 +9917,10 @@ async def handle_lazy_load_future_prediction(request: web.Request) -> web.Respon
     force_refresh = request.query.get('cache', 'true').lower() == 'false'
 
     try:
-        lookback = int(request.query.get('lookback', '120'))
+        lookback = int(request.query.get('lookback', '180'))
         lookback = max(30, min(1260, lookback))
     except (ValueError, TypeError):
-        lookback = 120
+        lookback = 180
 
     # Fast path: serve from cache immediately (regardless of age) to avoid
     # expensive recomputation. Prewarm cron handles keeping cache fresh.
@@ -9978,10 +10081,10 @@ async def handle_lazy_load_historical_prediction(request: web.Request) -> web.Re
         return web.json_response({'error': 'Prediction cache not initialized'}, status=500)
 
     try:
-        lookback = int(request.query.get('lookback', '120'))
+        lookback = int(request.query.get('lookback', '180'))
         lookback = max(30, min(1260, lookback))
     except (ValueError, TypeError):
-        lookback = 120
+        lookback = 180
 
     if fetch_historical_prediction is None:
         return web.json_response({'error': 'Historical predictions not available'}, status=500)
@@ -14626,6 +14729,14 @@ def _inject_range_percentiles_ws_script(html: str, tickers: list[str]) -> str:
     return html.replace("</body>", ws_script + "\n</body>", 1)
 
 
+def _wants_json_response(request: web.Request) -> bool:
+    """True if client wants JSON (query param or Accept header)."""
+    if request.query.get('format') == 'json' or request.query.get('content-type') == 'json':
+        return True
+    accept = (request.headers.get('Accept') or '').lower()
+    return 'application/json' in accept
+
+
 async def handle_range_percentiles_html(request: web.Request) -> web.Response:
     """
     Handle HTML page request for range percentiles analysis.
@@ -14635,9 +14746,12 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
         ?tickers=NDX (for multi-window, only single ticker supported)
         ?windows=* or ?windows=1,5,10 (triggers multi-window mode)
         ?window=5 (single-window mode, existing behavior)
+        ?format=json or ?content-type=json to get JSON instead of HTML
         ... other params
 
-    Returns styled HTML page (single or multi-window based on params).
+    Accept: application/json also returns JSON.
+
+    Returns styled HTML page (single or multi-window), or JSON when requested.
     """
     try:
         from common.range_percentiles import (
@@ -14752,16 +14866,8 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                 momentum_filter=momentum_filter,
             )
 
-            html = format_multi_window_as_html(
-                results,
-                params={"tickers": tickers, "windows": windows, "lookback": lookback},
-                multi_ticker=len(tickers) > 1
-            )
-
-            # If window 0 (0DTE) is included, compute and inject hourly moves-to-close
-            # per ticker, into each ticker's tab div (or before </body> for single ticker)
+            hourly = {}
             if 0 in windows:
-                is_multi = len(tickers) > 1
                 for ticker_name, _ in ticker_specs:
                     try:
                         hourly_data = await compute_hourly_moves_to_close(
@@ -14775,35 +14881,58 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                             ensure_tables=False,
                             log_level="WARNING",
                         )
-                        hourly_html = format_hourly_moves_as_html(hourly_data)
-                        if not hourly_html:
-                            continue
-                        # Strip I: prefix for display ticker used in tab IDs
                         display_t = ticker_name.replace("I:", "") if ticker_name.startswith("I:") else ticker_name
-                        if is_multi:
-                            # Inject into this ticker's tab: before its closing </div>
-                            tab_marker = f'id="tab_{display_t}">'
-                            # Find the tab div and inject before its last closing </div>
-                            tab_pos = html.find(tab_marker)
-                            if tab_pos >= 0:
-                                # Find the closing </div> for this tab
-                                # The tab content ends with "    </div>\n" before next tab or script
-                                content_start = tab_pos + len(tab_marker)
-                                # Find the next tab div or the script section
-                                next_tab = html.find('<div class="tab-content', content_start)
-                                script_pos = html.find('<script>', content_start)
-                                end_search = min(
-                                    next_tab if next_tab > 0 else len(html),
-                                    script_pos if script_pos > 0 else len(html),
-                                )
-                                # Find last </div> before end_search
-                                close_div_pos = html.rfind('</div>', content_start, end_search)
-                                if close_div_pos > 0:
-                                    html = html[:close_div_pos] + hourly_html + "\n" + html[close_div_pos:]
-                        else:
-                            html = html.replace("</body>", hourly_html + "\n</body>", 1)
+                        hourly[display_t] = hourly_data
                     except Exception as he:
                         logger.warning(f"Could not compute hourly moves for {ticker_name}: {he}")
+
+            if _wants_json_response(request):
+                params = {
+                    "tickers": tickers,
+                    "windows": windows,
+                    "lookback": lookback,
+                    "percentiles": percentiles,
+                    "min_days": min_days,
+                    "min_direction_days": min_direction_days,
+                }
+                if momentum_filter:
+                    params["momentum_filter"] = momentum_filter
+                return web.json_response({
+                    "mode": "multi_window",
+                    "params": params,
+                    "tickers": results,
+                    "hourly": hourly,
+                })
+
+            html = format_multi_window_as_html(
+                results,
+                params={"tickers": tickers, "windows": windows, "lookback": lookback},
+                multi_ticker=len(tickers) > 1
+            )
+
+            # If window 0 (0DTE) is included, inject hourly moves-to-close (already in hourly dict)
+            if 0 in windows and hourly:
+                is_multi = len(tickers) > 1
+                for display_t, hourly_data in hourly.items():
+                    hourly_html = format_hourly_moves_as_html(hourly_data)
+                    if not hourly_html:
+                        continue
+                    if is_multi:
+                        tab_marker = f'id="tab_{display_t}">'
+                        tab_pos = html.find(tab_marker)
+                        if tab_pos >= 0:
+                            content_start = tab_pos + len(tab_marker)
+                            next_tab = html.find('<div class="tab-content', content_start)
+                            script_pos = html.find('<script>', content_start)
+                            end_search = min(
+                                next_tab if next_tab > 0 else len(html),
+                                script_pos if script_pos > 0 else len(html),
+                            )
+                            close_div_pos = html.rfind('</div>', content_start, end_search)
+                            if close_div_pos > 0:
+                                html = html[:close_div_pos] + hourly_html + "\n" + html[close_div_pos:]
+                    else:
+                        html = html.replace("</body>", hourly_html + "\n</body>", 1)
 
             # Inject WebSocket live-price script
             html = _inject_range_percentiles_ws_script(html, tickers)
@@ -14914,19 +15043,9 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             window=window,
         )
 
-        html = format_as_html(
-            results,
-            params={
-                "tickers": tickers,
-                "window": window,
-                "lookback": lookback,
-                "percentiles": percentiles,
-            }
-        )
-
-        # If window is 0 (0DTE), compute and inject hourly moves-to-close
+        data_list = results if isinstance(results, list) else [results]
+        hourly = {}
         if window == 0:
-            hourly_sections = []
             for ticker_name, _ in ticker_specs:
                 try:
                     hourly_data = await compute_hourly_moves_to_close(
@@ -14940,12 +15059,39 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                         ensure_tables=False,
                         log_level="WARNING",
                     )
-                    hourly_html = format_hourly_moves_as_html(hourly_data)
-                    if hourly_html:
-                        hourly_sections.append(hourly_html)
+                    display_t = ticker_name.replace("I:", "") if ticker_name.startswith("I:") else ticker_name
+                    hourly[display_t] = hourly_data
                 except Exception as he:
                     logger.warning(f"Could not compute hourly moves for {ticker_name}: {he}")
 
+        if _wants_json_response(request):
+            return web.json_response({
+                "mode": "single_window",
+                "params": {
+                    "tickers": tickers,
+                    "window": window,
+                    "lookback": lookback,
+                    "percentiles": percentiles,
+                    "min_days": min_days,
+                    "min_direction_days": min_direction_days,
+                },
+                "data": data_list,
+                "hourly": hourly,
+            })
+
+        html = format_as_html(
+            results,
+            params={
+                "tickers": tickers,
+                "window": window,
+                "lookback": lookback,
+                "percentiles": percentiles,
+            }
+        )
+
+        if hourly:
+            hourly_sections = [format_hourly_moves_as_html(hd) for hd in hourly.values()]
+            hourly_sections = [h for h in hourly_sections if h]
             if hourly_sections:
                 hourly_combined = "\n".join(hourly_sections)
                 html = html.replace("</body>", hourly_combined + "\n</body>", 1)

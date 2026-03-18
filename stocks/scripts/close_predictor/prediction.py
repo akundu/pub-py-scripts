@@ -45,7 +45,7 @@ from scripts.csv_prediction_backtest import (
 
 def train_both_models(
     ticker: str,
-    lookback: int = 250,
+    lookback: int = 180,
     test_date: Optional[str] = None,
 ) -> Tuple[Optional[pd.DataFrame], Optional[StatisticalClosePredictor], List[str]]:
     """Load CSV data, train the statistical predictor, and collect percentile data.

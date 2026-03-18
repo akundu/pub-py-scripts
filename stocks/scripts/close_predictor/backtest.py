@@ -35,7 +35,7 @@ from scripts.csv_prediction_backtest import (
 
 def run_backtest(
     ticker: str,
-    lookback: int = 250,
+    lookback: int = 180,
     test_days: int = 10,
     vol_scale: bool = True,
     all_slots: bool = False,

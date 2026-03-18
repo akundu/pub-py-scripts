@@ -268,7 +268,7 @@ def clear_model_files(ticker, output_dir=Path('models/production')):
     return cleared
 
 
-async def train_0dte_model(ticker, lookback=120, db_config=None):
+async def train_0dte_model(ticker, lookback=180, db_config=None):
     """Train 0DTE LightGBM model and save to cache. Returns the predictor."""
     print(f"\n{'='*80}")
     print(f"TRAINING 0DTE MODEL - {ticker}")
@@ -339,7 +339,7 @@ def _load_vix_data(vix_ticker, all_dates):
     return vix_data
 
 
-def train_multi_day_models(ticker, train_days=250, validate_days=30,
+def train_multi_day_models(ticker, train_days=180, validate_days=30,
                            max_dte=20, output_dir=Path('models/production')):
     """Train multi-day LightGBM ensemble (DTE 1-N). Returns validation stats."""
     import pandas as pd
@@ -588,7 +588,7 @@ def train_multi_day_models(ticker, train_days=250, validate_days=30,
     return ensemble_stats
 
 
-async def predict_future_close(ticker: str, days_ahead: int, current_price: float, lookback: int = 120):
+async def predict_future_close(ticker: str, days_ahead: int, current_price: float, lookback: int = 180):
     """Predict close price N trading days in the future using historical patterns.
 
     Args:
@@ -1387,7 +1387,7 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
     return pred
 
 
-async def predict_close(ticker='NDX', lookback=120, force_retrain=False, similar_days_count=10, db_config=None, days_ahead=0, target_date=None, use_time_decay=True, use_intraday_vol=True):
+async def predict_close(ticker='NDX', lookback=180, force_retrain=False, similar_days_count=10, db_config=None, days_ahead=0, target_date=None, use_time_decay=True, use_intraday_vol=True):
     """Make a prediction for today's close (or future date) using LIVE QuestDB data.
 
     Args:
@@ -2153,8 +2153,8 @@ def _build_predict_parser(parser):
                         help='Predict close N trading days ahead (e.g., 5 for next Friday)')
     parser.add_argument('--target-date', type=str, metavar='YYYY-MM-DD',
                         help='Predict close for specific future date (e.g., 2026-02-20)')
-    parser.add_argument('--lookback', type=int, default=120, metavar='N',
-                        help='Number of historical trading days for training (default: 120)')
+    parser.add_argument('--lookback', type=int, default=180, metavar='N',
+                        help='Number of historical trading days for training (default: 180)')
     parser.add_argument('--db', type=str, default=None, metavar='CONNECTION_STRING',
                         help='QuestDB connection string (default: QUEST_DB_STRING env)')
     parser.add_argument('--no-time-decay', action='store_true', dest='no_time_decay',
@@ -2168,14 +2168,14 @@ def _build_train_parser(parser):
     from common.prediction_config import get_prediction_tickers
     parser.add_argument('ticker', nargs='?', default='NDX', choices=get_prediction_tickers(),
                         help='Ticker symbol to train (default: NDX)')
-    parser.add_argument('--lookback', type=int, default=120, metavar='N',
-                        help='0DTE training lookback in trading days (default: 120)')
+    parser.add_argument('--lookback', type=int, default=180, metavar='N',
+                        help='0DTE training lookback in trading days (default: 180)')
     parser.add_argument('--db', type=str, default=None, metavar='CONNECTION_STRING',
                         help='QuestDB connection string (default: QUEST_DB_STRING env)')
     parser.add_argument('--max-dte', type=int, default=0, metavar='N',
                         help='Also train multi-day models for DTE 1..N (e.g., 20). 0 = 0DTE only.')
-    parser.add_argument('--train-days', type=int, default=250, metavar='N',
-                        help='Multi-day training window in days (default: 250)')
+    parser.add_argument('--train-days', type=int, default=180, metavar='N',
+                        help='Multi-day training window in days (default: 180)')
     parser.add_argument('--validate-days', type=int, default=30, metavar='N',
                         help='Multi-day validation window in days (default: 30)')
     parser.add_argument('--output-dir', type=Path, default=Path('models/production'),
