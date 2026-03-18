@@ -1,0 +1,16 @@
+playbook:
+  name: "SPX Iron Condor"
+  description: "Iron condor on SPX — sell put spread + sell call spread for net credit"
+  broker: ibkr
+
+instructions:
+  - id: spx_iron_condor
+    type: iron_condor
+    symbol: SPX
+    expiration: "2026-03-20"
+    put_short: 5500
+    put_long: 5475
+    call_short: 5700
+    call_long: 5725
+    quantity: 1
+    net_price: 3.50

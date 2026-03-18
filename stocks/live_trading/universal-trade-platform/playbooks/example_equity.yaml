@@ -1,0 +1,27 @@
+playbook:
+  name: "Equity Trades"
+  description: "Simple equity buy and sell orders"
+  broker: ibkr
+
+instructions:
+  - id: buy_spy
+    type: equity
+    action: BUY
+    symbol: SPY
+    quantity: 100
+    order_type: MARKET
+
+  - id: buy_qqq_limit
+    type: equity
+    action: BUY
+    symbol: QQQ
+    quantity: 50
+    order_type: LIMIT
+    limit_price: 480.00
+
+  - id: sell_tqqq
+    type: equity
+    action: SELL
+    symbol: TQQQ
+    quantity: 200
+    order_type: MARKET

@@ -1,0 +1,64 @@
+# Market Data Streaming Configuration
+#
+# Used with: python utp.py daemon --live --streaming-config configs/streaming_default.yaml
+#
+# Subscribes to IBKR market data and publishes ticks to Redis and/or QuestDB
+# in the same format as polygon_realtime_streamer.py.
+#
+# IBKR limits (with 50% safety buffer):
+#   - Max 50 subscriptions (IBKR standard ~100 market data lines)
+#   - 22 msg/sec rate limit (IBKR soft limit 50 msg/sec)
+
+# ── Symbols to stream ───────────────────────────────────────────────────────
+# Simple string form: auto-detects index vs stock
+# Dict form: {symbol: SPX, sec_type: IND, exchange: CBOE}
+symbols:
+  # Major indices (auto-detected as IND with correct exchange)
+  - SPX
+  - RUT
+  - DJX
+  - VIX
+  - NDX
+  #- VIX1D
+
+  # Major ETFs (auto-detected as STK on SMART)
+  #- SPY
+  #- QQQ
+  #- IWM
+  #- DIA
+  #- TQQQ
+
+# ── Persistence targets ──────────────────────────────────────────────────────
+
+# Redis Pub/Sub — publishes to channels: realtime:quote:{SYMBOL}, realtime:trade:{SYMBOL}
+# Same format as polygon_realtime_streamer.py
+redis_enabled: true
+redis_url: "redis://lin1.kundu.dev:6379/0"
+redis_channel_prefix: "realtime"
+
+# QuestDB direct write — inserts into realtime_data table
+# Set questdb_url to enable (same connection string as QUEST_DB_STRING)
+questdb_enabled: false
+questdb_url: ""
+# Example: questdb_url: "questdb://stock_user:stock_password@lin1.kundu.dev:8812/stock_data"
+
+# ── Timing ────────────────────────────────────────────────────────────────────
+
+# How often to flush buffered ticks to persistence (seconds)
+tick_batch_interval: 0.5
+
+# Only stream during US market hours (9:30 AM - 4:00 PM ET)
+market_hours_only: true
+
+# ── WebSocket ─────────────────────────────────────────────────────────────────
+
+# Broadcast ticks to /ws/quotes WebSocket clients
+ws_broadcast_enabled: true
+
+# ── Safety limits (50% buffer on IBKR limits) ────────────────────────────────
+
+# Max simultaneous market data subscriptions (IBKR allows ~100)
+max_subscriptions: 50
+
+# Max messages per second to IBKR API (IBKR limit is 50)
+rate_limit_msg_sec: 22.0

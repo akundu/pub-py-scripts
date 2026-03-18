@@ -1,0 +1,16 @@
+# Secrets
+.env
+
+# Data persistence (runtime state)
+data/
+
+# Logs
+log/
+*.log
+
+# Caches
+__pycache__/
+.pytest_cache/
+
+# Generated HTML docs (rebuild with: python docs/build_html.py)
+docs/html/

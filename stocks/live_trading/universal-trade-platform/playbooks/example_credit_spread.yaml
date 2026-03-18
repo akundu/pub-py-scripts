@@ -1,0 +1,25 @@
+playbook:
+  name: "SPX Credit Spreads"
+  description: "Bull put and bear call credit spreads on SPX"
+  broker: ibkr
+
+instructions:
+  - id: spx_bull_put
+    type: credit_spread
+    symbol: SPX
+    expiration: "2026-03-20"
+    short_strike: 5500
+    long_strike: 5475
+    option_type: PUT
+    quantity: 2
+    net_price: 3.50
+
+  - id: spx_bear_call
+    type: credit_spread
+    symbol: SPX
+    expiration: "2026-03-20"
+    short_strike: 5800
+    long_strike: 5825
+    option_type: CALL
+    quantity: 1
+    net_price: 2.00
