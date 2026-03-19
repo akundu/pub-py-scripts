@@ -310,9 +310,10 @@ class IBKRLiveProvider(BrokerProvider):
                 except Exception as e:
                     logger.debug("Failed to get market price for %s: %s", pos.contract.symbol, e)
 
+                c = pos.contract
                 result.append(Position(
                     broker=Broker.IBKR,
-                    symbol=pos.contract.symbol,
+                    symbol=c.symbol,
                     quantity=float(pos.position),
                     avg_cost=float(pos.avgCost),
                     market_value=float(pos.position) * float(mkt_price),
@@ -320,6 +321,11 @@ class IBKRLiveProvider(BrokerProvider):
                     source=PositionSource.LIVE_API,
                     last_synced_at=datetime.now(UTC),
                     account_id=pos.account,
+                    con_id=c.conId if c.conId else None,
+                    sec_type=getattr(c, "secType", None),
+                    expiration=getattr(c, "lastTradeDateOrContractMonth", None) or None,
+                    strike=float(getattr(c, "strike", 0)) or None,
+                    right=getattr(c, "right", None) or None,
                 ))
             except Exception as e:
                 logger.error("Failed to parse IBKR position: %s", e)
@@ -359,18 +365,92 @@ class IBKRLiveProvider(BrokerProvider):
             })
         return result
 
+    # ── Executions (trade history, up to 7 days) ────────────────────────────
+
+    async def get_executions(self) -> list[dict]:
+        """Fetch execution reports from IBKR (up to ~7 days back).
+
+        Each Fill contains an Execution (trade details) and CommissionReport.
+        Returns structured dicts grouped by execId for deduplication.
+        """
+        if not self._ib or not self._connected:
+            return []
+
+        from ib_insync import ExecutionFilter
+        fills = await self._ib.reqExecutionsAsync(ExecutionFilter())
+        result = []
+        for fill in fills:
+            ex = fill.execution
+            c = fill.contract
+            cr = fill.commissionReport
+            result.append({
+                "exec_id": ex.execId,
+                "order_id": ex.orderId,
+                "perm_id": ex.permId,  # permanent order ID — consistent across sessions
+                "time": ex.time.isoformat() if hasattr(ex.time, "isoformat") else str(ex.time),
+                "side": ex.side,  # BOT or SLD
+                "shares": float(ex.shares),
+                "price": float(ex.price),
+                "avg_price": float(ex.avgPrice),
+                "cum_qty": float(ex.cumQty),
+                "account": ex.acctNumber,
+                "symbol": c.symbol,
+                "sec_type": c.secType,
+                "con_id": c.conId,
+                "local_symbol": getattr(c, "localSymbol", ""),
+                "expiration": getattr(c, "lastTradeDateOrContractMonth", ""),
+                "strike": float(getattr(c, "strike", 0)),
+                "right": getattr(c, "right", ""),
+                "exchange": getattr(ex, "exchange", ""),
+                "commission": float(cr.commission) if cr and cr.commission != 1e308 else 0.0,
+                "realized_pnl": float(cr.realizedPNL) if cr and cr.realizedPNL != 1e308 else 0.0,
+            })
+        return result
+
     # ── Quotes (cached) ──────────────────────────────────────────────────────
 
     async def get_quote(self, symbol: str) -> Quote:
         if not self._ib or not self._connected:
             raise RuntimeError("IBKR not connected")
 
-        # Check quote cache
+        # 1. Check streaming service first (instant, no IBKR round-trip)
+        try:
+            from app.services.market_data_streaming import get_streaming_service
+            svc = get_streaming_service()
+            if svc and svc.is_running:
+                tick = svc.get_last_tick(symbol.upper(), max_age_seconds=15.0)
+                if tick:
+                    price = tick.get("last") or tick.get("price") or 0
+                    if price and price > 0:
+                        from datetime import datetime as _dt, timezone as _tz
+                        tick_ts = _dt.fromisoformat(tick["timestamp"])
+                        quote = Quote(
+                            symbol=symbol,
+                            bid=tick.get("bid") or price,
+                            ask=tick.get("ask") or price,
+                            last=price,
+                            volume=tick.get("volume", 0),
+                            timestamp=tick_ts,
+                            source="streaming_cache",
+                        )
+                        self._cache.quotes.put(symbol, quote)
+                        return quote
+        except Exception:
+            pass
+
+        # 2. Check quote cache (5s TTL)
         cached = self._cache.quotes.get(symbol)
         if cached is not None:
             return cached
 
-        # Use Index contract for known indices, Stock for everything else
+        # 3. Fetch from IBKR
+        import asyncio
+        import math
+
+        def _safe_float(v: object) -> float:
+            f = float(v or 0)
+            return 0.0 if math.isnan(f) else f
+
         index_exchange = _INDEX_EXCHANGES.get(symbol.upper())
         if index_exchange:
             from ib_insync import Index
@@ -380,65 +460,34 @@ class IBKRLiveProvider(BrokerProvider):
             contract = Stock(symbol, self._exchange, "USD")
         await self._qualify_contract_cached(contract)
 
-        # Check if streaming service has a fresh tick (within 15s)
-        try:
-            from app.services.market_data_streaming import get_streaming_service
-            svc = get_streaming_service()
-            if svc and svc.is_running:
-                tick = svc.get_last_tick(symbol.upper(), max_age_seconds=15.0)
-                if tick:
-                    price = tick.get("last") or tick.get("price") or 0
-                    if price and price > 0:
-                        quote = Quote(
-                            symbol=symbol,
-                            bid=tick.get("bid") or price,
-                            ask=tick.get("ask") or price,
-                            last=price,
-                            volume=tick.get("volume", 0),
-                        )
-                        self._cache.quotes.put(symbol, quote)
-                        return quote
-        except Exception:
-            pass
-
-        import asyncio
-        import math
-
-        def _safe_float(v: object) -> float:
-            f = float(v or 0)
-            return 0.0 if math.isnan(f) else f
-
         await self._cache.rate_limiter.acquire()
 
-        if index_exchange:
-            # For indices, use reqMktData with streaming. If real-time is not
-            # subscribed (error 354), IBKR serves delayed data when market_data_type=4.
-            # Try real-time first, then explicitly request delayed if no data arrives.
+        # Use reqMktData(snapshot=False) + poll instead of reqTickersAsync
+        # (which uses snapshot=True with hardcoded 11s timeout in ib_insync).
+        # Poll every 0.5s, exit as soon as data arrives. Max 11s (same as before).
+        ticker = self._ib.reqMktData(contract, genericTickList="", snapshot=False)
+        got_data = False
+        for _ in range(37):  # up to ~11s in 0.3s increments
+            await asyncio.sleep(0.3)
+            last_val = _safe_float(ticker.last) or _safe_float(ticker.close)
+            bid_val = _safe_float(ticker.bid)
+            if last_val > 0 or bid_val > 0:
+                got_data = True
+                break
+
+        # For indices: if no data, try explicit delayed data type
+        if not got_data and index_exchange:
+            self._ib.cancelMktData(contract)
+            self._ib.reqMarketDataType(4)
             ticker = self._ib.reqMktData(contract, genericTickList="", snapshot=False)
-            got_data = False
-            for _ in range(4):  # up to 2 seconds
-                await asyncio.sleep(0.5)
+            for _ in range(37):  # up to ~11s for delayed data
+                await asyncio.sleep(0.3)
                 last_val = _safe_float(ticker.last) or _safe_float(ticker.close)
                 if last_val > 0:
-                    got_data = True
                     break
+            self._ib.reqMarketDataType(_cfg.settings.ibkr_market_data_type)
 
-            if not got_data:
-                # Explicitly request delayed data (type 4) and retry
-                self._ib.cancelMktData(contract)
-                self._ib.reqMarketDataType(4)
-                ticker = self._ib.reqMktData(contract, genericTickList="", snapshot=False)
-                for _ in range(6):  # up to 3 more seconds for delayed
-                    await asyncio.sleep(0.5)
-                    last_val = _safe_float(ticker.last) or _safe_float(ticker.close)
-                    if last_val > 0:
-                        break
-                # Restore configured market data type
-                self._ib.reqMarketDataType(_cfg.settings.ibkr_market_data_type)
-
-            self._ib.cancelMktData(contract)
-        else:
-            [ticker] = await self._ib.reqTickersAsync(contract)
+        self._ib.cancelMktData(contract)
 
         # For indices: IBKR never sends bid/ask (no order book). Use
         # close/last as the price. Volume may arrive via streaming.
@@ -446,12 +495,23 @@ class IBKRLiveProvider(BrokerProvider):
         ask = _safe_float(ticker.ask)
         last = _safe_float(ticker.last) or _safe_float(ticker.close)
 
+        # Get the ticker's last update time from ib_insync
+        ticker_time = getattr(ticker, "time", None)
+        if ticker_time and hasattr(ticker_time, "isoformat"):
+            quote_ts = ticker_time
+        else:
+            quote_ts = datetime.now(UTC)
+
+        source = "delayed" if not got_data and index_exchange else "ibkr"
+
         quote = Quote(
             symbol=symbol,
             bid=bid if bid > 0 else last,
             ask=ask if ask > 0 else last,
             last=last,
             volume=int(_safe_float(ticker.volume)),
+            timestamp=quote_ts,
+            source=source,
         )
 
         self._cache.quotes.put(symbol, quote)
@@ -671,7 +731,7 @@ class IBKRLiveProvider(BrokerProvider):
                 self._ib.cancelOrder(trade.order)
                 # Give IBKR a moment to process
                 import asyncio
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
                 # Check updated status
                 return await self.get_order_status(order_id)
 
@@ -877,14 +937,30 @@ class IBKRLiveProvider(BrokerProvider):
             len(newly_qualified), len(uncached),
         )
 
-        # Fetch market data in a single call. reqTickersAsync already uses
-        # asyncio.gather internally — it fires all reqMktData messages upfront
-        # then gathers all snapshot responses concurrently. The ~0.3-0.5s per
-        # contract is IBKR's server-side pacing, not something we can optimize
-        # from the client. The real parallelism happens at the caller level:
-        # _cmd_options fetches CALLS and PUTS concurrently via asyncio.gather.
+        # Fetch market data using reqMktData(snapshot=False) + poll instead of
+        # reqTickersAsync (which uses snapshot=True with 11s timeout per contract).
+        # Subscribe to all contracts, wait for data to stream in, then cancel.
+        import asyncio as _aio
         await self._cache.rate_limiter.acquire()
-        all_tickers = await self._ib.reqTickersAsync(*all_qualified)
+        tickers_map = {}
+        for c in all_qualified:
+            tickers_map[c.conId] = self._ib.reqMktData(c, genericTickList="", snapshot=False)
+
+        # Poll until ALL tickers have data or timeout (11s, same as old reqTickersAsync).
+        import math as _math
+        total_expected = len(tickers_map)
+        for _ in range(37):  # up to ~11s in 0.3s increments
+            await _aio.sleep(0.3)
+            got = sum(1 for t in tickers_map.values()
+                      if (t.last and t.last > 0 and not (isinstance(t.last, float) and _math.isnan(t.last)))
+                      or (t.bid and t.bid > 0 and not (isinstance(t.bid, float) and _math.isnan(t.bid))))
+            if got >= total_expected:  # all results in
+                break
+
+        all_tickers = list(tickers_map.values())
+        # Cancel all subscriptions
+        for c in all_qualified:
+            self._ib.cancelMktData(c)
 
         results = []
         for ticker in all_tickers:
@@ -1022,13 +1098,16 @@ class IBKRLiveProvider(BrokerProvider):
                         return 0.0
             return 0.0
 
-        # If accountValues() is empty, request an update
+        # If accountValues() is empty, request an update with poll (up to 5s)
         if not values:
+            import asyncio
             account_id = _cfg.settings.ibkr_account_id or ""
             self._ib.reqAccountUpdates(subscribe=True, account=account_id)
-            import asyncio
-            await asyncio.sleep(1)
-            values = self._ib.accountValues()
+            for _ in range(17):  # up to ~5s in 0.3s increments
+                await asyncio.sleep(0.3)
+                values = self._ib.accountValues()
+                if values:
+                    break
             self._ib.reqAccountUpdates(subscribe=False, account=account_id)
 
         return AccountBalances(

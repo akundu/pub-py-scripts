@@ -120,24 +120,54 @@ class PlatformPositionStore:
         market_value: float,
         unrealized_pnl: float,
         source: PositionSource = PositionSource.EXTERNAL_SYNC,
+        con_id: int | None = None,
+        sec_type: str | None = None,
+        expiration: str | None = None,
+        strike: float | None = None,
+        right: str | None = None,
     ) -> str:
         """Add a position discovered via broker sync."""
         with self._lock:
             # Use abs(avg_cost) — IBKR may return negative for short positions
             # but entry_price should be the absolute cost basis per share
             entry = abs(avg_cost) if avg_cost else 0
+
+            # Determine order_type from sec_type
+            if sec_type in ("OPT", "FOP"):
+                order_type = "option"
+            else:
+                order_type = "equity"
+
+            # Format expiration for options
+            fmt_exp = None
+            if expiration and len(expiration) == 8:
+                fmt_exp = f"{expiration[:4]}-{expiration[4:6]}-{expiration[6:8]}"
+            elif expiration:
+                fmt_exp = expiration
+
             pos = TrackedPosition(
                 source=source,
                 broker=broker,
-                order_type="equity",
+                order_type=order_type,
                 symbol=symbol,
                 quantity=quantity,
                 entry_price=entry,
+                expiration=fmt_exp,
                 current_mark=market_value / quantity if quantity else 0,
                 unrealized_pnl=unrealized_pnl,
                 last_synced_at=datetime.now(UTC),
             )
-            self._positions[pos.position_id] = json.loads(pos.model_dump_json())
+            pos_dict = json.loads(pos.model_dump_json())
+            # Store IBKR-specific fields for deduplication
+            if con_id:
+                pos_dict["con_id"] = con_id
+            if sec_type:
+                pos_dict["sec_type"] = sec_type
+            if strike:
+                pos_dict["strike"] = strike
+            if right:
+                pos_dict["right"] = right
+            self._positions[pos.position_id] = pos_dict
             self._save()
             return pos.position_id
 
@@ -350,6 +380,21 @@ class PlatformPositionStore:
             ):
                 return pos
         return None
+
+    def find_by_con_id(self, con_id: int) -> Optional[dict]:
+        """Find an open position by IBKR contract ID (globally unique)."""
+        for pos in self._positions.values():
+            if pos.get("status") == "open" and pos.get("con_id") == con_id:
+                return pos
+        return None
+
+    def update_field(self, position_id: str, field: str, value) -> None:
+        """Update a single field on a position."""
+        with self._lock:
+            pos = self._positions.get(position_id)
+            if pos:
+                pos[field] = value
+                self._save()
 
     def export_results(self) -> list[dict]:
         """Export closed positions in a format compatible with metrics computation."""

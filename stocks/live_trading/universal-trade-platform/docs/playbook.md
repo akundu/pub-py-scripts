@@ -187,7 +187,15 @@ curl http://localhost:8000/dashboard/status \
 
 ## Reconciliation
 
-The reconciliation system compares positions tracked in the UTP position store against positions reported by the broker (via `provider.get_positions()`). It produces a `ReconciliationReport` with:
+The reconciliation system compares positions tracked in the UTP position store against positions reported by the broker (via `provider.get_positions()`). Reconcile automatically fetches and caches IBKR executions.
+
+### Flush Behavior
+
+- `--flush` preserves closed positions (P&L history) and only flushes open positions
+- `--hard-reset` clears EVERYTHING: open + closed positions, ledger, and executions cache — for a full rebuild
+- `flush` command is blocked when a daemon is running (warns to use `reconcile --flush` instead)
+
+It produces a `ReconciliationReport` with:
 
 | Discrepancy Type | Meaning |
 |---|---|

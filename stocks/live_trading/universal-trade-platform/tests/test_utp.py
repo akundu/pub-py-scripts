@@ -4605,3 +4605,153 @@ symbols:
         from app.services.streaming_config import load_streaming_config
         config = load_streaming_config(config_path)
         assert len(config.symbols) >= 5  # SPX, NDX, RUT, DJX, VIX at minimum
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Execution Store — IBKR execution history and multi-leg grouping
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestExecutionStore:
+    """Tests for IBKR execution cache and order grouping."""
+
+    def _make_fill(self, exec_id, perm_id, order_id, symbol, side, shares, price,
+                   sec_type="STK", strike=0, right="", expiration="", con_id=100):
+        return {
+            "exec_id": exec_id,
+            "order_id": order_id,
+            "perm_id": perm_id,
+            "time": "2026-03-18T15:00:00",
+            "side": side,
+            "shares": shares,
+            "price": price,
+            "avg_price": price,
+            "cum_qty": shares,
+            "account": "U123",
+            "symbol": symbol,
+            "sec_type": sec_type,
+            "con_id": con_id,
+            "local_symbol": "",
+            "expiration": expiration,
+            "strike": strike,
+            "right": right,
+            "exchange": "SMART",
+            "commission": 1.0,
+            "realized_pnl": 0.0,
+        }
+
+    def test_store_and_dedup(self, tmp_path):
+        """Executions are stored and deduplicated by exec_id."""
+        from app.services.execution_store import ExecutionStore
+        store = ExecutionStore(tmp_path / "exec.json")
+        fills = [self._make_fill("ex1", 1001, 1, "GBTC", "BOT", 100, 55.0)]
+        assert store.merge_executions(fills) == 1
+        assert store.count == 1
+        # Merge again — should be 0 new
+        assert store.merge_executions(fills) == 0
+        assert store.count == 1
+
+    def test_persistence_across_loads(self, tmp_path):
+        """Stored executions survive reload."""
+        from app.services.execution_store import ExecutionStore
+        path = tmp_path / "exec.json"
+        store1 = ExecutionStore(path)
+        store1.merge_executions([self._make_fill("ex1", 1001, 1, "SPY", "BOT", 50, 500.0)])
+        assert store1.count == 1
+        # Reload
+        store2 = ExecutionStore(path)
+        assert store2.count == 1
+
+    def test_group_equity_order(self, tmp_path):
+        """Single equity fill grouped as one order."""
+        from app.services.execution_store import ExecutionStore
+        store = ExecutionStore(tmp_path / "exec.json")
+        store.merge_executions([
+            self._make_fill("ex1", 1001, 1, "GBTC", "BOT", 4350, 57.64),
+        ])
+        groups = store.get_grouped_by_order()
+        assert len(groups) == 1
+        assert groups[0]["order_type"] == "equity"
+        assert groups[0]["leg_count"] == 1
+
+    def test_group_credit_spread(self, tmp_path):
+        """Two option fills with same perm_id grouped as credit spread."""
+        from app.services.execution_store import ExecutionStore
+        store = ExecutionStore(tmp_path / "exec.json")
+        store.merge_executions([
+            self._make_fill("ex1", 2001, 10, "RUT", "SLD", 1, 3.50,
+                           sec_type="OPT", strike=2460, right="P",
+                           expiration="20260318", con_id=200),
+            self._make_fill("ex2", 2001, 10, "RUT", "BOT", 1, 1.20,
+                           sec_type="OPT", strike=2440, right="P",
+                           expiration="20260318", con_id=201),
+        ])
+        groups = store.get_grouped_by_order()
+        assert len(groups) == 1
+        g = groups[0]
+        assert g["order_type"] == "credit_spread"
+        assert g["leg_count"] == 2
+        assert g["net_amount"] > 0  # credit received
+        assert g["symbol"] == "RUT"
+        assert g["expiration"] == "2026-03-18"
+
+    def test_group_iron_condor(self, tmp_path):
+        """Four option fills with same perm_id grouped as iron condor."""
+        from app.services.execution_store import ExecutionStore
+        store = ExecutionStore(tmp_path / "exec.json")
+        store.merge_executions([
+            self._make_fill("ex1", 3001, 20, "SPX", "SLD", 1, 5.00,
+                           sec_type="OPT", strike=5500, right="P", con_id=300),
+            self._make_fill("ex2", 3001, 20, "SPX", "BOT", 1, 2.00,
+                           sec_type="OPT", strike=5475, right="P", con_id=301),
+            self._make_fill("ex3", 3001, 20, "SPX", "SLD", 1, 4.00,
+                           sec_type="OPT", strike=5700, right="C", con_id=302),
+            self._make_fill("ex4", 3001, 20, "SPX", "BOT", 1, 1.50,
+                           sec_type="OPT", strike=5725, right="C", con_id=303),
+        ])
+        groups = store.get_grouped_by_order()
+        assert len(groups) == 1
+        assert groups[0]["order_type"] == "iron_condor"
+        assert groups[0]["leg_count"] == 4
+
+    def test_multiple_orders_separate(self, tmp_path):
+        """Different perm_ids produce separate groups."""
+        from app.services.execution_store import ExecutionStore
+        store = ExecutionStore(tmp_path / "exec.json")
+        store.merge_executions([
+            self._make_fill("ex1", 4001, 30, "GBTC", "BOT", 100, 55.0, con_id=400),
+            self._make_fill("ex2", 4002, 31, "RUT", "SLD", 1, 3.00,
+                           sec_type="OPT", strike=2460, right="P", con_id=401),
+            self._make_fill("ex3", 4002, 31, "RUT", "BOT", 1, 1.00,
+                           sec_type="OPT", strike=2440, right="P", con_id=402),
+        ])
+        groups = store.get_grouped_by_order()
+        assert len(groups) == 2
+        types = {g["order_type"] for g in groups}
+        assert "equity" in types
+        assert "credit_spread" in types
+
+    def test_flush(self, tmp_path):
+        """Flush clears all executions."""
+        from app.services.execution_store import ExecutionStore
+        store = ExecutionStore(tmp_path / "exec.json")
+        store.merge_executions([self._make_fill("ex1", 5001, 40, "SPY", "BOT", 10, 500.0)])
+        assert store.count == 1
+        removed = store.flush()
+        assert removed == 1
+        assert store.count == 0
+
+    def test_merge_across_runs(self, tmp_path):
+        """Merging new executions preserves existing ones."""
+        from app.services.execution_store import ExecutionStore
+        store = ExecutionStore(tmp_path / "exec.json")
+        store.merge_executions([self._make_fill("ex1", 6001, 50, "SPY", "BOT", 10, 500.0)])
+        store.merge_executions([self._make_fill("ex2", 6002, 51, "QQQ", "BOT", 20, 400.0)])
+        assert store.count == 2
+        groups = store.get_grouped_by_order()
+        assert len(groups) == 2
+
+    def test_cmd_executions_exists(self):
+        """executions CLI command exists."""
+        import utp
+        assert hasattr(utp, "_cmd_executions")

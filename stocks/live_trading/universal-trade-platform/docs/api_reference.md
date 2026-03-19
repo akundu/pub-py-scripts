@@ -760,6 +760,45 @@ Return trade history (closed positions).
 
 ---
 
+## GET /account/executions
+
+Return IBKR execution history, grouped by permanent order ID (`perm_id`).
+
+**Required Scope:** `account:read`
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `symbol` | string | None | Filter by symbol |
+| `flush` | bool | false | Clear cache and re-fetch from IBKR |
+
+**Response (200):**
+
+```json
+{
+  "executions": [
+    {
+      "perm_id": 123456789,
+      "symbol": "RUT",
+      "legs": [
+        {
+          "exec_id": "0000e0d5.67890abc.01.01",
+          "side": "SLD",
+          "quantity": 1,
+          "price": 2.50,
+          "time": "2026-03-18T15:30:00"
+        }
+      ],
+      "is_multi_leg": true
+    }
+  ],
+  "count": 5
+}
+```
+
+---
+
 ## GET /account/orders
 
 Return open/working orders from the broker.

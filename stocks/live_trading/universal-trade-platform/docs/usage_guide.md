@@ -247,12 +247,17 @@ python utp.py playbook execute playbooks/example_mixed.yaml --live
 # Compare system positions vs broker
 python utp.py reconcile --live
 
-# Full flush + sync + reconcile + display
+# Flush open positions only (preserves closed P&L history), then sync + reconcile
 python utp.py reconcile --flush --show --live
+
+# Hard reset: clears EVERYTHING (open+closed positions, ledger, executions)
+python utp.py reconcile --hard-reset --live
 
 # Show full portfolio after reconciling
 python utp.py reconcile --flush --portfolio --live
 ```
+
+Note: `--flush` preserves closed positions (P&L history) and only flushes open positions. Use `--hard-reset` for a complete rebuild.
 
 ---
 
@@ -358,6 +363,69 @@ ws.send(JSON.stringify({action: "unsubscribe", symbols: ["SPX"]}))
 
 ---
 
+## Workflow 13: View Execution History (Grouped Trades)
+
+```bash
+# View IBKR executions grouped by permanent order ID (multi-leg trades shown together)
+python utp.py executions --live
+
+# Filter by symbol
+python utp.py executions --symbol RUT --live
+
+# Clear cache and re-fetch from IBKR
+python utp.py executions --flush --live
+```
+
+The execution store caches IBKR executions in `data/utp/live/executions.json` and groups them by `perm_id` (IBKR permanent order ID), making it easy to see which legs belong to the same multi-leg trade.
+
+---
+
+## Workflow 14: Simulate a Trade (Margin Check Without Execution)
+
+```bash
+# Qualifies contracts, checks margin, shows what would happen — but does NOT execute
+python utp.py trade credit-spread --symbol RUT --short-strike 2460 \
+  --long-strike 2440 --option-type PUT --expiration 2026-03-18 \
+  --quantity 1 --live --simulate
+
+# Also works for other trade types
+python utp.py trade iron-condor --symbol SPX --put-short 5500 \
+  --put-long 5475 --call-short 5700 --call-long 5725 \
+  --expiration 2026-03-20 --quantity 1 --net-price 3.50 --live --simulate
+```
+
+The `--simulate` flag uses the live IBKR connection to qualify contracts and check margin but never submits the order.
+
+---
+
+## Workflow 15: Full System Reset and Rebuild
+
+```bash
+# Hard reset: clears EVERYTHING (open + closed positions, ledger, executions)
+python utp.py reconcile --hard-reset --live
+
+# Regular flush: clears open positions only (preserves closed P&L history)
+python utp.py reconcile --flush --live
+
+# After reset, re-sync from broker
+python utp.py reconcile --show --live
+```
+
+---
+
+## Daemon-First CLI Routing
+
+Every CLI command auto-detects a running daemon via HTTP health check. When a daemon is found, commands route through its HTTP API (sharing the same IBKR connection). When no daemon is running, commands connect to IBKR directly.
+
+**Exceptions:**
+- `flush` — blocked when daemon running (warns to use `reconcile --flush` instead)
+- `readiness` — warns when daemon running (needs separate IBKR client-id)
+- `daemon` — starts the daemon itself
+- `repl` — connects to daemon
+- `server` — starts standalone HTTP server
+
+---
+
 ## CLI Subcommand Aliases
 
 | Alias | Full Command |
@@ -370,6 +438,7 @@ ws.send(JSON.stringify({action: "unsubscribe", symbols: ["SPX"]}))
 | `oo`, `open-orders` | `orders` |
 | `cx` | `cancel` |
 | `activity` | `trades` |
+| `exec` | `executions` |
 | `cl` | `close` |
 | `d` | `daemon` |
 | `shell`, `interactive` | `repl` |

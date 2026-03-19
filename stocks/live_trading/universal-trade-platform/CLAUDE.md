@@ -11,7 +11,7 @@ A unified multi-broker trading API (FastAPI) supporting Robinhood, E\*TRADE, and
 | File | Purpose |
 |------|---------|
 | `utp.py` | ALL CLI operations + API server |
-| `tests/test_utp.py` | ALL tests (349 tests) |
+| `tests/test_utp.py` | ALL tests (359 tests) |
 
 There are no standalone scripts. Do not create new top-level scripts unless explicitly asked.
 
@@ -35,7 +35,8 @@ python utp.py daemon --live --advisor-profile tiered_v2   # With advisor signals
 python utp.py daemon --live --advisor-profile tiered_v2 --auto-execute  # Full auto
 python utp.py daemon --live --no-restart              # Disable auto-restart on crash
 
-# CLI auto-detects running daemon — no flags needed
+# CLI auto-detects running daemon and routes through HTTP first,
+# falling back to direct IBKR if no daemon is running
 python utp.py portfolio        # Talks to daemon via HTTP
 python utp.py quote SPX NDX    # Talks to daemon via HTTP
 python utp.py close 2d9a       # Talks to daemon via HTTP
@@ -159,6 +160,16 @@ python utp.py trades --days 7 --live             # Last 7 days of trades
 python utp.py trades --all --live                # All trades (open + closed) regardless of date
 python utp.py trades --detail <pos-id> --live    # Full detail + close command
 
+# ── Execution History (IBKR) ────────────────────────────────────
+python utp.py executions --live                  # View IBKR executions grouped by perm_id
+python utp.py executions --symbol RUT --live     # Filter by symbol
+python utp.py executions --flush --live          # Clear cache and re-fetch
+
+# ── Trade Simulation ─────────────────────────────────────────────
+python utp.py trade credit-spread --symbol RUT --short-strike 2460 \
+  --long-strike 2440 --option-type PUT --expiration 2026-03-18 \
+  --quantity 1 --live --simulate                 # Qualify + margin check, no execution
+
 # ── Close by Position ID ─────────────────────────────────────────
 python utp.py close <pos-id-prefix>              # Dry-run close (auto-derives params)
 python utp.py close <pos-id-prefix> --live       # Close at $0.05 debit (default)
@@ -172,7 +183,8 @@ python utp.py playbook validate playbooks/example_mixed.yaml
 
 # ── Reconciliation ──────────────────────────────────────────────────
 python utp.py reconcile                          # System vs broker positions
-python utp.py reconcile --flush                  # Flush stale data, sync fresh, reconcile
+python utp.py reconcile --flush                  # Flush open positions only (preserves closed P&L history)
+python utp.py reconcile --hard-reset             # Full reset: clears open+closed positions, ledger, executions
 python utp.py reconcile --show                   # Show synced positions after reconciling
 python utp.py reconcile --portfolio              # Full portfolio dump after reconciling
 python utp.py reconcile --flush --show --live    # Atomic flush+sync+reconcile+display
@@ -218,6 +230,7 @@ python utp.py repl --server http://192.168.1.50:8000     # Explicit server
 | `open-orders` | `orders` |
 | `cx` | `cancel` |
 | `activity` | `trades` |
+| `exec` | `executions` |
 | `cl` | `close` |
 | `d` | `daemon` |
 | `shell` | `repl` |
@@ -314,6 +327,38 @@ python utp.py repl
 [LIVE] utp> trades --all     # Review all activity
 ```
 
+### Workflow 5: View execution history (grouped trades)
+
+```bash
+# View IBKR executions grouped by permanent order ID
+python utp.py executions --live
+
+# Filter by symbol
+python utp.py executions --symbol RUT --live
+
+# Clear cache and re-fetch
+python utp.py executions --flush --live
+```
+
+### Workflow 6: Simulate a trade (margin check without execution)
+
+```bash
+# Uses live IBKR connection: qualifies contracts, checks margin, but does NOT execute
+python utp.py trade credit-spread --symbol RUT --short-strike 2460 \
+  --long-strike 2440 --option-type PUT --expiration 2026-03-18 \
+  --quantity 1 --live --simulate
+```
+
+### Workflow 7: Full system reset and rebuild
+
+```bash
+# Hard reset: clears ALL data (open+closed positions, ledger, executions)
+python utp.py reconcile --hard-reset --live
+
+# Then re-sync from broker
+python utp.py reconcile --show --live
+```
+
 ## Architecture at a Glance
 
 ```
@@ -325,6 +370,17 @@ Clients → FastAPI Routes → Services → ProviderRegistry → Broker APIs
 ```
 
 **Key design pattern**: Module-level singletons for cross-cutting services (`get_ledger()`, `get_position_store()`). All calls guarded with `if get_*():` so tests that skip init still pass.
+
+### Daemon-First CLI Routing
+
+Every CLI command auto-detects a running daemon via HTTP health check. When daemon is found, all commands route through its HTTP API (sharing the same IBKR connection). When no daemon, commands connect to IBKR directly.
+
+**Exceptions:**
+- `flush` — blocked when daemon running (warns to use `reconcile --flush`)
+- `readiness` — warns when daemon running (needs separate IBKR client-id)
+- `daemon` — starts the daemon itself
+- `repl` — connects to daemon
+- `server` — starts standalone HTTP server
 
 ## File Layout
 
@@ -345,6 +401,7 @@ Clients → FastAPI Routes → Services → ProviderRegistry → Broker APIs
 | `live_data_service.py` | `LiveDataService` | IBKR-primary data with local fallback. Module accessor: `init_live_data_service()` / `get_live_data_service()` / `reset_live_data_service()` |
 | `market_data_streaming.py` | `MarketDataStreamingService` | IBKR real-time streaming to Redis/QuestDB/WS. Module accessor: `init_streaming_service()` / `get_streaming_service()` / `reset_streaming_service()` |
 | `streaming_config.py` | `StreamingConfig` | YAML config loader for streaming symbols and targets |
+| `execution_store.py` | `ExecutionStore` | IBKR execution cache with perm_id grouping. Module accessor: `init_execution_store()` / `get_execution_store()` / `reset_execution_store()` |
 
 ### Routes (`app/routes/`)
 
@@ -352,7 +409,7 @@ Clients → FastAPI Routes → Services → ProviderRegistry → Broker APIs
 |------|--------|-----------|
 | `trade.py` | `/trade` | `POST /trade/execute`, `POST /trade/close`, `POST /trade/advisor/confirm` |
 | `market.py` | `/market` | `GET /market/quote/{symbol}`, `POST /market/quotes`, `POST /market/margin`, `GET /market/options/{symbol}`, `GET /market/streaming/status`, `POST /market/streaming/subscribe`, `POST /market/streaming/unsubscribe` |
-| `account.py` | `/account` | `GET /positions`, `POST /sync`, `POST /check-expirations`, `GET /expiring`, `GET /reconciliation`, `GET /trades`, `GET /orders`, `POST /cancel` |
+| `account.py` | `/account` | `GET /positions`, `POST /sync`, `POST /check-expirations`, `GET /expiring`, `GET /reconciliation`, `GET /trades`, `GET /orders`, `POST /cancel`, `GET /executions` |
 | `ledger.py` | `/ledger` | `GET /entries`, `GET /entries/recent`, `POST /snapshot`, `GET /snapshots`, `GET /replay` |
 | `dashboard.py` | `/dashboard` | `GET /summary`, `GET /performance`, `GET /pnl/daily`, `GET /status`, `GET /terminal`, `GET /advisor/recommendations`, `GET /advisor/status` |
 | `import_routes.py` | `/import` | `POST /csv`, `POST /preview`, `GET /formats` |
@@ -373,7 +430,7 @@ Clients → FastAPI Routes → Services → ProviderRegistry → Broker APIs
 
 Key enums: `Broker`, `OrderStatus`, `LedgerEventType`, `PositionSource`
 
-Key models: `TradeRequest`, `OrderResult` (has `filled_price`), `Position` (has `source`, `last_synced_at`, `account_id`), `LedgerEntry`, `TrackedPosition`, `DashboardSummary`, `PerformanceMetrics`, `DailyPnL`, `CSVImportResult`, `SyncResult`, `ReconciliationEntry`, `ReconciliationReport`, `StatusReport`, `PlaybookDefinition`, `PlaybookInstruction`, `InstructionResult`, `PlaybookResult`
+Key models: `TradeRequest`, `OrderResult` (has `filled_price`), `Position` (has `source`, `last_synced_at`, `account_id`, `con_id`, `sec_type`, `expiration`, `strike`, `right`), `LedgerEntry`, `TrackedPosition`, `DashboardSummary`, `PerformanceMetrics`, `DailyPnL`, `CSVImportResult`, `SyncResult`, `ReconciliationEntry`, `ReconciliationReport`, `StatusReport`, `PlaybookDefinition`, `PlaybookInstruction`, `InstructionResult`, `PlaybookResult`
 
 ## Source Attribution
 
@@ -389,14 +446,14 @@ Every position and ledger entry carries `source: PositionSource`:
 ## Persistence
 
 ```
-data/utp/
+data/utp/live/
+├── positions.json           # All positions (open + closed, with con_id)
+├── executions.json          # IBKR execution cache (perm_id groupings)
 ├── cache/
 │   └── option_chains/       # Daily option chain cache (JSON per symbol per day)
-├── ledger/
-│   ├── ledger.jsonl         # Append-only, one JSON per line, monotonic sequence_number
-│   └── snapshots/           # Point-in-time state for replay
-├── positions.json           # All TrackedPositions (open + closed)
-└── imports/{broker}/        # Saved CSV uploads
+└── ledger/
+    ├── ledger.jsonl         # Append-only, one JSON per line, monotonic sequence_number
+    └── snapshots/           # Point-in-time state for replay
 ```
 
 - Ledger recovers sequence counter from last line on restart
@@ -411,7 +468,7 @@ data/utp/
 
 ## Background Tasks (started in `app/main.py` lifespan)
 
-1. **Expiration loop** — every `EXPIRATION_CHECK_INTERVAL_SECONDS` (60): finds positions with `expiration <= today`, auto-closes
+1. **Expiration loop** — every `EXPIRATION_CHECK_INTERVAL_SECONDS` (60): finds positions with `expiration < today` (strict — same-day 0DTE options stay live until `check_eod_exits()` runs after market close)
 2. **Position sync loop** — every `POSITION_SYNC_INTERVAL_SECONDS` (120): polls all providers during market hours (13:30-20:00 UTC)
 
 Both are `asyncio.Task`, cancelled on shutdown.
@@ -439,10 +496,10 @@ All from env vars / `.env`:
 
 ## Testing
 
-**349 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
+**359 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
 
 ```bash
-python -m pytest tests/ -v                              # All 349 tests
+python -m pytest tests/ -v                              # All 359 tests
 python -m pytest tests/test_utp.py -v                   # Same (only file)
 python -m pytest tests/test_utp.py -k "TestLedger" -v   # Filter by class
 python -m pytest tests/test_utp.py -k "TestIBKR" -v     # IBKR tests only
@@ -502,14 +559,22 @@ python -m pytest tests/test_utp.py -k "TestIBKR" -v     # IBKR tests only
 | `TestTradingClient` | 11 | Async/sync client, payloads, context manager |
 | `TestHTTPClientMode` | 8 | Server detection, HTTP functions, REPL |
 | `TestAdvisorIntegration` | 8 | Advisor endpoints, daemon state, confirm |
+| `TestExecutionStore` | 9 | Execution store, dedup, grouping, multi-leg detection |
 
 ## IBKR Live Provider
 
-`IBKRLiveProvider` in `app/core/providers/ibkr.py` uses `ib_insync`. Activated when `IBKR_ACCOUNT_ID` is set. Supports real quotes, positions, equity orders, multi-leg combo orders, option chain lookups, margin checks, open order management, order cancellation, and broker-authoritative portfolio P&L via `ib.portfolio()`. `IBKR_READONLY=true` (default) blocks all order submission.
+`IBKRLiveProvider` in `app/core/providers/ibkr.py` uses `ib_insync`. Activated when `IBKR_ACCOUNT_ID` is set. Supports real quotes, positions, equity orders, multi-leg combo orders, option chain lookups, margin checks, open order management, order cancellation, and broker-authoritative portfolio P&L via `ib.portfolio()`. `IBKR_READONLY=true` (default) blocks all order submission. Position sync uses IBKR `conId` for unique matching (prevents duplicate imports). The position store has a `find_by_con_id()` method for conId-based lookups. Quote fields handle NaN gracefully, index quotes use `reqMktData` with streaming + delayed data fallback, and the streaming cache serves fresh ticks (<15s) instantly.
 
 ### Broker-Authoritative P&L
 
 When connected to IBKR via `--live` or `--paper`, both `portfolio` and `trades` commands show **AvgCost** and **Mark** columns sourced directly from IBKR's `ib.portfolio()`. This provides broker-authoritative cost basis and current mark-to-market values. The `_match_broker_pnl()` helper now lives in `app/services/live_data_service.py` and is re-exported from `utp.py` for backwards compat. It matches IBKR portfolio items to system positions, with proration logic for shared strikes (e.g., when multiple positions reference the same option contract).
+
+### Portfolio Display
+
+- Shows short position ID (first 6 chars) for easy `close` command
+- Shows option strike info (e.g., `P2440/P2460`)
+- Shows `---` for zero/null market data instead of `$0.0000`
+- Fallback enrichment from IBKR portfolio items for unmatched positions
 
 ### IBKR-Primary Data Architecture
 
@@ -588,7 +653,7 @@ Supports Robinhood (`Activity Date, Instrument, Trans Code, Quantity, Price, Amo
 2. Init in `app/main.py` lifespan
 3. If background task needed, add `asyncio.create_task()` to lifespan
 4. Route in `app/routes/my_routes.py`, register in `main.py`
-5. Add tests as a new `class TestMyService` in `tests/test_utp.py` (currently 349 tests)
+5. Add tests as a new `class TestMyService` in `tests/test_utp.py` (currently 359 tests)
 6. Add `reset_*()` call to `conftest.py` teardown
 
 ### New ledger event type

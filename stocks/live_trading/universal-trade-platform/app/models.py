@@ -142,6 +142,7 @@ class Quote(BaseModel):
     last: float
     volume: int
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    source: str = ""  # e.g. "ibkr", "streaming_cache", "delayed"
 
 
 class Position(BaseModel):
@@ -154,6 +155,11 @@ class Position(BaseModel):
     source: PositionSource = PositionSource.LIVE_API
     last_synced_at: Optional[datetime] = None
     account_id: Optional[str] = None
+    con_id: Optional[int] = None  # IBKR contract ID — unique per instrument
+    sec_type: Optional[str] = None  # STK, OPT, FOP, IND
+    expiration: Optional[str] = None  # For options: YYYYMMDD
+    strike: Optional[float] = None  # For options
+    right: Optional[str] = None  # C or P for options
 
 
 class AggregatedPositions(BaseModel):

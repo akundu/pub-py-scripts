@@ -58,7 +58,9 @@ async def _setup_providers(tmp_path):
     reset_position_store()
     reset_live_data_service()
     from app.services.market_data_streaming import reset_streaming_service
+    from app.services.execution_store import reset_execution_store
     reset_streaming_service()
+    reset_execution_store()
 
     # Reset daemon shared state between tests
     from utp import _daemon_state

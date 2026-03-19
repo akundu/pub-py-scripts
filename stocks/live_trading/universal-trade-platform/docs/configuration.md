@@ -53,6 +53,7 @@ All configuration is managed through environment variables, loaded via `pydantic
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TRUST_LOCAL_NETWORK` | `true` | Skip auth for private IPs (127.*, 10.*, 172.16-31.*, 192.168.*). Disable for exposed servers. |
+| `REDIS_URL` | (empty) | Redis connection URL for streaming. Overrides `redis_url` in streaming YAML config if set. |
 
 ### Broker Selection
 
@@ -155,12 +156,15 @@ print(settings.broker_list())                     # ["robinhood", "etrade", "ibk
 When the server runs, the `DATA_DIR` is populated:
 
 ```
-data/utp/
+data/utp/live/
+├── positions.json            # All positions (open + closed, with con_id)
+├── executions.json           # IBKR execution cache (perm_id groupings)
+├── cache/
+│   └── option_chains/        # Daily option chain cache (JSON per symbol per day)
 ├── ledger/
 │   ├── ledger.jsonl          # Append-only transaction log
 │   └── snapshots/
 │       └── snapshot_42.json  # Point-in-time state snapshots
-├── positions.json            # All tracked positions (open + closed)
 └── imports/
     ├── robinhood/            # Saved CSV uploads
     └── etrade/
@@ -266,6 +270,8 @@ python utp.py daemon --live --streaming-config /path/to/my_streaming.yaml
 ```
 
 The streaming service initializes after the IBKR provider connects and runs as a background task alongside expiration and sync loops.
+
+**Redis URL precedence**: The `REDIS_URL` environment variable takes priority over the `redis_url` field in the streaming YAML config. This allows per-environment overrides without modifying the config file.
 
 ## Daemon Configuration
 

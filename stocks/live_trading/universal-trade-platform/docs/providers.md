@@ -87,6 +87,14 @@ The IBKR provider has **two implementations** in the same file:
 - Orders return `REJECTED` with clear message when readonly
 - Market data type defaults to `4` (delayed/free)
 - All positions include `source=LIVE_API` and `account_id`
+- Position sync uses IBKR `conId` for unique matching (prevents duplicate imports)
+- Position model includes `con_id`, `sec_type`, `expiration`, `strike`, `right`
+- Position store has `find_by_con_id()` method for conId-based lookups
+
+**Quote handling:**
+- NaN handling for all quote fields (bid/ask/last/volume)
+- Index quotes use `reqMktData` with streaming + delayed data fallback
+- Streaming cache: if the streaming service has a fresh tick (<15s), serves instantly
 
 **Selection logic in `app/main.py`:**
 

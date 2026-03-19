@@ -450,6 +450,37 @@ def _detect_server(args) -> str | None:
     return None
 
 
+async def _try_daemon(server: str, http_func, args) -> int | None:
+    """Try routing through daemon HTTP. Returns exit code on success, None to fall back.
+
+    Only falls back to direct IBKR when --allow-fallback is set (default: off).
+    Without it, connection errors report the failure and return exit code 1
+    to avoid client-id conflicts with a potentially running daemon.
+    """
+    allow_fallback = getattr(args, "allow_fallback", False)
+    try:
+        return await http_func(args, server)
+    except Exception as e:
+        err_name = type(e).__name__
+        connection_errors = ("ConnectError", "ConnectTimeout", "ConnectionRefusedError")
+        is_conn_error = err_name in connection_errors or "refused" in str(e).lower()
+
+        if is_conn_error and allow_fallback:
+            print(f"  Daemon unreachable ({err_name}), falling back to direct mode...")
+            return None
+
+        if is_conn_error:
+            print(f"  Daemon unreachable ({err_name}).")
+            print(f"  Start the daemon or use --allow-fallback to connect directly.")
+            return 1
+
+        if "timeout" in err_name.lower():
+            print(f"  Daemon request timed out ({err_name}). The daemon may be busy.")
+            print(f"  Retry the command or check daemon logs.")
+            return 1
+        raise
+
+
 def _init_read_only_services(data_dir: str = "data/utp", mode: str = "dry-run") -> None:
     """Initialize ledger + position store for read-only subcommands."""
     from app.services.ledger import init_ledger
@@ -1517,7 +1548,7 @@ async def _run_readiness_test(args) -> int:
 async def _cmd_portfolio_http(args, server: str) -> int:
     """Portfolio view via HTTP."""
     import httpx
-    async with httpx.AsyncClient(base_url=server, timeout=10.0) as client:
+    async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
         resp = await client.get("/dashboard/portfolio")
         if resp.status_code != 200:
             print(f"  Error: {resp.status_code} {resp.text}")
@@ -1637,25 +1668,64 @@ async def _cmd_portfolio_http(args, server: str) -> int:
 
 
 async def _cmd_quote_http(args, server: str) -> int:
-    """Quote via HTTP."""
+    """Quote via HTTP — fetches all symbols in parallel."""
+    import asyncio
     import httpx
     symbols = args.symbols
-    async with httpx.AsyncClient(base_url=server, timeout=10.0) as client:
-        for sym in symbols:
-            resp = await client.get(f"/market/quote/{sym.upper()}")
-            if resp.status_code == 200:
-                q = resp.json()
+
+    async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
+        # Fire all quote requests concurrently
+        async def _fetch_one(sym):
+            try:
+                resp = await client.get(f"/market/quote/{sym.upper()}")
+                return sym, resp
+            except Exception as e:
+                return sym, e
+
+        results = await asyncio.gather(*[_fetch_one(s) for s in symbols])
+
+        # Print in original order
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt.now(_tz.utc)
+        for sym, result in results:
+            if isinstance(result, Exception):
+                print(f"  {sym}: error ({type(result).__name__})")
+            elif result.status_code == 200:
+                q = result.json()
+                # Compute age of quote
+                ts_str = q.get("timestamp", "")
+                source = q.get("source", "")
+                age_str = ""
+                if ts_str:
+                    try:
+                        ts = _dt.fromisoformat(ts_str)
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=_tz.utc)
+                        age = (now - ts).total_seconds()
+                        if age < 2:
+                            age_str = "just now"
+                        elif age < 60:
+                            age_str = f"{age:.0f}s ago"
+                        elif age < 3600:
+                            age_str = f"{age/60:.0f}m ago"
+                        else:
+                            age_str = f"{age/3600:.1f}h ago"
+                    except Exception:
+                        pass
+                src_label = f" [{source}]" if source else ""
+                age_label = f" ({age_str})" if age_str else ""
                 print(f"  {q['symbol']:<8} Bid: {q['bid']:>10.2f}  Ask: {q['ask']:>10.2f}  "
-                      f"Last: {q['last']:>10.2f}  Vol: {q.get('volume',0):>10,}")
+                      f"Last: {q['last']:>10.2f}  Vol: {q.get('volume',0):>10,}"
+                      f"  {age_label}{src_label}")
             else:
-                print(f"  {sym}: error {resp.status_code}")
+                print(f"  {sym}: error {result.status_code}")
     return 0
 
 
 async def _cmd_status_http(args, server: str) -> int:
     """Status via HTTP."""
     import httpx
-    async with httpx.AsyncClient(base_url=server, timeout=10.0) as client:
+    async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
         resp = await client.get("/dashboard/status")
         if resp.status_code != 200:
             print(f"  Error: {resp.status_code}")
@@ -1674,7 +1744,7 @@ async def _cmd_status_http(args, server: str) -> int:
 async def _cmd_orders_http(args, server: str) -> int:
     """Orders via HTTP."""
     import httpx
-    async with httpx.AsyncClient(base_url=server, timeout=10.0) as client:
+    async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
         resp = await client.get("/account/orders")
         if resp.status_code != 200:
             print(f"  Error: {resp.status_code}")
@@ -1689,6 +1759,103 @@ async def _cmd_orders_http(args, server: str) -> int:
     return 0
 
 
+async def _cmd_cancel_http(args, server: str) -> int:
+    """Cancel orders via HTTP (through daemon)."""
+    import httpx
+    order_id = getattr(args, "order_id", None)
+    cancel_all = getattr(args, "all", False)
+
+    if not order_id and not cancel_all:
+        print("  Specify --order-id <ID> or --all")
+        return 1
+
+    async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
+        if cancel_all:
+            # Get all orders then cancel each
+            resp = await client.get("/account/orders")
+            if resp.status_code != 200:
+                print(f"  Error fetching orders: {resp.status_code}")
+                return 1
+            orders = resp.json()
+            if not orders:
+                print("  No open orders to cancel")
+                return 0
+            print(f"  Cancelling {len(orders)} order(s)...")
+            for o in orders:
+                oid = o.get("order_id", "?")
+                cr = await client.post("/account/cancel", params={"order_id": oid})
+                if cr.status_code == 200:
+                    d = cr.json()
+                    print(f"    Order #{oid}: {d.get('status', '?')} — {d.get('message', '')}")
+                else:
+                    print(f"    Order #{oid}: Error {cr.status_code}")
+        else:
+            resp = await client.post("/account/cancel", params={"order_id": order_id})
+            if resp.status_code == 200:
+                d = resp.json()
+                status_color = "92" if d.get("status") == "CANCELLED" else "91"
+                print(f"  Status: {_color(d.get('status', '?'), status_color)}")
+                print(f"  {d.get('message', '')}")
+            else:
+                print(f"  Error: {resp.status_code} {resp.text}")
+                return 1
+    return 0
+
+
+async def _cmd_playbook_http(args, server: str) -> int:
+    """Playbook via HTTP (through daemon)."""
+    import httpx
+    from pathlib import Path as P
+
+    action = getattr(args, "playbook_action", None)
+    if not action:
+        print("  Error: specify an action (execute or validate)")
+        return 1
+
+    playbook_file = getattr(args, "playbook_file", None)
+    if not playbook_file:
+        print("  Error: specify a playbook YAML file")
+        return 1
+
+    path = P(playbook_file)
+    if not path.exists():
+        print(f"  Error: Playbook file not found: {path}")
+        return 1
+
+    # Read the YAML and send to server
+    yaml_content = path.read_text()
+
+    mode = _get_mode(args)
+    headers = {}
+    if mode == "dry-run":
+        headers["X-Dry-Run"] = "true"
+
+    endpoint = "/playbook/execute" if action == "execute" else "/playbook/validate"
+
+    async with httpx.AsyncClient(base_url=server, timeout=120.0) as client:
+        resp = await client.post(endpoint, json={"yaml_content": yaml_content}, headers=headers)
+        if resp.status_code != 200:
+            print(f"  Error: {resp.status_code} {resp.text}")
+            return 1
+        data = resp.json()
+
+        _print_header(f"Playbook {'Execution' if action == 'execute' else 'Validation'} (via {server})")
+        if action == "validate":
+            print(f"  Status: {_color('VALID', '92')}")
+            print(f"  Name: {data.get('name', '?')}")
+            print(f"  Instructions: {data.get('instruction_count', '?')}")
+        else:
+            results = data.get("results", [])
+            passed = sum(1 for r in results if r.get("status") == "success")
+            failed = len(results) - passed
+            color = "92" if failed == 0 else "91"
+            print(f"  Results: {_color(f'{passed} passed, {failed} failed', color)}")
+            for r in results:
+                status_icon = _color("OK", "92") if r.get("status") == "success" else _color("FAIL", "91")
+                print(f"    [{status_icon:>12}] {r.get('instruction_id', '?')}: {r.get('message', '')}")
+    return 0
+
+
 async def _cmd_trades_http(args, server: str) -> int:
     """Trades via HTTP."""
     import httpx
@@ -1697,7 +1864,7 @@ async def _cmd_trades_http(args, server: str) -> int:
         params["days"] = args.days
     if getattr(args, "show_all", False):
         params["include_all"] = "true"
-    async with httpx.AsyncClient(base_url=server, timeout=10.0) as client:
+    async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
         resp = await client.get("/account/trades", params=params)
         if resp.status_code != 200:
             print(f"  Error: {resp.status_code}")
@@ -1727,7 +1894,7 @@ async def _cmd_close_http(args, server: str) -> int:
     if net_price is not None:
         payload["net_price"] = net_price
 
-    async with httpx.AsyncClient(base_url=server, timeout=10.0) as client:
+    async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
         resp = await client.post("/trade/close", json=payload)
         if resp.status_code != 200:
             print(f"  Error: {resp.status_code} — {resp.json().get('detail', resp.text)}")
@@ -1740,7 +1907,7 @@ async def _cmd_close_http(args, server: str) -> int:
 async def _cmd_performance_http(args, server: str) -> int:
     """Performance via HTTP."""
     import httpx
-    async with httpx.AsyncClient(base_url=server, timeout=10.0) as client:
+    async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
         resp = await client.get("/dashboard/performance")
         if resp.status_code != 200:
             print(f"  Error: {resp.status_code}")
@@ -1759,7 +1926,7 @@ async def _cmd_performance_http(args, server: str) -> int:
 async def _cmd_journal_http(args, server: str) -> int:
     """Journal via HTTP."""
     import httpx
-    async with httpx.AsyncClient(base_url=server, timeout=10.0) as client:
+    async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
         resp = await client.get("/ledger/entries/recent", params={"n": getattr(args, "limit", 20)})
         if resp.status_code != 200:
             print(f"  Error: {resp.status_code}")
@@ -1775,15 +1942,114 @@ async def _cmd_journal_http(args, server: str) -> int:
     return 0
 
 
+async def _cmd_executions_http(args, server: str) -> int:
+    """Executions via HTTP — routes through running daemon."""
+    import httpx
+
+    params = {}
+    if getattr(args, "flush", False):
+        params["flush"] = "true"
+    symbol_filter = getattr(args, "symbol", None)
+    if symbol_filter:
+        params["symbol"] = symbol_filter
+
+    async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
+        resp = await client.get("/account/executions", params=params)
+        if resp.status_code != 200:
+            print(f"  Error: {resp.status_code} {resp.text}")
+            return 1
+        data = resp.json()
+
+    fetched = data.get("fetched", 0)
+    new = data.get("new", 0)
+    total = data.get("total_cached", 0)
+    groups = data.get("orders", [])
+
+    if fetched:
+        print(f"  Fetched {fetched} executions from IBKR, {new} new (total: {total})")
+    else:
+        print(f"  Cached: {total} executions")
+
+    if not groups:
+        print("  No executions found")
+        return 0
+
+    _print_header(f"Execution History — {len(groups)} Orders ({total} fills)")
+
+    for g in groups:
+        otype = g.get("order_type", "?")
+        sym = g.get("symbol", "?")
+        exp = g.get("expiration", "")
+        time_str = (g.get("time") or "?")[:19]
+        net = g.get("net_amount", 0)
+        comm = g.get("total_commission", 0)
+        perm = g.get("perm_id", "?")
+        legs = g.get("legs", [])
+
+        if "spread" in otype or "condor" in otype:
+            type_color = "95"
+        elif otype == "single_option":
+            type_color = "96"
+        else:
+            type_color = "97"
+
+        net_color = "92" if net >= 0 else "91"
+        net_label = "credit" if net > 0 else "debit"
+
+        print(f"\n  {_color(otype.upper().replace('_', ' '), type_color):>28} | "
+              f"{sym:>6} | {time_str} | "
+              f"{_color(f'${net:>+10,.2f}', net_color)} ({net_label}) | "
+              f"comm=${comm:.2f} | perm={perm}")
+
+        if exp:
+            print(f"  {'':>28}   exp: {exp}")
+
+        for leg in legs:
+            side = leg.get("side", "?")
+            side_color = "91" if side == "SLD" else "92"
+            sec = leg.get("sec_type", "")
+
+            if sec in ("OPT", "FOP"):
+                right = leg.get("right", "?")
+                strike = leg.get("strike", 0)
+                desc = f"{right}{strike:.0f}"
+                print(f"  {'':>8} {_color(side, side_color):>12} "
+                      f"{desc:>10} x{leg.get('shares', 0):.0f} @ ${leg.get('price', 0):.2f} "
+                      f"(conId={leg.get('con_id', '?')})")
+            else:
+                print(f"  {'':>8} {_color(side, side_color):>12} "
+                      f"{leg.get('symbol', '?'):>10} x{leg.get('shares', 0):.0f} @ ${leg.get('price', 0):.2f}")
+
+    print()
+    return 0
+
+
 async def _cmd_reconcile_http(args, server: str) -> int:
     """Reconcile via HTTP."""
     import httpx
 
-    # Flush is local-only — warn if requested via HTTP
-    if getattr(args, "flush", False):
-        print("  Note: --flush operates on the daemon's data directory, not local.")
-
     async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
+        # Hard reset: clear daemon's in-memory store + re-sync
+        if getattr(args, "hard_reset", False):
+            _print_header("HARD RESET (via daemon)")
+            resp = await client.post("/account/hard-reset")
+            if resp.status_code != 200:
+                print(f"  Error: {resp.status_code} {resp.text}")
+                return 1
+            d = resp.json()
+            print(f"  Cleared: {d.get('cleared', 0)} positions + {d.get('executions_cleared', 0)} executions")
+            print(f"  Re-synced: {d.get('synced_new', 0)} new, {d.get('synced_updated', 0)} updated")
+            print(f"  Open positions: {d.get('open_positions', 0)}")
+            print()
+
+        # Flush: tell daemon to clear open positions and re-sync
+        elif getattr(args, "flush", False):
+            _print_header("Flush (via daemon)")
+            # Use hard-reset endpoint but it clears everything — for flush we'd
+            # need a softer version. For now, hard-reset is the only daemon-safe option.
+            print(f"  {_color('Note:', '93')} Use --hard-reset for daemon mode (--flush only works without daemon)")
+            print()
+
         broker = getattr(args, "broker", "ibkr")
         resp = await client.get("/account/reconciliation", params={"broker": broker})
         if resp.status_code != 200:
@@ -2154,7 +2420,7 @@ async def _cmd_repl(args) -> int:
                     else:
                         print(f"  Error: {resp.status_code}")
             elif cmd == "y" and len(parts) > 1:
-                async with httpx.AsyncClient(base_url=server, timeout=10.0) as hc:
+                async with httpx.AsyncClient(base_url=server, timeout=30.0) as hc:
                     for p_str in parts[1:]:
                         try:
                             p_int = int(p_str)
@@ -2184,7 +2450,9 @@ async def _cmd_portfolio(args) -> int:
     """Show current positions, P&L, and account summary."""
     server = _detect_server(args)
     if server:
-        return await _cmd_portfolio_http(args, server)
+        rc = await _try_daemon(server, _cmd_portfolio_http, args)
+        if rc is not None:
+            return rc
 
     from app.services.position_store import get_position_store
     from app.services.dashboard_service import DashboardService
@@ -2359,7 +2627,9 @@ async def _cmd_quote(args) -> int:
     """Get real-time quotes for one or more symbols."""
     server = _detect_server(args)
     if server:
-        return await _cmd_quote_http(args, server)
+        rc = await _try_daemon(server, _cmd_quote_http, args)
+        if rc is not None:
+            return rc
 
     mode = _get_mode(args)
     symbols = args.symbols
@@ -2375,17 +2645,37 @@ async def _cmd_quote(args) -> int:
 
     _print_header("Quotes")
 
-    print(f"  {'Symbol':>8} {'Bid':>10} {'Ask':>10} {'Last':>10} {'Spread':>8} {'Volume':>12}")
-    print(f"  {'─' * 8} {'─' * 10} {'─' * 10} {'─' * 10} {'─' * 8} {'─' * 12}")
+    print(f"  {'Symbol':>8} {'Bid':>10} {'Ask':>10} {'Last':>10} {'Spread':>8} {'Volume':>12}  {'Updated':>12} {'Source'}")
+    print(f"  {'─' * 8} {'─' * 10} {'─' * 10} {'─' * 10} {'─' * 8} {'─' * 12}  {'─' * 12} {'─' * 16}")
 
-    for symbol in symbols:
+    import asyncio as _aio
+    from datetime import datetime as _dt, timezone as _tz
+
+    async def _fetch_quote(sym):
         try:
-            q = await ibkr.get_quote(symbol)
-            spread = q.ask - q.bid if q.ask and q.bid else 0
-            print(f"  {q.symbol:>8} ${q.bid:>9.2f} ${q.ask:>9.2f} ${q.last:>9.2f} "
-                  f"${spread:>6.2f} {q.volume:>12,}")
+            return sym, await ibkr.get_quote(sym), None
         except Exception as e:
-            print(f"  {symbol:>8} {_color(f'ERROR: {e}', '91')}")
+            return sym, None, e
+
+    results = await _aio.gather(*[_fetch_quote(s) for s in symbols])
+    now = _dt.now(_tz.utc)
+
+    for symbol, q, err in results:
+        if err:
+            print(f"  {symbol:>8} {_color(f'ERROR: {err}', '91')}")
+        else:
+            spread = q.ask - q.bid if q.ask and q.bid else 0
+            age = (now - q.timestamp).total_seconds() if q.timestamp else 0
+            if age < 2:
+                age_str = "just now"
+            elif age < 60:
+                age_str = f"{age:.0f}s ago"
+            elif age < 3600:
+                age_str = f"{age/60:.0f}m ago"
+            else:
+                age_str = f"{age/3600:.1f}h ago"
+            print(f"  {q.symbol:>8} ${q.bid:>9.2f} ${q.ask:>9.2f} ${q.last:>9.2f} "
+                  f"${spread:>6.2f} {q.volume:>12,}  {age_str:>12} {q.source}")
 
     print()
 
@@ -2402,7 +2692,9 @@ async def _cmd_options(args) -> int:
     """Show available option strikes and quotes for a symbol."""
     server = _detect_server(args)
     if server:
-        return await _cmd_options_http(args, server)
+        rc = await _try_daemon(server, _cmd_options_http, args)
+        if rc is not None:
+            return rc
 
     from datetime import date as _date
 
@@ -2631,7 +2923,9 @@ async def _cmd_margin(args) -> int:
     """Check margin/cost for a hypothetical trade without executing."""
     server = _detect_server(args)
     if server:
-        return await _cmd_margin_http(args, server)
+        rc = await _try_daemon(server, _cmd_margin_http, args)
+        if rc is not None:
+            return rc
 
     subcommand = getattr(args, "margin_type", None)
     if not subcommand:
@@ -2672,7 +2966,7 @@ async def _cmd_margin(args) -> int:
     try:
         import asyncio as _asyncio
         try:
-            margin = await _asyncio.wait_for(ibkr.check_margin(order), timeout=10.0)
+            margin = await _asyncio.wait_for(ibkr.check_margin(order), timeout=30.0)
         except _asyncio.TimeoutError:
             margin = {"error": "Margin check timed out (10s) — may work during market hours",
                       "init_margin": 0.0, "maint_margin": 0.0, "commission": 0.0}
@@ -2853,7 +3147,9 @@ async def _cmd_trade(args) -> int:
     """Execute a trade (equity, option, credit-spread, debit-spread, iron-condor)."""
     server = _detect_server(args)
     if server and not getattr(args, "validate_all", False):
-        return await _cmd_trade_http(args, server)
+        rc = await _try_daemon(server, _cmd_trade_http, args)
+        if rc is not None:
+            return rc
 
     mode = _get_mode(args)
     broker = getattr(args, "broker", "ibkr")
@@ -3073,6 +3369,11 @@ async def _cmd_trade(args) -> int:
 
 async def _cmd_playbook(args) -> int:
     """Execute or validate a YAML playbook."""
+    server = _detect_server(args)
+    if server:
+        rc = await _try_daemon(server, _cmd_playbook_http, args)
+        if rc is not None:
+            return rc
     action = getattr(args, "playbook_action", None)
     if not action:
         print("  Error: specify an action (execute or validate)")
@@ -3216,7 +3517,9 @@ async def _cmd_status(args) -> int:
     """Dashboard: active positions, pending orders, recent closes."""
     server = _detect_server(args)
     if server:
-        return await _cmd_status_http(args, server)
+        rc = await _try_daemon(server, _cmd_status_http, args)
+        if rc is not None:
+            return rc
 
     from app.services.position_store import get_position_store
     from app.services.dashboard_service import DashboardService
@@ -3311,6 +3614,12 @@ async def _cmd_status(args) -> int:
 
 async def _cmd_flush(args) -> int:
     """Flush local position store and/or ledger."""
+    server = _detect_server(args)
+    if server:
+        print(f"  {_color('Warning:', '93')} Daemon is running at {server}.")
+        print(f"  Flush modifies files on disk — use 'reconcile --flush' or '--hard-reset' instead.")
+        print(f"  The daemon's in-memory state won't reflect flush changes until restart.")
+        return 1
     import json
 
     data_dir = _resolve_data_dir(args.data_dir, _get_mode(args))
@@ -3364,7 +3673,9 @@ async def _cmd_reconcile(args) -> int:
     """Compare system vs broker positions, optionally flushing local state first."""
     server = _detect_server(args)
     if server:
-        return await _cmd_reconcile_http(args, server)
+        rc = await _try_daemon(server, _cmd_reconcile_http, args)
+        if rc is not None:
+            return rc
 
     import json as _json
     from app.services.position_store import get_position_store, init_position_store
@@ -3375,22 +3686,74 @@ async def _cmd_reconcile(args) -> int:
     mode = _get_mode(args)
     data_dir = _resolve_data_dir(getattr(args, "data_dir", "data/utp"), mode)
 
+    # ── Hard reset: clear EVERYTHING ──
+    if getattr(args, "hard_reset", False):
+        _print_header("HARD RESET — Clearing ALL Local Data")
+
+        positions_file = data_dir / "positions.json"
+        ledger_file = data_dir / "ledger" / "ledger.jsonl"
+        snapshots_dir = data_dir / "ledger" / "snapshots"
+        exec_file = data_dir / "executions.json"
+
+        for f, label in [(positions_file, "Positions"), (ledger_file, "Ledger"), (exec_file, "Executions")]:
+            if f.exists():
+                count = 0
+                try:
+                    if f.suffix == ".json":
+                        count = len(_json.load(open(f)))
+                    else:
+                        count = sum(1 for _ in open(f))
+                except Exception:
+                    pass
+                if f.suffix == ".json":
+                    f.write_text("{}")
+                else:
+                    f.write_text("")
+                print(f"  {_color('✓', '92')} {label} cleared ({count} entries)")
+            else:
+                print(f"  {_color('✓', '92')} {label} (already empty)")
+
+        if snapshots_dir.exists():
+            import shutil
+            snap_count = len(list(snapshots_dir.glob("*.json")))
+            shutil.rmtree(snapshots_dir)
+            snapshots_dir.mkdir(parents=True, exist_ok=True)
+            if snap_count:
+                print(f"  {_color('✓', '92')} Snapshots cleared ({snap_count})")
+
+        print(f"\n  {_color('All local state cleared.', '93')} Rebuilding from broker...\n")
+        # Fall through to connect and sync
+
     # ── Flush local state before connecting ──
-    if getattr(args, "flush", False):
+    elif getattr(args, "flush", False):
         positions_file = data_dir / "positions.json"
         ledger_file = data_dir / "ledger" / "ledger.jsonl"
         snapshots_dir = data_dir / "ledger" / "snapshots"
 
-        _print_header("Flushing Local State")
+        _print_header("Flushing Local State (preserving closed positions)")
 
+        # Preserve closed positions — they contain P&L history that IBKR
+        # doesn't provide via API. Only flush open positions.
+        closed_preserved = 0
+        open_flushed = 0
         if positions_file.exists():
             try:
                 with open(positions_file) as f:
-                    count = len(_json.load(f))
+                    all_positions = _json.load(f)
+                # Keep closed positions, remove open ones
+                preserved = {}
+                for pid, pos in all_positions.items():
+                    if pos.get("status") == "closed":
+                        preserved[pid] = pos
+                        closed_preserved += 1
+                    else:
+                        open_flushed += 1
+                positions_file.write_text(_json.dumps(preserved, indent=2))
+                print(f"  {_color('✓', '92')} Open positions cleared ({open_flushed}), "
+                      f"closed preserved ({closed_preserved})")
             except Exception:
-                count = 0
-            positions_file.write_text("{}")
-            print(f"  {_color('✓', '92')} Positions cleared ({count} entries)")
+                positions_file.write_text("{}")
+                print(f"  {_color('✓', '92')} Positions cleared (parse error)")
         else:
             print(f"  {_color('✓', '92')} Positions (already empty)")
 
@@ -3409,6 +3772,9 @@ async def _cmd_reconcile(args) -> int:
             if snap_count:
                 print(f"  {_color('✓', '92')} Snapshots cleared ({snap_count})")
 
+        print(f"  {_color('Note:', '93')} Closed positions preserved for P&L history. "
+              f"Execution cache (executions.json) untouched.")
+
         print()
 
     # ── Connect and reconcile ──
@@ -3424,13 +3790,30 @@ async def _cmd_reconcile(args) -> int:
         await _disconnect(provider)
         return 1
 
-    # After flush, sync broker positions into the now-empty store
-    if getattr(args, "flush", False) and mode != "dry-run":
+    # After flush/hard-reset, sync broker positions into the now-empty store
+    if (getattr(args, "flush", False) or getattr(args, "hard_reset", False)) and mode != "dry-run":
         sync_service = PositionSyncService(store, ledger)
         result = await sync_service.sync_all_brokers()
         total = result.new_positions + result.updated_positions
         if total:
             print(f"  Synced {total} position(s) from broker into clean store\n")
+
+    # Fetch and merge IBKR executions (last ~7 days) for trade grouping
+    if mode != "dry-run" and provider and hasattr(provider, "get_executions"):
+        try:
+            from app.services.execution_store import get_execution_store, init_execution_store
+            exec_store = get_execution_store()
+            if not exec_store:
+                exec_store = init_execution_store(data_dir)
+            raw_execs = await provider.get_executions()
+            if raw_execs:
+                new_count = exec_store.merge_executions(raw_execs)
+                if new_count:
+                    print(f"  Fetched {len(raw_execs)} executions from IBKR, {new_count} new (total: {exec_store.count})")
+                else:
+                    print(f"  Executions up to date ({exec_store.count} stored)")
+        except Exception as e:
+            logger.debug("Failed to fetch IBKR executions: %s", e)
 
     sync_service = PositionSyncService(store, ledger)
     report = await sync_service.reconcile(Broker.IBKR)
@@ -3523,6 +3906,14 @@ async def _cmd_reconcile(args) -> int:
 
 async def _cmd_readiness(args) -> int:
     """Test IBKR connectivity and trade-type support."""
+    server = _detect_server(args)
+    if server:
+        # Readiness needs direct IBKR — can't go through daemon (tests order submission)
+        print(f"  {_color('Note:', '93')} Daemon detected at {server}, but readiness test needs a")
+        print(f"  dedicated IBKR connection. Use a different --client-id:")
+        print(f"  python utp.py readiness --symbol SPX --paper --client-id 11")
+        return 1
+
     mode = _get_mode(args)
 
     if mode == "dry-run":
@@ -3571,6 +3962,114 @@ def _cmd_server(args) -> int:
     return 0
 
 
+# ── executions ────────────────────────────────────────────────────────────────
+
+async def _cmd_executions(args) -> int:
+    """Show IBKR executions grouped by order — identifies multi-leg trades."""
+    server = _detect_server(args)
+    if server:
+        rc = await _try_daemon(server, _cmd_executions_http, args)
+        if rc is not None:
+            return rc
+
+    from app.services.execution_store import ExecutionStore, init_execution_store
+
+    mode = _get_mode(args)
+    if mode == "dry-run":
+        print("  --live or --paper required for execution history")
+        return 1
+
+    data_dir = _resolve_data_dir(getattr(args, "data_dir", "data/utp"), mode)
+    exec_store = init_execution_store(data_dir)
+
+    # Flush if requested
+    if getattr(args, "flush", False):
+        count = exec_store.flush()
+        print(f"  Cleared {count} cached executions")
+
+    # Fetch from IBKR
+    provider = await _init_ibkr_readonly(args)
+    try:
+        if hasattr(provider, "get_executions"):
+            raw = await provider.get_executions()
+            if raw:
+                new_count = exec_store.merge_executions(raw)
+                print(f"  Fetched {len(raw)} executions from IBKR, {new_count} new (total: {exec_store.count})")
+            else:
+                print(f"  No executions returned from IBKR (session may have restarted)")
+                print(f"  Cached: {exec_store.count} executions")
+        else:
+            print("  Provider does not support execution history")
+            await _disconnect(provider)
+            return 1
+    finally:
+        await _disconnect(provider)
+
+    # Group and display
+    groups = exec_store.get_grouped_by_order()
+
+    # Filter by symbol if requested
+    symbol_filter = getattr(args, "symbol", None)
+    if symbol_filter:
+        symbol_filter = symbol_filter.upper()
+        groups = [g for g in groups if g["symbol"] == symbol_filter]
+
+    if not groups:
+        print("  No executions found")
+        return 0
+
+    _print_header(f"Execution History — {len(groups)} Orders ({exec_store.count} fills)")
+
+    for g in groups:
+        otype = g["order_type"]
+        sym = g["symbol"]
+        exp = g.get("expiration", "")
+        time_str = g["time"][:19] if g["time"] else "?"
+        net = g["net_amount"]
+        comm = g["total_commission"]
+        perm = g["perm_id"]
+        legs = g["legs"]
+
+        # Color code by type
+        if "spread" in otype or "condor" in otype:
+            type_color = "95"  # purple
+        elif otype == "single_option":
+            type_color = "96"  # cyan
+        else:
+            type_color = "97"  # white
+
+        net_color = "92" if net >= 0 else "91"
+        net_label = "credit" if net > 0 else "debit"
+
+        print(f"\n  {_color(otype.upper().replace('_', ' '), type_color):>28} | "
+              f"{sym:>6} | {time_str} | "
+              f"{_color(f'${net:>+10,.2f}', net_color)} ({net_label}) | "
+              f"comm=${comm:.2f} | perm={perm}")
+
+        if exp:
+            print(f"  {'':>28}   exp: {exp}")
+
+        # Show legs
+        for leg in legs:
+            side = leg["side"]
+            side_color = "91" if side == "SLD" else "92"
+            sec = leg.get("sec_type", "")
+
+            if sec in ("OPT", "FOP"):
+                right = leg.get("right", "?")
+                strike = leg.get("strike", 0)
+                desc = f"{right}{strike:.0f}"
+                print(f"  {'':>8} {_color(side, side_color):>12} "
+                      f"{desc:>10} x{leg['shares']:.0f} @ ${leg['price']:.2f} "
+                      f"(conId={leg.get('con_id', '?')})")
+            else:
+                print(f"  {'':>8} {_color(side, side_color):>12} "
+                      f"{leg['symbol']:>10} x{leg['shares']:.0f} @ ${leg['price']:.2f}")
+
+    print()
+    return 0
+
+
 # ── daemon ───────────────────────────────────────────────────────────────────
 
 async def _cmd_daemon(args) -> int:
@@ -3588,6 +4087,8 @@ async def _cmd_daemon(args) -> int:
     data_dir = _resolve_data_dir(getattr(args, "data_dir", "data/utp"), mode)
     init_ledger(data_dir)
     init_position_store(data_dir)
+    from app.services.execution_store import init_execution_store
+    init_execution_store(data_dir)
 
     # Initialize IBKR provider
     live_provider = None
@@ -3746,13 +4247,13 @@ async def _cmd_daemon(args) -> int:
             _log = logging.getLogger("utp.ibkr_connect")
             delay = 2.0
             backoff_cap = 10.0
-            max_retries = 10
-            for attempt in range(1, max_retries + 1):
+            attempt = 0
+            while not shutdown_event.is_set():
+                attempt += 1
+                _log.info("IBKR connect attempt %d (delay=%.1fs)", attempt, delay)
+                await asyncio.sleep(delay)
                 if shutdown_event.is_set():
                     return
-                _log.info("IBKR initial connect attempt %d/%d (delay=%.1fs)",
-                          attempt, max_retries, delay)
-                await asyncio.sleep(delay)
                 try:
                     await live_provider.connect()
                     _log.info("IBKR connected on attempt %d", attempt)
@@ -3762,8 +4263,6 @@ async def _cmd_daemon(args) -> int:
                 except Exception as e:
                     _log.warning("IBKR connect attempt %d failed: %s", attempt, e)
                     delay = min(delay * 2, backoff_cap)
-            _log.error("IBKR initial connection failed after %d attempts — "
-                       "will rely on reconnect loop if connection appears later", max_retries)
 
         bg_tasks.append(asyncio.create_task(_ibkr_initial_connect_bg()))
 
@@ -3939,7 +4438,9 @@ async def _cmd_journal(args) -> int:
     """View trade history and ledger entries."""
     server = _detect_server(args)
     if server:
-        return await _cmd_journal_http(args, server)
+        rc = await _try_daemon(server, _cmd_journal_http, args)
+        if rc is not None:
+            return rc
 
     from app.services.ledger import get_ledger
     from app.models import LedgerQuery, LedgerEventType
@@ -4025,7 +4526,9 @@ async def _cmd_performance(args) -> int:
     """Show performance metrics."""
     server = _detect_server(args)
     if server:
-        return await _cmd_performance_http(args, server)
+        rc = await _try_daemon(server, _cmd_performance_http, args)
+        if rc is not None:
+            return rc
 
     from app.services.position_store import get_position_store
     from app.services.dashboard_service import DashboardService
@@ -4092,7 +4595,9 @@ async def _cmd_orders(args) -> int:
     """Show working (open) orders at the broker."""
     server = _detect_server(args)
     if server:
-        return await _cmd_orders_http(args, server)
+        rc = await _try_daemon(server, _cmd_orders_http, args)
+        if rc is not None:
+            return rc
 
     from app.core.provider import ProviderRegistry
     from app.models import Broker
@@ -4132,6 +4637,12 @@ async def _cmd_orders(args) -> int:
 
 async def _cmd_cancel(args) -> int:
     """Cancel a working order at the broker."""
+    server = _detect_server(args)
+    if server:
+        rc = await _try_daemon(server, _cmd_cancel_http, args)
+        if rc is not None:
+            return rc
+
     from app.core.provider import ProviderRegistry
     from app.models import Broker
 
@@ -4188,7 +4699,9 @@ async def _cmd_trades(args) -> int:
     """Show today's trades with order/position IDs and details."""
     server = _detect_server(args)
     if server:
-        return await _cmd_trades_http(args, server)
+        rc = await _try_daemon(server, _cmd_trades_http, args)
+        if rc is not None:
+            return rc
 
     from app.services.position_store import get_position_store
 
@@ -4420,7 +4933,9 @@ async def _cmd_close(args) -> int:
     """Close an open position by ID — auto-derives all trade parameters."""
     server = _detect_server(args)
     if server:
-        return await _cmd_close_http(args, server)
+        rc = await _try_daemon(server, _cmd_close_http, args)
+        if rc is not None:
+            return rc
 
     from app.services.position_store import get_position_store
 
@@ -4619,6 +5134,9 @@ def _add_connection_args(parser: argparse.ArgumentParser, *, default_paper: bool
     if "--server-port" not in existing:
         parser.add_argument("--server-port", type=int, default=8000,
                             help="Daemon port for auto-detect (default: 8000)")
+    parser.add_argument("--allow-fallback", action="store_true", default=False,
+                        help="If daemon is unreachable, fall back to direct IBKR connection "
+                             "(default: off — reports error instead to avoid client-id conflicts)")
 
 
 def _add_spread_args(parser: argparse.ArgumentParser, spread_type: str) -> None:
@@ -4687,7 +5205,9 @@ def _run_daemon_with_restart(args) -> int:
             reset_position_store()
             reset_live_data_service()
             from app.services.market_data_streaming import reset_streaming_service
+            from app.services.execution_store import reset_execution_store
             reset_streaming_service()
+            reset_execution_store()
             import app.main
             app.main._daemon_mode = False
 
@@ -5043,8 +5563,11 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
     p_recon = subparsers.add_parser("reconcile", help="Compare system vs broker positions",
                                      aliases=["recon"])
     p_recon.add_argument("--flush", action="store_true",
-                         help="Flush local positions/ledger before reconciling "
-                              "(clears stale data, syncs fresh from broker)")
+                         help="Flush open positions and re-sync from broker "
+                              "(preserves closed positions for P&L history)")
+    p_recon.add_argument("--hard-reset", action="store_true",
+                         help="Full reset: clear ALL data (open + closed positions, "
+                              "ledger, executions) and rebuild from scratch")
     p_recon.add_argument("--show", action="store_true",
                          help="After reconciling, show synced positions")
     p_recon.add_argument("--portfolio", action="store_true",
@@ -5239,6 +5762,32 @@ Aliases: activity
                            help="Show full detail for a position ID or order ID prefix")
     _add_connection_args(p_trades)  # includes --data-dir
 
+    # ── executions ──
+    p_exec = subparsers.add_parser("executions",
+                                    help="Show IBKR execution history grouped by order (identifies multi-leg trades)",
+                                    aliases=["exec"],
+                                    description='''
+Show trade executions from IBKR (last ~7 days), grouped by order.
+Multi-leg trades (credit spreads, iron condors) are automatically identified
+by matching fills with the same permanent order ID.
+
+Executions are cached locally and deduplicated across runs.
+                                    ''',
+                                    epilog='''
+Examples:
+  %(prog)s --live                  Fetch and show grouped executions
+  %(prog)s --live --flush          Clear cache, re-fetch, show
+  %(prog)s --live --symbol RUT     Filter by symbol
+
+Aliases: exec
+                                    ''',
+                                    formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_exec.add_argument("--flush", action="store_true",
+                         help="Clear local execution cache before fetching")
+    p_exec.add_argument("--symbol", default=None,
+                         help="Filter to a specific symbol")
+    _add_connection_args(p_exec)
+
     # Parse
     args = parser.parse_args()
 
@@ -5269,6 +5818,7 @@ Aliases: activity
         "cx": "cancel",
         "cl": "close",
         "activity": "trades",
+        "exec": "executions",
     }
     cmd = alias_map.get(cmd, cmd)
 
@@ -5338,6 +5888,8 @@ Aliases: activity
         rc = asyncio.run(_cmd_trades(args))
     elif cmd == "close":
         rc = asyncio.run(_cmd_close(args))
+    elif cmd == "executions":
+        rc = asyncio.run(_cmd_executions(args))
     else:
         parser.print_help()
         rc = 0

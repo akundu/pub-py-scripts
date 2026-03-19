@@ -406,16 +406,16 @@ def _build_index(md_files: list[Path]) -> None:
     """Build an index.html landing page linking to all docs."""
     cards = []
     descriptions = {
-        "api_reference": "All 33 REST endpoints with request/response schemas, authentication scopes, and example payloads.",
+        "api_reference": "All REST endpoints with request/response schemas, authentication scopes, and example payloads. Includes execution store and trade simulation.",
         "architecture": "System design, persistence model, background tasks, request flows, and extension patterns.",
         "authentication": "API key and OAuth2/JWT authentication flows, scopes, and security best practices.",
         "configuration": "All environment variables with defaults, .env template, and persistence directory layout.",
         "ibkr_setup_guide": "Step-by-step TWS/IB Gateway connection setup, troubleshooting, and market data configuration.",
-        "playbook": "Trade playbook system: YAML instruction format, CLI usage, reconciliation, status dashboard, readiness test.",
+        "playbook": "Trade playbook system: YAML instruction format, CLI usage, reconciliation (flush/hard-reset), status dashboard, readiness test.",
         "providers": "BrokerProvider interface, stub and live implementations, ProviderRegistry, and how to add new brokers.",
         "symbology": "Symbol mapping across brokers (UUID, conId, OSI format), OptionContract dataclass.",
-        "testing": "130 tests across 15 files: fixtures, per-file descriptions, testing patterns, and how to add new tests.",
-        "usage_guide": "Common workflows: quotes, option chains, credit spreads, iron condors, equity trades, daemon mode, playbooks, and more.",
+        "testing": "359 tests in a single file: fixtures, test class descriptions, testing patterns, and how to add new tests.",
+        "usage_guide": "15 common workflows: quotes, option chains, credit spreads, iron condors, equity trades, daemon mode, playbooks, execution history, trade simulation, system reset, and more.",
         "websockets": "Real-time order status streaming via WebSocket, message format, and client examples.",
     }
 
@@ -435,23 +435,22 @@ def _build_index(md_files: list[Path]) -> None:
     index_body = f"""
     <h1>Universal Trade Platform — Documentation</h1>
     <p>Unified multi-broker trading API (FastAPI) supporting Robinhood, E*TRADE, and IBKR.
-    Version 3.0 adds trade playbooks, reconciliation, status dashboard, and comprehensive readiness testing.</p>
+    Features daemon mode, execution store, trade simulation, conId-based deduplication, and market data streaming.</p>
 
     <h2>Quick Start</h2>
-    <pre><code># Start server
-python server.py
+    <pre><code># Start daemon (recommended)
+python utp.py daemon --live
 
-# Run all tests (130 tests, ~2.5s)
+# Run all tests (359 tests)
 python -m pytest tests/ -v
 
-# Execute a playbook (dry-run)
-python run_playbook.py playbooks/example_mixed.yaml --dry-run
+# CLI auto-detects daemon
+python utp.py portfolio
+python utp.py quote SPX NDX
+python utp.py executions --live
 
-# Show system status
-python run_playbook.py --status
-
-# Comprehensive readiness test (all 5 trade types)
-python test_ibkr_readiness.py --symbol SPX --port 7496 --skip-margin</code></pre>
+# Execute a playbook (paper)
+python utp.py playbook execute playbooks/example_mixed.yaml --paper</code></pre>
 
     <h2>Documentation</h2>
     <div class="card-grid">

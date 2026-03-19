@@ -4,7 +4,7 @@
 
 The test suite uses `pytest` with `pytest-asyncio` and `httpx` to test all REST endpoints, authentication flows, symbology mapping, WebSocket broadcasting, and the full persistence/dashboard/sync stack against mocked broker providers.
 
-**Total:** 310 tests in a single file (`tests/test_utp.py`), all passing
+**Total:** 359 tests in a single file (`tests/test_utp.py`), all passing
 
 ## Running Tests
 
@@ -112,15 +112,25 @@ All tests live in `tests/test_utp.py`, organized into classes by functional area
 | `TestPlaybookExecution` | 7 | Playbook execution flow, hooks |
 | `TestFillTracking` | 8 | Order fill polling, callbacks, timeouts |
 | `TestIBKRProvider` | 16 | IBKR stub + live + cache layer |
+| `TestOrdersCommand` | 3 | Orders/cancel CLI requires mode |
+| `TestStatusChangeDedup` | 2 | Ledger status change deduplication |
+| `TestPositionOrderId` | 3 | Position order_id tracking |
+| `TestProviderOpenOrdersCancel` | 3 | Provider ABC: open orders, cancel, portfolio items |
+| `TestPortfolioBrokerPnL` | 2 | Portfolio with broker-authoritative P&L |
+| `TestCloseFlag` | 7 | Close flag for credit/debit/iron condor trades |
+| `TestTradesCommand` | 3 | Trades activity + detail drill-down |
+| `TestCloseCommand` | 3 | Close position by ID (derives params, dry-run) |
 | `TestPositionStoreLocking` | 3 | Thread safety, atomic save, concurrent writes |
 | `TestReduceQuantityZombie` | 3 | Auto-close on zero quantity reduction |
-| `TestIBKRReconnection` | 4 | Reconnection, health check, backoff |
+| `TestIBKRReconnection` | 5 | Reconnection, health check, backoff cap |
+| `TestDaemonAutoRestart` | 5 | Process auto-restart, signal exit, crash restart, degraded mode |
 | `TestExceptionLogging` | 2 | Graceful error handling |
 | `TestLANTrust` | 6 | LAN auth bypass, config, disabled mode |
 | `TestDaemonCommand` | 13 | Daemon health, close, trades, orders, options endpoints |
 | `TestTradingClient` | 11 | Async/sync client, payloads, context manager |
 | `TestHTTPClientMode` | 8 | Server detection, HTTP functions, REPL |
 | `TestAdvisorIntegration` | 8 | Advisor endpoints, daemon state, confirm |
+| `TestExecutionStore` | 9 | Execution store, dedup, grouping, multi-leg detection |
 
 ## Testing Approach
 

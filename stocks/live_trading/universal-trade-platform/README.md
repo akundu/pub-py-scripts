@@ -40,6 +40,10 @@ A high-reliability Python library and REST API for unified multi-broker trading.
 - **Thread-Safe Position Store** -- `threading.Lock` + atomic file writes for concurrent access
 - **Advisor Integration** -- Background advisor loop with HTTP endpoints for recommendations and auto-execution
 - **IBKR-Primary Data** -- Live positions, balances, and P&L sourced from IBKR when connected, with automatic local fallback
+- **Execution Store** -- IBKR execution cache with `perm_id` grouping for multi-leg trade identification
+- **Trade Simulation** -- `--simulate` flag qualifies contracts and checks margin without executing
+- **conId Deduplication** -- Position sync uses IBKR `conId` for unique matching, preventing duplicates
+- **0DTE Fix** -- Same-day options stay live until after market close (`exp_date < today` strict check)
 
 ## Quick Start
 
@@ -95,7 +99,7 @@ python utp.py server                       # Start FastAPI server (no persistent
 ### Run Tests
 
 ```bash
-python -m pytest tests/ -v               # 310 tests, all passing
+python -m pytest tests/ -v               # 359 tests, all passing
 ```
 
 ## API Reference
@@ -145,6 +149,7 @@ python -m pytest tests/ -v               # 310 tests, all passing
 | `GET` | `/account/trades` | `account:read` | Trade history |
 | `GET` | `/account/orders` | `account:read` | Open/working orders |
 | `POST` | `/account/cancel` | `trades:write` | Cancel working order |
+| `GET` | `/account/executions` | `account:read` | IBKR execution history (grouped by perm_id) |
 
 ### Trade Playbooks
 
@@ -292,17 +297,21 @@ universal-trade-platform/
 │       ├── terminal_display.py  # ANSI terminal renderer
 │       ├── expiration_service.py# Auto-expiration + EOD close
 │       ├── position_sync.py     # Background broker position sync
-│       └── csv_importer.py      # Robinhood/E*TRADE CSV parsers
+│       ├── csv_importer.py      # Robinhood/E*TRADE CSV parsers
+│       └── execution_store.py   # IBKR execution cache with perm_id grouping
 │
-├── tests/                       # 310 tests in a single file
+├── tests/                       # 359 tests in a single file
 │   ├── conftest.py              # Fixtures (client, providers, ledger, position store)
-│   └── test_utp.py             # All tests (310)
+│   └── test_utp.py             # All tests (359)
 │
-├── data/utp/                    # Runtime persistence (gitignored)
+├── data/utp/live/               # Runtime persistence (gitignored)
+│   ├── positions.json           # All positions (open + closed, with con_id)
+│   ├── executions.json          # IBKR execution cache (perm_id groupings)
+│   ├── cache/
+│   │   └── option_chains/       # Daily option chain cache
 │   ├── ledger/
 │   │   ├── ledger.jsonl         # Append-only transaction log
 │   │   └── snapshots/           # Point-in-time state snapshots
-│   ├── positions.json           # Current position state
 │   └── imports/                 # Saved CSV uploads for audit
 │       ├── robinhood/
 │       └── etrade/
@@ -325,6 +334,7 @@ Full documentation lives in the [`docs/`](docs/) directory:
 
 | Document | Contents |
 |----------|----------|
+| [Usage Guide](docs/usage_guide.md) | Common workflows, CLI reference, option chain parameters |
 | [Architecture](docs/architecture.md) | System design, patterns, data flow, persistence layer, background tasks |
 | [API Reference](docs/api_reference.md) | All endpoints with request/response schemas and examples |
 | [Authentication](docs/authentication.md) | API key and OAuth2/JWT flows, scopes, security model |
@@ -368,7 +378,7 @@ The store survives server restarts and supports filtering by status, date range,
 ### Auto-Expiration
 
 A background `asyncio.Task` runs every 60 seconds (configurable):
-1. Finds open positions with `expiration <= today`
+1. Finds open positions with `expiration < today` (strict — same-day 0DTE options stay live until `check_eod_exits()` runs after market close)
 2. Auto-closes them with `exit_price=0` and `reason="expired"`
 3. Computes final P&L (e.g., credit spread credit fully kept)
 4. Logs to the transaction ledger

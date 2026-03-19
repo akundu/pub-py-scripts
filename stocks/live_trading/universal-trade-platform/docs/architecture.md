@@ -40,6 +40,7 @@ Universal Trade Platform is a layered system built on five core abstractions:
                   │  │ expiration_svc │   │
                   │  │ position_sync  │   │
                   │  │ csv_importer   │   │
+│  │ execution_store│   │
                   │  └───────┬────────┘   │
                   └──────────┼────────────┘
                              │
@@ -212,7 +213,7 @@ data/utp/ledger/
 ### Position Store
 
 ```
-data/utp/positions.json    # All tracked positions (open + closed)
+data/utp/live/positions.json    # All tracked positions (open + closed, with con_id)
 ```
 
 Each `TrackedPosition` includes:
@@ -220,7 +221,10 @@ Each `TrackedPosition` includes:
 - `broker`, `order_type` (equity/multi_leg), `symbol`
 - `entry_price`, `entry_time`, `exit_price`, `exit_time`, `exit_reason`
 - `legs` (for multi-leg orders), `expiration`
+- `con_id`, `sec_type`, `strike`, `right` (IBKR contract identifiers)
 - `pnl` (computed on close), `current_mark`, `unrealized_pnl`
+
+Position sync uses IBKR `conId` for unique matching, preventing duplicate imports. The position store has a `find_by_con_id()` method for conId-based lookups.
 
 The store is loaded into memory at startup and saved to disk on every mutation. P&L computation differs by order type:
 - **Equity BUY**: `(exit_price - entry_price) * quantity`
@@ -237,7 +241,7 @@ Three async background tasks run during the server lifespan:
 ### Expiration Loop
 
 Runs every `EXPIRATION_CHECK_INTERVAL_SECONDS` (default: 60):
-1. Queries position store for `expiration <= today`
+1. Queries position store for `expiration < today` (strict — same-day 0DTE options stay live until `check_eod_exits()` runs after market close)
 2. Auto-closes with `exit_price=0`, `reason="expired"`
 3. Computes final P&L
 4. Logs to ledger, broadcasts via WebSocket
@@ -402,6 +406,7 @@ Background Task            SyncService              Providers           Store/Le
 | `position_sync.py` | provider, position_store, ledger | main.py background task |
 | `csv_importer.py` | position_store, ledger | import_routes |
 | `terminal_display.py` | models | dashboard route |
+| `execution_store.py` | models, provider | account routes, reconciliation |
 | `websocket.py` | models | trade_service, expiration, ws route |
 | `routes/*` | auth, services, provider | main.py |
 | `main.py` | routes, providers, services | server.py |
