@@ -2000,8 +2000,23 @@ async def _cmd_close_http(args, server: str) -> int:
         if net_price is not None:
             payload["net_price"] = net_price
 
-        price_label = f"@ ${net_price:.2f}" if net_price else "@ current mark"
-        print(f"  Submitting closing order to IBKR {price_label}...")
+        # Show order summary before executing
+        confirm = getattr(args, "confirm", False)
+        price_label = f"${net_price:.2f}" if net_price else "current mark"
+
+        _print_header("Close Order Summary")
+        print(f"  Position:   {position_id[:8]}")
+        print(f"  Quantity:   {qty or 'all'}")
+        print(f"  Net price:  {price_label}")
+        if net_price:
+            cost = abs(net_price) * (qty or 1) * 100
+            print(f"  Est. cost:  ${cost:,.2f} (debit)")
+
+        if not confirm:
+            print(f"\n  {_color('NOT EXECUTED', '93')} — add --confirm to close the position")
+            return 0
+
+        print(f"\n  Submitting closing order to IBKR @ {price_label}...")
         resp = await client.post("/trade/close", json=payload)
         if resp.status_code != 200:
             try:
@@ -2443,10 +2458,54 @@ async def _cmd_trade_http(args, server: str) -> int:
             print(f"\n  {_color('NOT EXECUTED', '93')} — remove --simulate to place the order")
             return 0
 
+        # Show order summary before executing
+        confirm = getattr(args, "confirm", False)
+
+        _print_header("Trade Order Summary")
+        if trade_request.equity_order:
+            eo = trade_request.equity_order
+            print(f"  Type:       equity")
+            print(f"  Symbol:     {eo.symbol}")
+            print(f"  Side:       {eo.side.value}")
+            print(f"  Quantity:   {eo.quantity}")
+            if eo.limit_price:
+                print(f"  Price:      ${eo.limit_price:.2f}")
+                total = eo.limit_price * eo.quantity
+                action = "spend" if eo.side.value == "BUY" else "receive"
+                print(f"  Est. total: ${total:,.2f} ({action})")
+            else:
+                print(f"  Price:      MARKET")
+        elif trade_request.multi_leg_order:
+            order = trade_request.multi_leg_order
+            print(f"  Type:       {subcommand}")
+            print(f"  Symbol:     {order.legs[0].symbol if order.legs else '?'}")
+            print(f"  Quantity:   {order.quantity}")
+            print(f"  Exchange:   SMART (best execution)")
+            if order.net_price:
+                # Determine credit vs debit
+                is_credit = order.legs[0].action.value in ("SELL_TO_OPEN", "SELL_TO_CLOSE")
+                if is_credit:
+                    print(f"  Net credit: ${order.net_price:.2f} per spread")
+                    total = order.net_price * order.quantity * 100
+                    print(f"  You receive: ~${total:,.2f}")
+                else:
+                    print(f"  Net debit:  ${order.net_price:.2f} per spread")
+                    total = order.net_price * order.quantity * 100
+                    print(f"  You spend:  ~${total:,.2f}")
+            print(f"  Legs:")
+            for leg in (order.legs or []):
+                print(f"    {leg.action.value:>15} {leg.option_type.value:>4} "
+                      f"strike={leg.strike} exp={leg.expiration} qty={leg.quantity}")
+
+        if not confirm and mode != "dry-run":
+            print(f"\n  {_color('NOT EXECUTED', '93')} — add --confirm to place the order")
+            return 0
+
         headers = {}
         if mode == "dry-run":
             headers["X-Dry-Run"] = "true"
 
+        print(f"\n  Submitting order...")
         resp = await client.post("/trade/execute", json=payload, headers=headers)
         if resp.status_code != 200:
             print(f"  Error: {resp.status_code} {resp.text}")
@@ -5661,6 +5720,8 @@ Aliases: t
     p_trade.add_argument("--simulate", action="store_true",
                          help="Use live IBKR connection but do NOT execute — "
                               "qualifies contracts, checks margin, shows what would happen")
+    p_trade.add_argument("--confirm", action="store_true",
+                         help="Confirm and execute the trade (without this, shows order summary only)")
     p_trade.add_argument("--symbol", default="SPY",
                          help="Symbol for --validate-all (default: SPY)")
     p_trade.add_argument("--expiration", default=None,
@@ -5695,6 +5756,8 @@ Required flags:
                       help="Limit price (required for LIMIT orders)")
     t_eq.add_argument("--simulate", action="store_true",
                       help="Check margin only — do NOT execute")
+    t_eq.add_argument("--confirm", action="store_true",
+                      help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_eq)
 
     # trade option
@@ -5762,6 +5825,8 @@ P&L: credit_received - cost_to_close (max profit = full credit, max loss = width
                       help="Close an existing position (BUY_TO_CLOSE / SELL_TO_CLOSE)")
     t_cs.add_argument("--simulate", action="store_true",
                       help="Check margin only — do NOT execute")
+    t_cs.add_argument("--confirm", action="store_true",
+                      help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_cs)
 
     # trade debit-spread
@@ -5791,6 +5856,8 @@ P&L: value_on_close - debit_paid (max profit = width - debit, max loss = debit p
                       help="Close an existing position (SELL_TO_CLOSE / BUY_TO_CLOSE)")
     t_ds.add_argument("--simulate", action="store_true",
                       help="Check margin only — do NOT execute")
+    t_ds.add_argument("--confirm", action="store_true",
+                      help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_ds)
 
     # trade iron-condor
@@ -5822,6 +5889,8 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
                       help="Close an existing position (reverses all legs)")
     t_ic.add_argument("--simulate", action="store_true",
                       help="Check margin only — do NOT execute")
+    t_ic.add_argument("--confirm", action="store_true",
+                      help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_ic)
 
     # ── playbook ──
@@ -6306,6 +6375,8 @@ Aliases: cl
                           help="Debit price to close (default: current mark from IBKR)")
     p_close.add_argument("--simulate", action="store_true",
                           help="Check margin only — do NOT execute the close")
+    p_close.add_argument("--confirm", action="store_true",
+                          help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(p_close)
 
     # ── trades ──
