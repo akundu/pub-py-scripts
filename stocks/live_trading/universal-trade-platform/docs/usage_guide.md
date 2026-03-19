@@ -413,15 +413,84 @@ python utp.py reconcile --show --live
 
 ---
 
+## Workflow 16: Close a Position by ID
+
+The `close` command submits a real IBKR closing order (not just local bookkeeping). It auto-derives the closing parameters from the position's legs.
+
+```bash
+# Find position IDs from trades output
+python utp.py trades --all --live
+
+# Close at default $0.05 debit
+python utp.py close 2d9a --live
+
+# Close at a specific debit price
+python utp.py close 2d9a --net-price 0.10 --live
+
+# Partial close (1 contract only)
+python utp.py close 2d9a -q 1 --live
+
+# Simulate close (margin check only, no execution)
+python utp.py close 2d9a --simulate --live
+
+# Dry-run close (no broker connection)
+python utp.py close 2d9a
+```
+
+The position ID can be a prefix — if it uniquely matches one open position, that position is closed. For credit spreads, submits a BUY_TO_CLOSE combo order. For debit spreads, submits SELL_TO_CLOSE.
+
+---
+
+## Workflow 17: Flush Local Data
+
+The `flush` command clears local persisted data. It is blocked when a daemon is running — use `reconcile --flush` instead.
+
+```bash
+# Flush everything (positions + ledger)
+python utp.py flush
+
+# Flush positions only
+python utp.py flush positions
+
+# Flush ledger only
+python utp.py flush ledger
+```
+
+Note: `flush` is a local-only operation and does NOT affect the broker. For broker-aware flush, use `reconcile --flush --live`.
+
+---
+
+## Workflow 18: Validate Trade Types
+
+Test that all 5 trade types work without placing real orders:
+
+```bash
+# Validate on paper account
+python utp.py trade --validate-all --paper
+
+# Validate and clean up positions afterward
+python utp.py trade --validate-all --cleanup --paper
+
+# Validate with a specific symbol
+python utp.py trade --validate-all --symbol NDX --paper
+```
+
+---
+
 ## Daemon-First CLI Routing
 
 Every CLI command auto-detects a running daemon via HTTP health check. When a daemon is found, commands route through its HTTP API (sharing the same IBKR connection). When no daemon is running, commands connect to IBKR directly.
 
-**Exceptions:**
+**Key flags for routing:**
+- `--server URL` — explicitly point at a daemon (e.g., `--server http://192.168.1.50:8000`)
+- `--server-port PORT` — daemon port for auto-detection (default: 8000)
+- `--allow-fallback` — if daemon is unreachable, fall back to direct IBKR connection (default: off, to avoid client-id conflicts)
+
+**Exceptions (commands that do NOT route through daemon):**
 - `flush` — blocked when daemon running (warns to use `reconcile --flush` instead)
 - `readiness` — warns when daemon running (needs separate IBKR client-id)
 - `daemon` — starts the daemon itself
-- `repl` — connects to daemon
+- `repl` — connects to daemon via its own protocol
 - `server` — starts standalone HTTP server
 
 ---
@@ -430,20 +499,28 @@ Every CLI command auto-detects a running daemon via HTTP health check. When a da
 
 | Alias | Full Command |
 |-------|-------------|
-| `port`, `pos` | `portfolio` |
-| `perf` | `performance` |
-| `pb` | `playbook` |
+| `port`, `pos`, `positions` | `portfolio` |
+| `q` | `quote` |
 | `opts`, `chain` | `options` |
+| `m` | `margin` |
+| `t` | `trade` |
+| `pb` | `playbook` |
+| `st`, `dash` | `status` |
+| `reset` | `flush` |
 | `recon` | `reconcile` |
+| `ready`, `test` | `readiness` |
+| `serve`, `api` | `server` |
+| `d` | `daemon` |
+| `shell`, `interactive` | `repl` |
+| `log`, `history` | `journal` |
+| `perf`, `metrics` | `performance` |
 | `oo`, `open-orders` | `orders` |
 | `cx` | `cancel` |
 | `activity` | `trades` |
-| `exec` | `executions` |
 | `cl` | `close` |
-| `d` | `daemon` |
-| `shell`, `interactive` | `repl` |
+| `exec` | `executions` |
 
-## Common Flags (all subcommands)
+## Common Flags (all subcommands with IBKR connection)
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -453,6 +530,11 @@ Every CLI command auto-detects a running daemon via HTTP health check. When a da
 | `--client-id` | `10` | IBKR client ID |
 | `--exchange` | `SMART` | Exchange routing |
 | `--data-dir` | `data/utp` | Persistence directory |
+| `--server` | auto | Daemon URL for HTTP routing |
+| `--server-port` | `8000` | Daemon port for auto-detection |
+| `--allow-fallback` | off | Fall back to direct IBKR if daemon unreachable |
+| `--poll-timeout` | `30` | Max seconds to wait for order fill |
+| `--poll-interval` | `1.0` | Seconds between fill status checks |
 
 ## Option Chain Parameters
 

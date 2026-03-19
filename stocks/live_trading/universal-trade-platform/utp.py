@@ -1549,7 +1549,12 @@ async def _cmd_portfolio_http(args, server: str) -> int:
     """Portfolio view via HTTP."""
     import httpx
     async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
-        resp = await client.get("/dashboard/portfolio")
+        recent_n = getattr(args, "recent", 0)
+        params = {}
+        if recent_n > 0:
+            params["recent_count"] = recent_n
+
+        resp = await client.get("/dashboard/portfolio", params=params)
         if resp.status_code != 200:
             print(f"  Error: {resp.status_code} {resp.text}")
             return 1
@@ -1652,16 +1657,28 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                           f"{p.get('quantity',0):>6} {p.get('entry_price',0):>10.2f} "
                           f"{_color(f'${pnl:>8.2f}', pnl_color)} {p.get('status',''):<8}")
 
-        # Recent closed
+        # Recent closed trades
+        recent_n = getattr(args, "recent", 0)
         recent = data.get("recent_closed", [])
-        if recent:
-            _print_section("Recent Closed (last 5)")
-            for pos in recent:
+        if recent_n > 0:
+            # User requested N recent trades
+            show_recent = recent[:recent_n]
+        elif recent:
+            # Default: show up to 5 recent
+            show_recent = recent[:5]
+        else:
+            show_recent = []
+
+        if show_recent:
+            _print_section(f"Recent Closed (last {len(show_recent)})")
+            for pos in show_recent:
                 pnl = pos.get("pnl", 0)
                 pc = "92" if pnl >= 0 else "91"
                 sym = pos.get("symbol", "?")
                 reason = pos.get("exit_reason", "?")
-                print(f"  {sym:>8} | P&L={_color(f'${pnl:+,.2f}', pc):>20} | {reason}")
+                exp = pos.get("expiration", "")
+                exit_time = (pos.get("exit_time") or "")[:16]
+                print(f"  {sym:>8} | P&L={_color(f'${pnl:+,.2f}', pc):>20} | {reason:<15} | {exp} | {exit_time}")
 
         print()
     return 0
@@ -1886,21 +1903,144 @@ async def _cmd_close_http(args, server: str) -> int:
     """Close position via HTTP."""
     import httpx
     position_id = args.position_id
-    payload = {"position_id": position_id}
+    simulate = getattr(args, "simulate", False)
     qty = getattr(args, "quantity", None)
-    if qty:
-        payload["quantity"] = qty
     net_price = getattr(args, "net_price", None)
-    if net_price is not None:
-        payload["net_price"] = net_price
 
     async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
+        if simulate:
+            # Look up position details first, then run margin check
+            resp = await client.get("/dashboard/portfolio")
+            if resp.status_code != 200:
+                print(f"  Error fetching portfolio: {resp.status_code}")
+                return 1
+            positions = resp.json().get("positions", [])
+            match = None
+            for p in positions:
+                if p.get("position_id", "").startswith(position_id):
+                    match = p
+                    break
+            if not match:
+                print(f"  Position {position_id} not found")
+                return 1
+
+            # Build closing order for margin check
+            legs = match.get("legs") or []
+            if not legs and match.get("order_type") == "multi_leg":
+                print(f"  Cannot simulate: position has no leg details")
+                return 1
+
+            close_qty = qty or int(abs(match.get("quantity", 1)))
+            exp = match.get("expiration", "")
+
+            _print_header(f"Simulated Close (margin check only — NOT executed)")
+            print(f"  Position:   {position_id[:8]}")
+            print(f"  Symbol:     {match.get('symbol')}")
+            print(f"  Type:       {match.get('order_type')}")
+            print(f"  Qty:        {close_qty} of {int(abs(match.get('quantity', 0)))}")
+
+            # Show what price will be used
+            mark = match.get("market_price", 0)
+            mark_abs = abs(mark) if mark else 0
+            if net_price is not None:
+                print(f"  Net price:  ${net_price:.2f} (user-specified)")
+            elif mark_abs > 0:
+                print(f"  Net price:  ${mark_abs:.2f} (current mark — no --net-price specified)")
+            else:
+                print(f"  Net price:  $0.05 (fallback — mark unavailable)")
+
+            if legs:
+                print(f"  Closing legs:")
+                for leg in legs:
+                    action = leg.get("action", "")
+                    close_action = "BUY_TO_CLOSE" if "SELL" in action else "SELL_TO_CLOSE"
+                    ot = leg.get("option_type", "PUT")
+                    strike = leg.get("strike", 0)
+                    con_id = leg.get("con_id", "?")
+                    print(f"    {close_action:>18} {ot} {strike} x{close_qty} (conId={con_id})")
+
+                # Show current mark value to help set net_price
+                mark = match.get("market_price", 0)
+                if mark:
+                    mark_per = abs(mark)
+                    print(f"\n  Current mark:   ${mark_per:.4f} per spread")
+                    print(f"  Cost to close {close_qty}:  ~${mark_per * close_qty * 100:.2f}")
+                    if (net_price or 0.05) < mark_per * 0.8:
+                        print(f"  {_color('Warning:', '93')} --net-price ${net_price or 0.05:.2f} "
+                              f"is well below the mark (${mark_per:.2f}). Order will likely be cancelled.")
+                        print(f"  Suggest: --net-price {mark_per:.2f} or higher")
+
+                # Try margin check (may fail for some symbols)
+                from app.services.trade_service import build_closing_trade_request
+                trade_req = build_closing_trade_request(match, close_qty, net_price or 0.05)
+                if trade_req.multi_leg_order:
+                    try:
+                        margin_resp = await client.post("/market/margin", json={
+                            "order": trade_req.multi_leg_order.model_dump(), "timeout": 15.0,
+                        })
+                        if margin_resp.status_code == 200:
+                            md = margin_resp.json()
+                            if not md.get("error"):
+                                print(f"\n  Margin Requirements:")
+                                print(f"    Initial margin:     ${md.get('init_margin', 0):>12,.2f}")
+                                print(f"    Maintenance margin: ${md.get('maint_margin', 0):>12,.2f}")
+                                print(f"    Commission:         ${md.get('commission', 0):>12,.2f}")
+                    except Exception:
+                        pass  # Margin check is optional — conId close works without it
+            else:
+                print(f"\n  Equity close: {match.get('symbol')} x{close_qty}")
+
+            print(f"\n  {_color('NOT EXECUTED', '93')} — remove --simulate to close")
+            return 0
+
+        # Actual close — submits order to IBKR
+        payload = {"position_id": position_id}
+        if qty:
+            payload["quantity"] = qty
+        if net_price is not None:
+            payload["net_price"] = net_price
+
+        price_label = f"@ ${net_price:.2f}" if net_price else "@ current mark"
+        print(f"  Submitting closing order to IBKR {price_label}...")
         resp = await client.post("/trade/close", json=payload)
         if resp.status_code != 200:
-            print(f"  Error: {resp.status_code} — {resp.json().get('detail', resp.text)}")
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            print(f"  Error: {resp.status_code} — {detail}")
             return 1
         data = resp.json()
-        print(f"  Position closed: {data.get('position', {}).get('status', 'ok')}")
+        order_result = data.get("order_result", {})
+        pos = data.get("position", {})
+        symbol = pos.get("symbol", "?")
+        order_status = order_result.get("status", "?")
+        fill_price = order_result.get("filled_price")
+
+        if data.get("status") == "order_not_filled":
+            msg = order_result.get("message", "")
+            print(f"  {_color('NOT FILLED', '91')} — {order_status}")
+            if msg:
+                print(f"  Detail: {msg}")
+            if data.get("message"):
+                print(f"  {data['message']}")
+            print(f"  Local position NOT modified.")
+            return 1
+
+        # Order filled
+        pos_status = pos.get("status", "?")
+        if pos_status == "closed":
+            pnl = pos.get("pnl")
+            pnl_str = f"${pnl:+,.2f}" if pnl is not None else "N/A"
+            pnl_color = "92" if (pnl or 0) >= 0 else "91"
+            fill_str = f" @ ${fill_price:.2f}" if fill_price else ""
+            print(f"  {_color('FILLED & CLOSED', '92')} {symbol}{fill_str}")
+            print(f"  P&L: {_color(pnl_str, pnl_color)}")
+        else:
+            remaining = int(abs(pos.get("quantity", 0)))
+            closed_qty = qty or "all"
+            fill_str = f" @ ${fill_price:.2f}" if fill_price else ""
+            print(f"  {_color('FILLED', '92')} {symbol} — closed {closed_qty}{fill_str}, {remaining} remaining")
     return 0
 
 
@@ -5218,57 +5358,75 @@ def main():
         epilog="""
 Subcommands:
   portfolio     Current positions, P&L (broker-authoritative), account summary
-  quote         Real-time quotes
-  options       Option chain strikes and quotes (calls/puts)
-  margin        Margin/cost check for a hypothetical trade
-  trade         Execute trades (equity, option, spreads, iron condors)
+  quote         Real-time quotes for one or more symbols (fetched in parallel)
+  options       Option chain strikes, expirations, live bid/ask/volume
+  margin        Margin/cost check for a hypothetical trade (no execution)
+  trade         Execute trades (equity, option, credit-spread, debit-spread, iron-condor)
   orders        Show working (open) orders at the broker
-  cancel        Cancel a working order by ID or cancel all
-  trades        Today's trades with order/position IDs and detail drill-down
-  close         Close an open position by ID (auto-derives all parameters)
-  playbook      Execute/validate YAML trade playbooks
-  status        System dashboard (positions, orders, connections)
-  reconcile     Compare system vs broker positions
-  readiness     Test IBKR connectivity and trade types
-  server        Start the REST API server
-  journal       View trade history / ledger entries
-  performance   Performance metrics (win rate, Sharpe, drawdown)
-  flush         Clear local positions/ledger data
+  cancel        Cancel a working order by ID or cancel all open orders
+  trades        Today's trades with order/position IDs, P&L, and detail drill-down
+  close         Close an open position by ID — submits real IBKR closing order
+  executions    IBKR execution history grouped by order (identifies multi-leg trades)
+  playbook      Execute or validate YAML trade playbooks (batch trading)
+  status        System dashboard (positions, orders, connections, cache stats)
+  reconcile     Compare system vs broker positions, flush/hard-reset
+  readiness     Test IBKR connectivity and all 5 trade types
+  daemon        Start long-running daemon (IBKR + HTTP API + background loops)
+  repl          Interactive REPL connected to daemon
+  server        Start standalone REST API server (no IBKR, no background tasks)
+  journal       View trade history and ledger entries
+  performance   Performance metrics (win rate, Sharpe, drawdown, profit factor)
+  flush         Clear local positions/ledger data (blocked when daemon running)
+
+Daemon-first routing:
+  All commands auto-detect a running daemon and route through its HTTP API,
+  sharing the IBKR connection. When no daemon is running, commands connect
+  to IBKR directly (unless --allow-fallback is off). Use --server URL to
+  point at a specific daemon.
+
+Trade modes:
+  (default)     Dry-run: stub providers, no broker connection
+  --paper       Connect to IBKR paper account (port 7497)
+  --live        Connect to IBKR live account (port 7496) — requires confirmation
 
 Examples:
   %(prog)s portfolio --live                          # P&L from IBKR (authoritative)
   %(prog)s portfolio --paper                         # Paper account positions
-  %(prog)s quote SPY AAPL QQQ
+  %(prog)s quote SPY AAPL QQQ                        # Parallel quotes
+  %(prog)s quote SPX --live                          # Index quote with timestamp + source
   %(prog)s options RUT --type CALL --expiration 2026-03-16 --live
-  %(prog)s options SPX --type PUT --strike-min 5400 --strike-max 5600 --paper
-  %(prog)s options RUT --list-expirations --paper
+  %(prog)s options SPX --list-expirations --paper
   %(prog)s margin credit-spread --symbol RUT --short-strike 2550 \\
     --long-strike 2575 --option-type CALL --expiration 2026-03-16 --paper
-  %(prog)s trade credit-spread --symbol RUT --short-strike 2560 \\
-    --long-strike 2570 --option-type CALL --expiration 2026-03-17 \\
-    --quantity 2 --net-price 0.15 --live              # Open a credit spread
-  %(prog)s trade credit-spread --symbol RUT --short-strike 2560 \\
-    --long-strike 2570 --option-type CALL --expiration 2026-03-17 \\
-    --quantity 2 --net-price 0.05 --close --live      # Close a credit spread
-  %(prog)s trade equity --symbol SPY --side BUY --quantity 1
-  %(prog)s trade --validate-all --paper
-  %(prog)s orders --live                             # Show open/working orders
-  %(prog)s cancel --order-id 123 --live              # Cancel order by ID
-  %(prog)s cancel --all --live                       # Cancel all open orders
-  %(prog)s trades --live                             # Today's transactions (IBKR real-time P&L)
-  %(prog)s trades --days 7 --live                    # Last 7 days of trades
-  %(prog)s trades --all --live                       # All trades (open + closed) regardless of date
-  %(prog)s trades --detail <position-id> --live      # Drill down + close command
-  %(prog)s close 2d9a --live                         # Close position by ID prefix
-  %(prog)s close 2d9a                                # Dry-run close (no broker)
-  %(prog)s close 2d9a --net-price 0.10 --live        # Close at specific debit
-  %(prog)s playbook execute playbooks/example_mixed.yaml
-  %(prog)s status
-  %(prog)s reconcile --flush --show --live
-  %(prog)s readiness --symbol SPX --paper
-  %(prog)s server --server-port 8000
-  %(prog)s journal --days 7
-  %(prog)s performance --days 30
+  %(prog)s trade credit-spread --symbol SPX --short-strike 5500 \\
+    --long-strike 5475 --option-type PUT --expiration 2026-03-20 \\
+    --quantity 1 --net-price 3.50 --paper             # Open a credit spread
+  %(prog)s trade credit-spread --symbol SPX --short-strike 5500 \\
+    --long-strike 5475 --option-type PUT --expiration 2026-03-20 \\
+    --quantity 1 --net-price 0.05 --close --live      # Close a credit spread
+  %(prog)s trade --simulate --symbol RUT --live       # Margin check, no execution
+  %(prog)s trade --validate-all --paper               # Test all 5 trade types
+  %(prog)s orders --live                              # Show open/working orders
+  %(prog)s cancel --order-id 123 --live               # Cancel order by ID
+  %(prog)s cancel --all --live                        # Cancel all open orders
+  %(prog)s trades --live                              # Today's transactions (IBKR P&L)
+  %(prog)s trades --all --live                        # All trades (open + closed)
+  %(prog)s trades --detail <pos-id> --live            # Drill down + close command
+  %(prog)s close 2d9a --live                          # Close position (real IBKR order)
+  %(prog)s close 2d9a --net-price 0.10 --live         # Close at specific debit
+  %(prog)s close 2d9a --simulate --live               # Margin check only, no close
+  %(prog)s executions --live                          # IBKR executions grouped by order
+  %(prog)s playbook execute playbooks/example_mixed.yaml --paper
+  %(prog)s status                                     # System dashboard
+  %(prog)s reconcile --flush --show --live            # Flush + sync + display
+  %(prog)s reconcile --hard-reset --live              # Full reset + rebuild
+  %(prog)s readiness --symbol SPX --paper             # IBKR connectivity test
+  %(prog)s daemon --paper                             # Start daemon (paper)
+  %(prog)s daemon --live --advisor-profile tiered_v2  # Daemon with advisor
+  %(prog)s repl                                       # Interactive REPL
+  %(prog)s server --server-port 8000                  # Standalone HTTP server
+  %(prog)s journal --days 7                           # Recent ledger entries
+  %(prog)s performance --days 30                      # Win rate, Sharpe, drawdown
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -5276,19 +5434,97 @@ Examples:
     subparsers = parser.add_subparsers(dest="command", help="Subcommand")
 
     # ── portfolio ──
-    p_port = subparsers.add_parser("portfolio", help="Show current positions, P&L, account summary",
-                                    aliases=["port", "positions", "pos"])
+    p_port = subparsers.add_parser("portfolio",
+                                    help="Show current positions, P&L, account summary",
+                                    aliases=["port", "positions", "pos"],
+                                    description='''
+Show current positions, unrealized P&L, account balances, and position summary.
+When connected to IBKR (--paper or --live), displays broker-authoritative P&L
+including average cost, mark price, and unrealized gains. Auto-detects a running
+daemon and routes through HTTP if available.
+                                    ''',
+                                    epilog='''
+Examples:
+  %(prog)s --live                  Positions + P&L from IBKR live account
+  %(prog)s --paper                 Paper account positions
+  %(prog)s                         Local position store (default: paper mode)
+  %(prog)s --live --host 10.0.0.5  Connect to remote TWS
+
+Output includes:
+  - Per-position: symbol, type, quantity, avg cost, mark, unrealized P&L
+  - Account summary: net liquidation, buying power, cash balance
+  - When daemon is running, no --live/--paper flag needed
+
+Aliases: port, positions, pos
+                                    ''',
+                                    formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_port.add_argument("--recent", "-n", type=int, default=0,
+                        help="Show N most recent closed trades at the bottom (default: 0 = hide)")
     _add_connection_args(p_port, default_paper=True)
 
     # ── quote ──
-    p_quote = subparsers.add_parser("quote", help="Get real-time quotes",
-                                     aliases=["q"])
+    p_quote = subparsers.add_parser("quote",
+                                     help="Get real-time quotes for one or more symbols",
+                                     aliases=["q"],
+                                     description='''
+Fetch real-time quotes for one or more symbols. Symbols are fetched in parallel
+for speed. Output shows bid, ask, last price, and volume. When connected via
+daemon or IBKR, also shows the quote timestamp and data source (streaming_cache,
+ibkr, or delayed). For indices (SPX, NDX, RUT), uses IBKR streaming data.
+                                     ''',
+                                     epilog='''
+Examples:
+  %(prog)s SPY AAPL QQQ               Quotes for multiple equities (dry-run)
+  %(prog)s SPX --live                  Index quote via IBKR
+  %(prog)s SPX NDX RUT --live          Multiple index quotes
+  %(prog)s SPY --paper                 Paper account quote
+
+Output columns:
+  Symbol   Ticker symbol
+  Bid      Current best bid price
+  Ask      Current best ask price
+  Last     Last traded price
+  Vol      Trading volume
+
+Aliases: q
+                                     ''',
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     p_quote.add_argument("symbols", nargs="+", help="One or more ticker symbols")
     _add_connection_args(p_quote)
 
     # ── options ──
-    p_opts = subparsers.add_parser("options", help="Show option chain strikes and quotes",
-                                    aliases=["opts", "chain"])
+    p_opts = subparsers.add_parser("options",
+                                    help="Show option chain strikes and quotes",
+                                    aliases=["opts", "chain"],
+                                    description='''
+Show option chain data for an underlying symbol. Displays strikes with live
+bid/ask/last/volume for calls, puts, or both. By default shows today's
+expiration within +/-15% of current price. Use --strike-range to narrow the
+view or --strike-min/--strike-max for an explicit range. Use --list-expirations
+to see all available expiration dates instead of strike data.
+                                    ''',
+                                    epilog='''
+Examples:
+  %(prog)s SPX --live                              Today's exp, calls+puts, +/-15%%
+  %(prog)s SPX --strike-range 2 --live             Tight range: +/-2%% of price
+  %(prog)s SPX --type PUT --live                   Puts only, today's expiration
+  %(prog)s SPX --type CALL --live                  Calls only
+  %(prog)s SPX --strike-min 5400 --strike-max 5600 --live  Explicit range
+  %(prog)s SPX --expiration 2026-03-21 --live      Specific expiration date
+  %(prog)s SPX --list-expirations --live           List available expirations
+  %(prog)s RUT --strike-range 5 --live             RUT +/-5%%
+  %(prog)s NDX --type PUT --strike-range 3 --live  NDX puts +/-3%%
+
+Output columns:
+  Strike   Option strike price
+  Bid      Best bid price
+  Ask      Best ask price
+  Last     Last traded price
+  Vol      Trading volume
+
+Aliases: opts, chain
+                                    ''',
+                                    formatter_class=argparse.RawDescriptionHelpFormatter)
     p_opts.add_argument("symbol", help="Underlying symbol (e.g. RUT, SPX, SPY)")
     p_opts.add_argument("--type", default="BOTH", choices=["CALL", "PUT", "BOTH"],
                         help="Option type (default: BOTH)")
@@ -5305,8 +5541,37 @@ Examples:
     _add_connection_args(p_opts, default_paper=True)
 
     # ── margin ──
-    p_margin = subparsers.add_parser("margin", help="Check margin/cost for a hypothetical trade",
-                                      aliases=["m"])
+    p_margin = subparsers.add_parser("margin",
+                                      help="Check margin/cost for a hypothetical trade (no execution)",
+                                      aliases=["m"],
+                                      description='''
+Check margin requirements and buying power impact for a hypothetical trade
+without executing it. Supports credit spreads, debit spreads, iron condors,
+and single options. Connects to IBKR to qualify contracts and compute exact
+margin, but never submits an order.
+
+Choose a trade type subcommand: credit-spread, debit-spread, iron-condor, or option.
+                                      ''',
+                                      epilog='''
+Examples:
+  %(prog)s credit-spread --symbol SPX --short-strike 5500 \\
+    --long-strike 5475 --option-type PUT --expiration 2026-03-20
+  %(prog)s iron-condor --symbol SPX --put-short 5500 --put-long 5475 \\
+    --call-short 5700 --call-long 5725 --expiration 2026-03-20
+  %(prog)s option --symbol SPY --strike 550 \\
+    --option-type PUT --expiration 2026-03-20
+  %(prog)s debit-spread --symbol QQQ --long-strike 480 \\
+    --short-strike 490 --option-type CALL --expiration 2026-03-20
+
+Trade type subcommands (aliases):
+  credit-spread (cs)     Vertical credit spread margin check
+  debit-spread (ds)      Vertical debit spread margin check
+  iron-condor (ic)       Iron condor (4-leg) margin check
+  option (opt)           Single option margin check
+
+Aliases: m
+                                      ''',
+                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     margin_sub = p_margin.add_subparsers(dest="margin_type", help="Trade type to check margin for")
 
     m_cs = margin_sub.add_parser("credit-spread", help="Credit spread margin check", aliases=["cs"])
@@ -5332,6 +5597,16 @@ Examples:
 Execute equity, option, or multi-leg options trades. Choose a trade type
 subcommand (equity, option, credit-spread, debit-spread, iron-condor).
 Default mode is dry-run (no broker). Use --paper or --live for real execution.
+
+Special flags:
+  --simulate      Use live IBKR to qualify contracts and check margin, but do
+                  NOT submit the order. Works with any trade type.
+  --close         Reverse a spread position (BUY_TO_CLOSE / SELL_TO_CLOSE).
+                  Available on credit-spread, debit-spread, and iron-condor.
+  --validate-all  Run all 5 trade types as a validation suite (no real trades).
+  --cleanup       Close positions created by --validate-all.
+
+Auto-detects a running daemon and routes through HTTP if available.
                                      ''',
                                      epilog='''
 Examples:
@@ -5347,6 +5622,10 @@ Examples:
   %(prog)s credit-spread --symbol SPX --short-strike 5500 --long-strike 5475 \\
     --option-type PUT --expiration 2026-03-20 --quantity 1 --net-price 3.50 --paper
 
+  # Close a credit spread
+  %(prog)s credit-spread --symbol SPX --short-strike 5500 --long-strike 5475 \\
+    --option-type PUT --expiration 2026-03-20 --close --net-price 0.10 --live
+
   # Debit spread (buy premium)
   %(prog)s debit-spread --symbol QQQ --long-strike 480 --short-strike 490 \\
     --option-type CALL --expiration 2026-03-20 --quantity 3 --net-price 4.00 --paper
@@ -5355,8 +5634,13 @@ Examples:
   %(prog)s iron-condor --symbol SPX --put-short 5500 --put-long 5475 \\
     --call-short 5700 --call-long 5725 --expiration 2026-03-20 --quantity 1 --paper
 
+  # Simulate (margin check only, no execution)
+  %(prog)s credit-spread --symbol RUT --short-strike 2460 --long-strike 2440 \\
+    --option-type PUT --expiration 2026-03-18 --quantity 1 --live --simulate
+
   # Validate all 5 trade types (safe, no real execution)
   %(prog)s --validate-all --paper
+  %(prog)s --validate-all --cleanup --paper    # Validate + clean up after
 
 Trade types:
   equity          Buy or sell stocks (--side BUY or SELL)
@@ -5409,6 +5693,8 @@ Required flags:
                       help="Order type (default: MARKET)")
     t_eq.add_argument("--limit-price", type=float, default=None,
                       help="Limit price (required for LIMIT orders)")
+    t_eq.add_argument("--simulate", action="store_true",
+                      help="Check margin only — do NOT execute")
     _add_connection_args(t_eq)
 
     # trade option
@@ -5441,6 +5727,8 @@ Actions:
                        help="Order type (default: LIMIT)")
     t_opt.add_argument("--limit-price", type=float, default=None,
                        help="Limit price per contract (required for LIMIT orders)")
+    t_opt.add_argument("--simulate", action="store_true",
+                       help="Check margin only — do NOT execute")
     _add_connection_args(t_opt)
 
     # trade credit-spread
@@ -5472,6 +5760,8 @@ P&L: credit_received - cost_to_close (max profit = full credit, max loss = width
                       help="Use mid-point between market and best-case (default: market price)")
     t_cs.add_argument("--close", action="store_true",
                       help="Close an existing position (BUY_TO_CLOSE / SELL_TO_CLOSE)")
+    t_cs.add_argument("--simulate", action="store_true",
+                      help="Check margin only — do NOT execute")
     _add_connection_args(t_cs)
 
     # trade debit-spread
@@ -5499,6 +5789,8 @@ P&L: value_on_close - debit_paid (max profit = width - debit, max loss = debit p
                       help="Use mid-point between market and best-case (default: market price)")
     t_ds.add_argument("--close", action="store_true",
                       help="Close an existing position (SELL_TO_CLOSE / BUY_TO_CLOSE)")
+    t_ds.add_argument("--simulate", action="store_true",
+                      help="Check margin only — do NOT execute")
     _add_connection_args(t_ds)
 
     # trade iron-condor
@@ -5528,11 +5820,40 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
                       help="Use mid-point between market and best-case (default: market price)")
     t_ic.add_argument("--close", action="store_true",
                       help="Close an existing position (reverses all legs)")
+    t_ic.add_argument("--simulate", action="store_true",
+                      help="Check margin only — do NOT execute")
     _add_connection_args(t_ic)
 
     # ── playbook ──
-    p_pb = subparsers.add_parser("playbook", help="Execute or validate a YAML trade playbook",
-                                  aliases=["pb"])
+    p_pb = subparsers.add_parser("playbook",
+                                  help="Execute or validate a YAML trade playbook",
+                                  aliases=["pb"],
+                                  description='''
+Execute or validate YAML trade playbooks for batch trade execution. Playbooks
+define a sequence of trades (equity, option, credit-spread, debit-spread,
+iron-condor) in a single YAML file. Each instruction is executed in order.
+
+Actions:
+  execute (exec, run)   Execute all trades in the playbook
+  validate (check)      Validate playbook structure without executing
+  list (ls)             List available playbook files in a directory
+                                  ''',
+                                  epilog='''
+Examples:
+  %(prog)s execute playbooks/example_mixed.yaml          Execute (dry-run)
+  %(prog)s execute playbooks/example_mixed.yaml --paper   Execute on paper
+  %(prog)s execute playbooks/example_mixed.yaml --live    Execute on live
+  %(prog)s validate playbooks/example_mixed.yaml          Validate only
+  %(prog)s list                                           List available playbooks
+  %(prog)s list --dir ./my_playbooks                      List from custom dir
+
+Playbook YAML format:
+  - Each trade is an instruction with: type, symbol, strikes, expiration, etc.
+  - See playbooks/example_mixed.yaml for a full template
+
+Aliases: pb
+                                  ''',
+                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     pb_sub = p_pb.add_subparsers(dest="playbook_action", help="Playbook action")
 
     pb_exec = pb_sub.add_parser("execute", help="Execute a playbook", aliases=["exec", "run"])
@@ -5548,20 +5869,92 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
     pb_list.add_argument("--dir", default="playbooks", help="Playbooks directory (default: playbooks/)")
 
     # ── status ──
-    p_status = subparsers.add_parser("status", help="System dashboard", aliases=["st", "dash"])
+    p_status = subparsers.add_parser("status",
+                                      help="System dashboard (positions, orders, connections)",
+                                      aliases=["st", "dash"],
+                                      description='''
+Display a unified system dashboard showing active positions, pending orders,
+recent trades, IBKR connection status, and cache statistics. Provides a
+quick overview of the entire trading system state. Auto-detects a running
+daemon and routes through HTTP if available.
+                                      ''',
+                                      epilog='''
+Examples:
+  %(prog)s                         Dashboard (default: paper mode)
+  %(prog)s --live                  Dashboard with live IBKR data
+  %(prog)s --paper                 Dashboard with paper account data
+
+Dashboard sections:
+  - Active positions with current P&L
+  - Pending/working orders
+  - Recent trade activity
+  - IBKR connection health
+  - Data cache statistics
+
+Aliases: st, dash
+                                      ''',
+                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     _add_connection_args(p_status, default_paper=True)
 
     # ── flush ──
-    p_flush = subparsers.add_parser("flush", help="Clear local position store and/or ledger",
-                                     aliases=["reset"])
+    p_flush = subparsers.add_parser("flush",
+                                     help="Clear local position store and/or ledger",
+                                     aliases=["reset"],
+                                     description='''
+Clear local persisted data (positions, ledger, or both). This is a local-only
+operation that does NOT affect the broker. BLOCKED when a daemon is running —
+use 'reconcile --flush' instead to flush through the daemon safely.
+
+For a full system reset including closed P&L history, use 'reconcile --hard-reset'.
+                                     ''',
+                                     epilog='''
+Examples:
+  %(prog)s                         Flush all local data (positions + ledger)
+  %(prog)s positions               Flush positions only (keep ledger)
+  %(prog)s ledger                  Flush ledger only (keep positions)
+  %(prog)s --data-dir data/custom  Flush from custom data directory
+
+Note: This command is BLOCKED when a daemon is running to prevent
+data conflicts. Use 'reconcile --flush' or 'reconcile --hard-reset'
+to manage data through the daemon.
+
+Aliases: reset
+                                     ''',
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     p_flush.add_argument("what", nargs="?", default="all",
                          choices=["positions", "ledger", "all"],
                          help="What to flush (default: all)")
     p_flush.add_argument("--data-dir", default="data/utp", help="Data directory")
 
     # ── reconcile ──
-    p_recon = subparsers.add_parser("reconcile", help="Compare system vs broker positions",
-                                     aliases=["recon"])
+    p_recon = subparsers.add_parser("reconcile",
+                                     help="Compare system vs broker positions",
+                                     aliases=["recon"],
+                                     description='''
+Compare system-tracked positions against broker-reported positions to find
+discrepancies. Optionally flush and rebuild from the broker as the source of
+truth. Supports three levels of reset:
+
+  (no flags)       Compare only — show mismatches but change nothing
+  --flush          Clear open positions and re-sync from broker (preserves
+                   closed positions for P&L history)
+  --hard-reset     Full reset: clear ALL data (open + closed positions,
+                   ledger, executions) and rebuild from scratch. When a
+                   daemon is running, also clears the daemon's in-memory
+                   position store.
+                                     ''',
+                                     epilog='''
+Examples:
+  %(prog)s --live                          Compare system vs broker (read-only)
+  %(prog)s --flush --show --live           Flush open positions, sync, display
+  %(prog)s --flush --portfolio --live      Flush, sync, full portfolio dump
+  %(prog)s --hard-reset --live             Full reset + rebuild from scratch
+  %(prog)s --paper                         Reconcile paper account
+  %(prog)s --show --live                   Reconcile + show synced positions
+
+Aliases: recon
+                                     ''',
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     p_recon.add_argument("--flush", action="store_true",
                          help="Flush open positions and re-sync from broker "
                               "(preserves closed positions for P&L history)")
@@ -5575,8 +5968,35 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
     _add_connection_args(p_recon, default_paper=True)
 
     # ── readiness ──
-    p_ready = subparsers.add_parser("readiness", help="Test IBKR connectivity and trade types",
-                                     aliases=["ready", "test"])
+    p_ready = subparsers.add_parser("readiness",
+                                     help="Test IBKR connectivity and all 5 trade types",
+                                     aliases=["ready", "test"],
+                                     description='''
+Test IBKR connectivity by validating all 5 trade types (equity, option,
+credit-spread, debit-spread, iron-condor) without executing any orders.
+Checks: IBKR connection, contract qualification, market data, and
+optionally margin requirements.
+
+WARNING: When a daemon is running, readiness needs its own IBKR client-id
+to avoid conflicts. Use --client-id with a different value than the daemon.
+                                     ''',
+                                     epilog='''
+Examples:
+  %(prog)s --symbol SPX --paper                All 5 trade types (paper)
+  %(prog)s --symbol NDX --skip-margin --live   Skip margin checks
+  %(prog)s --symbol SPX --port 7496 --client-id 11  Custom connection
+  %(prog)s --symbol RUT --market-data-type 1   Use live (paid) market data
+
+Test steps:
+  1. Connect to IBKR TWS/Gateway
+  2. Qualify contracts for the symbol
+  3. Fetch market data (bid/ask/last)
+  4. Check margin for each trade type (unless --skip-margin)
+  5. Report pass/fail for each step
+
+Aliases: ready, test
+                                     ''',
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     p_ready.add_argument("--symbol", default="SPX", help="Symbol to test (default: SPX)")
     p_ready.add_argument("--expiration", default=None, help="Expiration date")
     p_ready.add_argument("--skip-margin", action="store_true", help="Skip margin checks")
@@ -5585,8 +6005,33 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
     _add_connection_args(p_ready)
 
     # ── server ──
-    p_server = subparsers.add_parser("server", help="Start the REST API server",
-                                      aliases=["serve", "api"])
+    p_server = subparsers.add_parser("server",
+                                      help="Start standalone REST API server",
+                                      aliases=["serve", "api"],
+                                      description='''
+Start a standalone FastAPI HTTP server. This is a lightweight server without
+IBKR connection or background tasks (no auto-expiration, no position sync).
+For a full-featured server with IBKR, use 'daemon' instead.
+
+The server binds to 0.0.0.0 by default so it is accessible from LAN.
+LAN requests (private IPs) skip authentication automatically.
+                                      ''',
+                                      epilog='''
+Examples:
+  %(prog)s                             Start on 0.0.0.0:8000
+  %(prog)s --server-port 9000          Custom port
+  %(prog)s --server-host 127.0.0.1     Bind to localhost only
+  %(prog)s --reload                    Auto-reload on code changes (dev mode)
+
+For production use, prefer 'daemon' which includes:
+  - Persistent IBKR connection
+  - Auto-expiration of options
+  - Position sync every 2 minutes
+  - Process auto-restart on crash
+
+Aliases: serve, api
+                                      ''',
+                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     p_server.add_argument("--server-host", default="0.0.0.0",
                           help="API server bind address (default: 0.0.0.0)")
     p_server.add_argument("--server-port", type=int, default=8000,
@@ -5595,8 +6040,41 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
                           help="Enable auto-reload for development")
 
     # ── daemon ──
-    p_daemon = subparsers.add_parser("daemon", help="Start long-running daemon (IBKR + HTTP API + background loops)",
-                                      aliases=["d"])
+    p_daemon = subparsers.add_parser("daemon",
+                                      help="Start long-running daemon (IBKR + HTTP API + background loops)",
+                                      aliases=["d"],
+                                      description='''
+Start an always-on daemon that holds the IBKR connection, runs background
+tasks, and serves the HTTP API. All CLI commands auto-detect the daemon and
+route through HTTP, sharing the same IBKR connection.
+
+Background tasks:
+  - Auto-expiration of options at end of day
+  - Position sync (polls IBKR every 2 minutes for out-of-band changes)
+  - IBKR auto-reconnect with exponential backoff (2s to 10s cap)
+  - Process auto-restart on crash (up to 20 consecutive failures)
+  - Optional: advisor signal generation + auto-execution
+  - Optional: real-time market data streaming to Redis/QuestDB/WS
+
+Starts in degraded mode if IBKR is unavailable, retrying in background.
+                                      ''',
+                                      epilog='''
+Examples:
+  %(prog)s --paper                                    Paper trading daemon
+  %(prog)s --live                                     Live trading daemon
+  %(prog)s --live --advisor-profile tiered_v2         With advisor signals
+  %(prog)s --live --advisor-profile tiered_v2 --auto-execute  Full auto
+  %(prog)s --live --no-restart                        No auto-restart on crash
+  %(prog)s --server-port 9000 --paper                 Custom API port
+  %(prog)s --live --streaming-config configs/streaming_default.yaml
+
+Stopping:
+  Ctrl-C or SIGTERM — clean shutdown (no restart)
+  Unhandled exception — auto-restarts with backoff (unless --no-restart)
+
+Aliases: d
+                                      ''',
+                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     p_daemon.add_argument("--server-host", default="0.0.0.0", help="API listen address (default: 0.0.0.0)")
     p_daemon.add_argument("--server-port", type=int, default=8000, help="API listen port (default: 8000)")
     p_daemon.add_argument("--advisor-profile", default=None, help="Advisor profile to run (e.g. tiered_v2)")
@@ -5608,16 +6086,78 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
     _add_connection_args(p_daemon, default_paper=True)
 
     # ── repl ──
-    p_repl = subparsers.add_parser("repl", help="Interactive REPL connected to daemon",
-                                    aliases=["shell", "interactive"])
+    p_repl = subparsers.add_parser("repl",
+                                    help="Interactive REPL connected to daemon",
+                                    aliases=["shell", "interactive"],
+                                    description='''
+Start an interactive Read-Eval-Print Loop connected to a running daemon.
+All commands are sent to the daemon via HTTP. The prompt shows the current
+trade mode ([LIVE], [PAPER], or [DRY]).
+
+REPL commands:
+  portfolio         Show positions and P&L
+  quote <SYMBOL>    Get real-time quote
+  options <SYM>     Show option chain (supports --strike-range, --type, etc.)
+  trades --all      Show all trade history
+  orders            Show open orders
+  advisor           View advisor recommendations (if --advisor-profile set)
+  y 1 3             Confirm advisor entries 1 and 3 for execution
+  status            System dashboard
+  help              Show available commands
+  quit / exit       Close REPL
+                                    ''',
+                                    epilog='''
+Examples:
+  %(prog)s                                 Auto-detect daemon on localhost:8000
+  %(prog)s --server http://192.168.1.50:8000  Connect to remote daemon
+  %(prog)s --server-port 9000              Auto-detect on custom port
+
+REPL session example:
+  [LIVE] utp> portfolio
+  [LIVE] utp> quote SPX NDX
+  [LIVE] utp> options SPX --strike-range 2
+  [LIVE] utp> advisor
+  [LIVE] utp> y 1 3
+  [LIVE] utp> quit
+
+Aliases: shell, interactive
+                                    ''',
+                                    formatter_class=argparse.RawDescriptionHelpFormatter)
     p_repl.add_argument("--server", default=None, metavar="URL",
                          help="Daemon URL (default: auto-detect)")
     p_repl.add_argument("--server-port", type=int, default=8000,
                          help="Daemon port for auto-detect (default: 8000)")
 
     # ── journal ──
-    p_journal = subparsers.add_parser("journal", help="View trade history and ledger entries",
-                                       aliases=["log", "history"])
+    p_journal = subparsers.add_parser("journal",
+                                       help="View trade history and ledger entries",
+                                       aliases=["log", "history"],
+                                       description='''
+View the append-only transaction ledger which records every trade event.
+Each entry includes timestamp, event type, order details, and position
+snapshots. Filter by date range, event type, or order ID. Auto-detects
+a running daemon and routes through HTTP if available.
+                                       ''',
+                                       epilog='''
+Examples:
+  %(prog)s --days 7                    Last 7 days of entries
+  %(prog)s --limit 100                 Show up to 100 entries
+  %(prog)s --event-type TRADE_EXECUTED Only executed trades
+  %(prog)s --event-type ORDER_SUBMITTED  Only submitted orders
+  %(prog)s --event-type POSITION_OPENED  Position openings
+  %(prog)s --event-type POSITION_CLOSED  Position closings
+  %(prog)s --order-id abc123           Filter by order ID
+
+Common event types:
+  ORDER_SUBMITTED    Order sent to broker
+  TRADE_EXECUTED     Order filled
+  POSITION_OPENED    New position created
+  POSITION_CLOSED    Position fully closed
+  EXPIRATION         Option expired worthless
+
+Aliases: log, history
+                                       ''',
+                                       formatter_class=argparse.RawDescriptionHelpFormatter)
     p_journal.add_argument("--days", type=int, default=None,
                            help="Show entries from the last N days")
     p_journal.add_argument("--limit", type=int, default=50,
@@ -5633,8 +6173,33 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
                            help="Daemon port for auto-detect (default: 8000)")
 
     # ── performance ──
-    p_perf = subparsers.add_parser("performance", help="Show performance metrics",
-                                    aliases=["perf", "metrics"])
+    p_perf = subparsers.add_parser("performance",
+                                    help="Show performance metrics (win rate, Sharpe, drawdown)",
+                                    aliases=["perf", "metrics"],
+                                    description='''
+Compute and display trading performance metrics from closed positions. Includes
+win rate, Sharpe ratio, max drawdown, profit factor, average win/loss, and
+total P&L. Can filter by date range. Auto-detects a running daemon and routes
+through HTTP if available.
+                                    ''',
+                                    epilog='''
+Examples:
+  %(prog)s --days 30                   Last 30 days of performance
+  %(prog)s --days 7                    Last week
+  %(prog)s --start-date 2026-01-01     From January 1st to now
+  %(prog)s --start-date 2026-01-01 --end-date 2026-03-01  Custom range
+
+Metrics shown:
+  Win Rate         Percentage of profitable trades
+  Sharpe Ratio     Risk-adjusted return
+  Max Drawdown     Largest peak-to-trough decline
+  Profit Factor    Gross profit / gross loss
+  Avg Win/Loss     Average P&L for winning and losing trades
+  Total P&L        Net profit/loss for the period
+
+Aliases: perf, metrics
+                                    ''',
+                                    formatter_class=argparse.RawDescriptionHelpFormatter)
     p_perf.add_argument("--days", type=int, default=30,
                         help="Show last N days (default: 30)")
     p_perf.add_argument("--start-date", default=None,
@@ -5653,14 +6218,16 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
                                       aliases=["open-orders", "oo"],
                                       description='''
 Show all working (open) orders at the broker. These are orders that have been
-submitted but not yet filled, cancelled, or rejected. Requires --paper or --live
-to connect to IBKR (or routes through daemon if running).
+submitted but not yet filled, cancelled, or rejected. Auto-detects a running
+daemon and routes through HTTP if available, otherwise connects to IBKR
+directly with --paper or --live.
                                       ''',
                                       epilog='''
 Examples:
   %(prog)s --live                  Show open orders on live account
   %(prog)s --paper                 Show open orders on paper account
   %(prog)s --live --host 10.0.0.5  Connect to remote TWS
+  %(prog)s                         Via daemon (if running, no flags needed)
 
 Output columns:
   Order ID     IBKR order identifier (use with 'cancel' command)
@@ -5677,13 +6244,20 @@ Aliases: open-orders, oo
                                       help="Cancel a working order",
                                       aliases=["cx"],
                                       description='''
-Cancel a working order at the broker. Use 'orders' to find order IDs.
+Cancel a working order at the broker by order ID, or cancel all open orders.
+Use 'orders' to find order IDs first. Auto-detects a running daemon and routes
+through HTTP if available.
                                       ''',
                                       epilog='''
 Examples:
   %(prog)s --order-id 123 --live   Cancel order #123 on live account
   %(prog)s --all --live            Cancel all open orders
   %(prog)s --order-id 456 --paper  Cancel on paper account
+  %(prog)s --order-id 123         Via daemon (if running, no --live needed)
+
+Workflow:
+  1. python utp.py orders --live     # Find order IDs
+  2. python utp.py cancel --order-id 123 --live  # Cancel specific order
 
 Aliases: cx
                                       ''',
@@ -5700,17 +6274,26 @@ Aliases: cx
                                      aliases=["cl"],
                                      description='''
 Close an open position by its position ID (or unique prefix). Automatically
-derives the closing order parameters from the position's legs.
-For credit spreads, submits a BUY_TO_CLOSE order at the specified debit price.
+derives the closing order parameters from the position's legs and submits a
+REAL closing order to IBKR (not just local bookkeeping).
+
+For credit spreads: submits a BUY_TO_CLOSE combo order at the specified debit.
+For debit spreads: submits a SELL_TO_CLOSE combo order.
+For iron condors: reverses all 4 legs.
+
+Use --simulate to check margin without actually closing.
+Auto-detects a running daemon and routes through HTTP if available.
                                      ''',
                                      epilog='''
 Examples:
-  %(prog)s 2d9a --paper            Close position starting with '2d9a' (paper)
-  %(prog)s 2d9a --live             Close on live account at $0.05 debit
-  %(prog)s 2d9a --net-price 0.10 --live   Close at $0.10 debit
-  %(prog)s 2d9a -q 1 --live        Partial close: close 1 contract
+  %(prog)s 2d9a --paper                    Close position '2d9a' on paper account
+  %(prog)s 2d9a --live                     Close on live at $0.05 debit (default)
+  %(prog)s 2d9a --net-price 0.10 --live    Close at $0.10 debit
+  %(prog)s 2d9a -q 1 --live               Partial close: 1 contract only
+  %(prog)s 2d9a --simulate --live          Margin check only, no close
+  %(prog)s 2d9a                            Dry-run close (no broker connection)
 
-The position ID can be a prefix -- if it uniquely matches one position,
+The position ID can be a prefix — if it uniquely matches one open position,
 that position is closed. Use 'trades --all' to find position IDs.
 
 Aliases: cl
@@ -5719,8 +6302,10 @@ Aliases: cl
     p_close.add_argument("position_id", help="Position ID or unique prefix to close")
     p_close.add_argument("--quantity", "-q", type=int, default=None,
                           help="Number of contracts to close (default: all)")
-    p_close.add_argument("--net-price", type=float, default=0.05,
-                          help="Debit price to close (default: $0.05)")
+    p_close.add_argument("--net-price", type=float, default=None,
+                          help="Debit price to close (default: current mark from IBKR)")
+    p_close.add_argument("--simulate", action="store_true",
+                          help="Check margin only — do NOT execute the close")
     _add_connection_args(p_close)
 
     # ── trades ──
@@ -5731,7 +6316,8 @@ Aliases: cl
 Show trade activity: positions opened and closed. By default shows today's
 closed positions. Use --days N for history or --all for everything.
 With --live or --paper, enriches output with broker-authoritative P&L
-(AvgCost, Mark, unrealized P&L from IBKR).
+(AvgCost, Mark, unrealized P&L from IBKR). Auto-detects a running daemon
+and routes through HTTP if available.
                                       ''',
                                       epilog='''
 Examples:
@@ -5767,17 +6353,27 @@ Aliases: activity
                                     help="Show IBKR execution history grouped by order (identifies multi-leg trades)",
                                     aliases=["exec"],
                                     description='''
-Show trade executions from IBKR (last ~7 days), grouped by order.
-Multi-leg trades (credit spreads, iron condors) are automatically identified
-by matching fills with the same permanent order ID.
+Show trade executions from IBKR (last ~7 days), grouped by permanent order ID
+(perm_id). Multi-leg trades (credit spreads, iron condors) are automatically
+identified by matching fills with the same perm_id, so you can see which legs
+belong to the same order.
 
-Executions are cached locally and deduplicated across runs.
+Executions are cached locally in data/utp/{mode}/executions.json and
+deduplicated across runs. Use --flush to clear the cache and re-fetch.
+Auto-detects a running daemon and routes through HTTP if available.
                                     ''',
                                     epilog='''
 Examples:
   %(prog)s --live                  Fetch and show grouped executions
-  %(prog)s --live --flush          Clear cache, re-fetch, show
+  %(prog)s --live --flush          Clear cache, re-fetch from IBKR
   %(prog)s --live --symbol RUT     Filter by symbol
+  %(prog)s --paper                 Paper account executions
+
+Output groups fills by perm_id:
+  Order #12345 (perm_id: 67890)
+    SELL SPX 5500P 2026-03-20  qty=1  price=3.50
+    BUY  SPX 5475P 2026-03-20  qty=1  price=1.20
+    Net credit: $2.30
 
 Aliases: exec
                                     ''',

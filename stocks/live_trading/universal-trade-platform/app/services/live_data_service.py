@@ -112,6 +112,109 @@ def _positions_to_dicts(positions: list[TrackedPosition]) -> list[dict]:
     return result
 
 
+def _group_options_into_spreads(positions: list[dict]) -> list[dict]:
+    """Group individual option positions into spreads for display.
+
+    Pairs long+short option legs with the same symbol+expiration into
+    multi_leg entries. Equities pass through unchanged.
+    """
+    from collections import defaultdict
+
+    equities = []
+    # Group options by (symbol, expiration)
+    option_groups: dict[tuple, list[dict]] = defaultdict(list)
+
+    for p in positions:
+        sec_type = p.get("sec_type", "")
+        if sec_type in ("OPT", "FOP"):
+            exp = p.get("expiration") or ""
+            option_groups[(p.get("symbol", ""), exp)].append(p)
+        else:
+            equities.append(p)
+
+    result = list(equities)
+
+    for (symbol, exp), legs in option_groups.items():
+        if len(legs) < 2:
+            # Single option — pass through
+            for p in legs:
+                p["order_type"] = "option"
+                result.append(p)
+            continue
+
+        # Pair legs into spreads: match short (qty < 0) with long (qty > 0)
+        shorts = sorted([l for l in legs if l.get("quantity", 0) < 0],
+                       key=lambda l: l.get("strike", 0))
+        longs = sorted([l for l in legs if l.get("quantity", 0) > 0],
+                      key=lambda l: l.get("strike", 0))
+
+        paired = []
+        used_longs = set()
+        for short in shorts:
+            s_strike = short.get("strike", 0)
+            s_right = short.get("right", "")
+            s_qty = abs(short.get("quantity", 0))
+            # Find matching long with same right and qty
+            best_long = None
+            for i, long in enumerate(longs):
+                if i in used_longs:
+                    continue
+                if (long.get("right", "") == s_right
+                        and abs(long.get("quantity", 0)) == s_qty):
+                    best_long = (i, long)
+                    break
+            if best_long:
+                idx, long_leg = best_long
+                used_longs.add(idx)
+                l_strike = long_leg.get("strike", 0)
+
+                # Build spread
+                total_mv = (short.get("market_value", 0) or 0) + (long_leg.get("market_value", 0) or 0)
+                total_upnl = (short.get("broker_unrealized_pnl", 0) or 0) + (long_leg.get("broker_unrealized_pnl", 0) or 0)
+                total_avg = (short.get("avg_cost", 0) or 0) + (long_leg.get("avg_cost", 0) or 0)
+                mark_per_spread = ((short.get("market_price", 0) or 0) * -1 +
+                                   (long_leg.get("market_price", 0) or 0))
+
+                right_label = "P" if s_right == "P" else "C"
+                spread = {
+                    "position_id": short.get("position_id", ""),
+                    "symbol": symbol,
+                    "order_type": "multi_leg",
+                    "quantity": s_qty,
+                    "expiration": exp,
+                    "source": short.get("source", ""),
+                    "broker": short.get("broker", ""),
+                    "status": "open",
+                    "avg_cost": total_avg,
+                    "market_price": mark_per_spread,
+                    "market_value": total_mv,
+                    "broker_unrealized_pnl": total_upnl,
+                    "legs_summary": f"{right_label}{min(s_strike, l_strike):.0f}/{right_label}{max(s_strike, l_strike):.0f}",
+                    "legs": [
+                        {"action": "SELL", "option_type": "PUT" if s_right == "P" else "CALL",
+                         "strike": s_strike, "quantity": int(s_qty), "con_id": short.get("con_id")},
+                        {"action": "BUY", "option_type": "PUT" if s_right == "P" else "CALL",
+                         "strike": l_strike, "quantity": int(s_qty), "con_id": long_leg.get("con_id")},
+                    ],
+                    "con_ids": [short.get("con_id"), long_leg.get("con_id")],
+                }
+                paired.append(spread)
+            else:
+                # Unmatched short — show as individual
+                short["order_type"] = "option"
+                paired.append(short)
+
+        # Add unmatched longs
+        for i, long in enumerate(longs):
+            if i not in used_longs:
+                long["order_type"] = "option"
+                paired.append(long)
+
+        result.extend(paired)
+
+    return result
+
+
 class LiveDataService:
     """IBKR-primary data source with local fallback.
 
@@ -173,7 +276,7 @@ class LiveDataService:
 
         return summary
 
-    async def get_portfolio(self) -> dict:
+    async def get_portfolio(self, recent_count: int = 5) -> dict:
         """Full portfolio view — IBKR-enriched positions when connected."""
         summary = self._dashboard.get_summary()
 
@@ -187,6 +290,7 @@ class LiveDataService:
         }
 
         broker_pnl = {}
+        logger.info("get_portfolio: ibkr_healthy=%s, ibkr=%s", self._ibkr_healthy(), type(self._ibkr).__name__ if self._ibkr else None)
 
         if self._ibkr_healthy():
             # Account balances
@@ -223,56 +327,48 @@ class LiveDataService:
                 except Exception:
                     logger.debug("Failed to fetch IBKR portfolio items", exc_info=True)
 
-        # Build position list with broker enrichment
-        # Also build a symbol→items index for fallback matching
-        portfolio_items_by_sym: dict[str, list[dict]] = {}
+        # Build con_id→IBKR item lookup for direct matching
+        # Reuse portfolio_items from above if available, avoid duplicate IBKR call
+        ibkr_by_con_id: dict[int, dict] = {}
+        items_for_enrichment = None
         if self._ibkr_healthy() and hasattr(self._ibkr, "get_portfolio_items"):
             try:
-                all_items = await self._ibkr.get_portfolio_items()
-                for item in (all_items or []):
-                    sym = item.get("symbol", "")
-                    portfolio_items_by_sym.setdefault(sym, []).append(item)
-            except Exception:
-                pass
+                items_for_enrichment = await self._ibkr.get_portfolio_items()
+                logger.info("Portfolio items for enrichment: %d items", len(items_for_enrichment or []))
+                for item in (items_for_enrichment or []):
+                    cid = item.get("con_id")
+                    if cid:
+                        ibkr_by_con_id[cid] = item
+                logger.info("con_id lookup built: %d entries, ibkr_healthy=%s", len(ibkr_by_con_id), self._ibkr_healthy())
+            except Exception as e:
+                logger.info("Failed to build con_id lookup: %s", e)
 
+        # Enrich each position with IBKR data (1:1 by con_id)
+        raw_positions = []
         for pos in summary.active_positions:
             p = pos.model_dump()
-            if pos.position_id in broker_pnl:
+            con_id = p.get("con_id")
+            logger.info("Enriching %s con_id=%s matched=%s", p.get("symbol"), con_id, con_id in ibkr_by_con_id if con_id else "N/A")
+            if con_id and con_id in ibkr_by_con_id:
+                item = ibkr_by_con_id[con_id]
+                p["avg_cost"] = item["avg_cost"]
+                p["market_price"] = item["market_price"]
+                p["market_value"] = item["market_value"]
+                p["broker_unrealized_pnl"] = item["unrealized_pnl"]
+            elif pos.position_id in broker_pnl:
                 pnl_data = broker_pnl[pos.position_id]
                 p["avg_cost"] = pnl_data["avg_cost"]
                 p["market_price"] = pnl_data["market_price"]
                 p["market_value"] = pnl_data["market_value"]
                 p["broker_unrealized_pnl"] = pnl_data["unrealized_pnl"]
-            elif pos.symbol in portfolio_items_by_sym:
-                # Fallback: aggregate all IBKR items for this symbol
-                # (handles options stored as equity in local store)
-                items = portfolio_items_by_sym[pos.symbol]
-                total_mv = sum(i.get("market_value", 0) for i in items)
-                total_upnl = sum(i.get("unrealized_pnl", 0) for i in items)
-                total_avg = sum(i.get("avg_cost", 0) for i in items)
-                # Use first item's market_price as representative
-                mark = items[0].get("market_price", 0) if items else 0
-                # Detect option legs and set expiration
-                opt_items = [i for i in items if i.get("sec_type") in ("OPT", "FOP")]
-                if opt_items and not p.get("expiration"):
-                    exp = opt_items[0].get("expiration", "")
-                    if exp:
-                        p["expiration"] = f"{exp[:4]}-{exp[4:6]}-{exp[6:8]}" if len(exp) == 8 else exp
-                    p["order_type"] = "multi_leg" if len(opt_items) > 1 else "option"
-                    # Build leg summary
-                    legs = []
-                    for oi in opt_items:
-                        legs.append(f"{oi.get('right','?')}{oi.get('strike',0):.0f}")
-                    p["legs_summary"] = " / ".join(legs)
-                p["avg_cost"] = total_avg
-                p["market_price"] = mark
-                p["market_value"] = total_mv
-                p["broker_unrealized_pnl"] = total_upnl
-            result["positions"].append(p)
+            raw_positions.append(p)
+
+        # Group option positions into spreads for display
+        result["positions"] = _group_options_into_spreads(raw_positions)
 
         # Closed positions (recent 5)
         closed = self._store.get_closed_positions()
-        recent = sorted(closed, key=lambda p: p.get("exit_time", ""), reverse=True)[:5]
+        recent = sorted(closed, key=lambda p: p.get("exit_time", ""), reverse=True)[:recent_count]
         result["recent_closed"] = recent
 
         return result

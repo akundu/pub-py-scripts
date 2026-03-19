@@ -170,10 +170,12 @@ python utp.py trade credit-spread --symbol RUT --short-strike 2460 \
   --long-strike 2440 --option-type PUT --expiration 2026-03-18 \
   --quantity 1 --live --simulate                 # Qualify + margin check, no execution
 
-# ── Close by Position ID ─────────────────────────────────────────
+# ── Close by Position ID (submits real IBKR closing order) ──────
 python utp.py close <pos-id-prefix>              # Dry-run close (auto-derives params)
 python utp.py close <pos-id-prefix> --live       # Close at $0.05 debit (default)
 python utp.py close <pos-id-prefix> --net-price 0.10 --live  # Close at specific debit
+python utp.py close <pos-id-prefix> -q 1 --live  # Partial close: 1 contract
+python utp.py close <pos-id-prefix> --simulate --live  # Margin check only, no close
 
 # ── Playbook ────────────────────────────────────────────────────────
 python utp.py playbook list                      # List available playbooks
@@ -210,10 +212,24 @@ python utp.py daemon --live --streaming-config configs/streaming_default.yaml
 # Then from another terminal or via HTTP:
 curl http://localhost:8000/market/streaming/status
 
+# ── Flush Local Data ─────────────────────────────────────────────
+python utp.py flush                              # Flush all (positions + ledger)
+python utp.py flush positions                    # Flush positions only
+python utp.py flush ledger                       # Flush ledger only
+# NOTE: flush is BLOCKED when daemon is running — use reconcile --flush instead
+
 # ── Interactive REPL ────────────────────────────────────────────────
 python utp.py repl                                       # Auto-detect daemon
 python utp.py repl --server http://192.168.1.50:8000     # Explicit server
 ```
+
+### Daemon-First Routing Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--server` | auto-detect | Daemon URL (e.g., `http://192.168.1.50:8000`) |
+| `--server-port` | `8000` | Port for auto-detection |
+| `--allow-fallback` | off | Fall back to direct IBKR if daemon unreachable |
 
 ### CLI Subcommand Aliases
 

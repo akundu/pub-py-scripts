@@ -300,3 +300,60 @@ async def poll_order_status(broker: Broker, order_id: str) -> None:
         timeout=settings.order_poll_timeout_seconds,
         on_status_update=_broadcast,
     )
+
+
+def build_closing_trade_request(position: dict, quantity: int | None = None,
+                                 net_price: float = 0.05) -> TradeRequest:
+    """Build a TradeRequest that closes (or partially closes) an open position.
+
+    Used by both POST /trade/close and the CLI close command.
+    Reverses option legs (SELL→BUY_TO_CLOSE, BUY→SELL_TO_CLOSE).
+    """
+    from app.models import (
+        Broker, EquityOrder, MultiLegOrder, OptionAction, OptionLeg,
+        OptionType, OrderSide,
+    )
+
+    order_type = position.get("order_type", "equity")
+    symbol = position.get("symbol", "")
+    legs = position.get("legs") or []
+    close_qty = quantity or int(abs(position.get("quantity", 1)))
+    broker = Broker(position.get("broker", "ibkr"))
+
+    if order_type in ("multi_leg", "option") and legs:
+        close_legs = []
+        exp = position.get("expiration", "")
+        exp_raw = exp.replace("-", "") if exp else ""
+        for leg in legs:
+            action = leg.get("action", "")
+            if "SELL" in action:
+                close_action = OptionAction.BUY_TO_CLOSE
+            else:
+                close_action = OptionAction.SELL_TO_CLOSE
+
+            close_legs.append(OptionLeg(
+                symbol=symbol,
+                expiration=exp_raw,
+                strike=float(leg.get("strike", 0)),
+                option_type=OptionType(leg.get("option_type", "PUT")),
+                action=close_action,
+                quantity=int(leg.get("quantity", 1)),
+            ))
+
+        return TradeRequest(
+            multi_leg_order=MultiLegOrder(
+                broker=broker,
+                legs=close_legs,
+                quantity=close_qty,
+                net_price=net_price,
+            )
+        )
+    else:
+        return TradeRequest(
+            equity_order=EquityOrder(
+                broker=broker,
+                symbol=symbol,
+                side=OrderSide.SELL if position.get("quantity", 0) > 0 else OrderSide.BUY,
+                quantity=close_qty,
+            )
+        )

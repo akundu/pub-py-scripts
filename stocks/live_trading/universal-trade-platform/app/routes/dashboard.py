@@ -39,6 +39,7 @@ async def dashboard_summary(
 @router.get("/portfolio")
 async def portfolio_view(
     _user: Annotated[TokenData, Security(require_auth, scopes=["account:read"])],
+    recent_count: int = 5,
 ) -> dict:
     """Full portfolio view with broker-authoritative cost basis and marks.
 
@@ -47,7 +48,7 @@ async def portfolio_view(
     """
     svc = get_live_data_service()
     if svc:
-        return await svc.get_portfolio()
+        return await svc.get_portfolio(recent_count=recent_count)
 
     # Fallback: local-only view
     summary = _get_dashboard_service().get_summary()

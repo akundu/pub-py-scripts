@@ -274,6 +274,8 @@ class IBKRLiveProvider(BrokerProvider):
         """Qualify a contract via TWS, using the contract cache.
 
         Returns the list of qualified contracts (same as qualifyContractsAsync).
+
+        Note: For option contracts, use _qualify_option() which tries multiple exchanges.
         """
         # Build cache key from contract attributes
         symbol = getattr(contract, "symbol", "")
@@ -283,22 +285,94 @@ class IBKRLiveProvider(BrokerProvider):
         right = getattr(contract, "right", "")
 
         cached = self._cache.contracts.get(symbol, sec_type, expiration, strike, right)
-        if cached is not None:
+        if cached is not None and getattr(cached, "conId", 0) > 0:
             return [cached]
 
         await self._cache.rate_limiter.acquire()
         qualified = await self._ib.qualifyContractsAsync(contract)
-        if qualified:
+        # Only cache successful qualifications (conId > 0)
+        if qualified and qualified[0].conId > 0:
             self._cache.contracts.put(
                 qualified[0], symbol, sec_type, expiration, strike, right
             )
-        return qualified
+            return qualified
+        return []
+
+    async def _qualify_option(self, symbol: str, exp_str: str, strike: float, right: str) -> list:
+        """Qualify an option contract, handling ambiguous contracts.
+
+        Index options (RUT, SPX) may be ambiguous: monthly (RUT) vs weekly (RUTW).
+        When ambiguous, IBKR returns multiple possibles. We pick the one whose
+        localSymbol expiration matches the requested date.
+        """
+        from ib_insync import Option
+
+        # Normalize expiration: remove dashes if present
+        exp_clean = exp_str.replace("-", "")
+
+        for exchange in ["SMART", "CBOE", ""]:
+            opt = Option(symbol, exp_clean, strike, right, exchange)
+            try:
+                qualified = await self._qualify_contract_cached(opt)
+                if qualified and qualified[0].conId > 0:
+                    logger.debug("Qualified %s %s %s%s on %s (conId=%d)",
+                                symbol, exp_clean, strike, right, exchange or "ANY", qualified[0].conId)
+                    return qualified
+            except Exception as e:
+                logger.debug("Qualify failed for %s %s %s%s on %s: %s",
+                            symbol, exp_clean, strike, right, exchange or "ANY", e)
+
+        # If all failed, try resolving ambiguous contracts manually
+        # IBKR returns ambiguous when multiple trading classes match (e.g. RUT vs RUTW)
+        try:
+            from ib_insync import Option as Opt
+            import asyncio
+            opt = Opt(symbol, exp_clean, strike, right, "SMART")
+            await self._cache.rate_limiter.acquire()
+            # reqContractDetails returns ALL matching contracts
+            details = await self._ib.reqContractDetailsAsync(opt)
+            if details:
+                # Find the contract whose localSymbol contains our exact expiration
+                # RUTW  260319P02430000 = weekly 2026-03-19
+                # RUT   260320P02430000 = monthly 2026-03-20
+                # Match by the 6-digit date in localSymbol: YYMMDD
+                target_yymmdd = exp_clean[2:]  # 20260319 → 260319
+                for cd in details:
+                    c = cd.contract
+                    local = getattr(c, "localSymbol", "")
+                    if target_yymmdd in local and c.conId > 0:
+                        logger.info("Resolved ambiguous %s %s %s%s → %s (conId=%d, class=%s)",
+                                   symbol, exp_clean, strike, right, local.strip(),
+                                   c.conId, getattr(cd, "tradingClass", c.tradingClass if hasattr(c, "tradingClass") else "?"))
+                        self._cache.contracts.put(
+                            c, symbol, "OPT", exp_clean, strike, right
+                        )
+                        return [c]
+                # If no exact match, pick the first valid one
+                for cd in details:
+                    c = cd.contract
+                    if c.conId > 0:
+                        logger.info("Resolved ambiguous %s %s %s%s → first valid (conId=%d)",
+                                   symbol, exp_clean, strike, right, c.conId)
+                        self._cache.contracts.put(
+                            c, symbol, "OPT", exp_clean, strike, right
+                        )
+                        return [c]
+        except Exception as e:
+            logger.debug("Ambiguous resolution failed for %s: %s", symbol, e)
+
+        logger.warning("Failed to qualify option %s %s %s%s on any exchange", symbol, exp_clean, strike, right)
+        return []
 
     # ── Positions ─────────────────────────────────────────────────────────────
 
     async def get_positions(self) -> list[Position]:
         if not self._ib or not self._connected:
             return []
+
+        # Yield to event loop to let ib_insync process pending TWS push messages.
+        import asyncio
+        await asyncio.sleep(0.1)
 
         positions = self._ib.positions()
         result = []
@@ -342,6 +416,10 @@ class IBKRLiveProvider(BrokerProvider):
         """
         if not self._ib or not self._connected:
             return []
+
+        # Yield to event loop to let ib_insync process pending TWS push messages.
+        import asyncio
+        await asyncio.sleep(0.1)
 
         items = self._ib.portfolio()
         result = []
@@ -575,8 +653,7 @@ class IBKRLiveProvider(BrokerProvider):
         for leg in order.legs:
             right = "C" if leg.option_type.value == "CALL" else "P"
             exp_str = leg.expiration.replace("-", "")  # YYYYMMDD
-            opt = Option(leg.symbol, exp_str, leg.strike, right, self._exchange)
-            qualified = await self._qualify_contract_cached(opt)
+            qualified = await self._qualify_option(leg.symbol, exp_str, leg.strike, right)
             if not qualified:
                 return OrderResult(
                     broker=Broker.IBKR,
@@ -1008,8 +1085,7 @@ class IBKRLiveProvider(BrokerProvider):
         for leg in order.legs:
             right = "C" if leg.option_type.value == "CALL" else "P"
             exp_str = leg.expiration.replace("-", "")
-            opt = Option(leg.symbol, exp_str, leg.strike, right, self._exchange)
-            qualified = await self._qualify_contract_cached(opt)
+            qualified = await self._qualify_option(leg.symbol, exp_str, leg.strike, right)
             if not qualified:
                 return {
                     "error": f"Failed to qualify: {leg.symbol} {leg.strike}{right} {leg.expiration}",
@@ -1063,17 +1139,20 @@ class IBKRLiveProvider(BrokerProvider):
             except (TypeError, ValueError):
                 return 0.0
 
+        def _get(attr: str) -> float:
+            return _safe_float(getattr(result, attr, 0))
+
         return {
-            "init_margin": _safe_float(result.initMarginChange),
-            "maint_margin": _safe_float(result.maintMarginChange),
-            "commission": _safe_float(result.commission),
-            "min_commission": _safe_float(result.minCommission),
-            "max_commission": _safe_float(result.maxCommission),
-            "equity_with_loan": _safe_float(result.equityWithLoanValue),
-            "init_margin_before": _safe_float(result.initMarginBefore),
-            "maint_margin_before": _safe_float(result.maintMarginBefore),
-            "init_margin_after": _safe_float(result.initMarginAfter),
-            "maint_margin_after": _safe_float(result.maintMarginAfter),
+            "init_margin": _get("initMarginChange"),
+            "maint_margin": _get("maintMarginChange"),
+            "commission": _get("commission"),
+            "min_commission": _get("minCommission"),
+            "max_commission": _get("maxCommission"),
+            "equity_with_loan": _get("equityWithLoanValue") or _get("equityWithLoan"),
+            "init_margin_before": _get("initMarginBefore"),
+            "maint_margin_before": _get("maintMarginBefore"),
+            "init_margin_after": _get("initMarginAfter"),
+            "maint_margin_after": _get("maintMarginAfter"),
         }
 
     # ── Account Balances ───────────────────────────────────────────────────────
@@ -1086,6 +1165,10 @@ class IBKRLiveProvider(BrokerProvider):
         """
         if not self._ib or not self._connected:
             return AccountBalances(broker="ibkr")
+
+        # Yield to event loop to let ib_insync process pending TWS push messages.
+        import asyncio
+        await asyncio.sleep(0.1)
 
         values = self._ib.accountValues()
 

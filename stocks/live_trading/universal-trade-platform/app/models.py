@@ -217,6 +217,10 @@ class TrackedPosition(BaseModel):
     current_mark: Optional[float] = None
     unrealized_pnl: Optional[float] = None
     last_synced_at: Optional[datetime] = None
+    con_id: Optional[int] = None
+    sec_type: Optional[str] = None
+    strike: Optional[float] = None
+    right: Optional[str] = None
 
 
 # ── Account Balances ──────────────────────────────────────────────────────────
