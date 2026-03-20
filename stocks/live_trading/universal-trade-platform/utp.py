@@ -2197,12 +2197,18 @@ async def _cmd_reconcile_http(args, server: str) -> int:
             print(f"  Open positions: {d.get('open_positions', 0)}")
             print()
 
-        # Flush: tell daemon to clear open positions and re-sync
+        # Flush: clear open positions in daemon memory, preserve closed, re-sync
         elif getattr(args, "flush", False):
-            _print_header("Flush (via daemon)")
-            # Use hard-reset endpoint but it clears everything — for flush we'd
-            # need a softer version. For now, hard-reset is the only daemon-safe option.
-            print(f"  {_color('Note:', '93')} Use --hard-reset for daemon mode (--flush only works without daemon)")
+            _print_header("Flush (via daemon — preserving closed positions)")
+            resp = await client.post("/account/flush")
+            if resp.status_code != 200:
+                print(f"  Error: {resp.status_code} {resp.text}")
+                return 1
+            d = resp.json()
+            print(f"  Open cleared:      {d.get('open_cleared', 0)}")
+            print(f"  Closed preserved:  {d.get('closed_preserved', 0)}")
+            print(f"  Re-synced:         {d.get('synced_new', 0)} new, {d.get('synced_updated', 0)} updated")
+            print(f"  Open positions:    {d.get('open_positions', 0)}")
             print()
 
         broker = getattr(args, "broker", "ibkr")
@@ -3815,10 +3821,19 @@ async def _cmd_flush(args) -> int:
     """Flush local position store and/or ledger."""
     server = _detect_server(args)
     if server:
-        print(f"  {_color('Warning:', '93')} Daemon is running at {server}.")
-        print(f"  Flush modifies files on disk — use 'reconcile --flush' or '--hard-reset' instead.")
-        print(f"  The daemon's in-memory state won't reflect flush changes until restart.")
-        return 1
+        # Route through daemon's flush endpoint (clears in-memory + disk)
+        import httpx
+        async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
+            resp = await client.post("/account/flush")
+            if resp.status_code != 200:
+                print(f"  Error: {resp.status_code} {resp.text}")
+                return 1
+            d = resp.json()
+            print(f"  Flushed via daemon:")
+            print(f"    Open cleared:     {d.get('open_cleared', 0)}")
+            print(f"    Closed preserved: {d.get('closed_preserved', 0)}")
+            print(f"    Re-synced:        {d.get('synced_new', 0)} new")
+        return 0
     import json
 
     data_dir = _resolve_data_dir(args.data_dir, _get_mode(args))

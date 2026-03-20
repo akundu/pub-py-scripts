@@ -104,6 +104,52 @@ async def reconcile_positions(
     return await sync_service.reconcile(broker_enum)
 
 
+@router.post("/flush")
+async def flush_positions(
+    _user: Annotated[TokenData, Security(require_auth, scopes=["trades:write"])],
+) -> dict:
+    """Flush open positions from daemon memory and re-sync from broker.
+
+    Preserves closed positions (P&L history). Only clears open positions
+    so they can be re-imported fresh from IBKR.
+    """
+    from app.services.ledger import get_ledger
+    from app.services.position_store import get_position_store
+    from app.services.position_sync import PositionSyncService
+
+    store = get_position_store()
+    ledger = get_ledger()
+    if not store or not ledger:
+        raise HTTPException(status_code=503, detail="Services not initialized")
+
+    # Clear only open positions, preserve closed
+    open_cleared = 0
+    closed_kept = 0
+    with store._lock:
+        to_remove = []
+        for pid, pos in store._positions.items():
+            if pos.get("status") == "open":
+                to_remove.append(pid)
+            else:
+                closed_kept += 1
+        for pid in to_remove:
+            del store._positions[pid]
+            open_cleared += 1
+        store._save()
+
+    # Re-sync from broker
+    sync_service = PositionSyncService(store, ledger)
+    sync_result = await sync_service.sync_all_brokers()
+
+    return {
+        "open_cleared": open_cleared,
+        "closed_preserved": closed_kept,
+        "synced_new": sync_result.new_positions,
+        "synced_updated": sync_result.updated_positions,
+        "open_positions": len(store.get_open_positions()),
+    }
+
+
 @router.post("/hard-reset")
 async def hard_reset(
     _user: Annotated[TokenData, Security(require_auth, scopes=["trades:write"])],
