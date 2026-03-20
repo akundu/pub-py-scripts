@@ -317,9 +317,16 @@ class MarketDataStreamingService:
             is_index = symbol.upper() in _INDEX_EXCHANGES
 
             if is_index:
-                # Indices: use last or close exclusively (not marketPrice which
-                # can return bad values from delayed/partial tick data)
-                price = last or close
+                # Indices: validate that the price is a reasonable index level.
+                # ticker.last can contain partial/stale option-like values.
+                # Use last only if it's > 100 (all major indices are > 100).
+                # Fall back to close (previous day's close) which is always correct.
+                if last and last > 100:
+                    price = last
+                elif close and close > 100:
+                    price = close
+                else:
+                    price = None
                 if price:
                     bid = price
                     ask = price
@@ -330,6 +337,14 @@ class MarketDataStreamingService:
                         price = (bid + ask) / 2
 
             if not price or price <= 0:
+                continue
+
+            # Log suspicious index prices for debugging
+            if is_index and price < 100:
+                logger.warning(
+                    "Suspicious index price for %s: price=%.4f last=%.4f close=%.4f bid=%.4f ask=%.4f mktPrice=%.4f — skipping",
+                    symbol, price, last or 0, close or 0, _safe(ticker.bid) or 0, _safe(ticker.ask) or 0, market_price or 0,
+                )
                 continue
 
             now_iso = datetime.now(timezone.utc).isoformat()

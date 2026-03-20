@@ -554,6 +554,9 @@ class IBKRLiveProvider(BrokerProvider):
                 tick = svc.get_last_tick(symbol.upper(), max_age_seconds=15.0)
                 if tick:
                     price = tick.get("last") or tick.get("price") or 0
+                    # Reject obviously bad index prices (should be > 100)
+                    if index_exchange and price and price < 100:
+                        price = 0
                     if price and price > 0:
                         from datetime import datetime as _dt, timezone as _tz
                         tick_ts = _dt.fromisoformat(tick["timestamp"])
