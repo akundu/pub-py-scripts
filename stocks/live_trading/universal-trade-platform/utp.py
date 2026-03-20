@@ -1581,9 +1581,12 @@ async def _cmd_portfolio_http(args, server: str) -> int:
         realized = data.get("realized_pnl", 0)
         total = data.get("total_pnl", 0)
         pnl_color = "92" if total >= 0 else "91"
+        daily = data.get("daily_pnl", 0)
         print(f"  Unrealized P&L:   {_color(f'${unrealized:>+14,.2f}', '92' if unrealized >= 0 else '91')}")
         print(f"  Realized P&L:     {_color(f'${realized:>+14,.2f}', '92' if realized >= 0 else '91')}")
         print(f"  Total P&L:        {_color(f'${total:>+14,.2f}', pnl_color)}")
+        if daily:
+            print(f"  Today's P&L:      {_color(f'${daily:>+14,.2f}', '92' if daily >= 0 else '91')}")
 
         by_source = data.get("positions_by_source", {})
         if by_source:
@@ -1601,9 +1604,10 @@ async def _cmd_portfolio_http(args, server: str) -> int:
             has_marks = any(p.get("avg_cost") is not None for p in positions)
 
             if has_marks:
-                print(f"  {'ID':<6} {'Symbol':>6} {'Type':>12} {'Strikes':>16} {'Qty':>5} {'AvgCost':>10} {'Mark':>10} {'MktVal':>10} {'P&L':>12} {'Exp':>12}")
-                print(f"  {'─'*6} {'─'*6} {'─'*12} {'─'*16} {'─'*5} {'─'*10} {'─'*10} {'─'*10} {'─'*12} {'─'*12}")
+                print(f"  {'ID':<6} {'Symbol':>6} {'Type':>12} {'Strikes':>16} {'Qty':>5} {'AvgCost':>10} {'Mark':>10} {'MktVal':>10} {'P&L':>12} {'Day P&L':>12} {'Exp':>12}")
+                print(f"  {'─'*6} {'─'*6} {'─'*12} {'─'*16} {'─'*5} {'─'*10} {'─'*10} {'─'*10} {'─'*12} {'─'*12} {'─'*12}")
                 total_upnl = 0.0
+                total_daily = 0.0
                 for p in positions:
                     sym = p.get("symbol", "?")
                     otype = p.get("order_type", "?")
@@ -1631,22 +1635,28 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                         mark = p.get("market_price", 0) or 0
                         mv = p.get("market_value", 0) or 0
                         upnl = p.get("broker_unrealized_pnl", 0) or 0
+                        dpnl = p.get("daily_pnl", 0) or 0
                         total_upnl += upnl
+                        total_daily += dpnl
                         pnl_c = "92" if upnl >= 0 else "91"
+                        dpnl_c = "92" if dpnl >= 0 else "91"
                         mark_s = f"${mark:>9.4f}" if mark else f"{'---':>10}"
                         mv_s = f"${mv:>9.2f}" if mv else f"{'---':>10}"
                         upnl_s = _color(f"${upnl:>+10,.2f}", pnl_c) if upnl else f"{'---':>12}"
+                        dpnl_s = _color(f"${dpnl:>+10,.2f}", dpnl_c) if dpnl else f"{'---':>12}"
                         print(f"  {pid:<6} {sym:>6} {otype:>12} {strikes_s:>16} {qty:>5.0f} "
                               f"${avg_cost:>9.4f} {mark_s} {mv_s} "
-                              f"{upnl_s:>20} {exp:>12}")
+                              f"{upnl_s:>20} {dpnl_s:>20} {exp:>12}")
                     else:
                         entry = p.get("entry_price", 0)
                         print(f"  {pid:<6} {sym:>6} {otype:>12} {strikes_s:>16} {qty:>5.0f} "
-                              f"${abs(entry):>9.4f} {'---':>10} {'---':>10} {'---':>12} {exp:>12}")
+                              f"${abs(entry):>9.4f} {'---':>10} {'---':>10} {'---':>12} {'---':>12} {exp:>12}")
 
                 upnl_c = "92" if total_upnl >= 0 else "91"
+                daily_c = "92" if total_daily >= 0 else "91"
                 print(f"  {'':>6} {'':>6} {'':>12} {'':>16} {'':>5} {'':>10} {'':>10} {'TOTAL':>10} "
-                      f"{_color(f'${total_upnl:>+10,.2f}', upnl_c):>20}")
+                      f"{_color(f'${total_upnl:>+10,.2f}', upnl_c):>20} "
+                      f"{_color(f'${total_daily:>+10,.2f}', daily_c):>20}")
             else:
                 print(f"  {'Symbol':<10} {'Type':<10} {'Qty':>6} {'Entry':>10} {'P&L':>10} {'Status':<8}")
                 print(f"  {'---':<10} {'---':<10} {'---':>6} {'---':>10} {'---':>10} {'---':<8}")

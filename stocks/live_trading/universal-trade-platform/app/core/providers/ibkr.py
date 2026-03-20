@@ -443,6 +443,61 @@ class IBKRLiveProvider(BrokerProvider):
             })
         return result
 
+    async def get_daily_pnl_by_con_id(self) -> dict[int, float]:
+        """Get today's daily P&L for each position, keyed by conId.
+
+        Uses reqPnLSingle for each position in the portfolio.
+        Returns {conId: dailyPnL} for all positions.
+        """
+        if not self._ib or not self._connected:
+            return {}
+
+        import asyncio
+
+        account = _cfg.settings.ibkr_account_id or ""
+        if not account:
+            # Try to get account from managed accounts
+            accounts = self._ib.managedAccounts()
+            if accounts:
+                account = accounts[0]
+            else:
+                return {}
+
+        # Get all portfolio items to know which conIds to query
+        items = self._ib.portfolio()
+        if not items:
+            return {}
+
+        # Subscribe to PnL for each conId
+        pnl_objects = {}
+        for item in items:
+            con_id = item.contract.conId
+            if con_id and con_id not in pnl_objects:
+                try:
+                    pnl_obj = self._ib.reqPnLSingle(account, "", con_id)
+                    pnl_objects[con_id] = pnl_obj
+                except Exception:
+                    pass
+
+        # Wait briefly for data to arrive
+        await asyncio.sleep(0.3)
+
+        # Read daily PnL values
+        result = {}
+        for con_id, pnl_obj in pnl_objects.items():
+            daily = getattr(pnl_obj, "dailyPnL", None)
+            if daily is not None and not (isinstance(daily, float) and __import__("math").isnan(daily)):
+                result[con_id] = float(daily)
+
+        # Cancel subscriptions
+        for con_id, pnl_obj in pnl_objects.items():
+            try:
+                self._ib.cancelPnLSingle(account, "", con_id)
+            except Exception:
+                pass
+
+        return result
+
     # ── Executions (trade history, up to 7 days) ────────────────────────────
 
     async def get_executions(self) -> list[dict]:

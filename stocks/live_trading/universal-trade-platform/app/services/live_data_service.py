@@ -171,6 +171,7 @@ def _group_options_into_spreads(positions: list[dict]) -> list[dict]:
                 # Build spread
                 total_mv = (short.get("market_value", 0) or 0) + (long_leg.get("market_value", 0) or 0)
                 total_upnl = (short.get("broker_unrealized_pnl", 0) or 0) + (long_leg.get("broker_unrealized_pnl", 0) or 0)
+                total_daily = (short.get("daily_pnl", 0) or 0) + (long_leg.get("daily_pnl", 0) or 0)
                 total_avg = (short.get("avg_cost", 0) or 0) + (long_leg.get("avg_cost", 0) or 0)
                 mark_per_spread = ((short.get("market_price", 0) or 0) * -1 +
                                    (long_leg.get("market_price", 0) or 0))
@@ -185,6 +186,7 @@ def _group_options_into_spreads(positions: list[dict]) -> list[dict]:
                     "source": short.get("source", ""),
                     "broker": short.get("broker", ""),
                     "status": "open",
+                    "daily_pnl": total_daily,
                     "avg_cost": total_avg,
                     "market_price": mark_per_spread,
                     "market_value": total_mv,
@@ -343,12 +345,20 @@ class LiveDataService:
             except Exception as e:
                 logger.info("Failed to build con_id lookup: %s", e)
 
+        # Fetch daily P&L per conId
+        daily_pnl_by_con: dict[int, float] = {}
+        if self._ibkr_healthy() and hasattr(self._ibkr, "get_daily_pnl_by_con_id"):
+            try:
+                daily_pnl_by_con = await self._ibkr.get_daily_pnl_by_con_id()
+            except Exception:
+                logger.debug("Failed to fetch daily PnL", exc_info=True)
+
         # Enrich each position with IBKR data (1:1 by con_id)
         raw_positions = []
+        total_daily_pnl = 0.0
         for pos in summary.active_positions:
             p = pos.model_dump()
             con_id = p.get("con_id")
-            logger.info("Enriching %s con_id=%s matched=%s", p.get("symbol"), con_id, con_id in ibkr_by_con_id if con_id else "N/A")
             if con_id and con_id in ibkr_by_con_id:
                 item = ibkr_by_con_id[con_id]
                 p["avg_cost"] = item["avg_cost"]
@@ -361,7 +371,13 @@ class LiveDataService:
                 p["market_price"] = pnl_data["market_price"]
                 p["market_value"] = pnl_data["market_value"]
                 p["broker_unrealized_pnl"] = pnl_data["unrealized_pnl"]
+            # Daily P&L
+            if con_id and con_id in daily_pnl_by_con:
+                p["daily_pnl"] = daily_pnl_by_con[con_id]
+                total_daily_pnl += daily_pnl_by_con[con_id]
             raw_positions.append(p)
+
+        result["daily_pnl"] = round(total_daily_pnl, 2)
 
         # Group option positions into spreads for display
         result["positions"] = _group_options_into_spreads(raw_positions)
