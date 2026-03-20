@@ -300,8 +300,18 @@ class MarketDataStreamingService:
             last = _safe(ticker.last) or _safe(ticker.close)
             volume = int(_safe(ticker.volume) or 0)
 
-            # Use bid as primary price for quotes, last for trades
-            price = bid or last or ask
+            # For indices (no order book): use last/close only.
+            # bid/ask are meaningless for indices and can contain stale/partial values.
+            from app.services.streaming_config import _INDEX_EXCHANGES
+            is_index = symbol.upper() in _INDEX_EXCHANGES
+            if is_index:
+                price = last
+                bid = last  # set bid/ask to last for consistency
+                ask = last
+            else:
+                # For stocks/ETFs: prefer last, fall back to mid of bid/ask
+                price = last or (((bid or 0) + (ask or 0)) / 2 if bid and ask else bid or ask)
+
             if not price or price <= 0:
                 continue
 
@@ -362,10 +372,11 @@ class MarketDataStreamingService:
         ask = tick.get("ask")
         volume = tick.get("volume", 0)
 
-        # Build records matching polygon_realtime_streamer format
+        # Build records matching polygon_realtime_streamer format.
+        # Use the validated price from tick handler (already correct for indices vs stocks).
         quote_record = {
             "timestamp": ts,
-            "price": float(bid) if bid else float(price),
+            "price": float(price),
             "size": int(volume),
             "ask_price": float(ask) if ask else None,
             "ask_size": int(volume),
@@ -373,7 +384,7 @@ class MarketDataStreamingService:
 
         trade_record = {
             "timestamp": ts,
-            "price": float(tick.get("last") or price),
+            "price": float(price),
             "size": int(volume),
         }
 
