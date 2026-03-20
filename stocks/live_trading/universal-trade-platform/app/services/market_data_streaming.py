@@ -377,7 +377,7 @@ class MarketDataStreamingService:
                 "price": price,
                 "bid": bid,
                 "ask": ask,
-                "last": last,
+                "last": price,  # Use validated price, not raw ticker.last
                 "volume": volume,
             }
 

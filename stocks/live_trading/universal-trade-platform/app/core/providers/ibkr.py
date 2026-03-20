@@ -553,7 +553,8 @@ class IBKRLiveProvider(BrokerProvider):
             if svc and svc.is_running:
                 tick = svc.get_last_tick(symbol.upper(), max_age_seconds=15.0)
                 if tick:
-                    price = tick.get("last") or tick.get("price") or 0
+                    # Use validated "price" field (not raw "last" which may be bad)
+                    price = tick.get("price") or tick.get("last") or 0
                     # Reject obviously bad index prices (should be > 100)
                     if index_exchange and price and price < 100:
                         price = 0
