@@ -316,14 +316,29 @@ class MarketDataStreamingService:
             from app.services.streaming_config import _INDEX_EXCHANGES
             is_index = symbol.upper() in _INDEX_EXCHANGES
 
+            # Determine the reference price for validation.
+            # Use close (previous day), or last known good price from our cache.
+            prev_good = None
+            prev_tick = self._last_tick.get(symbol)
+            if prev_tick:
+                prev_good = prev_tick.get("price", 0)
+            reference = close if (close and close > 0) else prev_good
+
             # Determine price based on instrument type
             if is_index:
-                # Indices: pick the best plausible value
-                candidates = [v for v in [last, close, market_price] if v and v > 100]
-                price = max(candidates) if candidates else None
-                if price:
-                    bid = price
-                    ask = price
+                # Indices: only accept values that look like index levels (> 100)
+                # and pass the reference check. Never publish close as "current" —
+                # only use it as a fallback reference for validation.
+                if last and last > 100:
+                    price = last
+                elif market_price and market_price > 100:
+                    price = market_price
+                else:
+                    # No valid live price — skip this tick entirely.
+                    # Do NOT publish close as current price (it's yesterday's).
+                    continue
+                bid = price
+                ask = price
             else:
                 price = market_price or last or close
                 if not price or price <= 0:
@@ -333,23 +348,25 @@ class MarketDataStreamingService:
             if not price or price <= 0:
                 continue
 
-            # Universal sanity check: reject any price < 50% of previous close.
-            # This catches bad tick data for ALL instrument types (indices and stocks).
-            if close and close > 0 and price < close * 0.5:
-                logger.warning(
-                    "Price rejected for %s: %.4f is < 50%% of close %.4f "
-                    "(last=%.4f mkt=%.4f bid=%.4f ask=%.4f)",
-                    symbol, price, close, last or 0, market_price or 0,
-                    _safe(ticker.bid) or 0, _safe(ticker.ask) or 0,
-                )
-                continue
-
-            # Also reject > 200% of close (circuit breaker territory)
-            if close and close > 0 and price > close * 2.0:
-                logger.warning(
-                    "Price rejected for %s: %.4f is > 200%% of close %.4f",
-                    symbol, price, close,
-                )
+            # Universal sanity check against reference price.
+            # Reject any price < 50% or > 200% of reference.
+            if reference and reference > 0:
+                if price < reference * 0.5:
+                    logger.warning(
+                        "Price rejected for %s: %.4f is < 50%% of reference %.4f "
+                        "(last=%.4f close=%.4f mkt=%.4f bid=%.4f ask=%.4f)",
+                        symbol, price, reference, last or 0, close or 0,
+                        market_price or 0, _safe(ticker.bid) or 0, _safe(ticker.ask) or 0,
+                    )
+                    continue
+                if price > reference * 2.0:
+                    logger.warning(
+                        "Price rejected for %s: %.4f is > 200%% of reference %.4f",
+                        symbol, price, reference,
+                    )
+                    continue
+            elif is_index and price < 100:
+                # No reference yet but index price is suspiciously low
                 continue
 
             now_iso = datetime.now(timezone.utc).isoformat()
