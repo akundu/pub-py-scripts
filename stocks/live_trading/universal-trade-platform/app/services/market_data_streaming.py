@@ -295,25 +295,34 @@ class MarketDataStreamingService:
                 f = float(v)
                 return None if math.isnan(f) else f
 
+            # Use ib_insync's marketPrice() — the most reliable price computation.
+            # It handles indices, stocks, delayed data, and partial ticks correctly.
+            raw_market = None
+            try:
+                raw_market = ticker.marketPrice()
+            except Exception:
+                pass
+            market_price = _safe(raw_market)
+
             bid = _safe(ticker.bid)
             ask = _safe(ticker.ask)
-            last = _safe(ticker.last) or _safe(ticker.close)
+            last = _safe(ticker.last)
+            close = _safe(ticker.close)
             volume = int(_safe(ticker.volume) or 0)
 
-            # For indices (no order book): use last/close only.
-            # bid/ask are meaningless for indices and can contain stale/partial values.
-            from app.services.streaming_config import _INDEX_EXCHANGES
-            is_index = symbol.upper() in _INDEX_EXCHANGES
-            if is_index:
-                price = last
-                bid = last  # set bid/ask to last for consistency
-                ask = last
-            else:
-                # For stocks/ETFs: prefer last, fall back to mid of bid/ask
-                price = last or (((bid or 0) + (ask or 0)) / 2 if bid and ask else bid or ask)
-
+            # Primary price: marketPrice() > last > close > mid(bid,ask)
+            price = market_price or last or close
+            if not price or price <= 0:
+                if bid and ask and bid > 0 and ask > 0:
+                    price = (bid + ask) / 2
             if not price or price <= 0:
                 continue
+
+            # For indices: set bid/ask to price (indices have no order book)
+            from app.services.streaming_config import _INDEX_EXCHANGES
+            if symbol.upper() in _INDEX_EXCHANGES:
+                bid = price
+                ask = price
 
             now_iso = datetime.now(timezone.utc).isoformat()
 
