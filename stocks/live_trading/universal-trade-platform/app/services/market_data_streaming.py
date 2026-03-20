@@ -316,17 +316,11 @@ class MarketDataStreamingService:
             from app.services.streaming_config import _INDEX_EXCHANGES
             is_index = symbol.upper() in _INDEX_EXCHANGES
 
+            # Determine price based on instrument type
             if is_index:
-                # Indices: validate that the price is a reasonable index level.
-                # ticker.last can contain partial/stale option-like values.
-                # Use last only if it's > 100 (all major indices are > 100).
-                # Fall back to close (previous day's close) which is always correct.
-                if last and last > 100:
-                    price = last
-                elif close and close > 100:
-                    price = close
-                else:
-                    price = None
+                # Indices: pick the best plausible value
+                candidates = [v for v in [last, close, market_price] if v and v > 100]
+                price = max(candidates) if candidates else None
                 if price:
                     bid = price
                     ask = price
@@ -339,11 +333,22 @@ class MarketDataStreamingService:
             if not price or price <= 0:
                 continue
 
-            # Log suspicious index prices for debugging
-            if is_index and price < 100:
+            # Universal sanity check: reject any price < 50% of previous close.
+            # This catches bad tick data for ALL instrument types (indices and stocks).
+            if close and close > 0 and price < close * 0.5:
                 logger.warning(
-                    "Suspicious index price for %s: price=%.4f last=%.4f close=%.4f bid=%.4f ask=%.4f mktPrice=%.4f — skipping",
-                    symbol, price, last or 0, close or 0, _safe(ticker.bid) or 0, _safe(ticker.ask) or 0, market_price or 0,
+                    "Price rejected for %s: %.4f is < 50%% of close %.4f "
+                    "(last=%.4f mkt=%.4f bid=%.4f ask=%.4f)",
+                    symbol, price, close, last or 0, market_price or 0,
+                    _safe(ticker.bid) or 0, _safe(ticker.ask) or 0,
+                )
+                continue
+
+            # Also reject > 200% of close (circuit breaker territory)
+            if close and close > 0 and price > close * 2.0:
+                logger.warning(
+                    "Price rejected for %s: %.4f is > 200%% of close %.4f",
+                    symbol, price, close,
                 )
                 continue
 
