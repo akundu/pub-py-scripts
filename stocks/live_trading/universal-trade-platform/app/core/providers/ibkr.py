@@ -1039,12 +1039,14 @@ class IBKRLiveProvider(BrokerProvider):
         # Qualify uncached contracts in a single call. qualifyContractsAsync
         # already uses asyncio.gather internally — it sends all reqContractDetails
         # in parallel and gathers responses. Splitting into sub-batches adds no
-        # benefit. Suppress ib_insync stderr noise for non-existent strikes.
+        # benefit. Suppress ib_insync logger noise for non-existent strikes.
         newly_qualified = []
         if uncached:
-            original_stderr = sys.stderr
+            import logging as _logging
+            ib_logger = _logging.getLogger("ib_insync")
+            original_level = ib_logger.level
             try:
-                sys.stderr = open("/dev/null", "w")
+                ib_logger.setLevel(_logging.CRITICAL)  # suppress WARNING/ERROR
                 await self._cache.rate_limiter.acquire()
                 qualified = await self._ib.qualifyContractsAsync(*uncached)
                 for c in qualified:
@@ -1055,8 +1057,7 @@ class IBKRLiveProvider(BrokerProvider):
                             float(c.strike), right,
                         )
             finally:
-                sys.stderr.close()
-                sys.stderr = original_stderr
+                ib_logger.setLevel(original_level)
 
         all_qualified = cached_contracts + newly_qualified
         if not all_qualified:

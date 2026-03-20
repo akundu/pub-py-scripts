@@ -310,19 +310,27 @@ class MarketDataStreamingService:
             close = _safe(ticker.close)
             volume = int(_safe(ticker.volume) or 0)
 
-            # Primary price: marketPrice() > last > close > mid(bid,ask)
-            price = market_price or last or close
-            if not price or price <= 0:
-                if bid and ask and bid > 0 and ask > 0:
-                    price = (bid + ask) / 2
+            # For indices: only use last or close — marketPrice() can return
+            # option-like values when delayed data is mixed in.
+            # For stocks: marketPrice() > last > close > mid(bid,ask)
+            from app.services.streaming_config import _INDEX_EXCHANGES
+            is_index = symbol.upper() in _INDEX_EXCHANGES
+
+            if is_index:
+                # Indices: use last or close exclusively (not marketPrice which
+                # can return bad values from delayed/partial tick data)
+                price = last or close
+                if price:
+                    bid = price
+                    ask = price
+            else:
+                price = market_price or last or close
+                if not price or price <= 0:
+                    if bid and ask and bid > 0 and ask > 0:
+                        price = (bid + ask) / 2
+
             if not price or price <= 0:
                 continue
-
-            # For indices: set bid/ask to price (indices have no order book)
-            from app.services.streaming_config import _INDEX_EXCHANGES
-            if symbol.upper() in _INDEX_EXCHANGES:
-                bid = price
-                ask = price
 
             now_iso = datetime.now(timezone.utc).isoformat()
 
