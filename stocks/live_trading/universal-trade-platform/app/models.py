@@ -87,7 +87,7 @@ class MultiLegOrder(BaseModel):
 
     broker: Broker
     legs: list[OptionLeg] = Field(..., min_length=1, max_length=4)
-    order_type: OrderType = OrderType.LIMIT
+    order_type: OrderType = OrderType.MARKET
     net_price: Optional[float] = Field(
         None, description="Net debit/credit per contract (required for LIMIT)"
     )
@@ -133,6 +133,7 @@ class OrderResult(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     filled_price: Optional[float] = None
     filled_quantity: Optional[int] = None
+    extra: dict = Field(default_factory=dict)
 
 
 class Quote(BaseModel):
@@ -308,6 +309,7 @@ class ReconciliationReport(BaseModel):
     total_broker_positions: int = 0
     matched: int = 0
     discrepancies: list[ReconciliationEntry] = Field(default_factory=list)
+    open_orders: list[dict] = Field(default_factory=list)
 
 
 # ── Status Dashboard Schemas ─────────────────────────────────────────────────

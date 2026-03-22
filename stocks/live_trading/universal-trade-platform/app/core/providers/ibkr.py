@@ -819,6 +819,14 @@ class IBKRLiveProvider(BrokerProvider):
         if not self._ib or not self._connected:
             return []
 
+        # reqAllOpenOrders() fetches orders from ALL sources: this API client,
+        # TWS UI, other API sessions, and manual orders. Without this call,
+        # ib.openTrades() only returns orders placed through THIS connection.
+        try:
+            await self._ib.reqAllOpenOrdersAsync()
+        except Exception as e:
+            logger.warning("reqAllOpenOrders failed: %s", e)
+
         status_map = {
             "Submitted": OrderStatus.SUBMITTED,
             "PreSubmitted": OrderStatus.PENDING,
@@ -838,18 +846,47 @@ class IBKRLiveProvider(BrokerProvider):
 
             # Build a descriptive message with contract info
             contract = trade.contract
+            order = trade.order
             desc = f"{contract.symbol}"
+            legs_info = []
             if hasattr(contract, "comboLegs") and contract.comboLegs:
                 desc += f" ({len(contract.comboLegs)}-leg combo)"
+                for cl in contract.comboLegs:
+                    legs_info.append({
+                        "con_id": cl.conId,
+                        "ratio": cl.ratio,
+                        "action": cl.action,
+                        "exchange": cl.exchange,
+                    })
+
+            # Determine order type and price
+            order_type = order.orderType if hasattr(order, "orderType") else "LMT"
+            lmt_price = order.lmtPrice if hasattr(order, "lmtPrice") else 0
+            price_str = "MARKET" if order_type == "MKT" else f"${lmt_price}"
+
+            msg = (f"{desc} | {order.action} {order.totalQuantity} "
+                   f"{order_type} @ {price_str} | IBKR: {ibkr_status}")
+            if order.permId:
+                msg += f" | permId={order.permId}"
 
             results.append(OrderResult(
-                order_id=str(trade.order.orderId),
+                order_id=str(order.orderId),
                 broker=Broker.IBKR,
                 status=status_map[ibkr_status],
-                message=f"{desc} | {trade.order.action} {trade.order.totalQuantity} "
-                        f"@ {trade.order.lmtPrice} | IBKR: {ibkr_status}",
+                message=msg,
                 filled_price=trade.orderStatus.avgFillPrice or None,
                 filled_quantity=filled_qty,
+                extra={
+                    "symbol": contract.symbol,
+                    "sec_type": contract.secType,
+                    "action": order.action,
+                    "quantity": int(order.totalQuantity),
+                    "order_type": order_type,
+                    "limit_price": lmt_price if order_type != "MKT" else None,
+                    "perm_id": order.permId,
+                    "legs": legs_info,
+                    "tif": order.tif if hasattr(order, "tif") else "DAY",
+                },
             ))
         return results
 
@@ -861,6 +898,12 @@ class IBKRLiveProvider(BrokerProvider):
                 status=OrderStatus.FAILED,
                 message="IBKR not connected",
             )
+
+        # Refresh to include orders from all sources (TWS, other sessions)
+        try:
+            await self._ib.reqAllOpenOrdersAsync()
+        except Exception:
+            pass
 
         for trade in self._ib.openTrades():
             if str(trade.order.orderId) == order_id:

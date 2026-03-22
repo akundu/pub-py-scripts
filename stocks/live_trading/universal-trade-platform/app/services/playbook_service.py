@@ -290,7 +290,8 @@ class PlaybookService:
         option_type_str = str(self._require(p, "option_type", instr.id)).upper()
         action_str = str(p.get("action", "BUY_TO_OPEN")).upper()
         quantity = int(p.get("quantity", 1))
-        order_type_str = str(p.get("order_type", "LIMIT")).upper()
+        net_price = p.get("limit_price") or p.get("net_price")
+        order_type_str = str(p.get("order_type", "LIMIT" if net_price else "MARKET")).upper()
 
         return TradeRequest(
             multi_leg_order=MultiLegOrder(
@@ -306,7 +307,7 @@ class PlaybookService:
                     ),
                 ],
                 order_type=OrderType(order_type_str),
-                net_price=p.get("limit_price") or p.get("net_price"),
+                net_price=net_price,
                 quantity=quantity,
                 time_in_force=p.get("time_in_force", "DAY"),
             )
@@ -351,7 +352,7 @@ class PlaybookService:
                         quantity=1,
                     ),
                 ],
-                order_type=OrderType.LIMIT,
+                order_type=OrderType.LIMIT if p.get("net_price") else OrderType.MARKET,
                 net_price=p.get("net_price"),
                 quantity=quantity,
                 time_in_force=p.get("time_in_force", "DAY"),
@@ -396,7 +397,7 @@ class PlaybookService:
                         quantity=1,
                     ),
                 ],
-                order_type=OrderType.LIMIT,
+                order_type=OrderType.LIMIT if p.get("net_price") else OrderType.MARKET,
                 net_price=p.get("net_price"),
                 quantity=quantity,
                 time_in_force=p.get("time_in_force", "DAY"),
@@ -456,7 +457,7 @@ class PlaybookService:
                         quantity=1,
                     ),
                 ],
-                order_type=OrderType.LIMIT,
+                order_type=OrderType.LIMIT if p.get("net_price") else OrderType.MARKET,
                 net_price=p.get("net_price"),
                 quantity=quantity,
                 time_in_force=p.get("time_in_force", "DAY"),

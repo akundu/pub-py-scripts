@@ -1693,6 +1693,61 @@ class TestReconciliation:
         assert types["SPY"] == "matched"
         assert types["QQQ"] == "quantity_mismatch"
 
+    @pytest.mark.asyncio
+    async def test_reconcile_includes_open_orders(self, _sync, position_store):
+        """Reconciliation report includes open/working orders from broker."""
+        broker_pos = Position(broker=Broker.IBKR, symbol="SPY", quantity=100,
+                              avg_cost=450.0, market_value=45000.0, unrealized_pnl=0.0)
+        order1 = OrderResult(
+            order_id="111", broker=Broker.IBKR, status=OrderStatus.SUBMITTED,
+            message="SPY BUY 50 LMT @ $445",
+            extra={"symbol": "SPY", "action": "BUY", "quantity": 50,
+                   "order_type": "LMT", "limit_price": 445.0, "perm_id": 999},
+        )
+        order2 = OrderResult(
+            order_id="222", broker=Broker.IBKR, status=OrderStatus.SUBMITTED,
+            message="RUT combo 2-leg",
+            extra={"symbol": "RUT", "action": "BUY", "quantity": 1,
+                   "order_type": "MKT", "limit_price": None, "perm_id": 1000,
+                   "legs": [{"con_id": 1, "action": "BUY", "ratio": 1}]},
+        )
+        mock_provider = MagicMock()
+        mock_provider.broker = Broker.IBKR
+        mock_provider.get_positions = AsyncMock(return_value=[broker_pos])
+        mock_provider.get_open_orders = AsyncMock(return_value=[order1, order2])
+        with patch("app.services.position_sync.ProviderRegistry") as mock_reg:
+            mock_reg.get.return_value = mock_provider
+            report = await _sync.reconcile(Broker.IBKR)
+        assert len(report.open_orders) == 2
+        assert report.open_orders[0]["order_id"] == "111"
+        assert report.open_orders[1]["extra"]["symbol"] == "RUT"
+
+    @pytest.mark.asyncio
+    async def test_reconcile_no_open_orders(self, _sync):
+        """Reconciliation works when broker has no open orders."""
+        mock_provider = MagicMock()
+        mock_provider.broker = Broker.IBKR
+        mock_provider.get_positions = AsyncMock(return_value=[])
+        mock_provider.get_open_orders = AsyncMock(return_value=[])
+        with patch("app.services.position_sync.ProviderRegistry") as mock_reg:
+            mock_reg.get.return_value = mock_provider
+            report = await _sync.reconcile(Broker.IBKR)
+        assert report.open_orders == []
+
+    @pytest.mark.asyncio
+    async def test_reconcile_order_fetch_failure_graceful(self, _sync):
+        """If fetching orders fails, reconciliation still returns positions."""
+        mock_provider = MagicMock()
+        mock_provider.broker = Broker.IBKR
+        mock_provider.get_positions = AsyncMock(return_value=[])
+        mock_provider.get_open_orders = AsyncMock(side_effect=RuntimeError("IBKR disconnected"))
+        with patch("app.services.position_sync.ProviderRegistry") as mock_reg:
+            mock_reg.get.return_value = mock_provider
+            report = await _sync.reconcile(Broker.IBKR)
+        # Report still generated — just no orders
+        assert report.open_orders == []
+        assert report.matched == 0
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Flush & Reconcile --flush
@@ -4893,6 +4948,178 @@ class TestCloseOrderPricing:
         parser.add_argument("--net-price", type=float, default=None)
         args = parser.parse_args(["--net-price", "1.50"])
         assert args.net_price == 1.50
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Market Order Default — no net_price means MARKET, with net_price means LIMIT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestMarketOrderDefault:
+    """Verify order_type defaults to MARKET when net_price is absent, LIMIT when present."""
+
+    def test_multi_leg_order_defaults_to_market(self):
+        """MultiLegOrder with no net_price has order_type=MARKET."""
+        order = MultiLegOrder(
+            broker=Broker.IBKR,
+            legs=[
+                OptionLeg(
+                    symbol="SPX", expiration="20260320", strike=5500,
+                    option_type=OptionType.PUT, action=OptionAction.SELL_TO_OPEN, quantity=1,
+                ),
+                OptionLeg(
+                    symbol="SPX", expiration="20260320", strike=5475,
+                    option_type=OptionType.PUT, action=OptionAction.BUY_TO_OPEN, quantity=1,
+                ),
+            ],
+            quantity=1,
+        )
+        assert order.order_type == OrderType.MARKET
+        assert order.net_price is None
+
+    def test_multi_leg_order_with_net_price_is_limit(self):
+        """MultiLegOrder with net_price has order_type=LIMIT."""
+        order = MultiLegOrder(
+            broker=Broker.IBKR,
+            legs=[
+                OptionLeg(
+                    symbol="SPX", expiration="20260320", strike=5500,
+                    option_type=OptionType.PUT, action=OptionAction.SELL_TO_OPEN, quantity=1,
+                ),
+                OptionLeg(
+                    symbol="SPX", expiration="20260320", strike=5475,
+                    option_type=OptionType.PUT, action=OptionAction.BUY_TO_OPEN, quantity=1,
+                ),
+            ],
+            order_type=OrderType.LIMIT,
+            net_price=3.50,
+            quantity=1,
+        )
+        assert order.order_type == OrderType.LIMIT
+        assert order.net_price == 3.50
+
+    def test_equity_order_defaults_to_market(self):
+        """EquityOrder defaults to MARKET."""
+        order = EquityOrder(
+            broker=Broker.IBKR,
+            symbol="SPY",
+            side=OrderSide.BUY,
+            quantity=100,
+        )
+        assert order.order_type == OrderType.MARKET
+        assert order.limit_price is None
+
+    def test_equity_order_with_limit_price_is_limit(self):
+        """EquityOrder with limit_price stays at whatever order_type is set."""
+        order = EquityOrder(
+            broker=Broker.IBKR,
+            symbol="SPY",
+            side=OrderSide.BUY,
+            quantity=100,
+            order_type=OrderType.LIMIT,
+            limit_price=450.00,
+        )
+        assert order.order_type == OrderType.LIMIT
+        assert order.limit_price == 450.00
+
+    def test_build_closing_trade_no_price_is_market(self):
+        """build_closing_trade_request() with no net_price produces a MARKET MultiLegOrder."""
+        from app.services.trade_service import build_closing_trade_request
+
+        position = {
+            "order_type": "multi_leg",
+            "symbol": "SPX",
+            "broker": "ibkr",
+            "quantity": 1,
+            "expiration": "2026-03-20",
+            "legs": [
+                {"action": "SELL_TO_OPEN", "strike": 5500, "option_type": "PUT", "quantity": 1},
+                {"action": "BUY_TO_OPEN", "strike": 5475, "option_type": "PUT", "quantity": 1},
+            ],
+        }
+        req = build_closing_trade_request(position)
+        assert req.multi_leg_order is not None
+        assert req.multi_leg_order.order_type == OrderType.MARKET
+        assert req.multi_leg_order.net_price is None
+
+    def test_build_closing_trade_with_price_is_limit(self):
+        """build_closing_trade_request() with net_price=0.10 produces LIMIT."""
+        from app.services.trade_service import build_closing_trade_request
+
+        position = {
+            "order_type": "multi_leg",
+            "symbol": "SPX",
+            "broker": "ibkr",
+            "quantity": 1,
+            "expiration": "2026-03-20",
+            "legs": [
+                {"action": "SELL_TO_OPEN", "strike": 5500, "option_type": "PUT", "quantity": 1},
+                {"action": "BUY_TO_OPEN", "strike": 5475, "option_type": "PUT", "quantity": 1},
+            ],
+        }
+        req = build_closing_trade_request(position, net_price=0.10)
+        assert req.multi_leg_order is not None
+        assert req.multi_leg_order.order_type == OrderType.LIMIT
+        assert req.multi_leg_order.net_price == 0.10
+
+    def test_playbook_credit_spread_no_price_is_market(self):
+        """PlaybookService._build_credit_spread with no net_price produces MARKET."""
+        from app.services.playbook_service import PlaybookService
+
+        instr = PlaybookInstruction(id="test", type="credit_spread", params={
+            "symbol": "SPX", "expiration": "20260320", "short_strike": 5500,
+            "long_strike": 5475, "option_type": "PUT", "quantity": 1,
+        })
+        svc = PlaybookService()
+        req = svc.instruction_to_trade_request(instr, Broker.IBKR)
+        assert req.multi_leg_order is not None
+        assert req.multi_leg_order.order_type == OrderType.MARKET
+        assert req.multi_leg_order.net_price is None
+
+    def test_playbook_credit_spread_with_price_is_limit(self):
+        """PlaybookService._build_credit_spread with net_price produces LIMIT."""
+        from app.services.playbook_service import PlaybookService
+
+        instr = PlaybookInstruction(id="test", type="credit_spread", params={
+            "symbol": "SPX", "expiration": "20260320", "short_strike": 5500,
+            "long_strike": 5475, "option_type": "PUT", "quantity": 1,
+            "net_price": 3.50,
+        })
+        svc = PlaybookService()
+        req = svc.instruction_to_trade_request(instr, Broker.IBKR)
+        assert req.multi_leg_order is not None
+        assert req.multi_leg_order.order_type == OrderType.LIMIT
+        assert req.multi_leg_order.net_price == 3.50
+
+    def test_playbook_debit_spread_no_price_is_market(self):
+        """PlaybookService._build_debit_spread with no net_price produces MARKET."""
+        from app.services.playbook_service import PlaybookService
+
+        instr = PlaybookInstruction(id="test", type="debit_spread", params={
+            "symbol": "QQQ", "expiration": "20260320", "long_strike": 480,
+            "short_strike": 490, "option_type": "CALL", "quantity": 1,
+        })
+        svc = PlaybookService()
+        req = svc.instruction_to_trade_request(instr, Broker.IBKR)
+        assert req.multi_leg_order is not None
+        assert req.multi_leg_order.order_type == OrderType.MARKET
+        assert req.multi_leg_order.net_price is None
+
+    def test_playbook_iron_condor_no_price_is_market(self):
+        """PlaybookService._build_iron_condor with no net_price produces MARKET."""
+        from app.services.playbook_service import PlaybookService
+
+        instr = PlaybookInstruction(id="test", type="iron_condor", params={
+            "symbol": "SPX", "expiration": "20260320",
+            "put_short": 5500, "put_long": 5475,
+            "call_short": 5700, "call_long": 5725,
+            "quantity": 1,
+        })
+        svc = PlaybookService()
+        req = svc.instruction_to_trade_request(instr, Broker.IBKR)
+        assert req.multi_leg_order is not None
+        assert req.multi_leg_order.order_type == OrderType.MARKET
+        assert req.multi_leg_order.net_price is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

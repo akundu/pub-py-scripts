@@ -77,7 +77,7 @@ The IBKR provider has **two implementations** in the same file:
 | Market data | Real quotes via `reqTickersAsync()` |
 | Positions | Real positions via `ib.positions()` |
 | Equity orders | `placeOrder()` with `Stock` contract |
-| Multi-leg | `placeOrder()` with `ComboLegs` BAG contract |
+| Multi-leg | `placeOrder()` with `ComboLegs` BAG contract. Supports both `MarketOrder` (default when `net_price` is omitted) and `LimitOrder` (when `net_price` is specified). |
 | Order status | Iterates `ib.trades()` to find matching orderId |
 | Safety | `IBKR_READONLY=true` rejects all order submissions |
 | When used | `IBKR_ACCOUNT_ID` is set to a valid account ID |

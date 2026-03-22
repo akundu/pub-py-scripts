@@ -70,7 +70,37 @@ Execute an equity or multi-leg options trade.
 }
 ```
 
-**Request Body -- Multi-Leg Order:**
+**Request Body -- Multi-Leg Order (MARKET, default when net_price omitted):**
+
+```json
+{
+  "multi_leg_order": {
+    "broker": "ibkr",
+    "legs": [
+      {
+        "symbol": "SPY",
+        "expiration": "2026-03-20",
+        "strike": 450.0,
+        "option_type": "PUT",
+        "action": "SELL_TO_OPEN",
+        "quantity": 1
+      },
+      {
+        "symbol": "SPY",
+        "expiration": "2026-03-20",
+        "strike": 445.0,
+        "option_type": "PUT",
+        "action": "BUY_TO_OPEN",
+        "quantity": 1
+      }
+    ],
+    "quantity": 5,
+    "time_in_force": "DAY"
+  }
+}
+```
+
+**Request Body -- Multi-Leg Order (LIMIT, when net_price specified):**
 
 ```json
 {
@@ -101,6 +131,11 @@ Execute an equity or multi-leg options trade.
   }
 }
 ```
+
+**Order Type Behavior:**
+
+- For `multi_leg_order`: `order_type` defaults to `MARKET` when `net_price` is not provided. When `net_price` is specified, `order_type` is automatically set to `LIMIT`.
+- For `equity_order`: use `order_type` and `limit_price` explicitly.
 
 **Validation Rules:**
 
@@ -158,13 +193,13 @@ Close an open position by ID.
 {
   "position_id": "a1b2c3d4",
   "quantity": null,
-  "net_price": 0.05
+  "net_price": null
 }
 ```
 
 - `position_id`: Full or prefix of position ID (prefix auto-resolves if unique)
 - `quantity`: Partial close quantity (null = close all)
-- `net_price`: Debit price for closing (default: $0.05)
+- `net_price`: Debit price for closing. Optional -- when `null` or omitted, a MARKET order is submitted. When specified, a LIMIT order is submitted at the given price.
 
 **Response (200):**
 

@@ -75,8 +75,8 @@ python utp.py daemon --live --no-restart                  # Disable auto-restart
 python utp.py portfolio                    # Positions & P&L
 python utp.py quote SPX NDX SPY            # Real-time quotes
 python utp.py options SPX --live           # Option chain
-python utp.py trade credit-spread ...      # Execute trades
-python utp.py close 2d9a                   # Close position
+python utp.py trade credit-spread ...      # Execute trades (MARKET default)
+python utp.py close 2d9a                   # Close position (MARKET default)
 python utp.py repl                         # Interactive REPL
 ```
 
@@ -224,7 +224,7 @@ curl -X POST http://localhost:8000/trade/execute \
   }'
 ```
 
-Add `X-Dry-Run: true` to simulate without submitting to the broker. Dry-run trades are tracked as paper positions with full P&L computation.
+Add `X-Dry-Run: true` to simulate without submitting to the broker. Dry-run trades are tracked as paper positions with full P&L computation. For multi-leg orders, omitting `net_price` submits a MARKET order; including `net_price` submits a LIMIT order.
 
 ### Dashboard Example
 

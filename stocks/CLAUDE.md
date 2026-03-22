@@ -29,6 +29,74 @@ questdb://user:password@host:port/database
 
 The code automatically converts `questdb://` to `postgresql://` for asyncpg compatibility.
 
+### Polygon.io API
+
+**REQUIRED** for downloading historical equities and options data:
+
+```bash
+export POLYGON_API_KEY="your_polygon_api_key"
+```
+
+## Data Download Pipeline
+
+### Automated (Crontab)
+
+Daily at 3:10 AM local time, crontab triggers:
+```bash
+curl 'http://localhost:9102/run_script?script=ms1_cron.sh'
+```
+
+This runs `run_scripts/ms1_cron.sh` which downloads equities + options and retrains models. Default: last 2 days. Override with query params: `?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD` or `?days_back=N`.
+
+### Manual Download Commands
+
+**Equities** (5-min OHLCV bars):
+```bash
+python3 scripts/equities_download.py I:VIX1D I:VIX SPY DJX I:DJX TQQQ QQQ I:NDX I:SPX I:RUT \
+  --start 2025-01-01 --end 2025-03-13 --output-dir ./equities_output
+```
+Output: `equities_output/{TICKER}/{TICKER}_equities_YYYY-MM-DD.csv`
+
+**0DTE Options** (5-min bars, same-day expiration):
+```bash
+python3 scripts/options_chain_download.py SPX NDX RUT \
+  --zero-dte-date-start 2025-01-01 --zero-dte-date-end 2025-03-13 \
+  --max-connections 30 --num-processes 2 --interval 5min \
+  --format-chain-csv --output-dir options_csv_output/
+```
+Output: `options_csv_output/{TICKER}/{TICKER}_options_YYYY-MM-DD.csv`
+
+**Multi-Day Options** (15-min bars, 30-day rolling window):
+```bash
+python3 scripts/options_chain_download.py SPX NDX DJX TQQQ RUT \
+  --track-from 2025-01-01 --track-end 2025-03-13 --track-days 30 \
+  --interval-minutes 15 --chunk-days 7 --max-connections 20 \
+  --num-processes 12 --window-workers 5 --skip-existing \
+  --format-chain-csv --output-dir ./options_csv_output_full/
+```
+Output: `options_csv_output_full/{TICKER}/{TICKER}_options_YYYY-MM-DD.csv`
+
+### Data Directories
+
+| Directory | Content | Interval | Key Tickers |
+|-----------|---------|----------|-------------|
+| `equities_output/` | Equity 5-min bars | 5min | I:NDX, I:SPX, TQQQ, SPY, QQQ, I:VIX, I:VIX1D, I:RUT, I:DJX, DJX |
+| `options_csv_output/` | 0DTE options chains | 5min | SPX, NDX, RUT |
+| `options_csv_output_full/` | Multi-day options (30d window) | 15min | SPX, NDX, DJX, TQQQ, RUT |
+| `csv_exports/options/` | Live options snapshots | realtime | NDX, SPX, RUT, DJX, TQQQ, AVGO, etc. |
+
+**Note**: `equities_output/` has symlinks: `NDX`→`I:NDX`, `SPX`→`I:SPX`, `RUT`→`I:RUT`, `DJX`→`I:DJX`
+
+### Key Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/equities_download.py` | Download equity bars from Polygon.io |
+| `scripts/options_chain_download.py` | Download options chains from Polygon.io |
+| `run_scripts/ms1_cron.sh` | Daily orchestrator (download + retrain) |
+| `run_scripts/build_close_models.sh` | Model retraining pipeline |
+| `scripts/retrain_models_auto.sh` | LightGBM retraining (1-20 DTE) |
+
 ## Command Line Interface Requirements
 
 **All command-line programs MUST include comprehensive help screens.** Every script that accepts command line arguments must use `argparse` with:
@@ -133,7 +201,7 @@ python scripts/backtest_band_accuracy.py NDX --days 90
 
 ## Testing Requirements
 
-**Tests MUST be run after every code change.** Before committing, always verify that all tests pass.
+**Tests MUST be run after every code change.** Before committing, always verify that all tests pass. **Every code change must include corresponding test additions or updates.** Do not add features or fix bugs without updating tests. All tests must pass before the change is considered complete.
 
 ### Running Tests
 
@@ -193,6 +261,15 @@ stocks/
 ## Modular Backtesting Framework
 
 The `scripts/backtesting/` directory contains a composable backtesting framework for options strategies. See `scripts/backtesting/BACKTESTING.md` for the full guide.
+
+### Strategy Development Guide
+
+**If you are building a new strategy, READ `docs/STRATEGY_DEVELOPMENT_GUIDE.md` FIRST.** It covers:
+- How to create a strategy (file, config, registration, tests)
+- How to inherit from or compose existing strategies
+- How to use the orchestrator (REQUIRED for all comparisons and production work)
+- Performance considerations (multiprocessing, data optimization)
+- Documentation and reporting requirements
 
 ### Quick Start
 
@@ -437,3 +514,110 @@ See `results/tiered_portfolio/report.html` for the canonical example of a well-s
 |----------|-----|
 | Tiered Portfolio v2 (NDX) | `docs/strategies/tiered_portfolio_v2.md` |
 | TQQQ Momentum Scalper | `results/TQQQ_MOMENTUM_SCALPER_ANALYSIS.md` |
+
+## Universal Trade Platform (UTP)
+
+The `live_trading/universal-trade-platform/` directory contains a unified multi-broker trading API (FastAPI) supporting Robinhood, E\*TRADE, and IBKR. **See `live_trading/universal-trade-platform/CLAUDE.md` for full UTP-specific context.**
+
+### Quick Start — Unified CLI (`utp.py`)
+
+Everything is in two files: `utp.py` (CLI + server) and `tests/test_utp.py` (all 325 tests).
+
+```bash
+cd live_trading/universal-trade-platform
+python utp.py portfolio                          # View positions, P&L
+python utp.py quote SPY AAPL                     # Real-time quotes
+python utp.py options RUT --type CALL --live     # Option chain quotes
+python utp.py options SPX --list-expirations     # List available expirations
+python utp.py margin credit-spread --symbol SPX --short-strike 5500 \
+  --long-strike 5475 --option-type PUT --expiration 2026-03-20
+python utp.py trade equity --symbol SPY --side BUY --quantity 1
+python utp.py trade --validate-all               # Test all 5 trade types
+python utp.py trades --live                      # Today's trades (IBKR real-time P&L)
+python utp.py trades --all --live                # All trades (open + closed)
+python utp.py close <pos-id> --live              # Close position by ID (MARKET order default)
+python utp.py close <pos-id> --net-price 0.10 --live  # Close at LIMIT $0.10 debit
+python utp.py playbook execute playbooks/example_mixed.yaml
+python utp.py status                             # System dashboard
+python utp.py journal --days 7                   # Trade history
+python utp.py performance --days 30              # Performance metrics
+python utp.py reconcile --flush --show --live    # Flush + reconcile + show positions
+python utp.py readiness --symbol SPX --paper     # IBKR connectivity test
+python utp.py daemon --paper                             # Start always-on daemon
+python utp.py daemon --live --advisor-profile tiered_v2  # With advisor signals
+python utp.py repl                                       # Interactive REPL
+python utp.py server                             # Start API server
+python -m pytest tests/ -v                       # Run all 325 tests
+```
+
+### Core Capabilities
+
+- **Multi-broker trading**: Unified REST API across Robinhood, E\*TRADE, IBKR
+- **Transaction ledger**: Append-only JSONL log of every trade event with snapshots
+- **Paper trading**: Dry-run trades tracked with real P&L computation
+- **Dashboard**: REST + terminal display for positions, cash, performance metrics
+- **Auto-expiration**: Background loop closes expired options at EOD
+- **Position sync**: Polls all brokers every 5 min for out-of-band positions
+- **CSV import**: Ingest Robinhood/E\*TRADE CSV exports for unified history
+- **Real IBKR**: Full `ib_insync` integration (set `IBKR_ACCOUNT_ID` to activate)
+- **Source attribution**: Every position/transaction tagged: `live_api`, `paper`, `csv_import`, `external_sync`
+- **Trade playbooks**: YAML instruction files for batch trade execution (equity, options, spreads, iron condors)
+- **Reconciliation**: Compare system positions against broker-reported positions
+- **Option chains**: View available expirations, strikes, and live bid/ask/volume for any underlying
+- **Status dashboard**: Unified view of active positions, pending orders, recent trades, cache stats
+- **Always-on daemon**: Server-first architecture with persistent IBKR connection, LAN trust, REPL, Python client library
+
+### Key Endpoints
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /trade/execute` | Execute trade (add `X-Dry-Run: true` for paper) |
+| `GET /dashboard/summary` | Active positions, P&L, source breakdown |
+| `GET /dashboard/performance` | Win rate, Sharpe, drawdown, profit factor |
+| `GET /ledger/entries` | Query transaction log (filter by broker, type, source) |
+| `POST /account/sync` | Manual position sync across brokers |
+| `POST /import/csv?broker=robinhood` | Import CSV transaction history |
+| `POST /playbook/execute` | Execute YAML trade playbook (add `X-Dry-Run: true` for paper) |
+| `POST /playbook/validate` | Validate playbook structure without executing |
+| `GET /account/reconciliation` | Compare system vs broker positions |
+| `GET /dashboard/status` | Full status: positions, orders, trades, cache |
+| `POST /trade/close` | Close position by ID |
+| `GET /account/trades` | Trade history |
+| `GET /account/orders` | Open orders |
+| `GET /market/options/{symbol}` | Option chain data |
+| `GET /dashboard/advisor/recommendations` | Current advisor signals |
+
+### Architecture
+
+```
+app/
+├── services/           # ledger, position_store, dashboard, expiration, sync, csv_importer, metrics, playbook
+├── routes/             # trade, market, account, ledger, dashboard, import, auth, ws, playbook
+├── core/providers/     # robinhood (stub), etrade (stub), ibkr (stub + live via ib_insync)
+└── main.py             # Lifespan: init services, register providers, start background tasks
+```
+
+### Testing
+
+325 tests in `tests/test_utp.py`. Tests use `tmp_path` for isolated persistence. Run from `live_trading/universal-trade-platform/`:
+
+```bash
+python -m pytest tests/ -v
+python -m pytest tests/test_utp.py -k "TestLedger" -v   # Filter by class
+```
+
+### UTP Documentation
+
+Full docs in `live_trading/universal-trade-platform/docs/`:
+- `architecture.md` — system design, persistence, background tasks, data flows
+- `api_reference.md` — all 33 endpoints with request/response schemas
+- `configuration.md` — all environment variables
+- `providers.md` — broker provider interface, IBKR live, adding new brokers
+- `ibkr_setup_guide.md` — TWS/IB Gateway connection walkthrough
+- `testing.md` — 202 tests, fixtures, test class descriptions
+- `playbook.md` — trade playbook system, reconciliation, status dashboard
+- `authentication.md` — API key + OAuth2/JWT flows
+- `symbology.md` — symbol mapping across brokers
+- `websockets.md` — real-time streaming
+
+**HTML docs**: `docs/html/` (dark-themed, 10 pages + index). Rebuild after any `.md` changes: `python3 docs/build_html.py`

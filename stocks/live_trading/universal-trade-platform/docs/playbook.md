@@ -72,7 +72,7 @@ instructions:
   long_strike: 5475              # Strike to BUY (protection)
   option_type: PUT
   quantity: 2
-  net_price: 3.50                # Net credit received
+  net_price: 3.50                # Optional: LIMIT order at $3.50. Omit for MARKET order.
 ```
 
 #### `debit_spread` — 2-Leg Debit Spread
@@ -86,7 +86,7 @@ instructions:
   short_strike: 490              # Strike to SELL
   option_type: CALL
   quantity: 3
-  net_price: 4.00                # Net debit paid
+  net_price: 4.00                # Optional: LIMIT order at $4.00. Omit for MARKET order.
 ```
 
 #### `iron_condor` — 4-Leg Iron Condor
@@ -101,8 +101,10 @@ instructions:
   call_short: 5700               # SELL call
   call_long: 5725                # BUY call (protection)
   quantity: 1
-  net_price: 3.50                # Net credit received
+  net_price: 3.50                # Optional: LIMIT order at $3.50. Omit for MARKET order.
 ```
+
+**Order type behavior:** For `credit_spread`, `debit_spread`, and `iron_condor` instructions, if `net_price` is omitted, a MARKET order is submitted. When `net_price` is specified, a LIMIT order is used.
 
 ## CLI Usage
 

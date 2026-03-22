@@ -248,10 +248,12 @@ class TradingClient:
         self,
         position_id: str,
         quantity: int | None = None,
-        net_price: float = 0.05,
+        net_price: float | None = None,
     ) -> dict:
-        """Close a position by ID."""
-        payload = {"position_id": position_id, "net_price": net_price}
+        """Close a position by ID. If net_price is None, uses MARKET order."""
+        payload: dict = {"position_id": position_id}
+        if net_price is not None:
+            payload["net_price"] = net_price
         if quantity is not None:
             payload["quantity"] = quantity
         return await self._post("/trade/close", **payload)
@@ -1780,9 +1782,30 @@ async def _cmd_orders_http(args, server: str) -> int:
         if not orders:
             print("  No open orders.")
             return 0
-        _print_header("Open Orders")
+        _print_header(f"Open Orders ({len(orders)})")
         for o in orders:
-            print(f"  [{o.get('order_id','?')[:8]}] {o.get('status','')} — {o.get('message','')}")
+            oid = o.get("order_id", "?")[:8]
+            status = o.get("status", "?")
+            extra = o.get("extra", {})
+            if extra:
+                sym = extra.get("symbol", "")
+                action = extra.get("action", "?")
+                qty = extra.get("quantity", 0)
+                otype = extra.get("order_type", "?")
+                price = extra.get("limit_price")
+                perm_id = extra.get("perm_id", "")
+                legs = extra.get("legs", [])
+                price_str = f"${price}" if price else "MARKET"
+                status_color = "92" if status == "SUBMITTED" else "93"
+                perm_str = f" permId={perm_id}" if perm_id else ""
+                print(f"  [{_color(oid, status_color)}] {sym} {action} {qty} "
+                      f"{otype} @ {price_str} — {status}{perm_str}")
+                if legs:
+                    for leg in legs:
+                        print(f"           leg: conId={leg.get('con_id')} "
+                              f"{leg.get('action')} ratio={leg.get('ratio')}")
+            else:
+                print(f"  [{oid}] {status} — {o.get('message', '')}")
     return 0
 
 
@@ -1953,11 +1976,11 @@ async def _cmd_close_http(args, server: str) -> int:
             mark = match.get("market_price", 0)
             mark_abs = abs(mark) if mark else 0
             if net_price is not None:
-                print(f"  Net price:  ${net_price:.2f} (user-specified)")
-            elif mark_abs > 0:
-                print(f"  Net price:  ${mark_abs:.2f} (current mark — no --net-price specified)")
+                print(f"  Order type: LIMIT @ ${net_price:.2f}")
             else:
-                print(f"  Net price:  $0.05 (fallback — mark unavailable)")
+                print(f"  Order type: MARKET")
+                if mark_abs > 0:
+                    print(f"  Current mark: ${mark_abs:.2f}")
 
             if legs:
                 print(f"  Closing legs:")
@@ -1969,20 +1992,20 @@ async def _cmd_close_http(args, server: str) -> int:
                     con_id = leg.get("con_id", "?")
                     print(f"    {close_action:>18} {ot} {strike} x{close_qty} (conId={con_id})")
 
-                # Show current mark value to help set net_price
+                # Show current mark value
                 mark = match.get("market_price", 0)
                 if mark:
                     mark_per = abs(mark)
                     print(f"\n  Current mark:   ${mark_per:.4f} per spread")
                     print(f"  Cost to close {close_qty}:  ~${mark_per * close_qty * 100:.2f}")
-                    if (net_price or 0.05) < mark_per * 0.8:
-                        print(f"  {_color('Warning:', '93')} --net-price ${net_price or 0.05:.2f} "
+                    if net_price is not None and net_price < mark_per * 0.8:
+                        print(f"  {_color('Warning:', '93')} --net-price ${net_price:.2f} "
                               f"is well below the mark (${mark_per:.2f}). Order will likely be cancelled.")
                         print(f"  Suggest: --net-price {mark_per:.2f} or higher")
 
                 # Try margin check (may fail for some symbols)
                 from app.services.trade_service import build_closing_trade_request
-                trade_req = build_closing_trade_request(match, close_qty, net_price or 0.05)
+                trade_req = build_closing_trade_request(match, close_qty, net_price)
                 if trade_req.multi_leg_order:
                     try:
                         margin_resp = await client.post("/market/margin", json={
@@ -2012,13 +2035,13 @@ async def _cmd_close_http(args, server: str) -> int:
 
         # Show order summary before executing
         confirm = getattr(args, "confirm", False)
-        price_label = f"${net_price:.2f}" if net_price else "current mark"
+        price_label = f"${net_price:.2f} (LIMIT)" if net_price is not None else "MARKET"
 
         _print_header("Close Order Summary")
         print(f"  Position:   {position_id[:8]}")
         print(f"  Quantity:   {qty or 'all'}")
-        print(f"  Net price:  {price_label}")
-        if net_price:
+        print(f"  Order type: {price_label}")
+        if net_price is not None:
             cost = abs(net_price) * (qty or 1) * 100
             print(f"  Est. cost:  ${cost:,.2f} (debit)")
 
@@ -2246,6 +2269,31 @@ async def _cmd_reconcile_http(args, server: str) -> int:
         else:
             print(f"\n  {_color('No discrepancies', '92')}")
 
+        # Show open orders from broker
+        open_orders = data.get("open_orders", [])
+        if open_orders:
+            _print_section(f"Open Orders ({len(open_orders)})")
+            for o in open_orders:
+                oid = o.get("order_id", "?")[:8]
+                status = o.get("status", "?")
+                msg = o.get("message", "")
+                extra = o.get("extra", {})
+                sym = extra.get("symbol", "")
+                otype = extra.get("order_type", "?")
+                action = extra.get("action", "?")
+                qty = extra.get("quantity", 0)
+                price = extra.get("limit_price")
+                legs = extra.get("legs", [])
+
+                price_str = f"${price}" if price else "MARKET"
+                status_color = "92" if status == "SUBMITTED" else "93"
+                print(f"  [{_color(oid, status_color)}] {sym} {action} {qty} "
+                      f"{otype} @ {price_str} — {status}")
+                if legs:
+                    for leg in legs:
+                        print(f"           leg: conId={leg.get('con_id')} "
+                              f"{leg.get('action')} ratio={leg.get('ratio')}")
+
         # Show synced positions if --show
         if getattr(args, "show", False):
             resp2 = await client.get("/dashboard/summary")
@@ -2450,7 +2498,9 @@ async def _cmd_trade_http(args, server: str) -> int:
             print(f"  Type:       {subcommand}")
             print(f"  Quantity:   {order.quantity}")
             if order.net_price:
-                print(f"  Net price:  ${order.net_price:.2f}")
+                print(f"  Net price:  ${order.net_price:.2f} (LIMIT)")
+            else:
+                print(f"  Price:      MARKET")
             print(f"  Legs:")
             for leg in (order.legs or []):
                 print(f"    {leg.action.value:>15} {leg.option_type.value:>4} "
@@ -2501,13 +2551,15 @@ async def _cmd_trade_http(args, server: str) -> int:
                 # Determine credit vs debit
                 is_credit = order.legs[0].action.value in ("SELL_TO_OPEN", "SELL_TO_CLOSE")
                 if is_credit:
-                    print(f"  Net credit: ${order.net_price:.2f} per spread")
+                    print(f"  Net credit: ${order.net_price:.2f} per spread (LIMIT)")
                     total = order.net_price * order.quantity * 100
                     print(f"  You receive: ~${total:,.2f}")
                 else:
-                    print(f"  Net debit:  ${order.net_price:.2f} per spread")
+                    print(f"  Net debit:  ${order.net_price:.2f} per spread (LIMIT)")
                     total = order.net_price * order.quantity * 100
                     print(f"  You spend:  ~${total:,.2f}")
+            else:
+                print(f"  Price:      MARKET (best available)")
             print(f"  Legs:")
             for leg in (order.legs or []):
                 print(f"    {leg.action.value:>15} {leg.option_type.value:>4} "
@@ -2605,7 +2657,7 @@ async def _cmd_repl(args) -> int:
                 ns = argparse.Namespace(days=0, show_all=False, server=server)
                 await _cmd_trades_http(ns, server)
             elif cmd in ("close", "cl") and len(parts) > 1:
-                ns = argparse.Namespace(position_id=parts[1], quantity=None, net_price=0.05, server=server)
+                ns = argparse.Namespace(position_id=parts[1], quantity=None, net_price=None, server=server)
                 await _cmd_close_http(ns, server)
             elif cmd in ("performance", "perf"):
                 ns = argparse.Namespace(server=server)
@@ -3433,9 +3485,7 @@ async def _cmd_trade(args) -> int:
             price_label = "mid-point" if use_mid else "market"
             print(f"  {_color(f'Using {price_label} price', '92')}: ${computed_price:.2f}")
         elif computed_price is None and no_price_given:
-            print(f"  {_color('WARNING', '93')}: Could not auto-price. Specify --net-price or quotes may be unavailable.")
-            await _disconnect(live_provider)
-            return 1
+            print(f"  {_color('No auto-price available', '93')} — submitting as MARKET order")
         print()
     else:
         live_provider = None
@@ -4071,6 +4121,33 @@ async def _cmd_reconcile(args) -> int:
             print(f"    - Broker reports negative qty for short positions (e.g. -1 = short)")
             print(f"    - Partial fills changed position size outside the system")
             print(f"    - Manual trades were placed directly through the broker")
+
+    # ── Open orders from broker ──
+    if report.open_orders:
+        _print_section(f"Open Orders ({len(report.open_orders)})")
+        for o in report.open_orders:
+            oid = o.get("order_id", "?")[:8]
+            status = o.get("status", "?")
+            extra = o.get("extra", {})
+            sym = extra.get("symbol", "")
+            otype = extra.get("order_type", "?")
+            action = extra.get("action", "?")
+            qty = extra.get("quantity", 0)
+            price = extra.get("limit_price")
+            perm_id = extra.get("perm_id", "")
+            legs = extra.get("legs", [])
+
+            price_str = f"${price}" if price else "MARKET"
+            status_color = "92" if status == "SUBMITTED" else "93"
+            perm_str = f" permId={perm_id}" if perm_id else ""
+            print(f"  [{_color(oid, status_color)}] {sym} {action} {qty} "
+                  f"{otype} @ {price_str} — {status}{perm_str}")
+            if legs:
+                for leg in legs:
+                    print(f"           leg: conId={leg.get('con_id')} "
+                          f"{leg.get('action')} ratio={leg.get('ratio')}")
+    else:
+        print(f"\n  Open Orders: {_color('none', '92')}")
 
     # ── Show synced positions ──
     if getattr(args, "show", False) or getattr(args, "portfolio", False):
@@ -5243,7 +5320,7 @@ async def _cmd_close(args) -> int:
             await _disconnect(provider)
         return 1
 
-    net_price = getattr(args, "net_price", None) or 0.05
+    net_price = getattr(args, "net_price", None)
 
     # Show what we're about to do
     _print_header("Close Position")
@@ -5256,7 +5333,10 @@ async def _cmd_close(args) -> int:
     else:
         print(f"  Quantity:   {close_qty}")
     print(f"  Expiration: {exp}")
-    print(f"  Net Price:  ${net_price:.2f} (debit to close)")
+    if net_price is not None:
+        print(f"  Order type: LIMIT @ ${net_price:.2f} (debit to close)")
+    else:
+        print(f"  Order type: MARKET")
     entry = match.get("entry_price", 0)
     credit = abs(entry)
     print(f"  Opened at:  ${credit:.2f} (credit received)")
@@ -5273,7 +5353,7 @@ async def _cmd_close(args) -> int:
         expiration=exp,
         quantity=close_qty,
         net_price=net_price,
-        order_type="LIMIT",
+        order_type="LIMIT" if net_price is not None else "MARKET",
         time_in_force="DAY",
         close=True,
         closing_position_id=match.get("position_id"),
@@ -5841,7 +5921,7 @@ P&L: credit_received - cost_to_close (max profit = full credit, max loss = width
     t_cs.add_argument("--option-type", required=True, choices=["CALL", "PUT"])
     t_cs.add_argument("--quantity", type=int, default=1)
     t_cs.add_argument("--net-price", type=float, default=None,
-                      help="Net credit per contract. If omitted with --paper/--live, auto-prices at mid-point")
+                      help="Net credit per contract (LIMIT order). If omitted, tries auto-price then MARKET")
     t_cs.add_argument("--auto-price", action="store_true",
                       help="Fetch live quotes and set price (default when --net-price omitted)")
     t_cs.add_argument("--mid", action="store_true",
@@ -5872,7 +5952,7 @@ P&L: value_on_close - debit_paid (max profit = width - debit, max loss = debit p
     t_ds.add_argument("--option-type", required=True, choices=["CALL", "PUT"])
     t_ds.add_argument("--quantity", type=int, default=1)
     t_ds.add_argument("--net-price", type=float, default=None,
-                      help="Net debit per contract. If omitted with --paper/--live, auto-prices at mid-point")
+                      help="Net debit per contract (LIMIT order). If omitted, tries auto-price then MARKET")
     t_ds.add_argument("--auto-price", action="store_true",
                       help="Fetch live quotes and set price (default when --net-price omitted)")
     t_ds.add_argument("--mid", action="store_true",
@@ -5905,7 +5985,7 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
     t_ic.add_argument("--call-long", type=float, required=True)
     t_ic.add_argument("--quantity", type=int, default=1)
     t_ic.add_argument("--net-price", type=float, default=None,
-                      help="Net credit per contract. If omitted with --paper/--live, auto-prices at mid-point")
+                      help="Net credit per contract (LIMIT order). If omitted, tries auto-price then MARKET")
     t_ic.add_argument("--auto-price", action="store_true",
                       help="Fetch live quotes and set price (default when --net-price omitted)")
     t_ic.add_argument("--mid", action="store_true",
@@ -6380,9 +6460,9 @@ Auto-detects a running daemon and routes through HTTP if available.
                                      ''',
                                      epilog='''
 Examples:
-  %(prog)s 2d9a --paper                    Close position '2d9a' on paper account
-  %(prog)s 2d9a --live                     Close on live at $0.05 debit (default)
-  %(prog)s 2d9a --net-price 0.10 --live    Close at $0.10 debit
+  %(prog)s 2d9a --paper                    Close position '2d9a' at MARKET
+  %(prog)s 2d9a --live                     Close on live at MARKET price
+  %(prog)s 2d9a --net-price 0.10 --live    Close at $0.10 LIMIT debit
   %(prog)s 2d9a -q 1 --live               Partial close: 1 contract only
   %(prog)s 2d9a --simulate --live          Margin check only, no close
   %(prog)s 2d9a                            Dry-run close (no broker connection)
@@ -6397,7 +6477,7 @@ Aliases: cl
     p_close.add_argument("--quantity", "-q", type=int, default=None,
                           help="Number of contracts to close (default: all)")
     p_close.add_argument("--net-price", type=float, default=None,
-                          help="Debit price to close (default: current mark from IBKR)")
+                          help="Debit price for LIMIT close. If omitted, uses MARKET order")
     p_close.add_argument("--simulate", action="store_true",
                           help="Check margin only — do NOT execute the close")
     p_close.add_argument("--confirm", action="store_true",

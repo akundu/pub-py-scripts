@@ -233,6 +233,17 @@ async def await_order_fill(
                 )
             last_logged_status = current_status
 
+        # PreSubmitted (PENDING) outside market hours means the order is
+        # queued for next open — no point polling for 30s.
+        if result.status == OrderStatus.PENDING:
+            from app.services.position_sync import PositionSyncService
+            if not PositionSyncService.is_trading_hours():
+                result.message = (
+                    f"{result.message} "
+                    f"[market closed — order queued for next open]"
+                ).strip()
+                return result
+
         if result.status in TERMINAL_STATUSES:
             # On fill, create position from pending request (or close existing)
             if result.status == OrderStatus.FILLED and order_id in _pending_orders:
@@ -303,7 +314,7 @@ async def poll_order_status(broker: Broker, order_id: str) -> None:
 
 
 def build_closing_trade_request(position: dict, quantity: int | None = None,
-                                 net_price: float = 0.05) -> TradeRequest:
+                                 net_price: float | None = None) -> TradeRequest:
     """Build a TradeRequest that closes (or partially closes) an open position.
 
     Used by both POST /trade/close and the CLI close command.
@@ -311,7 +322,7 @@ def build_closing_trade_request(position: dict, quantity: int | None = None,
     """
     from app.models import (
         Broker, EquityOrder, MultiLegOrder, OptionAction, OptionLeg,
-        OptionType, OrderSide,
+        OptionType, OrderSide, OrderType,
     )
 
     order_type = position.get("order_type", "equity")
@@ -345,6 +356,7 @@ def build_closing_trade_request(position: dict, quantity: int | None = None,
                 broker=broker,
                 legs=close_legs,
                 quantity=close_qty,
+                order_type=OrderType.LIMIT if net_price else OrderType.MARKET,
                 net_price=net_price,
             )
         )

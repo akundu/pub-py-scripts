@@ -123,11 +123,14 @@ class PositionSyncService:
     async def reconcile(self, broker: Broker) -> ReconciliationReport:
         """Compare system positions against broker-reported positions.
 
+        Also fetches open/working orders from the broker to give a complete
+        picture of outstanding activity.
+
         Args:
             broker: Which broker to reconcile against.
 
         Returns:
-            ReconciliationReport with matched/mismatched entries.
+            ReconciliationReport with matched/mismatched entries and open orders.
         """
         provider = ProviderRegistry.get(broker)
         broker_positions = await provider.get_positions()
@@ -199,6 +202,14 @@ class PositionSyncService:
                     discrepancy_type="missing_in_system",
                     details=f"Broker has {brk_qty} but system has no record",
                 ))
+
+        # Fetch open/working orders from the broker
+        try:
+            open_orders = await provider.get_open_orders()
+            for order in open_orders:
+                report.open_orders.append(order.model_dump())
+        except Exception as e:
+            logger.error("Failed to fetch open orders from %s: %s", broker.value, e)
 
         return report
 

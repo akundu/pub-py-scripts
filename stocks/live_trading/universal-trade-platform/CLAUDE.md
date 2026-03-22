@@ -66,7 +66,12 @@ async with TradingClient("http://192.168.1.50:8000") as client:
     result = await client.trade_credit_spread(
         symbol="SPX", short_strike=5500, long_strike=5475,
         option_type="PUT", expiration="2026-03-20",
-        quantity=1, net_price=3.50,
+        quantity=1,                  # MARKET order (no net_price)
+    )
+    result = await client.trade_credit_spread(
+        symbol="SPX", short_strike=5500, long_strike=5475,
+        option_type="PUT", expiration="2026-03-20",
+        quantity=1, net_price=3.50,  # LIMIT order at $3.50
     )
 
 # Sync
@@ -138,13 +143,16 @@ python utp.py trade option --symbol SPY --strike 550 --option-type PUT \
   --action BUY_TO_OPEN --quantity 1 --order-type LIMIT --limit-price 2.50
 python utp.py trade credit-spread --symbol SPX --short-strike 5500 \
   --long-strike 5475 --option-type PUT --expiration 2026-03-20 \
-  --quantity 1 --net-price 3.50 --paper
+  --quantity 1 --paper                             # MARKET order (default)
+python utp.py trade credit-spread --symbol SPX --short-strike 5500 \
+  --long-strike 5475 --option-type PUT --expiration 2026-03-20 \
+  --quantity 1 --net-price 3.50 --paper            # LIMIT order at $3.50
 python utp.py trade debit-spread --symbol QQQ --long-strike 480 \
   --short-strike 490 --option-type CALL --expiration 2026-03-20 \
-  --quantity 3 --net-price 4.00
+  --quantity 3 --net-price 4.00                    # LIMIT order at $4.00
 python utp.py trade iron-condor --symbol SPX --put-short 5500 \
   --put-long 5475 --call-short 5700 --call-long 5725 \
-  --expiration 2026-03-20 --quantity 1 --net-price 3.50 --live
+  --expiration 2026-03-20 --quantity 1 --live      # MARKET order (default)
 python utp.py trade --validate-all               # Test all 5 types (safe)
 python utp.py trade --validate-all --paper       # Paper account validation
 python utp.py trade --validate-all --cleanup     # Clean up after validation
@@ -172,8 +180,8 @@ python utp.py trade credit-spread --symbol RUT --short-strike 2460 \
 
 # ── Close by Position ID (submits real IBKR closing order) ──────
 python utp.py close <pos-id-prefix>              # Dry-run close (auto-derives params)
-python utp.py close <pos-id-prefix> --live       # Close at $0.05 debit (default)
-python utp.py close <pos-id-prefix> --net-price 0.10 --live  # Close at specific debit
+python utp.py close <pos-id-prefix> --live       # Close at MARKET (default)
+python utp.py close <pos-id-prefix> --net-price 0.10 --live  # Close at LIMIT $0.10 debit
 python utp.py close <pos-id-prefix> -q 1 --live  # Partial close: 1 contract
 python utp.py close <pos-id-prefix> --simulate --live  # Margin check only, no close
 
@@ -259,6 +267,10 @@ python utp.py repl --server http://192.168.1.50:8000     # Explicit server
 | (default) | `dry-run` | Stub (no broker) | N/A |
 | `--paper` | `paper` | IBKR paper | 7497 |
 | `--live` | `live` | IBKR live (requires confirmation) | 7496 |
+
+### Order Type Defaults
+
+All trade commands (`trade credit-spread`, `trade debit-spread`, `trade iron-condor`, `trade option`) and the `close` command default to **MARKET order** when `--net-price` is not specified. When `--net-price` is provided, the order is submitted as a **LIMIT order** at the specified price. This also applies to playbook execution and the `TradingClient` API -- omitting `net_price` results in a MARKET order.
 
 ### Common Flags (all subcommands)
 

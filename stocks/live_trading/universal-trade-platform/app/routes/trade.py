@@ -19,7 +19,7 @@ from app.services.trade_service import (
 router = APIRouter(prefix="/trade", tags=["trading"])
 
 
-async def _close_by_con_id(position: dict, quantity: int | None, net_price: float) -> OrderResult | None:
+async def _close_by_con_id(position: dict, quantity: int | None, net_price: float | None) -> OrderResult | None:
     """Close a multi-leg position using stored conIds — bypasses contract qualification.
 
     This is more reliable than qualifying from scratch since we already know the exact
@@ -37,7 +37,7 @@ async def _close_by_con_id(position: dict, quantity: int | None, net_price: floa
     if not ib or not getattr(provider, "_connected", False):
         return None
 
-    from ib_insync import ComboLeg, Contract, LimitOrder
+    from ib_insync import ComboLeg, Contract, LimitOrder, MarketOrder
 
     legs = position.get("legs") or []
     symbol = position.get("symbol", "")
@@ -80,23 +80,26 @@ async def _close_by_con_id(position: dict, quantity: int | None, net_price: floa
     # closing means BUY-ing it back (debit). Sort BUY first for credit spread close.
     has_short_leg = any(leg.get("action", "") == "SELL" for leg in legs)
     if has_short_leg:
-        # Credit spread close: BUY back the short first → debit (positive)
         combo_legs.sort(key=lambda cl: (0 if cl.action == "BUY" else 1))
-        ibkr_price = abs(net_price)
     else:
-        # Debit spread close: SELL back the long first → credit (negative)
         combo_legs.sort(key=lambda cl: (0 if cl.action == "SELL" else 1))
-        ibkr_price = -abs(net_price)
 
     import logging as _log
     _logger = _log.getLogger("utp.close")
 
-    ib_order = LimitOrder("BUY", close_qty, ibkr_price)
+    if net_price is not None:
+        ibkr_price = abs(net_price) if has_short_leg else -abs(net_price)
+        ib_order = LimitOrder("BUY", close_qty, ibkr_price)
+    else:
+        ibkr_price = 0.0
+        ib_order = MarketOrder("BUY", close_qty)
     ib_order.tif = "DAY"
 
+    price_label = f"LIMIT {ibkr_price:+.4f}" if net_price is not None else "MARKET"
     _logger.info(
-        "Close order: %s %d legs x%d, ibkr_price=%.4f (net=%.4f, avg_cost=%.4f), combo_legs=%s",
-        symbol, len(combo_legs), close_qty, ibkr_price, net_price,
+        "Close order: %s %d legs x%d, %s (net=%s, avg_cost=%.4f), combo_legs=%s",
+        symbol, len(combo_legs), close_qty, price_label,
+        f"{net_price:.4f}" if net_price is not None else "MARKET",
         position.get("avg_cost", 0),
         [(cl.conId, cl.action, cl.ratio) for cl in combo_legs],
     )
@@ -223,34 +226,9 @@ async def close_position(
     if pos.get("status") != "open":
         raise HTTPException(status_code=400, detail="Position is not open")
 
-    # Resolve net_price: if not specified, fetch current mark from IBKR portfolio
+    # net_price: if provided → LIMIT order at that price
+    # if None → MARKET order (IBKR fills at best available)
     net_price = request.net_price
-    if net_price is None:
-        # Try to get the live mark from IBKR's portfolio data
-        try:
-            from app.core.provider import ProviderRegistry as _PR
-            from app.models import Broker as _B
-            _ibkr = _PR.get(_B.IBKR)
-            if hasattr(_ibkr, "get_portfolio_items"):
-                items = await _ibkr.get_portfolio_items()
-                # Find items matching this position's legs (by con_id)
-                leg_con_ids = {leg.get("con_id") for leg in (pos.get("legs") or []) if leg.get("con_id")}
-                if leg_con_ids:
-                    matched_items = [i for i in items if i.get("con_id") in leg_con_ids]
-                    if matched_items:
-                        # Sum market prices across legs to get spread mark
-                        # Each item's market_price is the per-contract option price
-                        total_mark = 0.0
-                        for item in matched_items:
-                            mp = item.get("market_price", 0)
-                            pos_sign = 1 if item.get("position", 0) >= 0 else -1
-                            total_mark += mp * pos_sign
-                        net_price = round(abs(total_mark), 2)
-        except Exception:
-            pass
-
-        if net_price is None or net_price <= 0:
-            net_price = 0.05  # last resort fallback
 
     # Build closing trade request using shared function
     trade_request = build_closing_trade_request(pos, request.quantity, net_price)
@@ -270,7 +248,7 @@ async def close_position(
         if result:
             # Update local position store
             if result.status == OrderStatus.FILLED:
-                exit_price = result.filled_price or net_price
+                exit_price = result.filled_price or net_price or 0
                 if request.quantity and request.quantity < abs(pos.get("quantity", 0)):
                     updated = store.reduce_quantity(request.position_id, request.quantity)
                 else:
@@ -286,7 +264,7 @@ async def close_position(
                     timeout=settings.order_poll_timeout_seconds,
                 )
                 if result.status == OrderStatus.FILLED:
-                    exit_price = result.filled_price or net_price
+                    exit_price = result.filled_price or net_price or 0
                     if request.quantity and request.quantity < abs(pos.get("quantity", 0)):
                         updated = store.reduce_quantity(request.position_id, request.quantity)
                     else:
@@ -317,7 +295,7 @@ async def close_position(
 
     # Update local position store based on fill result
     if result.status == OrderStatus.FILLED:
-        exit_price = result.filled_price or net_price
+        exit_price = result.filled_price or net_price or 0
         if request.quantity and request.quantity < abs(pos.get("quantity", 0)):
             # Partial close
             updated = store.reduce_quantity(request.position_id, request.quantity)

@@ -318,11 +318,14 @@ class MarketDataStreamingService:
 
             # Determine the reference price for validation.
             # Use close (previous day), or last known good price from our cache.
+            # For indices, close must look like an index level (> 100) to be
+            # trusted — IBKR sometimes returns option-like values in close too.
             prev_good = None
             prev_tick = self._last_tick.get(symbol)
             if prev_tick:
                 prev_good = prev_tick.get("price", 0)
-            reference = close if (close and close > 0) else prev_good
+            valid_close = close and close > 0 and (not is_index or close > 100)
+            reference = close if valid_close else prev_good
 
             # Determine price based on instrument type
             if is_index:
@@ -349,24 +352,32 @@ class MarketDataStreamingService:
                 continue
 
             # Universal sanity check against reference price.
-            # Reject any price < 50% or > 200% of reference.
+            # Indices use tighter bands (±20%) since they don't gap that much
+            # intraday.  Stocks keep the wider ±50%/200% bands.
             if reference and reference > 0:
-                if price < reference * 0.5:
+                if is_index:
+                    lo, hi = reference * 0.8, reference * 1.2
+                else:
+                    lo, hi = reference * 0.5, reference * 2.0
+                if price < lo:
                     logger.warning(
-                        "Price rejected for %s: %.4f is < 50%% of reference %.4f "
+                        "Price rejected for %s: %.4f < %.0f%% of reference %.4f "
                         "(last=%.4f close=%.4f mkt=%.4f bid=%.4f ask=%.4f)",
-                        symbol, price, reference, last or 0, close or 0,
+                        symbol, price, 80 if is_index else 50, reference,
+                        last or 0, close or 0,
                         market_price or 0, _safe(ticker.bid) or 0, _safe(ticker.ask) or 0,
                     )
                     continue
-                if price > reference * 2.0:
+                if price > hi:
                     logger.warning(
-                        "Price rejected for %s: %.4f is > 200%% of reference %.4f",
-                        symbol, price, reference,
+                        "Price rejected for %s: %.4f > %.0f%% of reference %.4f",
+                        symbol, price, 120 if is_index else 200, reference,
                     )
                     continue
-            elif is_index and price < 100:
-                # No reference yet but index price is suspiciously low
+            elif is_index:
+                # No reference yet — do NOT publish index ticks until we have
+                # a reference (close or a previously validated price).  Without
+                # a reference, we can't distinguish a real price from garbage.
                 continue
 
             now_iso = datetime.now(timezone.utc).isoformat()
