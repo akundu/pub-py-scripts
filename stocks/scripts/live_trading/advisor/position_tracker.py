@@ -31,6 +31,7 @@ class TrackedPosition:
     dte: int
     entry_time: str         # ISO format
     entry_price: float      # underlying price at entry
+    ticker: str = ""        # which ticker this position is for
     status: str = "open"    # "open" | "closed"
     close_reason: str = ""
     close_time: str = ""
@@ -103,6 +104,7 @@ class PositionTracker:
         num_contracts: int,
         dte: int,
         entry_price: float,
+        ticker: str = "",
     ) -> TrackedPosition:
         """Record a new confirmed entry."""
         pos_id = uuid.uuid4().hex[:8]
@@ -122,6 +124,7 @@ class PositionTracker:
             dte=dte,
             entry_time=datetime.now(timezone.utc).isoformat(),
             entry_price=entry_price,
+            ticker=ticker,
         )
         self._positions.append(pos)
         self._trade_timestamps.append(datetime.now(timezone.utc))
@@ -153,6 +156,10 @@ class PositionTracker:
     def get_open_positions(self) -> List[TrackedPosition]:
         """Return all open positions."""
         return [p for p in self._positions if p.status == "open"]
+
+    def get_closed_positions(self) -> List[TrackedPosition]:
+        """Return all closed positions."""
+        return [p for p in self._positions if p.status == "closed"]
 
     def get_today_positions(self) -> List[TrackedPosition]:
         """Return positions opened today (UTC date)."""

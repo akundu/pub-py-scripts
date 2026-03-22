@@ -144,6 +144,7 @@ def build_credit_spreads(
     vix1d_value: Optional[float] = None,
     min_volume: Optional[int] = None,
     percentile_target_strike: Optional[float] = None,
+    min_otm_pct: float = 0.007,
 ) -> List[Dict[str, Any]]:
     """Build credit spreads from options DataFrame.
 
@@ -152,6 +153,8 @@ def build_credit_spreads(
                                Filters out unrealistic spreads with credit too close to width.
         max_strike_distance_pct: Maximum distance of short strike from previous close (as percentage).
                                 Filters out deep ITM/OTM options. None = no filtering.
+        min_otm_pct: Minimum OTM distance as fraction of price (default 0.01 = 1%).
+                    Short strike must be at least this far from current price.
         min_premium_diff: Minimum premium price difference between short and long side (net credit).
                          Tuple of (put_min_premium_diff, call_min_premium_diff). None = no filtering.
         dynamic_width_config: Configuration for dynamic spread width based on strike distance.
@@ -326,6 +329,17 @@ def build_credit_spreads(
 
                 # Apply delta filter
                 if not filter_spread_by_delta(short_delta, long_delta, delta_filter_config):
+                    continue
+
+            # Min OTM distance check: short strike must be at least min_otm_pct
+            # away from prev_close (current price proxy)
+            if min_otm_pct > 0 and prev_close > 0:
+                short_s = float(short_leg['strike'])
+                if option_type.lower() == "put":
+                    otm_dist = (prev_close - short_s) / prev_close
+                else:
+                    otm_dist = (short_s - prev_close) / prev_close
+                if otm_dist < min_otm_pct:
                     continue
 
             spread = {

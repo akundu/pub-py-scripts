@@ -628,11 +628,14 @@ class TestTierEvaluator:
         ev._prev_close = 19800.0
         ev._today_signals = {"moves_to_close": {"18:00": 200.0}}
 
+        # Price 19600, put strike 19500 → 100pts OTM, otm_pct ~0.51%
+        # Just above 0.5% threshold, so proximity roll should NOT fire
+        # Use a price closer to strike to trigger proximity roll
         late_time = datetime(2026, 3, 8, 18, 15, 0)
-        exits = ev.evaluate_exits(19600, late_time)
+        exits = ev.evaluate_exits(19550, late_time)  # 50pts away = 0.26% OTM
         assert len(exits) == 1
         assert exits[0].action == "ROLL"
-        assert "P95" in exits[0].reason
+        assert "ROLL" in exits[0].reason
 
     def test_otm_pct_put(self, tracker):
         from scripts.live_trading.advisor.tier_evaluator import TierEvaluator

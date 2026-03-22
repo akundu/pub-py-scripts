@@ -21,6 +21,62 @@ PROFILES_DIR = Path(__file__).resolve().parent / "profiles"
 
 
 @dataclass
+class AdaptiveBudgetConfig:
+    """Adaptive budget settings for live advisor. Boosts trade sizing and
+    frequency when opportunity quality exceeds historical norms."""
+    enabled: bool = False
+    # Opportunity scaling: boost contracts when CR > median
+    opportunity_scaling_enabled: bool = True
+    opportunity_max_multiplier: float = 3.0
+    # Momentum: allow more trades per window when intraday move > threshold
+    momentum_enabled: bool = True
+    momentum_threshold: float = 0.01   # 1% intraday move
+    momentum_extra_trades: int = 2     # extra trades per window when triggered
+    # 0DTE cutoff: no new 0DTE after this time (1DTE+ only)
+    dte0_cutoff_utc: str = "18:30"     # 11:30 AM PST
+    # Contract scaling: multiply contracts on above-median proposals
+    contract_scaling_enabled: bool = True
+    contract_max_multiplier: float = 4.0
+    # ROI-based dynamic allocation (fixed thresholds from empirical backtest)
+    # roi_mode: "fixed_roi" uses fixed ROI% thresholds (no historical data needed)
+    #           "percentile" uses per-DTE CR percentile tiers (legacy, needs history)
+    roi_tier_enabled: bool = True
+    roi_mode: str = "fixed_roi"
+    # fixed_roi mode: ROI = credit/(width-credit)*100, normalized by DTE+1
+    roi_thresholds: List[float] = field(default_factory=lambda: [6.0, 9.0])
+    roi_multipliers: List[float] = field(default_factory=lambda: [1.0, 2.0, 4.0])
+    roi_max_multiplier: float = 4.0
+    roi_normalize_dte: bool = True
+    # Per-ticker min credit ($/share) — ensures executable spreads
+    min_credit_per_ticker: Dict[str, float] = field(default_factory=lambda: {
+        "SPX": 0.50, "RUT": 0.50, "NDX": 0.90,
+    })
+    min_total_credit: float = 1000.0  # $1K minimum total credit per trade
+    # Legacy percentile mode fields (used when roi_mode="percentile")
+    roi_tier_percentiles: List[float] = field(default_factory=lambda: [50, 75, 90, 95])
+    roi_tier_multipliers: List[float] = field(default_factory=lambda: [1.0, 1.5, 2.0, 3.0, 4.0])
+    roi_tier_min_trades: int = 30
+    # Reserve bonus: release extra budget in last N minutes
+    reserve_enabled: bool = True
+    reserve_pct: float = 0.30
+    reserve_release_minutes: int = 120  # last 2 hours
+    # VIX regime multipliers
+    vix_budget_multipliers: Dict[str, float] = field(default_factory=lambda: {
+        "low": 1.2, "normal": 1.0, "high": 0.6, "extreme": 0.25,
+    })
+
+    @classmethod
+    def from_dict(cls, d: Dict) -> "AdaptiveBudgetConfig":
+        if not d:
+            return cls()
+        kwargs = {}
+        for fld in cls.__dataclass_fields__:
+            if fld in d:
+                kwargs[fld] = d[fld]
+        return cls(**kwargs)
+
+
+@dataclass
 class RiskConfig:
     max_risk_per_trade: float = 50_000
     daily_budget: float = 500_000
@@ -34,6 +90,7 @@ class ProviderConfig:
     options_csv_dir: str = "csv_exports/options"
     options_fallback_csv_dir: str = "options_csv_output_full"
     dte_buckets: List[int] = field(default_factory=lambda: list(range(0, 12)))
+    utp_base_url: str = "http://localhost:8000"
 
 
 @dataclass
@@ -53,7 +110,12 @@ class ExitRuleConfig:
     zero_dte_proximity_warn: float = 0.005
     profit_target_pct: Optional[float] = None
     stop_loss_pct: Optional[float] = None
+    stop_loss_start_utc: Optional[str] = None
     time_exit_utc: Optional[str] = None
+    roll_percentile: int = 85
+    max_width_multiplier: float = 2.0
+    roll_min_dte: int = 1
+    roll_max_dte: int = 10
 
 
 @dataclass
@@ -86,6 +148,7 @@ class AdvisorProfile:
     strategy_defaults: Dict[str, Any]
     tickers: List[str] = field(default_factory=list)
     ticker_params: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    adaptive_budget: Optional[AdaptiveBudgetConfig] = None
 
     @property
     def all_dtes(self) -> List[int]:
@@ -110,11 +173,13 @@ def _parse_risk(raw: Dict) -> RiskConfig:
 def _parse_providers(raw: Dict) -> ProviderConfig:
     equity = raw.get("equity", {})
     options = raw.get("options", {})
+    utp = raw.get("utp", {})
     return ProviderConfig(
         equity_csv_dir=equity.get("csv_dir", "equities_output"),
         options_csv_dir=options.get("csv_dir", "csv_exports/options"),
         options_fallback_csv_dir=options.get("fallback_csv_dir", "options_csv_output_full"),
         dte_buckets=options.get("dte_buckets", list(range(0, 12))),
+        utp_base_url=utp.get("base_url", "http://localhost:8000"),
     )
 
 
@@ -136,7 +201,12 @@ def _parse_exit_rules(raw: Dict) -> ExitRuleConfig:
         zero_dte_proximity_warn=raw.get("zero_dte_proximity_warn", 0.005),
         profit_target_pct=raw.get("profit_target_pct"),
         stop_loss_pct=raw.get("stop_loss_pct"),
+        stop_loss_start_utc=raw.get("stop_loss_start_utc"),
         time_exit_utc=raw.get("time_exit_utc"),
+        roll_percentile=raw.get("roll_percentile", 85),
+        max_width_multiplier=raw.get("max_width_multiplier", 2.0),
+        roll_min_dte=raw.get("roll_min_dte", 1),
+        roll_max_dte=raw.get("roll_max_dte", 10),
     )
 
 
@@ -224,6 +294,9 @@ def load_profile(name_or_path: str) -> AdvisorProfile:
     tiers = [_parse_tier(t) for t in tiers_raw]
     instrument = raw.get("instrument", "credit_spread")
     strategy_defaults = raw.get("strategy_defaults", {})
+    adaptive_budget = None
+    if raw.get("adaptive_budget"):
+        adaptive_budget = AdaptiveBudgetConfig.from_dict(raw["adaptive_budget"])
 
     profile = AdvisorProfile(
         name=name,
@@ -237,9 +310,16 @@ def load_profile(name_or_path: str) -> AdvisorProfile:
         strategy_defaults=strategy_defaults,
         tickers=tickers_list,
         ticker_params=ticker_params,
+        adaptive_budget=adaptive_budget,
     )
 
-    logger.info(f"Loaded profile '{name}': {ticker} (tickers: {tickers_list}), {len(tiers)} tiers")
+    if adaptive_budget and adaptive_budget.enabled:
+        logger.info(
+            f"Loaded profile '{name}': {ticker} (tickers: {tickers_list}), "
+            f"{len(tiers)} tiers, ADAPTIVE BUDGET enabled"
+        )
+    else:
+        logger.info(f"Loaded profile '{name}': {ticker} (tickers: {tickers_list}), {len(tiers)} tiers")
     return profile
 
 

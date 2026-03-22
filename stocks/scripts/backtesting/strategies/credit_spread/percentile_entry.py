@@ -486,6 +486,7 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
                 total_chain_pnl = pos_dict.get("total_pnl_chain", 0.0)
                 pnl_result.metadata["total_chain_pnl"] = total_chain_pnl + pnl_result.pnl
                 pnl_result.metadata["roll_count"] = pos_dict.get("roll_count", 0)
+                pnl_result.metadata["dte"] = pos_dte
                 self.constraints.notify_closed(position.max_loss, pnl_result.exit_time)
                 self._daily_capital_used -= position.max_loss
                 results.append(pnl_result.to_dict())
@@ -551,6 +552,7 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
         total_chain_pnl = pos_dict.get("total_pnl_chain", 0.0)
         pnl_result.metadata["total_chain_pnl"] = total_chain_pnl + pnl_result.pnl
         pnl_result.metadata["roll_count"] = pos_dict.get("roll_count", 0)
+        pnl_result.metadata["dte"] = pos_dict.get("dte", 0)
         self.constraints.notify_closed(position.max_loss, exit_signal.exit_time)
         self._daily_capital_used -= position.max_loss
         return pnl_result.to_dict()
@@ -573,6 +575,7 @@ class PercentileEntryCreditSpreadStrategy(BaseCreditSpreadStrategy):
         pnl_result.exit_reason = exit_signal.reason
         pnl_result.exit_time = exit_signal.exit_time
         pnl_result.metadata["roll_count"] = roll_count
+        pnl_result.metadata["dte"] = pos_dict.get("dte", 0)
         total_pnl += pnl_result.pnl
         pnl_result.metadata["total_chain_pnl"] = total_pnl
 

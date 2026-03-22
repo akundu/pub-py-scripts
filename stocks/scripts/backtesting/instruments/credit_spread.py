@@ -56,6 +56,11 @@ class CreditSpreadInstrument(Instrument):
 
         max_credit_width_ratio = signal.get("max_credit_width_ratio", 0.80)
         min_volume = signal.get("min_volume", None)
+        # min_otm_pct: if min_otm_dte0_only (default True), only apply to DTE=0
+        min_otm_pct_cfg = signal.get("min_otm_pct", 0.007)
+        min_otm_dte0_only = signal.get("min_otm_dte0_only", True)
+        sig_dte = signal.get("dte", 0)
+        min_otm_pct = min_otm_pct_cfg if (not min_otm_dte0_only or sig_dte == 0) else 0.0
 
         spreads = build_credit_spreads(
             options_df=options_data,
@@ -68,6 +73,7 @@ class CreditSpreadInstrument(Instrument):
             percentile_target_strike=percentile_target_strike,
             max_credit_width_ratio=max_credit_width_ratio,
             min_volume=min_volume,
+            min_otm_pct=min_otm_pct,
         )
 
         if not spreads:
@@ -90,6 +96,8 @@ class CreditSpreadInstrument(Instrument):
                 "net_credit_per_contract": best["net_credit_per_contract"],
                 "short_ticker": best.get("short_ticker", ""),
                 "long_ticker": best.get("long_ticker", ""),
+                "short_price": best.get("short_price", 0),
+                "long_price": best.get("long_price", 0),
             },
         )
 
