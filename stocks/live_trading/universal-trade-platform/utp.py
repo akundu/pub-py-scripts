@@ -97,6 +97,36 @@ def _print_step(title: str, status: str, detail: str = "") -> None:
             print(f"         {line}")
 
 
+def _print_order_row(o: dict) -> None:
+    """Print a single order row for orders/reconcile display."""
+    oid = o.get("order_id", "?")
+    status = o.get("status", "?")
+    extra = o.get("extra", {})
+    if not extra:
+        print(f"  [{oid[:8]}] {status} — {o.get('message', '')}")
+        return
+
+    sym = extra.get("symbol", "")
+    otype = extra.get("order_type", "?")
+    action = extra.get("action", "?")
+    qty = extra.get("quantity", 0)
+    price = extra.get("limit_price")
+    perm_id = extra.get("perm_id", "")
+    legs = extra.get("legs", [])
+
+    # Use permId as display ID when orderId is 0 (external orders from TWS/website)
+    display_id = oid[:8] if oid and oid != "0" else f"perm:{perm_id}" if perm_id else "?"
+
+    price_str = f"${price}" if price else "MARKET"
+    status_color = "92" if status == "SUBMITTED" else "93"
+    print(f"  [{_color(display_id, status_color)}] {sym} {action} {qty} "
+          f"{otype} @ {price_str} — {status}")
+    if legs:
+        for leg in legs:
+            print(f"           leg: conId={leg.get('con_id')} "
+                  f"{leg.get('action')} ratio={leg.get('ratio')}")
+
+
 def _next_trading_day() -> str:
     """Return the next weekday as YYYY-MM-DD."""
     d = date.today() + timedelta(days=1)
@@ -534,8 +564,17 @@ async def _init_services(args) -> Optional[object]:
             os.environ["IBKR_EXCHANGE"] = exchange
         app.config.settings = Settings()
 
-        from app.core.providers.ibkr import IBKRLiveProvider
-        live_provider = IBKRLiveProvider(exchange=exchange or None)
+        ibkr_api = getattr(args, "ibkr_api", "tws")
+        if ibkr_api == "rest":
+            from app.core.providers.ibkr_rest import IBKRRestProvider
+            live_provider = IBKRRestProvider(
+                gateway_url=getattr(args, "gateway_url", "https://localhost:5000"),
+                account_id=app.config.settings.ibkr_account_id,
+                exchange=exchange or "SMART",
+            )
+        else:
+            from app.core.providers.ibkr import IBKRLiveProvider
+            live_provider = IBKRLiveProvider(exchange=exchange or None)
         ProviderRegistry.register(live_provider)
         await live_provider.connect()
 
@@ -570,13 +609,25 @@ async def _init_ibkr_readonly(args) -> object:
     init_position_store(data_dir)
 
     host = getattr(args, "host", "127.0.0.1")
-    provider = IBKRLiveProvider(exchange=exchange or None)
+    ibkr_api = getattr(args, "ibkr_api", "tws")
+    if ibkr_api == "rest":
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(
+            gateway_url=getattr(args, "gateway_url", "https://localhost:5000"),
+            account_id=app.config.settings.ibkr_account_id,
+            exchange=exchange or "SMART",
+        )
+    else:
+        provider = IBKRLiveProvider(exchange=exchange or None)
     ProviderRegistry.register(provider)
 
     try:
         await provider.connect()
-    except (ConnectionRefusedError, OSError) as e:
-        # Try the other port before giving up
+    except (ConnectionRefusedError, OSError, RuntimeError) as e:
+        if ibkr_api == "rest":
+            print(f"  Connection to CPG at {getattr(args, 'gateway_url', 'https://localhost:5000')} failed: {e}")
+            raise SystemExit(1)
+        # Try the other port before giving up (TWS only)
         alt_port = 7496 if port == 7497 else 7497
         alt_label = "live" if alt_port == 7496 else "paper"
         print(f"  Connection to {host}:{port} failed.")
@@ -1414,18 +1465,30 @@ async def _run_readiness_test(args) -> int:
 
     failures = 0
     skips = 0
-    provider = IBKRLiveProvider(exchange=args.exchange or None)
+    ibkr_api = getattr(args, "ibkr_api", "tws")
+    if ibkr_api == "rest":
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(
+            gateway_url=getattr(args, "gateway_url", "https://localhost:5000"),
+            account_id=_cfg.settings.ibkr_account_id,
+            exchange=args.exchange or "SMART",
+        )
+    else:
+        provider = IBKRLiveProvider(exchange=args.exchange or None)
 
     # Connect
+    api_label = "CPG" if ibkr_api == "rest" else "TWS"
     print(f"{'─' * 70}")
     print(f"  CONNECTIVITY")
     print(f"{'─' * 70}")
     try:
         await provider.connect()
-        _print_step(f"Connect to TWS", "pass",
-                    f"Connected to {args.host}:{args.port} (clientId={args.client_id})")
+        _print_step(f"Connect to {api_label}", "pass",
+                    f"Connected to {args.host}:{args.port} (clientId={args.client_id})"
+                    if ibkr_api == "tws" else
+                    f"Connected to CPG at {getattr(args, 'gateway_url', 'https://localhost:5000')}")
     except Exception as e:
-        _print_step("Connect to TWS", "fail", str(e))
+        _print_step(f"Connect to {api_label}", "fail", str(e))
         print(f"\n  Cannot proceed without connection. Aborting.")
         return 1
 
@@ -1784,28 +1847,7 @@ async def _cmd_orders_http(args, server: str) -> int:
             return 0
         _print_header(f"Open Orders ({len(orders)})")
         for o in orders:
-            oid = o.get("order_id", "?")[:8]
-            status = o.get("status", "?")
-            extra = o.get("extra", {})
-            if extra:
-                sym = extra.get("symbol", "")
-                action = extra.get("action", "?")
-                qty = extra.get("quantity", 0)
-                otype = extra.get("order_type", "?")
-                price = extra.get("limit_price")
-                perm_id = extra.get("perm_id", "")
-                legs = extra.get("legs", [])
-                price_str = f"${price}" if price else "MARKET"
-                status_color = "92" if status == "SUBMITTED" else "93"
-                perm_str = f" permId={perm_id}" if perm_id else ""
-                print(f"  [{_color(oid, status_color)}] {sym} {action} {qty} "
-                      f"{otype} @ {price_str} — {status}{perm_str}")
-                if legs:
-                    for leg in legs:
-                        print(f"           leg: conId={leg.get('con_id')} "
-                              f"{leg.get('action')} ratio={leg.get('ratio')}")
-            else:
-                print(f"  [{oid}] {status} — {o.get('message', '')}")
+            _print_order_row(o)
     return 0
 
 
@@ -2043,7 +2085,22 @@ async def _cmd_close_http(args, server: str) -> int:
         print(f"  Order type: {price_label}")
         if net_price is not None:
             cost = abs(net_price) * (qty or 1) * 100
-            print(f"  Est. cost:  ${cost:,.2f} (debit)")
+            print(f"  Est. cost:  ~${cost:,.2f} (debit)")
+        else:
+            # Try to show mark-based estimate for MARKET close
+            try:
+                pos_resp = await client.get("/account/positions")
+                if pos_resp.status_code == 200:
+                    for p in pos_resp.json().get("positions", []):
+                        if p.get("position_id", "").startswith(position_id):
+                            mark = p.get("current_mark") or p.get("market_price")
+                            if mark and abs(mark) > 0:
+                                close_qty = qty or int(p.get("quantity", 1))
+                                est = abs(mark) * close_qty * 100
+                                print(f"  Est. cost:  ~${est:,.2f} (mark=${abs(mark):.4f})")
+                            break
+            except Exception:
+                pass
 
         if not confirm:
             print(f"\n  {_color('NOT EXECUTED', '93')} — add --confirm to close the position")
@@ -2274,25 +2331,7 @@ async def _cmd_reconcile_http(args, server: str) -> int:
         if open_orders:
             _print_section(f"Open Orders ({len(open_orders)})")
             for o in open_orders:
-                oid = o.get("order_id", "?")[:8]
-                status = o.get("status", "?")
-                msg = o.get("message", "")
-                extra = o.get("extra", {})
-                sym = extra.get("symbol", "")
-                otype = extra.get("order_type", "?")
-                action = extra.get("action", "?")
-                qty = extra.get("quantity", 0)
-                price = extra.get("limit_price")
-                legs = extra.get("legs", [])
-
-                price_str = f"${price}" if price else "MARKET"
-                status_color = "92" if status == "SUBMITTED" else "93"
-                print(f"  [{_color(oid, status_color)}] {sym} {action} {qty} "
-                      f"{otype} @ {price_str} — {status}")
-                if legs:
-                    for leg in legs:
-                        print(f"           leg: conId={leg.get('con_id')} "
-                              f"{leg.get('action')} ratio={leg.get('ratio')}")
+                _print_order_row(o)
 
         # Show synced positions if --show
         if getattr(args, "show", False):
@@ -2450,6 +2489,136 @@ async def _cmd_margin_http(args, server: str) -> int:
     return 0
 
 
+def _compute_max_loss_per_spread(legs, credit_per_spread: float) -> float | None:
+    """Compute max loss per spread for credit spreads and iron condors.
+
+    Credit spread: max_loss = spread_width - credit
+    Iron condor: max_loss = max(put_wing_width, call_wing_width) - credit
+    """
+    if not legs or len(legs) < 2:
+        return None
+
+    strikes = [leg.strike for leg in legs]
+    if len(legs) == 2:
+        # Credit/debit spread: width = difference between strikes
+        width = abs(strikes[0] - strikes[1])
+    elif len(legs) == 4:
+        # Iron condor: 2 put legs + 2 call legs
+        put_strikes = [leg.strike for leg in legs if leg.option_type.value == "PUT"]
+        call_strikes = [leg.strike for leg in legs if leg.option_type.value == "CALL"]
+        put_width = abs(put_strikes[0] - put_strikes[1]) if len(put_strikes) == 2 else 0
+        call_width = abs(call_strikes[0] - call_strikes[1]) if len(call_strikes) == 2 else 0
+        width = max(put_width, call_width)
+    else:
+        return None
+
+    if width <= 0:
+        return None
+
+    max_loss = width - credit_per_spread
+    return max_loss if max_loss > 0 else None
+
+
+async def _estimate_spread_market_price(client, order) -> dict | None:
+    """Estimate net credit/debit for a multi-leg order from current option quotes.
+
+    Returns dict with:
+        net: float (positive = credit, negative = debit)
+        legs: list of {action, option_type, strike, bid, ask, price_used, side}
+    or None if quotes are unavailable.
+    """
+    if not order.legs:
+        return None
+    symbol = order.legs[0].symbol
+    expiration = order.legs[0].expiration
+    if not expiration:
+        return None
+
+    # Collect unique option types needed
+    types_needed = set()
+    for leg in order.legs:
+        types_needed.add(leg.option_type.value)
+
+    # Fetch option quotes for each type
+    all_quotes: dict[tuple, dict] = {}  # (strike, type) → quote
+    for ot in types_needed:
+        try:
+            resp = await client.get(f"/market/options/{symbol}", params={
+                "expiration": expiration, "option_type": ot,
+            })
+            if resp.status_code == 200:
+                data = resp.json()
+                quotes = data.get("quotes", {}).get(ot.lower(), [])
+                if isinstance(quotes, list):
+                    for q in quotes:
+                        key = (q.get("strike", 0), ot)
+                        all_quotes[key] = q
+        except Exception:
+            pass
+
+    if not all_quotes:
+        return None
+
+    # Calculate net using natural prices (bid for sells, ask for buys).
+    # If bid > ask (crossed market = stale data), use mid as fallback.
+    net = 0.0
+    leg_details = []
+    has_crossed = False
+    for leg in order.legs:
+        key = (leg.strike, leg.option_type.value)
+        q = all_quotes.get(key)
+        if not q:
+            return None  # Missing quote for a leg
+        bid = q.get("bid", 0) or 0
+        ask = q.get("ask", 0) or 0
+        is_sell = leg.action.value in ("SELL_TO_OPEN", "SELL_TO_CLOSE")
+
+        crossed = bid > 0 and ask > 0 and bid > ask
+        if crossed:
+            has_crossed = True
+
+        if bid > 0 and ask > 0 and not crossed:
+            # Normal market — use natural prices
+            price_used = bid if is_sell else ask
+            side = "sell@bid" if is_sell else "buy@ask"
+        elif bid > 0 and ask > 0 and crossed:
+            # Crossed market — use mid as best guess
+            mid = (bid + ask) / 2
+            price_used = mid
+            side = "sell@mid" if is_sell else "buy@mid"
+        elif bid > 0:
+            price_used = bid
+            side = "sell@bid" if is_sell else "buy@bid"
+        elif ask > 0:
+            price_used = ask
+            side = "sell@ask" if is_sell else "buy@ask"
+        else:
+            return None
+
+        if is_sell:
+            net += price_used
+        else:
+            net -= price_used
+
+        detail = {
+            "action": leg.action.value,
+            "option_type": leg.option_type.value,
+            "strike": leg.strike,
+            "bid": bid,
+            "ask": ask,
+            "price_used": round(price_used, 2),
+            "side": side,
+        }
+        if crossed:
+            detail["warning"] = "crossed"
+        leg_details.append(detail)
+
+    result = {"net": round(net, 2), "legs": leg_details}
+    if has_crossed:
+        result["warning"] = "crossed_market"
+    return result
+
+
 async def _cmd_trade_http(args, server: str) -> int:
     """Execute trade via HTTP."""
     import httpx
@@ -2503,8 +2672,9 @@ async def _cmd_trade_http(args, server: str) -> int:
                 print(f"  Price:      MARKET")
             print(f"  Legs:")
             for leg in (order.legs or []):
+                leg_qty = leg.quantity * order.quantity
                 print(f"    {leg.action.value:>15} {leg.option_type.value:>4} "
-                      f"strike={leg.strike} exp={leg.expiration} qty={leg.quantity}")
+                      f"strike={leg.strike} exp={leg.expiration} qty={leg_qty}")
 
             resp = await client.post("/market/margin", json=margin_payload)
             if resp.status_code != 200:
@@ -2535,22 +2705,43 @@ async def _cmd_trade_http(args, server: str) -> int:
             print(f"  Side:       {eo.side.value}")
             print(f"  Quantity:   {eo.quantity}")
             if eo.limit_price:
-                print(f"  Price:      ${eo.limit_price:.2f}")
+                print(f"  Price:      ${eo.limit_price:.2f} (LIMIT)")
                 total = eo.limit_price * eo.quantity
                 action = "spend" if eo.side.value == "BUY" else "receive"
-                print(f"  Est. total: ${total:,.2f} ({action})")
+                print(f"  Est. total: ~${total:,.2f} ({action})")
             else:
-                print(f"  Price:      MARKET")
+                mkt_price = None
+                try:
+                    qr = await client.get(f"/market/quote/{eo.symbol}")
+                    if qr.status_code == 200:
+                        qd = qr.json()
+                        mkt_price = qd.get("last") or qd.get("bid") or qd.get("ask")
+                except Exception:
+                    pass
+                if mkt_price and mkt_price > 0:
+                    total = mkt_price * eo.quantity
+                    action = "spend" if eo.side.value == "BUY" else "receive"
+                    print(f"  Price:      MARKET (~${mkt_price:.2f})")
+                    print(f"  Est. total: ~${total:,.2f} ({action})")
+                else:
+                    print(f"  Price:      MARKET")
         elif trade_request.multi_leg_order:
             order = trade_request.multi_leg_order
             print(f"  Type:       {subcommand}")
             print(f"  Symbol:     {order.legs[0].symbol if order.legs else '?'}")
             print(f"  Quantity:   {order.quantity}")
             print(f"  Exchange:   SMART (best execution)")
+            is_credit = order.legs[0].action.value in ("SELL_TO_OPEN", "SELL_TO_CLOSE") if order.legs else False
+            credit_per_spread = None  # set below for ROI calc
+            est_legs = None  # set by MARKET path if quotes available
+
             if order.net_price:
-                # Determine credit vs debit
-                is_credit = order.legs[0].action.value in ("SELL_TO_OPEN", "SELL_TO_CLOSE")
+                # Also fetch current bid/ask for context
+                est_result = await _estimate_spread_market_price(client, order)
+                if est_result:
+                    est_legs = est_result.get("legs")
                 if is_credit:
+                    credit_per_spread = order.net_price
                     print(f"  Net credit: ${order.net_price:.2f} per spread (LIMIT)")
                     total = order.net_price * order.quantity * 100
                     print(f"  You receive: ~${total:,.2f}")
@@ -2559,11 +2750,51 @@ async def _cmd_trade_http(args, server: str) -> int:
                     total = order.net_price * order.quantity * 100
                     print(f"  You spend:  ~${total:,.2f}")
             else:
-                print(f"  Price:      MARKET (best available)")
+                est_result = await _estimate_spread_market_price(client, order)
+                if est_result is not None:
+                    est_net = est_result["net"]
+                    est_legs = est_result.get("legs")
+                    crossed = est_result.get("warning") == "crossed_market"
+                    total = abs(est_net) * order.quantity * 100
+                    approx = "~~" if crossed else "~"
+                    if est_net > 0:
+                        credit_per_spread = est_net
+                        print(f"  Price:      MARKET ({approx}${est_net:.2f} credit)")
+                        print(f"  You receive: {approx}${total:,.2f}")
+                    else:
+                        print(f"  Price:      MARKET ({approx}${abs(est_net):.2f} debit)")
+                        print(f"  You spend:  {approx}${total:,.2f}")
+                        if is_credit:
+                            print(f"  {_color('Note:', '93')} wide bid/ask makes this a net debit at current quotes")
+                    if crossed:
+                        print(f"  {_color('Warning:', '93')} bid/ask crossed on some legs — prices are approximate")
+                else:
+                    est_legs = None
+                    print(f"  Price:      MARKET (best available)")
+
+            # ROI for credit spreads / iron condors
+            if credit_per_spread and credit_per_spread > 0 and order.legs:
+                max_loss_per = _compute_max_loss_per_spread(order.legs, credit_per_spread)
+                if max_loss_per and max_loss_per > 0:
+                    roi = (credit_per_spread / max_loss_per) * 100
+                    max_loss_total = max_loss_per * order.quantity * 100
+                    print(f"  Max risk:   ~${max_loss_total:,.2f} (${max_loss_per:.2f}/spread)")
+                    print(f"  ROI:        {roi:.1f}%")
+
+            # Show legs with bid/ask pricing when available
             print(f"  Legs:")
-            for leg in (order.legs or []):
-                print(f"    {leg.action.value:>15} {leg.option_type.value:>4} "
-                      f"strike={leg.strike} exp={leg.expiration} qty={leg.quantity}")
+            if est_legs:
+                for ld in est_legs:
+                    flag = f" {_color('⚠ crossed', '93')}" if ld.get("warning") == "crossed" else ""
+                    print(f"    {ld['action']:>15} {ld['option_type']:>4} "
+                          f"strike={ld['strike']:<10} "
+                          f"bid=${ld['bid']:<8.2f} ask=${ld['ask']:<8.2f} "
+                          f"→ {ld['side']} ${ld['price_used']:.2f}{flag}")
+            else:
+                for leg in (order.legs or []):
+                    leg_qty = leg.quantity * order.quantity
+                    print(f"    {leg.action.value:>15} {leg.option_type.value:>4} "
+                          f"strike={leg.strike} exp={leg.expiration} qty={leg_qty}")
 
         if not confirm and mode != "dry-run":
             print(f"\n  {_color('NOT EXECUTED', '93')} — add --confirm to place the order")
@@ -3080,6 +3311,16 @@ async def _cmd_options(args) -> int:
 
     async def _fetch_one(otype):
         try:
+            # Try streaming cache first (instant)
+            from app.services.option_quote_streaming import get_option_quote_streaming
+            oq_svc = get_option_quote_streaming()
+            if oq_svc:
+                cached = oq_svc.get_cached_quotes(
+                    symbol, exp_match, otype,
+                    strike_min=strike_min, strike_max=strike_max,
+                )
+                if cached is not None:
+                    return otype, cached, None
             return otype, await ibkr.get_option_quotes(
                 symbol, exp_match, otype,
                 strike_min=strike_min, strike_max=strike_max,
@@ -4126,26 +4367,7 @@ async def _cmd_reconcile(args) -> int:
     if report.open_orders:
         _print_section(f"Open Orders ({len(report.open_orders)})")
         for o in report.open_orders:
-            oid = o.get("order_id", "?")[:8]
-            status = o.get("status", "?")
-            extra = o.get("extra", {})
-            sym = extra.get("symbol", "")
-            otype = extra.get("order_type", "?")
-            action = extra.get("action", "?")
-            qty = extra.get("quantity", 0)
-            price = extra.get("limit_price")
-            perm_id = extra.get("perm_id", "")
-            legs = extra.get("legs", [])
-
-            price_str = f"${price}" if price else "MARKET"
-            status_color = "92" if status == "SUBMITTED" else "93"
-            perm_str = f" permId={perm_id}" if perm_id else ""
-            print(f"  [{_color(oid, status_color)}] {sym} {action} {qty} "
-                  f"{otype} @ {price_str} — {status}{perm_str}")
-            if legs:
-                for leg in legs:
-                    print(f"           leg: conId={leg.get('con_id')} "
-                          f"{leg.get('action')} ratio={leg.get('ratio')}")
+            _print_order_row(o)
     else:
         print(f"\n  Open Orders: {_color('none', '92')}")
 
@@ -4381,6 +4603,12 @@ async def _cmd_daemon(args) -> int:
     from app.services.ledger import init_ledger
     from app.services.position_store import init_position_store
 
+    # Set log level from --log-level flag (also picked up by app.main via LOG_LEVEL env)
+    log_level = getattr(args, "log_level", "INFO").upper()
+    os.environ["LOG_LEVEL"] = log_level
+    import logging as _logging
+    _logging.getLogger().setLevel(getattr(_logging, log_level, _logging.INFO))
+
     mode = _get_mode(args)
     if mode == "dry-run":
         mode = "paper"  # daemon should always connect
@@ -4410,12 +4638,21 @@ async def _cmd_daemon(args) -> int:
             os.environ["IBKR_EXCHANGE"] = exchange
         app.config.settings = Settings()
 
-        from app.core.providers.ibkr import IBKRLiveProvider
-        live_provider = IBKRLiveProvider(exchange=exchange or None)
+        ibkr_api = getattr(args, "ibkr_api", "tws")
+        if ibkr_api == "rest":
+            from app.core.providers.ibkr_rest import IBKRRestProvider
+            live_provider = IBKRRestProvider(
+                gateway_url=getattr(args, "gateway_url", "https://localhost:5000"),
+                account_id=app.config.settings.ibkr_account_id,
+                exchange=exchange or "SMART",
+            )
+        else:
+            from app.core.providers.ibkr import IBKRLiveProvider
+            live_provider = IBKRLiveProvider(exchange=exchange or None)
         ProviderRegistry.register(live_provider)
         try:
             await live_provider.connect()
-        except (ConnectionRefusedError, OSError, Exception) as e:
+        except (ConnectionRefusedError, OSError, RuntimeError, Exception) as e:
             print(f"  IBKR not available: {e}")
             print(f"  Starting in degraded mode — will retry connection in background.")
             live_provider._connected = False
@@ -4523,7 +4760,9 @@ async def _cmd_daemon(args) -> int:
                     while not shutdown_event.is_set():
                         await asyncio.sleep(1)
                         # If IBKR reconnected and streaming lost subs, resubscribe
+                        # (only when using ib_insync — REST mode doesn't use tick subscriptions)
                         if (live_provider and live_provider.is_healthy()
+                                and _streaming_svc._has_ib_client
                                 and _streaming_svc.subscription_count == 0
                                 and len(stream_cfg.symbols) > 0):
                             _slog_log.info("IBKR reconnected — resubscribing streaming")
@@ -4537,6 +4776,29 @@ async def _cmd_daemon(args) -> int:
 
             bg_tasks.append(asyncio.create_task(_streaming_bg()))
             print(f"  Streaming: {len(stream_cfg.symbols)} symbols from {streaming_config_path}")
+
+            # Option quote streaming (if enabled in config)
+            if stream_cfg.option_quotes_enabled:
+                from app.services.option_quote_streaming import init_option_quote_streaming
+                _oq_svc = init_option_quote_streaming(stream_cfg, live_provider, _streaming_svc)
+
+                async def _option_quote_bg():
+                    import logging as _oqlog
+                    _oq_log = _oqlog.getLogger("utp.option_quotes")
+                    try:
+                        await _oq_svc.start()
+                        await _oq_svc.run_loop(shutdown_event)
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as e:
+                        _oq_log.error("Option quote streaming error: %s", e)
+                    finally:
+                        await _oq_svc.stop()
+
+                bg_tasks.append(asyncio.create_task(_option_quote_bg()))
+                oq_syms = [s.symbol for s in stream_cfg.symbols if s.sec_type in ("IND", "STK")]
+                print(f"  Option quotes: {len(oq_syms)} symbols, poll every {stream_cfg.option_quotes_poll_interval}s")
+
         except Exception as e:
             print(f"  Streaming config error: {e}")
             logger.error("Failed to load streaming config: %s", e)
@@ -4697,7 +4959,7 @@ async def _cmd_daemon(args) -> int:
         "app.main:app",
         host=server_host,
         port=server_port,
-        log_level="info",
+        log_level=log_level.lower(),
     )
     server = uvicorn.Server(config)
 
@@ -5421,6 +5683,10 @@ def _add_connection_args(parser: argparse.ArgumentParser, *, default_paper: bool
                         help="IBKR client ID (default: 10)")
     parser.add_argument("--exchange", default=None,
                         help="Exchange routing (default: SMART)")
+    parser.add_argument("--ibkr-api", default="tws", choices=["tws", "rest"],
+                        help="IBKR connectivity: 'tws' (ib_insync, default) or 'rest' (Client Portal Gateway)")
+    parser.add_argument("--gateway-url", default="https://localhost:5000",
+                        help="Client Portal Gateway URL (default: https://localhost:5000)")
     parser.add_argument("--broker", default="ibkr", choices=["ibkr", "robinhood", "etrade"],
                         help="Broker (default: ibkr)")
     parser.add_argument("--data-dir", default="data/utp",
@@ -5510,8 +5776,10 @@ def _run_daemon_with_restart(args) -> int:
             reset_live_data_service()
             from app.services.market_data_streaming import reset_streaming_service
             from app.services.execution_store import reset_execution_store
+            from app.services.option_quote_streaming import reset_option_quote_streaming
             reset_streaming_service()
             reset_execution_store()
+            reset_option_quote_streaming()
             import app.main
             app.main._daemon_mode = False
 
@@ -6257,6 +6525,9 @@ Aliases: d
                           help="Disable auto-restart on crash (exit immediately on failure)")
     p_daemon.add_argument("--streaming-config", default=None, metavar="YAML",
                           help="YAML config for real-time market data streaming (IBKR → Redis/QuestDB/WS)")
+    p_daemon.add_argument("--log-level", default="INFO",
+                          choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                          help="Log level (default: INFO)")
     _add_connection_args(p_daemon, default_paper=True)
 
     # ── repl ──

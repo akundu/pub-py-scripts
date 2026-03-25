@@ -121,7 +121,33 @@ async def get_options(
     list_expirations: bool = False,
 ) -> dict:
     """Get option chain data for a symbol."""
+    from app.services.option_quote_streaming import get_option_quote_streaming
+
     provider = ProviderRegistry.get(broker)
+    oq_svc = get_option_quote_streaming()
+
+    # Fast path: if we have cached quotes for the requested expiration+type,
+    # serve entirely from cache without hitting the provider at all.
+    if expiration and oq_svc and not list_expirations:
+        types_to_fetch = [option_type.upper()] if option_type else ["CALL", "PUT"]
+        all_cached = {}
+        for ot in types_to_fetch:
+            cached = oq_svc.get_cached_quotes(
+                symbol.upper(), expiration, ot,
+                strike_min=strike_min, strike_max=strike_max,
+            )
+            if cached is not None:
+                all_cached[ot.lower()] = cached
+
+        if len(all_cached) == len(types_to_fetch):
+            return {
+                "symbol": symbol.upper(),
+                "chain": {"expirations": [], "strikes": []},
+                "quotes": all_cached,
+                "source": "streaming_cache",
+            }
+
+    # Slow path: call provider
     chain = await provider.get_option_chain(symbol.upper())
 
     if list_expirations:
@@ -131,18 +157,23 @@ async def get_options(
 
     if expiration and hasattr(provider, 'get_option_quotes'):
         quotes = {}
-        types_to_fetch = []
-        if option_type:
-            types_to_fetch = [option_type.upper()]
-        else:
-            types_to_fetch = ["CALL", "PUT"]
+        types_to_fetch = [option_type.upper()] if option_type else ["CALL", "PUT"]
 
         for ot in types_to_fetch:
             try:
-                q = await provider.get_option_quotes(
-                    symbol.upper(), expiration, ot,
-                    strike_min=strike_min, strike_max=strike_max,
-                )
+                cached = None
+                if oq_svc:
+                    cached = oq_svc.get_cached_quotes(
+                        symbol.upper(), expiration, ot,
+                        strike_min=strike_min, strike_max=strike_max,
+                    )
+                if cached is not None:
+                    q = cached
+                else:
+                    q = await provider.get_option_quotes(
+                        symbol.upper(), expiration, ot,
+                        strike_min=strike_min, strike_max=strike_max,
+                    )
                 quotes[ot.lower()] = q
             except Exception as e:
                 quotes[ot.lower()] = {"error": str(e)}
@@ -165,6 +196,19 @@ async def streaming_status(
     svc = get_streaming_service()
     if not svc:
         return {"running": False, "message": "Streaming service not initialized. Start daemon with --streaming-config."}
+    return svc.stats
+
+
+@router.get("/streaming/option-quotes/status")
+async def option_quote_streaming_status(
+    _user: Annotated[TokenData, Security(require_auth, scopes=["market:read"])],
+) -> dict:
+    """Get option quote streaming cache status: size, cycle count, symbols tracked."""
+    from app.services.option_quote_streaming import get_option_quote_streaming
+
+    svc = get_option_quote_streaming()
+    if not svc:
+        return {"running": False, "message": "Option quote streaming not initialized. Enable option_quotes_enabled in streaming config."}
     return svc.stats
 
 

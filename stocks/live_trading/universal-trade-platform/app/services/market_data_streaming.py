@@ -50,9 +50,26 @@ class MarketDataStreamingService:
         # Used by get_quote() to serve cached streaming data
         self._last_tick: dict[str, dict] = {}
 
+        # Throttle rejection warnings: log first occurrence per symbol, then
+        # only every Nth rejection to avoid flooding the log.
+        self._reject_count: dict[str, int] = {}  # symbol -> count
+        _REJECT_LOG_INTERVAL = 100  # log every 100th rejection after the first
+
+        # Per-symbol Redis publish throttle (monotonic timestamp of last publish)
+        self._last_redis_publish: dict[str, float] = {}
+
+        # Previous close per symbol — anchored from IBKR ticker.close, never
+        # overwritten by live ticks.  Used for the hard ±35% sanity gate.
+        self._prev_close: dict[str, float] = {}
+
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def _has_ib_client(self) -> bool:
+        """True when provider has an ib_insync IB client (not REST/stub)."""
+        return getattr(self._ibkr, "_ib", None) is not None
 
     @property
     def subscription_count(self) -> int:
@@ -76,18 +93,37 @@ class MarketDataStreamingService:
     @property
     def stats(self) -> dict:
         uptime = time.time() - self._start_time if self._start_time else 0
+        ticks_rejected = sum(self._reject_count.values())
+
+        # Per-symbol last tick detail
+        per_symbol = {}
+        for symbol in list(self._subscriptions.keys()) or [s.symbol for s in self._config.symbols]:
+            tick = self._last_tick.get(symbol)
+            prev_close = self._prev_close.get(symbol)
+            rejected = self._reject_count.get(symbol, 0)
+            per_symbol[symbol] = {
+                "last_price": tick["price"] if tick else None,
+                "last_timestamp": tick["timestamp"] if tick else None,
+                "prev_close": prev_close,
+                "ticks_rejected": rejected,
+            }
+
         return {
             "running": self._running,
+            "has_ib_client": self._has_ib_client,
             "subscriptions": len(self._subscriptions),
             "max_subscriptions": self._config.max_subscriptions,
             "ticks_received": self._ticks_received,
             "ticks_published": self._ticks_published,
+            "ticks_rejected": ticks_rejected,
             "errors": self._errors,
             "uptime_seconds": round(uptime, 1),
             "symbols": list(self._subscriptions.keys()),
+            "per_symbol": per_symbol,
             "redis_enabled": self._config.redis_enabled,
             "questdb_enabled": self._config.questdb_enabled,
             "ws_broadcast_enabled": self._config.ws_broadcast_enabled,
+            "close_band_pct": self._config.close_band_pct,
         }
 
     async def start(self) -> None:
@@ -107,8 +143,13 @@ class MarketDataStreamingService:
         if self._config.questdb_enabled:
             await self._connect_questdb()
 
-        # Subscribe to IBKR market data
-        if self._ibkr and hasattr(self._ibkr, "is_healthy") and self._ibkr.is_healthy():
+        # Subscribe to IBKR market data (requires ib_insync — not available in REST mode)
+        if not self._has_ib_client:
+            logger.info(
+                "Tick streaming disabled — provider has no ib_insync client (REST mode). "
+                "Option quote streaming will still work via provider.get_option_quotes()."
+            )
+        elif self._ibkr and hasattr(self._ibkr, "is_healthy") and self._ibkr.is_healthy():
             await self._subscribe_all()
 
             # Register for tick events
@@ -196,6 +237,8 @@ class MarketDataStreamingService:
 
     async def resubscribe_all(self) -> None:
         """Re-subscribe all symbols (call after IBKR reconnect)."""
+        if not self._has_ib_client:
+            return
         logger.info("Re-subscribing all %d symbols after reconnect", len(self._config.symbols))
         self._subscriptions.clear()
         self._contracts.clear()
@@ -316,16 +359,22 @@ class MarketDataStreamingService:
             from app.services.streaming_config import _INDEX_EXCHANGES
             is_index = symbol.upper() in _INDEX_EXCHANGES
 
-            # Determine the reference price for validation.
-            # Use close (previous day), or last known good price from our cache.
-            # For indices, close must look like an index level (> 100) to be
-            # trusted — IBKR sometimes returns option-like values in close too.
+            # ── Anchor the previous close (once per symbol per session) ────
+            # IBKR's ticker.close is the prior-day settlement.  We latch it
+            # the first time we see a plausible value and never overwrite it
+            # with live tick data — this gives us a stable reference for the
+            # hard ±35% gate below.
+            valid_close = close and close > 0 and (not is_index or close > 100)
+            if valid_close and symbol not in self._prev_close:
+                self._prev_close[symbol] = close
+
+            # Secondary reference: last validated tick (can drift, used for
+            # the tighter intraday band only).
             prev_good = None
             prev_tick = self._last_tick.get(symbol)
             if prev_tick:
                 prev_good = prev_tick.get("price", 0)
-            valid_close = close and close > 0 and (not is_index or close > 100)
-            reference = close if valid_close else prev_good
+            reference = self._prev_close.get(symbol) or prev_good
 
             # Determine price based on instrument type
             if is_index:
@@ -351,34 +400,54 @@ class MarketDataStreamingService:
             if not price or price <= 0:
                 continue
 
-            # Universal sanity check against reference price.
-            # Indices use tighter bands (±20%) since they don't gap that much
-            # intraday.  Stocks keep the wider ±50%/200% bands.
+            # ── Hard gate: ±35% from previous close ──────────────────────
+            # This is the primary defence against garbage prices.  The
+            # previous close is anchored from IBKR and never overwritten by
+            # live ticks, so bad prices cannot cause reference drift.
+            anchor_close = self._prev_close.get(symbol)
+            if anchor_close and anchor_close > 0:
+                band = self._config.close_band_pct
+                lo_close = anchor_close * (1 - band)
+                hi_close = anchor_close * (1 + band)
+                if price < lo_close or price > hi_close:
+                    cnt = self._reject_count.get(symbol, 0) + 1
+                    self._reject_count[symbol] = cnt
+                    if cnt == 1 or cnt % 100 == 0:
+                        direction = "low" if price < lo_close else "high"
+                        logger.warning(
+                            "Price rejected (close gate) for %s: %.4f %s vs "
+                            "prev_close %.4f ±%.0f%% (rejected %d times) "
+                            "last=%.4f close=%.4f mkt=%.4f",
+                            symbol, price, direction, anchor_close,
+                            band * 100, cnt,
+                            last or 0, close or 0, market_price or 0,
+                        )
+                    continue
+            elif is_index:
+                # No previous close yet — do NOT publish index ticks until
+                # we have a close to validate against.
+                continue
+
+            # ── Secondary intraday sanity check against reference ────────
+            # Tighter band vs last validated tick to catch moderate outliers.
             if reference and reference > 0:
                 if is_index:
                     lo, hi = reference * 0.8, reference * 1.2
                 else:
-                    lo, hi = reference * 0.5, reference * 2.0
-                if price < lo:
-                    logger.warning(
-                        "Price rejected for %s: %.4f < %.0f%% of reference %.4f "
-                        "(last=%.4f close=%.4f mkt=%.4f bid=%.4f ask=%.4f)",
-                        symbol, price, 80 if is_index else 50, reference,
-                        last or 0, close or 0,
-                        market_price or 0, _safe(ticker.bid) or 0, _safe(ticker.ask) or 0,
-                    )
+                    lo, hi = reference * 0.65, reference * 1.35
+                if price < lo or price > hi:
+                    cnt = self._reject_count.get(symbol, 0) + 1
+                    self._reject_count[symbol] = cnt
+                    if cnt == 1 or cnt % 100 == 0:
+                        direction = "low" if price < lo else "high"
+                        logger.warning(
+                            "Price rejected (ref gate) for %s: %.4f %s vs "
+                            "reference %.4f (rejected %d times) "
+                            "last=%.4f close=%.4f mkt=%.4f",
+                            symbol, price, direction, reference, cnt,
+                            last or 0, close or 0, market_price or 0,
+                        )
                     continue
-                if price > hi:
-                    logger.warning(
-                        "Price rejected for %s: %.4f > %.0f%% of reference %.4f",
-                        symbol, price, 120 if is_index else 200, reference,
-                    )
-                    continue
-            elif is_index:
-                # No reference yet — do NOT publish index ticks until we have
-                # a reference (close or a previously validated price).  Without
-                # a reference, we can't distinguish a real price from garbage.
-                continue
 
             now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -454,7 +523,12 @@ class MarketDataStreamingService:
         }
 
         # 1. Redis Pub/Sub (same channel format as polygon streamer)
-        if self._config.redis_enabled and self._redis_client:
+        # Rate-limit: at most 1 publish per redis_publish_interval per symbol
+        now_mono = time.monotonic()
+        last_pub = self._last_redis_publish.get(symbol, 0)
+        redis_ok = (now_mono - last_pub) >= self._config.redis_publish_interval
+
+        if self._config.redis_enabled and self._redis_client and redis_ok:
             prefix = self._config.redis_channel_prefix
             try:
                 # Publish quote
@@ -478,6 +552,7 @@ class MarketDataStreamingService:
                 await self._redis_client.publish(f"{prefix}:trade:{symbol}", trade_msg)
 
                 self._ticks_published += 1
+                self._last_redis_publish[symbol] = now_mono
             except Exception as e:
                 logger.debug("Redis publish error for %s: %s", symbol, e)
                 self._errors += 1

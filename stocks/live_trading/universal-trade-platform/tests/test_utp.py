@@ -12,7 +12,7 @@ import argparse
 import asyncio
 import json
 import time
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2566,6 +2566,600 @@ class TestIBKRProvider:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# IBKR REST Provider (Client Portal Gateway)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestIBKRRestProvider:
+    """Tests for the IBKRRestProvider (CPG REST API backend)."""
+
+    def test_rest_broker_enum(self):
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        assert provider.broker == Broker.IBKR
+
+    @pytest.mark.asyncio
+    async def test_connect_auth_check(self):
+        """connect() should call auth/status + accounts."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+
+        mock_session = AsyncMock()
+        auth_resp = AsyncMock()
+        auth_resp.json = AsyncMock(return_value={"authenticated": True})
+        auth_resp.text = AsyncMock(return_value='{"authenticated": true}')
+        auth_resp.raise_for_status = MagicMock()
+        auth_resp.__aenter__ = AsyncMock(return_value=auth_resp)
+        auth_resp.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session.post = MagicMock(return_value=auth_resp)
+        mock_session.close = AsyncMock()
+
+        # Patch aiohttp.ClientSession to return our mock
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch("aiohttp.TCPConnector"):
+                await provider.connect()
+
+        assert provider._connected is True
+        assert provider._account_id == "U123"
+        # Clean up keepalive
+        await provider.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_connect_not_authenticated(self):
+        """connect() should raise when CPG session is not authenticated."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+
+        mock_session = AsyncMock()
+        auth_resp = AsyncMock()
+        auth_resp.json = AsyncMock(return_value={"authenticated": False})
+        auth_resp.text = AsyncMock(return_value='{"authenticated": false}')
+        auth_resp.raise_for_status = MagicMock()
+        auth_resp.__aenter__ = AsyncMock(return_value=auth_resp)
+        auth_resp.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session.post = MagicMock(return_value=auth_resp)
+        mock_session.close = AsyncMock()
+
+        with patch("aiohttp.ClientSession", return_value=mock_session):
+            with patch("aiohttp.TCPConnector"):
+                with pytest.raises(RuntimeError, match="not authenticated"):
+                    await provider.connect()
+
+        assert provider._connected is False
+
+    @pytest.mark.asyncio
+    async def test_disconnect_cancels_keepalive(self):
+        """disconnect() should cancel the keepalive task."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._session.close = AsyncMock()
+
+        # Create a real asyncio task that we can cancel
+        async def fake_keepalive():
+            await asyncio.sleep(3600)
+
+        task = asyncio.create_task(fake_keepalive())
+        provider._keepalive_task = task
+
+        await provider.disconnect()
+        assert task.cancelled()
+        assert provider._connected is False
+        assert provider._session is None
+
+    def test_is_healthy(self):
+        """is_healthy() should reflect connection state."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        assert provider.is_healthy() is False
+
+        provider._connected = True
+        provider._session = AsyncMock()
+        assert provider.is_healthy() is True
+
+    @pytest.mark.asyncio
+    async def test_get_quote(self):
+        """get_quote() should map snapshot fields to Quote."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["SPX"] = 416904
+
+        snap_resp = AsyncMock()
+        snap_resp.json = AsyncMock(return_value=[{
+            "31": "5650.25", "84": "5649.50", "85": "5651.00", "87": "1500000",
+        }])
+        snap_resp.raise_for_status = MagicMock()
+        snap_resp.__aenter__ = AsyncMock(return_value=snap_resp)
+        snap_resp.__aexit__ = AsyncMock(return_value=False)
+        provider._session.get = MagicMock(return_value=snap_resp)
+
+        quote = await provider.get_quote("SPX")
+        assert quote.symbol == "SPX"
+        assert quote.last == 5650.25
+        assert quote.bid == 5649.50
+        assert quote.ask == 5651.00
+        assert quote.volume == 1500000
+        assert quote.source == "cpg"
+
+    @pytest.mark.asyncio
+    async def test_get_quote_not_connected(self):
+        """get_quote() should raise when disconnected."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        with pytest.raises(RuntimeError, match="not connected"):
+            await provider.get_quote("SPX")
+
+    @pytest.mark.asyncio
+    async def test_get_positions(self):
+        """get_positions() should map CPG positions to Position model."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+
+        pos_resp = AsyncMock()
+        pos_resp.json = AsyncMock(return_value=[{
+            "conid": 416904, "contractDesc": "SPX OPT", "position": -3,
+            "avgCost": 2.50, "mktValue": -750.0, "unrealizedPnl": 100.0,
+            "assetClass": "OPT", "expiry": "20260320", "strike": 5500.0,
+            "putOrCall": "P",
+        }])
+        pos_resp.raise_for_status = MagicMock()
+        pos_resp.__aenter__ = AsyncMock(return_value=pos_resp)
+        pos_resp.__aexit__ = AsyncMock(return_value=False)
+        provider._session.get = MagicMock(return_value=pos_resp)
+
+        positions = await provider.get_positions()
+        assert len(positions) == 1
+        assert positions[0].quantity == -3
+        assert positions[0].con_id == 416904
+        assert positions[0].sec_type == "OPT"
+        assert positions[0].right == "P"
+
+    @pytest.mark.asyncio
+    async def test_get_positions_empty(self):
+        """get_positions() returns [] when no positions."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+
+        pos_resp = AsyncMock()
+        pos_resp.json = AsyncMock(return_value=[])
+        pos_resp.raise_for_status = MagicMock()
+        pos_resp.__aenter__ = AsyncMock(return_value=pos_resp)
+        pos_resp.__aexit__ = AsyncMock(return_value=False)
+        provider._session.get = MagicMock(return_value=pos_resp)
+
+        positions = await provider.get_positions()
+        assert positions == []
+
+    @pytest.mark.asyncio
+    async def test_execute_equity_order_buy(self):
+        """execute_equity_order() should build correct BUY JSON."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["SPY"] = 756733
+
+        import app.config
+        orig = app.config.settings.ibkr_readonly
+        app.config.settings.ibkr_readonly = False
+
+        order_resp = AsyncMock()
+        order_resp.json = AsyncMock(return_value=[{"order_id": "12345"}])
+        order_resp.text = AsyncMock(return_value='[{"order_id": "12345"}]')
+        order_resp.raise_for_status = MagicMock()
+        order_resp.__aenter__ = AsyncMock(return_value=order_resp)
+        order_resp.__aexit__ = AsyncMock(return_value=False)
+        provider._session.post = MagicMock(return_value=order_resp)
+
+        order = EquityOrder(broker=Broker.IBKR, symbol="SPY", side=OrderSide.BUY,
+                           quantity=100, order_type=OrderType.MARKET)
+        result = await provider.execute_equity_order(order)
+        assert result.status == OrderStatus.SUBMITTED
+        assert "SPY" in result.message
+        app.config.settings.ibkr_readonly = orig
+
+    @pytest.mark.asyncio
+    async def test_execute_equity_readonly(self):
+        """execute_equity_order() should reject when readonly."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+
+        import app.config
+        orig = app.config.settings.ibkr_readonly
+        app.config.settings.ibkr_readonly = True
+
+        order = EquityOrder(broker=Broker.IBKR, symbol="SPY", side=OrderSide.BUY,
+                           quantity=100, order_type=OrderType.MARKET)
+        result = await provider.execute_equity_order(order)
+        assert result.status == OrderStatus.REJECTED
+        assert "read-only" in result.message
+        app.config.settings.ibkr_readonly = orig
+
+    @pytest.mark.asyncio
+    async def test_execute_credit_spread_conidex(self):
+        """execute_multi_leg_order() should build correct conidex for credit spread."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["SPX"] = 416904
+        provider._option_conid_cache["SPX_20260320_5500.0_P"] = 100001
+        provider._option_conid_cache["SPX_20260320_5475.0_P"] = 100002
+
+        import app.config
+        orig = app.config.settings.ibkr_readonly
+        app.config.settings.ibkr_readonly = False
+
+        order_resp = AsyncMock()
+        order_resp.json = AsyncMock(return_value=[{"order_id": "67890"}])
+        order_resp.text = AsyncMock(return_value='[{"order_id": "67890"}]')
+        order_resp.raise_for_status = MagicMock()
+        order_resp.__aenter__ = AsyncMock(return_value=order_resp)
+        order_resp.__aexit__ = AsyncMock(return_value=False)
+        provider._session.post = MagicMock(return_value=order_resp)
+
+        order = MultiLegOrder(
+            broker=Broker.IBKR,
+            legs=[
+                OptionLeg(symbol="SPX", expiration="2026-03-20", strike=5500.0,
+                         option_type=OptionType.PUT, action=OptionAction.SELL_TO_OPEN, quantity=1),
+                OptionLeg(symbol="SPX", expiration="2026-03-20", strike=5475.0,
+                         option_type=OptionType.PUT, action=OptionAction.BUY_TO_OPEN, quantity=1),
+            ],
+            order_type=OrderType.MARKET,
+            quantity=1,
+        )
+        result = await provider.execute_multi_leg_order(order)
+        assert result.status == OrderStatus.SUBMITTED
+
+        # Verify the conidex was constructed correctly
+        call_args = provider._session.post.call_args_list
+        # Find the order submission call (the one with /orders in the URL)
+        for call in call_args:
+            url = call[0][0] if call[0] else ""
+            if "/orders" in url and "whatif" not in url:
+                body = call[1].get("json", {})
+                orders = body.get("orders", [{}])
+                if orders:
+                    conidex = orders[0].get("conidex", "")
+                    # SELL leg gets negative ratio, BUY gets positive
+                    assert "100001/-1" in conidex
+                    assert "100002/1" in conidex
+                    assert conidex.startswith("416904;;;")
+                break
+
+        app.config.settings.ibkr_readonly = orig
+
+    @pytest.mark.asyncio
+    async def test_execute_market_order(self):
+        """execute_multi_leg_order() with MARKET type should use orderType=MKT."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["SPX"] = 416904
+        provider._option_conid_cache["SPX_20260320_5500.0_P"] = 100001
+        provider._option_conid_cache["SPX_20260320_5475.0_P"] = 100002
+
+        import app.config
+        orig = app.config.settings.ibkr_readonly
+        app.config.settings.ibkr_readonly = False
+
+        order_resp = AsyncMock()
+        order_resp.json = AsyncMock(return_value=[{"order_id": "111"}])
+        order_resp.text = AsyncMock(return_value='[{"order_id": "111"}]')
+        order_resp.raise_for_status = MagicMock()
+        order_resp.__aenter__ = AsyncMock(return_value=order_resp)
+        order_resp.__aexit__ = AsyncMock(return_value=False)
+        provider._session.post = MagicMock(return_value=order_resp)
+
+        order = MultiLegOrder(
+            broker=Broker.IBKR,
+            legs=[
+                OptionLeg(symbol="SPX", expiration="2026-03-20", strike=5500.0,
+                         option_type=OptionType.PUT, action=OptionAction.SELL_TO_OPEN, quantity=1),
+                OptionLeg(symbol="SPX", expiration="2026-03-20", strike=5475.0,
+                         option_type=OptionType.PUT, action=OptionAction.BUY_TO_OPEN, quantity=1),
+            ],
+            order_type=OrderType.MARKET,
+            quantity=1,
+        )
+        result = await provider.execute_multi_leg_order(order)
+        assert result.status == OrderStatus.SUBMITTED
+        assert "MARKET" in result.message
+        app.config.settings.ibkr_readonly = orig
+
+    @pytest.mark.asyncio
+    async def test_order_confirmation_reply(self):
+        """_place_order_with_confirmation() should auto-confirm replyId."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+
+        # First call returns confirmation prompt, second returns order
+        call_count = 0
+        def make_resp(return_val):
+            resp = AsyncMock()
+            resp.json = AsyncMock(return_value=return_val)
+            resp.text = AsyncMock(return_value=str(return_val))
+            resp.raise_for_status = MagicMock()
+            resp.__aenter__ = AsyncMock(return_value=resp)
+            resp.__aexit__ = AsyncMock(return_value=False)
+            return resp
+
+        responses = [
+            make_resp([{"id": "abc-123", "message": ["Confirm order?"]}]),
+            make_resp([{"order_id": "99999"}]),
+        ]
+        provider._session.post = MagicMock(side_effect=responses)
+
+        result = await provider._place_order_with_confirmation({"conid": 416904, "side": "BUY"})
+        assert result.get("order_id") == "99999"
+        # Should have made 2 POST calls: order + confirmation
+        assert provider._session.post.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_get_order_status(self):
+        """get_order_status() should map CPG status to OrderStatus."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+
+        status_resp = AsyncMock()
+        status_resp.json = AsyncMock(return_value={
+            "order_status": "Filled", "avg_price": 3.50, "filled_quantity": 5,
+        })
+        status_resp.raise_for_status = MagicMock()
+        status_resp.__aenter__ = AsyncMock(return_value=status_resp)
+        status_resp.__aexit__ = AsyncMock(return_value=False)
+        provider._session.get = MagicMock(return_value=status_resp)
+
+        result = await provider.get_order_status("12345")
+        assert result.status == OrderStatus.FILLED
+        assert result.filled_price == 3.50
+        assert result.filled_quantity == 5
+
+    @pytest.mark.asyncio
+    async def test_get_option_chain(self):
+        """get_option_chain() should return expirations + strikes."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["SPX"] = 416904
+
+        # Mock strikes response
+        strikes_resp = AsyncMock()
+        strikes_resp.json = AsyncMock(return_value={
+            "call": [5400.0, 5500.0, 5600.0],
+            "put": [5400.0, 5500.0, 5600.0],
+        })
+        strikes_resp.text = AsyncMock(return_value='{}')
+        strikes_resp.raise_for_status = MagicMock()
+        strikes_resp.__aenter__ = AsyncMock(return_value=strikes_resp)
+        strikes_resp.__aexit__ = AsyncMock(return_value=False)
+
+        # Mock expirations response
+        exp_resp = AsyncMock()
+        exp_resp.json = AsyncMock(return_value=[
+            {"maturityDate": "20260320"},
+            {"maturityDate": "20260327"},
+        ])
+        exp_resp.raise_for_status = MagicMock()
+        exp_resp.__aenter__ = AsyncMock(return_value=exp_resp)
+        exp_resp.__aexit__ = AsyncMock(return_value=False)
+
+        provider._session.post = MagicMock(return_value=strikes_resp)
+        provider._session.get = MagicMock(return_value=exp_resp)
+
+        chain = await provider.get_option_chain("SPX")
+        assert 5500.0 in chain["strikes"]
+        assert len(chain["strikes"]) == 3
+        assert "20260320" in chain["expirations"]
+
+    @pytest.mark.asyncio
+    async def test_check_margin_whatif(self):
+        """check_margin() should parse what-if response."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["SPX"] = 416904
+        provider._option_conid_cache["SPX_20260320_5500.0_P"] = 100001
+        provider._option_conid_cache["SPX_20260320_5475.0_P"] = 100002
+
+        whatif_resp = AsyncMock()
+        whatif_resp.json = AsyncMock(return_value={
+            "initMargin": "2500.0", "maintMargin": "2500.0", "commission": "2.60",
+        })
+        whatif_resp.text = AsyncMock(return_value='{}')
+        whatif_resp.raise_for_status = MagicMock()
+        whatif_resp.__aenter__ = AsyncMock(return_value=whatif_resp)
+        whatif_resp.__aexit__ = AsyncMock(return_value=False)
+        provider._session.post = MagicMock(return_value=whatif_resp)
+
+        order = MultiLegOrder(
+            broker=Broker.IBKR,
+            legs=[
+                OptionLeg(symbol="SPX", expiration="2026-03-20", strike=5500.0,
+                         option_type=OptionType.PUT, action=OptionAction.SELL_TO_OPEN, quantity=1),
+                OptionLeg(symbol="SPX", expiration="2026-03-20", strike=5475.0,
+                         option_type=OptionType.PUT, action=OptionAction.BUY_TO_OPEN, quantity=1),
+            ],
+            quantity=1,
+        )
+        margin = await provider.check_margin(order)
+        assert margin["init_margin"] == 2500.0
+        assert margin["commission"] == 2.60
+
+    @pytest.mark.asyncio
+    async def test_get_account_balances(self):
+        """get_account_balances() should map summary to AccountBalances."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+
+        summary_resp = AsyncMock()
+        summary_resp.json = AsyncMock(return_value={
+            "totalcashvalue": {"amount": 50000.0},
+            "netliquidation": {"amount": 150000.0},
+            "buyingpower": {"amount": 200000.0},
+            "maintmarginreq": {"amount": 25000.0},
+            "availablefunds": {"amount": 125000.0},
+        })
+        summary_resp.raise_for_status = MagicMock()
+        summary_resp.__aenter__ = AsyncMock(return_value=summary_resp)
+        summary_resp.__aexit__ = AsyncMock(return_value=False)
+        provider._session.get = MagicMock(return_value=summary_resp)
+
+        balances = await provider.get_account_balances()
+        assert balances.cash == 50000.0
+        assert balances.net_liquidation == 150000.0
+        assert balances.buying_power == 200000.0
+        assert balances.broker == "ibkr"
+
+    @pytest.mark.asyncio
+    async def test_get_open_orders(self):
+        """get_open_orders() should map to OrderResult list."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+
+        orders_resp = AsyncMock()
+        orders_resp.json = AsyncMock(return_value={
+            "orders": [
+                {"orderId": "100", "ticker": "SPX", "side": "BUY", "totalSize": 5,
+                 "orderType": "LMT", "price": 3.50, "status": "Submitted"},
+            ]
+        })
+        orders_resp.raise_for_status = MagicMock()
+        orders_resp.__aenter__ = AsyncMock(return_value=orders_resp)
+        orders_resp.__aexit__ = AsyncMock(return_value=False)
+        provider._session.get = MagicMock(return_value=orders_resp)
+
+        orders = await provider.get_open_orders()
+        assert len(orders) == 1
+        assert orders[0].order_id == "100"
+        assert orders[0].status == OrderStatus.SUBMITTED
+
+    @pytest.mark.asyncio
+    async def test_cancel_order(self):
+        """cancel_order() should send DELETE correctly."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+
+        del_resp = AsyncMock()
+        del_resp.json = AsyncMock(return_value={"msg": "cancelled"})
+        del_resp.text = AsyncMock(return_value='{}')
+        del_resp.raise_for_status = MagicMock()
+        del_resp.__aenter__ = AsyncMock(return_value=del_resp)
+        del_resp.__aexit__ = AsyncMock(return_value=False)
+
+        status_resp = AsyncMock()
+        status_resp.json = AsyncMock(return_value={"order_status": "Cancelled"})
+        status_resp.raise_for_status = MagicMock()
+        status_resp.__aenter__ = AsyncMock(return_value=status_resp)
+        status_resp.__aexit__ = AsyncMock(return_value=False)
+
+        provider._session.delete = MagicMock(return_value=del_resp)
+        provider._session.get = MagicMock(return_value=status_resp)
+
+        result = await provider.cancel_order("12345")
+        assert result.status == OrderStatus.CANCELLED
+        provider._session.delete.assert_called_once()
+
+    def test_resolve_conid_cached(self):
+        """Cached conIds should skip HTTP calls."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._conid_cache["AAPL"] = 265598
+        # No session needed — cache hit
+        assert provider._conid_cache["AAPL"] == 265598
+
+    def test_ssl_disabled(self):
+        """Provider should create session with SSL verification disabled."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        # The SSL context is created in connect(); just verify the gateway URL
+        assert provider._gateway_url == "https://localhost:5000"
+
+    def test_rate_limiter_configured(self):
+        """Rate limiter should be set to 9 req/sec for CPG."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        assert provider._cache.rate_limiter._rate == 9.0
+
+    @pytest.mark.asyncio
+    async def test_get_daily_pnl_by_con_id(self):
+        """get_daily_pnl_by_con_id() should extract dailyPnl from positions."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+
+        pos_resp = AsyncMock()
+        pos_resp.json = AsyncMock(return_value=[
+            {"conid": 416904, "position": -3, "dailyPnl": -42.50},
+            {"conid": 265598, "position": 100, "dailyPnl": 125.00},
+            {"conid": 999999, "position": 10, "dailyPnl": None},
+        ])
+        pos_resp.raise_for_status = MagicMock()
+        pos_resp.__aenter__ = AsyncMock(return_value=pos_resp)
+        pos_resp.__aexit__ = AsyncMock(return_value=False)
+        provider._session.get = MagicMock(return_value=pos_resp)
+
+        result = await provider.get_daily_pnl_by_con_id()
+        assert result[416904] == -42.50
+        assert result[265598] == 125.00
+        assert 999999 not in result  # None dailyPnl excluded
+
+    @pytest.mark.asyncio
+    async def test_get_account_daily_pnl(self):
+        """get_account_daily_pnl() should extract dpl from partitioned PnL."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+
+        pnl_resp = AsyncMock()
+        pnl_resp.json = AsyncMock(return_value={
+            "acctId": {"U123": {"dpl": -256.78, "nl": 963000.0, "upl": -87000.0}},
+        })
+        pnl_resp.raise_for_status = MagicMock()
+        pnl_resp.__aenter__ = AsyncMock(return_value=pnl_resp)
+        pnl_resp.__aexit__ = AsyncMock(return_value=False)
+        provider._session.get = MagicMock(return_value=pnl_resp)
+
+        result = await provider.get_account_daily_pnl()
+        assert result == -256.78
+
+    @pytest.mark.asyncio
+    async def test_get_account_daily_pnl_not_connected(self):
+        """get_account_daily_pnl() returns 0 when not connected."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        result = await provider.get_account_daily_pnl()
+        assert result == 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Account Balances in Portfolio
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -4659,7 +5253,137 @@ symbols:
         assert config_path.exists()
         from app.services.streaming_config import load_streaming_config
         config = load_streaming_config(config_path)
-        assert len(config.symbols) >= 5  # SPX, NDX, RUT, DJX, VIX at minimum
+        assert len(config.symbols) >= 1
+
+    def test_close_gate_rejects_price_beyond_35pct(self, tmp_path):
+        """Tick with price >35% from previous close is rejected."""
+        from app.services.streaming_config import load_streaming_config
+        from app.services.market_data_streaming import MarketDataStreamingService
+
+        cfg_file = tmp_path / "stream.yaml"
+        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\n")
+        config = load_streaming_config(cfg_file)
+        svc = MarketDataStreamingService(config, ibkr_provider=None)
+
+        # Simulate subscription so the tick handler accepts SPY
+        svc._subscriptions["SPY"] = MagicMock()
+
+        # Build a fake ticker: close=500, last=750 (50% above → rejected)
+        ticker = MagicMock()
+        ticker.contract = MagicMock(symbol="SPY")
+        ticker.marketPrice.return_value = 750.0
+        ticker.bid = 749.0
+        ticker.ask = 751.0
+        ticker.last = 750.0
+        ticker.close = 500.0
+        ticker.volume = 100
+
+        svc._on_pending_tickers([ticker])
+        # Price 750 is 50% above close 500 → should be rejected
+        assert "SPY" not in svc._pending_ticks
+        assert "SPY" not in svc._last_tick
+
+    def test_close_gate_accepts_price_within_35pct(self, tmp_path):
+        """Tick with price within 35% of previous close is accepted."""
+        from app.services.streaming_config import load_streaming_config
+        from app.services.market_data_streaming import MarketDataStreamingService
+
+        cfg_file = tmp_path / "stream.yaml"
+        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\n")
+        config = load_streaming_config(cfg_file)
+        svc = MarketDataStreamingService(config, ibkr_provider=None)
+
+        svc._subscriptions["SPY"] = MagicMock()
+
+        ticker = MagicMock()
+        ticker.contract = MagicMock(symbol="SPY")
+        ticker.marketPrice.return_value = 510.0
+        ticker.bid = 509.0
+        ticker.ask = 511.0
+        ticker.last = 510.0
+        ticker.close = 500.0
+        ticker.volume = 100
+
+        svc._on_pending_tickers([ticker])
+        # 510 is 2% above close 500 → accepted
+        assert "SPY" in svc._pending_ticks
+        assert svc._pending_ticks["SPY"]["price"] == 510.0
+
+    def test_close_gate_index_rejects_garbage(self, tmp_path):
+        """Index tick with garbage price vs close is rejected."""
+        from app.services.streaming_config import load_streaming_config
+        from app.services.market_data_streaming import MarketDataStreamingService
+
+        cfg_file = tmp_path / "stream.yaml"
+        cfg_file.write_text("symbols:\n  - SPX\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\n")
+        config = load_streaming_config(cfg_file)
+        svc = MarketDataStreamingService(config, ibkr_provider=None)
+
+        svc._subscriptions["SPX"] = MagicMock()
+
+        ticker = MagicMock()
+        ticker.contract = MagicMock(symbol="SPX")
+        ticker.marketPrice.return_value = 200.0  # garbage for SPX
+        ticker.bid = float("nan")
+        ticker.ask = float("nan")
+        ticker.last = 200.0
+        ticker.close = 5700.0  # real previous close
+        ticker.volume = 0
+
+        svc._on_pending_tickers([ticker])
+        # 200 is >35% below close 5700 → rejected
+        assert "SPX" not in svc._pending_ticks
+
+    def test_close_gate_uses_config_value(self, tmp_path):
+        """Close gate respects close_band_pct from config (e.g., 10%)."""
+        from app.services.streaming_config import load_streaming_config
+        from app.services.market_data_streaming import MarketDataStreamingService
+
+        cfg_file = tmp_path / "stream.yaml"
+        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\nclose_band_pct: 0.10\n")
+        config = load_streaming_config(cfg_file)
+        assert config.close_band_pct == 0.10
+        svc = MarketDataStreamingService(config, ibkr_provider=None)
+        svc._subscriptions["SPY"] = MagicMock()
+
+        # 20% above close → rejected with 10% band, would pass with default 35%
+        ticker = MagicMock()
+        ticker.contract = MagicMock(symbol="SPY")
+        ticker.marketPrice.return_value = 600.0
+        ticker.bid = 599.0; ticker.ask = 601.0; ticker.last = 600.0
+        ticker.close = 500.0; ticker.volume = 100
+        svc._on_pending_tickers([ticker])
+        assert "SPY" not in svc._pending_ticks
+
+    def test_close_gate_does_not_drift(self, tmp_path):
+        """Previous close anchor is not overwritten by live ticks."""
+        from app.services.streaming_config import load_streaming_config
+        from app.services.market_data_streaming import MarketDataStreamingService
+
+        cfg_file = tmp_path / "stream.yaml"
+        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\n")
+        config = load_streaming_config(cfg_file)
+        svc = MarketDataStreamingService(config, ibkr_provider=None)
+        svc._subscriptions["SPY"] = MagicMock()
+
+        # First tick: close=500, price=510 → accepted, close anchored at 500
+        t1 = MagicMock()
+        t1.contract = MagicMock(symbol="SPY")
+        t1.marketPrice.return_value = 510.0
+        t1.bid = 509.0; t1.ask = 511.0; t1.last = 510.0
+        t1.close = 500.0; t1.volume = 100
+        svc._on_pending_tickers([t1])
+        assert svc._prev_close["SPY"] == 500.0
+
+        # Second tick: close changes to 600 (shouldn't update anchor)
+        t2 = MagicMock()
+        t2.contract = MagicMock(symbol="SPY")
+        t2.marketPrice.return_value = 520.0
+        t2.bid = 519.0; t2.ask = 521.0; t2.last = 520.0
+        t2.close = 600.0; t2.volume = 200
+        svc._on_pending_tickers([t2])
+        # Anchor still 500, not 600
+        assert svc._prev_close["SPY"] == 500.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -5218,3 +5942,351 @@ class TestSmartExchangeRouting:
             capture_output=True, text=True
         )
         assert "--confirm" in result.stdout
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Option Quote Streaming
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestOptionQuoteStreaming:
+    """Tests for background option quote streaming cache."""
+
+    def test_streaming_config_defaults(self):
+        """StreamingConfig has option quote fields with correct defaults."""
+        from app.services.streaming_config import StreamingConfig
+        cfg = StreamingConfig()
+        assert cfg.option_quotes_enabled is False
+        assert cfg.option_quotes_poll_interval == 2.0
+        assert cfg.option_quotes_strike_range_pct == 3.0
+        assert cfg.option_quotes_num_expirations == 3
+
+    def test_streaming_config_loads_from_yaml(self, tmp_path):
+        """load_streaming_config parses option quote fields from YAML."""
+        from app.services.streaming_config import load_streaming_config
+        yaml_content = """\
+symbols:
+  - SPX
+option_quotes_enabled: true
+option_quotes_poll_interval: 5.0
+option_quotes_strike_range_pct: 4.5
+option_quotes_num_expirations: 2
+"""
+        cfg_file = tmp_path / "streaming.yaml"
+        cfg_file.write_text(yaml_content)
+        cfg = load_streaming_config(cfg_file)
+        assert cfg.option_quotes_enabled is True
+        assert cfg.option_quotes_poll_interval == 5.0
+        assert cfg.option_quotes_strike_range_pct == 4.5
+        assert cfg.option_quotes_num_expirations == 2
+
+    def test_cache_put_get(self):
+        """Cache stores and retrieves quotes."""
+        from app.services.option_quote_streaming import OptionQuoteCache
+        cache = OptionQuoteCache()
+        quotes = [{"strike": 5500, "bid": 1.0, "ask": 1.5}]
+        cache.put("SPX", "2026-03-24", "CALL", quotes)
+        result = cache.get("SPX", "2026-03-24", "CALL", max_age_seconds=10.0)
+        assert result == quotes
+
+    def test_cache_get_expired(self):
+        """Cache returns None for expired entries."""
+        from app.services.option_quote_streaming import OptionQuoteCache, CachedQuotes
+        cache = OptionQuoteCache()
+        # Insert with an old timestamp
+        cache._cache[("SPX", "2026-03-24", "CALL")] = CachedQuotes(
+            quotes=[{"strike": 5500}],
+            fetched_at=time.monotonic() - 60,
+            fetched_at_utc="2026-03-24T10:00:00+00:00",
+        )
+        result = cache.get("SPX", "2026-03-24", "CALL", max_age_seconds=10.0)
+        assert result is None
+
+    def test_cache_get_missing(self):
+        """Cache returns None for missing keys."""
+        from app.services.option_quote_streaming import OptionQuoteCache
+        cache = OptionQuoteCache()
+        assert cache.get("SPX", "2026-03-24", "CALL") is None
+
+    def test_cache_stats(self):
+        """Cache stats returns entry count and total quotes."""
+        from app.services.option_quote_streaming import OptionQuoteCache
+        cache = OptionQuoteCache()
+        cache.put("SPX", "2026-03-24", "CALL", [{"s": 1}, {"s": 2}])
+        cache.put("SPX", "2026-03-24", "PUT", [{"s": 3}])
+        stats = cache.stats()
+        assert stats["entries"] == 2
+        assert stats["total_quotes"] == 3
+
+    def test_cache_clear(self):
+        """Cache clear removes all entries."""
+        from app.services.option_quote_streaming import OptionQuoteCache
+        cache = OptionQuoteCache()
+        cache.put("SPX", "2026-03-24", "CALL", [{"s": 1}])
+        cache.clear()
+        assert cache.stats()["entries"] == 0
+
+    def test_cache_normalizes_expiration_format(self):
+        """Cache normalizes YYYYMMDD and YYYY-MM-DD to same key."""
+        from app.services.option_quote_streaming import OptionQuoteCache
+        cache = OptionQuoteCache()
+        quotes = [{"strike": 5500, "bid": 1.0}]
+        # Store with YYYYMMDD
+        cache.put("SPX", "20260324", "CALL", quotes)
+        # Retrieve with YYYY-MM-DD
+        result = cache.get("SPX", "2026-03-24", "CALL", max_age_seconds=10.0)
+        assert result == quotes
+        # And vice versa
+        cache.put("SPX", "2026-03-25", "PUT", quotes)
+        result2 = cache.get("SPX", "20260325", "PUT", max_age_seconds=10.0)
+        assert result2 == quotes
+
+    def test_next_n_trading_days_skips_weekends(self):
+        """_next_n_trading_days skips Saturday and Sunday."""
+        from app.services.option_quote_streaming import _next_n_trading_days
+        # 2026-03-20 is Friday
+        result = _next_n_trading_days(3, start=date(2026, 3, 20))
+        assert result == ["2026-03-20", "2026-03-23", "2026-03-24"]
+
+    def test_next_n_trading_days_includes_today(self):
+        """_next_n_trading_days includes today if it's a weekday."""
+        from app.services.option_quote_streaming import _next_n_trading_days
+        # 2026-03-23 is Monday
+        result = _next_n_trading_days(1, start=date(2026, 3, 23))
+        assert result == ["2026-03-23"]
+
+    def test_next_n_trading_days_starts_on_weekend(self):
+        """_next_n_trading_days starting on Saturday skips to Monday."""
+        from app.services.option_quote_streaming import _next_n_trading_days
+        # 2026-03-21 is Saturday
+        result = _next_n_trading_days(2, start=date(2026, 3, 21))
+        assert result == ["2026-03-23", "2026-03-24"]
+
+    async def test_service_lifecycle(self):
+        """Service start/stop lifecycle."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+        svc = OptionQuoteStreamingService(StreamingConfig(), provider=MagicMock())
+        await svc.start()
+        assert svc.stats["running"] is True
+        await svc.stop()
+        assert svc.stats["running"] is False
+
+    async def test_service_run_cycle_skips_market_closed_when_cache_warm(self):
+        """Service skips fetching when market is closed and cache already populated."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig, StreamingSymbolConfig
+        provider = AsyncMock()
+        cfg = StreamingConfig(symbols=[StreamingSymbolConfig(symbol="SPX", sec_type="IND")])
+        svc = OptionQuoteStreamingService(cfg, provider=provider)
+
+        # Pre-populate cache so the "warm cache once" logic doesn't trigger
+        svc._cache.put("SPX", "2026-03-24", "CALL", [{"strike": 5500}])
+
+        # Patch _is_market_hours to return False
+        import app.services.option_quote_streaming as oqs_mod
+        with patch.object(oqs_mod, "_is_market_hours", return_value=False):
+            await svc._run_one_cycle()
+
+        # Provider should NOT have been called (market closed + cache warm)
+        provider.get_quote.assert_not_called()
+        provider.get_option_quotes.assert_not_called()
+
+    async def test_service_fetches_for_configured_symbols(self):
+        """Service calls provider for configured symbols during market hours."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig, StreamingSymbolConfig
+        provider = AsyncMock()
+        provider.get_quote.return_value = MagicMock(last=5500.0, bid=5499.0, ask=5501.0)
+        provider.get_option_chain.return_value = {
+            "expirations": ["2026-03-24", "2026-03-25"],
+            "strikes": [5400, 5500, 5600],
+        }
+        provider.get_option_quotes.return_value = [{"strike": 5500, "bid": 1.0}]
+
+        cfg = StreamingConfig(
+            symbols=[StreamingSymbolConfig(symbol="SPX", sec_type="IND", exchange="CBOE")],
+            option_quotes_num_expirations=1,
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=provider)
+
+        # Patch datetime to return market-open time (15:00 UTC)
+        import app.services.option_quote_streaming as oqs_mod
+        mock_dt = MagicMock(wraps=datetime)
+        mock_dt.now.return_value = datetime(2026, 3, 24, 15, 0, 0, tzinfo=timezone.utc)
+        with patch.object(oqs_mod, "datetime", mock_dt):
+            with patch.object(oqs_mod, "date") as mock_date:
+                mock_date.today.return_value = date(2026, 3, 24)
+                mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+                await svc._run_one_cycle()
+
+        # Provider should have been called
+        assert provider.get_option_quotes.call_count >= 1
+
+    def test_get_cached_quotes_strike_filtering(self):
+        """get_cached_quotes filters by strike range."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+        svc = OptionQuoteStreamingService(StreamingConfig(), provider=MagicMock())
+        svc._cache.put("SPX", "2026-03-24", "CALL", [
+            {"strike": 5400, "bid": 1.0},
+            {"strike": 5500, "bid": 2.0},
+            {"strike": 5600, "bid": 0.5},
+        ])
+        result = svc.get_cached_quotes("SPX", "2026-03-24", "CALL",
+                                       strike_min=5450, strike_max=5550)
+        assert len(result) == 1
+        assert result[0]["strike"] == 5500
+
+    def test_singleton_init_get_reset(self):
+        """Module singleton: init, get, reset."""
+        from app.services.option_quote_streaming import (
+            init_option_quote_streaming,
+            get_option_quote_streaming,
+            reset_option_quote_streaming,
+        )
+        from app.services.streaming_config import StreamingConfig
+        svc = init_option_quote_streaming(StreamingConfig(), provider=MagicMock())
+        assert get_option_quote_streaming() is svc
+        reset_option_quote_streaming()
+        assert get_option_quote_streaming() is None
+
+    async def test_route_option_quote_status_not_initialized(self, client, api_key_headers):
+        """Status endpoint returns not-initialized when service is off."""
+        resp = await client.get("/market/streaming/option-quotes/status", headers=api_key_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["running"] is False
+
+    async def test_route_option_quote_status_initialized(self, client, api_key_headers):
+        """Status endpoint returns stats when service is initialized."""
+        from app.services.option_quote_streaming import init_option_quote_streaming, reset_option_quote_streaming
+        from app.services.streaming_config import StreamingConfig, StreamingSymbolConfig
+        cfg = StreamingConfig(symbols=[StreamingSymbolConfig(symbol="SPX", sec_type="IND")])
+        svc = init_option_quote_streaming(cfg, provider=MagicMock())
+        await svc.start()
+        try:
+            resp = await client.get("/market/streaming/option-quotes/status", headers=api_key_headers)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["running"] is True
+            assert "SPX" in data["symbols"]
+        finally:
+            await svc.stop()
+            reset_option_quote_streaming()
+
+    async def test_route_options_uses_cache(self, client, api_key_headers):
+        """GET /market/options/{symbol} serves from streaming cache (fast path, no provider call)."""
+        from app.services.option_quote_streaming import init_option_quote_streaming, reset_option_quote_streaming
+        from app.services.streaming_config import StreamingConfig
+        from app.core.provider import ProviderRegistry
+        from app.models import Broker
+
+        cached_quotes = [{"strike": 5500, "bid": 1.0, "ask": 1.5, "last": 1.2,
+                          "volume": 100, "open_interest": 500, "symbol": "SPX260324C5500"}]
+
+        cfg = StreamingConfig()
+        provider = MagicMock()
+        svc = init_option_quote_streaming(cfg, provider=provider)
+        svc._cache.put("SPX", "2026-03-24", "CALL", cached_quotes)
+
+        # Mock the IBKR provider — should NOT be called at all (fast path)
+        ibkr = ProviderRegistry.get(Broker.IBKR)
+        ibkr.get_option_chain = AsyncMock(return_value={
+            "expirations": ["2026-03-24"], "strikes": [5500]
+        })
+        ibkr.get_option_quotes = AsyncMock()
+
+        try:
+            resp = await client.get(
+                "/market/options/SPX",
+                params={"expiration": "2026-03-24", "option_type": "CALL"},
+                headers=api_key_headers,
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "quotes" in data
+            assert data["quotes"]["call"] == cached_quotes
+            assert data.get("source") == "streaming_cache"
+            # Fast path: neither get_option_chain nor get_option_quotes called
+            ibkr.get_option_chain.assert_not_called()
+            ibkr.get_option_quotes.assert_not_called()
+        finally:
+            reset_option_quote_streaming()
+
+    async def test_redis_conid_cache_save_and_load(self):
+        """conID cache saves to Redis and loads on next startup."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        provider = MagicMock()
+        provider._option_conid_cache = {"SPX_20260324_6580.0_C": 857789795, "SPX_20260324_6580.0_P": 857789800}
+        provider._conid_cache = {"SPX": 416904}
+
+        # Mock Redis
+        mock_redis = AsyncMock()
+        mock_redis.ping = AsyncMock()
+        mock_redis.hgetall = AsyncMock(return_value={})
+        mock_pipe = AsyncMock()
+        mock_pipe.hset = MagicMock(return_value=mock_pipe)
+        mock_pipe.expire = MagicMock(return_value=mock_pipe)
+        mock_pipe.execute = AsyncMock(return_value=[])
+        mock_redis.pipeline = MagicMock(return_value=mock_pipe)
+        mock_redis.aclose = AsyncMock()
+
+        cfg = StreamingConfig(redis_enabled=True, redis_url="redis://localhost:6379/0")
+        svc = OptionQuoteStreamingService(cfg, provider=provider)
+        svc._redis = mock_redis
+
+        # Save
+        await svc._redis_save_conid_cache()
+        # Should have called hset for each entry
+        assert mock_pipe.hset.call_count >= 2
+
+        # Now simulate load into a fresh provider
+        provider2 = MagicMock()
+        provider2._option_conid_cache = {}
+        provider2._conid_cache = {}
+        svc2 = OptionQuoteStreamingService(cfg, provider=provider2)
+        svc2._redis = AsyncMock()
+        svc2._redis.hgetall = AsyncMock(side_effect=[
+            {"SPX_20260324_6580.0_C": "857789795", "SPX_20260324_6580.0_P": "857789800"},
+            {"SPX": "416904"},
+        ])
+        await svc2._redis_load_conid_cache()
+        assert provider2._option_conid_cache["SPX_20260324_6580.0_C"] == 857789795
+        assert provider2._conid_cache["SPX"] == 416904
+        assert svc2._conid_cache_loaded is True
+
+    async def test_route_options_falls_back_when_cache_partial(self, client, api_key_headers):
+        """GET /market/options/{symbol} falls back to provider when cache is incomplete."""
+        from app.services.option_quote_streaming import init_option_quote_streaming, reset_option_quote_streaming
+        from app.services.streaming_config import StreamingConfig
+        from app.core.provider import ProviderRegistry
+        from app.models import Broker
+
+        # Only cache CALLs, not PUTs — requesting BOTH should fall back
+        cfg = StreamingConfig()
+        provider = MagicMock()
+        svc = init_option_quote_streaming(cfg, provider=provider)
+        svc._cache.put("SPX", "2026-03-24", "CALL", [{"strike": 5500}])
+
+        ibkr = ProviderRegistry.get(Broker.IBKR)
+        ibkr.get_option_chain = AsyncMock(return_value={
+            "expirations": ["2026-03-24"], "strikes": [5500]
+        })
+        ibkr.get_option_quotes = AsyncMock(return_value=[{"strike": 5500, "bid": 0.5}])
+
+        try:
+            resp = await client.get(
+                "/market/options/SPX",
+                params={"expiration": "2026-03-24"},  # no option_type → BOTH
+                headers=api_key_headers,
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            # Fell back to slow path — get_option_chain was called
+            ibkr.get_option_chain.assert_called_once()
+            assert "source" not in data  # no streaming_cache tag
+        finally:
+            reset_option_quote_streaming()

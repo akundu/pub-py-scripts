@@ -14,11 +14,11 @@
 # Dict form: {symbol: SPX, sec_type: IND, exchange: CBOE}
 symbols:
   # Major indices (auto-detected as IND with correct exchange)
-  - SPX
   - RUT
-  - DJX
-  - VIX
   - NDX
+  - SPX
+  #- DJX
+  #- VIX
   #- VIX1D
 
   # Major ETFs (auto-detected as STK on SMART)
@@ -47,6 +47,10 @@ questdb_url: ""
 # How often to flush buffered ticks to persistence (seconds)
 tick_batch_interval: 0.5
 
+# Minimum seconds between Redis publishes per symbol (default: 1.0)
+# Ticks arriving faster are buffered; the latest value is published when the interval elapses.
+redis_publish_interval: 1.0
+
 # Only stream during US market hours (9:30 AM - 4:00 PM ET)
 market_hours_only: true
 
@@ -62,3 +66,23 @@ max_subscriptions: 50
 
 # Max messages per second to IBKR API (IBKR limit is 50)
 rate_limit_msg_sec: 22.0
+
+# Hard price gate: reject any tick more than this fraction from previous close
+# 0.35 = ±35%.  Set lower for tighter filtering (e.g., 0.20 for indices).
+close_band_pct: 0.35
+
+# ── Option quote streaming (background pre-fetch) ─────────────────────────
+# When enabled, the daemon continuously pre-fetches option quotes for streaming
+# symbols and caches them for instant serving via CLI and REST endpoints.
+
+# Enable background option quote streaming
+option_quotes_enabled: true
+
+# Seconds between fetch cycles
+option_quotes_poll_interval: 2.0
+
+# Strike range as percentage of current price (e.g., 3.0 = ±3%)
+option_quotes_strike_range_pct: 4.0
+
+# Number of upcoming expirations to fetch per symbol
+option_quotes_num_expirations: 3

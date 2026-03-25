@@ -62,6 +62,18 @@ class StreamingConfig:
     # WebSocket broadcast to /ws/quotes clients
     ws_broadcast_enabled: bool = True
 
+    # Minimum seconds between Redis publishes per symbol (throttle)
+    redis_publish_interval: float = 1.0
+
+    # Hard price gate: reject any tick more than this % from previous close (0.35 = ±35%)
+    close_band_pct: float = 0.35
+
+    # Option quote streaming (background pre-fetch)
+    option_quotes_enabled: bool = False
+    option_quotes_poll_interval: float = 2.0
+    option_quotes_strike_range_pct: float = 3.0
+    option_quotes_num_expirations: int = 3
+
     def validate(self) -> list[str]:
         """Validate config. Returns list of errors (empty = valid)."""
         errors = []
@@ -144,6 +156,12 @@ def load_streaming_config(path: str | Path) -> StreamingConfig:
         redis_enabled=raw.get("redis_enabled", True),
         questdb_enabled=raw.get("questdb_enabled", bool(raw.get("questdb_url"))),
         ws_broadcast_enabled=raw.get("ws_broadcast_enabled", True),
+        redis_publish_interval=float(raw.get("redis_publish_interval", 1.0)),
+        close_band_pct=float(raw.get("close_band_pct", 0.35)),
+        option_quotes_enabled=raw.get("option_quotes_enabled", False),
+        option_quotes_poll_interval=float(raw.get("option_quotes_poll_interval", 2.0)),
+        option_quotes_strike_range_pct=float(raw.get("option_quotes_strike_range_pct", 3.0)),
+        option_quotes_num_expirations=int(raw.get("option_quotes_num_expirations", 3)),
     )
 
     errors = config.validate()
