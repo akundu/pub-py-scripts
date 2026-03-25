@@ -170,7 +170,7 @@ class MarketDataStreamingService:
             if self._has_ib_client:
                 mode = "ib_insync"
             elif self._is_cpg_provider:
-                mode = "websocket"
+                mode = "polling"  # polling is more reliable than WS for indices
             else:
                 mode = "disabled"
 
