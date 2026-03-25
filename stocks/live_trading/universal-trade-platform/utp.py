@@ -1965,12 +1965,91 @@ async def _cmd_trades_http(args, server: str) -> int:
         if not trades:
             print("  No trades found.")
             return 0
-        _print_header("Trades")
-        for t in trades:
-            pnl = t.get("pnl") or 0
-            pnl_color = "92" if pnl >= 0 else "91"
-            print(f"  {t.get('symbol',''):<10} {t.get('status',''):<8} "
-                  f"P&L: {_color(f'${pnl:.2f}', pnl_color)}")
+
+        # Separate open and closed
+        open_trades = [t for t in trades if t.get("status") == "open"]
+        closed_trades = [t for t in trades if t.get("status") != "open"]
+
+        def _fmt_time(iso_str):
+            if not iso_str:
+                return "—"
+            try:
+                from datetime import datetime as _dt
+                dt = _dt.fromisoformat(iso_str)
+                return dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                return iso_str[:16]
+
+        def _fmt_price(v):
+            if v is None or v == 0:
+                return "—"
+            return f"${abs(v):,.4f}" if abs(v) < 10 else f"${abs(v):,.2f}"
+
+        def _describe_position(t):
+            """Build a short description like 'PUT 23550/23500' or 'STK'."""
+            legs = t.get("legs") or []
+            if legs and len(legs) >= 2:
+                strikes = sorted(set(leg.get("strike", 0) for leg in legs))
+                ot = legs[0].get("option_type", "")
+                return f"{ot} {'/'.join(str(int(s)) for s in strikes)}"
+            sec = t.get("sec_type", "")
+            strike = t.get("strike")
+            right = t.get("right", "")
+            if strike and right:
+                return f"{right} {int(strike)}"
+            if sec == "STK":
+                return "equity"
+            return sec or t.get("order_type", "")
+
+        if open_trades:
+            _print_header(f"Open Positions ({len(open_trades)})")
+            for t in open_trades:
+                sym = t.get("symbol", "?")
+                desc = _describe_position(t)
+                qty = t.get("quantity", 0)
+                entry = t.get("entry_price", 0)
+                entry_time = _fmt_time(t.get("entry_time"))
+                mark = t.get("current_mark")
+                upnl = t.get("unrealized_pnl")
+                exp = t.get("expiration", "")
+                pid = t.get("position_id", "")[:6]
+
+                upnl_str = ""
+                if upnl is not None:
+                    upnl_color = "92" if upnl >= 0 else "91"
+                    upnl_str = f"  uP&L: {_color(f'${upnl:>+,.2f}', upnl_color)}"
+
+                print(f"  {pid}  {sym:<6} {desc:<20} qty={int(abs(qty)):<4} "
+                      f"entry={_fmt_price(entry):<12} mark={_fmt_price(mark):<12}{upnl_str}")
+                print(f"         opened {entry_time}  exp={exp or '—'}")
+
+        if closed_trades:
+            _print_header(f"Closed Trades ({len(closed_trades)})")
+            total_pnl = 0
+            for t in closed_trades:
+                sym = t.get("symbol", "?")
+                desc = _describe_position(t)
+                qty = t.get("quantity", 0)
+                entry = t.get("entry_price", 0)
+                exit_p = t.get("exit_price")
+                entry_time = _fmt_time(t.get("entry_time"))
+                exit_time = _fmt_time(t.get("exit_time"))
+                exit_reason = t.get("exit_reason", "")
+                pnl = t.get("pnl") or 0
+                total_pnl += pnl
+                exp = t.get("expiration", "")
+                pid = t.get("position_id", "")[:6]
+
+                pnl_color = "92" if pnl >= 0 else "91"
+                print(f"  {pid}  {sym:<6} {desc:<20} qty={int(abs(qty)):<4} "
+                      f"entry={_fmt_price(entry):<12} exit={_fmt_price(exit_p):<12} "
+                      f"P&L: {_color(f'${pnl:>+,.2f}', pnl_color)}")
+                print(f"         opened {entry_time}  closed {exit_time}  "
+                      f"exp={exp or '—'}  {exit_reason}")
+
+            pnl_color = "92" if total_pnl >= 0 else "91"
+            print(f"\n  Total P&L: {_color(f'${total_pnl:>+,.2f}', pnl_color)}")
+
     return 0
 
 
