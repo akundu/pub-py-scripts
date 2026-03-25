@@ -5255,6 +5255,95 @@ symbols:
         config = load_streaming_config(config_path)
         assert len(config.symbols) >= 1
 
+    def test_streaming_config_cpg_mode(self, tmp_path):
+        """Config loads streaming_mode and cpg_poll_interval."""
+        from app.services.streaming_config import load_streaming_config
+        cfg_file = tmp_path / "stream.yaml"
+        cfg_file.write_text("symbols:\n  - SPX\nstreaming_mode: polling\ncpg_poll_interval: 2.5\n")
+        config = load_streaming_config(cfg_file)
+        assert config.streaming_mode == "polling"
+        assert config.cpg_poll_interval == 2.5
+
+    def test_streaming_config_defaults_auto(self, tmp_path):
+        """Default streaming_mode is auto."""
+        from app.services.streaming_config import load_streaming_config
+        cfg_file = tmp_path / "stream.yaml"
+        cfg_file.write_text("symbols:\n  - SPX\n")
+        config = load_streaming_config(cfg_file)
+        assert config.streaming_mode == "auto"
+        assert config.cpg_poll_interval == 1.5
+
+    def test_ingest_tick_valid(self, tmp_path):
+        """_ingest_tick accepts a valid stock price."""
+        from app.services.streaming_config import load_streaming_config
+        from app.services.market_data_streaming import MarketDataStreamingService
+        cfg_file = tmp_path / "stream.yaml"
+        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\n")
+        config = load_streaming_config(cfg_file)
+        svc = MarketDataStreamingService(config, ibkr_provider=None)
+        accepted = svc._ingest_tick("SPY", 510.0, 509.0, 511.0, 100, 500.0, False)
+        assert accepted is True
+        assert svc._last_tick["SPY"]["price"] == 510.0
+        assert svc._prev_close["SPY"] == 500.0
+
+    def test_ingest_tick_rejects_outside_close_band(self, tmp_path):
+        """_ingest_tick rejects price outside close band."""
+        from app.services.streaming_config import load_streaming_config
+        from app.services.market_data_streaming import MarketDataStreamingService
+        cfg_file = tmp_path / "stream.yaml"
+        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\n")
+        config = load_streaming_config(cfg_file)
+        svc = MarketDataStreamingService(config, ibkr_provider=None)
+        # Seed close
+        svc._ingest_tick("SPY", 500.0, 499.0, 501.0, 100, 500.0, False)
+        # Price 50% above close — rejected
+        accepted = svc._ingest_tick("SPY", 750.0, 749.0, 751.0, 100, None, False)
+        assert accepted is False
+
+    def test_parse_cpg_float(self):
+        """CPG float parser handles prefixed values."""
+        from app.services.market_data_streaming import MarketDataStreamingService
+        parse = MarketDataStreamingService._parse_cpg_float
+        assert parse("5800.25") == 5800.25
+        assert parse("C5800.25") == 5800.25
+        assert parse("H100.5") == 100.5
+        assert parse("L50.0") == 50.0
+        assert parse(None) is None
+        assert parse("") is None
+        assert parse(0) is None
+
+    def test_process_cpg_snapshot(self, tmp_path):
+        """_process_cpg_snapshot feeds a tick into _ingest_tick."""
+        from app.services.streaming_config import load_streaming_config
+        from app.services.market_data_streaming import MarketDataStreamingService
+        cfg_file = tmp_path / "stream.yaml"
+        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\n")
+        config = load_streaming_config(cfg_file)
+        svc = MarketDataStreamingService(config, ibkr_provider=None)
+        svc._cpg_conid_to_symbol = {12345: "SPY"}
+        # Seed close for validation
+        svc._prev_close["SPY"] = 500.0
+        snap = {"conid": 12345, "31": "510.0", "84": "509.5", "85": "510.5", "87": "1000"}
+        svc._process_cpg_snapshot(snap)
+        assert "SPY" in svc._last_tick
+        assert svc._last_tick["SPY"]["price"] == 510.0
+
+    @pytest.mark.anyio
+    async def test_streaming_mode_auto_selects_cpg(self, tmp_path):
+        """Auto mode selects CPG websocket when provider has _gateway_url."""
+        from app.services.streaming_config import load_streaming_config
+        from app.services.market_data_streaming import MarketDataStreamingService
+        cfg_file = tmp_path / "stream.yaml"
+        cfg_file.write_text("symbols:\n  - SPX\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\n")
+        config = load_streaming_config(cfg_file)
+        # Mock CPG provider (has _gateway_url, no _ib)
+        mock_provider = MagicMock()
+        mock_provider._gateway_url = "https://localhost:7498"
+        del mock_provider._ib  # ensure no _ib attribute
+        svc = MarketDataStreamingService(config, ibkr_provider=mock_provider)
+        assert svc._is_cpg_provider is True
+        assert svc._has_ib_client is False
+
     def test_close_gate_rejects_price_beyond_35pct(self, tmp_path):
         """Tick with price >35% from previous close is rejected."""
         from app.services.streaming_config import load_streaming_config

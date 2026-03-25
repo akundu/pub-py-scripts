@@ -71,6 +71,17 @@ rate_limit_msg_sec: 22.0
 # 0.35 = ±35%.  Set lower for tighter filtering (e.g., 0.20 for indices).
 close_band_pct: 0.35
 
+# ── Tick streaming mode ────────────────────────────────────────────────────
+# How to stream real-time price ticks for configured symbols.
+#
+# "auto"      — use ib_insync (reqMktData) if TWS connected, else CPG WebSocket
+# "websocket" — force CPG WebSocket streaming (wss://gateway/v1/api/ws)
+# "polling"   — force CPG snapshot polling (/iserver/marketdata/snapshot)
+streaming_mode: auto
+
+# Seconds between snapshot polls (only used when streaming_mode=polling)
+cpg_poll_interval: 1.5
+
 # ── Option quote streaming (background pre-fetch) ─────────────────────────
 # When enabled, the daemon continuously pre-fetches option quotes for streaming
 # symbols and caches them for instant serving via CLI and REST endpoints.

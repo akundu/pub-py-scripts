@@ -33,6 +33,7 @@ class MarketDataStreamingService:
         self._contracts: dict[str, object] = {}       # symbol -> ib_insync Contract
         self._running = False
         self._batch_task: Optional[asyncio.Task] = None
+        self._cpg_task: Optional[asyncio.Task] = None  # CPG WS or polling task
         self._redis_client = None
         self._questdb_pool = None
 
@@ -41,6 +42,7 @@ class MarketDataStreamingService:
         self._ticks_published = 0
         self._errors = 0
         self._start_time: Optional[float] = None
+        self._streaming_mode: str = "disabled"  # set in start()
 
         # Pending ticks buffer (flushed every tick_batch_interval)
         self._pending_ticks: dict[str, dict] = {}  # symbol -> latest tick data
@@ -53,7 +55,6 @@ class MarketDataStreamingService:
         # Throttle rejection warnings: log first occurrence per symbol, then
         # only every Nth rejection to avoid flooding the log.
         self._reject_count: dict[str, int] = {}  # symbol -> count
-        _REJECT_LOG_INTERVAL = 100  # log every 100th rejection after the first
 
         # Per-symbol Redis publish throttle (monotonic timestamp of last publish)
         self._last_redis_publish: dict[str, float] = {}
@@ -61,6 +62,10 @@ class MarketDataStreamingService:
         # Previous close per symbol — anchored from IBKR ticker.close, never
         # overwritten by live ticks.  Used for the hard ±35% sanity gate.
         self._prev_close: dict[str, float] = {}
+
+        # CPG streaming state
+        self._cpg_conid_to_symbol: dict[int, str] = {}
+        self._cpg_ws = None  # aiohttp WebSocket session
 
     @property
     def is_running(self) -> bool:
@@ -70,6 +75,11 @@ class MarketDataStreamingService:
     def _has_ib_client(self) -> bool:
         """True when provider has an ib_insync IB client (not REST/stub)."""
         return getattr(self._ibkr, "_ib", None) is not None
+
+    @property
+    def _is_cpg_provider(self) -> bool:
+        """True when provider is IBKRRestProvider (has _gateway_url)."""
+        return hasattr(self._ibkr, "_gateway_url") if self._ibkr else False
 
     @property
     def subscription_count(self) -> int:
@@ -97,7 +107,8 @@ class MarketDataStreamingService:
 
         # Per-symbol last tick detail
         per_symbol = {}
-        for symbol in list(self._subscriptions.keys()) or [s.symbol for s in self._config.symbols]:
+        tracked = list(self._subscriptions.keys()) or list(self._cpg_conid_to_symbol.values()) or [s.symbol for s in self._config.symbols]
+        for symbol in tracked:
             tick = self._last_tick.get(symbol)
             prev_close = self._prev_close.get(symbol)
             rejected = self._reject_count.get(symbol, 0)
@@ -110,8 +121,10 @@ class MarketDataStreamingService:
 
         return {
             "running": self._running,
+            "streaming_mode": self._streaming_mode,
             "has_ib_client": self._has_ib_client,
-            "subscriptions": len(self._subscriptions),
+            "is_cpg_provider": self._is_cpg_provider,
+            "subscriptions": len(self._subscriptions) or len(self._cpg_conid_to_symbol),
             "max_subscriptions": self._config.max_subscriptions,
             "ticks_received": self._ticks_received,
             "ticks_published": self._ticks_published,
@@ -143,22 +156,39 @@ class MarketDataStreamingService:
         if self._config.questdb_enabled:
             await self._connect_questdb()
 
-        # Subscribe to IBKR market data (requires ib_insync — not available in REST mode)
-        if not self._has_ib_client:
-            logger.info(
-                "Tick streaming disabled — provider has no ib_insync client (REST mode). "
-                "Option quote streaming will still work via provider.get_option_quotes()."
-            )
-        elif self._ibkr and hasattr(self._ibkr, "is_healthy") and self._ibkr.is_healthy():
-            await self._subscribe_all()
+        # Select tick source based on config and available provider
+        mode = self._config.streaming_mode  # auto, websocket, polling
+        if mode == "auto":
+            if self._has_ib_client:
+                mode = "ib_insync"
+            elif self._is_cpg_provider:
+                mode = "websocket"
+            else:
+                mode = "disabled"
 
-            # Register for tick events
-            ib = getattr(self._ibkr, "_ib", None)
-            if ib and hasattr(ib, "pendingTickersEvent"):
-                ib.pendingTickersEvent += self._on_pending_tickers
-                logger.info("Registered IBKR pendingTickersEvent handler")
+        if mode == "ib_insync":
+            if self._ibkr and hasattr(self._ibkr, "is_healthy") and self._ibkr.is_healthy():
+                await self._subscribe_all()
+                ib = getattr(self._ibkr, "_ib", None)
+                if ib and hasattr(ib, "pendingTickersEvent"):
+                    ib.pendingTickersEvent += self._on_pending_tickers
+                    logger.info("Registered IBKR pendingTickersEvent handler")
+                self._streaming_mode = "ib_insync"
+            else:
+                logger.warning("IBKR not healthy — streaming will start when connection is available")
+                self._streaming_mode = "ib_insync_pending"
+        elif mode in ("websocket", "polling") and self._is_cpg_provider:
+            if mode == "polling":
+                self._cpg_task = asyncio.create_task(self._cpg_poll_loop())
+                self._streaming_mode = "cpg_polling"
+                logger.info("CPG tick streaming started (polling every %.1fs)", self._config.cpg_poll_interval)
+            else:
+                self._cpg_task = asyncio.create_task(self._cpg_ws_loop())
+                self._streaming_mode = "cpg_websocket"
+                logger.info("CPG tick streaming started (WebSocket)")
         else:
-            logger.warning("IBKR not healthy — streaming will start when connection is available")
+            logger.info("Tick streaming disabled — no compatible provider available")
+            self._streaming_mode = "disabled"
 
         # Start batch flush loop
         self._batch_task = asyncio.create_task(self._batch_flush_loop())
@@ -181,6 +211,22 @@ class MarketDataStreamingService:
                 await self._batch_task
             except asyncio.CancelledError:
                 pass
+
+        # Cancel CPG task
+        if self._cpg_task and not self._cpg_task.done():
+            self._cpg_task.cancel()
+            try:
+                await self._cpg_task
+            except asyncio.CancelledError:
+                pass
+
+        # Close CPG WebSocket
+        if self._cpg_ws:
+            try:
+                await self._cpg_ws.close()
+            except Exception:
+                pass
+            self._cpg_ws = None
 
         # Flush remaining ticks
         await self._flush_ticks()
@@ -318,19 +364,91 @@ class MarketDataStreamingService:
             except Exception as e:
                 logger.debug("Error unsubscribing %s: %s", symbol, e)
 
-    # ── Tick event handling ───────────────────────────────────────────────────
+    # ── Tick ingestion (shared by ib_insync, CPG WS, CPG polling) ────────────
+
+    def _ingest_tick(
+        self, symbol: str, price: float,
+        bid: float | None, ask: float | None,
+        volume: int, close: float | None,
+        is_index: bool,
+    ) -> bool:
+        """Validate and buffer a single tick. Returns True if accepted."""
+        self._ticks_received += 1
+
+        # Anchor previous close (once per symbol per session)
+        valid_close = close and close > 0 and (not is_index or close > 100)
+        if valid_close and symbol not in self._prev_close:
+            self._prev_close[symbol] = close
+
+        # Secondary reference: last validated tick
+        prev_good = None
+        prev_tick = self._last_tick.get(symbol)
+        if prev_tick:
+            prev_good = prev_tick.get("price", 0)
+        reference = self._prev_close.get(symbol) or prev_good
+
+        if not price or price <= 0:
+            return False
+
+        # Hard gate: ±close_band_pct from previous close
+        anchor_close = self._prev_close.get(symbol)
+        if anchor_close and anchor_close > 0:
+            band = self._config.close_band_pct
+            lo_close = anchor_close * (1 - band)
+            hi_close = anchor_close * (1 + band)
+            if price < lo_close or price > hi_close:
+                cnt = self._reject_count.get(symbol, 0) + 1
+                self._reject_count[symbol] = cnt
+                if cnt == 1 or cnt % 100 == 0:
+                    direction = "low" if price < lo_close else "high"
+                    logger.warning(
+                        "Price rejected (close gate) for %s: %.4f %s vs "
+                        "prev_close %.4f ±%.0f%% (rejected %d times)",
+                        symbol, price, direction, anchor_close, band * 100, cnt,
+                    )
+                return False
+        elif is_index:
+            return False  # No close yet — skip index ticks
+
+        # Secondary intraday reference check
+        if reference and reference > 0:
+            if is_index:
+                lo, hi = reference * 0.8, reference * 1.2
+            else:
+                lo, hi = reference * 0.65, reference * 1.35
+            if price < lo or price > hi:
+                cnt = self._reject_count.get(symbol, 0) + 1
+                self._reject_count[symbol] = cnt
+                if cnt == 1 or cnt % 100 == 0:
+                    direction = "low" if price < lo else "high"
+                    logger.warning(
+                        "Price rejected (ref gate) for %s: %.4f %s vs reference %.4f (rejected %d times)",
+                        symbol, price, direction, reference, cnt,
+                    )
+                return False
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        tick_data = {
+            "symbol": symbol,
+            "timestamp": now_iso,
+            "price": price,
+            "bid": bid,
+            "ask": ask,
+            "last": price,
+            "volume": volume,
+        }
+        self._pending_ticks[symbol] = tick_data
+        self._last_tick[symbol] = tick_data
+        return True
+
+    # ── ib_insync tick handler ─────────────────────────────────────────────
 
     def _on_pending_tickers(self, tickers) -> None:
-        """Callback from ib_insync pendingTickersEvent — fires for all tickers with updates.
-
-        This runs in the ib_insync event loop. We buffer ticks for async batch processing.
-        """
+        """Callback from ib_insync pendingTickersEvent."""
         for ticker in tickers:
             symbol = getattr(ticker.contract, "symbol", None)
             if not symbol or symbol not in self._subscriptions:
                 continue
-
-            self._ticks_received += 1
 
             def _safe(v):
                 if v is None:
@@ -338,56 +456,28 @@ class MarketDataStreamingService:
                 f = float(v)
                 return None if math.isnan(f) else f
 
-            # Use ib_insync's marketPrice() — the most reliable price computation.
-            # It handles indices, stocks, delayed data, and partial ticks correctly.
             raw_market = None
             try:
                 raw_market = ticker.marketPrice()
             except Exception:
                 pass
             market_price = _safe(raw_market)
-
             bid = _safe(ticker.bid)
             ask = _safe(ticker.ask)
             last = _safe(ticker.last)
             close = _safe(ticker.close)
             volume = int(_safe(ticker.volume) or 0)
 
-            # For indices: only use last or close — marketPrice() can return
-            # option-like values when delayed data is mixed in.
-            # For stocks: marketPrice() > last > close > mid(bid,ask)
             from app.services.streaming_config import _INDEX_EXCHANGES
             is_index = symbol.upper() in _INDEX_EXCHANGES
 
-            # ── Anchor the previous close (once per symbol per session) ────
-            # IBKR's ticker.close is the prior-day settlement.  We latch it
-            # the first time we see a plausible value and never overwrite it
-            # with live tick data — this gives us a stable reference for the
-            # hard ±35% gate below.
-            valid_close = close and close > 0 and (not is_index or close > 100)
-            if valid_close and symbol not in self._prev_close:
-                self._prev_close[symbol] = close
-
-            # Secondary reference: last validated tick (can drift, used for
-            # the tighter intraday band only).
-            prev_good = None
-            prev_tick = self._last_tick.get(symbol)
-            if prev_tick:
-                prev_good = prev_tick.get("price", 0)
-            reference = self._prev_close.get(symbol) or prev_good
-
-            # Determine price based on instrument type
+            # Determine price
             if is_index:
-                # Indices: only accept values that look like index levels (> 100)
-                # and pass the reference check. Never publish close as "current" —
-                # only use it as a fallback reference for validation.
                 if last and last > 100:
                     price = last
                 elif market_price and market_price > 100:
                     price = market_price
                 else:
-                    # No valid live price — skip this tick entirely.
-                    # Do NOT publish close as current price (it's yesterday's).
                     continue
                 bid = price
                 ask = price
@@ -397,73 +487,181 @@ class MarketDataStreamingService:
                     if bid and ask and bid > 0 and ask > 0:
                         price = (bid + ask) / 2
 
-            if not price or price <= 0:
-                continue
+            if price and price > 0:
+                self._ingest_tick(symbol, price, bid, ask, volume, close, is_index)
 
-            # ── Hard gate: ±35% from previous close ──────────────────────
-            # This is the primary defence against garbage prices.  The
-            # previous close is anchored from IBKR and never overwritten by
-            # live ticks, so bad prices cannot cause reference drift.
-            anchor_close = self._prev_close.get(symbol)
-            if anchor_close and anchor_close > 0:
-                band = self._config.close_band_pct
-                lo_close = anchor_close * (1 - band)
-                hi_close = anchor_close * (1 + band)
-                if price < lo_close or price > hi_close:
-                    cnt = self._reject_count.get(symbol, 0) + 1
-                    self._reject_count[symbol] = cnt
-                    if cnt == 1 or cnt % 100 == 0:
-                        direction = "low" if price < lo_close else "high"
-                        logger.warning(
-                            "Price rejected (close gate) for %s: %.4f %s vs "
-                            "prev_close %.4f ±%.0f%% (rejected %d times) "
-                            "last=%.4f close=%.4f mkt=%.4f",
-                            symbol, price, direction, anchor_close,
-                            band * 100, cnt,
-                            last or 0, close or 0, market_price or 0,
-                        )
-                    continue
-            elif is_index:
-                # No previous close yet — do NOT publish index ticks until
-                # we have a close to validate against.
-                continue
+    # ── CPG WebSocket streaming ────────────────────────────────────────────
 
-            # ── Secondary intraday sanity check against reference ────────
-            # Tighter band vs last validated tick to catch moderate outliers.
-            if reference and reference > 0:
-                if is_index:
-                    lo, hi = reference * 0.8, reference * 1.2
-                else:
-                    lo, hi = reference * 0.65, reference * 1.35
-                if price < lo or price > hi:
-                    cnt = self._reject_count.get(symbol, 0) + 1
-                    self._reject_count[symbol] = cnt
-                    if cnt == 1 or cnt % 100 == 0:
-                        direction = "low" if price < lo else "high"
-                        logger.warning(
-                            "Price rejected (ref gate) for %s: %.4f %s vs "
-                            "reference %.4f (rejected %d times) "
-                            "last=%.4f close=%.4f mkt=%.4f",
-                            symbol, price, direction, reference, cnt,
-                            last or 0, close or 0, market_price or 0,
-                        )
-                    continue
+    async def _cpg_resolve_conids(self) -> None:
+        """Resolve conIDs for all configured symbols via the REST provider."""
+        self._cpg_conid_to_symbol.clear()
+        for sym_cfg in self._config.symbols:
+            try:
+                conid = await self._ibkr._resolve_conid(sym_cfg.symbol)
+                self._cpg_conid_to_symbol[conid] = sym_cfg.symbol
+                logger.info("CPG resolved %s → conid %d", sym_cfg.symbol, conid)
+            except Exception as e:
+                logger.warning("CPG conid resolve failed for %s: %s", sym_cfg.symbol, e)
+                self._errors += 1
 
-            now_iso = datetime.now(timezone.utc).isoformat()
+    async def _cpg_subscribe_snapshots(self) -> None:
+        """Subscribe conIDs for market data by requesting initial snapshots."""
+        if not self._cpg_conid_to_symbol:
+            return
+        conids = ",".join(str(c) for c in self._cpg_conid_to_symbol)
+        try:
+            await self._ibkr._get(
+                "/iserver/marketdata/snapshot",
+                params={"conids": conids, "fields": "31,84,85,87"},
+            )
+        except Exception as e:
+            logger.debug("CPG initial snapshot subscription: %s", e)
 
-            tick_data = {
-                "symbol": symbol,
-                "timestamp": now_iso,
-                "price": price,
-                "bid": bid,
-                "ask": ask,
-                "last": price,  # Use validated price, not raw ticker.last
-                "volume": volume,
-            }
+    @staticmethod
+    def _parse_cpg_float(value) -> float | None:
+        """Parse CPG price field — may have C/H/L prefix."""
+        if value is None:
+            return None
+        s = str(value).strip()
+        if not s:
+            return None
+        for pfx in ("C", "H", "L"):
+            if s.startswith(pfx):
+                s = s[1:]
+        try:
+            f = float(s)
+            return f if f > 0 and not math.isnan(f) else None
+        except (ValueError, TypeError):
+            return None
 
-            # Buffer (overwrite previous tick for same symbol — we want latest)
-            self._pending_ticks[symbol] = tick_data
-            self._last_tick[symbol] = tick_data  # persistent cache for get_quote()
+    def _process_cpg_snapshot(self, snap: dict) -> None:
+        """Process a single CPG snapshot/WS update into _ingest_tick."""
+        conid = int(snap.get("conid", snap.get("conidEx", 0)))
+        symbol = self._cpg_conid_to_symbol.get(conid)
+        if not symbol:
+            return
+
+        from app.services.streaming_config import _INDEX_EXCHANGES
+        is_index = symbol.upper() in _INDEX_EXCHANGES
+
+        last = self._parse_cpg_float(snap.get("31"))
+        bid = self._parse_cpg_float(snap.get("84"))
+        ask = self._parse_cpg_float(snap.get("85"))
+        volume_raw = self._parse_cpg_float(snap.get("87"))
+        volume = int(volume_raw) if volume_raw else 0
+
+        # Determine best price
+        if is_index:
+            price = last
+            if price:
+                bid = price
+                ask = price
+        else:
+            price = last or (((bid or 0) + (ask or 0)) / 2 if bid and ask else None)
+
+        # Try to extract close from "C" prefixed values (CPG convention)
+        close = None
+        raw_last = snap.get("31")
+        if isinstance(raw_last, str) and raw_last.startswith("C"):
+            try:
+                close = float(raw_last[1:])
+            except (ValueError, TypeError):
+                pass
+
+        if price and price > 0:
+            self._ingest_tick(symbol, price, bid, ask, volume, close, is_index)
+
+    async def _cpg_ws_loop(self) -> None:
+        """CPG WebSocket streaming loop — connects and receives push updates."""
+        import aiohttp
+        import ssl as _ssl
+
+        # Build WSS URL from gateway URL
+        gw = self._ibkr._gateway_url
+        ws_url = gw.replace("https://", "wss://").replace("http://", "ws://") + "/v1/api/ws"
+
+        ssl_ctx = _ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = _ssl.CERT_NONE
+
+        delay = 2.0
+        backoff_cap = 30.0
+
+        while self._running:
+            try:
+                # Resolve conIDs and subscribe
+                await self._cpg_resolve_conids()
+                await self._cpg_subscribe_snapshots()
+
+                logger.info("CPG WebSocket connecting to %s (%d symbols)", ws_url, len(self._cpg_conid_to_symbol))
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.ws_connect(ws_url, ssl=ssl_ctx, heartbeat=30) as ws:
+                        self._cpg_ws = ws
+                        delay = 2.0  # reset backoff on successful connect
+                        logger.info("CPG WebSocket connected")
+
+                        async for msg in ws:
+                            if not self._running:
+                                break
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                try:
+                                    data = json.loads(msg.data)
+                                    if isinstance(data, dict) and ("conid" in data or "conidEx" in data):
+                                        self._process_cpg_snapshot(data)
+                                except json.JSONDecodeError:
+                                    pass
+                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                logger.warning("CPG WebSocket closed/error: %s", msg.data)
+                                break
+
+                self._cpg_ws = None
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("CPG WebSocket error: %s — reconnecting in %.0fs", e, delay)
+                self._errors += 1
+
+            if not self._running:
+                break
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, backoff_cap)
+
+    # ── CPG polling loop ───────────────────────────────────────────────────
+
+    async def _cpg_poll_loop(self) -> None:
+        """CPG snapshot polling loop — fetches prices at regular intervals."""
+        # Initial setup
+        await self._cpg_resolve_conids()
+        await self._cpg_subscribe_snapshots()
+
+        if not self._cpg_conid_to_symbol:
+            logger.warning("CPG polling: no symbols resolved — stopping")
+            return
+
+        conids = ",".join(str(c) for c in self._cpg_conid_to_symbol)
+        logger.info("CPG polling started for %d symbols", len(self._cpg_conid_to_symbol))
+
+        # First snapshot may return empty — need a second one
+        await asyncio.sleep(0.5)
+
+        while self._running:
+            try:
+                data = await self._ibkr._get(
+                    "/iserver/marketdata/snapshot",
+                    params={"conids": conids, "fields": "31,84,85,87"},
+                )
+                if isinstance(data, list):
+                    for snap in data:
+                        self._process_cpg_snapshot(snap)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug("CPG poll error: %s", e)
+                self._errors += 1
+
+            await asyncio.sleep(self._config.cpg_poll_interval)
 
     # ── Batch flush loop ──────────────────────────────────────────────────────
 

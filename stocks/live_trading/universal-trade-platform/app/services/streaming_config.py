@@ -68,6 +68,11 @@ class StreamingConfig:
     # Hard price gate: reject any tick more than this % from previous close (0.35 = ±35%)
     close_band_pct: float = 0.35
 
+    # Streaming mode for tick data: "auto" (ib_insync if available, else CPG websocket),
+    # "websocket" (force CPG WebSocket), "polling" (force CPG snapshot polling)
+    streaming_mode: str = "auto"
+    cpg_poll_interval: float = 1.5  # seconds between polls (polling mode only)
+
     # Option quote streaming (background pre-fetch)
     option_quotes_enabled: bool = False
     option_quotes_poll_interval: float = 2.0
@@ -158,6 +163,8 @@ def load_streaming_config(path: str | Path) -> StreamingConfig:
         ws_broadcast_enabled=raw.get("ws_broadcast_enabled", True),
         redis_publish_interval=float(raw.get("redis_publish_interval", 1.0)),
         close_band_pct=float(raw.get("close_band_pct", 0.35)),
+        streaming_mode=raw.get("streaming_mode", "auto"),
+        cpg_poll_interval=float(raw.get("cpg_poll_interval", 1.5)),
         option_quotes_enabled=raw.get("option_quotes_enabled", False),
         option_quotes_poll_interval=float(raw.get("option_quotes_poll_interval", 2.0)),
         option_quotes_strike_range_pct=float(raw.get("option_quotes_strike_range_pct", 3.0)),
