@@ -63,6 +63,10 @@ class MarketDataStreamingService:
         # overwritten by live ticks.  Used for the hard ±35% sanity gate.
         self._prev_close: dict[str, float] = {}
 
+        # Per-symbol message counters
+        self._ticks_received_per_symbol: dict[str, int] = {}
+        self._ticks_accepted_per_symbol: dict[str, int] = {}
+
         # CPG streaming state
         self._cpg_conid_to_symbol: dict[int, str] = {}
         self._cpg_ws = None  # aiohttp WebSocket session
@@ -112,10 +116,14 @@ class MarketDataStreamingService:
             tick = self._last_tick.get(symbol)
             prev_close = self._prev_close.get(symbol)
             rejected = self._reject_count.get(symbol, 0)
+            received = self._ticks_received_per_symbol.get(symbol, 0)
+            accepted = self._ticks_accepted_per_symbol.get(symbol, 0)
             per_symbol[symbol] = {
                 "last_price": tick["price"] if tick else None,
                 "last_timestamp": tick["timestamp"] if tick else None,
                 "prev_close": prev_close,
+                "ticks_received": received,
+                "ticks_accepted": accepted,
                 "ticks_rejected": rejected,
             }
 
@@ -374,6 +382,7 @@ class MarketDataStreamingService:
     ) -> bool:
         """Validate and buffer a single tick. Returns True if accepted."""
         self._ticks_received += 1
+        self._ticks_received_per_symbol[symbol] = self._ticks_received_per_symbol.get(symbol, 0) + 1
 
         # Anchor previous close (once per symbol per session)
         valid_close = close and close > 0 and (not is_index or close > 100)
@@ -439,6 +448,7 @@ class MarketDataStreamingService:
         }
         self._pending_ticks[symbol] = tick_data
         self._last_tick[symbol] = tick_data
+        self._ticks_accepted_per_symbol[symbol] = self._ticks_accepted_per_symbol.get(symbol, 0) + 1
         return True
 
     # ── ib_insync tick handler ─────────────────────────────────────────────
