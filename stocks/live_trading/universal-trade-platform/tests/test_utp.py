@@ -2671,7 +2671,7 @@ class TestIBKRRestProvider:
 
         snap_resp = AsyncMock()
         snap_resp.json = AsyncMock(return_value=[{
-            "31": "5650.25", "84": "5649.50", "85": "5651.00", "87": "1500000",
+            "31": "5650.25", "84": "5649.50", "86": "5651.00", "87": "1500000",
         }])
         snap_resp.raise_for_status = MagicMock()
         snap_resp.__aenter__ = AsyncMock(return_value=snap_resp)
@@ -2934,36 +2934,19 @@ class TestIBKRRestProvider:
 
     @pytest.mark.asyncio
     async def test_get_option_chain(self):
-        """get_option_chain() should return expirations + strikes."""
+        """get_option_chain() should return expirations + strikes from cache."""
         from app.core.providers.ibkr_rest import IBKRRestProvider
         provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
         provider._connected = True
         provider._session = AsyncMock()
         provider._conid_cache["SPX"] = 416904
 
-        # Mock strikes response
-        strikes_resp = AsyncMock()
-        strikes_resp.json = AsyncMock(return_value={
-            "call": [5400.0, 5500.0, 5600.0],
-            "put": [5400.0, 5500.0, 5600.0],
-        })
-        strikes_resp.text = AsyncMock(return_value='{}')
-        strikes_resp.raise_for_status = MagicMock()
-        strikes_resp.__aenter__ = AsyncMock(return_value=strikes_resp)
-        strikes_resp.__aexit__ = AsyncMock(return_value=False)
-
-        # Mock expirations response
-        exp_resp = AsyncMock()
-        exp_resp.json = AsyncMock(return_value=[
-            {"maturityDate": "20260320"},
-            {"maturityDate": "20260327"},
-        ])
-        exp_resp.raise_for_status = MagicMock()
-        exp_resp.__aenter__ = AsyncMock(return_value=exp_resp)
-        exp_resp.__aexit__ = AsyncMock(return_value=False)
-
-        provider._session.post = MagicMock(return_value=strikes_resp)
-        provider._session.get = MagicMock(return_value=exp_resp)
+        # Seed the daily cache directly (avoids mocking the multi-step CPG flow)
+        provider._cache.option_chains.put(
+            "SPX",
+            expirations=["20260320", "20260327"],
+            strikes=[5400.0, 5500.0, 5600.0],
+        )
 
         chain = await provider.get_option_chain("SPX")
         assert 5500.0 in chain["strikes"]
@@ -5323,7 +5306,7 @@ symbols:
         svc._cpg_conid_to_symbol = {12345: "SPY"}
         # Seed close for validation
         svc._prev_close["SPY"] = 500.0
-        snap = {"conid": 12345, "31": "510.0", "84": "509.5", "85": "510.5", "87": "1000"}
+        snap = {"conid": 12345, "31": "510.0", "84": "509.5", "86": "510.5", "87": "1000"}
         svc._process_cpg_snapshot(snap)
         assert "SPY" in svc._last_tick
         assert svc._last_tick["SPY"]["price"] == 510.0
@@ -6379,3 +6362,80 @@ option_quotes_num_expirations: 2
             assert "source" not in data  # no streaming_cache tag
         finally:
             reset_option_quote_streaming()
+
+    async def test_redis_quote_cache_put_writes_to_redis(self):
+        """Cache.put() writes quotes to Redis asynchronously."""
+        from app.services.option_quote_streaming import OptionQuoteCache
+        mock_redis = AsyncMock()
+        mock_redis.set = AsyncMock()
+        cache = OptionQuoteCache(redis_client=mock_redis)
+        quotes = [{"strike": 5500, "bid": 1.0, "ask": 1.5}]
+        cache.put("SPX", "2026-03-25", "CALL", quotes)
+        # Allow the fire-and-forget task to run
+        await asyncio.sleep(0.05)
+        mock_redis.set.assert_called_once()
+        call_args = mock_redis.set.call_args
+        assert "utp:option_quotes:SPX:2026-03-25:CALL" == call_args[0][0]
+        import json as _json
+        payload = _json.loads(call_args[0][1])
+        assert payload["quotes"] == quotes
+        assert "fetched_at_utc" in payload
+
+    async def test_redis_quote_cache_load_populates_memory(self):
+        """load_from_redis() populates in-memory cache from Redis."""
+        import json as _json
+        from app.services.option_quote_streaming import OptionQuoteCache
+        quotes = [{"strike": 5500, "bid": 1.0, "ask": 1.5}]
+        mock_redis = AsyncMock()
+        mock_redis.get = AsyncMock(side_effect=lambda key: _json.dumps({
+            "quotes": quotes, "fetched_at_utc": "2026-03-25T14:00:00+00:00",
+        }) if "CALL" in key else None)
+
+        cache = OptionQuoteCache(redis_client=mock_redis)
+        loaded = await cache.load_from_redis(["SPX"], ["2026-03-25"])
+        assert loaded == 1  # CALL loaded, PUT returned None
+        result = cache.get("SPX", "2026-03-25", "CALL", max_age_seconds=60.0)
+        assert result == quotes
+
+    async def test_redis_quote_cache_no_overwrite_fresher(self):
+        """load_from_redis() doesn't overwrite fresher in-memory data."""
+        import json as _json
+        from app.services.option_quote_streaming import OptionQuoteCache
+        fresh_quotes = [{"strike": 5500, "bid": 2.0}]
+        old_quotes = [{"strike": 5500, "bid": 1.0}]
+        mock_redis = AsyncMock()
+        mock_redis.get = AsyncMock(return_value=_json.dumps({
+            "quotes": old_quotes, "fetched_at_utc": "2026-03-25T12:00:00+00:00",
+        }))
+
+        cache = OptionQuoteCache(redis_client=mock_redis)
+        # Put fresh data in memory first
+        cache.put("SPX", "2026-03-25", "CALL", fresh_quotes)
+        # Load from Redis — should NOT overwrite
+        await cache.load_from_redis(["SPX"], ["2026-03-25"])
+        result = cache.get("SPX", "2026-03-25", "CALL", max_age_seconds=60.0)
+        assert result == fresh_quotes  # Still the fresh data
+
+    def test_get_cached_quotes_market_hours_5min_ttl(self):
+        """During market hours, get_cached_quotes uses 5-minute max age."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService, CachedQuotes, _is_market_hours
+        from app.services.streaming_config import StreamingConfig
+        import app.services.option_quote_streaming as oqs_mod
+
+        svc = OptionQuoteStreamingService(StreamingConfig(), provider=MagicMock())
+        # Insert entry that's 6 minutes old
+        svc._cache._cache[("SPX", "2026-03-25", "CALL")] = CachedQuotes(
+            quotes=[{"strike": 5500}],
+            fetched_at=time.monotonic() - 360,  # 6 min ago
+            fetched_at_utc="2026-03-25T14:00:00+00:00",
+        )
+        # During market hours: 6 min > 5 min limit → None
+        with patch.object(oqs_mod, "_is_market_hours", return_value=True):
+            result = svc.get_cached_quotes("SPX", "2026-03-25", "CALL")
+            assert result is None
+
+        # Outside market hours: serve regardless of age
+        with patch.object(oqs_mod, "_is_market_hours", return_value=False):
+            result = svc.get_cached_quotes("SPX", "2026-03-25", "CALL")
+            assert result is not None
+            assert result[0]["strike"] == 5500

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import ssl
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import Any, ClassVar
@@ -54,9 +55,14 @@ from app.models import (
 logger = logging.getLogger(__name__)
 
 # CPG snapshot field IDs
+# Verified against raw CPG responses:
+#   84 = bid price, 85 = bid size, 86 = ask price, 88 = ask size
+#   31 = last price, 87 = volume
 _FIELD_LAST = "31"
 _FIELD_BID = "84"
-_FIELD_ASK = "85"
+_FIELD_ASK = "86"
+_FIELD_BID_SIZE = "85"
+_FIELD_ASK_SIZE = "88"
 _FIELD_VOLUME = "87"
 
 # CPG order status → our OrderStatus
@@ -91,6 +97,11 @@ class IBKRRestProvider(BrokerProvider):
         self._keepalive_task: asyncio.Task | None = None
         self._conid_cache: dict[str, int] = {}
         self._option_conid_cache: dict[str, int] = {}
+        # Short-lived caches for portfolio/balance data (avoid repeated CPG calls)
+        self._portfolio_cache: tuple[float, list[dict]] | None = None  # (monotonic_ts, items)
+        self._positions_raw_cache: tuple[float, list] | None = None  # (monotonic_ts, raw CPG list)
+        self._balances_cache: tuple[float, Any] | None = None  # (monotonic_ts, AccountBalances)
+        self._PORTFOLIO_CACHE_TTL = 10.0  # seconds
         self._cache = IBKRCacheManager(
             option_chain_cache_dir=(
                 option_chain_cache_dir or _cfg.settings.ibkr_option_chain_cache_dir
@@ -169,33 +180,39 @@ class IBKRRestProvider(BrokerProvider):
         """Resolve option contract → conId via CPG secdef/info. Cached."""
         key = f"{symbol}_{expiration}_{strike}_{right}"
         cached = self._option_conid_cache.get(key)
-        if cached is not None:
-            if cached == 0:
-                raise RuntimeError(f"No contract (cached): {symbol} {expiration} {strike}{right}")
+        if cached is not None and cached > 0:
             return cached
+        # If cached == 0 (negative) for an index, don't trust it — may have been
+        # cached from the wrong exchange (SMART instead of CBOE).  Re-resolve.
+        if cached == 0 and symbol.upper() not in self._INDEX_SYMBOLS:
+            raise RuntimeError(f"No contract (cached): {symbol} {expiration} {strike}{right}")
 
         underlying_conid = await self._resolve_conid(symbol)
         exp_clean = expiration.replace("-", "")
 
         month_mmmyy = _to_mmmyy(exp_clean)
 
-        # SMART works for all symbols on secdef/info (CBOE fails for RUT/NDX)
-        try:
-            data = await self._get("/iserver/secdef/info", params={
-                "conid": underlying_conid, "sectype": "OPT", "month": month_mmmyy,
-                "strike": str(strike), "right": right, "exchange": "SMART",
-            })
-        except Exception:
-            data = None
+        # Try exchanges in order: SMART works for RUT/NDX, CBOE needed for SPX.
+        # For non-index symbols, only try SMART.
+        exchanges = ["SMART", "CBOE"] if symbol.upper() in self._INDEX_SYMBOLS else ["SMART"]
+        for exch in exchanges:
+            try:
+                data = await self._get("/iserver/secdef/info", params={
+                    "conid": underlying_conid, "sectype": "OPT", "month": month_mmmyy,
+                    "strike": str(strike), "right": right, "exchange": exch,
+                })
+            except Exception:
+                data = None
+                continue
 
-        if isinstance(data, list):
-            for item in data:
-                item_exp = str(item.get("maturityDate", "")).replace("-", "")
-                if item_exp == exp_clean and item.get("conid"):
-                    con_id = int(item["conid"])
-                    self._option_conid_cache[key] = con_id
-                    return con_id
-            # Do NOT fall back to first result — wrong expiration = wrong conID
+            if isinstance(data, list):
+                for item in data:
+                    item_exp = str(item.get("maturityDate", "")).replace("-", "")
+                    if item_exp == exp_clean and item.get("conid"):
+                        con_id = int(item["conid"])
+                        self._option_conid_cache[key] = con_id
+                        return con_id
+                # Do NOT fall back to first result — wrong expiration = wrong conID
 
         # Cache negative result to avoid re-hitting CPG for the same strike
         self._option_conid_cache[key] = 0
@@ -211,29 +228,36 @@ class IBKRRestProvider(BrokerProvider):
         """Submit order to CPG, auto-confirm if a replyId is returned.
 
         CPG may return [{"id": "reply_id", "message": [...]}] requiring
-        confirmation before the order is accepted.
+        confirmation before the order is accepted.  Multiple confirmation
+        prompts can be chained (e.g., margin warning then price warning).
         """
         data = await self._post(
             f"/iserver/account/{self._account_id}/orders",
             json={"orders": [order_body]},
         )
 
-        # CPG returns a list — first element may be a confirmation prompt
-        if isinstance(data, list) and data:
+        # Auto-confirm up to 5 chained prompts (margin, price, size, etc.)
+        for attempt in range(5):
+            if not isinstance(data, list) or not data:
+                break
             first = data[0]
             # If it has an "id" but no "order_id", it's a confirmation prompt
-            if "id" in first and "order_id" not in first:
-                reply_id = first["id"]
-                logger.info("CPG order confirmation required (replyId=%s)", reply_id)
-                data = await self._post(
-                    f"/iserver/reply/{reply_id}",
-                    json={"confirmed": True},
-                )
-                if isinstance(data, list) and data:
-                    return data[0]
-                return data if isinstance(data, dict) else {}
-            return first
+            if "id" not in first or "order_id" in first:
+                return first
+            reply_id = first["id"]
+            messages = first.get("message", [])
+            logger.info(
+                "CPG order confirmation %d (replyId=%s): %s",
+                attempt + 1, reply_id,
+                "; ".join(messages) if isinstance(messages, list) else str(messages),
+            )
+            data = await self._post(
+                f"/iserver/reply/{reply_id}",
+                json={"confirmed": True},
+            )
 
+        if isinstance(data, list) and data:
+            return data[0]
         return data if isinstance(data, dict) else {}
 
     # ── Keepalive ─────────────────────────────────────────────────────────────
@@ -339,10 +363,10 @@ class IBKRRestProvider(BrokerProvider):
         con_id = await self._resolve_conid(symbol)
 
         # Request market data snapshot
-        # Fields: 31=last, 84=bid, 85=ask, 87=volume
+        # Fields: 31=last, 84=bid, 86=ask, 87=volume
         data = await self._get(
             "/iserver/marketdata/snapshot",
-            params={"conids": str(con_id), "fields": "31,84,85,87"},
+            params={"conids": str(con_id), "fields": "31,84,86,87"},
         )
 
         if not isinstance(data, list) or not data:
@@ -436,9 +460,18 @@ class IBKRRestProvider(BrokerProvider):
         if not self._connected or not self._session:
             return []
 
+        # Return cached if fresh
+        if self._portfolio_cache:
+            ts, cached = self._portfolio_cache
+            if (time.monotonic() - ts) < self._PORTFOLIO_CACHE_TTL:
+                return cached
+
         data = await self._get(f"/portfolio/{self._account_id}/positions/0")
         if not isinstance(data, list):
             return []
+
+        # Cache raw response for get_daily_pnl_by_con_id to reuse
+        self._positions_raw_cache = (time.monotonic(), data)
 
         result = []
         for item in data:
@@ -462,6 +495,7 @@ class IBKRRestProvider(BrokerProvider):
                     "account": self._account_id,
                 }
             )
+        self._portfolio_cache = (time.monotonic(), result)
         return result
 
     # ── Equity Orders ─────────────────────────────────────────────────────────
@@ -575,6 +609,7 @@ class IBKRRestProvider(BrokerProvider):
         )
 
         result = await self._place_order_with_confirmation(order_body)
+        logger.info("CPG combo order result: %s", result)
         order_id = str(result.get("order_id", result.get("orderId", uuid.uuid4())))
 
         return OrderResult(
@@ -840,7 +875,7 @@ class IBKRRestProvider(BrokerProvider):
                 # First request — subscribes conIds, may return empty fields
                 await self._get(
                     "/iserver/marketdata/snapshot",
-                    params={"conids": conids_str, "fields": "31,84,85,87"},
+                    params={"conids": conids_str, "fields": "31,84,86,87"},
                 )
                 # Short delay for CPG to populate
                 import asyncio as _aio
@@ -848,7 +883,7 @@ class IBKRRestProvider(BrokerProvider):
                 # Second request — should have data
                 data = await self._get(
                     "/iserver/marketdata/snapshot",
-                    params={"conids": conids_str, "fields": "31,84,85,87"},
+                    params={"conids": conids_str, "fields": "31,84,86,87"},
                 )
                 if isinstance(data, list):
                     all_snaps.extend(data)
@@ -946,6 +981,12 @@ class IBKRRestProvider(BrokerProvider):
         if not self._connected or not self._session:
             return AccountBalances()
 
+        # Return cached if fresh
+        if self._balances_cache:
+            ts, cached = self._balances_cache
+            if (time.monotonic() - ts) < self._PORTFOLIO_CACHE_TTL:
+                return cached
+
         data = await self._get(f"/portfolio/{self._account_id}/summary")
         if not isinstance(data, dict):
             return AccountBalances()
@@ -959,7 +1000,7 @@ class IBKRRestProvider(BrokerProvider):
             except (ValueError, TypeError):
                 return 0.0
 
-        return AccountBalances(
+        result = AccountBalances(
             cash=_val("totalcashvalue"),
             net_liquidation=_val("netliquidation"),
             buying_power=_val("buyingpower"),
@@ -967,22 +1008,32 @@ class IBKRRestProvider(BrokerProvider):
             available_funds=_val("availablefunds"),
             broker="ibkr",
         )
+        self._balances_cache = (time.monotonic(), result)
+        return result
 
     # ── Daily P&L ──────────────────────────────────────────────────────────────
 
     async def get_daily_pnl_by_con_id(self) -> dict[int, float]:
         """Get today's daily P&L for each position, keyed by conId.
 
-        CPG positions endpoint may include dailyPnl per position — try that first.
-        Falls back to empty dict if not available (per-position daily P&L
-        requires TWS streaming via reqPnLSingle, which CPG doesn't expose).
+        Reuses the cached positions response from get_portfolio_items() when
+        fresh (avoids a duplicate CPG HTTP call).
         """
         if not self._connected or not self._session:
             return {}
 
-        data = await self._get(f"/portfolio/{self._account_id}/positions/0")
-        if not isinstance(data, list):
-            return {}
+        # Reuse raw positions cache if fresh
+        data = None
+        if self._positions_raw_cache:
+            ts, cached_data = self._positions_raw_cache
+            if (time.monotonic() - ts) < self._PORTFOLIO_CACHE_TTL:
+                data = cached_data
+
+        if data is None:
+            data = await self._get(f"/portfolio/{self._account_id}/positions/0")
+            if not isinstance(data, list):
+                return {}
+            self._positions_raw_cache = (time.monotonic(), data)
 
         result: dict[int, float] = {}
         for item in data:

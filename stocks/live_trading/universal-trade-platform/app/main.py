@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,7 +29,9 @@ from app.services.live_data_service import init_live_data_service, reset_live_da
 from app.services.position_store import init_position_store, get_position_store
 from app.websocket import ws_manager
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+_log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, _log_level, logging.INFO),
+                    format="%(asctime)s %(name)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 # Module-level daemon mode flag. When True, lifespan() skips provider init
@@ -92,8 +95,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     init_ledger(data_dir)
     init_position_store(data_dir)
 
-    # Select IBKR provider: real if account_id is configured, stub otherwise
-    if settings.ibkr_account_id:
+    # Select IBKR provider: REST (CPG), live (ib_insync), or stub
+    if settings.ibkr_api_mode == "rest":
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        ibkr_provider = IBKRRestProvider(
+            gateway_url=settings.ibkr_gateway_url,
+            account_id=settings.ibkr_account_id,
+        )
+    elif settings.ibkr_account_id:
         ibkr_provider = IBKRLiveProvider()
     else:
         ibkr_provider = IBKRProvider()

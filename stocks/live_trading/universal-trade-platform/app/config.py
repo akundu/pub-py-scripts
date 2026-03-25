@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     ibkr_readonly: bool = True
     ibkr_exchange: str = "SMART"
     ibkr_option_chain_cache_dir: str = "data/utp/cache/option_chains"
+    ibkr_api_mode: str = "tws"  # "tws" (ib_insync) or "rest" (Client Portal Gateway)
+    ibkr_gateway_url: str = "https://localhost:5000"
 
     # Enabled brokers
     enabled_brokers: str = "robinhood,etrade,ibkr"

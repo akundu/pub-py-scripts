@@ -3,11 +3,20 @@
 Activated by ``option_quotes_enabled: true`` in the streaming config YAML.
 Continuously fetches option quotes for configured symbols and caches them
 for instant serving via CLI and REST endpoints.
+
+Option quotes are cached in both in-memory and Redis.  Redis acts as a
+warm-start cache so that a daemon restart serves quotes instantly without
+waiting for the first fetch cycle.  The freshness policy is:
+  - During market hours (9:20a–4:10p ET Mon–Fri): max 5 min age
+  - Outside market hours: serve whatever is cached (no age limit)
+Redis keys are mode-agnostic — data written by TWS is usable by CPG and
+vice-versa.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -17,6 +26,10 @@ from typing import Optional
 from app.services.streaming_config import StreamingConfig
 
 logger = logging.getLogger(__name__)
+
+# Redis key prefix for option quote prices
+_REDIS_QUOTES_KEY_PREFIX = "utp:option_quotes"
+_REDIS_QUOTES_TTL = 24 * 3600  # 24 hours — large TTL; freshness enforced by age check
 
 
 # ── Cache dataclass ──────────────────────────────────────────────────────────
@@ -30,10 +43,25 @@ class CachedQuotes:
 
 
 class OptionQuoteCache:
-    """In-memory cache keyed by (symbol, expiration, option_type)."""
+    """In-memory + Redis backed cache keyed by (symbol, expiration, option_type).
 
-    def __init__(self) -> None:
+    Writes go to both in-memory dict and Redis (async, fire-and-forget).
+    Reads check in-memory first, then Redis as fallback.
+    Redis keys are mode-agnostic so TWS and CPG share the same cache.
+    """
+
+    def __init__(self, redis_client=None) -> None:
         self._cache: dict[tuple[str, str, str], CachedQuotes] = {}
+        self._redis = redis_client
+
+    def set_redis(self, redis_client) -> None:
+        """Set or update the Redis client (called after connect)."""
+        self._redis = redis_client
+
+    @staticmethod
+    def _redis_key(symbol: str, expiration: str, option_type: str) -> str:
+        """Build Redis hash key: utp:option_quotes:SPX:2026-03-25:CALL"""
+        return f"{_REDIS_QUOTES_KEY_PREFIX}:{symbol}:{expiration}:{option_type}"
 
     def get(
         self,
@@ -67,12 +95,77 @@ class OptionQuoteCache:
         option_type: str,
         quotes: list[dict],
     ) -> None:
-        key = (symbol.upper(), _normalize_exp(expiration), option_type.upper())
+        symbol = symbol.upper()
+        expiration = _normalize_exp(expiration)
+        option_type = option_type.upper()
+        key = (symbol, expiration, option_type)
+        now_utc = datetime.now(timezone.utc).isoformat()
         self._cache[key] = CachedQuotes(
             quotes=quotes,
             fetched_at=time.monotonic(),
-            fetched_at_utc=datetime.now(timezone.utc).isoformat(),
+            fetched_at_utc=now_utc,
         )
+        # Fire-and-forget Redis write (scheduled on event loop if available)
+        if self._redis is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._redis_put(symbol, expiration, option_type, quotes, now_utc))
+            except RuntimeError:
+                pass  # No event loop — skip Redis (e.g. in tests)
+
+    async def _redis_put(
+        self,
+        symbol: str,
+        expiration: str,
+        option_type: str,
+        quotes: list[dict],
+        fetched_at_utc: str,
+    ) -> None:
+        """Write quotes to Redis as JSON with timestamp."""
+        try:
+            rkey = self._redis_key(symbol, expiration, option_type)
+            payload = json.dumps({
+                "quotes": quotes,
+                "fetched_at_utc": fetched_at_utc,
+            })
+            await self._redis.set(rkey, payload, ex=_REDIS_QUOTES_TTL)
+        except Exception as e:
+            logger.debug("Redis quote write failed for %s %s %s: %s",
+                         symbol, expiration, option_type, e)
+
+    async def load_from_redis(self, symbols: list[str], expirations: list[str],
+                              option_types: list[str] = ("CALL", "PUT")) -> int:
+        """Load quotes from Redis into in-memory cache. Returns count loaded."""
+        if not self._redis:
+            return 0
+        loaded = 0
+        for symbol in symbols:
+            for exp in expirations:
+                for opt_type in option_types:
+                    rkey = self._redis_key(symbol.upper(), _normalize_exp(exp), opt_type.upper())
+                    try:
+                        raw = await self._redis.get(rkey)
+                        if not raw:
+                            continue
+                        data = json.loads(raw)
+                        quotes = data.get("quotes", [])
+                        fetched_utc = data.get("fetched_at_utc", "")
+                        if not quotes:
+                            continue
+                        key = (symbol.upper(), _normalize_exp(exp), opt_type.upper())
+                        # Only load if not already in memory (don't overwrite fresher data)
+                        if key not in self._cache:
+                            self._cache[key] = CachedQuotes(
+                                quotes=quotes,
+                                fetched_at=time.monotonic(),  # treat as "just loaded"
+                                fetched_at_utc=fetched_utc,
+                            )
+                            loaded += 1
+                    except Exception as e:
+                        logger.debug("Redis quote load failed for %s: %s", rkey, e)
+        if loaded:
+            logger.info("Loaded %d quote entries from Redis cache", loaded)
+        return loaded
 
     def stats(self) -> dict:
         now = time.monotonic()
@@ -239,6 +332,9 @@ class OptionQuoteStreamingService:
                 "loaded": self._conid_cache_loaded,
                 "provider_conid_cache_size": len(getattr(self._provider, '_option_conid_cache', {})),
             },
+            "redis_quote_cache": {
+                "enabled": self._redis is not None,
+            },
             "config": {
                 "poll_interval": self._config.option_quotes_poll_interval,
                 "strike_range_pct": self._config.option_quotes_strike_range_pct,
@@ -255,6 +351,12 @@ class OptionQuoteStreamingService:
         # Connect to Redis and load conID cache
         await self._redis_connect()
         await self._redis_load_conid_cache()
+
+        # Share Redis client with the quote cache for persistence
+        self._cache.set_redis(self._redis)
+
+        # Warm quote cache from Redis — instant prices on restart
+        await self._redis_load_quotes()
 
         logger.info("Option quote streaming started")
 
@@ -313,18 +415,23 @@ class OptionQuoteStreamingService:
         if not self._redis:
             return
         try:
-            # Load option conID cache
+            # Load option conID cache (skip negative/zero entries)
             data = await self._redis.hgetall(self._redis_conid_key)
             if data and hasattr(self._provider, '_option_conid_cache'):
                 count = 0
+                skipped = 0
                 for key, val in data.items():
                     try:
-                        self._provider._option_conid_cache[key] = int(val)
+                        v = int(val)
+                        if v <= 0:
+                            skipped += 1
+                            continue
+                        self._provider._option_conid_cache[key] = v
                         count += 1
                     except (ValueError, TypeError):
                         pass
                 self._conid_cache_snapshot = len(self._provider._option_conid_cache)
-                logger.info("Loaded %d option conIDs from Redis", count)
+                logger.info("Loaded %d option conIDs from Redis (skipped %d negative)", count, skipped)
 
             # Load underlying conID cache
             udata = await self._redis.hgetall(self._REDIS_UNDERLYING_KEY)
@@ -343,6 +450,20 @@ class OptionQuoteStreamingService:
         except Exception as e:
             logger.warning("Failed to load conID cache from Redis: %s", e)
 
+    async def _redis_load_quotes(self) -> None:
+        """Load cached option quotes from Redis on startup for instant serving."""
+        if not self._redis:
+            return
+        try:
+            symbols = [s.symbol for s in self._config.symbols if s.sec_type in ("IND", "STK")]
+            # Use next N trading days as candidate expirations
+            expirations = _next_n_trading_days(self._config.option_quotes_num_expirations)
+            loaded = await self._cache.load_from_redis(symbols, expirations)
+            if loaded:
+                logger.info("Warm-started %d quote cache entries from Redis", loaded)
+        except Exception as e:
+            logger.warning("Failed to load quotes from Redis: %s", e)
+
     async def _redis_save_conid_cache(self) -> None:
         """Save new conID entries to Redis (incremental — only saves new keys)."""
         if not self._redis:
@@ -353,9 +474,11 @@ class OptionQuoteStreamingService:
                 cache = self._provider._option_conid_cache
                 current_size = len(cache)
                 if current_size > self._conid_cache_snapshot:
-                    # Pipeline all entries (Redis HSET is idempotent)
+                    # Pipeline all positive entries (skip negative/zero)
                     pipe = self._redis.pipeline()
                     for key, val in cache.items():
+                        if val <= 0:
+                            continue
                         pipe.hset(self._redis_conid_key, key, str(val))
                     pipe.expire(self._redis_conid_key, self._REDIS_CONID_TTL)
                     await pipe.execute()
@@ -538,9 +661,16 @@ class OptionQuoteStreamingService:
         upcoming = _next_n_trading_days(n)
         filtered = [e for e in all_exps if e in upcoming]
 
-        # If no exact matches, take the first N future expirations
-        if not filtered:
-            filtered = [e for e in all_exps if e >= today_str][:n]
+        # If fewer than N matches, supplement with upcoming trading days directly.
+        # CPG's get_option_chain may not enumerate daily expirations (e.g. SPX 0DTE)
+        # but secdef/info CAN resolve conIDs for those dates.
+        if len(filtered) < n:
+            for day in upcoming:
+                if day not in filtered:
+                    filtered.append(day)
+                if len(filtered) >= n:
+                    break
+            filtered = sorted(filtered)
 
         self._expiration_cache[symbol] = (today_str, filtered)
         if filtered:
@@ -564,7 +694,7 @@ class OptionQuoteStreamingService:
 
         max_age=0 (default) auto-selects:
         - Market hours (9:20a-4:10p ET, Mon-Fri): 5 minutes
-        - Outside market hours: 1 day (serve whatever is cached)
+        - Outside market hours: serve whatever is cached (no age limit)
         """
         if max_age <= 0:
             max_age = 300.0 if _is_market_hours() else 86400.0

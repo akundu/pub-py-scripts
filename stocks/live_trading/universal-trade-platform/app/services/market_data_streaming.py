@@ -522,7 +522,7 @@ class MarketDataStreamingService:
         try:
             await self._ibkr._get(
                 "/iserver/marketdata/snapshot",
-                params={"conids": conids, "fields": "31,84,85,87"},
+                params={"conids": conids, "fields": "31,84,86,87"},
             )
         except Exception as e:
             logger.debug("CPG initial snapshot subscription: %s", e)
@@ -556,7 +556,7 @@ class MarketDataStreamingService:
 
         last = self._parse_cpg_float(snap.get("31"))
         bid = self._parse_cpg_float(snap.get("84"))
-        ask = self._parse_cpg_float(snap.get("85"))
+        ask = self._parse_cpg_float(snap.get("86"))   # 86=ask price (85=bid size)
         volume_raw = self._parse_cpg_float(snap.get("87"))
         volume = int(volume_raw) if volume_raw else 0
 
@@ -660,7 +660,7 @@ class MarketDataStreamingService:
             try:
                 data = await self._ibkr._get(
                     "/iserver/marketdata/snapshot",
-                    params={"conids": conids, "fields": "31,84,85,87"},
+                    params={"conids": conids, "fields": "31,84,86,87"},
                 )
                 if isinstance(data, list):
                     for snap in data:

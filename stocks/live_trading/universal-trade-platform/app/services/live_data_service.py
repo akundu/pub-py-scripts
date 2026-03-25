@@ -143,30 +143,30 @@ def _group_options_into_spreads(positions: list[dict]) -> list[dict]:
             continue
 
         # Pair legs into spreads: match short (qty < 0) with long (qty > 0)
-        shorts = sorted([l for l in legs if l.get("quantity", 0) < 0],
-                       key=lambda l: l.get("strike", 0))
-        longs = sorted([l for l in legs if l.get("quantity", 0) > 0],
-                      key=lambda l: l.get("strike", 0))
+        shorts = sorted([l for l in legs if (l.get("quantity", 0) or 0) < 0],
+                       key=lambda l: float(l.get("strike", 0) or 0))
+        longs = sorted([l for l in legs if (l.get("quantity", 0) or 0) > 0],
+                      key=lambda l: float(l.get("strike", 0) or 0))
 
         paired = []
         used_longs = set()
         for short in shorts:
-            s_strike = short.get("strike", 0)
-            s_right = short.get("right", "")
-            s_qty = abs(short.get("quantity", 0))
+            s_strike = float(short.get("strike", 0) or 0)
+            s_right = short.get("right", "") or ""
+            s_qty = abs(int(short.get("quantity", 0) or 0))
             # Find matching long with same right and qty
             best_long = None
             for i, long in enumerate(longs):
                 if i in used_longs:
                     continue
-                if (long.get("right", "") == s_right
-                        and abs(long.get("quantity", 0)) == s_qty):
+                if ((long.get("right", "") or "") == s_right
+                        and abs(int(long.get("quantity", 0) or 0)) == s_qty):
                     best_long = (i, long)
                     break
             if best_long:
                 idx, long_leg = best_long
                 used_longs.add(idx)
-                l_strike = long_leg.get("strike", 0)
+                l_strike = float(long_leg.get("strike", 0) or 0)
 
                 # Build spread
                 total_mv = (short.get("market_value", 0) or 0) + (long_leg.get("market_value", 0) or 0)
@@ -292,58 +292,58 @@ class LiveDataService:
         }
 
         broker_pnl = {}
-        logger.info("get_portfolio: ibkr_healthy=%s, ibkr=%s", self._ibkr_healthy(), type(self._ibkr).__name__ if self._ibkr else None)
+        portfolio_items: list[dict] = []
 
         if self._ibkr_healthy():
-            # Account balances
-            if hasattr(self._ibkr, "get_account_balances"):
-                try:
-                    balances = await self._ibkr.get_account_balances()
-                    if balances.net_liquidation > 0:
-                        result["balances"] = {
-                            "cash": balances.cash,
-                            "net_liquidation": balances.net_liquidation,
-                            "buying_power": balances.buying_power,
-                            "maint_margin_req": balances.maint_margin_req,
-                            "available_funds": balances.available_funds,
-                        }
-                except Exception:
-                    logger.debug("Failed to fetch IBKR balances for portfolio", exc_info=True)
+            # Fetch balances and portfolio items concurrently
+            import asyncio as _aio
+            balances_coro = (
+                self._ibkr.get_account_balances()
+                if hasattr(self._ibkr, "get_account_balances") else _aio.sleep(0)
+            )
+            items_coro = (
+                self._ibkr.get_portfolio_items()
+                if hasattr(self._ibkr, "get_portfolio_items") else _aio.sleep(0)
+            )
+            balances_result, items_result = await _aio.gather(
+                balances_coro, items_coro, return_exceptions=True,
+            )
 
-            # Portfolio items for per-position P&L
-            if hasattr(self._ibkr, "get_portfolio_items"):
-                try:
-                    portfolio_items = await self._ibkr.get_portfolio_items()
-                    if portfolio_items:
-                        pos_dicts = _positions_to_dicts(summary.active_positions)
-                        broker_pnl = _match_broker_pnl(portfolio_items, pos_dicts)
+            # Process balances
+            if not isinstance(balances_result, BaseException) and hasattr(balances_result, "net_liquidation"):
+                if balances_result.net_liquidation > 0:
+                    result["balances"] = {
+                        "cash": balances_result.cash,
+                        "net_liquidation": balances_result.net_liquidation,
+                        "buying_power": balances_result.buying_power,
+                        "maint_margin_req": balances_result.maint_margin_req,
+                        "available_funds": balances_result.available_funds,
+                    }
 
-                        if broker_pnl:
-                            broker_total_upnl = sum(
-                                v["unrealized_pnl"] for v in broker_pnl.values()
-                            )
-                            result["unrealized_pnl"] = round(broker_total_upnl, 2)
-                            result["total_pnl"] = round(
-                                summary.realized_pnl + broker_total_upnl, 2
-                            )
-                except Exception:
-                    logger.debug("Failed to fetch IBKR portfolio items", exc_info=True)
+            # Process portfolio items
+            if not isinstance(items_result, BaseException) and isinstance(items_result, list):
+                portfolio_items = items_result
+                if portfolio_items:
+                    pos_dicts = _positions_to_dicts(summary.active_positions)
+                    broker_pnl = _match_broker_pnl(portfolio_items, pos_dicts)
+
+                    if broker_pnl:
+                        broker_total_upnl = sum(
+                            v["unrealized_pnl"] for v in broker_pnl.values()
+                        )
+                        result["unrealized_pnl"] = round(broker_total_upnl, 2)
+                        result["total_pnl"] = round(
+                            summary.realized_pnl + broker_total_upnl, 2
+                        )
 
         # Build con_id→IBKR item lookup for direct matching
-        # Reuse portfolio_items from above if available, avoid duplicate IBKR call
+        # Reuse portfolio_items from above (already fetched at line 316)
         ibkr_by_con_id: dict[int, dict] = {}
-        items_for_enrichment = None
-        if self._ibkr_healthy() and hasattr(self._ibkr, "get_portfolio_items"):
-            try:
-                items_for_enrichment = await self._ibkr.get_portfolio_items()
-                logger.info("Portfolio items for enrichment: %d items", len(items_for_enrichment or []))
-                for item in (items_for_enrichment or []):
-                    cid = item.get("con_id")
-                    if cid:
-                        ibkr_by_con_id[cid] = item
-                logger.info("con_id lookup built: %d entries, ibkr_healthy=%s", len(ibkr_by_con_id), self._ibkr_healthy())
-            except Exception as e:
-                logger.info("Failed to build con_id lookup: %s", e)
+        if portfolio_items:
+            for item in portfolio_items:
+                cid = item.get("con_id")
+                if cid:
+                    ibkr_by_con_id[cid] = item
 
         # Fetch daily P&L per conId
         daily_pnl_by_con: dict[int, float] = {}
@@ -352,6 +352,14 @@ class LiveDataService:
                 daily_pnl_by_con = await self._ibkr.get_daily_pnl_by_con_id()
             except Exception:
                 logger.debug("Failed to fetch daily PnL", exc_info=True)
+
+        # Fallback: account-level daily P&L (CPG REST doesn't provide per-position)
+        account_daily_pnl = 0.0
+        if not daily_pnl_by_con and self._ibkr_healthy() and hasattr(self._ibkr, "get_account_daily_pnl"):
+            try:
+                account_daily_pnl = await self._ibkr.get_account_daily_pnl()
+            except Exception:
+                logger.debug("Failed to fetch account daily PnL", exc_info=True)
 
         # Enrich each position with IBKR data (1:1 by con_id)
         raw_positions = []
@@ -377,6 +385,9 @@ class LiveDataService:
                 total_daily_pnl += daily_pnl_by_con[con_id]
             raw_positions.append(p)
 
+        # Use per-position total if available, otherwise account-level fallback
+        if total_daily_pnl == 0.0 and account_daily_pnl != 0.0:
+            total_daily_pnl = account_daily_pnl
         result["daily_pnl"] = round(total_daily_pnl, 2)
 
         # Group option positions into spreads for display
