@@ -417,7 +417,9 @@ class MarketDataStreamingService:
                     )
                 return False
         elif is_index:
-            return False  # No close yet — skip index ticks
+            # No close yet — seed from first valid tick so subsequent ticks pass the gate
+            self._prev_close[symbol] = price
+            logger.info("Seeded prev_close for %s from first tick: %.4f", symbol, price)
 
         # Secondary intraday reference check
         if reference and reference > 0:
