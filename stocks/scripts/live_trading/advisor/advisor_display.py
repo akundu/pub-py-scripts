@@ -196,15 +196,35 @@ class AdvisorDisplay:
             for ticker, info in ticker_prices.items():
                 p = info.get("price")
                 pc = info.get("prev_close")
+                qt = info.get("quote_ts")
+                # Show age of quote
+                age_str = ""
+                if qt is not None:
+                    try:
+                        if hasattr(qt, 'to_pydatetime'):
+                            qt = qt.to_pydatetime()
+                        if qt.tzinfo:
+                            age_secs = (datetime.now(qt.tzinfo) - qt).total_seconds()
+                        else:
+                            age_secs = 0
+                        if age_secs > 60:
+                            age_str = f" {C.YELLOW}({int(age_secs//60)}m ago){C.RESET}"
+                        elif age_secs > 10:
+                            age_str = f" {C.DIM}({int(age_secs)}s){C.RESET}"
+                    except Exception:
+                        pass
+
                 if p and pc and pc > 0:
                     pct = (p - pc) / pc
                     clr = C.GREEN if pct >= 0 else C.RED
                     parts.append(
                         f"{C.BOLD}{ticker}{C.RESET} {_fmt_price(p)} "
-                        f"{clr}{pct:+.2%}{C.RESET}"
+                        f"{clr}{pct:+.2%}{C.RESET}{age_str}"
                     )
                 elif p:
-                    parts.append(f"{C.BOLD}{ticker}{C.RESET} {_fmt_price(p)}")
+                    parts.append(f"{C.BOLD}{ticker}{C.RESET} {_fmt_price(p)}{age_str}")
+                else:
+                    parts.append(f"{C.BOLD}{ticker}{C.RESET} {C.RED}no quote{C.RESET}")
             if parts:
                 print(f" {' | '.join(parts)}")
         elif current_price:

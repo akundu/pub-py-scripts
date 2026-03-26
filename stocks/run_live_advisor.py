@@ -33,7 +33,7 @@ import signal
 import sys
 import threading
 import time as time_mod
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 
 # Ensure project root is in path
@@ -913,9 +913,16 @@ Examples:
     if not args.profile:
         parser.error("--profile is required (or use --list-profiles)")
 
-    # Load profile
+    # Determine mode and load profile with mode-specific overrides
+    if args.simulate:
+        profile_mode = "simulate"
+    elif args.live:
+        profile_mode = "live"
+    else:
+        profile_mode = "live"
+
     try:
-        profile = load_profile(args.profile)
+        profile = load_profile(args.profile, mode=profile_mode)
     except (FileNotFoundError, ValueError) as e:
         print(f"Error loading profile: {e}", file=sys.stderr)
         sys.exit(1)
@@ -993,10 +1000,19 @@ Examples:
         )
         input_thread.start()
 
-    # Graceful shutdown
+    # Graceful shutdown — first Ctrl+C sets stop flag, second force-exits
+    _ctrl_c_count = [0]
+
     def _signal_handler(sig, frame):
+        _ctrl_c_count[0] += 1
         stop_event.set()
-        display.print_info("\nShutting down...")
+        if _ctrl_c_count[0] >= 2:
+            display.print_info("\nForce exit.")
+            # Print summary before dying
+            for ev in evaluators.values():
+                ev.close()
+            os._exit(0)
+        display.print_info("\nShutting down... (Ctrl+C again to force)")
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -1037,18 +1053,33 @@ Examples:
                 pass
             continue
 
-        # Market open initialization (all tickers)
+        # Market open initialization (all tickers in parallel)
         if not day_initialized:
-            display.print_info("Market opening — initializing day signals...")
+            display.print_info("Market opening — initializing day signals (parallel)...")
             all_ok = True
-            for eticker, ev in evaluators.items():
-                if ev.on_market_open():
-                    display.print_success(
-                        f"  {eticker}: prev_close={ev.prev_close:.2f}"
-                    )
-                else:
-                    display.print_error(f"  {eticker}: failed to initialize")
-                    all_ok = False
+            init_results: dict = {}
+
+            def _init_ticker(eticker_ev):
+                etk, evl = eticker_ev
+                try:
+                    ok = evl.on_market_open()
+                    return (etk, ok, evl.prev_close)
+                except Exception as e:
+                    return (etk, False, str(e))
+
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=len(evaluators)) as pool:
+                futures = {pool.submit(_init_ticker, item): item[0]
+                           for item in evaluators.items()}
+                for future in futures:
+                    eticker, ok, prev = future.result()
+                    if ok:
+                        display.print_success(f"  {eticker}: prev_close={prev:.2f}")
+                    else:
+                        display.print_error(f"  {eticker}: failed ({prev})")
+                        all_ok = False
+
+            # Replace the old sequential block
             if all_ok or any(ev.day_initialized for ev in evaluators.values()):
                 day_initialized = True
             else:
@@ -1076,19 +1107,45 @@ Examples:
         ticker_prices: dict = {}
 
         for eticker, ev in evaluators.items():
-            price = ev.get_current_price()
+            if stop_event.is_set():
+                break
+
+            try:
+                price = ev.get_current_price()
+            except Exception as e:
+                logger.warning(f"Price fetch failed for {eticker}: {e}")
+                price = None
+
+            # Get quote timestamp if available
+            quote_ts = None
+            if price is not None:
+                try:
+                    bars = ev._equity_provider.get_bars(eticker, date.today())
+                    if bars is not None and not bars.empty and "timestamp" in bars.columns:
+                        quote_ts = bars["timestamp"].iloc[-1]
+                except Exception:
+                    pass
+
+            # Always add to ticker_prices so header shows all tickers
+            ticker_prices[eticker] = {
+                "price": price,
+                "prev_close": ev.prev_close,
+                "quote_ts": quote_ts,
+            }
+
             if price is None:
                 continue
             if current_price is None:
                 current_price = price
 
-            ticker_prices[eticker] = {
-                "price": price,
-                "prev_close": ev.prev_close,
-            }
+            if stop_event.is_set():
+                break
 
             exits = ev.evaluate_exits(price, now)
             last_exits.extend(exits)
+
+            if stop_event.is_set():
+                break
 
             if _is_trading_hours(now):
                 entries = ev.evaluate_entries(price, now)

@@ -1,86 +1,89 @@
+# ============================================================================
+# Adaptive V5 — SINGLE SOURCE OF TRUTH for all trading parameters
+#
+# This file drives ALL three modes:
+#   - Live:     python run_live_advisor.py --profile adaptive_v5 --live
+#   - Simulate: python run_live_advisor.py --profile adaptive_v5 --simulate 2026-03-20
+#   - Backtest: scripts/backtesting/configs/orchestration_adaptive_budget.yaml
+#               (references this file via 'profile: adaptive_v5')
+#
+# Shared settings are at the top level. Mode-specific overrides are under
+# mode_overrides.{live|simulate|backtest}. To change trading behavior for
+# all modes, edit the shared section. To change only backtest behavior
+# (e.g., use_mid, profit targets), edit mode_overrides.backtest.
+#
+# File: scripts/live_trading/advisor/profiles/adaptive_v5.yaml
+# ============================================================================
+
 name: adaptive_v5
 tickers: [NDX, SPX, RUT]
 default_ticker: NDX
 
 ticker_params:
   NDX:
-    spread_width: 50
+    spread_width: 60
     min_credit_per_option: 0.75
   SPX:
-    spread_width: 50
+    spread_width: 30
     min_credit_per_option: 0.35
   RUT:
-    spread_width: 10
+    spread_width: 30
     min_credit_per_option: 0.35
 
+# --- Risk ---
 risk:
   max_risk_per_trade: 50000
-  daily_budget: 500000
-  max_trades_per_window: 3      # base: 3 trades per 10min window (adaptive boosts this)
+  daily_budget: 1000000
+  max_trades_per_window: 3
   trade_window_minutes: 10
 
-# Adaptive budget — ROI-based dynamic allocation from empirical backtest
-# Backtest result: +46% P&L vs static, 56% lower drawdown, 11.77 Sharpe
+# --- Adaptive budget (shared across all modes) ---
 adaptive_budget:
   enabled: true
-
-  # ROI-based dynamic allocation (fixed thresholds, no historical data needed)
-  # norm_roi = credit/(width-credit)*100 / (DTE+1)
-  # Derived from 180-day bid/ask backtest across SPX/NDX/RUT
   roi_tier_enabled: true
   roi_mode: fixed_roi
-  roi_thresholds: [6.0, 9.0]           # ROI% breakpoints
-  roi_multipliers: [1.0, 2.0, 4.0]     # <6%→1x, 6-9%→2x, >9%→4x
-  roi_max_multiplier: 4.0              # absolute cap
-  roi_normalize_dte: true              # divide ROI by (DTE+1) for cross-DTE fairness
-
-  min_total_credit: 500                # $500 minimum total credit per trade
-
-  # Contract scaling: multiply contracts based on ROI tier
+  roi_thresholds: [6.0, 9.0]
+  roi_multipliers: [1.0, 2.0, 4.0]
+  roi_max_multiplier: 4.0
+  roi_normalize_dte: true
+  min_total_credit: 500
   contract_scaling_enabled: true
-  contract_max_multiplier: 4.0         # matches roi_max_multiplier
-
-  # Momentum: allow more trades per window when intraday move > 1%
+  contract_max_multiplier: 4.0
   momentum_enabled: true
   momentum_threshold: 0.01
   momentum_extra_trades: 2
-
-  # 0DTE cutoff: no new 0DTE after 11:30 AM PST (divert to 1DTE+)
   dte0_cutoff_utc: "18:30"
-
-  # Reserve: release extra budget in last 2 hours
   reserve_enabled: true
   reserve_pct: 0.30
   reserve_release_minutes: 120
-
-  # VIX regime scaling
   vix_budget_multipliers:
     low: 1.2
     normal: 1.0
     high: 0.6
     extreme: 0.25
 
+# --- Data providers ---
 providers:
   equity:
     csv_dir: equities_output
   options:
     csv_dir: csv_exports/options
     fallback_csv_dir: options_csv_output_full
-    dte_buckets: [0, 1, 2, 5]    # match tier DTEs only; fewer = faster IBKR fetches
+    dte_buckets: [0, 1, 2, 5]
   utp:
     base_url: http://localhost:8000
 
+# --- Signal ---
 signal:
   name: percentile_range
   params:
     lookback: 120
-    percentiles: [85, 90, 92]
-    dte_windows: [0, 1, 2, 3, 5, 7, 10]
+    percentiles: [80, 85, 92]
+    dte_windows: [0, 1, 2, 3, 5]
 
 instrument: credit_spread
 
-# Tiers: sell in direction of move (pursuit)
-# DTE0=P93, DTE1=P90, DTE2+=P85
+# --- Tiers: DTE0=P90, DTE1=P85, DTE2=P85, DTE3+=P80, pursuit direction ---
 tiers:
   - label: dte0_p92
     priority: 1
@@ -91,10 +94,10 @@ tiers:
     entry_start: "13:30"
     entry_end: "20:00"
 
-  - label: dte1_p90
+  - label: dte1_p85
     priority: 2
     dte: 1
-    percentile: 90
+    percentile: 85
     spread_width: 50
     directional: pursuit
     entry_start: "13:00"
@@ -109,42 +112,93 @@ tiers:
     entry_start: "14:00"
     entry_end: "19:00"
 
-  - label: dte5_p85
+  - label: dte5_p80
     priority: 4
     dte: 5
-    percentile: 85
+    percentile: 80
     spread_width: 50
     directional: pursuit
     entry_start: "14:00"
     entry_end: "19:00"
 
+# --- Exit rules (shared) ---
 exit_rules:
   roll_enabled: true
   max_rolls: 3
-  roll_check_start_utc: "18:30"     # 11:30am PST — single evaluation time
-  roll_proximity_pct: 0.005          # 0.5% from strike
-  roll_percentile: 85               # P85 strike at rolled DTE
+  roll_check_start_utc: "18:30"
+  roll_proximity_pct: 0.005
+  roll_percentile: 85
   max_width_multiplier: 2.0
   roll_min_dte: 1
   roll_max_dte: 10
   max_move_cap: 150
   zero_dte_proximity_warn: 0.005
-  profit_target_pct: null            # disabled — hold to expiration
-  stop_loss_pct: null                # disabled — no stop loss
+  profit_target_pct: null
+  stop_loss_pct: null
   stop_loss_start_utc: null
-  time_exit_utc: null                # disabled — no time-based exit
+  time_exit_utc: null
 
+# --- Strategy defaults (shared) ---
 strategy_defaults:
   lookback: 120
   option_types: ["put", "call"]
   interval_minutes: 10
   num_contracts: 1
   min_credit: 0.15
-  min_total_credit: 2000            # $2K minimum total credit
+  min_total_credit: 2000
   min_volume: 5
-  use_mid: false                       # realistic: sell at BID, buy at ASK
+  use_mid: false
   contract_sizing: max_budget
   max_credit_width_ratio: 0.80
-  min_otm_pct: 0.007                 # short strike must be at least 0.7% OTM
-  min_otm_dte0_only: true            # only enforce min_otm_pct on DTE=0
+  min_otm_pct: 0.007
+  min_otm_dte0_only: true
   width_search_factors: [1.0, 0.75, 0.50]
+
+# ============================================================================
+# Mode-specific overrides
+#
+# Keys here override the shared config above for a specific mode.
+# Only specify what differs — everything else inherits from the shared config.
+# ============================================================================
+mode_overrides:
+  backtest:
+    # Backtest uses mid prices (historical data doesn't have reliable bid/ask)
+    strategy_defaults:
+      use_mid: true
+    # Backtest uses profit target and stop loss for position management
+    exit_rules:
+      profit_target_pct: 0.50
+      stop_loss_pct: 2.0
+      stop_loss_start_utc: "19:00"
+      time_exit_utc: "20:30"
+    # Backtest orchestration-specific settings
+    orchestration:
+      lookback_days: 250
+      output_dir: results/orchestrated_adaptive_budget
+      phase2_mode: interval
+      interval_minutes: 5
+      interval_budget_mode: adaptive
+      selection_mode: top_n
+      top_n: 5
+      interval_budget_cap: 50000
+      max_risk_per_transaction: 50000
+      scoring_weights: [0.80, 0.10, 0.10]
+      # Additional adaptive budget params for orchestration engine
+      adaptive_budget_extra:
+        opportunity_scaling_enabled: true
+        opportunity_max_multiplier: 3.0
+        momentum_boost: 1.5
+        time_weight_enabled: true
+        time_weight_curve: linear
+        time_weight_late_factor: 1.5
+        absolute_interval_cap: null
+        max_daily_utilization: 0.95
+        combined_max_multiplier: 5.0
+
+  live:
+    # Live uses UTP/IBKR — no overrides needed, all shared defaults apply
+    {}
+
+  simulate:
+    # Simulate uses CSV data — no overrides needed, all shared defaults apply
+    {}

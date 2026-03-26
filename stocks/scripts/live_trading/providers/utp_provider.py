@@ -20,8 +20,8 @@ from scripts.backtesting.providers.base import DataProvider
 
 logger = logging.getLogger(__name__)
 
-# Default cache TTL: 2 minutes (advisor runs on 60s cycle)
-DEFAULT_CACHE_TTL = 120
+# Default cache TTL: 30 seconds (fresh prices each advisor cycle)
+DEFAULT_CACHE_TTL = 30
 
 
 class _CacheMixin:
@@ -159,12 +159,7 @@ class UtpEquityProvider(DataProvider, _CacheMixin):
             self._realtime_provider.close()
 
     def _get_utp_quote(self, ticker: str) -> Optional[pd.DataFrame]:
-        """Fetch current quote from UTP, return as single-row DataFrame."""
-        cache_key = f"quote_{ticker}"
-        cached = self._cache_get(cache_key)
-        if cached is not None:
-            return cached
-
+        """Fetch current quote from UTP, return as single-row DataFrame. Never cached."""
         try:
             resp = self._session.get(
                 f"{self._base_url}/market/quote/{ticker}",
@@ -176,17 +171,31 @@ class UtpEquityProvider(DataProvider, _CacheMixin):
             logger.warning(f"UTP quote fetch failed for {ticker}: {e}")
             return None
 
-        # Extract price from UTP response
-        last = data.get("last") or data.get("price") or data.get("close")
+        # Extract price — prefer last, then bid, then ask
+        last = data.get("last") or data.get("bid") or data.get("ask") or data.get("price")
         if last is None:
             logger.warning(f"UTP quote for {ticker} has no price field: {list(data.keys())}")
             return None
 
         last = float(last)
-        now = datetime.now(timezone.utc)
+
+        # Use the quote's own timestamp if available
+        quote_ts = data.get("timestamp")
+        if quote_ts:
+            try:
+                ts = pd.Timestamp(quote_ts)
+                if ts.tzinfo is None:
+                    ts = ts.tz_localize("UTC")
+            except Exception:
+                ts = pd.Timestamp(datetime.now(timezone.utc))
+        else:
+            ts = pd.Timestamp(datetime.now(timezone.utc))
+
+        source = data.get("source", "unknown")
+        logger.debug(f"UTP quote {ticker}: {last:.2f} @ {ts} ({source})")
 
         df = pd.DataFrame([{
-            "timestamp": now,
+            "timestamp": ts,
             "open": last,
             "high": last,
             "low": last,
@@ -194,8 +203,6 @@ class UtpEquityProvider(DataProvider, _CacheMixin):
             "volume": int(data.get("volume", 0)),
         }])
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-
-        self._cache_set(cache_key, df)
         return df
 
     @staticmethod
@@ -390,7 +397,7 @@ class UtpOptionsProvider(DataProvider, _CacheMixin):
             resp = self._session.get(
                 f"{self._base_url}/market/options/{ticker}",
                 params=params,
-                timeout=15,  # 15s timeout; skip this expiration if IBKR is slow
+                timeout=45,  # 45s timeout; IBKR can be slow qualifying contracts
             )
             resp.raise_for_status()
             data = resp.json()

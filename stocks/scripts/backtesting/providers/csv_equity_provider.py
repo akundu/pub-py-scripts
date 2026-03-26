@@ -138,10 +138,18 @@ class CSVEquityProvider(DataProvider):
                 idx = i
                 break
 
-        if idx is None or idx == 0:
+        if idx is not None and idx > 0:
+            prev_date = sorted_dates[idx - 1]
+        elif idx is None and sorted_dates:
+            # trading_date not in file list (e.g., today before data download)
+            # Use the last available date before trading_date
+            prev_dates = [d for d in sorted_dates if d < trading_date]
+            if not prev_dates:
+                return None
+            prev_date = prev_dates[-1]
+        else:
             return None
 
-        prev_date = sorted_dates[idx - 1]
         prev_bars = self.get_bars(ticker, prev_date)
         if prev_bars.empty:
             return None

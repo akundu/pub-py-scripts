@@ -234,12 +234,26 @@ def _parse_tier(raw: Dict) -> TierDef:
     )
 
 
-def load_profile(name_or_path: str) -> AdvisorProfile:
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge override into base. Override values win."""
+    result = dict(base)
+    for key, val in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = val
+    return result
+
+
+def load_profile(name_or_path: str, mode: str = "live") -> AdvisorProfile:
     """Load an advisor profile from a YAML file.
 
     Args:
         name_or_path: Either a profile name (looked up in profiles/ dir)
                       or an absolute/relative path to a YAML file.
+        mode: One of "live", "simulate", "backtest". If the profile has
+              mode_overrides.<mode>, those values are deep-merged over
+              the shared config before parsing.
 
     Returns:
         AdvisorProfile with all fields populated.
@@ -258,6 +272,12 @@ def load_profile(name_or_path: str) -> AdvisorProfile:
 
     with open(path) as f:
         raw = yaml.safe_load(f)
+
+    # Apply mode-specific overrides
+    overrides = (raw.get("mode_overrides") or {}).get(mode, {})
+    if overrides and isinstance(overrides, dict):
+        raw = _deep_merge(raw, overrides)
+        logger.info(f"Applied mode_overrides.{mode}: {list(overrides.keys())}")
 
     if not raw:
         raise ValueError(f"Empty profile: {path}")
