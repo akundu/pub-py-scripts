@@ -2133,27 +2133,88 @@ async def _cmd_close_http(args, server: str) -> int:
                     print(f"  Current mark: ${mark_abs:.2f}")
 
             if legs:
-                print(f"  Closing legs:")
+                # Build closing legs for estimate
+                from app.models import MultiLegOrder, OptionLeg, OrderType as _OT, OptionType as _OpT, OptionAction as _OA
+                close_legs = []
                 for leg in legs:
+                    if not isinstance(leg, dict):
+                        continue
                     action = leg.get("action", "")
                     close_action = "BUY_TO_CLOSE" if "SELL" in action else "SELL_TO_CLOSE"
-                    ot = leg.get("option_type", "PUT")
-                    strike = leg.get("strike", 0)
-                    con_id = leg.get("con_id", "?")
-                    print(f"    {close_action:>18} {ot} {strike} x{close_qty} (conId={con_id})")
+                    close_legs.append(OptionLeg(
+                        symbol=match.get("symbol", ""),
+                        expiration=exp,
+                        strike=float(leg.get("strike", 0)),
+                        option_type=_OpT(leg.get("option_type", "PUT")),
+                        action=_OA(close_action),
+                        quantity=close_qty,
+                    ))
 
-                # Show current mark value
-                mark = match.get("market_price", 0)
-                if mark:
-                    mark_per = abs(mark)
-                    print(f"\n  Current mark:   ${mark_per:.4f} per spread")
-                    print(f"  Cost to close {close_qty}:  ~${mark_per * close_qty * 100:.2f}")
-                    if net_price is not None and net_price < mark_per * 0.8:
+                # Fetch per-leg bid/ask
+                est_result = None
+                if close_legs:
+                    fake_order = MultiLegOrder(
+                        broker="ibkr", legs=close_legs,
+                        order_type=_OT.LIMIT if net_price else _OT.MARKET,
+                        quantity=close_qty,
+                    )
+                    est_result = await _estimate_spread_market_price(client, fake_order)
+
+                if est_result:
+                    net = est_result["net"]
+                    est_legs = est_result.get("legs", [])
+                    is_debit = net < 0
+                    cost_total = abs(net) * close_qty * 100
+                    if is_debit:
+                        print(f"  Est. cost:  ~${cost_total:,.2f} (debit to close)")
+                    else:
+                        print(f"  Est. receive: ~${cost_total:,.2f} (credit to close)")
+
+                    # Show estimated P&L
+                    upnl = match.get("broker_unrealized_pnl", 0) or 0
+                    mv = match.get("market_value", 0) or 0
+                    derived_credit = upnl + abs(mv) if mv else 0
+                    if derived_credit > 0:
+                        realized_pnl = derived_credit - cost_total
+                        pnl_c = "92" if realized_pnl >= 0 else "91"
+                        print(f"  Est. P&L:   {_color(f'~${realized_pnl:+,.2f}', pnl_c)} (credit received ~${derived_credit:,.2f})")
+
+                    print(f"  Legs:")
+                    for ld in est_legs:
+                        side_label = f"→ {'sell@bid' if ld['side'] == 'sell' else 'buy@ask'} ${ld['price_used']:.2f}"
+                        crossed = " ⚠ crossed" if ld.get("crossed") else ""
+                        print(f"    {ld['action']:>18} {ld['option_type']} strike={ld['strike']:<10}"
+                              f" bid=${ld['bid']:<9.2f} ask=${ld['ask']:<9.2f} {side_label}{crossed}")
+                else:
+                    # Fallback: mark-based display (per-leg quotes not in cache range)
+                    print(f"  Closing legs:")
+                    for leg in legs:
+                        action = leg.get("action", "")
+                        close_action = "BUY_TO_CLOSE" if "SELL" in action else "SELL_TO_CLOSE"
+                        ot = leg.get("option_type", "PUT")
+                        strike = leg.get("strike", 0)
+                        print(f"    {close_action:>18} {ot} {strike} x{close_qty}")
+                    mark = match.get("market_price", 0)
+                    if mark:
+                        mark_per = abs(mark)
+                        cost_total = mark_per * close_qty * 100
+                        print(f"\n  Est. cost:  ~${cost_total:,.2f} (debit to close, mark=${mark_per:.4f}/spread)")
+
+                        upnl = match.get("broker_unrealized_pnl", 0) or 0
+                        mv = match.get("market_value", 0) or 0
+                        derived_credit = upnl + abs(mv) if mv else 0
+                        if derived_credit > 0:
+                            realized_pnl = derived_credit - cost_total
+                            pnl_c = "92" if realized_pnl >= 0 else "91"
+                            print(f"  Est. P&L:   {_color(f'~${realized_pnl:+,.2f}', pnl_c)} (credit received ~${derived_credit:,.2f})")
+
+                if net_price is not None:
+                    mark = match.get("market_price", 0)
+                    if mark and net_price < abs(mark) * 0.8:
                         print(f"  {_color('Warning:', '93')} --net-price ${net_price:.2f} "
-                              f"is well below the mark (${mark_per:.2f}). Order will likely be cancelled.")
-                        print(f"  Suggest: --net-price {mark_per:.2f} or higher")
+                              f"is well below the mark (${abs(mark):.2f}). Order may not fill.")
 
-                # Try margin check (may fail for some symbols)
+                # Try margin check
                 from app.services.trade_service import build_closing_trade_request
                 trade_req = build_closing_trade_request(match, close_qty, net_price)
                 if trade_req.multi_leg_order:
@@ -2169,7 +2230,7 @@ async def _cmd_close_http(args, server: str) -> int:
                                 print(f"    Maintenance margin: ${md.get('maint_margin', 0):>12,.2f}")
                                 print(f"    Commission:         ${md.get('commission', 0):>12,.2f}")
                     except Exception:
-                        pass  # Margin check is optional — conId close works without it
+                        pass
             else:
                 print(f"\n  Equity close: {match.get('symbol')} x{close_qty}")
 
@@ -2183,32 +2244,119 @@ async def _cmd_close_http(args, server: str) -> int:
         if net_price is not None:
             payload["net_price"] = net_price
 
-        # Show order summary before executing
+        # Look up position for the summary
         confirm = getattr(args, "confirm", False)
-        price_label = f"${net_price:.2f} (LIMIT)" if net_price is not None else "MARKET"
+        price_label = f"LIMIT @ ${net_price:.2f}" if net_price is not None else "MARKET"
+        match = None
+        try:
+            pos_resp = await client.get("/dashboard/portfolio")
+            if pos_resp.status_code == 200:
+                for p in pos_resp.json().get("positions", []):
+                    if p.get("position_id", "").startswith(position_id):
+                        match = p
+                        break
+        except Exception:
+            pass
 
         _print_header("Close Order Summary")
         print(f"  Position:   {position_id[:8]}")
-        print(f"  Quantity:   {qty or 'all'}")
-        print(f"  Order type: {price_label}")
-        if net_price is not None:
-            cost = abs(net_price) * (qty or 1) * 100
-            print(f"  Est. cost:  ~${cost:,.2f} (debit)")
+        if match:
+            sym = match.get("symbol", "?")
+            otype = match.get("order_type", "?")
+            close_qty = qty or int(abs(match.get("quantity", 1)))
+            exp = match.get("expiration", "")
+            legs = match.get("legs") or []
+
+            # Build strikes display
+            strikes_s = match.get("legs_summary", "")
+            if not strikes_s and legs:
+                parts = []
+                for leg in legs:
+                    if isinstance(leg, dict):
+                        r = "P" if leg.get("option_type") == "PUT" else "C"
+                        parts.append(f"{r}{leg.get('strike', '')}")
+                strikes_s = "/".join(parts)
+
+            print(f"  Symbol:     {sym}")
+            print(f"  Type:       {otype} {strikes_s}")
+            print(f"  Quantity:   {close_qty}")
+            print(f"  Expiration: {exp}")
+            print(f"  Price:      {price_label}")
+
+            # Fetch per-leg bid/ask for the closing order
+            if legs and otype == "multi_leg":
+                from app.models import MultiLegOrder, OptionLeg, OrderType as _OT, OptionType as _OpT, OptionAction as _OA
+                close_legs = []
+                for leg in legs:
+                    if not isinstance(leg, dict):
+                        continue
+                    action = leg.get("action", "")
+                    close_action = "BUY_TO_CLOSE" if "SELL" in action else "SELL_TO_CLOSE"
+                    close_legs.append(OptionLeg(
+                        symbol=sym,
+                        expiration=exp,
+                        strike=float(leg.get("strike", 0)),
+                        option_type=_OpT(leg.get("option_type", "PUT")),
+                        action=_OA(close_action),
+                        quantity=close_qty,
+                    ))
+                if close_legs:
+                    fake_order = MultiLegOrder(
+                        broker="ibkr", legs=close_legs,
+                        order_type=_OT.LIMIT if net_price else _OT.MARKET,
+                        quantity=close_qty,
+                    )
+                    est_result = await _estimate_spread_market_price(client, fake_order)
+                    if est_result:
+                        net = est_result["net"]
+                        est_legs = est_result.get("legs", [])
+                        is_debit = net < 0
+                        cost_total = abs(net) * close_qty * 100
+                        if is_debit:
+                            print(f"  Est. cost:  ~${cost_total:,.2f} (debit to close)")
+                        else:
+                            print(f"  Est. receive: ~${cost_total:,.2f} (credit to close)")
+
+                        # Show per-leg bid/ask
+                        if est_legs:
+                            upnl = match.get("broker_unrealized_pnl", 0) or 0
+                            mv = match.get("market_value", 0) or 0
+                            derived_credit = upnl + abs(mv) if mv else 0
+                            if derived_credit > 0:
+                                realized_pnl = derived_credit - cost_total
+                                pnl_c = "92" if realized_pnl >= 0 else "91"
+                                print(f"  Est. P&L:   {_color(f'~${realized_pnl:+,.2f}', pnl_c)} (credit received ~${derived_credit:,.2f})")
+                            print(f"  Legs:")
+                            for ld in est_legs:
+                                side_label = f"→ {'sell@bid' if ld['side'] == 'sell' else 'buy@ask'} ${ld['price_used']:.2f}"
+                                crossed = " ⚠ crossed" if ld.get("crossed") else ""
+                                print(f"    {ld['action']:>18} {ld['option_type']} strike={ld['strike']:<10}"
+                                      f" bid=${ld['bid']:<9.2f} ask=${ld['ask']:<9.2f} {side_label}{crossed}")
+                    else:
+                        # Fallback: mark-based estimate (per-leg quotes not in cache range)
+                        mark = match.get("market_price", 0)
+                        if mark and abs(mark) > 0:
+                            mark_per = abs(mark)
+                            cost_total = mark_per * close_qty * 100
+                            print(f"  Est. cost:  ~${cost_total:,.2f} (debit to close, mark=${mark_per:.4f}/spread)")
+
+                            # Show estimated P&L using derived credit
+                            upnl = match.get("broker_unrealized_pnl", 0) or 0
+                            mv = match.get("market_value", 0) or 0
+                            derived_credit = upnl + abs(mv) if mv else 0
+                            if derived_credit > 0:
+                                realized_pnl = derived_credit - cost_total
+                                pnl_c = "92" if realized_pnl >= 0 else "91"
+                                print(f"  Est. P&L:   {_color(f'~${realized_pnl:+,.2f}', pnl_c)} (credit received ~${derived_credit:,.2f})")
+            else:
+                # Equity or no legs
+                mark = match.get("market_price", 0) or match.get("current_mark", 0)
+                if mark and abs(mark) > 0:
+                    est = abs(mark) * (qty or int(abs(match.get("quantity", 1))))
+                    print(f"  Est. value: ~${est:,.2f} (mark=${abs(mark):.4f})")
         else:
-            # Try to show mark-based estimate for MARKET close
-            try:
-                pos_resp = await client.get("/account/positions")
-                if pos_resp.status_code == 200:
-                    for p in pos_resp.json().get("positions", []):
-                        if p.get("position_id", "").startswith(position_id):
-                            mark = p.get("current_mark") or p.get("market_price")
-                            if mark and abs(mark) > 0:
-                                close_qty = qty or int(p.get("quantity", 1))
-                                est = abs(mark) * close_qty * 100
-                                print(f"  Est. cost:  ~${est:,.2f} (mark=${abs(mark):.4f})")
-                            break
-            except Exception:
-                pass
+            print(f"  Quantity:   {qty or 'all'}")
+            print(f"  Price:      {price_label}")
 
         if not confirm:
             print(f"\n  {_color('NOT EXECUTED', '93')} — add --confirm to close the position")
