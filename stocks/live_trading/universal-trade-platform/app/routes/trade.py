@@ -287,7 +287,13 @@ async def close_position(
     net_price = request.net_price
 
     # Build closing trade request using shared function
-    trade_request = build_closing_trade_request(pos, request.quantity, net_price)
+    import logging as _log
+    _close_logger = _log.getLogger("utp.close")
+    try:
+        trade_request = build_closing_trade_request(pos, request.quantity, net_price)
+    except Exception as e:
+        _close_logger.error("build_closing_trade_request failed for %s: %s", request.position_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to build closing order: {e}")
 
     # Determine broker from the trade request
     from app.models import Broker
