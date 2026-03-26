@@ -300,7 +300,13 @@ async def close_position(
     legs = pos.get("legs") or []
     has_con_ids = all(leg.get("con_id") for leg in legs) if legs else False
     if has_con_ids and trade_request.multi_leg_order and not dry_run:
-        result = await _close_by_con_id(pos, request.quantity, net_price)
+        import logging as _log
+        _close_logger = _log.getLogger("utp.close")
+        try:
+            result = await _close_by_con_id(pos, request.quantity, net_price)
+        except Exception as e:
+            _close_logger.error("_close_by_con_id failed: %s", e, exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Close order failed: {e}")
         if result:
             # Update local position store
             if result.status == OrderStatus.FILLED:
