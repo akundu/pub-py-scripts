@@ -1669,10 +1669,11 @@ async def _cmd_portfolio_http(args, server: str) -> int:
             has_marks = any(p.get("avg_cost") is not None for p in positions)
 
             if has_marks:
-                print(f"  {'ID':<6} {'Symbol':>6} {'Type':>12} {'Strikes':>16} {'Qty':>5} {'AvgCost':>10} {'Mark':>10} {'MktVal':>10} {'P&L':>12} {'Day P&L':>12} {'Exp':>12}")
-                print(f"  {'─'*6} {'─'*6} {'─'*12} {'─'*16} {'─'*5} {'─'*10} {'─'*10} {'─'*10} {'─'*12} {'─'*12} {'─'*12}")
+                print(f"  {'ID':<6} {'Symbol':>6} {'Type':>12} {'Strikes':>16} {'Qty':>5} {'Credit':>10} {'Mark':>10} {'P&L':>12} {'ROI%':>7} {'MaxLoss':>10} {'Exp':>12}")
+                print(f"  {'─'*6} {'─'*6} {'─'*12} {'─'*16} {'─'*5} {'─'*10} {'─'*10} {'─'*12} {'─'*7} {'─'*10} {'─'*12}")
                 total_upnl = 0.0
                 total_daily = 0.0
+                total_max_loss = 0.0
                 for p in positions:
                     sym = p.get("symbol", "?")
                     otype = p.get("order_type", "?")
@@ -1683,9 +1684,10 @@ async def _cmd_portfolio_http(args, server: str) -> int:
 
                     # Build strikes display from legs or legs_summary
                     strikes_s = ""
+                    leg_strikes: list[float] = []
                     if legs_summary:
                         strikes_s = legs_summary
-                    elif isinstance(p.get("legs"), list) and p["legs"]:
+                    if isinstance(p.get("legs"), list) and p["legs"]:
                         parts = []
                         for leg in p["legs"]:
                             if isinstance(leg, dict):
@@ -1693,8 +1695,16 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                                 ot = leg.get("option_type", "")
                                 r = "P" if ot == "PUT" else "C" if ot == "CALL" else ""
                                 parts.append(f"{r}{s}")
-                        strikes_s = "/".join(parts)
+                                try:
+                                    leg_strikes.append(float(s))
+                                except (ValueError, TypeError):
+                                    pass
+                        if not strikes_s:
+                            strikes_s = "/".join(parts)
 
+                    # Compute max loss and ROI for multi-leg (credit spread / iron condor)
+                    max_loss_s = f"{'---':>10}"
+                    roi_s = f"{'---':>7}"
                     if p.get("avg_cost") is not None:
                         avg_cost = p["avg_cost"]
                         mark = p.get("market_price", 0) or 0
@@ -1704,24 +1714,48 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                         total_upnl += upnl
                         total_daily += dpnl
                         pnl_c = "92" if upnl >= 0 else "91"
-                        dpnl_c = "92" if dpnl >= 0 else "91"
                         mark_s = f"${mark:>9.4f}" if mark else f"{'---':>10}"
-                        mv_s = f"${mv:>9.2f}" if mv else f"{'---':>10}"
                         upnl_s = _color(f"${upnl:>+10,.2f}", pnl_c) if upnl else f"{'---':>12}"
-                        dpnl_s = _color(f"${dpnl:>+10,.2f}", dpnl_c) if dpnl else f"{'---':>12}"
+
+                        # Max loss for credit spreads: (spread_width - credit_per_share) * qty * 100
+                        # avg_cost from IBKR synced positions: total $ per contract (e.g., 530 = $5.30/share)
+                        # avg_cost from live_api positions: per-share (e.g., -5.30)
+                        if otype == "multi_leg" and len(leg_strikes) >= 2:
+                            spread_width = abs(leg_strikes[0] - leg_strikes[1])
+                            credit_per_share = abs(avg_cost)
+                            # If avg_cost > spread_width, it's in total-dollars-per-contract — divide by 100
+                            if credit_per_share > spread_width:
+                                credit_per_share = credit_per_share / 100.0
+                            # Only show if credit fits within spread width (sanity check)
+                            if 0 < credit_per_share <= spread_width:
+                                max_loss_per_contract = (spread_width - credit_per_share) * 100
+                                if max_loss_per_contract > 0:
+                                    max_loss_total = max_loss_per_contract * abs(qty)
+                                    credit_total = credit_per_share * 100 * abs(qty)
+                                    total_max_loss += max_loss_total
+                                    roi_pct = (credit_total / max_loss_total) * 100
+                                    max_loss_s = f"${max_loss_total:>9,.0f}"
+                                    roi_s = f"{roi_pct:>6.1f}%"
+
+                        # Credit display: show absolute value for readability
+                        credit_s = f"${avg_cost:>9.4f}"
+
                         print(f"  {pid:<6} {sym:>6} {otype:>12} {strikes_s:>16} {qty:>5.0f} "
-                              f"${avg_cost:>9.4f} {mark_s} {mv_s} "
-                              f"{upnl_s:>20} {dpnl_s:>20} {exp:>12}")
+                              f"{credit_s} {mark_s} "
+                              f"{upnl_s:>20} {roi_s} {max_loss_s} {exp:>12}")
                     else:
                         entry = p.get("entry_price", 0)
                         print(f"  {pid:<6} {sym:>6} {otype:>12} {strikes_s:>16} {qty:>5.0f} "
-                              f"${abs(entry):>9.4f} {'---':>10} {'---':>10} {'---':>12} {'---':>12} {exp:>12}")
+                              f"${abs(entry):>9.4f} {'---':>10} {'---':>12} {'---':>7} {'---':>10} {exp:>12}")
 
                 upnl_c = "92" if total_upnl >= 0 else "91"
-                daily_c = "92" if total_daily >= 0 else "91"
-                print(f"  {'':>6} {'':>6} {'':>12} {'':>16} {'':>5} {'':>10} {'':>10} {'TOTAL':>10} "
-                      f"{_color(f'${total_upnl:>+10,.2f}', upnl_c):>20} "
-                      f"{_color(f'${total_daily:>+10,.2f}', daily_c):>20}")
+                max_loss_total_s = f"${total_max_loss:>9,.0f}" if total_max_loss > 0 else f"{'':>10}"
+                total_roi_s = ""
+                if total_max_loss > 0 and total_upnl != 0:
+                    total_roi_pct = (total_upnl / total_max_loss) * 100
+                    total_roi_s = f"{total_roi_pct:>+5.1f}%"
+                print(f"  {'':>6} {'':>6} {'':>12} {'':>16} {'':>5} {'':>10} {'TOTAL':>10} "
+                      f"{_color(f'${total_upnl:>+10,.2f}', upnl_c):>20} {total_roi_s:>7} {max_loss_total_s}")
             else:
                 print(f"  {'Symbol':<10} {'Type':<10} {'Qty':>6} {'Entry':>10} {'P&L':>10} {'Status':<8}")
                 print(f"  {'---':<10} {'---':<10} {'---':>6} {'---':>10} {'---':>10} {'---':<8}")
