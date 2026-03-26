@@ -348,23 +348,33 @@ async def close_position(
     # If legs have con_ids, use direct conId-based closing (bypasses qualification)
     # The local position store may not have legs — enrich from IBKR portfolio if needed
     legs = pos.get("legs") or []
-    if not legs and pos.get("order_type") == "multi_leg":
+    if not legs and pos.get("order_type") in ("multi_leg", "option"):
         # Try to get enriched position from LiveDataService (has IBKR legs + con_ids)
         from app.services.live_data_service import get_live_data_service
         live_svc = get_live_data_service()
+        _close_logger.info("Enriching legs: live_svc=%s, order_type=%s, position_id=%s",
+                          type(live_svc).__name__ if live_svc else None,
+                          pos.get("order_type"), request.position_id[:8])
         if live_svc:
             try:
                 portfolio = await live_svc.get_portfolio()
-                for p in portfolio.get("positions", []):
-                    if p.get("position_id", "").startswith(request.position_id):
+                positions_list = portfolio.get("positions", [])
+                _close_logger.info("Portfolio has %d positions, looking for %s",
+                                  len(positions_list), request.position_id[:12])
+                for p in positions_list:
+                    pid = p.get("position_id", "")
+                    if pid.startswith(request.position_id) or request.position_id.startswith(pid[:8]):
                         enriched_legs = p.get("legs") or []
+                        _close_logger.info("Matched position %s, enriched_legs=%d", pid[:8], len(enriched_legs))
                         if enriched_legs:
                             legs = enriched_legs
-                            pos["legs"] = legs  # Attach for downstream use
+                            pos["legs"] = legs
                             _close_logger.info("Enriched position %s with %d legs from IBKR", request.position_id[:8], len(legs))
                         break
+                else:
+                    _close_logger.warning("Position %s not found in portfolio positions", request.position_id[:8])
             except Exception as e:
-                _close_logger.debug("Failed to enrich legs from portfolio: %s", e)
+                _close_logger.error("Failed to enrich legs from portfolio: %s", e, exc_info=True)
 
     has_con_ids = all(leg.get("con_id") for leg in legs) if legs else False
 
