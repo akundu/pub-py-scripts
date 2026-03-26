@@ -11,7 +11,7 @@ A unified multi-broker trading API (FastAPI) supporting Robinhood, E\*TRADE, and
 | File | Purpose |
 |------|---------|
 | `utp.py` | ALL CLI operations + API server |
-| `tests/test_utp.py` | ALL tests (359 tests) |
+| `tests/test_utp.py` | ALL tests (454 tests) |
 
 There are no standalone scripts. Do not create new top-level scripts unless explicitly asked.
 
@@ -427,8 +427,9 @@ Every CLI command auto-detects a running daemon via HTTP health check. When daem
 | `csv_importer.py` | `CSVTransactionImporter` | Parse Robinhood/E\*TRADE CSVs, deduplicate, import |
 | `playbook_service.py` | `PlaybookService` | Parse YAML playbooks, translate instructions to TradeRequest, execute |
 | `live_data_service.py` | `LiveDataService` | IBKR-primary data with local fallback. Module accessor: `init_live_data_service()` / `get_live_data_service()` / `reset_live_data_service()` |
-| `market_data_streaming.py` | `MarketDataStreamingService` | IBKR real-time streaming to Redis/QuestDB/WS. Module accessor: `init_streaming_service()` / `get_streaming_service()` / `reset_streaming_service()` |
-| `streaming_config.py` | `StreamingConfig` | YAML config loader for streaming symbols and targets |
+| `market_data_streaming.py` | `MarketDataStreamingService` | IBKR real-time streaming to Redis/QuestDB/WS. Supports ib_insync, CPG WebSocket, and CPG polling modes. Module accessor: `init_streaming_service()` / `get_streaming_service()` / `reset_streaming_service()` |
+| `streaming_config.py` | `StreamingConfig` | YAML config loader for streaming symbols, targets, and option quote streaming |
+| `option_quote_streaming.py` | `OptionQuoteStreamingService` | Background option quote pre-fetch with in-memory + Redis cache. Module accessor: `init_option_quote_streaming()` / `get_option_quote_streaming()` / `reset_option_quote_streaming()` |
 | `execution_store.py` | `ExecutionStore` | IBKR execution cache with perm_id grouping. Module accessor: `init_execution_store()` / `get_execution_store()` / `reset_execution_store()` |
 
 ### Routes (`app/routes/`)
@@ -436,7 +437,7 @@ Every CLI command auto-detects a running daemon via HTTP health check. When daem
 | File | Prefix | Endpoints |
 |------|--------|-----------|
 | `trade.py` | `/trade` | `POST /trade/execute`, `POST /trade/close`, `POST /trade/advisor/confirm` |
-| `market.py` | `/market` | `GET /market/quote/{symbol}`, `POST /market/quotes`, `POST /market/margin`, `GET /market/options/{symbol}`, `GET /market/streaming/status`, `POST /market/streaming/subscribe`, `POST /market/streaming/unsubscribe` |
+| `market.py` | `/market` | `GET /market/quote/{symbol}`, `POST /market/quotes`, `POST /market/margin`, `GET /market/options/{symbol}`, `GET /market/streaming/status`, `POST /market/streaming/subscribe`, `POST /market/streaming/unsubscribe`, `GET /market/streaming/option-quotes/status` |
 | `account.py` | `/account` | `GET /positions`, `POST /sync`, `POST /check-expirations`, `GET /expiring`, `GET /reconciliation`, `GET /trades`, `GET /orders`, `POST /cancel`, `GET /executions` |
 | `ledger.py` | `/ledger` | `GET /entries`, `GET /entries/recent`, `POST /snapshot`, `GET /snapshots`, `GET /replay` |
 | `dashboard.py` | `/dashboard` | `GET /summary`, `GET /performance`, `GET /pnl/daily`, `GET /status`, `GET /terminal`, `GET /advisor/recommendations`, `GET /advisor/status` |
@@ -453,6 +454,7 @@ Every CLI command auto-detects a running daemon via HTTP health check. When daem
 | `etrade.py` | `EtradeProvider` | Stub |
 | `ibkr.py` | `IBKRProvider` (stub) + `IBKRLiveProvider` (real) | Live uses `ib_insync`, activated by setting `IBKR_ACCOUNT_ID` |
 | `ibkr_cache.py` | `ContractCache`, `OptionChainCache`, `QuoteSnapshotCache`, `IBKRRateLimiter`, `IBKRCacheManager` | Caching layer for IBKR — no `ib_insync` dependency |
+| `ibkr_rest.py` | `IBKRRestProvider` | IBKR via Client Portal Gateway (CPG) REST API. Used with `--ibkr-api rest --gateway-url`. Supports quotes, options, multi-leg orders, margin checks, portfolio. 10s response cache on balances/positions. |
 
 ### Models (`app/models.py`)
 
@@ -524,7 +526,7 @@ All from env vars / `.env`:
 
 ## Testing
 
-**359 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
+**454 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
 
 ```bash
 python -m pytest tests/ -v                              # All 359 tests
@@ -588,6 +590,9 @@ python -m pytest tests/test_utp.py -k "TestIBKR" -v     # IBKR tests only
 | `TestHTTPClientMode` | 8 | Server detection, HTTP functions, REPL |
 | `TestAdvisorIntegration` | 8 | Advisor endpoints, daemon state, confirm |
 | `TestExecutionStore` | 9 | Execution store, dedup, grouping, multi-leg detection |
+| `TestIBKRRestProvider` | 10 | CPG REST provider: connect, auth, quote, positions, orders, chains, margin |
+| `TestOptionQuoteStreaming` | 25 | Option quote cache, Redis persistence, streaming lifecycle, market hours TTL |
+| `TestMarketDataStreaming` | 24 | CPG polling/WS modes, snapshot parsing, tick ingestion, close-band gate |
 
 ## IBKR Live Provider
 
@@ -614,19 +619,23 @@ When connected to IBKR via `--live` or `--paper`, both `portfolio` and `trades` 
 
 **How it works:**
 1. Daemon loads the streaming YAML config (`StreamingConfig` from `app/services/streaming_config.py`)
-2. Subscribes to IBKR `reqMktData` for all configured symbols
+2. Selects tick source based on `streaming_mode` config:
+   - **`auto`** — uses ib_insync (`reqMktData`) if TWS connected, else CPG polling
+   - **`polling`** — CPG snapshot polling every `cpg_poll_interval` seconds (default 1.5s, most reliable for indices)
+   - **`websocket`** — CPG WebSocket push (works for stocks, unreliable for indices)
 3. Publishes ticks to three targets:
    - **Redis Pub/Sub** -- channels `realtime:quote:{SYMBOL}` and `realtime:trade:{SYMBOL}`
    - **QuestDB** -- inserts into `realtime_data` table
    - **WebSocket** -- broadcasts to `/ws/quotes` clients
 4. Uses the **same message format** as `polygon_realtime_streamer.py` for full compatibility
+5. **Price validation gate**: rejects ticks more than `close_band_pct` (default ±35%) from previous close
 
 **Safety limits (50% buffer on all IBKR limits):**
 - Max 50 simultaneous subscriptions (IBKR standard ~100 lines)
 - 22 msg/sec rate limit (IBKR soft limit 50 msg/sec)
 
 **Runtime management via REST:**
-- `GET /market/streaming/status` -- subscription count, per-symbol stats, throughput
+- `GET /market/streaming/status` -- subscription count, per-symbol stats, throughput, ticks per symbol
 - `POST /market/streaming/subscribe` -- add symbols at runtime (`{"symbols": ["AAPL", "MSFT"]}`)
 - `POST /market/streaming/unsubscribe` -- remove symbols at runtime
 
@@ -637,6 +646,36 @@ When connected to IBKR via `--live` or `--paper`, both `portfolio` and `trades` 
 
 **Config file:** `configs/streaming_default.yaml` -- defines symbols, Redis/QuestDB targets, timing, and safety limits.
 
+### Background Option Quote Streaming
+
+When `option_quotes_enabled: true` in the streaming config, the daemon runs a background loop that continuously pre-fetches option quotes for configured symbols and caches them for instant serving.
+
+**How it works:**
+1. Every `option_quotes_poll_interval` seconds (default 2s), fetches option quotes for all configured symbols
+2. For each symbol: gets current price, computes strike range (±`option_quotes_strike_range_pct`%), fetches next N expirations
+3. Caches quotes in-memory and persists to Redis for instant serving on daemon restart
+4. `GET /market/options/{symbol}` checks the streaming cache first (fast path), falling back to direct provider only if cache miss
+
+**Freshness policy:**
+- During market hours (9:20 AM - 4:10 PM ET): max 5 minutes age
+- Outside market hours: serve whatever is cached (no age limit)
+
+**Redis persistence:**
+- Quote cache keys: `utp:option_quotes:{SYMBOL}:{EXPIRATION}:{TYPE}` (24h TTL)
+- ConID cache keys: `utp:option_conid_cache:{DATE}` (16h TTL, daily-scoped)
+- Mode-agnostic: data written by TWS is usable by CPG and vice-versa
+- Negative conIDs (failed resolutions) are never persisted to Redis
+
+**Status endpoint:** `GET /market/streaming/option-quotes/status` — shows running state, cache entries, per-symbol detail, Redis status, cycle stats.
+
+**Config fields:**
+| Field | Default | Description |
+|-------|---------|-------------|
+| `option_quotes_enabled` | `false` | Enable background option quote streaming |
+| `option_quotes_poll_interval` | `2.0` | Seconds between fetch cycles |
+| `option_quotes_strike_range_pct` | `3.0` | Strike range as % of current price (e.g., 4.0 = ±4%) |
+| `option_quotes_num_expirations` | `3` | Number of upcoming expirations to fetch per symbol |
+
 ### Caching Layer (`app/core/providers/ibkr_cache.py`)
 
 All caches are managed by `IBKRCacheManager`:
@@ -644,7 +683,12 @@ All caches are managed by `IBKRCacheManager`:
 - **OptionChainCache** — daily-refresh, persisted to disk as JSON (one file per symbol per day)
 - **QuoteSnapshotCache** — 5-second TTL for equity quote deduplication
 - **OptionQuotesCache** — market-hours-aware: always fresh during trading, 1-hour TTL after close+5min
-- **IBKRRateLimiter** — token-bucket pacing (45 msg/sec, IBKR limit is 50)
+- **IBKRRateLimiter** — token-bucket pacing (45 msg/sec for TWS, 9 msg/sec for CPG)
+
+**CPG REST Provider caches** (`IBKRRestProvider`):
+- **Portfolio items** — 10s TTL, shared between `get_portfolio_items()` and `get_daily_pnl_by_con_id()`
+- **Account balances** — 10s TTL
+- **ConID cache** — session-lifetime (underlying + option), persisted to Redis daily
 
 ### Provider ABC Methods
 

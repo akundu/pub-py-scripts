@@ -273,9 +273,9 @@ Recommendations are accessible via `GET /dashboard/advisor/recommendations`.
 When started with `--streaming-config`, the daemon runs a `MarketDataStreamingService` that streams real-time IBKR market data:
 
 ```
-IBKR TWS/Gateway
+IBKR TWS/Gateway or CPG REST
     │
-    │  reqMktData (up to 50 subscriptions)
+    │  reqMktData (TWS) / snapshot polling (CPG) / WebSocket (CPG)
     │
     ▼
 MarketDataStreamingService
@@ -285,16 +285,36 @@ MarketDataStreamingService
     ├──► QuestDB (INSERT INTO realtime_data)
     │
     └──► WebSocket /ws/quotes (filtered by client subscription)
+
+OptionQuoteStreamingService (background)
+    │
+    ├──► In-memory cache (5-min TTL during market hours)
+    │
+    └──► Redis cache (24h TTL, instant restart)
 ```
+
+**Tick streaming modes** (`streaming_mode` in YAML config):
+- **`auto`** (default) — uses ib_insync if TWS connected, else CPG polling
+- **`polling`** — CPG snapshot polling every `cpg_poll_interval` seconds (most reliable for indices)
+- **`websocket`** — CPG WebSocket push (works for stocks, unreliable for index symbols)
 
 **Data flow:**
 1. `StreamingConfig` (`app/services/streaming_config.py`) loads the YAML config specifying symbols, targets, and limits
-2. `MarketDataStreamingService` (`app/services/market_data_streaming.py`) subscribes to IBKR `reqMktData` for each symbol
-3. Incoming ticks are batched (default 0.5s interval) and published to enabled targets
-4. The message format matches `polygon_realtime_streamer.py` so downstream consumers (dashboards, predictors) work without changes
+2. `MarketDataStreamingService` selects tick source based on `streaming_mode` and available provider
+3. **Price validation gate**: ticks beyond `close_band_pct` (±35%) from previous close are rejected
+4. Incoming ticks are batched (default 0.5s interval) and published to enabled targets
+5. The message format matches `polygon_realtime_streamer.py` so downstream consumers work without changes
+
+**Option quote streaming** (when `option_quotes_enabled: true`):
+1. `OptionQuoteStreamingService` runs a background loop fetching option quotes for configured symbols
+2. Caches in-memory (5-min TTL during market hours) and Redis (24h TTL) for instant serving
+3. `GET /market/options/{symbol}` checks the streaming cache first (fast path, no provider call)
+4. Redis cache enables instant option prices on daemon restart without waiting for first fetch cycle
+5. ConID cache persisted to Redis (positive entries only) for fast option contract resolution
 
 **Runtime management:**
-- `GET /market/streaming/status` -- current subscriptions, per-symbol tick counts, throughput
+- `GET /market/streaming/status` -- per-symbol tick counts (received/accepted/rejected), throughput
+- `GET /market/streaming/option-quotes/status` -- cache entries, cycle stats, per-symbol detail
 - `POST /market/streaming/subscribe` -- add symbols (respects the 50-subscription cap)
 - `POST /market/streaming/unsubscribe` -- remove symbols and cancel IBKR data lines
 

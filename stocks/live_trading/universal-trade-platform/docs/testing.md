@@ -4,7 +4,7 @@
 
 The test suite uses `pytest` with `pytest-asyncio` and `httpx` to test all REST endpoints, authentication flows, symbology mapping, WebSocket broadcasting, and the full persistence/dashboard/sync stack against mocked broker providers.
 
-**Total:** 359 tests in a single file (`tests/test_utp.py`), all passing
+**Total:** 454 tests in a single file (`tests/test_utp.py`), all passing
 
 ## Running Tests
 
@@ -131,6 +131,9 @@ All tests live in `tests/test_utp.py`, organized into classes by functional area
 | `TestHTTPClientMode` | 8 | Server detection, HTTP functions, REPL |
 | `TestAdvisorIntegration` | 8 | Advisor endpoints, daemon state, confirm |
 | `TestExecutionStore` | 9 | Execution store, dedup, grouping, multi-leg detection |
+| `TestIBKRRestProvider` | 10 | CPG REST provider: connect, auth, quote, positions, orders, option chains, margin |
+| `TestOptionQuoteStreaming` | 25 | Option quote cache, Redis persistence, streaming lifecycle, market hours TTL, route integration |
+| `TestMarketDataStreaming` | 24 | CPG polling/WS modes, snapshot parsing, tick ingestion, close-band price gate |
 
 ## Testing Approach
 

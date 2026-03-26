@@ -241,6 +241,22 @@ max_subscriptions: 50
 
 # Max messages per second to IBKR API (IBKR limit is 50)
 rate_limit_msg_sec: 22.0
+
+# Hard price gate: reject any tick more than this fraction from previous close
+close_band_pct: 0.35
+
+# ── Tick streaming mode ──────────────────────────────────────────
+# "auto" — ib_insync if TWS connected, else CPG polling
+# "websocket" — force CPG WebSocket streaming
+# "polling" — force CPG snapshot polling
+streaming_mode: auto
+cpg_poll_interval: 1.5
+
+# ── Option quote streaming (background pre-fetch) ───────────────
+option_quotes_enabled: false
+option_quotes_poll_interval: 2.0
+option_quotes_strike_range_pct: 3.0
+option_quotes_num_expirations: 3
 ```
 
 ### Streaming Config Fields
@@ -254,10 +270,18 @@ rate_limit_msg_sec: 22.0
 | `questdb_enabled` | `false` | Insert ticks into QuestDB `realtime_data` table |
 | `questdb_url` | (empty) | QuestDB connection string (same format as `QUEST_DB_STRING`) |
 | `tick_batch_interval` | `0.5` | Seconds between tick batch flushes to persistence targets |
+| `redis_publish_interval` | `1.0` | Minimum seconds between Redis publishes per symbol (throttle) |
 | `market_hours_only` | `true` | Only stream during US market hours (9:30 AM - 4:00 PM ET) |
 | `ws_broadcast_enabled` | `true` | Broadcast ticks to `/ws/quotes` WebSocket clients |
 | `max_subscriptions` | `50` | Max simultaneous IBKR market data subscriptions (50% of ~100 IBKR limit) |
 | `rate_limit_msg_sec` | `22.0` | Max IBKR API messages per second (50% of 50 msg/sec IBKR limit) |
+| `close_band_pct` | `0.35` | Hard price gate: reject ticks more than this fraction from previous close (0.35 = ±35%) |
+| `streaming_mode` | `auto` | Tick streaming mode: `auto` (ib_insync if TWS, else CPG polling), `websocket` (CPG WebSocket), `polling` (CPG snapshot) |
+| `cpg_poll_interval` | `1.5` | Seconds between CPG snapshot polls (polling mode only) |
+| `option_quotes_enabled` | `false` | Enable background option quote streaming and caching |
+| `option_quotes_poll_interval` | `2.0` | Seconds between option quote fetch cycles |
+| `option_quotes_strike_range_pct` | `3.0` | Strike range as % of price (e.g., 4.0 = ±4%) |
+| `option_quotes_num_expirations` | `3` | Number of upcoming expirations to fetch per symbol |
 
 ### Usage
 

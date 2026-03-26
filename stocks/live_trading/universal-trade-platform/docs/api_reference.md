@@ -960,6 +960,92 @@ See [WebSockets](websockets.md) for connection examples and message flow.
 
 ---
 
+## GET /market/streaming/status
+
+Get real-time market data streaming status.
+
+**Required Scope:** `market:read`
+
+**Response (200):**
+
+```json
+{
+  "running": true,
+  "streaming_mode": "cpg_polling",
+  "subscriptions": 3,
+  "ticks_received": 1500,
+  "ticks_published": 1200,
+  "ticks_rejected": 5,
+  "per_symbol": {
+    "SPX": {"last_price": 6600.0, "ticks_received": 500, "ticks_accepted": 498},
+    "NDX": {"last_price": 24200.0, "ticks_received": 500, "ticks_accepted": 499},
+    "RUT": {"last_price": 2540.0, "ticks_received": 500, "ticks_accepted": 500}
+  },
+  "redis_enabled": true,
+  "close_band_pct": 0.35
+}
+```
+
+---
+
+## GET /market/streaming/option-quotes/status
+
+Get background option quote streaming status and cache detail.
+
+**Required Scope:** `market:read`
+
+**Response (200):**
+
+```json
+{
+  "running": true,
+  "market_hours": true,
+  "symbols": ["RUT", "NDX", "SPX"],
+  "cycles": 100,
+  "fetches_ok": 1800,
+  "fetches_failed": 0,
+  "cache": {"entries": 18, "total_quotes": 1900},
+  "cache_detail": [
+    {"symbol": "SPX", "expiration": "2026-03-25", "option_type": "CALL", "quotes": 106, "age_seconds": 2.1}
+  ],
+  "per_symbol": {
+    "SPX": {"last_price": 6600.0, "expirations": ["2026-03-25", "2026-03-26", "2026-03-27"], "errors": 0}
+  },
+  "redis_conid_cache": {"connected": true, "loaded": true, "provider_conid_cache_size": 3000},
+  "redis_quote_cache": {"enabled": true}
+}
+```
+
+---
+
+## POST /market/streaming/subscribe
+
+Add symbols to the streaming service at runtime.
+
+**Required Scope:** `market:read`
+
+**Request Body:**
+
+```json
+{"symbols": ["AAPL", "MSFT"]}
+```
+
+---
+
+## POST /market/streaming/unsubscribe
+
+Remove symbols from the streaming service.
+
+**Required Scope:** `market:read`
+
+**Request Body:**
+
+```json
+{"symbols": ["AAPL"]}
+```
+
+---
+
 ## GET /health
 
 Health check endpoint. No authentication required.

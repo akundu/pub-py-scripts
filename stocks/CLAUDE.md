@@ -379,81 +379,103 @@ The `LiveEngine` runs a tick loop during market hours:
 
 Positions survive restarts via JSON persistence. The `OrderExecutor` ABC is designed for future exchange connectivity (IBKR/TDA) but only `PaperExecutor` is implemented now.
 
-## Live Advisor — Profile-Based System
+## Live Advisor — Unified Config System
 
-The `scripts/live_trading/advisor/` package provides a **generic, profile-based** live trading advisor. Any backtest configuration can be run as a live advisor by defining a YAML profile.
+The live advisor, simulator, and orchestrated backtest all share a **single config file** that controls all trading parameters. Mode-specific differences (e.g., mid pricing for backtests) are handled via `mode_overrides`.
+
+### Unified Config: The Single Source of Truth
+
+**All trading parameters live in one file:**
+
+```
+scripts/live_trading/advisor/profiles/adaptive_v5.yaml
+```
+
+This file controls: tickers, percentiles, spread widths, tiers, ROI thresholds, risk limits, exit rules, adaptive budget, and everything else. All three modes read from it:
+
+- **Live**: `python run_live_advisor.py --profile adaptive_v5 --live`
+- **Simulate**: `python run_live_advisor.py --profile adaptive_v5 --simulate 2026-03-20`
+- **Backtest**: `scripts/backtesting/configs/orchestration_adaptive_budget.yaml` references it via `profile: adaptive_v5`
+
+Mode-specific overrides are in the `mode_overrides` section at the bottom of the YAML:
+```yaml
+mode_overrides:
+  backtest:
+    strategy_defaults:
+      use_mid: true              # backtest uses mid prices
+    exit_rules:
+      profit_target_pct: 0.50    # backtest manages exits
+      stop_loss_pct: 2.0
+  live: {}                        # no overrides
+  simulate: {}                    # no overrides
+```
+
+**To change trading behavior**: Edit `adaptive_v5.yaml`. All three modes pick it up.
+
+**To change backtest-only behavior**: Edit `mode_overrides.backtest` in the same file.
+
+**To change backtest run parameters** (date range, output dir, instances): Edit `orchestration_adaptive_budget.yaml`.
 
 ### Quick Start
 
 ```bash
-# List available profiles
-python run_live_advisor.py --list-profiles
+# Live advisor with UTP/IBKR (all tickers)
+python run_live_advisor.py --profile adaptive_v5 --live
 
-# Run the 9-tier NDX advisor (current production config)
-python run_live_advisor.py --profile tiered_v2
+# Live with specific ticker and faster refresh
+python run_live_advisor.py --profile adaptive_v5 --live --ticker RUT --interval 30
 
-# Dry run (no QuestDB needed)
-python run_live_advisor.py --profile tiered_v2 --dry-run
+# Simulate a historical day from CSV
+python run_live_advisor.py --profile adaptive_v5 --simulate 2026-03-20 --sim-speed 5
 
-# Single-tier profile
-python run_live_advisor.py --profile single_p90_dte2 --dry-run
+# Fast simulation scan
+python run_live_advisor.py --profile adaptive_v5 --simulate 2026-03-20 --sim-speed 0.1 --no-interactive
 
-# Override ticker
-python run_live_advisor.py --profile tiered_v2 --ticker SPX
+# Dry run (show config and exit)
+python run_live_advisor.py --profile adaptive_v5 --dry-run
 
-# Load from arbitrary YAML path
-python run_live_advisor.py --profile ./my_custom_profile.yaml
-
-# Legacy entry point (backwards compat, loads tiered_v2)
-python run_live_advisor_v2.py --dry-run
+# Orchestrated backtest
+python -m scripts.backtesting.scripts.run_orchestrated_backtest \
+    --config scripts/backtesting/configs/orchestration_adaptive_budget.yaml
 ```
+
+### Interactive Commands (Live/Simulate)
+
+| Command | Action |
+|---------|--------|
+| `buy <order_id>` | Confirm a trade (e.g., `buy RUT_P2420_D0`) |
+| `close <pos_id>` | Close a position |
+| `close <pos_id> <price>` | Close with exit price for P&L |
+| `flush` | Close all open positions |
+| `p` | Show positions |
+| `s` | Summary |
+| `q` | Quit (Ctrl+C also works, twice to force) |
 
 ### Key Components
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| Profile Loader | `scripts/live_trading/advisor/profile_loader.py` | `AdvisorProfile` dataclass + YAML loader + validator |
-| Direction Modes | `scripts/live_trading/advisor/direction_modes.py` | Pluggable directional logic (pursuit, pursuit_eod, etc.) |
-| Tier Evaluator | `scripts/live_trading/advisor/tier_evaluator.py` | Evaluates all tiers, accepts `AdvisorProfile` |
-| Display | `scripts/live_trading/advisor/advisor_display.py` | Terminal UI, reads all config from profile |
-| Position Tracker | `scripts/live_trading/advisor/position_tracker.py` | JSON-backed positions, profile-keyed dirs |
-| Tier Config | `scripts/live_trading/advisor/tier_config.py` | Legacy constants (still used by `run_tiered_backtest_v2.py`) |
-| Profiles | `scripts/live_trading/advisor/profiles/*.yaml` | Profile definitions |
-| Runner | `run_live_advisor.py` | Generic CLI entry point |
+| **Unified Config** | `scripts/live_trading/advisor/profiles/adaptive_v5.yaml` | Single source of truth for all trading params |
+| Profile Loader | `scripts/live_trading/advisor/profile_loader.py` | Loads YAML with mode-specific overrides |
+| Tier Evaluator | `scripts/live_trading/advisor/tier_evaluator.py` | Evaluates tiers, builds spreads, tracks rejections |
+| Display | `scripts/live_trading/advisor/advisor_display.py` | Terminal UI with multi-ticker prices |
+| Position Tracker | `scripts/live_trading/advisor/position_tracker.py` | JSON-backed positions, rate limiting |
+| Spread Builder | `scripts/credit_spread_utils/spread_builder.py` | Core spread construction (shared across all modes) |
+| Roll Builder | `scripts/credit_spread_utils/roll_builder.py` | Roll spread with width expansion (shared) |
+| UTP Provider | `scripts/live_trading/providers/utp_provider.py` | IBKR quotes/options via UTP daemon |
+| CSV Exports Provider | `scripts/backtesting/providers/csv_exports_options_provider.py` | Historical options for simulation |
+| Runner | `run_live_advisor.py` | CLI entry point for live/simulate |
+| Backtest Runner | `scripts/backtesting/scripts/run_orchestrated_backtest.py` | CLI for orchestrated backtest |
+| Backtest Config | `scripts/backtesting/configs/orchestration_adaptive_budget.yaml` | Backtest-only: dates, instances, scoring |
 
-### Profile YAML Format
+### Shared Code Across All Modes
 
-Profiles live in `scripts/live_trading/advisor/profiles/<name>.yaml`. Each profile defines:
-- `name`, `ticker` — identity
-- `risk` — max_risk_per_trade, daily_budget, rate limits
-- `providers` — equity/options data source dirs
-- `signal` — signal generator name + params
-- `tiers` — ordered list with label, priority, directional mode, DTE, percentile, etc.
-- `exit_rules` — roll timing, proximity thresholds, 0DTE warnings
-- `strategy_defaults` — min_credit, use_mid, contract_sizing, etc.
+The following code is shared — backtest, live, and simulate all call the same functions:
 
-### Adding a New Profile
-
-1. Create `scripts/live_trading/advisor/profiles/<name>.yaml` (use `tiered_v2.yaml` as template)
-2. Define tiers with directional modes (`pursuit`, `pursuit_eod`, or register new ones in `direction_modes.py`)
-3. Test: `python run_live_advisor.py --profile <name> --dry-run`
-
-### Tiered Portfolio v2 Backtest
-
-The canonical backtest runner is `run_tiered_backtest_v2.py`. It uses `tier_config.py` for tier definitions and runs all 9 tiers in parallel.
-
-```bash
-python run_tiered_backtest_v2.py            # Full run (9 tiers, ~10 min)
-python run_tiered_backtest_v2.py --analyze  # Re-analyze only (skip backtests)
-```
-
-**Results**: `results/tiered_portfolio_v2/` — per-tier CSVs, portfolio simulation, charts, and HTML report.
-
-### Timing Parameters — CRITICAL
-
-**All roll/exit timing is unified at 18:00 UTC (11:00 AM PST / 2:00 PM ET).**
-
-When changing timing parameters, you MUST update all locations listed in `docs/TIMING_CHANGE_GUIDELINES.md`. This includes exit rule defaults, YAML configs, profile loader defaults, tier_config.py, backtest runner, and tests.
+- `spread_builder.build_credit_spreads()` — spread construction, min_otm_pct, bid/ask pricing
+- `CreditSpreadInstrument.build_position()` — instrument wrapper
+- `roll_builder.build_roll_spread()` — roll width expansion, BTC cost comparison
+- `AdaptiveBudgetConfig` — ROI tier thresholds and multipliers
 
 ### Running Advisor Tests
 
@@ -521,7 +543,7 @@ The `live_trading/universal-trade-platform/` directory contains a unified multi-
 
 ### Quick Start — Unified CLI (`utp.py`)
 
-Everything is in two files: `utp.py` (CLI + server) and `tests/test_utp.py` (all 325 tests).
+Everything is in two files: `utp.py` (CLI + server) and `tests/test_utp.py` (all 454 tests).
 
 ```bash
 cd live_trading/universal-trade-platform
@@ -547,7 +569,7 @@ python utp.py daemon --paper                             # Start always-on daemo
 python utp.py daemon --live --advisor-profile tiered_v2  # With advisor signals
 python utp.py repl                                       # Interactive REPL
 python utp.py server                             # Start API server
-python -m pytest tests/ -v                       # Run all 325 tests
+python -m pytest tests/ -v                       # Run all 454 tests
 ```
 
 ### Core Capabilities

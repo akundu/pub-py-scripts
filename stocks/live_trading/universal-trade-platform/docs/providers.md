@@ -115,6 +115,35 @@ else:
 
 See [IBKR Setup Guide](ibkr_setup_guide.md) for connection walkthrough.
 
+#### `IBKRRestProvider` (CPG REST API)
+
+**File:** `app/core/providers/ibkr_rest.py`
+
+An alternative IBKR provider using the Client Portal Gateway (CPG) REST API instead of `ib_insync`/TWS. Activated with `--ibkr-api rest --gateway-url https://localhost:7498`.
+
+| Feature | Implementation |
+|---------|---------------|
+| Auth | CPG session auth (browser-based login, then REST) |
+| Market data | Snapshot polling (`/iserver/marketdata/snapshot`) |
+| Positions | `/portfolio/{account}/positions/0` with 10s cache |
+| Equity orders | `/iserver/account/{account}/orders` |
+| Multi-leg | Combo orders via `conidex` format with auto-confirmation (up to 5 chained prompts) |
+| Option chains | `/iserver/secdef/strikes` + `/iserver/secdef/info` |
+| Option quotes | Batch snapshot with conID resolution per strike |
+| Margin check | What-if order via `/iserver/account/{account}/orders/whatif` |
+| Keepalive | Background `/tickle` every 60s |
+
+**CPG-specific notes:**
+- Snapshot field mapping: `84`=bid, `86`=ask, `85`=bid size, `88`=ask size, `31`=last, `87`=volume
+- ConID resolution: tries SMART exchange first, falls back to CBOE for index symbols (SPX needs CBOE)
+- Month format: CPG requires MMMYY (e.g., `MAR26`), not YYYYMM
+- Negative conIDs (failed resolutions) cached in-memory only, never persisted to Redis
+- Portfolio/balance responses cached 10s to avoid repeated CPG round-trips
+
+**When to use CPG vs TWS:**
+- **TWS/ib_insync**: Best for streaming data, lower latency, full API access
+- **CPG REST**: No TWS dependency, web-based auth, works through firewalls, better for headless servers
+
 ## ProviderRegistry
 
 **File:** `app/core/provider.py`
