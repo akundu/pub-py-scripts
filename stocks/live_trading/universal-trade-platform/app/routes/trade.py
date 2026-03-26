@@ -140,48 +140,80 @@ async def _close_by_con_id(position: dict, quantity: int | None, net_price: floa
 
 
 async def _close_by_con_id_rest(provider, position: dict, quantity: int | None, net_price: float | None) -> OrderResult | None:
-    """Close a multi-leg position via CPG REST using stored conIds."""
-    from app.models import Broker, MultiLegOrder, OptionLeg, OptionType, OptionAction, OrderType, OrderResult, OrderStatus
+    """Close a multi-leg position via CPG REST using stored conIds directly.
+
+    Builds the CPG combo order body from stored con_ids — no strike/expiration
+    re-resolution needed.  This is more reliable than execute_multi_leg_order
+    which resolves conIds from scratch.
+    """
+    from app.models import Broker, OrderResult, OrderStatus, OrderType
     import logging as _log
     _logger = _log.getLogger("utp.close")
 
     legs = position.get("legs") or []
     symbol = position.get("symbol", "")
     close_qty = quantity or int(abs(position.get("quantity", 1)))
-    exp = position.get("expiration", "")
 
-    # Build closing MultiLegOrder using the stored conIds
-    close_legs = []
-    for leg in legs:
-        action_str = leg.get("action", "")
-        close_action = "BUY_TO_CLOSE" if "SELL" in action_str else "SELL_TO_CLOSE"
-        ot = leg.get("option_type", "PUT")
-        close_legs.append(OptionLeg(
-            symbol=symbol,
-            expiration=exp,
-            strike=float(leg.get("strike", 0)),
-            option_type=OptionType(ot),
-            action=OptionAction(close_action),
-            quantity=close_qty,
-        ))
-
-    if not close_legs:
+    # Resolve the underlying conId
+    try:
+        underlying_conid = await provider._resolve_conid(symbol)
+    except Exception as e:
+        _logger.error("Failed to resolve underlying conId for %s: %s", symbol, e)
         return None
 
-    order = MultiLegOrder(
-        broker=Broker.IBKR,
-        legs=close_legs,
-        order_type=OrderType.LIMIT if net_price else OrderType.MARKET,
-        quantity=close_qty,
-        net_price=net_price,
-    )
+    # Build conidex from stored leg con_ids
+    leg_parts = []
+    has_short_leg = False
+    for leg in legs:
+        con_id = leg.get("con_id")
+        if not con_id:
+            return None  # Fall back to qualification path
 
-    _logger.info("CPG close order: %s %d legs x%d, net_price=%s", symbol, len(close_legs), close_qty,
-                 f"${net_price:.2f}" if net_price else "MARKET")
+        action_str = leg.get("action", "")
+        # Reverse: SELL→BUY (close), BUY→SELL (close)
+        is_sell = "SELL" in action_str
+        if is_sell:
+            has_short_leg = True
+        close_action_ratio = 1 if is_sell else -1  # BUY to close short, SELL to close long
+        leg_parts.append(f"{con_id}/{close_action_ratio}")
+
+    conidex = f"{underlying_conid};;;{','.join(leg_parts)}"
+
+    # Build order body
+    order_body = {
+        "conidex": conidex,
+        "orderType": "MKT" if net_price is None else "LMT",
+        "side": "BUY",
+        "quantity": close_qty,
+        "tif": "DAY",
+    }
+    if net_price is not None:
+        # Closing a credit spread = debit (positive price)
+        ibkr_price = abs(net_price) if has_short_leg else -abs(net_price)
+        order_body["price"] = ibkr_price
+
+    price_label = f"LIMIT ${net_price:.2f}" if net_price else "MARKET"
+    _logger.info("CPG close order: %s %d legs x%d, %s, conidex=%s",
+                 symbol, len(legs), close_qty, price_label, conidex)
 
     try:
-        result = await provider.execute_multi_leg_order(order)
-        return result
+        result = await provider._place_order_with_confirmation(order_body)
+        _logger.info("CPG close order result: %s", result)
+        order_id = str(result.get("order_id", result.get("orderId", "")))
+
+        if not order_id:
+            return OrderResult(
+                broker=Broker.IBKR,
+                status=OrderStatus.FAILED,
+                message=f"CPG close: no order_id in response: {result}",
+            )
+
+        return OrderResult(
+            order_id=order_id,
+            broker=Broker.IBKR,
+            status=OrderStatus.SUBMITTED,
+            message=f"CPG close: {symbol} {len(legs)} legs x{close_qty} @ {price_label}",
+        )
     except Exception as e:
         _logger.error("CPG close order failed: %s", e)
         return OrderResult(
