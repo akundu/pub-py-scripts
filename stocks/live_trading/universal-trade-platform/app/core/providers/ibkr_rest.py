@@ -630,7 +630,34 @@ class IBKRRestProvider(BrokerProvider):
                 message="IBKR REST not connected",
             )
 
-        data = await self._get(f"/iserver/account/order/status/{order_id}")
+        try:
+            data = await self._get(f"/iserver/account/order/status/{order_id}")
+        except Exception as e:
+            # CPG returns 400 for non-numeric order IDs or unknown orders.
+            # Try to find the order in the live orders list as fallback.
+            logger.debug("get_order_status(%s) failed: %s — trying live orders", order_id, e)
+            try:
+                orders = await self._get("/iserver/account/orders")
+                live_orders = orders.get("orders", []) if isinstance(orders, dict) else (orders if isinstance(orders, list) else [])
+                for o in live_orders:
+                    oid = str(o.get("orderId", ""))
+                    if oid == order_id or str(o.get("order_ref", "")) == order_id:
+                        cpg_status = o.get("status", o.get("order_ccp_status", ""))
+                        return OrderResult(
+                            order_id=oid,
+                            broker=Broker.IBKR,
+                            status=_STATUS_MAP.get(cpg_status, OrderStatus.PENDING),
+                            message=f"CPG status: {cpg_status}",
+                            filled_price=float(o.get("avgPrice", 0) or 0) or None,
+                        )
+            except Exception:
+                pass
+            return OrderResult(
+                order_id=order_id,
+                broker=Broker.IBKR,
+                status=OrderStatus.FAILED,
+                message=f"Order status unavailable: {e}",
+            )
         if not isinstance(data, dict):
             return OrderResult(
                 order_id=order_id,
