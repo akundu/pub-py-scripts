@@ -28,12 +28,23 @@ async def _close_by_con_id(position: dict, quantity: int | None, net_price: floa
     from app.core.provider import ProviderRegistry
     from app.models import Broker, OrderType
 
+    import logging as _clog
+    _clog.getLogger("utp.close").info("_close_by_con_id called")
     try:
         provider = ProviderRegistry.get(Broker.IBKR)
     except Exception:
+        _clog.getLogger("utp.close").info("No IBKR provider in registry")
         return None
 
-    # Check if this is a CPG REST provider — delegate to execute_multi_leg_order instead
+    _clog.getLogger("utp.close").info(
+        "Provider type=%s, has_gateway_url=%s, has_ib=%s, connected=%s",
+        type(provider).__name__,
+        hasattr(provider, "_gateway_url"),
+        hasattr(provider, "_ib"),
+        getattr(provider, "_connected", "N/A"),
+    )
+
+    # Check if this is a CPG REST provider
     if hasattr(provider, "_gateway_url"):
         return await _close_by_con_id_rest(provider, position, quantity, net_price)
 
@@ -335,8 +346,39 @@ async def close_position(
     )
 
     # If legs have con_ids, use direct conId-based closing (bypasses qualification)
+    # The local position store may not have legs — enrich from IBKR portfolio if needed
     legs = pos.get("legs") or []
+    if not legs and pos.get("order_type") == "multi_leg":
+        # Try to get enriched position from LiveDataService (has IBKR legs + con_ids)
+        from app.services.live_data_service import get_live_data_service
+        live_svc = get_live_data_service()
+        if live_svc:
+            try:
+                portfolio = await live_svc.get_portfolio()
+                for p in portfolio.get("positions", []):
+                    if p.get("position_id", "").startswith(request.position_id):
+                        enriched_legs = p.get("legs") or []
+                        if enriched_legs:
+                            legs = enriched_legs
+                            pos["legs"] = legs  # Attach for downstream use
+                            _close_logger.info("Enriched position %s with %d legs from IBKR", request.position_id[:8], len(legs))
+                        break
+            except Exception as e:
+                _close_logger.debug("Failed to enrich legs from portfolio: %s", e)
+
     has_con_ids = all(leg.get("con_id") for leg in legs) if legs else False
+
+    # Rebuild trade_request if we enriched the legs (original may have been equity fallback)
+    if legs and not trade_request.multi_leg_order:
+        try:
+            trade_request = build_closing_trade_request(pos, request.quantity, net_price)
+        except Exception:
+            pass
+
+    _close_logger.info(
+        "Close path check: has_con_ids=%s, has_multi_leg=%s, dry_run=%s, legs=%d",
+        has_con_ids, trade_request.multi_leg_order is not None, dry_run, len(legs),
+    )
     if has_con_ids and trade_request.multi_leg_order and not dry_run:
         import logging as _log
         _close_logger = _log.getLogger("utp.close")
