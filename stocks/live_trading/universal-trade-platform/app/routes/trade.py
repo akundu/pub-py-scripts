@@ -310,27 +310,9 @@ async def close_position(
         _close_logger = _log.getLogger("utp.close")
         try:
             result = await _close_by_con_id(pos, request.quantity, net_price)
-        except Exception as e:
-            _close_logger.error("_close_by_con_id failed: %s", e, exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Close order failed: {e}")
-        if result:
-            # Update local position store
-            if result.status == OrderStatus.FILLED:
-                exit_price = result.filled_price or net_price or 0
-                if request.quantity and request.quantity < abs(pos.get("quantity", 0)):
-                    updated = store.reduce_quantity(request.position_id, request.quantity)
-                else:
-                    updated = store.close_position(request.position_id, exit_price, "api_close")
-                return {"status": "ok", "order_result": result.model_dump(), "position": updated}
-            if result.status not in {OrderStatus.FILLED, OrderStatus.CANCELLED,
-                                      OrderStatus.REJECTED, OrderStatus.FAILED}:
-                # Wait for fill
-                result = await await_order_fill(
-                    broker=broker,
-                    order_id=result.order_id,
-                    poll_interval=settings.order_poll_interval_seconds,
-                    timeout=settings.order_poll_timeout_seconds,
-                )
+            if result:
+                _close_logger.info("Close order submitted: %s status=%s", result.order_id, result.status)
+                # Update local position store
                 if result.status == OrderStatus.FILLED:
                     exit_price = result.filled_price or net_price or 0
                     if request.quantity and request.quantity < abs(pos.get("quantity", 0)):
@@ -338,12 +320,33 @@ async def close_position(
                     else:
                         updated = store.close_position(request.position_id, exit_price, "api_close")
                     return {"status": "ok", "order_result": result.model_dump(), "position": updated}
-            return {
-                "status": "order_not_filled",
-                "order_result": result.model_dump(),
-                "position": pos,
-                "message": f"Order status: {result.status.value} — {result.message}",
-            }
+                if result.status not in {OrderStatus.FILLED, OrderStatus.CANCELLED,
+                                          OrderStatus.REJECTED, OrderStatus.FAILED}:
+                    # Wait for fill
+                    result = await await_order_fill(
+                        broker=broker,
+                        order_id=result.order_id,
+                        poll_interval=settings.order_poll_interval_seconds,
+                        timeout=settings.order_poll_timeout_seconds,
+                    )
+                    if result.status == OrderStatus.FILLED:
+                        exit_price = result.filled_price or net_price or 0
+                        if request.quantity and request.quantity < abs(pos.get("quantity", 0)):
+                            updated = store.reduce_quantity(request.position_id, request.quantity)
+                        else:
+                            updated = store.close_position(request.position_id, exit_price, "api_close")
+                        return {"status": "ok", "order_result": result.model_dump(), "position": updated}
+                return {
+                    "status": "order_not_filled",
+                    "order_result": result.model_dump(),
+                    "position": pos,
+                    "message": f"Order status: {result.status.value} — {result.message}",
+                }
+        except HTTPException:
+            raise
+        except Exception as e:
+            _close_logger.error("Close by conId failed: %s", e, exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Close order failed: {e}")
 
     # Fallback: submit via execute_trade (requires contract qualification)
     result = await execute_trade(trade_request, dry_run=dry_run)
