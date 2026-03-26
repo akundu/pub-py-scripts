@@ -80,7 +80,7 @@ close_band_pct: 0.35
 streaming_mode: auto
 
 # Seconds between snapshot polls (only used when streaming_mode=polling)
-cpg_poll_interval: 1.5
+cpg_poll_interval: 0.5
 
 # ── Option quote streaming (background pre-fetch) ─────────────────────────
 # When enabled, the daemon continuously pre-fetches option quotes for streaming
