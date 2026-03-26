@@ -1721,6 +1721,7 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                         # IBKR's avgCost for combos is unreliable (varies per-combo vs total).
                         # Derive credit from authoritative fields: credit = P&L + |market_value|
                         # (for a credit spread: P&L = credit_received - cost_to_close)
+                        derived_credit = 0.0
                         if otype == "multi_leg" and len(leg_strikes) >= 2:
                             spread_width = abs(leg_strikes[0] - leg_strikes[1])
                             gross_risk = spread_width * abs(qty) * 100
@@ -1732,8 +1733,11 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                                 max_loss_s = f"${max_loss:>9,.0f}"
                                 roi_s = f"{roi_pct:>6.1f}%"
 
-                        # Credit display: show absolute value for readability
-                        credit_s = f"${avg_cost:>9.4f}"
+                        # Credit display: use derived credit (consistent with ROI), fallback to avg_cost
+                        if derived_credit > 0:
+                            credit_s = f"${derived_credit:>9,.0f}"
+                        else:
+                            credit_s = f"${avg_cost:>9.4f}"
 
                         print(f"  {pid:<6} {sym:>6} {otype:>12} {strikes_s:>16} {qty:>5.0f} "
                               f"{credit_s} {mark_s} "
