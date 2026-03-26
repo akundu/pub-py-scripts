@@ -1717,25 +1717,20 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                         mark_s = f"${mark:>9.4f}" if mark else f"{'---':>10}"
                         upnl_s = _color(f"${upnl:>+10,.2f}", pnl_c) if upnl else f"{'---':>12}"
 
-                        # Max loss for credit spreads: (spread_width - credit_per_share) * qty * 100
-                        # avg_cost from IBKR synced positions: total $ per contract (e.g., 530 = $5.30/share)
-                        # avg_cost from live_api positions: per-share (e.g., -5.30)
+                        # Max loss & ROI for credit spreads
+                        # avg_cost from IBKR: total credit received in dollars (all contracts combined)
+                        # Formula: ROI = credit / (spread_width * qty * 100 - credit)
                         if otype == "multi_leg" and len(leg_strikes) >= 2:
                             spread_width = abs(leg_strikes[0] - leg_strikes[1])
-                            credit_per_share = abs(avg_cost)
-                            # If avg_cost > spread_width, it's in total-dollars-per-contract — divide by 100
-                            if credit_per_share > spread_width:
-                                credit_per_share = credit_per_share / 100.0
-                            # Only show if credit fits within spread width (sanity check)
-                            if 0 < credit_per_share <= spread_width:
-                                max_loss_per_contract = (spread_width - credit_per_share) * 100
-                                if max_loss_per_contract > 0:
-                                    max_loss_total = max_loss_per_contract * abs(qty)
-                                    credit_total = credit_per_share * 100 * abs(qty)
-                                    total_max_loss += max_loss_total
-                                    roi_pct = (credit_total / max_loss_total) * 100
-                                    max_loss_s = f"${max_loss_total:>9,.0f}"
-                                    roi_s = f"{roi_pct:>6.1f}%"
+                            credit_total = abs(avg_cost)
+                            gross_risk = spread_width * abs(qty) * 100
+                            max_loss = gross_risk - credit_total
+                            # Sanity: credit must be less than gross risk
+                            if 0 < credit_total < gross_risk and max_loss > 0:
+                                total_max_loss += max_loss
+                                roi_pct = (credit_total / max_loss) * 100
+                                max_loss_s = f"${max_loss:>9,.0f}"
+                                roi_s = f"{roi_pct:>6.1f}%"
 
                         # Credit display: show absolute value for readability
                         credit_s = f"${avg_cost:>9.4f}"
