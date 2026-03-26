@@ -1718,17 +1718,17 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                         upnl_s = _color(f"${upnl:>+10,.2f}", pnl_c) if upnl else f"{'---':>12}"
 
                         # Max loss & ROI for credit spreads
-                        # avg_cost from IBKR: total credit received in dollars (all contracts combined)
-                        # Formula: ROI = credit / (spread_width * qty * 100 - credit)
+                        # IBKR's avgCost for combos is unreliable (varies per-combo vs total).
+                        # Derive credit from authoritative fields: credit = P&L + |market_value|
+                        # (for a credit spread: P&L = credit_received - cost_to_close)
                         if otype == "multi_leg" and len(leg_strikes) >= 2:
                             spread_width = abs(leg_strikes[0] - leg_strikes[1])
-                            credit_total = abs(avg_cost)
                             gross_risk = spread_width * abs(qty) * 100
-                            max_loss = gross_risk - credit_total
-                            # Sanity: credit must be less than gross risk
-                            if 0 < credit_total < gross_risk and max_loss > 0:
+                            derived_credit = upnl + abs(mv)
+                            if 0 < derived_credit < gross_risk:
+                                max_loss = gross_risk - derived_credit
                                 total_max_loss += max_loss
-                                roi_pct = (credit_total / max_loss) * 100
+                                roi_pct = (derived_credit / max_loss) * 100
                                 max_loss_s = f"${max_loss:>9,.0f}"
                                 roi_s = f"{roi_pct:>6.1f}%"
 
