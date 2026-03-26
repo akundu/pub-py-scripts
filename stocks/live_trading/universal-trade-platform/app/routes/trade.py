@@ -33,6 +33,10 @@ async def _close_by_con_id(position: dict, quantity: int | None, net_price: floa
     except Exception:
         return None
 
+    # Check if this is a CPG REST provider — delegate to execute_multi_leg_order instead
+    if hasattr(provider, "_gateway_url"):
+        return await _close_by_con_id_rest(provider, position, quantity, net_price)
+
     ib = getattr(provider, "_ib", None)
     if not ib or not getattr(provider, "_connected", False):
         return None
@@ -133,6 +137,58 @@ async def _close_by_con_id(position: dict, quantity: int | None, net_price: floa
                 f"({ibkr_status}){(' — ' + ibkr_message) if ibkr_message else ''}",
         filled_price=trade.orderStatus.avgFillPrice if trade.orderStatus and trade.orderStatus.avgFillPrice else None,
     )
+
+
+async def _close_by_con_id_rest(provider, position: dict, quantity: int | None, net_price: float | None) -> OrderResult | None:
+    """Close a multi-leg position via CPG REST using stored conIds."""
+    from app.models import Broker, MultiLegOrder, OptionLeg, OptionType, OptionAction, OrderType, OrderResult, OrderStatus
+    import logging as _log
+    _logger = _log.getLogger("utp.close")
+
+    legs = position.get("legs") or []
+    symbol = position.get("symbol", "")
+    close_qty = quantity or int(abs(position.get("quantity", 1)))
+    exp = position.get("expiration", "")
+
+    # Build closing MultiLegOrder using the stored conIds
+    close_legs = []
+    for leg in legs:
+        action_str = leg.get("action", "")
+        close_action = "BUY_TO_CLOSE" if "SELL" in action_str else "SELL_TO_CLOSE"
+        ot = leg.get("option_type", "PUT")
+        close_legs.append(OptionLeg(
+            symbol=symbol,
+            expiration=exp,
+            strike=float(leg.get("strike", 0)),
+            option_type=OptionType(ot),
+            action=OptionAction(close_action),
+            quantity=close_qty,
+        ))
+
+    if not close_legs:
+        return None
+
+    order = MultiLegOrder(
+        broker=Broker.IBKR,
+        legs=close_legs,
+        order_type=OrderType.LIMIT if net_price else OrderType.MARKET,
+        quantity=close_qty,
+        net_price=net_price,
+    )
+
+    _logger.info("CPG close order: %s %d legs x%d, net_price=%s", symbol, len(close_legs), close_qty,
+                 f"${net_price:.2f}" if net_price else "MARKET")
+
+    try:
+        result = await provider.execute_multi_leg_order(order)
+        return result
+    except Exception as e:
+        _logger.error("CPG close order failed: %s", e)
+        return OrderResult(
+            broker=Broker.IBKR,
+            status=OrderStatus.FAILED,
+            message=f"CPG close failed: {e}",
+        )
 
 
 class ClosePositionRequest(BaseModel):
