@@ -644,14 +644,22 @@ class MarketDataStreamingService:
 
     async def _cpg_poll_loop(self) -> None:
         """CPG snapshot polling loop — fetches prices at regular intervals."""
-        # Initial setup
-        await self._cpg_resolve_conids()
-        await self._cpg_subscribe_snapshots()
+        # Retry resolution until symbols are resolved (CPG may not be authenticated yet)
+        for attempt in range(30):
+            await self._cpg_resolve_conids()
+            if self._cpg_conid_to_symbol:
+                break
+            delay = min(2.0 * (attempt + 1), 10.0)
+            logger.info("CPG polling: no symbols resolved (attempt %d) — retrying in %.0fs", attempt + 1, delay)
+            await asyncio.sleep(delay)
+            if not self._running:
+                return
 
         if not self._cpg_conid_to_symbol:
-            logger.warning("CPG polling: no symbols resolved — stopping")
+            logger.warning("CPG polling: no symbols resolved after retries — stopping")
             return
 
+        await self._cpg_subscribe_snapshots()
         conids = ",".join(str(c) for c in self._cpg_conid_to_symbol)
         logger.info("CPG polling started for %d symbols", len(self._cpg_conid_to_symbol))
 
