@@ -149,39 +149,53 @@ def _group_options_into_spreads(positions: list[dict]) -> list[dict]:
                       key=lambda l: float(l.get("strike", 0) or 0))
 
         paired = []
-        used_longs = set()
+        # Track remaining long qty for partial matching
+        long_remaining = {i: abs(int(l.get("quantity", 0) or 0)) for i, l in enumerate(longs)}
         for short in shorts:
             s_strike = float(short.get("strike", 0) or 0)
             s_right = short.get("right", "") or ""
             s_qty = abs(int(short.get("quantity", 0) or 0))
-            # Find matching long with same right and qty
+            # Find matching long with same right and available qty
             best_long = None
             for i, long in enumerate(longs):
-                if i in used_longs:
+                if long_remaining.get(i, 0) <= 0:
                     continue
-                if ((long.get("right", "") or "") == s_right
-                        and abs(int(long.get("quantity", 0) or 0)) == s_qty):
+                if (long.get("right", "") or "") == s_right:
                     best_long = (i, long)
                     break
             if best_long:
                 idx, long_leg = best_long
-                used_longs.add(idx)
+                # Use min of short qty and remaining long qty
+                pair_qty = min(s_qty, long_remaining[idx])
+                long_remaining[idx] -= pair_qty
                 l_strike = float(long_leg.get("strike", 0) or 0)
+                # Prorate values by pair_qty / original_qty
+                s_total = abs(int(short.get("quantity", 0) or 0))
+                l_total = abs(int(long_leg.get("quantity", 0) or 0))
+                s_frac = pair_qty / s_total if s_total else 1
+                l_frac = pair_qty / l_total if l_total else 1
 
-                # Build spread
-                total_mv = (short.get("market_value", 0) or 0) + (long_leg.get("market_value", 0) or 0)
-                total_upnl = (short.get("broker_unrealized_pnl", 0) or 0) + (long_leg.get("broker_unrealized_pnl", 0) or 0)
-                total_daily = (short.get("daily_pnl", 0) or 0) + (long_leg.get("daily_pnl", 0) or 0)
-                total_avg = (short.get("avg_cost", 0) or 0) + (long_leg.get("avg_cost", 0) or 0)
+                # Build spread with prorated values
+                total_mv = ((short.get("market_value", 0) or 0) * s_frac +
+                           (long_leg.get("market_value", 0) or 0) * l_frac)
+                total_upnl = ((short.get("broker_unrealized_pnl", 0) or 0) * s_frac +
+                             (long_leg.get("broker_unrealized_pnl", 0) or 0) * l_frac)
+                total_daily = ((short.get("daily_pnl", 0) or 0) * s_frac +
+                              (long_leg.get("daily_pnl", 0) or 0) * l_frac)
+                total_avg = ((short.get("avg_cost", 0) or 0) * s_frac +
+                            (long_leg.get("avg_cost", 0) or 0) * l_frac)
                 mark_per_spread = ((short.get("market_price", 0) or 0) * -1 +
                                    (long_leg.get("market_price", 0) or 0))
 
                 right_label = "P" if s_right == "P" else "C"
+                # Generate a stable synthetic ID from the conIds
+                import hashlib
+                syn_id = hashlib.md5(f"{short.get('con_id')}_{long_leg.get('con_id')}_{pair_qty}".encode()).hexdigest()
                 spread = {
-                    "position_id": short.get("position_id", ""),
+                    "position_id": syn_id,
                     "symbol": symbol,
                     "order_type": "multi_leg",
-                    "quantity": s_qty,
+                    "quantity": pair_qty,
                     "expiration": exp,
                     "source": short.get("source", ""),
                     "broker": short.get("broker", ""),
@@ -194,23 +208,45 @@ def _group_options_into_spreads(positions: list[dict]) -> list[dict]:
                     "legs_summary": f"{right_label}{min(s_strike, l_strike):.0f}/{right_label}{max(s_strike, l_strike):.0f}",
                     "legs": [
                         {"action": "SELL", "option_type": "PUT" if s_right == "P" else "CALL",
-                         "strike": s_strike, "quantity": int(s_qty), "con_id": short.get("con_id")},
+                         "strike": s_strike, "quantity": pair_qty, "con_id": short.get("con_id")},
                         {"action": "BUY", "option_type": "PUT" if s_right == "P" else "CALL",
-                         "strike": l_strike, "quantity": int(s_qty), "con_id": long_leg.get("con_id")},
+                         "strike": l_strike, "quantity": pair_qty, "con_id": long_leg.get("con_id")},
                     ],
                     "con_ids": [short.get("con_id"), long_leg.get("con_id")],
+                    "_synthetic": True,  # Flag for close handler
                 }
                 paired.append(spread)
+
+                # If short had more qty than paired, re-add remainder as unpaired
+                if s_qty > pair_qty:
+                    remainder = dict(short)
+                    remainder["quantity"] = -(s_qty - pair_qty)
+                    remainder["order_type"] = "option"
+                    # Prorate values
+                    rem_frac = (s_qty - pair_qty) / s_total if s_total else 0
+                    for key in ("market_value", "broker_unrealized_pnl", "daily_pnl", "avg_cost"):
+                        if remainder.get(key):
+                            remainder[key] = remainder[key] * rem_frac
+                    paired.append(remainder)
             else:
                 # Unmatched short — show as individual
                 short["order_type"] = "option"
                 paired.append(short)
 
-        # Add unmatched longs
+        # Add unmatched longs (remaining qty)
         for i, long in enumerate(longs):
-            if i not in used_longs:
-                long["order_type"] = "option"
-                paired.append(long)
+            if long_remaining.get(i, 0) > 0:
+                remainder = dict(long)
+                orig_qty = abs(int(long.get("quantity", 0) or 0))
+                rem_qty = long_remaining[i]
+                remainder["quantity"] = rem_qty
+                remainder["order_type"] = "option"
+                if orig_qty > 0 and rem_qty < orig_qty:
+                    rem_frac = rem_qty / orig_qty
+                    for key in ("market_value", "broker_unrealized_pnl", "daily_pnl", "avg_cost"):
+                        if remainder.get(key):
+                            remainder[key] = remainder[key] * rem_frac
+                paired.append(remainder)
 
         result.extend(paired)
 

@@ -312,7 +312,7 @@ async def close_position(
 
     pos = store.get_position(request.position_id)
     if not pos:
-        # Try prefix match
+        # Try prefix match in local store
         matches = [pid for pid in store._positions if pid.startswith(request.position_id)]
         if len(matches) == 1:
             pos = store.get_position(matches[0])
@@ -320,7 +320,23 @@ async def close_position(
         elif len(matches) > 1:
             raise HTTPException(status_code=400, detail=f"Ambiguous prefix: {len(matches)} matches")
         else:
-            raise HTTPException(status_code=404, detail="Position not found")
+            # Try synthetic positions from portfolio (spread-grouped individual legs)
+            from app.services.live_data_service import get_live_data_service
+            live_svc = get_live_data_service()
+            if live_svc:
+                try:
+                    portfolio = await live_svc.get_portfolio()
+                    for p in portfolio.get("positions", []):
+                        pid = p.get("position_id", "")
+                        if pid.startswith(request.position_id) and p.get("_synthetic"):
+                            pos = p
+                            pos["status"] = "open"
+                            request.position_id = pid
+                            break
+                except Exception:
+                    pass
+            if not pos:
+                raise HTTPException(status_code=404, detail="Position not found")
 
     if pos.get("status") != "open":
         raise HTTPException(status_code=400, detail="Position is not open")
