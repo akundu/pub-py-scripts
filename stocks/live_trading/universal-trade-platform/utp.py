@@ -1613,7 +1613,7 @@ async def _run_readiness_test(args) -> int:
 async def _cmd_portfolio_http(args, server: str) -> int:
     """Portfolio view via HTTP."""
     import httpx
-    async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
+    async with httpx.AsyncClient(base_url=server, timeout=60.0) as client:
         recent_n = getattr(args, "recent", 0)
         params = {}
         if recent_n > 0:
@@ -2094,7 +2094,7 @@ async def _cmd_close_http(args, server: str) -> int:
     qty = getattr(args, "quantity", None)
     net_price = getattr(args, "net_price", None)
 
-    async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
+    async with httpx.AsyncClient(base_url=server, timeout=60.0) as client:
         if simulate:
             # Look up position details first, then run margin check
             resp = await client.get("/dashboard/portfolio")
@@ -2533,7 +2533,7 @@ async def _cmd_reconcile_http(args, server: str) -> int:
     """Reconcile via HTTP."""
     import httpx
 
-    async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
+    async with httpx.AsyncClient(base_url=server, timeout=60.0) as client:
         # Hard reset: clear daemon's in-memory store + re-sync
         if getattr(args, "hard_reset", False):
             _print_header("HARD RESET (via daemon)")
