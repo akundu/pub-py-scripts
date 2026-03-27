@@ -3031,6 +3031,15 @@ async def _cmd_trade_http(args, server: str) -> int:
                 else:
                     est_legs = None
                     print(f"  Price:      MARKET (best available)")
+                    exp = order.legs[0].expiration if order.legs else ""
+                    print(f"  Note:       live quotes unavailable for {exp} — estimate not shown")
+
+            # Max loss from spread width (always computable from strikes)
+            if credit_per_spread is None and is_credit and order.legs:
+                max_loss_per = _compute_max_loss_per_spread(order.legs, 0)
+                if max_loss_per and max_loss_per > 0:
+                    max_loss_total = max_loss_per * order.quantity * 100
+                    print(f"  Max risk:   ~${max_loss_total:,.2f} (${max_loss_per:.2f}/spread width)")
 
             # ROI for credit spreads / iron condors
             if credit_per_spread and credit_per_spread > 0 and order.legs:
