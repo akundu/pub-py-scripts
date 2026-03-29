@@ -370,6 +370,51 @@ python run_vmaxmin_live.py --positions
 - Full analysis: `docs/strategies/vmaxmin_layer_analysis.md`
 - Tests: `tests/test_vmaxmin.py` (88 tests)
 
+### Roll Cost Analysis Tool
+
+Standalone analysis tool that calculates the net cost of rolling breached 0DTE credit spreads to future expirations. Answers: "At what time of day, to which DTE, and at what strike placement should I roll?"
+
+**Two scripts:**
+- `scripts/roll_cost_table.py` — Core engine: generates roll cost data and ASCII tables
+- `scripts/generate_roll_cost_report.py` — Full pipeline: runs data for multiple tickers, generates charts, builds a tabbed HTML report with playbooks
+
+```bash
+# Single ticker analysis
+python scripts/roll_cost_table.py --ticker RUT --start 2026-01-01 --end 2026-03-29 \
+    --spread-width 20 --options-dir ./options_csv_output_full
+
+# Multi-ticker report with charts (one command does everything)
+python scripts/generate_roll_cost_report.py --start 2026-01-01 --end 2026-03-29 \
+    --tickers RUT:20 SPX:10 NDX:50 --options-dir ./options_csv_output_full \
+    --output-dir ./results/roll_cost_q1_2026
+```
+
+**Key parameters:**
+- `--entry-breach-pcts` (default: 100 75 50 25) — how deep ITM the 0DTE spread is
+- `--target-breach-pcts` (default: 100 50 25 0) — where the new short strike lands (100=same strikes, 0=ATM)
+- `--check-times` — times in PST (default: 08:30 to 12:55, 30-min intervals)
+- `--roll-dtes` (default: 1 2 3 5) — DTE targets for the roll
+- `--options-dir` / `--equities-dir` — configurable data sources
+
+**How it works:**
+1. For each day/time, constructs a hypothetical 0DTE spread at the specified breach depth
+2. Calculates close cost (buy back 0DTE) and open credit (sell DTE+N spread) using mid pricing
+3. Reports net = close_debit - open_credit (negative = credit received, positive = cost)
+4. If options dir has multi-exp data (e.g. `options_csv_output_full_15`), uses same-moment pricing; otherwise uses cross-day opening snapshots for DTE+N
+
+**Report output includes:**
+- Roll playbook with best time/DTE/strike recommendations per option type
+- Decision tree for puts vs calls
+- Summary tables, heatmaps (entry x target x time x DTE), line charts, distributions
+- Collapsible detailed tables for every parameter combination
+- Tabbed interface when multiple tickers are analyzed
+
+**Key files:**
+- Core engine: `scripts/roll_cost_table.py`
+- Report generator: `scripts/generate_roll_cost_report.py`
+- Strategy doc: `docs/strategies/roll_cost_analysis.md`
+- Tests: `tests/test_roll_cost_table.py` (34 tests)
+
 ## Live Paper Trading Platform
 
 The `scripts/live_trading/` directory contains a live paper trading platform that runs strategies during market hours. It reuses the backtesting framework's abstractions (`DataProvider`, `SignalGenerator`, `Constraint`, `ExitRule`, `Instrument`) with live data from QuestDB and `csv_exports/options/`.
