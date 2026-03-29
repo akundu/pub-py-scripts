@@ -147,6 +147,10 @@ try:
         fetch_future_prediction,
         fetch_all_predictions,
         fetch_historical_prediction,
+        prewarm_one_ticker_async,
+        _prewarm_ticker_worker_job,
+        get_prewarm_process_executor,
+        PREWARM_POOL_MAX_WORKERS,
         PREDICTIONS_AVAILABLE,
         ET_TZ
     )
@@ -159,6 +163,10 @@ except ImportError as e:
     fetch_future_prediction = None
     fetch_all_predictions = None
     fetch_historical_prediction = None
+    prewarm_one_ticker_async = None
+    _prewarm_ticker_worker_job = None
+    get_prewarm_process_executor = None
+    PREWARM_POOL_MAX_WORKERS = 5
     # Define ET_TZ fallback
     try:
         from zoneinfo import ZoneInfo
@@ -5271,6 +5279,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
         let currentCacheTimestamp = null;  // Track current data timestamp for smart polling
         let vixWsConnection = null;  // Separate WebSocket for VIX1D live updates
         let currentHistDate = null;  // null = today/live, 'YYYY-MM-DD' = historical
+        let forceNextPredictionCacheBust = false;  // Refresh button forces ?cache=false on API
         const dayTabs = [{', '.join(str(d) for d in day_tabs)}];
 
         // Format a price value with commas and 2 decimal places
@@ -5468,7 +5477,10 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             try {{
                 showLoading();
 
-                const lb = `?lookback=${{currentLookback}}`;
+                const urlWantsBust = new URLSearchParams(window.location.search).get('cache') === 'false';
+                const bust = forceNextPredictionCacheBust || urlWantsBust;
+                forceNextPredictionCacheBust = false;
+                const lb = `?lookback=${{currentLookback}}` + (bust ? '&cache=false' : '');
                 let endpoint;
                 if (currentHistDate && currentDays === 0) {{
                     endpoint = `/predictions/api/lazy/historical/${{currentTicker}}/${{currentHistDate}}${{lb}}`;
@@ -5513,9 +5525,14 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                     return;
                 }}
 
-                // Check if data has changed by comparing timestamps
-                const newTimestamp = data.cache_timestamp || null;
-                if (newTimestamp && newTimestamp !== currentCacheTimestamp) {{
+                // Only adopt strictly newer cache_timestamp. With multiple workers,
+                // a poll can return an older in-memory copy and must not replace fresh data.
+                const newTimestamp = data.cache_timestamp != null ? Number(data.cache_timestamp) : null;
+                const curTs = currentCacheTimestamp != null ? Number(currentCacheTimestamp) : null;
+                if (
+                    newTimestamp != null && !Number.isNaN(newTimestamp) &&
+                    (curTs == null || Number.isNaN(curTs) || newTimestamp > curTs)
+                ) {{
                     console.log('New data detected! Updating... (old:', currentCacheTimestamp, 'new:', newTimestamp, ')');
 
                     // Data has changed - update UI with new data
@@ -6178,6 +6195,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
 
         // Manual refresh button
         function refreshPredictions() {{
+            forceNextPredictionCacheBust = true;
             loadPredictions();
         }}
 
@@ -9751,7 +9769,12 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
             lookback = 180
         force_refresh = not params['cache']
         today_result = await fetch_today_prediction(
-            ticker, cache, force_refresh=force_refresh, history=history, lookback=lookback
+            ticker,
+            cache,
+            force_refresh=force_refresh,
+            history=history,
+            lookback=lookback,
+            stock_db=request.app.get('db_instance'),
         )
         future_results = {}
         for days in day_tabs:
@@ -9837,8 +9860,8 @@ async def handle_predictions_api_index(request: web.Request) -> web.Response:
             {
                 "path": "/predictions/api/prewarm",
                 "method": "GET",
-                "description": "Pre-warm cache (e.g. cron every 5 min).",
-                "query": "?ticker=NDX,SPX&days=1,3,5",
+                "description": "Pre-warm cache (e.g. cron). Tickers run in parallel (max 5 subprocess workers when disk cache is enabled).",
+                "query": "?ticker=NDX,SPX&days=1,3,5&lookback=180",
                 "example": f"{base.rstrip('/')}/predictions/api/prewarm?ticker=NDX,SPX",
             },
         ],
@@ -9872,20 +9895,16 @@ async def handle_lazy_load_today_prediction(request: web.Request) -> web.Respons
     except (ValueError, TypeError):
         lookback = 180
 
-    # Fast path: serve from cache immediately to avoid expensive recomputation
-    cache_key = f"today_{ticker}_{lookback}"
-    if not force_refresh:
-        cached = await cache.get_with_timestamp(cache_key)
-        if cached is not None:
-            cached_data, cache_timestamp = cached
-            if isinstance(cached_data, dict) and 'error' not in cached_data:
-                # Record snapshot for band convergence chart (only during market hours)
-                if history is not None and cached_data.get('current_price', 0) > 0 and is_market_hours():
-                    date_str = datetime.now(ET_TZ).strftime('%Y-%m-%d')
-                    await history.add_snapshot(ticker, date_str, cached_data)
-                return web.json_response({**cached_data, 'cache_timestamp': cache_timestamp})
-
-    result = await fetch_today_prediction(ticker, cache, force_refresh=force_refresh, history=history, lookback=lookback)
+    # Always use fetch_today_prediction so cache TTL is enforced (stale entries
+    # are regenerated; the old handler fast-path returned disk cache regardless of age).
+    result = await fetch_today_prediction(
+        ticker,
+        cache,
+        force_refresh=force_refresh,
+        history=history,
+        lookback=lookback,
+        stock_db=request.app.get('db_instance'),
+    )
 
     return web.json_response(result)
 
@@ -10100,6 +10119,9 @@ async def handle_prewarm_predictions(request: web.Request) -> web.Response:
     GET /predictions/api/prewarm?ticker=NDX,SPX
 
     This endpoint should be called by a cron job every 5 minutes to keep the cache fresh.
+    Tickers are warmed in parallel (up to five subprocess jobs at once) so the asyncio event
+    loop stays responsive for other HTTP traffic.
+
     Returns JSON with status of each ticker.
     """
     tickers_param = request.query.get('ticker', ','.join(sorted(PREDICTION_TICKERS)))
@@ -10119,43 +10141,82 @@ async def handle_prewarm_predictions(request: web.Request) -> web.Response:
     if not prewarm_days:
         prewarm_days = compute_default_prediction_days()
 
+    try:
+        lookback = int(request.query.get('lookback', '180'))
+        lookback = max(30, min(1260, lookback))
+    except (ValueError, TypeError):
+        lookback = 180
+
     cache = request.app.get('prediction_cache')
     history = request.app.get('prediction_history')
 
     if not cache:
         return web.json_response({'error': 'Prediction cache not initialized'}, status=500)
 
-    results = {}
+    if (
+        prewarm_one_ticker_async is None
+        or _prewarm_ticker_worker_job is None
+        or get_prewarm_process_executor is None
+    ):
+        return web.json_response({'error': 'Prediction prewarm not available'}, status=500)
+
+    results: dict = {}
+    valid_tickers: list = []
 
     for ticker in tickers:
         if ticker not in PREDICTION_TICKERS:
             results[ticker] = {'status': 'error', 'message': 'Invalid ticker'}
-            continue
+        else:
+            valid_tickers.append(ticker)
 
-        try:
-            # Fetch today's prediction (will cache it)
-            today_result = await fetch_today_prediction(ticker, cache, force_refresh=True, history=history)
+    disk_dir = cache.resolved_disk_cache_dir()
+    loop = asyncio.get_running_loop()
+    prewarm_mode = 'none'
 
-            # Fetch future predictions
-            future_results = {}
-            for days in prewarm_days:
-                future_result = await fetch_future_prediction(ticker, days, cache, force_refresh=True)
-                future_results[f'{days}d'] = 'ok' if 'error' not in future_result else 'error'
+    if disk_dir and valid_tickers:
+        prewarm_mode = 'process_pool'
+        executor = get_prewarm_process_executor(PREWARM_POOL_MAX_WORKERS)
+        days_tuple = tuple(prewarm_days)
+        tasks = [
+            loop.run_in_executor(
+                executor,
+                _prewarm_ticker_worker_job,
+                (t, lookback, days_tuple, disk_dir),
+            )
+            for t in valid_tickers
+        ]
+        finished = await asyncio.gather(*tasks, return_exceptions=True)
+        for t, item in zip(valid_tickers, finished):
+            if isinstance(item, Exception):
+                results[t] = {
+                    'status': 'error',
+                    'message': str(item),
+                    'today': 'error',
+                    'future': {},
+                    'timestamp': datetime.now(ET_TZ).isoformat(),
+                }
+            else:
+                results[t] = item
+    elif valid_tickers:
+        # No disk backend: parallelize in-process (still capped); yields GIL but avoids process spawn.
+        prewarm_mode = 'asyncio'
+        sem = asyncio.Semaphore(PREWARM_POOL_MAX_WORKERS)
 
-            results[ticker] = {
-                'status': 'ok' if 'error' not in today_result else 'error',
-                'today': 'ok' if 'error' not in today_result else 'error',
-                'future': future_results,
-                'timestamp': datetime.now(ET_TZ).isoformat()
-            }
-        except Exception as e:
-            results[ticker] = {
-                'status': 'error',
-                'message': str(e)
-            }
+        async def _one(ticker: str) -> tuple:
+            async with sem:
+                payload = await prewarm_one_ticker_async(
+                    ticker, lookback, prewarm_days, cache, history
+                )
+                return ticker, payload
+
+        pairs = await asyncio.gather(*[_one(t) for t in valid_tickers])
+        for t, payload in pairs:
+            results[t] = payload
 
     return web.json_response({
         'status': 'completed',
+        'mode': prewarm_mode,
+        'max_workers': PREWARM_POOL_MAX_WORKERS,
         'results': results,
         'timestamp': datetime.now(ET_TZ).isoformat()
     })
@@ -14866,8 +14927,11 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                 momentum_filter=momentum_filter,
             )
 
+            # Intraday hourly computation scans many 5-min CSV files and can be expensive.
+            # Keep this opt-in so default multi-window requests stay responsive.
+            include_hourly = request.query.get('include_hourly', '').strip().lower() in {"1", "true", "yes", "on"}
             hourly = {}
-            if 0 in windows:
+            if include_hourly and 0 in windows:
                 for ticker_name, _ in ticker_specs:
                     try:
                         hourly_data = await compute_hourly_moves_to_close(
@@ -14911,7 +14975,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             )
 
             # If window 0 (0DTE) is included, inject hourly moves-to-close (already in hourly dict)
-            if 0 in windows and hourly:
+            if include_hourly and 0 in windows and hourly:
                 is_multi = len(tickers) > 1
                 for display_t, hourly_data in hourly.items():
                     hourly_html = format_hourly_moves_as_html(hourly_data)

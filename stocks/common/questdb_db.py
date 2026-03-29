@@ -4502,13 +4502,21 @@ class PriceService:
         result = await self.get_latest_price_with_data(ticker, use_market_time)
         return result['price'] if result else None
     
-    async def get_latest_price_with_data(self, ticker: str, use_market_time: bool = True, only_source: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    async def get_latest_price_with_data(
+        self,
+        ticker: str,
+        use_market_time: bool = True,
+        only_source: Optional[str] = None,
+        *,
+        bypass_cache: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         """Get latest price with full data (price, timestamp, source, realtime_df).
         
         Args:
             ticker: Stock ticker symbol
             use_market_time: Whether to adjust behavior based on market hours
             only_source: If specified, only query this data source ('realtime', 'hourly', or 'daily')
+            bypass_cache: Skip Redis read-through cache and read QuestDB (still refreshes cache on hit)
         
         Returns:
             Dict with keys: 'price', 'timestamp', 'source', 'realtime_df' (if from realtime)
@@ -4517,7 +4525,7 @@ class PriceService:
         # Check cache first (but only use it when data is still "fresh" for the current market context)
         cached_data = None
         last_save_time = None
-        if self.cache and self.cache.enable_cache:
+        if self.cache and self.cache.enable_cache and not bypass_cache:
             try:
                 cache_key = CacheKeyGenerator.latest_price_data(ticker, source=only_source)
                 cached_df = await self.cache.get(cache_key)
@@ -5293,9 +5301,18 @@ class StockQuestDB(StockDBBase):
         """Get latest price."""
         return await self.price_service.get_latest_price(ticker, use_market_time)
     
-    async def get_latest_price_with_data(self, ticker: str, use_market_time: bool = True, only_source: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    async def get_latest_price_with_data(
+        self,
+        ticker: str,
+        use_market_time: bool = True,
+        only_source: Optional[str] = None,
+        *,
+        bypass_cache: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         """Get latest price with full data (price, timestamp, source, realtime_df)."""
-        return await self.price_service.get_latest_price_with_data(ticker, use_market_time, only_source=only_source)
+        return await self.price_service.get_latest_price_with_data(
+            ticker, use_market_time, only_source=only_source, bypass_cache=bypass_cache
+        )
     
     async def get_latest_prices(self, tickers: List[str], num_simultaneous: int = 25,
                                use_market_time: bool = True) -> Dict[str, Optional[float]]:

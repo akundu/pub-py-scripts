@@ -1,0 +1,19 @@
+---
+description: Use the stocks project virtualenv for all Python CLI and tests
+alwaysApply: true
+---
+
+# Python environment (`stocks/`)
+
+This repo’s dependencies and `pytest` live in the local venv at `stocks/.venv`.
+
+**When running any terminal command** that uses Python (`python`, `pytest`, `pip`, module runs, etc.) from this project:
+
+1. `cd` to the `stocks` directory (this workspace root).
+2. Run `source .venv/bin/activate` first, **or** use one line:
+
+```bash
+cd "/path/to/stocks" && source .venv/bin/activate && python -m pytest tests/ -v
+```
+
+Do not assume the system `python` or `python3` has project packages unless the venv is activated.

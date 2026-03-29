@@ -6,12 +6,15 @@ for the prediction web interface.
 """
 
 import asyncio
+import copy
 import json
 import logging
+import threading
 import time
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 # Import market hours check
@@ -317,26 +320,46 @@ class PredictionCache:
         logger.info(f"PredictionCache initialized with backends: {backend_names}")
 
     async def get(self, key: str) -> Optional[Any]:
-        """Get cached value, trying backends in priority order.
+        """Get cached value.
 
-        Returns value from first backend that has it.
+        When multiple backends are configured, returns the entry with the newest
+        stored timestamp so disk (shared across workers) can beat stale per-worker
+        memory after a prewarm or ?cache=false refresh on another process.
         """
-        for backend in self.backend_instances:
-            value = await backend.get(key)
-            if value is not None:
-                logger.debug(f"Cache HIT on {backend.get_name()} for {key}")
-                return value
-
+        result = await self.get_with_timestamp(key)
+        if result is not None:
+            logger.debug(f"Cache HIT (merged) for {key}")
+            return result[0]
         logger.debug(f"Cache MISS for {key}")
         return None
 
     async def get_with_timestamp(self, key: str) -> Optional[Tuple[Any, float]]:
-        """Get cached value with timestamp, trying backends in priority order."""
+        """Get cached value with timestamp from the backend that has the newest timestamp.
+
+        Queries all backends and picks (data, ts) with maximum ts. Missing or invalid
+        timestamps are treated as 0.0 for comparison only.
+        """
+        best: Optional[Tuple[Any, float]] = None
+        best_ts = float("-inf")
         for backend in self.backend_instances:
             result = await backend.get_with_timestamp(key)
-            if result is not None:
-                logger.debug(f"Cache HIT on {backend.get_name()} for {key}")
-                return result
+            if result is None:
+                continue
+            data, ts = result
+            try:
+                ts_f = float(ts)
+            except (TypeError, ValueError):
+                ts_f = 0.0
+            if ts_f > best_ts:
+                best_ts = ts_f
+                best = (data, ts_f)
+
+        if best is not None:
+            logger.debug(
+                f"Cache HIT (merged, ts={best_ts}) for {key} "
+                f"across {[b.get_name() for b in self.backend_instances]}"
+            )
+            return best
 
         logger.debug(f"Cache MISS for {key}")
         return None
@@ -357,6 +380,29 @@ class PredictionCache:
     async def cleanup_expired(self):
         """No-op: cache entries never expire automatically."""
         pass
+
+    def resolved_disk_cache_dir(self) -> Optional[str]:
+        """Absolute path to on-disk prediction cache if a DiskCache backend exists."""
+        for backend in self.backend_instances:
+            if isinstance(backend, DiskCache):
+                return str(backend.cache_dir.resolve())
+        return None
+
+
+# Max concurrent prewarm worker processes (one ticker per job; pool queues extras).
+PREWARM_POOL_MAX_WORKERS = 5
+
+_prewarm_executor: Optional[ProcessPoolExecutor] = None
+_prewarm_executor_lock = threading.Lock()
+
+
+def get_prewarm_process_executor(max_workers: int = PREWARM_POOL_MAX_WORKERS) -> ProcessPoolExecutor:
+    """Lazily create a shared process pool for /predictions/api/prewarm."""
+    global _prewarm_executor
+    with _prewarm_executor_lock:
+        if _prewarm_executor is None:
+            _prewarm_executor = ProcessPoolExecutor(max_workers=max_workers)
+        return _prewarm_executor
 
 
 class PredictionHistory:
@@ -747,11 +793,146 @@ def _serialize_unified_prediction(pred: Any) -> dict:
     return result
 
 
+def _rescale_band_dict_for_new_spot(band_dict: Any, old_px: float, new_px: float) -> None:
+    """Recompute absolute band levels when spot moves; prefers lo_pct/hi_pct from model."""
+    if not isinstance(band_dict, dict) or old_px <= 0 or new_px <= 0:
+        return
+    for _name, band in band_dict.items():
+        if not isinstance(band, dict):
+            continue
+        lo_pct = band.get('lo_pct')
+        hi_pct = band.get('hi_pct')
+        try:
+            if lo_pct is not None and hi_pct is not None:
+                band['lo_price'] = float(new_px) * (1.0 + float(lo_pct) / 100.0)
+                band['hi_price'] = float(new_px) * (1.0 + float(hi_pct) / 100.0)
+                band['width_pts'] = band['hi_price'] - band['lo_price']
+                band['width_pct'] = (band['width_pts'] / float(new_px)) * 100.0
+            else:
+                r = new_px / old_px
+                for k in ('lo_price', 'hi_price', 'width_pts'):
+                    if band.get(k) is not None:
+                        band[k] = float(band[k]) * r
+                if band.get('lo_price') is not None and band.get('hi_price') is not None:
+                    band['width_pct'] = ((band['hi_price'] - band['lo_price']) / float(new_px)) * 100.0
+        except (TypeError, ValueError):
+            continue
+
+
+def _rescale_prediction_payload_bands(payload: dict, old_px: float, new_px: float) -> None:
+    for key in (
+        'percentile_bands',
+        'statistical_bands',
+        'combined_bands',
+        'empirical_continuous_bands',
+    ):
+        bd = payload.get(key)
+        if isinstance(bd, dict):
+            _rescale_band_dict_for_new_spot(bd, old_px, new_px)
+    da = payload.get('directional_analysis')
+    if isinstance(da, dict):
+        asym = da.get('asymmetric_bands')
+        if isinstance(asym, dict):
+            _rescale_band_dict_for_new_spot(asym, old_px, new_px)
+
+
+async def overlay_questdb_spot_on_prediction_payload(
+    ticker: str,
+    payload: dict,
+    stock_db: Any,
+) -> None:
+    """Align ``current_price`` / ``prev_close`` with QuestDB, bypassing Redis price cache.
+
+    Cached prediction JSON can embed stale spot from PriceService Redis; this refreshes
+    display fields from DB before the response is sent.
+    """
+    if not isinstance(payload, dict) or payload.get('error'):
+        return
+    getter = getattr(stock_db, 'get_latest_price_with_data', None)
+    if not callable(getter):
+        return
+    db_ticker = ticker.replace('I:', '') if ticker.startswith('I:') else ticker
+    try:
+        live = await getter(db_ticker, True, bypass_cache=True)
+    except TypeError:
+        live = await getter(db_ticker, True)
+    except Exception as e:
+        logger.warning('overlay_questdb_spot: live price fetch failed for %s: %s', ticker, e)
+        return
+    if not live or live.get('price') is None:
+        return
+    try:
+        new_px = float(live['price'])
+    except (TypeError, ValueError):
+        return
+    if new_px <= 0:
+        return
+    old_px = float(payload.get('current_price') or 0.0)
+    payload['live_overlay_applied'] = True
+    payload['live_spot_source'] = live.get('source')
+    ts = live.get('timestamp')
+    if ts is not None:
+        payload['live_spot_timestamp'] = (
+            ts.isoformat() if hasattr(ts, 'isoformat') else str(ts)
+        )
+    payload['current_price'] = new_px
+
+    try:
+        ts_utc = live.get('timestamp')
+        if ts_utc is not None:
+            if hasattr(ts_utc, 'to_pydatetime'):
+                ts_utc = ts_utc.to_pydatetime()
+            if getattr(ts_utc, 'tzinfo', None) is None:
+                ts_utc = ts_utc.replace(tzinfo=timezone.utc)
+            current_date = ts_utc.astimezone(ET_TZ).date()
+        else:
+            current_date = datetime.now(ET_TZ).date()
+        connmgr = getattr(stock_db, 'connection', None)
+        if connmgr is not None and hasattr(connmgr, 'get_connection'):
+            async with connmgr.get_connection() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT date, close
+                    FROM daily_prices
+                    WHERE ticker = $1 AND date < $2
+                    ORDER BY date DESC
+                    LIMIT 1
+                    """,
+                    db_ticker,
+                    current_date,
+                )
+            if row is not None and row['close'] is not None:
+                payload['prev_close'] = float(row['close'])
+                pdt = row['date']
+                if hasattr(pdt, 'date'):
+                    pdt = pdt.date()
+                payload['prev_close_date'] = pdt.isoformat() if hasattr(pdt, 'isoformat') else str(pdt)
+    except Exception as e:
+        logger.debug('overlay_questdb_spot: prev_close refresh skipped for %s: %s', ticker, e)
+
+    pc = payload.get('prev_close')
+    if pc is not None:
+        try:
+            payload['above_prev'] = new_px >= float(pc)
+        except (TypeError, ValueError):
+            pass
+
+    if old_px > 0 and abs(new_px - old_px) / old_px > 1e-9:
+        _rescale_prediction_payload_bands(payload, old_px, new_px)
+
+
 # ============================================================================
 # Data Fetching Functions
 # ============================================================================
 
-async def fetch_today_prediction(ticker: str, cache: PredictionCache, force_refresh: bool = False, history: Optional[PredictionHistory] = None, lookback: int = 180):
+async def fetch_today_prediction(
+    ticker: str,
+    cache: PredictionCache,
+    force_refresh: bool = False,
+    history: Optional[PredictionHistory] = None,
+    lookback: int = 180,
+    stock_db: Optional[Any] = None,
+):
     """Fetch today's prediction, using cache if available and not stale.
 
     Cache TTL:
@@ -780,8 +961,14 @@ async def fetch_today_prediction(ticker: str, cache: PredictionCache, force_refr
             # this can happen if the price fetch failed at cache-write time.
             cached_price = cached_data.get('current_price') if isinstance(cached_data, dict) else None
             if cached_price and cached_price > 0 and age_seconds <= cache_ttl_seconds:
-                # Cache is fresh and valid — return it
-                return {**cached_data, 'cache_timestamp': cache_timestamp}
+                # Deep copy so overlay + history never mutate shared cache objects
+                out = copy.deepcopy(cached_data)
+                out['cache_timestamp'] = cache_timestamp
+                await overlay_questdb_spot_on_prediction_payload(ticker, out, stock_db)
+                if history is not None and is_market_hours(now_et):
+                    date_str = now_et.strftime('%Y-%m-%d')
+                    await history.add_snapshot(ticker, date_str, out)
+                return out
             elif not (cached_price and cached_price > 0):
                 logger.warning(
                     f"Stale/invalid cache for {cache_key} (current_price={cached_price}). Regenerating."
@@ -813,25 +1000,29 @@ async def fetch_today_prediction(ticker: str, cache: PredictionCache, force_refr
                     if isinstance(cached_data, dict) and cached_data.get('current_price', 0) > 0:
                         # Merge fresh band data into cached entry (handles new fields
                         # like empirical_continuous_bands added after cache was written)
+                        merged = copy.deepcopy(cached_data)
                         for band_key in ('percentile_bands', 'statistical_bands',
                                          'combined_bands', 'empirical_continuous_bands',
                                          'ensemble_methods', 'directional_analysis'):
                             fresh_val = serialized.get(band_key)
-                            if fresh_val and band_key not in cached_data:
-                                cached_data[band_key] = fresh_val
-                        cached_data['cache_timestamp'] = time.time()
-                        await cache.set(cache_key, cached_data)
+                            if fresh_val and band_key not in merged:
+                                merged[band_key] = fresh_val
+                        merged['cache_timestamp'] = time.time()
+                        await cache.set(cache_key, merged)
                         logger.info(f"Refreshed cache timestamp for {cache_key} (market closed, reusing last valid price)")
-                        return cached_data
+                        await overlay_questdb_spot_on_prediction_payload(ticker, merged, stock_db)
+                        return merged
             logger.warning(f"Prediction for {ticker} returned current_price={serialized.get('current_price')}; skipping cache write.")
             serialized['cache_timestamp'] = time.time()
+            await overlay_questdb_spot_on_prediction_payload(ticker, serialized, stock_db)
             return serialized
 
         # Add current timestamp as cache_timestamp for fresh data
         serialized['cache_timestamp'] = time.time()
 
-        # Cache it
-        await cache.set(cache_key, serialized)
+        # Persist raw model output; overlay mutates the in-memory dict for the response only
+        await cache.set(cache_key, copy.deepcopy(serialized))
+        await overlay_questdb_spot_on_prediction_payload(ticker, serialized, stock_db)
 
         # Store snapshot in history for band convergence visualization
         if history is not None:
@@ -1020,6 +1211,84 @@ async def fetch_future_prediction(ticker: str, days_ahead: int, cache: Predictio
         import traceback
         traceback.print_exc()
         return {'error': str(e)}
+
+
+async def prewarm_one_ticker_async(
+    ticker: str,
+    lookback: int,
+    prewarm_days: List[int],
+    cache: PredictionCache,
+    history: Optional[PredictionHistory],
+) -> Dict[str, Any]:
+    """Warm today + configured future horizons for one ticker; JSON shape matches prewarm API."""
+    try:
+        today_result = await fetch_today_prediction(
+            ticker, cache, force_refresh=True, history=history, lookback=lookback
+        )
+        future_results: Dict[str, str] = {}
+        for days in prewarm_days:
+            fr = await fetch_future_prediction(
+                ticker, days, cache, force_refresh=True, lookback=lookback
+            )
+            future_results[f'{days}d'] = (
+                'ok' if isinstance(fr, dict) and 'error' not in fr else 'error'
+            )
+        today_ok = isinstance(today_result, dict) and 'error' not in today_result
+        return {
+            'status': 'ok' if today_ok else 'error',
+            'today': 'ok' if today_ok else 'error',
+            'future': future_results,
+            'timestamp': datetime.now(ET_TZ).isoformat(),
+        }
+    except Exception as e:
+        logger.exception("Prewarm failed for %s", ticker)
+        return {
+            'status': 'error',
+            'message': str(e),
+            'today': 'error',
+            'future': {},
+            'timestamp': datetime.now(ET_TZ).isoformat(),
+        }
+
+
+def _prewarm_ticker_worker_job(
+    args: Tuple[str, int, Tuple[int, ...], str],
+) -> Dict[str, Any]:
+    """Run ``prewarm_one_ticker_async`` in a subprocess (picklable entry point).
+
+    Uses a disk-only PredictionCache at ``disk_cache_dir`` so warmed JSON files are
+    shared with the web app (merged with Redis/memory on read when configured).
+
+    Args:
+        args: (ticker, lookback, prewarm_days, disk_cache_dir)
+    """
+    ticker, lookback, prewarm_days, disk_cache_dir = args
+    if not PREDICTIONS_AVAILABLE:
+        return {
+            'status': 'error',
+            'message': 'Predictions module not available',
+            'today': 'error',
+            'future': {},
+            'timestamp': datetime.now(ET_TZ).isoformat(),
+        }
+
+    async def _run() -> Dict[str, Any]:
+        cache = PredictionCache(backends=['disk'], cache_dir=disk_cache_dir)
+        return await prewarm_one_ticker_async(
+            ticker, lookback, list(prewarm_days), cache, None
+        )
+
+    try:
+        return asyncio.run(_run())
+    except Exception as e:
+        logger.exception("Prewarm worker failed for %s", ticker)
+        return {
+            'status': 'error',
+            'message': str(e),
+            'today': 'error',
+            'future': {},
+            'timestamp': datetime.now(ET_TZ).isoformat(),
+        }
 
 
 async def fetch_all_predictions(ticker: str, cache: PredictionCache, future_days=None):
