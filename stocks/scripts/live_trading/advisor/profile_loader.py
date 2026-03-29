@@ -149,6 +149,8 @@ class AdvisorProfile:
     tickers: List[str] = field(default_factory=list)
     ticker_params: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     adaptive_budget: Optional[AdaptiveBudgetConfig] = None
+    strategy: str = "tier_evaluator"  # "tier_evaluator" or "vmaxmin_v1"
+    raw_config: Dict[str, Any] = field(default_factory=dict)  # full raw YAML for custom strategies
 
     @property
     def all_dtes(self) -> List[int]:
@@ -302,8 +304,10 @@ def load_profile(name_or_path: str, mode: str = "live") -> AdvisorProfile:
 
     ticker_params = raw.get("ticker_params", {})
 
+    strategy = raw.get("strategy", "tier_evaluator")
+
     tiers_raw = raw.get("tiers")
-    if not tiers_raw:
+    if not tiers_raw and strategy not in ("vmaxmin_v1",):
         raise ValueError(f"Profile missing 'tiers': {path}")
 
     # Parse sections
@@ -311,7 +315,7 @@ def load_profile(name_or_path: str, mode: str = "live") -> AdvisorProfile:
     providers = _parse_providers(raw.get("providers", {}))
     signal = _parse_signal(raw.get("signal", {}))
     exit_rules = _parse_exit_rules(raw.get("exit_rules", {}))
-    tiers = [_parse_tier(t) for t in tiers_raw]
+    tiers = [_parse_tier(t) for t in tiers_raw] if tiers_raw else []
     instrument = raw.get("instrument", "credit_spread")
     strategy_defaults = raw.get("strategy_defaults", {})
     adaptive_budget = None
@@ -331,6 +335,8 @@ def load_profile(name_or_path: str, mode: str = "live") -> AdvisorProfile:
         tickers=tickers_list,
         ticker_params=ticker_params,
         adaptive_budget=adaptive_budget,
+        strategy=strategy,
+        raw_config=raw,
     )
 
     if adaptive_budget and adaptive_budget.enabled:

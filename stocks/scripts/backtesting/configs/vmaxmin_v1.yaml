@@ -1,0 +1,68 @@
+infra:
+  ticker: SPX
+  lookback_days: 30
+  output_dir: results/vmaxmin_v1
+  log_level: INFO
+
+providers:
+  - name: csv_equity
+    role: equity
+    params:
+      base_dir: equities_output
+  - name: csv_options
+    role: options
+    params:
+      base_dir: options_csv_output_full
+
+strategy:
+  name: vmaxmin_v1
+  params:
+    # Entry
+    entry_time_pacific: "06:35"
+    otm_pct: 0.005                    # 0.5% OTM from price (or HOD/LOD)
+    max_per_transaction: 50000        # $ budget per position
+    commission_per_transaction: 10    # $ per trade/roll
+    num_contracts: null               # null = auto-calculate from budget
+
+    # Intraday rolling
+    roll_check_times_pacific:
+      - "07:35"
+      - "08:35"
+      - "09:35"
+      - "10:35"
+      - "11:35"
+
+    # EOD proximity roll
+    proximity_check_start_pacific: "12:30"
+    proximity_check_end_pacific: "12:50"
+    proximity_check_interval_mins: 5
+    proximity_threshold_pct: 0.005    # 0.5%
+
+    # Spread construction
+    min_width_steps:
+      SPX: 5
+      NDX: 10
+      RUT: 5
+    max_width_multiplier: 10          # Max width = min_step * multiplier
+
+    # Data sources
+    equity_dir: equities_output
+    options_0dte_dir: options_csv_output_full
+    options_dte1_dir: csv_exports/options
+
+constraints:
+  budget:
+    daily_budget: 50000
+  trading_hours:
+    entry_start: "06:30"
+    entry_end: "13:00"
+
+report:
+  formats:
+    - console
+  metrics:
+    - win_rate
+    - roi
+    - sharpe
+    - max_drawdown
+    - profit_factor

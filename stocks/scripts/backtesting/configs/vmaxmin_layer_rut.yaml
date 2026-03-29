@@ -1,0 +1,78 @@
+infra:
+  ticker: RUT
+  lookback_days: 30
+  output_dir: results/vmaxmin_layer_rut
+  log_level: INFO
+
+providers:
+  - name: csv_equity
+    role: equity
+    params:
+      base_dir: equities_output
+  - name: csv_options
+    role: options
+    params:
+      base_dir: options_csv_output_full_5/RUT/RUT
+  - name: csv_options_dte1
+    role: options_dte1
+    params:
+      base_dir: csv_exports/options
+
+strategy:
+  name: vmaxmin_v1
+  params:
+    strategy_mode: layer
+    num_contracts: 40
+    commission_per_transaction: 10
+
+    # Layer mode entry
+    layer_dual_entry: true
+    layer_entry_directions: both
+    layer_entry_window_start: "06:30"
+    layer_entry_window_end: "06:45"
+
+    # Layer mode EOD scan
+    layer_eod_scan_start: "12:50"
+    layer_eod_scan_end: "13:00"
+    layer_eod_proximity: 0.002
+
+    # Roll parameters
+    max_roll_count: 99
+    roll_recovery_threshold: 99.0
+    roll_match_contracts: false
+    roll_max_chain_contracts: null
+    roll_max_width_mult: 5
+    roll_max_contract_mult: 2
+
+    # Call-track settings
+    call_track_unlimited_budget: true
+    call_track_check_times_pacific:
+      - "08:35"
+      - "10:35"
+    call_track_leg_placement: best_roi
+    call_track_depth_pct: 0.003
+
+    # Data sources
+    equity_dir: equities_output
+    options_0dte_dir: options_csv_output_full_5/RUT/RUT
+    options_dte1_dir: csv_exports/options
+
+constraints:
+  budget:
+    daily_budget: 100000
+  risk:
+    max_total_exposure: 500000
+    max_skip_days: 3
+  trading_hours:
+    entry_start: "06:30"
+    entry_end: "13:00"
+
+report:
+  formats:
+    - console
+  metrics:
+    - win_rate
+    - roi
+    - sharpe
+    - max_drawdown
+    - profit_factor

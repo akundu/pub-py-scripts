@@ -784,6 +784,46 @@ def _run_simulation(profile, tracker, args, display) -> None:
     display.print_info(f"Simulation of {sim_date_str} complete.")
 
 
+def _run_vmaxmin(profile, args) -> None:
+    """Dispatch to vMaxMin layer runner for simulate/live modes."""
+    import subprocess
+
+    ticker = args.ticker or profile.ticker
+    raw = profile.raw_config
+    nc = raw.get("entry", {}).get("contracts", 40)
+
+    if args.simulate:
+        cmd = [
+            sys.executable, "run_vmaxmin_live.py",
+            "--simulate", args.simulate,
+            "--num-contracts", str(nc),
+            "--sim-speed", str(args.sim_speed),
+        ]
+        subprocess.run(cmd)
+    elif args.live:
+        cmd = [
+            sys.executable, "run_vmaxmin_live.py",
+            "--live",
+            "--num-contracts", str(nc),
+        ]
+        subprocess.run(cmd)
+    elif args.dry_run:
+        print(f"  vMaxMin Layer Profile: {profile.name}")
+        print(f"  Ticker: {ticker}")
+        print(f"  Contracts: {nc}")
+        print(f"  Entry window: {raw.get('entry', {}).get('window_start', '06:30')}-{raw.get('entry', {}).get('window_end', '06:45')}")
+        print(f"  EOD scan: {raw.get('eod_roll', {}).get('scan_start', '12:50')}-{raw.get('eod_roll', {}).get('scan_end', '13:00')}")
+        print(f"  Risk: ${raw.get('risk', {}).get('daily_budget', 100000):,.0f}/day, ${raw.get('risk', {}).get('max_total_exposure', 500000):,.0f} cap")
+    elif args.positions:
+        cmd = [sys.executable, "run_vmaxmin_live.py", "--positions"]
+        subprocess.run(cmd)
+    else:
+        print(f"  vMaxMin profile loaded. Use --simulate DATE or --live to run.")
+        print(f"  Examples:")
+        print(f"    python run_live_advisor.py --profile vmaxmin_layer --simulate 2026-03-20")
+        print(f"    python run_live_advisor.py --profile vmaxmin_layer --live")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description='''
@@ -952,6 +992,11 @@ Examples:
     # Summary-only mode
     if args.summary:
         display.print_summary(tracker)
+        return
+
+    # vMaxMin strategy: dispatch to dedicated runner
+    if profile.strategy == "vmaxmin_v1":
+        _run_vmaxmin(profile, args)
         return
 
     # Simulation mode: replay a historical day from CSV

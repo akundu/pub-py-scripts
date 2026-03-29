@@ -325,6 +325,51 @@ python run_tqqq_momentum_sweep.py
 
 **Data:** Uses `options_csv_output_full/TQQQ/` (full chain with 0-1 DTE) and `equities_output/TQQQ/` (5-min bars).
 
+### vMaxMin Layer Strategy
+
+A 0DTE credit spread strategy that opens both call and put spreads at market open, layers additional spreads at HOD/LOD throughout the day, and rolls ITM positions to DTE+1 using credit-neutral sizing with infinite rolls.
+
+```bash
+# Simulate a date
+python run_live_advisor.py --profile vmaxmin_layer --simulate 2026-03-20 --sim-speed 0
+
+# Or directly
+python run_vmaxmin_live.py --simulate 2026-03-20 --num-contracts 40
+
+# Backtest
+python scripts/backtesting/scripts/run_vmaxmin_backtest.py \
+    --tickers RUT --layer --lookback-days 120 --num-contracts 40 \
+    --daily-budget 100000 --risk-cap 500000 -v
+
+# Check carry positions
+python run_vmaxmin_live.py --positions
+```
+
+**Key Parameters:**
+- Entry: `best_roi` spread finder, scan 06:30-06:45 window, 0.3% proximity
+- Layers: check 08:35, 10:35 for new HOD/LOD
+- EOD: scan 12:50-13:00 every minute, roll if ITM or within 0.2%
+- Rolls: credit-neutral sizing, no chain cap, infinite rolls
+- Risk: $100K/day budget, $500K max exposure, 3-day skip limit
+
+**6-Month Backtest Results (40 contracts):**
+
+| Ticker | True P&L | Annualized | Win Rate | Avg/Day |
+|--------|----------|------------|----------|---------|
+| RUT | +$5.18M | +$10.5M | 100% | +$41,763 |
+| SPX | +$2.22M | +$4.5M | 100% | +$17,921 |
+| NDX | +$10.6M | +$21.5M | 100% | +$85,509 |
+
+**Key files:**
+- Core engine: `scripts/backtesting/scripts/vmaxmin_engine.py`
+- Backtest CLI: `scripts/backtesting/scripts/run_vmaxmin_backtest.py`
+- Single-day simulator: `scripts/backtesting/scripts/run_vmaxmin_simulate.py`
+- Live/simulate runner: `run_vmaxmin_live.py`
+- Profile config: `scripts/live_trading/advisor/profiles/vmaxmin_layer.yaml`
+- Backtest YAML config: `scripts/backtesting/configs/vmaxmin_layer_rut.yaml`
+- Full analysis: `docs/strategies/vmaxmin_layer_analysis.md`
+- Tests: `tests/test_vmaxmin.py` (88 tests)
+
 ## Live Paper Trading Platform
 
 The `scripts/live_trading/` directory contains a live paper trading platform that runs strategies during market hours. It reuses the backtesting framework's abstractions (`DataProvider`, `SignalGenerator`, `Constraint`, `ExitRule`, `Instrument`) with live data from QuestDB and `csv_exports/options/`.

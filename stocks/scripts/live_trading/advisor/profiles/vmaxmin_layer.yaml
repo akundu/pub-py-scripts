@@ -1,0 +1,71 @@
+# ============================================================================
+# vMaxMin Layer — 0DTE Credit Spread Layer Strategy
+#
+# This profile is NOT used by the standard live advisor (run_live_advisor.py).
+# The vMaxMin engine is a standalone strategy with its own backtesting and
+# simulation runner.
+#
+# Run modes:
+#   Backtest:  python scripts/backtesting/scripts/run_vmaxmin_backtest.py \
+#                --tickers RUT --layer --lookback-days 120 \
+#                --num-contracts 40 --entry-directions both -v
+#
+#   Simulate:  python scripts/backtesting/scripts/run_vmaxmin_simulate.py \
+#                --ticker RUT --date 2026-03-20 --num-contracts 40 -v
+#
+# Config reference (scripts/backtesting/configs/vmaxmin_layer_rut.yaml)
+# ============================================================================
+
+name: vmaxmin_layer
+strategy: vmaxmin_v1
+tickers: [RUT]
+default_ticker: RUT
+
+# --- Entry ---
+entry:
+  mode: layer                        # layer = dual entry + intraday layering
+  directions: both                   # both, call, put
+  contracts: 40                      # per position
+  window_start: "06:30"             # scan for best entry from this time
+  window_end: "06:45"               # to this time (Pacific)
+  spread_finder: best_roi            # best_roi = highest ROI within proximity
+  proximity_pct: 0.003               # 0.3% of price — strike search radius
+
+# --- Intraday Layers ---
+layers:
+  check_times: ["08:35", "10:35"]    # Pacific times to check for new HOD/LOD
+  # New HOD → add call spread at HOD
+  # New LOD → add put spread at LOD
+
+# --- EOD Roll (scan every minute) ---
+eod_roll:
+  scan_start: "12:50"               # Start scanning (Pacific)
+  scan_end: "13:00"                 # Stop scanning
+  proximity_pct: 0.002               # Roll if ITM or within 0.2% of short strike
+  sizing: credit_neutral             # Roll-open credit covers close debit
+  chain_cap: null                    # No cap on contracts per roll chain
+  max_rolls: 99                      # Effectively infinite
+  width_mult: 5                      # Max roll width = original × 5
+  contract_mult: 2                   # Max roll contracts = original × 2
+
+# --- Risk Management ---
+risk:
+  daily_budget: 100000               # $100K max new capital per day
+  max_total_exposure: 500000         # $500K max total risk at any time
+  max_skip_days: 3                   # Pause up to 3 days if exposure too high
+  commission_per_transaction: 10
+
+# --- Data Sources ---
+data:
+  equity_dir: equities_output
+  options_0dte_dir: options_csv_output_full_5/RUT/RUT
+  options_dte1_dir: csv_exports/options
+  # For DTE+1 rolls, falls back to next day's 0DTE open prices
+
+# --- Expected Performance (6-month backtest) ---
+# Period: 2025-09-29 to 2026-03-26 (124 days)
+# True P&L: +$5,178,657 at 40 contracts
+# Win Rate: 100% (zero losing days)
+# Avg Daily: +$41,763
+# ROI: 53.5%
+# Max Exposure: $436,500 (within $500K cap)
