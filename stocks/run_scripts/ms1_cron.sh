@@ -19,7 +19,22 @@ echo "end date $end_date"
 
 python3 scripts/options_chain_download.py SPX NDX RUT --zero-dte-date-start $start_date  --zero-dte-date-end $end_date  --max-connections 30 --num-processes 2  --interval 5min --format-chain-csv --output-dir options_csv_output/
 python3 scripts/equities_download.py I:VIX1D I:VIX SPY DJX I:DJX TQQQ QQQ I:NDX I:SPX I:RUT  --start $start_date  --end $end_date --output-dir ./equities_output 
-python3 scripts/options_chain_download.py SPX NDX DJX TQQQ RUT --track-from $start_date --track-end $end_date --track-days 30  --interval-minutes 15 --chunk-days 7 --max-connections 20 --num-processes 12      --window-workers 5      --skip-existing --format-chain-csv --output-dir ./options_csv_output_full/
+#python3 scripts/options_chain_download.py SPX NDX DJX TQQQ RUT --track-from $start_date --track-end $end_date --track-days 30  --interval-minutes 5 --chunk-days 7 --max-connections 20 --num-processes 12      --window-workers 5      --skip-existing --format-chain-csv --output-dir ./options_csv_output_full/
+
+#for TICKER in RUT SPX NDX; do
+#    python3 scripts/options_chain_download.py $TICKER \
+#      --track-from $(date -v-10d +%Y-%m-%d) --track-end $(date +%Y-%m-%d) --track-days 7 --track-step 1 \
+#      --interval-minutes 5 --chunk-days 7 --max-connections 20 \
+#      --num-processes 12 --window-workers 5 \
+#      --format-chain-csv --output-dir ./options_csv_output_full_5/
+#done
+#wait
+
+python3 scripts/options_chain_download.py SPX RUT NDX DJX \
+  --track-from $(date -v-10d +%Y-%m-%d) --track-end $(date +%Y-%m-%d) --track-days 7 --track-step 1 \
+  --interval-minutes 5 --chunk-days 7 --max-connections 20 \
+  --num-processes 12 --window-workers 5 \
+  --format-chain-csv --output-dir ./options_csv_output_full_5/
 
 
 #build the close models
