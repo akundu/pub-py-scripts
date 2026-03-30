@@ -432,12 +432,16 @@ class MarketDataStreamingService:
                 return False
         elif is_index:
             # No close yet — seed from first valid tick so subsequent ticks pass the gate.
-            # Sanity check: index values should be > 500 (SPX ~6000, NDX ~23000, RUT ~2500).
-            # Reject obvious garbage like 120 for RUT (delayed/erroneous data from TWS).
-            if price < 500:
+            # Known index floor prices (well below any realistic value, but catches
+            # TWS garbage like 10% of real price: 250 for RUT, 2300 for NDX, 640 for SPX).
+            _INDEX_MIN_PRICES = {
+                "SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5,
+            }
+            min_price = _INDEX_MIN_PRICES.get(symbol, 500)
+            if price < min_price:
                 logger.warning(
-                    "Rejected first tick for %s as prev_close: %.4f too low for an index (need >500)",
-                    symbol, price,
+                    "Rejected first tick for %s as prev_close: %.4f too low (min=%d)",
+                    symbol, price, min_price,
                 )
                 return False
             self._prev_close[symbol] = price
@@ -738,6 +742,9 @@ class MarketDataStreamingService:
                 logger.error("Failed to publish tick for %s: %s", symbol, e)
                 self._errors += 1
 
+    # Absolute floor prices per index — never publish below these
+    _PUBLISH_MIN_PRICES = {"SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5}
+
     async def _publish_tick(self, symbol: str, tick: dict) -> None:
         """Publish a single tick to all configured targets."""
         ts = tick["timestamp"]
@@ -745,6 +752,15 @@ class MarketDataStreamingService:
         bid = tick.get("bid")
         ask = tick.get("ask")
         volume = tick.get("volume", 0)
+
+        # Final safety gate: never publish obviously wrong prices for known indices
+        min_pub = self._PUBLISH_MIN_PRICES.get(symbol)
+        if min_pub and price < min_pub:
+            logger.warning(
+                "Blocked publish for %s: price %.2f below floor %d",
+                symbol, price, min_pub,
+            )
+            return
 
         # Build records matching polygon_realtime_streamer format.
         # Use the validated price from tick handler (already correct for indices vs stocks).
