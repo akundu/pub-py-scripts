@@ -618,16 +618,25 @@ class OptionQuoteStreamingService:
                         symbol, exp, opt_type, smin, smax,
                     )
 
+    # Absolute floor prices per index — reject garbage from TWS delayed data
+    _INDEX_MIN_PRICES = {"SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5}
+
     async def _get_price(self, symbol: str) -> tuple[float | None, str]:
         """Get current price — try streaming cache first, then direct quote.
 
         Returns (price, source) where source is "streaming", "quote", or "".
         """
+        min_price = self._INDEX_MIN_PRICES.get(symbol, 0)
+
         # Try streaming tick cache
         if self._streaming_svc:
             tick = self._streaming_svc.get_last_tick(symbol, max_age_seconds=30.0)
             if tick and tick.get("price", 0) > 0:
-                return tick["price"], "streaming"
+                p = tick["price"]
+                if min_price and p < min_price:
+                    logger.debug("Streaming price for %s (%.2f) below floor %d — skipping", symbol, p, min_price)
+                else:
+                    return p, "streaming"
 
         # Fallback: direct quote
         try:
@@ -636,7 +645,10 @@ class OptionQuoteStreamingService:
             if p and p > 0:
                 import math
                 if not math.isnan(p):
-                    return p, "quote"
+                    if min_price and p < min_price:
+                        logger.debug("Quote price for %s (%.2f) below floor %d — skipping", symbol, p, min_price)
+                    else:
+                        return p, "quote"
         except Exception as e:
             logger.debug("get_quote(%s) failed: %s", symbol, e)
         return None, ""
