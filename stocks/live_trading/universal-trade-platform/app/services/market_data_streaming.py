@@ -399,7 +399,8 @@ class MarketDataStreamingService:
         if not price or price <= 0:
             return False
 
-        # Hard gate: ±close_band_pct from previous close
+        # Hard gate: reject any tick outside (1 - band) to (1 + band) of previous close
+        # Default close_band_pct=0.40 → allowed range is 60%-140% of close
         anchor_close = self._prev_close.get(symbol)
         if anchor_close and anchor_close > 0:
             band = self._config.close_band_pct
@@ -408,6 +409,19 @@ class MarketDataStreamingService:
             if price < lo_close or price > hi_close:
                 cnt = self._reject_count.get(symbol, 0) + 1
                 self._reject_count[symbol] = cnt
+
+                # Self-correcting: if we've rejected 50+ ticks consistently,
+                # the prev_close was probably seeded wrong. Re-seed.
+                if cnt >= 50 and cnt % 50 == 0:
+                    logger.warning(
+                        "Re-seeding prev_close for %s: rejected %d ticks at ~%.2f "
+                        "vs prev_close %.2f — likely seeded from bad data",
+                        symbol, cnt, price, anchor_close,
+                    )
+                    self._prev_close[symbol] = price
+                    self._reject_count[symbol] = 0
+                    return False  # Still reject this one; next tick will pass
+
                 if cnt == 1 or cnt % 100 == 0:
                     direction = "low" if price < lo_close else "high"
                     logger.warning(
@@ -417,7 +431,15 @@ class MarketDataStreamingService:
                     )
                 return False
         elif is_index:
-            # No close yet — seed from first valid tick so subsequent ticks pass the gate
+            # No close yet — seed from first valid tick so subsequent ticks pass the gate.
+            # Sanity check: index values should be > 500 (SPX ~6000, NDX ~23000, RUT ~2500).
+            # Reject obvious garbage like 120 for RUT (delayed/erroneous data from TWS).
+            if price < 500:
+                logger.warning(
+                    "Rejected first tick for %s as prev_close: %.4f too low for an index (need >500)",
+                    symbol, price,
+                )
+                return False
             self._prev_close[symbol] = price
             logger.info("Seeded prev_close for %s from first tick: %.4f", symbol, price)
 

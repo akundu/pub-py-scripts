@@ -67,9 +67,10 @@ max_subscriptions: 50
 # Max messages per second to IBKR API (IBKR limit is 50)
 rate_limit_msg_sec: 22.0
 
-# Hard price gate: reject any tick more than this fraction from previous close
-# 0.35 = ±35%.  Set lower for tighter filtering (e.g., 0.20 for indices).
-close_band_pct: 0.35
+# Hard price gate: reject any tick outside 60%-140% of previous close.
+# Also self-corrects: if 50+ ticks are rejected, re-seeds prev_close.
+# This field is kept for backward compat but the gate is now hardcoded at 60%-140%.
+close_band_pct: 0.40
 
 # ── Tick streaming mode ────────────────────────────────────────────────────
 # How to stream real-time price ticks for configured symbols.
@@ -93,7 +94,7 @@ option_quotes_enabled: true
 option_quotes_poll_interval: 1.5
 
 # Strike range as percentage of current price (e.g., 3.0 = ±3%)
-option_quotes_strike_range_pct: 3.5
+option_quotes_strike_range_pct: 5
 
 # Number of upcoming expirations to fetch per symbol
-option_quotes_num_expirations: 3
+option_quotes_num_expirations: 5
