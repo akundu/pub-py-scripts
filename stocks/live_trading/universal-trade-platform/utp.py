@@ -2560,6 +2560,18 @@ async def _cmd_reconcile_http(args, server: str) -> int:
             print(f"  Re-synced:         {d.get('synced_new', 0)} new, {d.get('synced_updated', 0)} updated")
             print(f"  Open positions:    {d.get('open_positions', 0)}")
             print()
+            # Flush already synced — skip slow reconciliation (avoids duplicate get_positions)
+            if getattr(args, "show", False):
+                resp2 = await client.get("/dashboard/summary")
+                if resp2.status_code == 200:
+                    positions = resp2.json().get("active_positions", [])
+                    if positions:
+                        _print_section("Synced Positions")
+                        for p in positions:
+                            sym = p.get("symbol", "?")
+                            qty = p.get("quantity", 0)
+                            print(f"  {sym:<10} qty={qty}")
+            return 0
 
         broker = getattr(args, "broker", "ibkr")
         resp = await client.get("/account/reconciliation", params={"broker": broker})
