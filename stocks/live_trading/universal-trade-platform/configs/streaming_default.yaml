@@ -81,7 +81,7 @@ close_band_pct: 0.40
 streaming_mode: auto
 
 # Seconds between snapshot polls (only used when streaming_mode=polling)
-cpg_poll_interval: 0.5
+cpg_poll_interval: 1
 
 # ── Option quote streaming (background pre-fetch) ─────────────────────────
 # When enabled, the daemon continuously pre-fetches option quotes for streaming
@@ -94,7 +94,7 @@ option_quotes_enabled: true
 option_quotes_poll_interval: 1.5
 
 # Strike range as percentage of current price (e.g., 3.0 = ±3%)
-option_quotes_strike_range_pct: 5
+option_quotes_strike_range_pct: 3.5
 
 # Number of upcoming expirations to fetch per symbol
 option_quotes_num_expirations: 5
