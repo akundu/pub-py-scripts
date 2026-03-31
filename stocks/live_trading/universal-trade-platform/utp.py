@@ -1669,8 +1669,8 @@ async def _cmd_portfolio_http(args, server: str) -> int:
             has_marks = any(p.get("avg_cost") is not None for p in positions)
 
             if has_marks:
-                print(f"  {'ID':<6} {'Symbol':>6} {'Type':>12} {'Strikes':>16} {'Qty':>5} {'Mark':>10} {'P&L':>12} {'Credit/ROI/MaxLoss':>30} {'Exp':>12}")
-                print(f"  {'─'*6} {'─'*6} {'─'*12} {'─'*16} {'─'*5} {'─'*10} {'─'*12} {'─'*30} {'─'*12}")
+                print(f"  {'ID':<6} {'Symbol':>6} {'Type':>12} {'Strikes':>16} {'Qty':>5} {'Mark':>10} {'P&L':>12} {'Cr/ROI/MaxLoss':^22} {'Exp':>12}")
+                print(f"  {'─'*6} {'─'*6} {'─'*12} {'─'*16} {'─'*5} {'─'*10} {'─'*12} {'─'*22} {'─'*12}")
                 total_upnl = 0.0
                 total_daily = 0.0
                 total_max_loss = 0.0
@@ -1726,22 +1726,22 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                                 total_max_loss += max_loss
                                 total_credit += derived_credit
                                 roi_pct = (derived_credit / max_loss) * 100
-                                risk_info = f"${derived_credit:>7,.0f} {roi_pct:>5.1f}% ${max_loss:>9,.0f}"
+                                risk_info = f"{derived_credit:,.0f}/{roi_pct:.1f}%/{max_loss:,.0f}"
 
                         print(f"  {pid:<6} {sym:>6} {otype:>12} {strikes_s:>16} {qty:>5.0f} "
-                              f"{mark_s} {upnl_s:>20} {risk_info:>30} {exp:>12}")
+                              f"{mark_s} {upnl_s:>20} {risk_info:^22} {exp:>12}")
                     else:
                         entry = p.get("entry_price", 0)
                         print(f"  {pid:<6} {sym:>6} {otype:>12} {strikes_s:>16} {qty:>5.0f} "
-                              f"{'---':>10} {'---':>12} {'':>30} {exp:>12}")
+                              f"{'---':>10} {'---':>12} {'':>22} {exp:>12}")
 
                 upnl_c = "92" if total_upnl >= 0 else "91"
                 total_risk_info = ""
                 if total_max_loss > 0:
                     total_roi_pct = (total_upnl / total_max_loss) * 100
-                    total_risk_info = f"${total_credit:>7,.0f} {total_roi_pct:>+5.1f}% ${total_max_loss:>9,.0f}"
+                    total_risk_info = f"{total_credit:,.0f}/{total_roi_pct:+.1f}%/{total_max_loss:,.0f}"
                 print(f"  {'':>6} {'':>6} {'':>12} {'':>16} {'':>5} {'TOTAL':>10} "
-                      f"{_color(f'${total_upnl:>+10,.2f}', upnl_c):>20} {total_risk_info:>30}")
+                      f"{_color(f'${total_upnl:>+10,.2f}', upnl_c):>20} {total_risk_info:^22}")
             else:
                 print(f"  {'Symbol':<10} {'Type':<10} {'Qty':>6} {'Entry':>10} {'P&L':>10} {'Status':<8}")
                 print(f"  {'---':<10} {'---':<10} {'---':>6} {'---':>10} {'---':>10} {'---':<8}")
