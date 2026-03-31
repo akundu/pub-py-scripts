@@ -128,6 +128,8 @@ async def get_options(
 
     # Fast path: if we have cached quotes for the requested expiration+type,
     # serve entirely from cache without hitting the provider at all.
+    # But only if the cache actually has data for the requested strike range —
+    # an empty result with strike filters means the cache doesn't cover those strikes.
     if expiration and oq_svc and not list_expirations:
         types_to_fetch = [option_type.upper()] if option_type else ["CALL", "PUT"]
         all_cached = {}
@@ -136,7 +138,8 @@ async def get_options(
                 symbol.upper(), expiration, ot,
                 strike_min=strike_min, strike_max=strike_max,
             )
-            if cached is not None:
+            # Treat empty list with strike filters as cache miss (strikes outside cached range)
+            if cached is not None and (cached or (strike_min is None and strike_max is None)):
                 all_cached[ot.lower()] = cached
 
         if len(all_cached) == len(types_to_fetch):
@@ -167,7 +170,8 @@ async def get_options(
                         symbol.upper(), expiration, ot,
                         strike_min=strike_min, strike_max=strike_max,
                     )
-                if cached is not None:
+                # Use cache only if non-empty (empty with strike filters = cache miss)
+                if cached:
                     q = cached
                 else:
                     q = await provider.get_option_quotes(
