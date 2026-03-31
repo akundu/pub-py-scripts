@@ -2793,18 +2793,27 @@ async def _estimate_spread_market_price(client, order) -> dict | None:
     if not expiration:
         return None
 
-    # Collect unique option types needed
+    # Collect unique option types and strike range needed
     types_needed = set()
+    order_strikes = []
     for leg in order.legs:
         types_needed.add(leg.option_type.value)
+        order_strikes.append(leg.strike)
 
-    # Fetch option quotes for each type
+    # Build strike range that covers the order's strikes with margin
+    strike_min = min(order_strikes) - 10 if order_strikes else None
+    strike_max = max(order_strikes) + 10 if order_strikes else None
+
+    # Fetch option quotes for each type, with strike range covering the order
     all_quotes: dict[tuple, dict] = {}  # (strike, type) → quote
     for ot in types_needed:
         try:
-            resp = await client.get(f"/market/options/{symbol}", params={
-                "expiration": expiration, "option_type": ot,
-            })
+            params = {"expiration": expiration, "option_type": ot}
+            if strike_min is not None:
+                params["strike_min"] = strike_min
+            if strike_max is not None:
+                params["strike_max"] = strike_max
+            resp = await client.get(f"/market/options/{symbol}", params=params)
             if resp.status_code == 200:
                 data = resp.json()
                 quotes = data.get("quotes", {}).get(ot.lower(), [])
