@@ -2081,7 +2081,7 @@ async def _cmd_close_http(args, server: str) -> int:
     qty = getattr(args, "quantity", None)
     net_price = getattr(args, "net_price", None)
 
-    async with httpx.AsyncClient(base_url=server, timeout=60.0) as client:
+    async with httpx.AsyncClient(base_url=server, timeout=90.0) as client:
         if simulate:
             # Look up position details first, then run margin check
             resp = await client.get("/dashboard/portfolio")
@@ -2908,7 +2908,7 @@ async def _cmd_trade_http(args, server: str) -> int:
     mode = _get_mode(args)
     simulate = getattr(args, "simulate", False)
 
-    async with httpx.AsyncClient(base_url=server, timeout=60.0) as client:
+    async with httpx.AsyncClient(base_url=server, timeout=90.0) as client:
         if simulate:
             # --simulate: use margin check (whatIfOrder) — qualifies contracts,
             # checks margin, shows costs, but does NOT place the order.

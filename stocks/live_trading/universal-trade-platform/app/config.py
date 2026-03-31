@@ -59,7 +59,7 @@ class Settings(BaseSettings):
 
     # Order fill tracking
     order_poll_interval_seconds: float = 1.0
-    order_poll_timeout_seconds: float = 30.0
+    order_poll_timeout_seconds: float = 60.0
 
     # LAN trust
     trust_local_network: bool = True
