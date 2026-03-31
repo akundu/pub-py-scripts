@@ -1669,11 +1669,12 @@ async def _cmd_portfolio_http(args, server: str) -> int:
             has_marks = any(p.get("avg_cost") is not None for p in positions)
 
             if has_marks:
-                print(f"  {'ID':<6} {'Symbol':>6} {'Type':>12} {'Strikes':>16} {'Qty':>5} {'Credit':>10} {'Mark':>10} {'P&L':>12} {'ROI%':>7} {'MaxLoss':>10} {'Exp':>12}")
-                print(f"  {'─'*6} {'─'*6} {'─'*12} {'─'*16} {'─'*5} {'─'*10} {'─'*10} {'─'*12} {'─'*7} {'─'*10} {'─'*12}")
+                print(f"  {'ID':<6} {'Symbol':>6} {'Type':>12} {'Strikes':>16} {'Qty':>5} {'Mark':>10} {'P&L':>12} {'Credit/ROI/MaxLoss':>30} {'Exp':>12}")
+                print(f"  {'─'*6} {'─'*6} {'─'*12} {'─'*16} {'─'*5} {'─'*10} {'─'*12} {'─'*30} {'─'*12}")
                 total_upnl = 0.0
                 total_daily = 0.0
                 total_max_loss = 0.0
+                total_credit = 0.0
                 for p in positions:
                     sym = p.get("symbol", "?")
                     otype = p.get("order_type", "?")
@@ -1702,9 +1703,7 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                         if not strikes_s:
                             strikes_s = "/".join(parts)
 
-                    # Compute max loss and ROI for multi-leg (credit spread / iron condor)
-                    max_loss_s = f"{'---':>10}"
-                    roi_s = f"{'---':>7}"
+                    risk_info = ""  # Combined Credit/ROI/MaxLoss column
                     if p.get("avg_cost") is not None:
                         avg_cost = p["avg_cost"]
                         mark = p.get("market_price", 0) or 0
@@ -1717,11 +1716,7 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                         mark_s = f"${mark:>9.4f}" if mark else f"{'---':>10}"
                         upnl_s = _color(f"${upnl:>+10,.2f}", pnl_c) if upnl else f"{'---':>12}"
 
-                        # Max loss & ROI for credit spreads
-                        # IBKR's avgCost for combos is unreliable (varies per-combo vs total).
-                        # Derive credit from authoritative fields: credit = P&L + |market_value|
-                        # (for a credit spread: P&L = credit_received - cost_to_close)
-                        derived_credit = 0.0
+                        # Derive credit and compute ROI/MaxLoss for spreads
                         if otype == "multi_leg" and len(leg_strikes) >= 2:
                             spread_width = abs(leg_strikes[0] - leg_strikes[1])
                             gross_risk = spread_width * abs(qty) * 100
@@ -1729,32 +1724,24 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                             if 0 < derived_credit < gross_risk:
                                 max_loss = gross_risk - derived_credit
                                 total_max_loss += max_loss
+                                total_credit += derived_credit
                                 roi_pct = (derived_credit / max_loss) * 100
-                                max_loss_s = f"${max_loss:>9,.0f}"
-                                roi_s = f"{roi_pct:>6.1f}%"
-
-                        # Credit display: use derived credit (consistent with ROI), fallback to avg_cost
-                        if derived_credit > 0:
-                            credit_s = f"${derived_credit:>9,.0f}"
-                        else:
-                            credit_s = f"${avg_cost:>9.4f}"
+                                risk_info = f"${derived_credit:>7,.0f} {roi_pct:>5.1f}% ${max_loss:>9,.0f}"
 
                         print(f"  {pid:<6} {sym:>6} {otype:>12} {strikes_s:>16} {qty:>5.0f} "
-                              f"{credit_s} {mark_s} "
-                              f"{upnl_s:>20} {roi_s} {max_loss_s} {exp:>12}")
+                              f"{mark_s} {upnl_s:>20} {risk_info:>30} {exp:>12}")
                     else:
                         entry = p.get("entry_price", 0)
                         print(f"  {pid:<6} {sym:>6} {otype:>12} {strikes_s:>16} {qty:>5.0f} "
-                              f"${abs(entry):>9.4f} {'---':>10} {'---':>12} {'---':>7} {'---':>10} {exp:>12}")
+                              f"{'---':>10} {'---':>12} {'':>30} {exp:>12}")
 
                 upnl_c = "92" if total_upnl >= 0 else "91"
-                max_loss_total_s = f"${total_max_loss:>9,.0f}" if total_max_loss > 0 else f"{'':>10}"
-                total_roi_s = ""
-                if total_max_loss > 0 and total_upnl != 0:
+                total_risk_info = ""
+                if total_max_loss > 0:
                     total_roi_pct = (total_upnl / total_max_loss) * 100
-                    total_roi_s = f"{total_roi_pct:>+5.1f}%"
-                print(f"  {'':>6} {'':>6} {'':>12} {'':>16} {'':>5} {'':>10} {'TOTAL':>10} "
-                      f"{_color(f'${total_upnl:>+10,.2f}', upnl_c):>20} {total_roi_s:>7} {max_loss_total_s}")
+                    total_risk_info = f"${total_credit:>7,.0f} {total_roi_pct:>+5.1f}% ${total_max_loss:>9,.0f}"
+                print(f"  {'':>6} {'':>6} {'':>12} {'':>16} {'':>5} {'TOTAL':>10} "
+                      f"{_color(f'${total_upnl:>+10,.2f}', upnl_c):>20} {total_risk_info:>30}")
             else:
                 print(f"  {'Symbol':<10} {'Type':<10} {'Qty':>6} {'Entry':>10} {'P&L':>10} {'Status':<8}")
                 print(f"  {'---':<10} {'---':<10} {'---':>6} {'---':>10} {'---':>10} {'---':<8}")
