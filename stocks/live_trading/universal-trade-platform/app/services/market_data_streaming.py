@@ -185,6 +185,11 @@ class MarketDataStreamingService:
             else:
                 logger.warning("IBKR not healthy — streaming will start when connection is available")
                 self._streaming_mode = "ib_insync_pending"
+        elif mode == "polling" and self._has_ib_client:
+            # TWS polling: periodically call get_quote for each symbol
+            self._cpg_task = asyncio.create_task(self._tws_poll_loop())
+            self._streaming_mode = "tws_polling"
+            logger.info("TWS tick streaming started (polling every %.1fs)", self._config.cpg_poll_interval)
         elif mode in ("websocket", "polling") and self._is_cpg_provider:
             if mode == "polling":
                 self._cpg_task = asyncio.create_task(self._cpg_poll_loop())
@@ -194,6 +199,10 @@ class MarketDataStreamingService:
                 self._cpg_task = asyncio.create_task(self._cpg_ws_loop())
                 self._streaming_mode = "cpg_websocket"
                 logger.info("CPG tick streaming started (WebSocket)")
+        elif mode in ("websocket", "polling") and self._has_ib_client:
+            logger.warning("streaming_mode=%s requested but TWS detected — using TWS polling instead", mode)
+            self._cpg_task = asyncio.create_task(self._tws_poll_loop())
+            self._streaming_mode = "tws_polling"
         else:
             logger.info("Tick streaming disabled — no compatible provider available")
             self._streaming_mode = "disabled"
@@ -527,6 +536,61 @@ class MarketDataStreamingService:
 
             if price and price > 0:
                 self._ingest_tick(symbol, price, bid, ask, volume, close, is_index)
+
+    # ── TWS polling loop ──────────────────────────────────────────────────
+
+    async def _tws_poll_loop(self) -> None:
+        """TWS polling loop — calls get_quote for each symbol at regular intervals."""
+        from app.services.streaming_config import _INDEX_EXCHANGES
+
+        symbols = [s.symbol for s in self._config.symbols]
+        if not symbols:
+            logger.warning("TWS polling: no symbols configured — stopping")
+            return
+
+        # Wait for IBKR connection
+        for attempt in range(30):
+            if self._ibkr and hasattr(self._ibkr, "is_healthy") and self._ibkr.is_healthy():
+                break
+            delay = min(2.0 * (attempt + 1), 10.0)
+            logger.info("TWS polling: waiting for IBKR connection (attempt %d)", attempt + 1)
+            await asyncio.sleep(delay)
+            if not self._running:
+                return
+
+        if not (self._ibkr and hasattr(self._ibkr, "is_healthy") and self._ibkr.is_healthy()):
+            logger.warning("TWS polling: IBKR not available — stopping")
+            return
+
+        logger.info("TWS polling started for %d symbols: %s", len(symbols), symbols)
+
+        while self._running:
+            for symbol in symbols:
+                if not self._running:
+                    break
+                try:
+                    quote = await self._ibkr.get_quote(symbol)
+                    price = quote.last or quote.bid or quote.ask
+                    if not price or price <= 0:
+                        continue
+
+                    is_index = symbol.upper() in _INDEX_EXCHANGES
+                    bid = quote.bid if quote.bid > 0 else price
+                    ask = quote.ask if quote.ask > 0 else price
+                    volume = quote.volume or 0
+
+                    if is_index:
+                        bid = price
+                        ask = price
+
+                    self._ingest_tick(symbol, price, bid, ask, volume, None, is_index)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.debug("TWS poll error for %s: %s", symbol, e)
+                    self._errors += 1
+
+            await asyncio.sleep(self._config.cpg_poll_interval)
 
     # ── CPG WebSocket streaming ────────────────────────────────────────────
 
