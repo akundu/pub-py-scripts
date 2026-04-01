@@ -902,7 +902,7 @@ class IBKRRestProvider(BrokerProvider):
                 # First request — subscribes conIds, may return empty fields
                 await self._get(
                     "/iserver/marketdata/snapshot",
-                    params={"conids": conids_str, "fields": "31,84,86,87"},
+                    params={"conids": conids_str, "fields": "31,84,86,87,7283,7308,7309,7310,7311"},
                 )
                 # Short delay for CPG to populate
                 import asyncio as _aio
@@ -910,7 +910,7 @@ class IBKRRestProvider(BrokerProvider):
                 # Second request — should have data
                 data = await self._get(
                     "/iserver/marketdata/snapshot",
-                    params={"conids": conids_str, "fields": "31,84,86,87"},
+                    params={"conids": conids_str, "fields": "31,84,86,87,7283,7308,7309,7310,7311"},
                 )
                 if isinstance(data, list):
                     all_snaps.extend(data)
@@ -936,16 +936,34 @@ class IBKRRestProvider(BrokerProvider):
                     except (ValueError, TypeError):
                         return 0.0
 
-                results.append(
-                    {
-                        "strike": strike_val,
-                        "bid": _pf(_FIELD_BID),
-                        "ask": _pf(_FIELD_ASK),
-                        "last": _pf(_FIELD_LAST),
-                        "volume": int(_pf(_FIELD_VOLUME)),
-                        "open_interest": 0,  # CPG doesn't provide OI in snapshot
+                # Extract greeks from CPG snapshot fields
+                # 7311=delta, 7310=theta, 7308=vega, 7309=gamma, 7283=IV%
+                greeks = {}
+                delta = _pf("7311")
+                gamma = _pf("7309")
+                theta = _pf("7310")
+                vega = _pf("7308")
+                iv_pct = _pf("7283")
+                if delta or gamma or theta or vega or iv_pct:
+                    greeks = {
+                        "delta": round(delta, 6) if delta else None,
+                        "gamma": round(gamma, 6) if gamma else None,
+                        "theta": round(theta, 6) if theta else None,
+                        "vega": round(vega, 6) if vega else None,
+                        "iv": round(iv_pct / 100.0, 6) if iv_pct else None,  # CPG returns as %
                     }
-                )
+
+                entry = {
+                    "strike": strike_val,
+                    "bid": _pf(_FIELD_BID),
+                    "ask": _pf(_FIELD_ASK),
+                    "last": _pf(_FIELD_LAST),
+                    "volume": int(_pf(_FIELD_VOLUME)),
+                    "open_interest": 0,
+                }
+                if any(v is not None for v in greeks.values()):
+                    entry["greeks"] = greeks
+                results.append(entry)
 
         return sorted(results, key=lambda x: x["strike"])
 

@@ -2877,6 +2877,9 @@ async def _estimate_spread_market_price(client, order) -> dict | None:
             "price_used": round(price_used, 2),
             "side": side,
         }
+        # Include greeks if available from the quote
+        if q.get("greeks"):
+            detail["greeks"] = q["greeks"]
         if crossed:
             detail["warning"] = "crossed"
         leg_details.append(detail)
@@ -2995,10 +2998,22 @@ async def _cmd_trade_http(args, server: str) -> int:
                     print(f"  Price:      MARKET")
         elif trade_request.multi_leg_order:
             order = trade_request.multi_leg_order
+            sym = order.legs[0].symbol if order.legs else "?"
             print(f"  Type:       {subcommand}")
-            print(f"  Symbol:     {order.legs[0].symbol if order.legs else '?'}")
+            print(f"  Symbol:     {sym}")
             print(f"  Quantity:   {order.quantity}")
             print(f"  Exchange:   SMART (best execution)")
+
+            # Fetch and show current underlying price
+            try:
+                qr = await client.get(f"/market/quote/{sym}")
+                if qr.status_code == 200:
+                    qd = qr.json()
+                    ul_price = qd.get("last") or qd.get("bid") or qd.get("ask")
+                    if ul_price and ul_price > 0:
+                        print(f"  Underlying: ${ul_price:,.2f}")
+            except Exception:
+                pass
             is_credit = order.legs[0].action.value in ("SELL_TO_OPEN", "SELL_TO_CLOSE") if order.legs else False
             credit_per_spread = None  # set below for ROI calc
             est_legs = None  # set by MARKET path if quotes available
@@ -3058,7 +3073,7 @@ async def _cmd_trade_http(args, server: str) -> int:
                     print(f"  Max risk:   ~${max_loss_total:,.2f} (${max_loss_per:.2f}/spread)")
                     print(f"  ROI:        {roi:.1f}%")
 
-            # Show legs with bid/ask pricing when available
+            # Show legs with bid/ask pricing and greeks when available
             print(f"  Legs:")
             if est_legs:
                 for ld in est_legs:
@@ -3067,6 +3082,22 @@ async def _cmd_trade_http(args, server: str) -> int:
                           f"strike={ld['strike']:<10} "
                           f"bid=${ld['bid']:<8.2f} ask=${ld['ask']:<8.2f} "
                           f"→ {ld['side']} ${ld['price_used']:.2f}{flag}")
+                    # Show greeks if available
+                    g = ld.get("greeks")
+                    if g:
+                        parts = []
+                        if g.get("delta") is not None:
+                            parts.append(f"Δ={g['delta']:+.3f}")
+                        if g.get("gamma") is not None:
+                            parts.append(f"Γ={g['gamma']:.4f}")
+                        if g.get("theta") is not None:
+                            parts.append(f"Θ={g['theta']:+.3f}")
+                        if g.get("vega") is not None:
+                            parts.append(f"V={g['vega']:.3f}")
+                        if g.get("iv") is not None:
+                            parts.append(f"IV={g['iv']*100:.1f}%")
+                        if parts:
+                            print(f"{'':>20} {' '.join(parts)}")
             else:
                 for leg in (order.legs or []):
                     leg_qty = leg.quantity * order.quantity

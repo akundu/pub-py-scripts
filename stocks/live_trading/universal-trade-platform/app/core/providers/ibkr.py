@@ -1152,7 +1152,27 @@ class IBKRLiveProvider(BrokerProvider):
                 # Fallback: construct from parts
                 r_label = "C" if right == "C" else "P"
                 occ_symbol = f"{symbol}{exp_yyyymmdd[2:]}{r_label}{int(c.strike * 1000):08d}"
-            results.append({
+            # Extract greeks from modelGreeks (computed by IBKR's option model)
+            greeks = {}
+            mg = getattr(ticker, "modelGreeks", None)
+            if mg:
+                def _gf(v):
+                    if v is None:
+                        return None
+                    try:
+                        f = float(v)
+                        return None if math.isnan(f) else round(f, 6)
+                    except (TypeError, ValueError):
+                        return None
+                greeks = {
+                    "delta": _gf(mg.delta),
+                    "gamma": _gf(mg.gamma),
+                    "theta": _gf(mg.theta),
+                    "vega": _gf(mg.vega),
+                    "iv": _gf(mg.impliedVol),
+                }
+
+            entry = {
                 "symbol": occ_symbol.strip(),
                 "strike": float(c.strike),
                 "bid": float(ticker.bid or 0),
@@ -1160,7 +1180,10 @@ class IBKRLiveProvider(BrokerProvider):
                 "last": float(ticker.last or 0),
                 "volume": _safe_int(ticker.volume),
                 "open_interest": _safe_int(getattr(ticker, "open_interest", 0)),
-            })
+            }
+            if any(v is not None for v in greeks.values()):
+                entry["greeks"] = greeks
+            results.append(entry)
 
         results.sort(key=lambda r: r["strike"])
 
