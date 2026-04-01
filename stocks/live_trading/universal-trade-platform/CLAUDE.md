@@ -20,6 +20,7 @@ There are no standalone scripts. Do not create new top-level scripts unless expl
 1. **Tests must be updated with every code change.** Any new feature, bug fix, or refactor must include corresponding test additions or updates in `tests/test_utp.py`. Run `python -m pytest tests/ -v` and confirm all tests pass before considering the change complete.
 2. **All tests must pass.** Never leave broken tests. If a change breaks existing tests, fix them as part of the same change.
 3. **Do not create new files** for scripts or tests. Add to `utp.py` and `tests/test_utp.py` respectively.
+4. **All market data access MUST go through `app/services/market_data.py`.** Never call `provider.get_quote()` or `provider.get_option_quotes()` directly from routes, CLI, or any other code. Always use `from app.services.market_data import get_quote, get_option_quotes`. This module enforces a consistent cache → stale → provider fallback pattern that prevents slow 10-18s IBKR round-trips. Direct provider calls bypass the streaming cache and cause severe performance regressions.
 
 ## Server-First Architecture (v4.0)
 
@@ -429,6 +430,7 @@ Every CLI command auto-detects a running daemon via HTTP health check. When daem
 | `live_data_service.py` | `LiveDataService` | IBKR-primary data with local fallback. Module accessor: `init_live_data_service()` / `get_live_data_service()` / `reset_live_data_service()` |
 | `market_data_streaming.py` | `MarketDataStreamingService` | IBKR real-time streaming to Redis/QuestDB/WS. Supports ib_insync, CPG WebSocket, and CPG polling modes. Module accessor: `init_streaming_service()` / `get_streaming_service()` / `reset_streaming_service()` |
 | `streaming_config.py` | `StreamingConfig` | YAML config loader for streaming symbols, targets, and option quote streaming |
+| `market_data.py` | `get_quote()`, `get_option_quotes()` | **Centralized market data access layer.** All quote and option data requests MUST go through this module. Enforces cache → stale → provider fallback. |
 | `option_quote_streaming.py` | `OptionQuoteStreamingService` | Background option quote pre-fetch with in-memory + Redis cache. Module accessor: `init_option_quote_streaming()` / `get_option_quote_streaming()` / `reset_option_quote_streaming()` |
 | `execution_store.py` | `ExecutionStore` | IBKR execution cache with perm_id grouping. Module accessor: `init_execution_store()` / `get_execution_store()` / `reset_execution_store()` |
 
