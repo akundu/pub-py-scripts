@@ -6357,9 +6357,10 @@ option_quotes_num_expirations: 2
             )
             assert resp.status_code == 200
             data = resp.json()
-            # Fell back to slow path — get_option_chain was called
-            ibkr.get_option_chain.assert_called_once()
-            assert "source" not in data  # no streaming_cache tag
+            # PUT was missing from cache — provider's get_option_quotes called for it
+            ibkr.get_option_quotes.assert_called()
+            # CALL came from cache, PUT from provider
+            assert "quotes" in data
         finally:
             reset_option_quote_streaming()
 

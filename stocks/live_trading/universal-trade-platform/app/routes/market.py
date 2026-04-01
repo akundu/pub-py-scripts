@@ -23,32 +23,9 @@ async def get_quote(
     _user: Annotated[TokenData, Security(require_auth, scopes=["market:read"])],
     broker: Broker = Broker.IBKR,
 ) -> Quote:
-    """Fetch a real-time quote for a symbol using the symbology engine.
-
-    Checks streaming cache first (< 60s) to avoid slow TWS reqMktData round-trips.
-    """
-    from app.services.market_data_streaming import get_streaming_service
-    from datetime import datetime as _dt, timezone as _tz
-
-    # Fast path: streaming cache (instant, no IBKR round-trip)
-    svc = get_streaming_service()
-    if svc and svc.is_running:
-        tick = svc.get_last_tick(symbol.upper(), max_age_seconds=60.0)
-        if tick and tick.get("price", 0) > 0:
-            price = tick["price"]
-            return Quote(
-                symbol=symbol.upper(),
-                bid=tick.get("bid") or price,
-                ask=tick.get("ask") or price,
-                last=price,
-                volume=tick.get("volume", 0),
-                timestamp=_dt.fromisoformat(tick["timestamp"]),
-                source="streaming_cache",
-            )
-
-    # Slow path: provider (TWS reqMktData or CPG snapshot)
-    provider = ProviderRegistry.get(broker)
-    return await provider.get_quote(symbol.upper())
+    """Fetch a real-time quote — streaming cache first, provider fallback."""
+    from app.services.market_data import get_quote as _get_quote
+    return await _get_quote(symbol, broker)
 
 
 class BatchQuoteRequest(BaseModel):
@@ -143,74 +120,50 @@ async def get_options(
     strike_max: float | None = None,
     list_expirations: bool = False,
 ) -> dict:
-    """Get option chain data for a symbol."""
-    from app.services.option_quote_streaming import get_option_quote_streaming
+    """Get option chain data — centralized cache → provider fallback."""
+    from app.services.market_data import get_option_quotes as _get_opts
 
     provider = ProviderRegistry.get(broker)
-    oq_svc = get_option_quote_streaming()
-
-    # Fast path: if we have cached quotes for the requested expiration+type,
-    # serve entirely from cache without hitting the provider at all.
-    # Try default TTL first (5 min market hours), then stale fallback (30 min)
-    # so we serve slightly-old data rather than nothing when the background loop
-    # fails to refresh.
-    if expiration and oq_svc and not list_expirations:
-        types_to_fetch = [option_type.upper()] if option_type else ["CALL", "PUT"]
-        for max_age in [0, 1800]:  # 0 = auto (5min/1day), 1800 = 30 min stale fallback
-            all_cached = {}
-            for ot in types_to_fetch:
-                cached = oq_svc.get_cached_quotes(
-                    symbol.upper(), expiration, ot,
-                    strike_min=strike_min, strike_max=strike_max,
-                    max_age=max_age,
-                )
-                # Treat empty list with strike filters as cache miss
-                if cached is not None and (cached or (strike_min is None and strike_max is None)):
-                    all_cached[ot.lower()] = cached
-
-            if len(all_cached) == len(types_to_fetch):
-                return {
-                    "symbol": symbol.upper(),
-                    "chain": {"expirations": [], "strikes": []},
-                    "quotes": all_cached,
-                    "source": "streaming_cache" if max_age == 0 else "streaming_cache_stale",
-                }
-
-    # Slow path: call provider
-    chain = await provider.get_option_chain(symbol.upper())
 
     if list_expirations:
+        chain = await provider.get_option_chain(symbol.upper())
         return {"symbol": symbol.upper(), "expirations": chain.get("expirations", [])}
 
-    result = {"symbol": symbol.upper(), "chain": chain}
+    if not expiration:
+        chain = await provider.get_option_chain(symbol.upper())
+        return {"symbol": symbol.upper(), "chain": chain}
 
-    if expiration and hasattr(provider, 'get_option_quotes'):
-        quotes = {}
-        types_to_fetch = [option_type.upper()] if option_type else ["CALL", "PUT"]
+    # Fetch quotes through centralized data layer (cache → stale → provider)
+    types_to_fetch = [option_type.upper()] if option_type else ["CALL", "PUT"]
+    quotes = {}
+    source = "provider"
+    for ot in types_to_fetch:
+        try:
+            q = await _get_opts(
+                symbol, expiration, ot,
+                strike_min=strike_min, strike_max=strike_max,
+                broker=broker,
+            )
+            quotes[ot.lower()] = q
+        except Exception as e:
+            quotes[ot.lower()] = {"error": str(e)}
 
-        for ot in types_to_fetch:
-            try:
-                cached = None
-                if oq_svc:
-                    cached = oq_svc.get_cached_quotes(
-                        symbol.upper(), expiration, ot,
-                        strike_min=strike_min, strike_max=strike_max,
-                    )
-                # Use cache only if non-empty (empty with strike filters = cache miss)
-                if cached:
-                    q = cached
-                else:
-                    q = await provider.get_option_quotes(
-                        symbol.upper(), expiration, ot,
-                        strike_min=strike_min, strike_max=strike_max,
-                    )
-                quotes[ot.lower()] = q
-            except Exception as e:
-                quotes[ot.lower()] = {"error": str(e)}
+    # Detect source from whether streaming cache was used
+    from app.services.option_quote_streaming import get_option_quote_streaming
+    oq_svc = get_option_quote_streaming()
+    if oq_svc:
+        age = oq_svc._cache.get_age(symbol.upper(), expiration, types_to_fetch[0])
+        if age is not None and age < 300:
+            source = "streaming_cache"
+        elif age is not None:
+            source = "streaming_cache_stale"
 
-        result["quotes"] = quotes
-
-    return result
+    return {
+        "symbol": symbol.upper(),
+        "chain": {"expirations": [], "strikes": []},
+        "quotes": quotes,
+        "source": source,
+    }
 
 
 # ── Streaming management ──────────────────────────────────────────────────────
