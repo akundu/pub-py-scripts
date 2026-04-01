@@ -23,7 +23,30 @@ async def get_quote(
     _user: Annotated[TokenData, Security(require_auth, scopes=["market:read"])],
     broker: Broker = Broker.IBKR,
 ) -> Quote:
-    """Fetch a real-time quote for a symbol using the symbology engine."""
+    """Fetch a real-time quote for a symbol using the symbology engine.
+
+    Checks streaming cache first (< 60s) to avoid slow TWS reqMktData round-trips.
+    """
+    from app.services.market_data_streaming import get_streaming_service
+    from datetime import datetime as _dt, timezone as _tz
+
+    # Fast path: streaming cache (instant, no IBKR round-trip)
+    svc = get_streaming_service()
+    if svc and svc.is_running:
+        tick = svc.get_last_tick(symbol.upper(), max_age_seconds=60.0)
+        if tick and tick.get("price", 0) > 0:
+            price = tick["price"]
+            return Quote(
+                symbol=symbol.upper(),
+                bid=tick.get("bid") or price,
+                ask=tick.get("ask") or price,
+                last=price,
+                volume=tick.get("volume", 0),
+                timestamp=_dt.fromisoformat(tick["timestamp"]),
+                source="streaming_cache",
+            )
+
+    # Slow path: provider (TWS reqMktData or CPG snapshot)
     provider = ProviderRegistry.get(broker)
     return await provider.get_quote(symbol.upper())
 
