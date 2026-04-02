@@ -234,13 +234,12 @@ class IBKRLiveProvider(BrokerProvider):
             logger.error("No running event loop — cannot start reconnect task")
 
     async def _reconnect_loop(self) -> None:
-        """Retry connection with exponential backoff."""
+        """Retry connection indefinitely with exponential backoff (capped at 30s)."""
         delay = 2.0
-        for attempt in range(1, self._max_reconnect_retries + 1):
-            logger.info(
-                "IBKR reconnect attempt %d/%d (delay=%.1fs)",
-                attempt, self._max_reconnect_retries, delay,
-            )
+        attempt = 0
+        while True:
+            attempt += 1
+            logger.info("IBKR reconnect attempt %d (delay=%.1fs)", attempt, delay)
             try:
                 await asyncio.sleep(delay)
                 await self._ib.connectAsync(
@@ -257,12 +256,7 @@ class IBKRLiveProvider(BrokerProvider):
                 raise
             except Exception as e:
                 logger.warning("IBKR reconnect attempt %d failed: %s", attempt, e)
-                delay = min(delay * 2, self._reconnect_backoff_cap)
-
-        logger.error(
-            "IBKR reconnection failed after %d attempts", self._max_reconnect_retries
-        )
-        self._connected = False
+                delay = min(delay * 1.5, 30.0)  # cap at 30s between retries
 
     def is_healthy(self) -> bool:
         """Return True if connected and IB client is available."""
