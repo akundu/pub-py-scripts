@@ -422,16 +422,26 @@ class MarketDataStreamingService:
                 cnt = self._reject_count.get(symbol, 0) + 1
                 self._reject_count[symbol] = cnt
 
-                # Self-correcting: if we've rejected 50+ ticks consistently,
-                # the prev_close was probably seeded wrong. Re-seed.
-                if cnt >= 50 and cnt % 50 == 0:
-                    logger.warning(
-                        "Re-seeding prev_close for %s: rejected %d ticks at ~%.2f "
-                        "vs prev_close %.2f — likely seeded from bad data",
-                        symbol, cnt, price, anchor_close,
-                    )
-                    self._prev_close[symbol] = price
-                    self._reject_count[symbol] = 0
+                # Self-correcting: if we've rejected 200+ ticks consistently,
+                # the prev_close was probably seeded wrong. Re-seed ONLY if the
+                # price passes the per-index floor check (prevents thrashing on
+                # garbage TWS data that bounces between random low values).
+                if cnt >= 200 and cnt % 200 == 0:
+                    _IDX_FLOORS_RS = {"SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5}
+                    floor = _IDX_FLOORS_RS.get(symbol, 0) if is_index else 0
+                    if price > floor:
+                        logger.warning(
+                            "Re-seeding prev_close for %s: rejected %d ticks at ~%.2f "
+                            "vs prev_close %.2f — likely seeded from bad data",
+                            symbol, cnt, price, anchor_close,
+                        )
+                        self._prev_close[symbol] = price
+                        self._reject_count[symbol] = 0
+                    else:
+                        logger.debug(
+                            "Not re-seeding %s: price %.2f below floor %d after %d rejects",
+                            symbol, price, floor, cnt,
+                        )
                     return False  # Still reject this one; next tick will pass
 
                 if cnt == 1 or cnt % 100 == 0:
