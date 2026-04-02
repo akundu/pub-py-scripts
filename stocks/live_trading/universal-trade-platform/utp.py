@@ -2836,7 +2836,27 @@ async def _estimate_spread_market_price(client, order) -> dict | None:
         key = (leg.strike, leg.option_type.value)
         q = all_quotes.get(key)
         if not q:
-            return None  # Missing quote for a leg
+            # Strike not in initial fetch — try a targeted fetch for just this strike
+            try:
+                params = {
+                    "expiration": expiration,
+                    "option_type": leg.option_type.value,
+                    "strike_min": leg.strike - 1,
+                    "strike_max": leg.strike + 1,
+                }
+                resp = await client.get(f"/market/options/{symbol}", params=params)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    quotes = data.get("quotes", {}).get(leg.option_type.value.lower(), [])
+                    if isinstance(quotes, list):
+                        for qq in quotes:
+                            if qq.get("strike") == leg.strike:
+                                q = qq
+                                break
+            except Exception:
+                pass
+            if not q:
+                return None  # Still missing after targeted fetch
         bid = q.get("bid", 0) or 0
         ask = q.get("ask", 0) or 0
         is_sell = leg.action.value in ("SELL_TO_OPEN", "SELL_TO_CLOSE")
