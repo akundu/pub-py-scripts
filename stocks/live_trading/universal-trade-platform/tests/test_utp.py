@@ -2443,16 +2443,23 @@ class TestIBKRProvider:
 
     def test_option_chain_cache(self, tmp_path):
         from app.core.providers.ibkr_cache import OptionChainCache
+        from datetime import date, timedelta
         cache = OptionChainCache(cache_dir=str(tmp_path))
-        cache.put("SPX", ["20260316"], [5400.0, 5500.0, 5600.0])
+        # Use a future expiration and enough strikes to pass validation
+        future_exp = (date.today() + timedelta(days=7)).strftime("%Y%m%d")
+        strikes = [float(5000 + i * 10) for i in range(20)]
+        cache.put("SPX", [future_exp], strikes)
         result = cache.get("SPX")
         assert result is not None
-        assert result["strikes"] == [5400.0, 5500.0, 5600.0]
+        assert result["strikes"] == strikes
 
     def test_option_chain_cache_disk_reload(self, tmp_path):
         from app.core.providers.ibkr_cache import OptionChainCache
+        from datetime import date, timedelta
         c1 = OptionChainCache(cache_dir=str(tmp_path))
-        c1.put("NDX", ["20260316"], [20000.0, 20050.0])
+        future_exp = (date.today() + timedelta(days=7)).strftime("%Y%m%d")
+        strikes = [float(20000 + i * 50) for i in range(20)]
+        c1.put("NDX", [future_exp], strikes)
         c2 = OptionChainCache(cache_dir=str(tmp_path))
         assert c2.get("NDX") is not None
 
@@ -2942,16 +2949,19 @@ class TestIBKRRestProvider:
         provider._conid_cache["SPX"] = 416904
 
         # Seed the daily cache directly (avoids mocking the multi-step CPG flow)
+        from datetime import date, timedelta
+        future_exp = (date.today() + timedelta(days=7)).strftime("%Y%m%d")
+        strikes = [float(5000 + i * 10) for i in range(20)]
         provider._cache.option_chains.put(
             "SPX",
-            expirations=["20260320", "20260327"],
-            strikes=[5400.0, 5500.0, 5600.0],
+            expirations=[future_exp],
+            strikes=strikes,
         )
 
         chain = await provider.get_option_chain("SPX")
-        assert 5500.0 in chain["strikes"]
-        assert len(chain["strikes"]) == 3
-        assert "20260320" in chain["expirations"]
+        assert 5100.0 in chain["strikes"]
+        assert len(chain["strikes"]) == 20
+        assert future_exp in chain["expirations"]
 
     @pytest.mark.asyncio
     async def test_check_margin_whatif(self):

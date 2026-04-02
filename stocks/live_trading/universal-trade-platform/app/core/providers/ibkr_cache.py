@@ -83,24 +83,47 @@ class OptionChainCache:
         return self._cache_dir / f"{symbol}_{day.isoformat()}.json"
 
     def get(self, symbol: str) -> dict | None:
-        """Return cached chain data or None if stale/missing."""
+        """Return cached chain data or None if stale/missing/invalid."""
         today = date.today()
+
+        def _is_valid(data: dict) -> bool:
+            """Reject cache entries with too few strikes or only past expirations."""
+            strikes = data.get("strikes", [])
+            expirations = data.get("expirations", [])
+            if len(strikes) < 10:
+                logger.info("Option chain cache rejected for %s: only %d strikes", symbol, len(strikes))
+                return False
+            # Check if all expirations are in the past
+            today_str = today.isoformat().replace("-", "")
+            future_exps = [e for e in expirations if e.replace("-", "") >= today_str]
+            if expirations and not future_exps:
+                logger.info("Option chain cache rejected for %s: all expirations in the past", symbol)
+                return False
+            return True
 
         # Check in-memory first
         if symbol in self._memory:
             cached = self._memory[symbol]
-            if cached.get("date") == today.isoformat():
+            if cached.get("date") == today.isoformat() and _is_valid(cached):
                 self._hits += 1
                 return cached
+            elif cached.get("date") == today.isoformat():
+                # Invalid — remove from memory so it gets re-fetched
+                del self._memory[symbol]
 
         # Check disk
         path = self._file_path(symbol, today)
         if path.exists():
             try:
                 data = json.loads(path.read_text())
-                self._memory[symbol] = data
-                self._hits += 1
-                return data
+                if _is_valid(data):
+                    self._memory[symbol] = data
+                    self._hits += 1
+                    return data
+                else:
+                    # Delete invalid cache file
+                    path.unlink(missing_ok=True)
+                    logger.info("Deleted invalid option chain cache: %s", path)
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning("Failed to read option chain cache %s: %s", path, e)
 
