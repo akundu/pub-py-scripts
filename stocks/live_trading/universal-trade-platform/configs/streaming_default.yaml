@@ -16,7 +16,7 @@ symbols:
   # Major indices (auto-detected as IND with correct exchange)
   - RUT
   - NDX
-  #  - SPX
+  - SPX
   #- DJX
   #- VIX
   #- VIX1D
@@ -81,7 +81,7 @@ close_band_pct: 0.40
 streaming_mode: auto
 
 # Seconds between snapshot polls (only used when streaming_mode=polling)
-cpg_poll_interval: 1.5
+cpg_poll_interval: 2.0
 
 # ── Option quote streaming (background pre-fetch) ─────────────────────────
 # When enabled, the daemon continuously pre-fetches option quotes for streaming
