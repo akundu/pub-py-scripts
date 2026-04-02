@@ -31,6 +31,19 @@ _OPTION_CACHE_TTL = 0         # 0 = auto (5 min market, 1 day off-hours)
 _OPTION_STALE_TTL = 1800.0    # stale fallback (30 min)
 
 
+# Absolute floor prices per index — reject garbage from TWS/CPG
+_INDEX_FLOOR_PRICES = {"SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5}
+
+
+def _is_valid_price(symbol: str, price: float) -> bool:
+    """Check if a price is above the known floor for an index symbol."""
+    floor = _INDEX_FLOOR_PRICES.get(symbol)
+    if floor and price < floor:
+        logger.warning("Rejected garbage price for %s: %.2f (floor=%d)", symbol, price, floor)
+        return False
+    return price > 0
+
+
 async def get_quote(symbol: str, broker: Broker = Broker.IBKR) -> Quote:
     """Get a quote for a symbol.
 
@@ -38,6 +51,8 @@ async def get_quote(symbol: str, broker: Broker = Broker.IBKR) -> Quote:
     1. Streaming tick cache (< 60s) — instant
     2. Provider quote cache (5s TWS, 10s CPG) — fast
     3. Provider reqMktData / snapshot — slow (10-18s TWS, 2s CPG)
+
+    All prices are validated against per-index floor prices.
     """
     symbol = symbol.upper()
 
@@ -46,7 +61,7 @@ async def get_quote(symbol: str, broker: Broker = Broker.IBKR) -> Quote:
     svc = get_streaming_service()
     if svc and svc.is_running:
         tick = svc.get_last_tick(symbol, max_age_seconds=_QUOTE_STREAMING_TTL)
-        if tick and tick.get("price", 0) > 0:
+        if tick and tick.get("price", 0) > 0 and _is_valid_price(symbol, tick["price"]):
             price = tick["price"]
             return Quote(
                 symbol=symbol,
@@ -60,7 +75,15 @@ async def get_quote(symbol: str, broker: Broker = Broker.IBKR) -> Quote:
 
     # 2-3. Provider (has its own internal cache before hitting IBKR)
     provider = ProviderRegistry.get(broker)
-    return await provider.get_quote(symbol)
+    quote = await provider.get_quote(symbol)
+
+    # Validate provider response
+    price = quote.last or quote.bid or quote.ask or 0
+    if price > 0 and not _is_valid_price(symbol, price):
+        logger.warning("Provider returned garbage quote for %s: %.2f — returning zero", symbol, price)
+        return Quote(symbol=symbol, bid=0, ask=0, last=0, volume=0, source="rejected")
+
+    return quote
 
 
 async def get_option_quotes(

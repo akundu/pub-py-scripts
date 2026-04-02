@@ -394,7 +394,10 @@ class MarketDataStreamingService:
         self._ticks_received_per_symbol[symbol] = self._ticks_received_per_symbol.get(symbol, 0) + 1
 
         # Anchor previous close (once per symbol per session)
-        valid_close = close and close > 0 and (not is_index or close > 100)
+        # Use the same per-index floor prices to reject garbage close values from TWS
+        _IDX_FLOORS = {"SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5}
+        min_close = _IDX_FLOORS.get(symbol, 100) if is_index else 0
+        valid_close = close and close > min_close
         if valid_close and symbol not in self._prev_close:
             self._prev_close[symbol] = close
 
