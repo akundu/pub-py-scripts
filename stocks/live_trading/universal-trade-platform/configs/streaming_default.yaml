@@ -91,10 +91,10 @@ cpg_poll_interval: 2.0
 option_quotes_enabled: true
 
 # Seconds between fetch cycles
-option_quotes_poll_interval: 10
+option_quotes_poll_interval: 5
 
 # Strike range as percentage of current price (e.g., 3.0 = ±3%)
-option_quotes_strike_range_pct: 3
+option_quotes_strike_range_pct: 4
 
 # Number of upcoming expirations to fetch per symbol
 option_quotes_num_expirations: 3
