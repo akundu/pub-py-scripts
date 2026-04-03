@@ -1669,12 +1669,14 @@ async def _cmd_portfolio_http(args, server: str) -> int:
             has_marks = any(p.get("avg_cost") is not None for p in positions)
 
             if has_marks:
-                print(f"  {'ID':<6} {'Symbol':>6} {'Type':>12} {'Strikes':>16} {'Qty':>5} {'Mark':>10} {'P&L':>12} {'Cr/ROI/MaxLoss':^22} {'Exp':>12}")
-                print(f"  {'─'*6} {'─'*6} {'─'*12} {'─'*16} {'─'*5} {'─'*10} {'─'*12} {'─'*22} {'─'*12}")
+                print(f"  {'ID':<6} {'Symbol':>6} {'Type':>12} {'Strikes':>16} {'Qty':>5} {'Cost':>12} {'Value':>12} {'P&L':>12} {'Cr/ROI/MaxLoss':^22} {'Exp':>12}")
+                print(f"  {'─'*6} {'─'*6} {'─'*12} {'─'*16} {'─'*5} {'─'*12} {'─'*12} {'─'*12} {'─'*22} {'─'*12}")
                 total_upnl = 0.0
                 total_daily = 0.0
                 total_max_loss = 0.0
                 total_credit = 0.0
+                total_cost = 0.0
+                total_value = 0.0
                 for p in positions:
                     sym = p.get("symbol", "?")
                     otype = p.get("order_type", "?")
@@ -1706,15 +1708,20 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                     risk_info = ""  # Combined Credit/ROI/MaxLoss column
                     if p.get("avg_cost") is not None:
                         avg_cost = p["avg_cost"]
-                        mark = p.get("market_price", 0) or 0
                         mv = p.get("market_value", 0) or 0
                         upnl = p.get("broker_unrealized_pnl", 0) or 0
                         dpnl = p.get("daily_pnl", 0) or 0
                         total_upnl += upnl
                         total_daily += dpnl
                         pnl_c = "92" if upnl >= 0 else "91"
-                        mark_s = f"${mark:>9.4f}" if mark else f"{'---':>10}"
                         upnl_s = _color(f"${upnl:>+10,.2f}", pnl_c) if upnl else f"{'---':>12}"
+
+                        # Cost basis = market_value - unrealized_pnl (what you paid/received)
+                        cost_basis = mv - upnl if mv and upnl else 0
+                        cost_s = f"${cost_basis:>10,.2f}" if cost_basis else f"{'---':>12}"
+                        value_s = f"${mv:>10,.2f}" if mv else f"{'---':>12}"
+                        total_cost += cost_basis
+                        total_value += mv
 
                         # Derive credit and compute ROI/MaxLoss for spreads
                         if otype == "multi_leg" and len(leg_strikes) >= 2:
@@ -1729,18 +1736,19 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                                 risk_info = f"{derived_credit:,.0f}/{roi_pct:.1f}%/{max_loss:,.0f}"
 
                         print(f"  {pid:<6} {sym:>6} {otype:>12} {strikes_s:>16} {qty:>5.0f} "
-                              f"{mark_s} {upnl_s:>20} {risk_info:^22} {exp:>12}")
+                              f"{cost_s} {value_s} {upnl_s:>20} {risk_info:^22} {exp:>12}")
                     else:
                         entry = p.get("entry_price", 0)
                         print(f"  {pid:<6} {sym:>6} {otype:>12} {strikes_s:>16} {qty:>5.0f} "
-                              f"{'---':>10} {'---':>12} {'':>22} {exp:>12}")
+                              f"{'---':>12} {'---':>12} {'---':>12} {'':>22} {exp:>12}")
 
                 upnl_c = "92" if total_upnl >= 0 else "91"
                 total_risk_info = ""
                 if total_max_loss > 0:
                     total_roi_pct = (total_upnl / total_max_loss) * 100
                     total_risk_info = f"{total_credit:,.0f}/{total_roi_pct:+.1f}%/{total_max_loss:,.0f}"
-                print(f"  {'':>6} {'':>6} {'':>12} {'':>16} {'':>5} {'TOTAL':>10} "
+                print(f"  {'':>6} {'':>6} {'':>12} {'':>16} {'':>5} "
+                      f"{'$'+f'{total_cost:>10,.2f}':>12} {'$'+f'{total_value:>10,.2f}':>12} "
                       f"{_color(f'${total_upnl:>+10,.2f}', upnl_c):>20} {total_risk_info:^22}")
             else:
                 print(f"  {'Symbol':<10} {'Type':<10} {'Qty':>6} {'Entry':>10} {'P&L':>10} {'Status':<8}")
