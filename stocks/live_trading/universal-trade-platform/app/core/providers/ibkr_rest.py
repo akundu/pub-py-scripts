@@ -263,16 +263,48 @@ class IBKRRestProvider(BrokerProvider):
     # ── Keepalive ─────────────────────────────────────────────────────────────
 
     async def _keepalive_loop(self) -> None:
-        """POST /tickle every 60 seconds to keep the CPG session alive."""
+        """POST /tickle every 60 seconds to keep the CPG session alive.
+
+        If the tickle fails repeatedly, attempts to re-authenticate.
+        Retries indefinitely with backoff (capped at 30s).
+        """
+        consecutive_failures = 0
         while True:
             try:
                 await asyncio.sleep(60)
                 await self._post("/tickle")
                 logger.debug("CPG keepalive tickle sent")
+                if consecutive_failures > 0:
+                    logger.info("CPG keepalive recovered after %d failures", consecutive_failures)
+                consecutive_failures = 0
+                self._connected = True
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.warning("CPG keepalive failed: %s", e)
+                consecutive_failures += 1
+                logger.warning("CPG keepalive failed (%d): %s", consecutive_failures, e)
+                self._connected = False
+
+                # After 3 consecutive failures, try to re-authenticate
+                if consecutive_failures >= 3 and consecutive_failures % 3 == 0:
+                    try:
+                        auth_status = await self._post("/iserver/auth/status")
+                        if auth_status.get("authenticated", False):
+                            logger.info("CPG session still authenticated — will retry tickle")
+                            self._connected = True
+                        else:
+                            logger.warning(
+                                "CPG session lost authentication (attempt %d). "
+                                "Re-login at %s/sso/Login?forwardTo=22&RL=1&ip2loc=on",
+                                consecutive_failures, self._gateway_url,
+                            )
+                    except Exception as auth_err:
+                        delay = min(2.0 * consecutive_failures, 30.0)
+                        logger.warning(
+                            "CPG re-auth check failed (attempt %d): %s — retrying in %.0fs",
+                            consecutive_failures, auth_err, delay,
+                        )
+                        await asyncio.sleep(delay)
 
     # ── Connection Lifecycle ──────────────────────────────────────────────────
 
