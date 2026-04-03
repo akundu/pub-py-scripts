@@ -408,17 +408,47 @@ async def close_position(
     if has_con_ids and trade_request.multi_leg_order and not dry_run:
         import logging as _log
         _close_logger = _log.getLogger("utp.close")
+
+        def _update_store_after_close(exit_price: float, close_qty: int | None) -> dict:
+            """Update local position store after a successful close.
+
+            For synthetic positions (spread-grouped legs), updates the
+            underlying source positions. For regular positions, updates
+            the position directly.
+            """
+            source_pids = pos.get("_source_position_ids", [])
+            is_partial = close_qty and close_qty < abs(pos.get("quantity", 0))
+
+            if source_pids:
+                # Synthetic spread — update source positions in the local store
+                updated_any = {}
+                for src_pid in source_pids:
+                    src_pos = store.get_position(src_pid)
+                    if not src_pos:
+                        continue
+                    try:
+                        if is_partial:
+                            updated_any = store.reduce_quantity(src_pid, close_qty)
+                        else:
+                            updated_any = store.close_position(src_pid, exit_price, "api_close")
+                    except Exception as e:
+                        _close_logger.debug("Failed to update source position %s: %s", src_pid[:8], e)
+                _close_logger.info("Updated %d source positions for synthetic %s", len(source_pids), request.position_id[:8])
+                return updated_any or pos
+            else:
+                # Regular position — update directly
+                if is_partial:
+                    return store.reduce_quantity(request.position_id, close_qty)
+                else:
+                    return store.close_position(request.position_id, exit_price, "api_close")
+
         try:
             result = await _close_by_con_id(pos, request.quantity, net_price)
             if result:
                 _close_logger.info("Close order submitted: %s status=%s", result.order_id, result.status)
-                # Update local position store
                 if result.status == OrderStatus.FILLED:
                     exit_price = result.filled_price or net_price or 0
-                    if request.quantity and request.quantity < abs(pos.get("quantity", 0)):
-                        updated = store.reduce_quantity(request.position_id, request.quantity)
-                    else:
-                        updated = store.close_position(request.position_id, exit_price, "api_close")
+                    updated = _update_store_after_close(exit_price, request.quantity)
                     return {"status": "ok", "order_result": result.model_dump(), "position": updated}
                 if result.status not in {OrderStatus.FILLED, OrderStatus.CANCELLED,
                                           OrderStatus.REJECTED, OrderStatus.FAILED}:
@@ -431,10 +461,7 @@ async def close_position(
                     )
                     if result.status == OrderStatus.FILLED:
                         exit_price = result.filled_price or net_price or 0
-                        if request.quantity and request.quantity < abs(pos.get("quantity", 0)):
-                            updated = store.reduce_quantity(request.position_id, request.quantity)
-                        else:
-                            updated = store.close_position(request.position_id, exit_price, "api_close")
+                        updated = _update_store_after_close(exit_price, request.quantity)
                         return {"status": "ok", "order_result": result.model_dump(), "position": updated}
                 return {
                     "status": "order_not_filled",

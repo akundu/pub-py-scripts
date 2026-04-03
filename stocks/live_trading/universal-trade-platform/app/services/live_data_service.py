@@ -214,6 +214,10 @@ def _group_options_into_spreads(positions: list[dict]) -> list[dict]:
                     ],
                     "con_ids": [short.get("con_id"), long_leg.get("con_id")],
                     "_synthetic": True,  # Flag for close handler
+                    # Track source position IDs for local store updates after close
+                    "_source_position_ids": [
+                        pid for pid in [short.get("position_id"), long_leg.get("position_id")] if pid
+                    ],
                 }
                 paired.append(spread)
 
