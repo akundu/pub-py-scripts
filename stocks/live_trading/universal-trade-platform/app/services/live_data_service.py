@@ -11,6 +11,7 @@ the local store since IBKR doesn't retain that.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 from app.models import DailyPnL, DashboardSummary, PerformanceMetrics, StatusReport, TrackedPosition
@@ -257,6 +258,181 @@ def _group_options_into_spreads(positions: list[dict]) -> list[dict]:
     return result
 
 
+def _compute_spread_metrics(positions: list[dict]) -> None:
+    """Compute spread metrics (width, derived_credit, roi_pct, max_loss) in-place.
+
+    For multi-leg positions with broker marks available, computes:
+    - spread_width: |strike1 - strike2|
+    - gross_risk: spread_width * quantity * 100
+    - derived_credit: unrealized_pnl + abs(market_value)
+    - max_loss: gross_risk - derived_credit
+    - roi_pct: derived_credit / max_loss * 100
+    """
+    for p in positions:
+        if p.get("order_type") != "multi_leg":
+            continue
+        legs = p.get("legs") or []
+        if len(legs) < 2:
+            continue
+
+        strikes = [float(l.get("strike", 0) or 0) for l in legs if l.get("strike")]
+        if len(strikes) < 2:
+            continue
+
+        qty = abs(int(p.get("quantity", 0) or 0))
+        if qty == 0:
+            continue
+
+        spread_width = abs(strikes[0] - strikes[1])
+        gross_risk = spread_width * qty * 100
+
+        upnl = p.get("broker_unrealized_pnl", 0) or 0
+        mv = p.get("market_value", 0) or 0
+
+        if not upnl and not mv:
+            p["spread_metrics"] = {"spread_width": spread_width, "gross_risk": gross_risk}
+            continue
+
+        derived_credit = upnl + abs(mv)
+        if derived_credit <= 0 or derived_credit >= gross_risk:
+            p["spread_metrics"] = {"spread_width": spread_width, "gross_risk": gross_risk}
+            continue
+
+        max_loss = gross_risk - derived_credit
+        roi_pct = (derived_credit / max_loss) * 100 if max_loss > 0 else 0
+
+        p["spread_metrics"] = {
+            "spread_width": spread_width,
+            "gross_risk": round(gross_risk, 2),
+            "derived_credit": round(derived_credit, 2),
+            "max_loss": round(max_loss, 2),
+            "roi_pct": round(roi_pct, 1),
+        }
+
+
+def _calc_breach_status(current_price: float, position: dict) -> dict | None:
+    """Calculate how close a position is to being breached.
+
+    Returns dict with: short_strike, option_type, distance, distance_pct,
+    direction, is_itm, severity (breached|critical|warning|watch|safe).
+    """
+    if not current_price:
+        return None
+
+    legs = position.get("legs") or []
+    if not legs:
+        strike = position.get("strike")
+        right = position.get("right")
+        if strike and right:
+            legs = [{"strike": strike, "option_type": "PUT" if right == "P" else "CALL",
+                     "action": "SELL"}]
+        else:
+            return None
+
+    short_legs = [l for l in legs if "SELL" in l.get("action", "")]
+    if not short_legs:
+        return None
+
+    short_leg = short_legs[0]
+    short_strike = float(short_leg.get("strike", 0) or 0)
+    opt_type = short_leg.get("option_type", "")
+    if not short_strike:
+        return None
+
+    distance = abs(current_price - short_strike)
+    distance_pct = (distance / current_price) * 100 if current_price else 0
+
+    if opt_type == "PUT":
+        is_itm = current_price <= short_strike
+    else:
+        is_itm = current_price >= short_strike
+
+    if is_itm:
+        severity = "breached"
+    elif distance_pct < 0.5:
+        severity = "critical"
+    elif distance_pct < 1.0:
+        severity = "warning"
+    elif distance_pct < 2.0:
+        severity = "watch"
+    else:
+        severity = "safe"
+
+    return {
+        "short_strike": short_strike,
+        "option_type": opt_type,
+        "distance": round(distance, 2),
+        "distance_pct": round(distance_pct, 2),
+        "is_itm": is_itm,
+        "severity": severity,
+    }
+
+
+DB_SERVER_URL = os.environ.get("DB_SERVER_URL", "http://localhost:8080")
+
+
+async def _fetch_prices_from_db_server(tickers: list[str]) -> dict[str, float]:
+    """Batch fetch latest prices from db_server (QuestDB realtime_data).
+
+    Returns {ticker: price} for tickers that have data. Fast (~50ms).
+    """
+    import httpx as _httpx
+    try:
+        async with _httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                f"{DB_SERVER_URL}/db_command",
+                json={"command": "get_latest_prices", "tickers": tickers},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                prices = data.get("prices", {})
+                return {k: v for k, v in prices.items() if v and v > 0}
+    except Exception as e:
+        logger.debug("db_server price fetch failed: %s", e)
+    return {}
+
+
+async def _enrich_with_quotes_and_breach(positions: list[dict], ibkr_provider) -> None:
+    """Fetch current quotes for all underlyings and add breach status to positions.
+
+    Uses a fast path (db_server batch query from QuestDB realtime_data) first,
+    then falls back to the streaming cache / IBKR provider for any missing tickers.
+
+    Modifies positions in-place, adding 'current_price' and 'breach_status' fields.
+    """
+    import asyncio as _aio
+
+    underlyings = list({p.get("symbol", "") for p in positions if p.get("symbol")})
+    if not underlyings:
+        return
+
+    # Fast path: batch query from db_server (QuestDB realtime_data, ~50ms)
+    quotes = await _fetch_prices_from_db_server(underlyings)
+
+    # Fill in any missing tickers from streaming cache / IBKR provider
+    missing = [s for s in underlyings if s not in quotes]
+    if missing:
+        async def _fetch(sym: str) -> tuple[str, float]:
+            try:
+                from app.services.market_data import get_quote
+                q = await get_quote(sym)
+                return sym, q.last or q.bid or 0
+            except Exception:
+                return sym, 0
+
+        results = await _aio.gather(*[_fetch(s) for s in missing])
+        for sym, price in results:
+            if price:
+                quotes[sym] = price
+
+    # Enrich positions
+    for pos in positions:
+        sym = pos.get("symbol", "")
+        price = quotes.get(sym, 0)
+        pos["current_price"] = price or None
+        pos["breach_status"] = _calc_breach_status(price, pos) if price else None
+
+
 class LiveDataService:
     """IBKR-primary data source with local fallback.
 
@@ -318,7 +494,7 @@ class LiveDataService:
 
         return summary
 
-    async def get_portfolio(self, recent_count: int = 5) -> dict:
+    async def get_portfolio(self, recent_count: int = 5, include_quotes: bool = False) -> dict:
         """Full portfolio view — IBKR-enriched positions when connected."""
         summary = self._dashboard.get_summary()
 
@@ -333,9 +509,11 @@ class LiveDataService:
 
         broker_pnl = {}
         portfolio_items: list[dict] = []
+        daily_pnl_by_con: dict[int, float] = {}
+        account_daily_pnl = 0.0
 
         if self._ibkr_healthy():
-            # Fetch balances and portfolio items concurrently
+            # Fetch balances, portfolio items, and daily P&L ALL concurrently
             import asyncio as _aio
             balances_coro = (
                 self._ibkr.get_account_balances()
@@ -345,8 +523,17 @@ class LiveDataService:
                 self._ibkr.get_portfolio_items()
                 if hasattr(self._ibkr, "get_portfolio_items") else _aio.sleep(0)
             )
-            balances_result, items_result = await _aio.gather(
-                balances_coro, items_coro, return_exceptions=True,
+            daily_pnl_coro = (
+                self._ibkr.get_daily_pnl_by_con_id()
+                if hasattr(self._ibkr, "get_daily_pnl_by_con_id") else _aio.sleep(0)
+            )
+            acct_daily_coro = (
+                self._ibkr.get_account_daily_pnl()
+                if hasattr(self._ibkr, "get_account_daily_pnl") else _aio.sleep(0)
+            )
+            balances_result, items_result, daily_result, acct_daily_result = await _aio.gather(
+                balances_coro, items_coro, daily_pnl_coro, acct_daily_coro,
+                return_exceptions=True,
             )
 
             # Process balances
@@ -376,30 +563,20 @@ class LiveDataService:
                             summary.realized_pnl + broker_total_upnl, 2
                         )
 
+            # Process daily P&L
+            if not isinstance(daily_result, BaseException) and isinstance(daily_result, dict):
+                daily_pnl_by_con = daily_result
+            if not daily_pnl_by_con and not isinstance(acct_daily_result, BaseException):
+                if isinstance(acct_daily_result, (int, float)) and acct_daily_result != 0:
+                    account_daily_pnl = acct_daily_result
+
         # Build con_id→IBKR item lookup for direct matching
-        # Reuse portfolio_items from above (already fetched at line 316)
         ibkr_by_con_id: dict[int, dict] = {}
         if portfolio_items:
             for item in portfolio_items:
                 cid = item.get("con_id")
                 if cid:
                     ibkr_by_con_id[cid] = item
-
-        # Fetch daily P&L per conId
-        daily_pnl_by_con: dict[int, float] = {}
-        if self._ibkr_healthy() and hasattr(self._ibkr, "get_daily_pnl_by_con_id"):
-            try:
-                daily_pnl_by_con = await self._ibkr.get_daily_pnl_by_con_id()
-            except Exception:
-                logger.debug("Failed to fetch daily PnL", exc_info=True)
-
-        # Fallback: account-level daily P&L (CPG REST doesn't provide per-position)
-        account_daily_pnl = 0.0
-        if not daily_pnl_by_con and self._ibkr_healthy() and hasattr(self._ibkr, "get_account_daily_pnl"):
-            try:
-                account_daily_pnl = await self._ibkr.get_account_daily_pnl()
-            except Exception:
-                logger.debug("Failed to fetch account daily PnL", exc_info=True)
 
         # Enrich each position with IBKR data (1:1 by con_id)
         raw_positions = []
@@ -431,7 +608,16 @@ class LiveDataService:
         result["daily_pnl"] = round(total_daily_pnl, 2)
 
         # Group option positions into spreads for display
-        result["positions"] = _group_options_into_spreads(raw_positions)
+        grouped = _group_options_into_spreads(raw_positions)
+
+        # Compute spread metrics (width, credit, ROI, max_loss) for each multi-leg position
+        _compute_spread_metrics(grouped)
+
+        # Optionally fetch quotes and compute breach status
+        if include_quotes:
+            await _enrich_with_quotes_and_breach(grouped, self._ibkr)
+
+        result["positions"] = grouped
 
         # Closed positions (recent 5)
         closed = self._store.get_closed_positions()

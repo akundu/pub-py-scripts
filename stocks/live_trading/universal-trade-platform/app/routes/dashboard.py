@@ -40,15 +40,23 @@ async def dashboard_summary(
 async def portfolio_view(
     _user: Annotated[TokenData, Security(require_auth, scopes=["account:read"])],
     recent_count: int = 5,
+    include_quotes: bool = False,
 ) -> dict:
     """Full portfolio view with broker-authoritative cost basis and marks.
 
     Returns positions enriched with AvgCost, Mark, and MktVal from broker
     when available. This is what the CLI 'portfolio' command displays.
+
+    Query params:
+        include_quotes: If true, fetches current quotes for each underlying
+            and adds current_price + breach_status to each position.
+            Adds ~1-3s latency. Default false for CLI speed.
     """
     svc = get_live_data_service()
     if svc:
-        return await svc.get_portfolio(recent_count=recent_count)
+        return await svc.get_portfolio(
+            recent_count=recent_count, include_quotes=include_quotes,
+        )
 
     # Fallback: local-only view
     summary = _get_dashboard_service().get_summary()
