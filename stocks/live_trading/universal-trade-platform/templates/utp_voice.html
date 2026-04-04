@@ -220,6 +220,15 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
 .ot-actions { display:flex; gap:8px; margin-top:8px; }
 .ot-actions .btn { flex:1; min-height:48px; font-size:14px; }
 
+/* ── Data Source Banner ─────────────────────────────────────────── */
+#data-source-bar { padding:3px 12px; background:var(--bg); border-bottom:1px solid var(--border); font-size:10px; color:var(--muted); display:flex; flex-wrap:wrap; gap:4px 12px; min-height:20px; flex-shrink:0; }
+#data-source-bar .src-tag { display:inline-flex; align-items:center; gap:3px; }
+#data-source-bar .src-dot { width:6px; height:6px; border-radius:50%; flex-shrink:0; }
+#data-source-bar .src-ibkr { background:var(--green-b); }
+#data-source-bar .src-csv { background:var(--yellow); }
+#data-source-bar .src-cache { background:var(--blue); }
+#data-source-bar .src-questdb { background:var(--green-b); }
+
 /* ── Trade Modal ────────────────────────────────────────────────── */
 #trade-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:100; align-items:flex-end; justify-content:center; }
 #trade-modal.show { display:flex; }
@@ -261,6 +270,9 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
   <!-- Ticker Bar -->
   <div id="ticker-bar"></div>
 
+  <!-- Data source banner -->
+  <div id="data-source-bar"></div>
+
   <!-- Tab Content -->
   <div class="tab-content">
     <!-- Portfolio Tab -->
@@ -269,7 +281,11 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
         <div id="portfolio-kpis" class="kpi-strip"></div>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
           <span class="card-title" style="margin:0">Positions</span>
-          <span class="refresh-btn" onclick="loadPortfolio()">&#x21bb;</span>
+          <div style="display:flex;gap:6px;align-items:center">
+            <button class="btn btn-muted btn-sm" onclick="flushPortfolio()" title="Flush open positions and re-sync from broker">Flush</button>
+            <button class="btn btn-red btn-sm" onclick="confirmHardReset()" title="Hard reset: clear ALL data (open+closed+ledger)">Reset</button>
+            <span class="refresh-btn" onclick="loadPortfolio()">&#x21bb;</span>
+          </div>
         </div>
         <div id="portfolio-table"></div>
       </div>
@@ -298,6 +314,20 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
           </select>
           <span class="refresh-btn" onclick="loadOptionsGrid()">&#x21bb;</span>
         </div>
+        <div class="grid-controls" style="margin-bottom:8px;font-size:11px">
+          <label style="color:var(--muted)">Min OTM%</label>
+          <input type="number" id="opt-min-otm" class="select-styled" style="width:55px" value="0" min="0" step="0.5" onchange="refilterChain()">
+          <label style="color:var(--muted)">Min Pctl</label>
+          <select id="opt-min-pctl" class="select-styled" onchange="refilterChain()">
+            <option value="0" selected>All</option>
+            <option value="75">&gt;P75</option>
+            <option value="90">&gt;P90</option>
+            <option value="95">&gt;P95</option>
+            <option value="98">&gt;P98</option>
+          </select>
+          <label style="color:var(--muted)">Min Credit</label>
+          <input type="number" id="opt-min-credit" class="select-styled" style="width:60px" value="0" min="0" step="0.5" onchange="refilterChain()">
+        </div>
         <div class="options-layout">
           <div class="options-chain-col">
             <div id="options-grid"></div>
@@ -317,12 +347,18 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
           <span class="refresh-btn" onclick="loadRecommendations()">&#x21bb;</span>
         </div>
         <div class="grid-controls" style="margin-bottom:10px">
+          <label style="color:var(--muted);font-size:11px">DTE</label>
+          <select id="rec-dte" class="select-styled" onchange="filterRecs()">
+            <option value="0" selected>0DTE</option>
+            <option value="1">1DTE</option>
+            <option value="2">2DTE</option>
+            <option value="5">5DTE</option>
+          </select>
           <label style="color:var(--muted);font-size:11px">Min ROI%</label>
-          <input type="number" id="rec-min-roi" class="select-styled" style="width:65px" value="10" min="0" step="5" onchange="filterRecs()">
-          <label style="color:var(--muted);font-size:11px">Min Credit</label>
-          <input type="number" id="rec-min-credit" class="select-styled" style="width:65px" value="0" min="0" step="0.5" onchange="filterRecs()">
+          <input type="number" id="rec-min-roi" class="select-styled" style="width:65px" value="5" min="0" step="5" onchange="filterRecs()">
+          <input type="hidden" id="rec-min-credit" value="0">
           <label style="color:var(--muted);font-size:11px">Min OTM%</label>
-          <input type="number" id="rec-min-otm" class="select-styled" style="width:65px" value="0" min="0" step="0.5" onchange="filterRecs()">
+          <input type="number" id="rec-min-otm" class="select-styled" style="width:65px" value="2" min="0" step="0.5" onchange="filterRecs()">
           <label style="color:var(--muted);font-size:11px">Width</label>
           <input type="number" id="rec-width" class="select-styled" style="width:65px" value="0" min="0" step="5" placeholder="Auto" onchange="filterRecs()">
           <select id="rec-type-filter" class="select-styled" onchange="filterRecs()">
@@ -330,6 +366,30 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
             <option value="PUT">Puts</option>
             <option value="CALL">Calls</option>
           </select>
+          <label style="color:var(--muted);font-size:11px">Min Pctl</label>
+          <select id="rec-min-pctl" class="select-styled" onchange="filterRecs()">
+            <option value="0">All</option>
+            <option value="75">&gt;P75</option>
+            <option value="90" selected>&gt;P90</option>
+            <option value="95">&gt;P95</option>
+            <option value="98">&gt;P98</option>
+            <option value="99">&gt;P99</option>
+          </select>
+          <label style="color:var(--muted);font-size:11px">Min Pred</label>
+          <select id="rec-min-pred" class="select-styled" onchange="filterRecs()">
+            <option value="0">All</option>
+            <option value="80">&gt;P80</option>
+            <option value="90" selected>&gt;P90</option>
+            <option value="95">&gt;P95</option>
+            <option value="98">&gt;P98</option>
+            <option value="99">&gt;P99</option>
+          </select>
+          <label style="color:var(--muted);font-size:11px">Qty</label>
+          <input type="number" id="rec-qty" class="select-styled" style="width:60px" value="25" min="1" step="5" onchange="filterRecs()">
+          <label style="color:var(--muted);font-size:11px">Min Tot Cr</label>
+          <input type="number" id="rec-min-total-credit" class="select-styled" style="width:75px" value="1000" min="0" step="500" onchange="filterRecs()">
+          <label style="color:var(--muted);font-size:11px">Max Loss</label>
+          <input type="number" id="rec-max-total-loss" class="select-styled" style="width:80px" value="100000" min="0" step="5000" onchange="filterRecs()">
         </div>
         <div id="recs-content"></div>
       </div>
@@ -397,46 +457,299 @@ let conversationHistory = [];
 let optSelectedShort = null, optSelectedLong = null, optGridData = null;
 
 // Global chain cache — keeps option data for ALL default tickers fresh
-// {SPX: {chain:{put:[...],call:[...]}, current_price, expiration, expirations, source, fetched_at, ts}, ...}
+// chainCache[sym][expiration] = {chain, current_price, source, fetched_at, ts}
+// chainCache[sym]._expirations = [...], chainCache[sym]._current_price = N
 const DEFAULT_WIDTHS = {SPX:20, NDX:50, RUT:20};
 const CHAIN_TICKERS = ['SPX','NDX','RUT'];
+const CHAIN_DTE_TARGETS = [0, 1, 2, 5];  // DTE 0 first, then 1, 2, 5 progressively
 let chainCache = {};
 let _chainRefreshTimer = null;
-let _chainTickerIdx = 0;  // Round-robin index
+let _chainJobQueue = [];  // [{sym, exp, dte, priority}] — round-robin job queue
+let _chainJobIdx = 0;
 
-// Refresh one ticker at a time, rotating through the list.
-// With 3 tickers and a 10s interval, each ticker refreshes every 30s.
-async function refreshOneChainTicker() {
-  const sym = CHAIN_TICKERS[_chainTickerIdx % CHAIN_TICKERS.length];
-  _chainTickerIdx++;
+// Build the job queue: DTE 0 for all tickers first (highest priority),
+// then DTE 1, 2, 5 added after DTE 0 is done for each ticker.
+function _buildChainJobs() {
+  const jobs = [];
+  // Phase 1: DTE 0 for all tickers (highest priority)
+  for (const sym of CHAIN_TICKERS) {
+    const exps = chainCache[sym]?._expirations || [];
+    if (!exps.length) {
+      jobs.push({sym, exp: '', dte: 0, priority: 0});
+      continue;
+    }
+    const exp0 = exps[0];
+    if (exp0) jobs.push({sym, exp: exp0, dte: 0, priority: 0});
+  }
+  // Phase 2: DTE 1, 2, 5 — only add if DTE 0 has data for that ticker
+  for (const dte of [1, 2, 5]) {
+    for (const sym of CHAIN_TICKERS) {
+      const exps = chainCache[sym]?._expirations || [];
+      if (!exps.length) continue;
+      // Only queue higher DTEs after DTE 0 has been fetched
+      const exp0 = exps[0];
+      if (!exp0 || !chainCache[sym]?.[exp0]?.chain) continue;  // DTE 0 not ready yet
+      const target = exps[Math.min(dte, exps.length - 1)];
+      if (target && target !== exp0) {
+        // Avoid duplicates
+        if (!jobs.find(j => j.sym === sym && j.exp === target)) {
+          jobs.push({sym, exp: target, dte, priority: dte});
+        }
+      }
+    }
+  }
+  return jobs;
+}
+
+let _chainRunning = false;
+let _chainStopped = false;
+
+async function _fetchChainJob(job) {
   try {
-    const exp = chainCache[sym]?.expiration || '';
-    const params = new URLSearchParams({symbol:sym, option_type:'BOTH', strike_range_pct:'5'});
-    if (exp) params.set('expiration', exp);
-    const r = await fetch('/api/options-grid?'+params);
+    const params = new URLSearchParams({symbol: job.sym, option_type: 'BOTH', strike_range_pct: '5'});
+    if (job.exp) params.set('expiration', job.exp);
+    const r = await fetch('/api/options-grid?' + params);
     if (!r.ok) return;
     const d = await r.json();
-    if (d.chain && ((d.chain.put||[]).length || (d.chain.call||[]).length)) {
-      chainCache[sym] = {...d, ts: new Date()};
-      if (optGridData?.symbol === sym) optGridData = d;
+    if (!d.chain) return;
+    if (!(d.chain.put||[]).length && !(d.chain.call||[]).length) return;
+
+    if (!chainCache[job.sym]) chainCache[job.sym] = {};
+    const exp = d.expiration || job.exp;
+    chainCache[job.sym][exp] = {chain: d.chain, current_price: d.current_price, source: d.source, fetched_at: d.fetched_at, ts: new Date()};
+    chainCache[job.sym]._expirations = d.expirations || [];
+    chainCache[job.sym]._current_price = d.current_price;
+
+    if (optGridData?.symbol === job.sym && optGridData?.expiration === exp) {
+      optGridData = d;
+    }
+    renderRecs();
+  } catch(e) { /* silent */ }
+}
+
+// Sequential loop: runs DTE0 for all tickers first, then DTE1, DTE2, DTE5.
+// Each cycle takes ~30s. If a fetch is slow, lower DTEs still get priority next cycle.
+async function _chainRefreshLoop() {
+  _chainRunning = true;
+  while (!_chainStopped) {
+    const cycleStart = Date.now();
+    const jobs = _buildChainJobs();
+
+    for (const job of jobs) {
+      if (_chainStopped) break;
+      await _fetchChainJob(job);
+      // Pace: wait so the full cycle takes ~30s
+      // But minimum 1s between fetches to avoid hammering
+      if (_chainStopped) break;
+      const elapsed = Date.now() - cycleStart;
+      const remaining = 30000 - elapsed;
+      const jobsLeft = jobs.length - jobs.indexOf(job) - 1;
+      const paceMs = jobsLeft > 0 ? Math.max(1000, Math.floor(remaining / jobsLeft)) : 0;
+      if (paceMs > 0 && jobsLeft > 0) {
+        await new Promise(r => setTimeout(r, paceMs));
+      }
+    }
+
+    // If cycle finished early, wait for the remainder of 30s
+    const cycleTime = Date.now() - cycleStart;
+    if (cycleTime < 30000 && !_chainStopped) {
+      await new Promise(r => setTimeout(r, 30000 - cycleTime));
+    }
+  }
+  _chainRunning = false;
+}
+
+function startChainRefresh() {
+  if (_chainRunning) return;
+  _chainStopped = false;
+  _chainRefreshLoop();
+}
+
+function stopChainRefresh() {
+  _chainStopped = true;
+}
+
+// ── Percentile Data ───────────────────────────────────────────────────────────
+let percentileData = null;  // Raw response from /api/percentiles
+let _pctlByTicker = {};     // Processed: {SPX: {lastDay, close, windows: {0: {up:{p75,p90,...}, down:{...}}, ...}}}
+
+async function fetchPercentiles() {
+  try {
+    const r = await fetch('/api/percentiles');
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.error) return;
+    percentileData = d;
+    // Build lookup
+    _pctlByTicker = {};
+    for (const t of d.tickers || []) {
+      const sym = t.ticker;
+      _pctlByTicker[sym] = {
+        lastDay: t.metadata?.last_trading_day,
+        close: t.metadata?.previous_close,
+        streak: t.metadata?.current_streak,
+        windows: {}
+      };
+      for (const [wk, wv] of Object.entries(t.windows || {})) {
+        _pctlByTicker[sym].windows[wk] = {
+          up: wv.when_up?.pct || {},
+          down: wv.when_down?.pct || {},
+        };
+      }
     }
   } catch(e) { /* silent */ }
 }
 
-function startChainRefresh() {
-  if (_chainRefreshTimer) return;
-  // 30s per ticker / 3 tickers = one fetch every 10s
-  const intervalMs = Math.round(30000 / CHAIN_TICKERS.length);
-  _chainRefreshTimer = setInterval(refreshOneChainTicker, intervalMs);
-  // Immediate first fetch for all tickers (staggered 0ms, 1s, 2s)
-  CHAIN_TICKERS.forEach((sym, i) => {
-    setTimeout(() => { _chainTickerIdx = i; refreshOneChainTicker(); }, i * 1000);
-  });
-  _chainTickerIdx = 0;
+// Map an expiration date to a DTE window key (trading days from last trading day)
+function expirationToDTE(sym, expDate) {
+  const meta = _pctlByTicker[sym];
+  if (!meta?.lastDay || !expDate) return null;
+  // Count trading days between lastDay and expDate (approximate: skip weekends)
+  const start = new Date(meta.lastDay + 'T00:00:00');
+  const end = new Date(expDate + 'T00:00:00');
+  let tradingDays = 0;
+  const d = new Date(start);
+  while (d < end) {
+    d.setDate(d.getDate() + 1);
+    const dow = d.getDay();
+    if (dow !== 0 && dow !== 6) tradingDays++;
+  }
+  return tradingDays;
 }
 
-function stopChainRefresh() {
-  if (_chainRefreshTimer) { clearInterval(_chainRefreshTimer); _chainRefreshTimer = null; }
+// Find the best matching window key for a given DTE
+function findWindowKey(sym, dte) {
+  const meta = _pctlByTicker[sym];
+  if (!meta) return null;
+  const keys = Object.keys(meta.windows).map(Number).sort((a,b) => a-b);
+  // Find exact match or closest <= dte
+  let best = null;
+  for (const k of keys) {
+    if (k <= dte) best = k;
+  }
+  return best !== null ? String(best) : (keys.length ? String(keys[0]) : null);
+}
+
+// Get the percentile bracket for a spread's OTM%
+// Returns: {pctl: 95, label: '>P95', beyond: true} or null
+function getPercentileBracket(sym, expDate, optionType, otmPct) {
+  const dte = expirationToDTE(sym, expDate);
+  if (dte === null) return null;
+  const wk = findWindowKey(sym, dte);
+  if (!wk) return null;
+  const meta = _pctlByTicker[sym];
+  const w = meta?.windows[wk];
+  if (!w) return null;
+
+  // For puts: otmPct is positive (distance below price). Compare against abs(down percentiles).
+  // For calls: otmPct is positive (distance above price). Compare against up percentiles.
+  const pctData = optionType === 'PUT' ? w.down : w.up;
+  if (!pctData) return null;
+
+  // Percentile values are the max move at that level
+  // If OTM% > p99 move, the spread is beyond P99 (very safe)
+  const absOtm = Math.abs(otmPct);
+  const levels = [
+    {pctl: 100, val: Math.abs(pctData.p100 || 999)},
+    {pctl: 99, val: Math.abs(pctData.p99 || 999)},
+    {pctl: 98, val: Math.abs(pctData.p98 || 999)},
+    {pctl: 95, val: Math.abs(pctData.p95 || 999)},
+    {pctl: 90, val: Math.abs(pctData.p90 || 999)},
+    {pctl: 75, val: Math.abs(pctData.p75 || 999)},
+  ];
+
+  for (const lv of levels) {
+    if (absOtm >= lv.val) {
+      return {pctl: lv.pctl, label: `>P${lv.pctl}`, dte, window: wk};
+    }
+  }
+  return {pctl: 0, label: '<P75', dte, window: wk};
+}
+
+function pctlBadge(bracket) {
+  if (!bracket) return '';
+  const p = bracket.pctl;
+  let cls = 'badge-critical';  // <P75 = red
+  if (p >= 99) cls = 'badge-safe';
+  else if (p >= 95) cls = 'badge-safe';
+  else if (p >= 90) cls = 'badge-watch';
+  else if (p >= 75) cls = 'badge-warning';
+  return `<span class="badge ${cls}">${bracket.label}</span>`;
+}
+
+// ── Predictions Data (model-based bands) ─────────────────────────────────────
+let predictionsData = null;  // {SPX: {today:{...}, future:{0:{...}, 1:{...}, ...}}, ...}
+
+async function fetchPredictions() {
+  try {
+    const r = await fetch('/api/predictions');
+    if (!r.ok) return;
+    const d = await r.json();
+    if (!d.error) predictionsData = d;
+  } catch(e) { /* silent */ }
+}
+
+// Get the predicted percentile bracket for a spread using model-based bands
+// Returns: {pctl: 95, label: '>P95', source: 'predicted'} or null
+function getPredictedBracket(sym, expDate, optionType, otmPct) {
+  if (!predictionsData?.[sym]) return null;
+  const pred = predictionsData[sym];
+
+  // Map expiration to DTE
+  const dte = expirationToDTE(sym, expDate);
+  if (dte === null) return null;
+
+  // Get the future prediction for this DTE
+  const futureBands = pred.future?.[String(dte)] || pred.future?.[String(Math.min(dte, 5))] || pred.today;
+  if (!futureBands) return null;
+
+  const bands = futureBands.percentile_bands || {};
+  const absOtm = Math.abs(otmPct);
+
+  // For puts: check if OTM% is beyond the predicted downside (lo_pct)
+  // For calls: check if OTM% is beyond the predicted upside (hi_pct)
+  const levels = [
+    {pctl: 100, key: 'P100'},
+    {pctl: 99, key: 'P99'},
+    {pctl: 98, key: 'P98'},
+    {pctl: 97, key: 'P97'},
+    {pctl: 95, key: 'P95'},
+    {pctl: 90, key: 'P90'},
+    {pctl: 80, key: 'P80'},
+  ];
+
+  for (const lv of levels) {
+    const band = bands[lv.key];
+    if (!band) continue;
+    const threshold = optionType === 'PUT' ? Math.abs(band.lo_pct || 0) : Math.abs(band.hi_pct || 0);
+    if (absOtm >= threshold) {
+      return {pctl: lv.pctl, label: `>P${lv.pctl}`, source: 'predicted', dte};
+    }
+  }
+  return {pctl: 0, label: '<P80', source: 'predicted', dte};
+}
+
+function predBadge(bracket) {
+  if (!bracket) return '';
+  const p = bracket.pctl;
+  let color = 'var(--red-b)';
+  if (p >= 95) color = 'var(--green-b)';
+  else if (p >= 90) color = 'var(--yellow)';
+  else if (p >= 80) color = 'var(--orange)';
+  // Outline style to distinguish from solid empirical badge
+  return `<span style="display:inline-block;padding:2px 5px;border-radius:4px;font-size:10px;font-weight:bold;border:1px solid ${color};color:${color};background:transparent" title="Predicted">${bracket.label}</span>`;
+}
+
+// Helper to get chain data from cache for a specific symbol+expiration
+function getCachedChain(sym, exp) {
+  if (!chainCache[sym]) return null;
+  if (exp && chainCache[sym][exp]) return chainCache[sym][exp];
+  // Default: return first available expiration's data
+  const exps = chainCache[sym]._expirations || [];
+  for (const e of exps) {
+    if (chainCache[sym][e]) return chainCache[sym][e];
+  }
+  return null;
 }
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
@@ -617,6 +930,14 @@ async function loadPortfolio() {
     // Add last-updated timestamp
     html += `<div style="margin-top:6px;font-size:10px;color:var(--muted);text-align:right">Updated ${new Date().toLocaleTimeString()}</div>`;
     tbl.innerHTML = html;
+
+    // Update data source bar for portfolio tab
+    const srcEntries = [{label:'Portfolio', source: d.balances?.net_liquidation ? 'ibkr' : 'local', time: new Date().toISOString()}];
+    if (d.quotes) {
+      // Quote sources from the daemon's QuestDB batch fetch
+      srcEntries.push({label:'Quotes', source:'questdb/ibkr', time: new Date().toISOString()});
+    }
+    updateDataSourceBar(srcEntries);
   } catch(e) {
     // Only show error if we have no existing data
     if (!tbl.innerHTML.includes('tbl')) {
@@ -712,6 +1033,75 @@ async function executeClose(pid) {
     const ok = d.status === 'ok' && !d.result?.error;
     const msg = d.result?.message || d.result?.status || JSON.stringify(d.result || d.error || d);
     resEl.innerHTML = `<div class="confirm-result ${ok?'success':'failure'}" style="margin-top:8px">${ok?'SUBMITTED':'FAILED'}: ${msg}</div>`;
+    if (ok) setTimeout(() => { closeTrade(); loadPortfolio(); }, 2000);
+  } catch(e) { resEl.innerHTML = `<div class="confirm-result failure" style="margin-top:8px">${e.message}</div>`; }
+}
+
+async function flushPortfolio() {
+  const tbl = document.getElementById('portfolio-table');
+  try {
+    tbl.insertAdjacentHTML('afterbegin', '<div id="flush-status" class="loading" style="margin-bottom:8px">Flushing & re-syncing</div>');
+    const r = await fetch('/api/execute-raw', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({endpoint:'/account/flush', method:'POST'})});
+    const d = await r.json();
+    document.getElementById('flush-status')?.remove();
+    const ok = d.status === 'ok';
+    const info = d.result || {};
+    const msg = ok ? `Flushed: ${info.open_cleared||0} cleared, ${info.resynced||info.synced_new||0} re-synced` : `Error: ${JSON.stringify(d.error||d)}`;
+    tbl.insertAdjacentHTML('afterbegin', `<div style="font-size:11px;padding:6px 8px;margin-bottom:8px;border-radius:4px;background:${ok?'rgba(35,134,54,0.1)':'rgba(218,54,51,0.1)'};color:${ok?'var(--green-b)':'var(--red-b)'}">${msg}</div>`);
+    loadPortfolio();
+  } catch(e) {
+    document.getElementById('flush-status')?.remove();
+    alert('Flush error: ' + e.message);
+  }
+}
+
+function confirmHardReset() {
+  const modal = document.getElementById('trade-modal');
+  const content = document.getElementById('trade-modal-content');
+  content.innerHTML = `
+    <div class="ot-title" style="color:var(--red-b)">HARD RESET</div>
+    <div style="font-size:13px;margin-bottom:12px;color:var(--text)">
+      This will <b>permanently delete</b> all local data:
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:16px;padding:10px;background:var(--bg);border-radius:6px">
+      <div style="margin-bottom:4px">&#x2022; All open positions</div>
+      <div style="margin-bottom:4px">&#x2022; All closed position history &amp; P&amp;L</div>
+      <div style="margin-bottom:4px">&#x2022; Transaction ledger</div>
+      <div>&#x2022; Execution cache</div>
+    </div>
+    <div style="font-size:12px;color:var(--text);margin-bottom:16px">
+      After reset, positions will be re-synced from the broker. Historical P&amp;L data will be <b>lost permanently</b>.
+    </div>
+    <div style="font-size:12px;margin-bottom:16px">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="reset-confirm-check" style="width:18px;height:18px">
+        <span style="color:var(--red-b);font-weight:bold">I understand this cannot be undone</span>
+      </label>
+    </div>
+    <div class="ot-actions">
+      <button class="btn btn-muted" onclick="closeTrade()">Cancel</button>
+      <button class="btn btn-red" id="reset-btn" onclick="executeHardReset()" disabled>Hard Reset</button>
+    </div>
+    <div id="reset-result"></div>
+  `;
+  // Enable button only when checkbox is checked
+  document.getElementById('reset-confirm-check').onchange = function() {
+    document.getElementById('reset-btn').disabled = !this.checked;
+  };
+  modal.classList.add('show');
+}
+
+async function executeHardReset() {
+  const resEl = document.getElementById('reset-result');
+  resEl.innerHTML = '<div class="loading" style="margin-top:8px">Resetting</div>';
+  try {
+    // Hard reset via POST /account/hard-reset
+    const r = await fetch('/api/execute-raw', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({endpoint:'/account/hard-reset', method:'POST'})});
+    const d = await r.json();
+    const ok = d.status === 'ok';
+    resEl.innerHTML = `<div class="confirm-result ${ok?'success':'failure'}" style="margin-top:8px">${ok?'Reset complete. Re-syncing from broker...':'Failed: '+JSON.stringify(d.error||d)}</div>`;
     if (ok) setTimeout(() => { closeTrade(); loadPortfolio(); }, 2000);
   } catch(e) { resEl.innerHTML = `<div class="confirm-result failure" style="margin-top:8px">${e.message}</div>`; }
 }
@@ -848,6 +1238,9 @@ async function loadOptionsGrid() {
 
     // Start 2-second auto-refresh
     startOptAutoRefresh();
+
+    // Update data source bar for options tab
+    updateDataSourceBar([{sym:d.symbol, source:d.source, time:d.fetched_at}, {label:'Mkt', source: d.market_open?'open':'closed'}]);
   } catch(e) {
     if (!grid.innerHTML.includes('tbl')) {
       grid.innerHTML = `<div class="msg-error">${e.message}</div>`;
@@ -913,6 +1306,34 @@ function distPct(strike, cp) {
   return `<div style="font-size:9px;color:var(--muted);font-weight:normal">${pct>0?'+':''}${pct}%</div>`;
 }
 
+// ── Data Source Banner ────────────────────────────────────────────────────────
+
+function updateDataSourceBar(entries) {
+  // entries: [{label, source, time, sym?}]
+  const bar = document.getElementById('data-source-bar');
+  if (!bar) return;
+  if (!entries || !entries.length) { bar.innerHTML = ''; return; }
+
+  bar.innerHTML = entries.map(e => {
+    const src = (e.source || '').toLowerCase();
+    let dotClass = 'src-cache';
+    let srcName = e.source || 'unknown';
+    if (src.includes('ibkr') || src === 'streaming_cache') { dotClass = 'src-ibkr'; srcName = 'IBKR'; }
+    else if (src.includes('csv') || src.includes('polygon')) { dotClass = 'src-csv'; srcName = 'Polygon/CSV'; }
+    else if (src.includes('questdb') || src.includes('db_server')) { dotClass = 'src-questdb'; srcName = 'QuestDB'; }
+    else if (src === 'cache' || src === 'voice_cache') { dotClass = 'src-cache'; srcName = 'Cache'; }
+
+    const timeStr = e.time ? formatDateShort(e.time) : '';
+    const prefix = e.sym ? `${e.sym}: ` : (e.label ? `${e.label}: ` : '');
+    return `<span class="src-tag"><span class="src-dot ${dotClass}"></span>${prefix}${srcName}${timeStr ? ' ' + timeStr : ''}</span>`;
+  }).join('');
+}
+
+function fmtGreek(val, decimals) {
+  if (val == null || val === undefined) return '--';
+  return val.toFixed(decimals || 2);
+}
+
 function renderChainGrid(puts, calls, cp, sym, exp) {
   const allStrikes = new Set([...puts.map(p=>p.strike), ...calls.map(c=>c.strike)]);
   const strikes = [...allStrikes].sort((a,b) => a-b);
@@ -921,14 +1342,16 @@ function renderChainGrid(puts, calls, cp, sym, exp) {
   let atmStrike = strikes[0], minDist = Infinity;
   for (const s of strikes) { const d = Math.abs(s-cp); if (d < minDist) { minDist=d; atmStrike=s; } }
 
-  // [C Delta] [C IV] [C Bid] [C Ask] | Strike | [P Bid] [P Ask] [P Delta] [P IV]
-  // Greeks hidden on mobile via .greek-col class
+  const width = DEFAULT_WIDTHS[sym] || 20;
+
   let html = '<table class="tbl"><thead><tr>';
-  html += '<th class="num greek-col">&delta;</th><th class="num greek-col">IV</th>';
+  html += '<th class="num greek-col">&delta;</th><th class="num greek-col">&theta;</th><th class="num greek-col">IV</th>';
+  html += '<th class="num greek-col" title="Hist / Pred">H/P</th>';
   html += '<th class="num" style="color:var(--green-b)">C Bid</th><th class="num" style="color:var(--green-b)">C Ask</th>';
   html += '<th class="num" style="color:var(--blue);text-align:center">Strike</th>';
   html += '<th class="num" style="color:var(--red-b)">P Bid</th><th class="num" style="color:var(--red-b)">P Ask</th>';
-  html += '<th class="num greek-col">&delta;</th><th class="num greek-col">IV</th>';
+  html += '<th class="num greek-col" title="Hist / Pred">H/P</th>';
+  html += '<th class="num greek-col">&delta;</th><th class="num greek-col">&theta;</th><th class="num greek-col">IV</th>';
   html += '</tr></thead><tbody>';
   for (const s of strikes) {
     const p = putMap[s], c = callMap[s];
@@ -938,10 +1361,28 @@ function renderChainGrid(puts, calls, cp, sym, exp) {
     const putBg = itmPut ? 'background:rgba(218,54,51,0.06);' : '';
     const callBg = itmCall ? 'background:rgba(35,134,54,0.06);' : '';
     const cg = c?.greeks || {}, pg = p?.greeks || {};
-    html += `<tr class="strike-row" data-strike="${s}" ${rowId} style="${isAtm?'border-top:2px solid var(--blue);border-bottom:2px solid var(--blue);':''}">`;
-    // Call greeks (left of calls)
-    html += `<td class="num greek-col" style="${callBg}">${cg.delta!=null?cg.delta.toFixed(2):''}</td>`;
-    html += `<td class="num greek-col" style="${callBg}">${cg.iv!=null?(cg.iv*100).toFixed(0)+'%':''}</td>`;
+
+    // Compute OTM% and credit for filtering
+    const callOtm = cp ? Math.abs((s - cp) / cp * 100) : 0;
+    const putOtm = callOtm;
+    const callLong = callMap[s + width], putLong = putMap[s - width];
+    const callCredit = (c?.bid||0) - (callLong?.ask||0);
+    const putCredit = (p?.bid||0) - (putLong?.ask||0);
+
+    // Percentile brackets
+    const cPctl = !itmCall ? getPercentileBracket(sym, exp, 'CALL', callOtm) : null;
+    const pPctl = !itmPut ? getPercentileBracket(sym, exp, 'PUT', putOtm) : null;
+    const cPred = !itmCall ? getPredictedBracket(sym, exp, 'CALL', callOtm) : null;
+    const pPred = !itmPut ? getPredictedBracket(sym, exp, 'PUT', putOtm) : null;
+
+    // Data attrs for filtering
+    html += `<tr class="strike-row" data-strike="${s}" data-c-otm="${callOtm.toFixed(2)}" data-p-otm="${putOtm.toFixed(2)}" data-c-credit="${callCredit.toFixed(2)}" data-p-credit="${putCredit.toFixed(2)}" data-c-pctl="${cPctl?.pctl||0}" data-p-pctl="${pPctl?.pctl||0}" ${rowId} style="${isAtm?'border-top:2px solid var(--blue);border-bottom:2px solid var(--blue);':''}">`;
+    // Call greeks
+    html += `<td class="num greek-col" data-field="c-delta" data-strike="${s}" style="${callBg}">${fmtGreek(cg.delta)}</td>`;
+    html += `<td class="num greek-col" data-field="c-theta" data-strike="${s}" style="${callBg}">${fmtGreek(cg.theta)}</td>`;
+    html += `<td class="num greek-col" data-field="c-iv" data-strike="${s}" style="${callBg}">${cg.iv!=null?(cg.iv*100).toFixed(0)+'%':'--'}</td>`;
+    // Call percentile (empirical + predicted combined)
+    html += `<td class="num greek-col" style="${callBg};white-space:nowrap">${pctlBadge(cPctl)}${cPred ? ' '+predBadge(cPred) : ''}</td>`;
     // Calls
     html += `<td class="num cell-tap" data-field="c-bid" data-strike="${s}" style="${callBg}" onclick="addLeg(${s},'CALL','SELL','${sym}','${exp}')">${c?c.bid?.toFixed(2)||'--':'--'}</td>`;
     html += `<td class="num cell-tap" data-field="c-ask" data-strike="${s}" style="${callBg}" onclick="addLeg(${s},'CALL','BUY','${sym}','${exp}')">${c?c.ask?.toFixed(2)||'--':'--'}</td>`;
@@ -950,13 +1391,46 @@ function renderChainGrid(puts, calls, cp, sym, exp) {
     // Puts
     html += `<td class="num cell-tap" data-field="p-bid" data-strike="${s}" style="${putBg}" onclick="addLeg(${s},'PUT','SELL','${sym}','${exp}')">${p?p.bid?.toFixed(2)||'--':'--'}</td>`;
     html += `<td class="num cell-tap" data-field="p-ask" data-strike="${s}" style="${putBg}" onclick="addLeg(${s},'PUT','BUY','${sym}','${exp}')">${p?p.ask?.toFixed(2)||'--':'--'}</td>`;
-    // Put greeks (right of puts)
-    html += `<td class="num greek-col" style="${putBg}">${pg.delta!=null?pg.delta.toFixed(2):''}</td>`;
-    html += `<td class="num greek-col" style="${putBg}">${pg.iv!=null?(pg.iv*100).toFixed(0)+'%':''}</td>`;
+    // Put percentile (empirical + predicted combined)
+    html += `<td class="num greek-col" style="${putBg};white-space:nowrap">${pctlBadge(pPctl)}${pPred ? ' '+predBadge(pPred) : ''}</td>`;
+    // Put greeks
+    html += `<td class="num greek-col" data-field="p-delta" data-strike="${s}" style="${putBg}">${fmtGreek(pg.delta)}</td>`;
+    html += `<td class="num greek-col" data-field="p-theta" data-strike="${s}" style="${putBg}">${fmtGreek(pg.theta)}</td>`;
+    html += `<td class="num greek-col" data-field="p-iv" data-strike="${s}" style="${putBg}">${pg.iv!=null?(pg.iv*100).toFixed(0)+'%':'--'}</td>`;
     html += '</tr>';
   }
   html += '</tbody></table>';
   return html;
+}
+
+function refilterChain() {
+  const minOtm = parseFloat(document.getElementById('opt-min-otm')?.value) || 0;
+  const minPctl = parseInt(document.getElementById('opt-min-pctl')?.value) || 0;
+  const minCredit = parseFloat(document.getElementById('opt-min-credit')?.value) || 0;
+  const otype = document.getElementById('opt-type').value;
+
+  document.querySelectorAll('.strike-row').forEach(row => {
+    const cOtm = parseFloat(row.dataset.cOtm) || 0;
+    const pOtm = parseFloat(row.dataset.pOtm) || 0;
+    const cCredit = parseFloat(row.dataset.cCredit) || 0;
+    const pCredit = parseFloat(row.dataset.pCredit) || 0;
+    const cPctl = parseInt(row.dataset.cPctl) || 0;
+    const pPctl = parseInt(row.dataset.pPctl) || 0;
+
+    // A row passes if EITHER the call side or put side meets all filters
+    let callPass = true, putPass = true;
+
+    if (minOtm > 0) { callPass = callPass && cOtm >= minOtm; putPass = putPass && pOtm >= minOtm; }
+    if (minPctl > 0) { callPass = callPass && cPctl >= minPctl; putPass = putPass && pPctl >= minPctl; }
+    if (minCredit > 0) { callPass = callPass && cCredit >= minCredit; putPass = putPass && pCredit >= minCredit; }
+
+    let show = false;
+    if (otype === 'BOTH') show = callPass || putPass;
+    else if (otype === 'CALL') show = callPass;
+    else show = putPass;
+
+    row.style.display = show ? '' : 'none';
+  });
 }
 
 function renderSingleChain(options, cp, type, sym, exp) {
@@ -1022,15 +1496,23 @@ async function refreshOptionPrices() {
     document.querySelectorAll('[data-field][data-strike]').forEach(cell => {
       const strike = parseFloat(cell.dataset.strike);
       const field = cell.dataset.field;
+      const cq = callMap[strike], pq = putMap[strike];
+      const cgg = cq?.greeks || {}, pgg = pq?.greeks || {};
       let val = '--';
-      if (field === 'c-bid') val = callMap[strike]?.bid?.toFixed(2) || '--';
-      else if (field === 'c-ask') val = callMap[strike]?.ask?.toFixed(2) || '--';
-      else if (field === 'p-bid') val = putMap[strike]?.bid?.toFixed(2) || '--';
-      else if (field === 'p-ask') val = putMap[strike]?.ask?.toFixed(2) || '--';
-      else if (field === 'c-last') val = callMap[strike]?.last?.toFixed(2) || '--';
-      else if (field === 'p-last') val = putMap[strike]?.last?.toFixed(2) || '--';
-      else if (field === 'c-vol') val = callMap[strike]?.volume || '';
-      else if (field === 'p-vol') val = putMap[strike]?.volume || '';
+      if (field === 'c-bid') val = cq?.bid?.toFixed(2) || '--';
+      else if (field === 'c-ask') val = cq?.ask?.toFixed(2) || '--';
+      else if (field === 'p-bid') val = pq?.bid?.toFixed(2) || '--';
+      else if (field === 'p-ask') val = pq?.ask?.toFixed(2) || '--';
+      else if (field === 'c-last') val = cq?.last?.toFixed(2) || '--';
+      else if (field === 'p-last') val = pq?.last?.toFixed(2) || '--';
+      else if (field === 'c-vol') val = cq?.volume || '';
+      else if (field === 'p-vol') val = pq?.volume || '';
+      else if (field === 'c-delta') val = fmtGreek(cgg.delta);
+      else if (field === 'c-theta') val = fmtGreek(cgg.theta);
+      else if (field === 'c-iv') val = cgg.iv != null ? (cgg.iv*100).toFixed(0)+'%' : '--';
+      else if (field === 'p-delta') val = fmtGreek(pgg.delta);
+      else if (field === 'p-theta') val = fmtGreek(pgg.theta);
+      else if (field === 'p-iv') val = pgg.iv != null ? (pgg.iv*100).toFixed(0)+'%' : '--';
       cell.textContent = val;
     });
 
@@ -1055,6 +1537,9 @@ async function refreshOptionPrices() {
     // Update timestamp footer
     const tsDiv = document.querySelector('#options-grid div[style*="text-align:right"]');
     if (tsDiv) tsDiv.innerHTML = formatTimestamp(d).replace(/<div[^>]*>|<\/div>/g, '');
+
+    // Update data source bar on refresh too
+    updateDataSourceBar([{sym:d.symbol, source:d.source, time:d.fetched_at}, {label:'Mkt', source: d.market_open?'open':'closed'}]);
 
   } catch(e) { /* silent — don't disrupt UI on refresh failure */ }
 }
@@ -1480,14 +1965,68 @@ async function loadRecommendations() {
     }
   }
   renderRecs();
-  // Retry if any ticker still has no data
-  if (CHAIN_TICKERS.some(s => !chainCache[s]?.chain)) {
+  // Retry if any ticker still has no chain data at all
+  if (CHAIN_TICKERS.some(s => !getCachedChain(s))) {
     if (_recRetryTimer) clearTimeout(_recRetryTimer);
     _recRetryTimer = setTimeout(() => loadRecommendations(), 5000);
   }
 }
 
-function filterRecs() { renderRecs(); }
+function filterRecs() {
+  const selectedDte = parseInt(document.getElementById('rec-dte')?.value) || 0;
+
+  // If user selected a DTE, check if we have fresh-enough data for it.
+  // Freshness threshold: 30s * DTE (DTE0=30s, DTE1=60s, DTE2=90s, DTE5=180s)
+  if (selectedDte > 0) {
+    const maxAge = 30000 * (selectedDte + 1);  // ms
+    let needFetch = false;
+    for (const sym of CHAIN_TICKERS) {
+      const exps = chainCache[sym]?._expirations || [];
+      const dteIdx = Math.min(selectedDte, exps.length - 1);
+      const exp = exps[Math.max(0, dteIdx)] || '';
+      if (!exp) { needFetch = true; continue; }
+      const cached = chainCache[sym]?.[exp];
+      if (!cached?.chain || (Date.now() - cached.ts.getTime()) > maxAge) {
+        needFetch = true;
+        // Priority fetch this ticker+exp now
+        _priorityFetchChain(sym, exp, selectedDte);
+      }
+    }
+  }
+
+  renderRecs();
+}
+
+async function _priorityFetchChain(sym, exp, dte) {
+  // Show loading indicator in the picks content for this ticker
+  const el = document.getElementById('recs-content');
+  const existing = el?.querySelector(`[data-priority-sym="${sym}"]`);
+  if (existing) return;  // Already fetching
+
+  // Insert a small loading indicator
+  const indicator = document.createElement('div');
+  indicator.dataset.prioritySym = sym;
+  indicator.style.cssText = 'font-size:10px;color:var(--blue);padding:2px 8px';
+  indicator.innerHTML = `<span class="spinner" style="width:10px;height:10px;border-width:1px;vertical-align:middle"></span> Fetching ${sym} DTE${dte}...`;
+  el?.prepend(indicator);
+
+  try {
+    const params = new URLSearchParams({symbol: sym, option_type: 'BOTH', strike_range_pct: '5', expiration: exp});
+    const r = await fetch('/api/options-grid?' + params);
+    if (r.ok) {
+      const d = await r.json();
+      if (d.chain && ((d.chain.put||[]).length || (d.chain.call||[]).length)) {
+        if (!chainCache[sym]) chainCache[sym] = {};
+        const rExp = d.expiration || exp;
+        chainCache[sym][rExp] = {chain: d.chain, current_price: d.current_price, source: d.source, fetched_at: d.fetched_at, ts: new Date()};
+        chainCache[sym]._expirations = d.expirations || chainCache[sym]._expirations || [];
+        chainCache[sym]._current_price = d.current_price;
+        renderRecs();
+      }
+    }
+  } catch(e) { /* silent */ }
+  indicator.remove();
+}
 
 function renderRecs() {
   const el = document.getElementById('recs-content');
@@ -1496,54 +2035,134 @@ function renderRecs() {
   const minOtm = parseFloat(document.getElementById('rec-min-otm')?.value) || 0;
   const typeFilter = document.getElementById('rec-type-filter')?.value || 'ALL';
   const customWidth = parseInt(document.getElementById('rec-width')?.value) || 0;
+  const minPctl = parseInt(document.getElementById('rec-min-pctl')?.value) || 0;
+  const minPred = parseInt(document.getElementById('rec-min-pred')?.value) || 0;
+  const recQty = parseInt(document.getElementById('rec-qty')?.value) || 25;
+  const minTotalCredit = parseInt(document.getElementById('rec-min-total-credit')?.value) || 0;
+  const maxTotalLoss = parseInt(document.getElementById('rec-max-total-loss')?.value) || Infinity;
+  const selectedDte = parseInt(document.getElementById('rec-dte')?.value) || 0;
 
   let html = '';
   for (const sym of CHAIN_TICKERS) {
-    const cached = chainCache[sym];
+    const symCache = chainCache[sym];
+    const exps = symCache?._expirations || [];
+    // Pick the expiration matching the selected DTE
+    const dteIdx = Math.min(selectedDte, exps.length - 1);
+    const exp = exps[Math.max(0, dteIdx)] || '';
+    const cached = exp ? (symCache?.[exp] || getCachedChain(sym, exp)) : getCachedChain(sym);
     if (!cached?.chain) {
-      html += `<div class="rec-card"><div class="rec-header"><span class="rec-ticker">${sym}</span></div><div style="padding:12px;color:var(--muted);font-size:12px">Waiting for option data... <span class="spinner"></span><span class="fetching" style="display:none"></span></div></div>`;
+      const loading = exp ? `Loading ${sym} ${exp}...` : 'Waiting for option data...';
+      html += `<div class="rec-card"><div class="rec-header"><span class="rec-ticker">${sym}</span></div><div style="padding:12px;color:var(--muted);font-size:12px">${loading} <span class="spinner"></span><span class="fetching" style="display:none"></span></div></div>`;
       continue;
     }
-    const cp = cached.current_price || 0;
-    const exp = cached.expiration || '';
+    const cp = cached.current_price || symCache?._current_price || 0;
     const width = customWidth || DEFAULT_WIDTHS[sym] || 20;
     const allSpreads = computeSpreads(cached.chain, sym, cp, width);
 
-    // Apply filters
-    const spreads = allSpreads.filter(s => {
-      if (s.roi_pct < minRoi) return false;
-      if (s.credit < minCredit) return false;
-      if (Math.abs(s.otm_pct) < minOtm) return false;
-      if (typeFilter !== 'ALL' && s.option_type !== typeFilter) return false;
-      return true;
+    // Compute empirical + predicted percentile brackets
+    const spreadsWithPctl = allSpreads.map(s => {
+      const bracket = getPercentileBracket(sym, exp, s.option_type, s.otm_pct);
+      const predicted = getPredictedBracket(sym, exp, s.option_type, s.otm_pct);
+      return {...s, _pctl: bracket, _pred: predicted};
     });
+
+    // Tag each spread with which filters it fails
+    function checkFilters(s) {
+      const fails = [];
+      if (s.roi_pct < minRoi) fails.push('ROI');
+      if (s.credit < minCredit) fails.push('Credit');
+      if (Math.abs(s.otm_pct) < minOtm) fails.push('OTM');
+      if (typeFilter !== 'ALL' && s.option_type !== typeFilter) fails.push('Type');
+      if (minPctl > 0 && (!s._pctl || s._pctl.pctl < minPctl)) fails.push('Hist');
+      if (minPred > 0 && (!s._pred || s._pred.pctl < minPred)) fails.push('Pred');
+      if (minTotalCredit > 0 && (s.credit_per_contract * recQty) < minTotalCredit) fails.push('TotCr');
+      if (maxTotalLoss < Infinity && (s.max_loss * recQty) > maxTotalLoss) fails.push('MaxL');
+      return fails;
+    }
+
+    const spreads = [];
+    const nearMisses = [];
+    for (const s of spreadsWithPctl) {
+      const fails = checkFilters(s);
+      if (fails.length === 0) {
+        spreads.push(s);
+      } else {
+        nearMisses.push({...s, _fails: fails});
+      }
+    }
+    // Sort near-misses: fewest failures first, then by ROI
+    nearMisses.sort((a, b) => a._fails.length - b._fails.length || b.roi_pct - a.roi_pct);
 
     const srcLabel = cached.source === 'csv_exports' ? 'CSV' : cached.source === 'ibkr' ? 'IBKR' : (cached.source||'cache');
     const age = cached.ts ? timeSince(cached.ts.toISOString()) : '?';
+    const pctlMeta = _pctlByTicker[sym];
+    const streakInfo = pctlMeta ? `${pctlMeta.streak}d ${pctlMeta.streak>0?'up':'dn'}` : '';
 
-    html += `<div class="card"><div class="card-title">${sym} <span style="color:var(--text);font-weight:normal">${cp?.toLocaleString()} | Exp: ${exp} | Width: ${width}</span></div>`;
-    if (!spreads.length) {
-      html += `<div style="padding:8px;color:var(--muted);font-size:12px">No spreads match filters (${allSpreads.length} total)</div></div>`;
+    html += `<div class="card"><div class="card-title">${sym} <span style="color:var(--text);font-weight:normal">${cp?.toLocaleString()} | Exp: ${exp} | Width: ${width}${streakInfo ? ' | '+streakInfo : ''}</span></div>`;
+
+    const showMatches = spreads.slice(0, 10);
+    const needNearMiss = showMatches.length < 10;
+    const nearMissCount = needNearMiss ? Math.min(10 - showMatches.length, nearMisses.length) : 0;
+
+    if (!showMatches.length && !nearMissCount) {
+      html += `<div style="padding:8px;color:var(--muted);font-size:12px">No spreads available (${allSpreads.length} total)</div></div>`;
       continue;
     }
-    html += '<table class="tbl"><thead><tr><th>Type</th><th>Short</th><th>Long</th><th class="num">Credit/c</th><th class="num">MaxLoss/c</th><th class="num">ROI%</th><th class="num">OTM%</th><th></th></tr></thead><tbody>';
-    for (const s of spreads.slice(0, 10)) {
+
+    html += `<table class="tbl"><thead><tr><th>Type</th><th>Short</th><th>Long</th><th class="num">Credit</th><th class="num">MaxLoss</th><th class="num">ROI%</th><th class="num">OTM%</th><th>Hist</th><th>Pred</th><th></th></tr></thead><tbody>`;
+
+    // Render matching spreads
+    for (const s of showMatches) {
+      const totalCr = s.credit_per_contract * recQty;
+      const totalML = s.max_loss * recQty;
       html += `<tr>`;
       html += `<td><span class="badge ${s.option_type==='PUT'?'badge-safe':'badge-watch'}">${s.option_type}</span></td>`;
       html += `<td>${s.short_strike}</td><td>${s.long_strike}</td>`;
-      html += `<td class="num pos">$${s.credit_per_contract.toLocaleString()}</td>`;
-      html += `<td class="num" style="color:var(--red-b)">$${s.max_loss.toLocaleString()}</td>`;
+      html += `<td class="num pos">$${totalCr.toLocaleString()}<div style="font-size:9px;color:var(--muted)">$${s.credit_per_contract.toLocaleString()}/c</div></td>`;
+      html += `<td class="num" style="color:var(--red-b)">$${totalML.toLocaleString()}<div style="font-size:9px;color:var(--muted)">$${s.max_loss.toLocaleString()}/c</div></td>`;
       html += `<td class="num rec-roi">${s.roi_pct}%</td>`;
       html += `<td class="num">${s.otm_pct}%</td>`;
+      html += `<td>${pctlBadge(s._pctl)}</td>`;
+      html += `<td>${predBadge(s._pred)}</td>`;
       html += `<td><button class="btn btn-green btn-sm" onclick="tradeRec('${sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${exp}')">Trade</button></td>`;
       html += '</tr>';
     }
+
+    // Render near-miss spreads in grey
+    if (nearMissCount > 0) {
+      html += `<tr><td colspan="10" style="padding:4px 8px;font-size:10px;color:var(--muted);background:var(--bg);border-top:2px dashed var(--border)">Filtered out — closest to matching (${nearMisses.length} total)</td></tr>`;
+      for (const s of nearMisses.slice(0, nearMissCount)) {
+        const totalCr = s.credit_per_contract * recQty;
+        const totalML = s.max_loss * recQty;
+        const failTags = s._fails.map(f => `<span style="background:rgba(218,54,51,0.15);color:var(--red-b);padding:1px 4px;border-radius:3px;font-size:9px;margin-left:2px">${f}</span>`).join('');
+        html += `<tr style="opacity:0.45">`;
+        html += `<td><span class="badge ${s.option_type==='PUT'?'badge-safe':'badge-watch'}">${s.option_type}</span></td>`;
+        html += `<td>${s.short_strike}</td><td>${s.long_strike}</td>`;
+        html += `<td class="num">$${totalCr.toLocaleString()}<div style="font-size:9px">$${s.credit_per_contract.toLocaleString()}/c</div></td>`;
+        html += `<td class="num">$${totalML.toLocaleString()}<div style="font-size:9px">$${s.max_loss.toLocaleString()}/c</div></td>`;
+        html += `<td class="num">${s.roi_pct}%</td>`;
+        html += `<td class="num">${s.otm_pct}%</td>`;
+        html += `<td>${pctlBadge(s._pctl)}</td>`;
+        html += `<td>${predBadge(s._pred)}</td>`;
+        html += `<td>${failTags}</td>`;
+        html += '</tr>';
+      }
+    }
+
     html += '</tbody></table>';
     html += `<div style="font-size:9px;color:var(--muted);text-align:right;padding:2px 4px">${srcLabel} · ${age} ago</div>`;
     html += '</div>';
   }
 
   html += `<div style="margin-top:4px;font-size:10px;color:var(--muted);text-align:right">Computed ${new Date().toLocaleTimeString()} (client-side)</div>`;
+
+  // Update data source bar for picks tab
+  const srcEntries = [];
+  for (const sym of CHAIN_TICKERS) {
+    const c = getCachedChain(sym);
+    if (c) srcEntries.push({sym, source:c.source, time:c.fetched_at || c.ts?.toISOString()});
+  }
+  updateDataSourceBar(srcEntries);
   el.innerHTML = html || '<div class="empty-msg">No data</div>';
 }
 
@@ -1687,10 +2306,15 @@ function loadAll() {
   checkHealth();
   loadTickers();
   loadPortfolio();
-  // Server-side prefetch (warms daemon cache from CSV/IBKR)
   fetch('/api/prefetch').catch(() => {});
-  // Client-side chain cache refresh (keeps option data fresh for all tickers)
   startChainRefresh();
+  // Fetch percentile + prediction data, then eagerly generate picks
+  fetchPercentiles();
+  fetchPredictions();
+  setInterval(fetchPercentiles, 60000);
+  setInterval(fetchPredictions, 60000);
+  // Pre-load picks data (chain data fetched by startChainRefresh triggers renderRecs on each update)
+  loadRecommendations();
 }
 
 // Auto-refresh tickers every 15s, portfolio every 30s
@@ -1704,11 +2328,17 @@ switchTab = function(name, btn) {
   origSwitchTab(name, btn);
   if (name === 'options') {
     if (!document.getElementById('options-grid').innerHTML.includes('tbl')) loadOptionsGrid();
-    else startOptAutoRefresh();  // Resume refresh when returning to options tab
+    else startOptAutoRefresh();
   } else {
-    stopOptAutoRefresh();  // Pause refresh when leaving options tab
+    stopOptAutoRefresh();
   }
-  if (name === 'recs' && !document.getElementById('recs-content').innerHTML.includes('tbl')) loadRecommendations();
+  if (name === 'recs') {
+    if (!document.getElementById('recs-content').innerHTML.includes('tbl')) loadRecommendations();
+    else renderRecs();  // Re-render to update source bar
+  }
+  if (name === 'chat') {
+    updateDataSourceBar([{label:'Chat', source:'Claude API', time: new Date().toISOString()}]);
+  }
 };
 
 // ── Init ─────────────────────────────────────────────────────────────────────

@@ -151,7 +151,7 @@ class UTPDaemonClient:
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
-                base_url=self.base_url, timeout=60.0
+                base_url=self.base_url, timeout=15.0
             )
         return self._client
 
@@ -1037,6 +1037,16 @@ async def run_agent(
 app = FastAPI(title="UTP Voice", docs_url=None, redoc_url=None)
 
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch all unhandled exceptions and return 500 instead of crashing."""
+    logger.error("Unhandled exception on %s %s: %s", request.method, request.url.path, exc, exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {type(exc).__name__}: {exc}"},
+    )
+
+
 def _get_base_path(request: Request) -> str:
     """Get the base path from X-Forwarded-Prefix header (set by envoy)."""
     return (request.headers.get("x-forwarded-prefix") or "").rstrip("/")
@@ -1266,9 +1276,10 @@ def _is_market_hours() -> bool:
 
 
 def _cache_ttl() -> float:
-    """During market hours: 2 min. Outside market hours: infinite (never expire)."""
+    """During market hours: 0 (no voice-server cache, always go to daemon).
+    Outside market hours: infinite (serve cached CSV/IBKR data forever)."""
     if _is_market_hours():
-        return OPTIONS_CACHE_TTL_MARKET
+        return 0
     return float("inf")
 
 
@@ -1950,6 +1961,75 @@ async def api_performance_summary(
         raise HTTPException(status_code=502, detail=str(e))
 
 
+PERCENTILE_SERVER_URL = os.environ.get("PERCENTILE_SERVER_URL", "http://localhost:9100")
+_percentile_cache: dict | None = None
+_percentile_cache_at: float = 0
+
+
+@app.get("/api/percentiles")
+async def api_percentiles(username: str = Depends(require_session)):
+    """Proxy to range_percentiles server. Cached 60s during market hours, infinite when closed."""
+    global _percentile_cache, _percentile_cache_at
+    ttl = 60 if _is_market_hours() else float("inf")
+    if _percentile_cache and (time.time() - _percentile_cache_at) < ttl:
+        return _percentile_cache
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{PERCENTILE_SERVER_URL}/range_percentiles",
+                params={"ticker": "SPX,NDX,RUT", "windows": "0,1,2,3,5", "format": "json"},
+            )
+            if resp.status_code == 200:
+                _percentile_cache = resp.json()
+                _percentile_cache_at = time.time()
+                return _percentile_cache
+    except Exception as e:
+        logger.warning("Percentile server unavailable: %s", e)
+
+    if _percentile_cache:
+        return _percentile_cache
+    return {"error": "Percentile server unavailable"}
+
+
+_predictions_cache: dict[str, dict] = {}  # {ticker: response}
+_predictions_cache_at: float = 0
+
+
+@app.get("/api/predictions")
+async def api_predictions(username: str = Depends(require_session)):
+    """Proxy to predictions server for all default tickers. Cached same as percentiles."""
+    global _predictions_cache, _predictions_cache_at
+    ttl = 60 if _is_market_hours() else float("inf")
+    if _predictions_cache and (time.time() - _predictions_cache_at) < ttl:
+        return _predictions_cache
+
+    result = {}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for sym in DEFAULT_TICKERS:
+                try:
+                    resp = await client.get(
+                        f"{PERCENTILE_SERVER_URL}/predictions/{sym}",
+                        params={"format": "json"},
+                    )
+                    if resp.status_code == 200:
+                        result[sym] = resp.json()
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.warning("Predictions server unavailable: %s", e)
+
+    if result:
+        _predictions_cache = result
+        _predictions_cache_at = time.time()
+        return result
+
+    if _predictions_cache:
+        return _predictions_cache
+    return {"error": "Predictions server unavailable"}
+
+
 @app.post("/api/quick-trade")
 async def api_quick_trade(
     request: Request,
@@ -2082,16 +2162,62 @@ Examples:
         print(f"  Workers: {workers}")
         print(f"  Open http://localhost:{port} in your browser")
 
-        if workers > 1:
-            # Multi-worker mode: use uvicorn's process manager with app string
-            # Each worker is a separate process with its own in-memory cache
-            uvicorn.run(
-                "utp_voice:app",
-                host=host, port=port, log_level=log_level,
-                workers=workers,
-            )
-        else:
-            uvicorn.run(app, host=host, port=port, log_level=log_level)
+        _run_server_with_restart(host, port, log_level, workers)
+
+
+def _run_server_with_restart(host: str, port: int, log_level: str, workers: int) -> None:
+    """Run uvicorn with auto-restart on crash. Ctrl-C/SIGTERM exits cleanly."""
+    import signal
+
+    max_restarts = 50
+    restart_count = 0
+    backoff = 2.0
+    max_backoff = 30.0
+
+    while restart_count < max_restarts:
+        try:
+            if workers > 1:
+                uvicorn.run(
+                    "utp_voice:app",
+                    host=host, port=port, log_level=log_level,
+                    workers=workers,
+                )
+            else:
+                uvicorn.run(app, host=host, port=port, log_level=log_level)
+
+            # Clean exit (uvicorn returned normally) — don't restart
+            break
+
+        except KeyboardInterrupt:
+            print("\n  Shutting down (Ctrl-C)...")
+            break
+        except SystemExit as e:
+            if e.code == 0:
+                break
+            # Non-zero exit — restart
+            restart_count += 1
+            wait = min(backoff * restart_count, max_backoff)
+            print(f"\n  Server exited with code {e.code}. Restarting in {wait:.0f}s... ({restart_count}/{max_restarts})")
+            try:
+                time.sleep(wait)
+            except KeyboardInterrupt:
+                print("\n  Shutting down (Ctrl-C during restart)...")
+                break
+        except Exception as e:
+            restart_count += 1
+            wait = min(backoff * restart_count, max_backoff)
+            logger.error("Server crashed: %s", e, exc_info=True)
+            print(f"\n  Server crashed: {e}")
+            print(f"  Restarting in {wait:.0f}s... ({restart_count}/{max_restarts})")
+            try:
+                time.sleep(wait)
+            except KeyboardInterrupt:
+                print("\n  Shutting down (Ctrl-C during restart)...")
+                break
+
+    if restart_count >= max_restarts:
+        print(f"\n  Max restarts ({max_restarts}) reached. Giving up.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
