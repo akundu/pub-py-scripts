@@ -44,13 +44,13 @@ async def get_quotes_batch(
     _user: Annotated[TokenData, Security(require_auth, scopes=["market:read"])],
 ) -> BatchQuoteResponse:
     """Fetch quotes for multiple symbols in a single request."""
-    provider = ProviderRegistry.get(request.broker)
+    from app.services.market_data import get_quote as _get_quote
     quotes: list[Quote] = []
     errors: dict[str, str] = {}
 
     for symbol in request.symbols:
         try:
-            q = await provider.get_quote(symbol.upper())
+            q = await _get_quote(symbol.upper(), request.broker)
             quotes.append(q)
         except Exception as e:
             errors[symbol] = str(e)

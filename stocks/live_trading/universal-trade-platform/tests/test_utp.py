@@ -3197,14 +3197,15 @@ class TestAutoPrice:
     @pytest.mark.asyncio
     async def test_auto_price_credit_spread_market(self, capsys):
         """Default auto-price returns market price (sell at bid, buy at ask)."""
-        provider = AsyncMock()
-        provider.get_option_quotes = AsyncMock(return_value=[
+        mock_quotes = [
             {"strike": 5500.0, "bid": 8.00, "ask": 8.50, "last": 8.25, "volume": 100},
             {"strike": 5475.0, "bid": 5.00, "ask": 5.50, "last": 5.25, "volume": 200},
-        ])
-        price = await _auto_price_spread(
-            provider, "SPX", "2026-03-20",
-            [5500.0, 5475.0], "PUT", "credit_spread")
+        ]
+        provider = AsyncMock()
+        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=mock_quotes):
+            price = await _auto_price_spread(
+                provider, "SPX", "2026-03-20",
+                [5500.0, 5475.0], "PUT", "credit_spread")
         # market = short_bid - long_ask = 8.00 - 5.50 = 2.50
         assert price == 2.50
         out = capsys.readouterr().out
@@ -3214,12 +3215,13 @@ class TestAutoPrice:
     @pytest.mark.asyncio
     async def test_auto_price_credit_spread_mid(self, capsys):
         """With use_mid=True, returns mid-point between market and best-case."""
-        provider = AsyncMock()
-        provider.get_option_quotes = AsyncMock(return_value=[
+        mock_quotes = [
             {"strike": 5500.0, "bid": 8.00, "ask": 8.50, "last": 8.25, "volume": 100},
             {"strike": 5475.0, "bid": 5.00, "ask": 5.50, "last": 5.25, "volume": 200},
-        ])
-        price = await _auto_price_spread(
+        ]
+        provider = AsyncMock()
+        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=mock_quotes):
+            price = await _auto_price_spread(
             provider, "SPX", "2026-03-20",
             [5500.0, 5475.0], "PUT", "credit_spread", use_mid=True)
         # market = 2.50, best = 8.50 - 5.00 = 3.50, mid = 3.00
@@ -3228,14 +3230,15 @@ class TestAutoPrice:
     @pytest.mark.asyncio
     async def test_auto_price_debit_spread_market(self, capsys):
         """Default auto-price for debit spread returns market price."""
-        provider = AsyncMock()
-        provider.get_option_quotes = AsyncMock(return_value=[
+        mock_quotes = [
             {"strike": 480.0, "bid": 6.00, "ask": 6.40, "last": 6.20, "volume": 100},
             {"strike": 490.0, "bid": 3.00, "ask": 3.40, "last": 3.20, "volume": 200},
-        ])
-        price = await _auto_price_spread(
-            provider, "QQQ", "2026-03-20",
-            [480.0, 490.0], "CALL", "debit_spread")
+        ]
+        provider = AsyncMock()
+        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=mock_quotes):
+            price = await _auto_price_spread(
+                provider, "QQQ", "2026-03-20",
+                [480.0, 490.0], "CALL", "debit_spread")
         # market = long_ask - short_bid = 6.40 - 3.00 = 3.40
         assert price == 3.40
         out = capsys.readouterr().out
@@ -3247,7 +3250,7 @@ class TestAutoPrice:
         """Default auto-price for iron condor returns market price."""
         provider = AsyncMock()
 
-        async def mock_quotes(symbol, expiration, option_type, **kwargs):
+        async def mock_mkt_opts(symbol, expiration, option_type, **kwargs):
             if option_type == "PUT":
                 return [
                     {"strike": 5400.0, "bid": 4.00, "ask": 4.50, "last": 4.25, "volume": 100},
@@ -3259,9 +3262,9 @@ class TestAutoPrice:
                     {"strike": 5725.0, "bid": 1.00, "ask": 1.50, "last": 1.25, "volume": 200},
                 ]
 
-        provider.get_option_quotes = mock_quotes
-        price = await _auto_price_iron_condor(
-            provider, "SPX", "2026-03-20", 5400.0, 5375.0, 5700.0, 5725.0)
+        with patch("app.services.market_data.get_option_quotes", side_effect=mock_mkt_opts):
+            price = await _auto_price_iron_condor(
+                provider, "SPX", "2026-03-20", 5400.0, 5375.0, 5700.0, 5725.0)
         # puts: market = 4.00-2.50=1.50, calls: market = 3.00-1.50=1.50, total = 3.00
         assert price == 3.00
         out = capsys.readouterr().out
@@ -3273,7 +3276,7 @@ class TestAutoPrice:
         """With use_mid=True, iron condor returns mid-point."""
         provider = AsyncMock()
 
-        async def mock_quotes(symbol, expiration, option_type, **kwargs):
+        async def mock_mkt_opts(symbol, expiration, option_type, **kwargs):
             if option_type == "PUT":
                 return [
                     {"strike": 5400.0, "bid": 4.00, "ask": 4.50, "last": 4.25, "volume": 100},
@@ -3285,32 +3288,34 @@ class TestAutoPrice:
                     {"strike": 5725.0, "bid": 1.00, "ask": 1.50, "last": 1.25, "volume": 200},
                 ]
 
-        provider.get_option_quotes = mock_quotes
-        price = await _auto_price_iron_condor(
-            provider, "SPX", "2026-03-20", 5400.0, 5375.0, 5700.0, 5725.0,
-            use_mid=True)
+        with patch("app.services.market_data.get_option_quotes", side_effect=mock_mkt_opts):
+            price = await _auto_price_iron_condor(
+                provider, "SPX", "2026-03-20", 5400.0, 5375.0, 5700.0, 5725.0,
+                use_mid=True)
         # market = 3.00, best = 5.00, mid = 4.00
         assert price == 4.00
 
     @pytest.mark.asyncio
     async def test_auto_price_missing_strike(self):
         """Returns None when quotes don't include requested strikes."""
-        provider = AsyncMock()
-        provider.get_option_quotes = AsyncMock(return_value=[
+        mock_quotes = [
             {"strike": 5500.0, "bid": 8.00, "ask": 8.50, "last": 8.25, "volume": 100},
-        ])
-        price = await _auto_price_spread(
-            provider, "SPX", "2026-03-20",
-            [5500.0, 5475.0], "PUT", "credit_spread")
-        assert price is None
+        ]
+        provider = AsyncMock()
+        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=mock_quotes):
+            price = await _auto_price_spread(
+                provider, "SPX", "2026-03-20",
+                [5500.0, 5475.0], "PUT", "credit_spread")
+            assert price is None
 
     @pytest.mark.asyncio
     async def test_auto_price_no_provider_method(self):
-        """Returns None when provider lacks get_option_quotes."""
+        """Returns None when provider lacks get_option_quotes — centralized layer handles."""
         provider = MagicMock(spec=[])
-        price = await _auto_price_spread(
-            provider, "SPX", "2026-03-20",
-            [5500.0, 5475.0], "PUT", "credit_spread")
+        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=[]):
+            price = await _auto_price_spread(
+                provider, "SPX", "2026-03-20",
+                [5500.0, 5475.0], "PUT", "credit_spread")
         assert price is None
 
 

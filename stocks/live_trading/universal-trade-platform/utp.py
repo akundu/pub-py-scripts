@@ -1723,8 +1723,17 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                         total_cost += cost_basis
                         total_value += mv
 
-                        # Derive credit and compute ROI/MaxLoss for spreads
-                        if otype == "multi_leg" and len(leg_strikes) >= 2:
+                        # Use daemon-computed spread metrics if available
+                        sm = p.get("spread_metrics", {})
+                        if sm.get("derived_credit"):
+                            derived_credit = sm["derived_credit"]
+                            max_loss = sm.get("max_loss", 0)
+                            roi_pct = sm.get("roi_pct", 0)
+                            total_max_loss += max_loss
+                            total_credit += derived_credit
+                            risk_info = f"{derived_credit:,.0f}/{roi_pct:.1f}%/{max_loss:,.0f}"
+                        elif otype == "multi_leg" and len(leg_strikes) >= 2:
+                            # Fallback: compute locally (direct IBKR path without daemon)
                             spread_width = abs(leg_strikes[0] - leg_strikes[1])
                             gross_risk = spread_width * abs(qty) * 100
                             derived_credit = upnl + abs(mv)
@@ -3487,7 +3496,8 @@ async def _cmd_quote(args) -> int:
 
     async def _fetch_quote(sym):
         try:
-            return sym, await ibkr.get_quote(sym), None
+            from app.services.market_data import get_quote as _mkt_quote
+            return sym, await _mkt_quote(sym), None
         except Exception as e:
             return sym, None, e
 
@@ -3611,7 +3621,8 @@ async def _cmd_options(args) -> int:
         # Try to get a live quote for the underlying
         if mode != "dry-run":
             try:
-                q = await ibkr.get_quote(symbol)
+                from app.services.market_data import get_quote as _mkt_quote
+                q = await _mkt_quote(symbol)
                 p = q.last or q.bid or q.ask
                 if p and not math.isnan(p) and p > 0:
                     price = p
@@ -3657,7 +3668,8 @@ async def _cmd_options(args) -> int:
                 )
                 if cached is not None:
                     return otype, cached, None
-            return otype, await ibkr.get_option_quotes(
+            from app.services.market_data import get_option_quotes as _mkt_opts
+            return otype, await _mkt_opts(
                 symbol, exp_match, otype,
                 strike_min=strike_min, strike_max=strike_max,
             ), None
@@ -3889,13 +3901,11 @@ async def _auto_price_spread(provider, symbol: str, expiration: str,
 
     Returns the selected price, or None if quotes unavailable.
     """
-    if not hasattr(provider, "get_option_quotes"):
-        return None
-
     strike_min = min(strikes) - 1
     strike_max = max(strikes) + 1
 
-    quotes = await provider.get_option_quotes(
+    from app.services.market_data import get_option_quotes as _mkt_opts
+    quotes = await _mkt_opts(
         symbol, expiration, option_type,
         strike_min=strike_min, strike_max=strike_max,
     )
@@ -3946,16 +3956,15 @@ async def _auto_price_iron_condor(provider, symbol: str, expiration: str,
     Args:
         use_mid: If True, return mid-point. If False (default), return market price.
     """
-    if not hasattr(provider, "get_option_quotes"):
-        return None
+    from app.services.market_data import get_option_quotes as _mkt_opts
 
     all_strikes = [put_short, put_long, call_short, call_long]
     strike_min = min(all_strikes) - 1
     strike_max = max(all_strikes) + 1
 
-    put_quotes = await provider.get_option_quotes(
+    put_quotes = await _mkt_opts(
         symbol, expiration, "PUT", strike_min=strike_min, strike_max=strike_max)
-    call_quotes = await provider.get_option_quotes(
+    call_quotes = await _mkt_opts(
         symbol, expiration, "CALL", strike_min=strike_min, strike_max=strike_max)
 
     puts_by_strike = {q["strike"]: q for q in put_quotes}
@@ -4812,12 +4821,16 @@ def _cmd_server(args) -> int:
     port = getattr(args, "server_port", 8000)
     reload = getattr(args, "reload", False)
 
+    workers = getattr(args, "workers", 1)
     print(f"  Starting UTP API server on {host}:{port}")
     if reload:
         print(f"  Auto-reload enabled")
+    if workers > 1:
+        print(f"  Workers: {workers}")
     print()
 
-    uvicorn.run("app.main:app", host=host, port=port, reload=reload)
+    uvicorn.run("app.main:app", host=host, port=port, reload=reload,
+                workers=workers if workers > 1 else None)
     return 0
 
 
@@ -5291,13 +5304,22 @@ async def _cmd_daemon(args) -> int:
         loop.add_signal_handler(sig, lambda: shutdown_event.set())
 
     # Start embedded uvicorn (non-blocking)
+    # Background tasks (IBKR, sync, advisor, streaming) run in the main process.
+    # When workers > 1, uvicorn forks worker processes for HTTP handling only.
+    # Each worker gets its own copy of the app via app.main lifespan, but the
+    # IBKR connection + background loops are already running in the main process.
+    num_workers = getattr(args, "workers", 1)
     config = uvicorn.Config(
         "app.main:app",
         host=server_host,
         port=server_port,
         log_level=log_level.lower(),
+        workers=num_workers if num_workers > 1 else None,
     )
     server = uvicorn.Server(config)
+
+    if num_workers > 1:
+        print(f"  HTTP workers: {num_workers}")
 
     # Run server in background task
     server_task = asyncio.create_task(server.serve())
@@ -6816,6 +6838,8 @@ Aliases: serve, api
                           help="API server port (default: 8000)")
     p_server.add_argument("--reload", action="store_true",
                           help="Enable auto-reload for development")
+    p_server.add_argument("--workers", type=int, default=1,
+                          help="Number of worker processes (default: 1). Use 2-4 for multi-core.")
 
     # ── daemon ──
     p_daemon = subparsers.add_parser("daemon",
@@ -6855,6 +6879,9 @@ Aliases: d
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
     p_daemon.add_argument("--server-host", default="0.0.0.0", help="API listen address (default: 0.0.0.0)")
     p_daemon.add_argument("--server-port", type=int, default=8000, help="API listen port (default: 8000)")
+    p_daemon.add_argument("--workers", type=int, default=1,
+                          help="Number of uvicorn worker processes for HTTP serving (default: 1). "
+                               "Background tasks (IBKR, sync, advisor) always run in the main process.")
     p_daemon.add_argument("--advisor-profile", default=None, help="Advisor profile to run (e.g. tiered_v2)")
     p_daemon.add_argument("--auto-execute", action="store_true", help="Auto-execute advisor recommendations")
     p_daemon.add_argument("--no-restart", action="store_true",

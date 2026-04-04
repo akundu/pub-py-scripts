@@ -540,41 +540,17 @@ class IBKRLiveProvider(BrokerProvider):
         if not self._ib or not self._connected:
             raise RuntimeError("IBKR not connected")
 
-        # 1. Check streaming service first (instant, no IBKR round-trip)
-        try:
-            from app.services.market_data_streaming import get_streaming_service
-            svc = get_streaming_service()
-            if svc and svc.is_running:
-                tick = svc.get_last_tick(symbol.upper(), max_age_seconds=15.0)
-                if tick:
-                    # Use validated "price" field (not raw "last" which may be bad)
-                    price = tick.get("price") or tick.get("last") or 0
-                    # Reject obviously bad index prices (should be > 100)
-                    if index_exchange and price and price < 100:
-                        price = 0
-                    if price and price > 0:
-                        from datetime import datetime as _dt, timezone as _tz
-                        tick_ts = _dt.fromisoformat(tick["timestamp"])
-                        quote = Quote(
-                            symbol=symbol,
-                            bid=tick.get("bid") or price,
-                            ask=tick.get("ask") or price,
-                            last=price,
-                            volume=tick.get("volume", 0),
-                            timestamp=tick_ts,
-                            source="streaming_cache",
-                        )
-                        self._cache.quotes.put(symbol, quote)
-                        return quote
-        except Exception:
-            pass
+        # NOTE: Callers should use app.services.market_data.get_quote() which checks
+        # the streaming cache first (Rule 4 in CLAUDE.md). This method is the slow
+        # fallback that actually hits IBKR. The streaming cache check was removed from
+        # here to avoid duplicate logic with different TTLs.
 
-        # 2. Check quote cache (5s TTL)
+        # 1. Check quote cache (5s TTL)
         cached = self._cache.quotes.get(symbol)
         if cached is not None:
             return cached
 
-        # 3. Fetch from IBKR
+        # 2. Fetch from IBKR
         import asyncio
         import math
 
