@@ -622,35 +622,21 @@ class OptionQuoteStreamingService:
     _INDEX_MIN_PRICES = {"SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5}
 
     async def _get_price(self, symbol: str) -> tuple[float | None, str]:
-        """Get current price — try streaming cache first, then direct quote.
+        """Get current price via centralized market data layer.
 
-        Returns (price, source) where source is "streaming", "quote", or "".
+        Uses app.services.market_data.get_quote which handles:
+        streaming cache → provider cache → provider fetch, with floor checks.
+
+        Returns (price, source) where source is "streaming_cache", "quote", etc.
         """
-        min_price = self._INDEX_MIN_PRICES.get(symbol, 0)
-
-        # Try streaming tick cache
-        if self._streaming_svc:
-            tick = self._streaming_svc.get_last_tick(symbol, max_age_seconds=30.0)
-            if tick and tick.get("price", 0) > 0:
-                p = tick["price"]
-                if min_price and p < min_price:
-                    logger.debug("Streaming price for %s (%.2f) below floor %d — skipping", symbol, p, min_price)
-                else:
-                    return p, "streaming"
-
-        # Fallback: direct quote
         try:
-            q = await self._provider.get_quote(symbol)
-            p = q.last or q.bid or q.ask
+            from app.services.market_data import get_quote
+            q = await get_quote(symbol)
+            p = q.last or q.bid or q.ask or 0
             if p and p > 0:
-                import math
-                if not math.isnan(p):
-                    if min_price and p < min_price:
-                        logger.debug("Quote price for %s (%.2f) below floor %d — skipping", symbol, p, min_price)
-                    else:
-                        return p, "quote"
+                return p, q.source or "quote"
         except Exception as e:
-            logger.debug("get_quote(%s) failed: %s", symbol, e)
+            logger.debug("get_price(%s) failed: %s", symbol, e)
         return None, ""
 
     async def _get_expirations(self, symbol: str, n: int) -> list[str]:

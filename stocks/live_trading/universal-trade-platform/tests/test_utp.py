@@ -6193,14 +6193,17 @@ option_quotes_num_expirations: 2
         svc = OptionQuoteStreamingService(cfg, provider=provider)
 
         # Patch datetime to return market-open time (15:00 UTC)
+        # Also patch market_data.get_quote since _get_price now uses the centralized layer
         import app.services.option_quote_streaming as oqs_mod
         mock_dt = MagicMock(wraps=datetime)
         mock_dt.now.return_value = datetime(2026, 3, 24, 15, 0, 0, tzinfo=timezone.utc)
+        mock_quote = MagicMock(last=5500.0, bid=5499.0, ask=5501.0, source="test")
         with patch.object(oqs_mod, "datetime", mock_dt):
             with patch.object(oqs_mod, "date") as mock_date:
                 mock_date.today.return_value = date(2026, 3, 24)
                 mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
-                await svc._run_one_cycle()
+                with patch("app.services.market_data.get_quote", new_callable=AsyncMock, return_value=mock_quote):
+                    await svc._run_one_cycle()
 
         # Provider should have been called
         assert provider.get_option_quotes.call_count >= 1
