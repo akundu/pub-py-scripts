@@ -2559,6 +2559,59 @@ async def api_trades_export(username: str = Depends(require_session)):
     )
 
 
+@app.get("/api/trades/list")
+async def api_trades_list(
+    days: int = 0,
+    page: int = 1,
+    per_page: int = 20,
+    username: str = Depends(require_session),
+):
+    """List trades from CSV with optional date filter, paginated, newest first."""
+    import csv as csv_mod
+    if not TRADES_CSV_PATH.exists():
+        return {"trades": [], "total": 0, "page": 1, "pages": 0, "summary": {}}
+
+    trades = []
+    with open(TRADES_CSV_PATH) as f:
+        reader = csv_mod.DictReader(f)
+        for row in reader:
+            trades.append(row)
+
+    # Date filter
+    if days > 0:
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        trades = [t for t in trades if (t.get("timestamp", "") or "")[:10] >= cutoff]
+
+    # Sort newest first
+    trades.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
+
+    # Summary KPIs
+    total_credit = sum(float(t.get("total_credit", 0) or 0) for t in trades)
+    total_max_loss = sum(float(t.get("total_max_loss", 0) or 0) for t in trades)
+    auto_count = sum(1 for t in trades if t.get("source") == "auto")
+    manual_count = sum(1 for t in trades if t.get("source") != "auto")
+
+    # Pagination
+    total = len(trades)
+    start = (page - 1) * per_page
+    page_trades = trades[start:start + per_page]
+
+    return {
+        "trades": page_trades,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": (total + per_page - 1) // per_page if total else 0,
+        "summary": {
+            "total_trades": total,
+            "auto_trades": auto_count,
+            "manual_trades": manual_count,
+            "total_credit": round(total_credit, 2),
+            "total_max_loss": round(total_max_loss, 2),
+        },
+    }
+
+
 @app.post("/api/auto-trade/start")
 async def api_auto_trade_start(
     request: Request,

@@ -402,11 +402,44 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
           <input type="number" id="rec-min-total-credit" class="select-styled" style="width:75px" value="1000" min="0" step="500" onchange="filterRecs()">
           <label style="color:var(--muted);font-size:11px">Max Loss</label>
           <input type="number" id="rec-max-total-loss" class="select-styled" style="width:100px" value="100000" min="0" step="5000" onchange="filterRecs()">
-          <button class="btn btn-red btn-sm" id="auto-trade-btn" onclick="toggleAutoTradePanel()" style="margin-left:8px">Auto-Trade</button>
         </div>
+        <div id="recs-content"></div>
+      </div>
+    </div>
+
+    <!-- Trades Tab -->
+    <div id="pane-trades" class="tab-pane">
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span class="card-title" style="margin:0">Trade History</span>
+          <div style="display:flex;gap:6px;align-items:center">
+            <select id="trades-days" class="select-styled" onchange="loadTradesList()">
+              <option value="0">Today</option>
+              <option value="7">7 days</option>
+              <option value="30" selected>30 days</option>
+              <option value="9999">All</option>
+            </select>
+            <a href="/api/trades/export" class="btn btn-muted btn-sm" style="text-decoration:none">Export CSV</a>
+            <span class="refresh-btn" onclick="loadTradesList()">&#x21bb;</span>
+          </div>
+        </div>
+        <div id="trades-kpis" class="kpi-strip"></div>
+        <div id="trades-list"></div>
+      </div>
+    </div>
+
+    <!-- Auto-Trades Tab -->
+    <div id="pane-auto" class="tab-pane">
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <span class="card-title" style="margin:0">Auto-Trading</span>
+          <button class="btn btn-red btn-sm" id="auto-trade-btn" onclick="toggleAutoTradePanel()">Configure</button>
+        </div>
+        <div id="auto-trade-status" style="display:none;margin-bottom:10px"></div>
         <div id="auto-trade-panel" style="display:none;margin-bottom:10px">
           <div class="card" style="border-color:var(--red)">
-            <div class="card-title" style="color:var(--red-b)">Auto-Trade Configuration</div>
+            <div class="card-title" style="color:var(--red-b)">Configuration</div>
+            <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Uses the current Picks tab filters. Set filters there first, then configure auto-trade here.</div>
             <div class="grid-controls" style="margin-bottom:8px">
               <label style="color:var(--muted);font-size:11px">Top N</label>
               <input type="number" id="at-top-n" class="select-styled" style="width:50px" value="3" min="1" max="10">
@@ -418,14 +451,14 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
               <span style="color:var(--muted);font-size:11px">ET</span>
             </div>
             <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px;padding:8px;background:var(--bg);border-radius:6px">
-              <div style="flex:1;min-width:140px" title="After buying a specific spread (e.g. SPX PUT 6400/6380), wait this many minutes before buying the exact same spread again. Prevents stacking the same trade every interval.">
+              <div style="flex:1;min-width:140px" title="After buying a specific spread, wait this many minutes before buying the exact same spread again. Prevents stacking.">
                 <div style="color:var(--muted);font-size:10px;margin-bottom:3px">Cooldown <span style="color:var(--blue);cursor:help">&#x24D8;</span></div>
                 <div style="display:flex;align-items:center;gap:4px">
                   <input type="number" id="at-dedup" class="select-styled" style="width:60px" value="10" min="0" max="60">
                   <span style="color:var(--muted);font-size:11px">min before re-buying same spread</span>
                 </div>
               </div>
-              <div style="flex:1;min-width:140px" title="If ALL available spreads have been bought recently and none are past the cooldown, allow re-buying after this many minutes. Ensures the auto-trader doesn't sit idle when options are limited.">
+              <div style="flex:1;min-width:140px" title="If ALL available spreads have been bought recently, allow re-buying after this many minutes.">
                 <div style="color:var(--muted);font-size:10px;margin-bottom:3px">Re-buy if no alternatives <span style="color:var(--blue);cursor:help">&#x24D8;</span></div>
                 <div style="display:flex;align-items:center;gap:4px">
                   <input type="number" id="at-dedup-fallback" class="select-styled" style="width:60px" value="15" min="0" max="60">
@@ -439,15 +472,8 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
             </div>
           </div>
         </div>
-        <div id="auto-trade-status" style="display:none;margin-bottom:10px"></div>
-        <div id="recs-content"></div>
-        <div style="margin-top:16px">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;cursor:pointer" onclick="toggleAutoHistory()">
-            <span class="card-title" style="margin:0">Auto-Trade History</span>
-            <span id="auto-history-toggle" style="color:var(--muted);font-size:12px">&#x25BC; Show</span>
-          </div>
-          <div id="auto-trade-history" style="display:none"></div>
-        </div>
+        <div class="card-title" style="margin-top:12px">Session History</div>
+        <div id="auto-trade-history"></div>
       </div>
     </div>
 
@@ -479,6 +505,12 @@ Examples:
     </button>
     <button class="tab-btn" onclick="switchTab('recs',this)">
       <span class="tab-icon">&#x2605;</span><span>Picks</span>
+    </button>
+    <button class="tab-btn" onclick="switchTab('trades',this)">
+      <span class="tab-icon">&#x1f4cb;</span><span>Trades</span>
+    </button>
+    <button class="tab-btn" onclick="switchTab('auto',this)">
+      <span class="tab-icon">&#x26a1;</span><span>Auto</span>
     </button>
     <button class="tab-btn" onclick="switchTab('chat',this)">
       <span class="tab-icon">&#x1f4ac;</span><span>Chat</span>
@@ -870,7 +902,7 @@ function requireLogin(callback) {
 }
 
 // ── Tab Navigation ───────────────────────────────────────────────────────────
-const PROTECTED_TABS = ['portfolio', 'chat'];
+const PROTECTED_TABS = ['portfolio', 'trades', 'auto', 'chat'];
 
 function switchTab(name, btn) {
   // Protected tabs require login
@@ -2339,6 +2371,83 @@ async function tradeRec(sym, type, short_s, long_s, exp) {
   } catch(e) { alert('Error: '+e.message); }
 }
 
+// ── Trades Tab ───────────────────────────────────────────────────────────────
+
+let _tradesPage = 1;
+
+async function loadTradesList(page) {
+  const list = document.getElementById('trades-list');
+  const kpis = document.getElementById('trades-kpis');
+  if (page) _tradesPage = page;
+  const days = parseInt(document.getElementById('trades-days')?.value) || 0;
+
+  if (!list.innerHTML.includes('tbl')) {
+    list.innerHTML = '<div class="loading">Loading trades</div>';
+  }
+
+  try {
+    const r = await fetch(`/api/trades/list?days=${days}&page=${_tradesPage}&per_page=20`);
+    if (r.status === 401) { showLoginModal(); return; }
+    const d = await r.json();
+    const s = d.summary || {};
+
+    // KPIs
+    kpis.innerHTML = `
+      <div class="kpi"><div class="label">Total Trades</div><div class="value">${s.total_trades||0}</div></div>
+      <div class="kpi"><div class="label">Auto</div><div class="value">${s.auto_trades||0}</div></div>
+      <div class="kpi"><div class="label">Manual</div><div class="value">${s.manual_trades||0}</div></div>
+      <div class="kpi"><div class="label">Total Credit</div><div class="value pos">$${fmt(s.total_credit||0)}</div></div>
+      <div class="kpi"><div class="label">Total Max Loss</div><div class="value neg">$${fmt(s.total_max_loss||0)}</div></div>
+    `;
+
+    if (!d.trades?.length) {
+      list.innerHTML = '<div class="empty-msg">No trades found</div>';
+      return;
+    }
+
+    let html = '<div style="overflow-x:auto"><table class="tbl"><thead><tr>';
+    html += '<th>Date</th><th>Symbol</th><th>Type</th><th>Short/Long</th><th class="num">Qty</th>';
+    html += '<th class="num">Credit</th><th class="num">MaxLoss</th><th class="num">ROI%</th>';
+    html += '<th class="num">OTM%</th><th>Status</th><th>Source</th>';
+    html += '</tr></thead><tbody>';
+
+    for (const t of d.trades) {
+      const isAuto = t.source === 'auto';
+      const ts = t.timestamp ? formatDateShort(t.timestamp) : '--';
+      const srcBadge = isAuto
+        ? '<span class="badge badge-warning" style="font-size:9px">auto</span>'
+        : '<span style="font-size:10px;color:var(--muted)">manual</span>';
+
+      html += `<tr style="${isAuto?'background:rgba(219,109,40,0.05)':''}">`;
+      html += `<td style="font-size:11px">${ts}</td>`;
+      html += `<td><b>${t.symbol||''}</b></td>`;
+      html += `<td>${t.option_type||''}</td>`;
+      html += `<td>${t.short_strike||''}/${t.long_strike||''}</td>`;
+      html += `<td class="num">${t.quantity||''}</td>`;
+      html += `<td class="num pos">$${fmt(parseFloat(t.total_credit||0))}</td>`;
+      html += `<td class="num neg">$${fmt(parseFloat(t.total_max_loss||0))}</td>`;
+      html += `<td class="num">${t.roi_pct||''}%</td>`;
+      html += `<td class="num">${t.otm_pct||''}%</td>`;
+      html += `<td style="font-size:10px">${t.status||''}</td>`;
+      html += `<td>${srcBadge}</td>`;
+      html += '</tr>';
+    }
+    html += '</tbody></table></div>';
+
+    // Pagination
+    if (d.pages > 1) {
+      html += '<div style="display:flex;justify-content:center;gap:6px;margin-top:8px">';
+      for (let p = 1; p <= Math.min(d.pages, 10); p++) {
+        html += `<button class="btn btn-sm ${p===d.page?'btn-blue':'btn-muted'}" onclick="loadTradesList(${p})" style="min-width:32px">${p}</button>`;
+      }
+      html += '</div>';
+    }
+
+    html += `<div style="margin-top:6px;font-size:10px;color:var(--muted);text-align:right">Updated ${new Date().toLocaleTimeString()}</div>`;
+    list.innerHTML = html;
+  } catch(e) { list.innerHTML = `<div class="msg-error">${e.message}</div>`; }
+}
+
 // ── Auto-Trade Controls ──────────────────────────────────────────────────────
 
 function toggleAutoTradePanel() {
@@ -2441,16 +2550,8 @@ let _autoHistoryPage = 1;
 let _autoHistoryLoaded = false;
 
 function toggleAutoHistory() {
-  const el = document.getElementById('auto-trade-history');
-  const toggle = document.getElementById('auto-history-toggle');
-  if (el.style.display === 'none') {
-    el.style.display = 'block';
-    toggle.innerHTML = '&#x25B2; Hide';
-    if (!_autoHistoryLoaded) loadAutoTradeHistory();
-  } else {
-    el.style.display = 'none';
-    toggle.innerHTML = '&#x25BC; Show';
-  }
+  // Legacy — history is now always visible in Auto tab
+  loadAutoTradeHistory();
 }
 
 async function loadAutoTradeHistory(page) {
@@ -2685,7 +2786,7 @@ switchTab = function(name, btn) {
   origSwitchTab(name, btn);
 
   // Update URL hash
-  const hashMap = {options:'options', recs:'picks', portfolio:'portfolio', chat:'chat'};
+  const hashMap = {options:'options', recs:'picks', portfolio:'portfolio', trades:'trades', auto:'auto', chat:'chat'};
   const hashName = hashMap[name] || name;
   const params = {};
   if (name === 'options') {
@@ -2703,6 +2804,13 @@ switchTab = function(name, btn) {
   if (name === 'recs') {
     if (!document.getElementById('recs-content').innerHTML.includes('tbl')) loadRecommendations();
     else renderRecs();
+  }
+  if (name === 'trades') {
+    if (!document.getElementById('trades-list').innerHTML.includes('tbl')) loadTradesList();
+  }
+  if (name === 'auto') {
+    loadAutoTradeHistory();
+    refreshAutoTradeStatus();
   }
   if (name === 'chat') {
     updateDataSourceBar([{label:'Chat', source:'Claude API', time: new Date().toISOString()}]);
@@ -2737,7 +2845,7 @@ function updateHash(tab, params) {
 
 function applyRoute() {
   const {tab, params} = parseHash();
-  const tabMap = {options:'options', picks:'recs', portfolio:'portfolio', chat:'chat', recs:'recs'};
+  const tabMap = {options:'options', picks:'recs', portfolio:'portfolio', trades:'trades', auto:'auto', chat:'chat', recs:'recs'};
   const resolved = tabMap[tab] || 'options';
 
   // Apply params before switching tab
@@ -2755,7 +2863,7 @@ function applyRoute() {
 
   // Find the matching tab button
   const tabBtns = document.querySelectorAll('.tab-btn');
-  const btnIdx = {portfolio:0, options:1, recs:2, chat:3};
+  const btnIdx = {portfolio:0, options:1, recs:2, trades:3, auto:4, chat:5};
   const btn = tabBtns[btnIdx[resolved]] || tabBtns[1];
   switchTab(resolved, btn);
 }
