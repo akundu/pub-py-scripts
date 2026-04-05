@@ -1168,3 +1168,89 @@ class TestCacheSourcePriority:
         entry = utp_voice._get_cached_options("SPX", "2026-04-06", "PUT")
         assert entry.source == "ibkr"
         assert entry.data == [{"new": True}]
+
+
+# ── Server-Side Spread Computation Tests ──────────────────────────────────────
+
+
+class TestComputeSpreadsServer:
+    def test_basic_credit_spread(self):
+        chain = {
+            "put": [
+                {"strike": 6400, "bid": 5.0, "ask": 5.5, "greeks": {"delta": -0.15}},
+                {"strike": 6380, "bid": 2.5, "ask": 3.0, "greeks": {"delta": -0.08}},
+            ],
+            "call": [],
+        }
+        spreads = utp_voice.compute_spreads_server(chain, "SPX", 6500, 20)
+        assert len(spreads) == 1
+        s = spreads[0]
+        assert s["option_type"] == "PUT"
+        assert s["short_strike"] == 6400
+        assert s["long_strike"] == 6380
+        assert s["credit"] == 2.0  # 5.0 - 3.0
+        assert s["credit_per_contract"] == 200
+        assert s["max_loss"] == 1800  # 20*100 - 200
+        assert s["short_delta"] == -0.15
+
+    def test_filters_applied(self):
+        chain = {
+            "put": [
+                {"strike": 6490, "bid": 10.0, "ask": 10.5},  # 0.15% OTM
+                {"strike": 6470, "bid": 5.0, "ask": 5.5},
+                {"strike": 6400, "bid": 3.0, "ask": 3.5},  # 1.54% OTM
+                {"strike": 6380, "bid": 1.5, "ask": 2.0},
+            ],
+            "call": [],
+        }
+        # With min_otm 1%: should exclude 6490 (too close)
+        spreads = utp_voice.compute_spreads_server(chain, "SPX", 6500, 20, {"min_otm_pct": 1.0})
+        strikes = [s["short_strike"] for s in spreads]
+        assert 6490 not in strikes
+        assert 6400 in strikes
+
+    def test_itm_filtered(self):
+        chain = {
+            "put": [
+                {"strike": 6600, "bid": 50.0, "ask": 51.0},  # ITM put
+                {"strike": 6580, "bid": 30.0, "ask": 31.0},
+            ],
+            "call": [],
+        }
+        spreads = utp_voice.compute_spreads_server(chain, "SPX", 6500, 20)
+        assert len(spreads) == 0  # All ITM
+
+
+class TestAutoTradeState:
+    def test_save_and_load(self, tmp_path):
+        utp_voice.AUTO_TRADE_STATE_PATH = tmp_path / "state.json"
+        state = {"active": True, "trading_day": "2026-04-07", "executed_today": []}
+        utp_voice._save_auto_trade_state(state)
+        loaded = utp_voice._load_auto_trade_state()
+        assert loaded["active"] is True
+        assert loaded["trading_day"] == "2026-04-07"
+
+    def test_load_missing(self, tmp_path):
+        utp_voice.AUTO_TRADE_STATE_PATH = tmp_path / "nonexistent.json"
+        loaded = utp_voice._load_auto_trade_state()
+        assert loaded["active"] is False
+
+
+class TestTradeCSVLogger:
+    def test_log_creates_csv(self, tmp_path):
+        utp_voice.TRADES_CSV_PATH = tmp_path / "trades.csv"
+        utp_voice.log_trade_to_csv(
+            {"trade_type": "credit-spread", "symbol": "SPX", "option_type": "PUT",
+             "short_strike": 6400, "long_strike": 6380, "quantity": 25, "expiration": "2026-04-07"},
+            {"order_id": "123", "status": "FILLED"},
+            source="manual",
+        )
+        assert utp_voice.TRADES_CSV_PATH.exists()
+        import csv
+        with open(utp_voice.TRADES_CSV_PATH) as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+        assert len(rows) == 1
+        assert rows[0]["symbol"] == "SPX"
+        assert rows[0]["source"] == "manual"
+        assert rows[0]["order_id"] == "123"

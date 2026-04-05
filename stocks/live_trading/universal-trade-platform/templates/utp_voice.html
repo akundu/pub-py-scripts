@@ -335,6 +335,8 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
           </select>
           <label style="color:var(--muted)">Min Credit</label>
           <input type="number" id="opt-min-credit" class="select-styled" style="width:60px" value="0" min="0" step="0.5" onchange="refilterChain()">
+          <label style="color:var(--muted)">Max |&delta;|</label>
+          <input type="number" id="opt-max-delta" class="select-styled" style="width:55px" value="" min="0" max="1" step="0.05" placeholder="Any" onchange="refilterChain()">
         </div>
         <div class="options-layout">
           <div class="options-chain-col">
@@ -392,13 +394,36 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
             <option value="98">&gt;P98</option>
             <option value="99">&gt;P99</option>
           </select>
+          <label style="color:var(--muted);font-size:11px">Max |&delta;|</label>
+          <input type="number" id="rec-max-delta" class="select-styled" style="width:60px" value="" min="0" max="1" step="0.05" placeholder="Any" onchange="filterRecs()">
           <label style="color:var(--muted);font-size:11px">Qty</label>
           <input type="number" id="rec-qty" class="select-styled" style="width:60px" value="25" min="1" step="5" onchange="filterRecs()">
           <label style="color:var(--muted);font-size:11px">Min Tot Cr</label>
           <input type="number" id="rec-min-total-credit" class="select-styled" style="width:75px" value="1000" min="0" step="500" onchange="filterRecs()">
           <label style="color:var(--muted);font-size:11px">Max Loss</label>
           <input type="number" id="rec-max-total-loss" class="select-styled" style="width:100px" value="100000" min="0" step="5000" onchange="filterRecs()">
+          <button class="btn btn-red btn-sm" id="auto-trade-btn" onclick="toggleAutoTradePanel()" style="margin-left:8px">Auto-Trade</button>
         </div>
+        <div id="auto-trade-panel" style="display:none;margin-bottom:10px">
+          <div class="card" style="border-color:var(--red)">
+            <div class="card-title" style="color:var(--red-b)">Auto-Trade Configuration</div>
+            <div class="grid-controls" style="margin-bottom:8px">
+              <label style="color:var(--muted);font-size:11px">Top N</label>
+              <input type="number" id="at-top-n" class="select-styled" style="width:50px" value="3" min="1" max="10">
+              <label style="color:var(--muted);font-size:11px">Every</label>
+              <input type="number" id="at-interval" class="select-styled" style="width:50px" value="3" min="1" max="30">
+              <span style="color:var(--muted);font-size:11px">min</span>
+              <label style="color:var(--muted);font-size:11px">Until</label>
+              <input type="time" id="at-end-time" class="select-styled" style="width:90px" value="12:00">
+              <span style="color:var(--muted);font-size:11px">ET</span>
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-red" onclick="startAutoTrade()" id="at-start-btn">Start Auto-Trading</button>
+              <button class="btn btn-muted" onclick="toggleAutoTradePanel()">Cancel</button>
+            </div>
+          </div>
+        </div>
+        <div id="auto-trade-status" style="display:none;margin-bottom:10px"></div>
         <div id="recs-content"></div>
       </div>
     </div>
@@ -940,19 +965,51 @@ async function loadPortfolio() {
       html += `<td style="font-size:11px;color:var(--muted)">${exp||'---'}</td>`;
       html += `<td>${badge}</td></tr>`;
 
-      // Detail row with actions
+      // Detail card with entry, current, greeks, risk, actions
       const posJson = encodeURIComponent(JSON.stringify({pid,sym,qty,exp,legs,lsum,order_type:p.order_type}));
-      html += `<tr><td colspan="${NCOLS}"><div class="pos-detail" id="det-${pid}">`;
-      html += `<div style="font-size:11px;margin-bottom:8px">ID: ${pid.substring(0,8)} | Type: ${p.order_type||p.sec_type||''}`;
-      if (p.avg_cost != null) html += ` | AvgCost: $${Math.abs(p.avg_cost).toFixed(2)}`;
-      if (p.market_price != null) html += ` | Mark: $${Math.abs(p.market_price).toFixed(2)}`;
-      if (bs && bs.is_itm) html += ` | <b style="color:var(--red-b)">ITM by ${bs.distance} pts</b>`;
+      const avgCost = p.avg_cost != null ? Math.abs(p.avg_cost) : null;
+      const markPrice = p.market_price != null ? Math.abs(p.market_price) : null;
+      const mktVal = p.market_value != null ? Math.abs(p.market_value) : null;
+      const dailyPnl = p.daily_pnl || 0;
+      const entryTime = p.entry_time ? formatDateShort(p.entry_time) : '--';
+      const entryPrice = p.entry_price || p.current_price || 0;
+      const timeInPos = p.entry_time ? timeSince(p.entry_time) : '--';
+      const pnlVsRisk = (sm.max_loss && pnl) ? (pnl / sm.max_loss * 100).toFixed(1) : '--';
+      const dte_days = exp ? Math.max(0, Math.round((new Date(exp+'T16:00:00') - new Date()) / 86400000)) : '--';
+
+      html += `<tr><td colspan="${NCOLS}"><div class="pos-detail" id="det-${pid}" style="padding:10px">`;
+
+      // Entry section
+      html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:11px;margin-bottom:8px;padding:8px;background:var(--bg);border-radius:6px">`;
+      html += `<div style="color:var(--blue);font-weight:bold;grid-column:1/-1">ENTRY</div>`;
+      html += `<div>Time: ${entryTime}</div><div>Underlying: $${entryPrice ? entryPrice.toLocaleString() : '--'}</div>`;
+      if (avgCost != null) html += `<div>Avg Cost: $${avgCost.toFixed(2)}</div>`;
+      if (sm.derived_credit) html += `<div>Credit: $${sm.derived_credit.toLocaleString()}</div>`;
+      html += `<div>ID: ${pid.substring(0,8)}</div><div>Source: ${p.source||''}</div>`;
       html += `</div>`;
-      // Action buttons
+
+      // Current section
+      html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:11px;margin-bottom:8px;padding:8px;background:var(--bg);border-radius:6px">`;
+      html += `<div style="color:var(--green-b);font-weight:bold;grid-column:1/-1">CURRENT</div>`;
+      if (markPrice != null) html += `<div>Mark: $${markPrice.toFixed(2)}/sh</div>`;
+      if (mktVal != null) html += `<div>Value: $${mktVal.toLocaleString()}</div>`;
+      html += `<div>Unrealized: <span class="${pnl>=0?'pos':'neg'}">${pnl>=0?'+':'-'}$${fmt(pnl)}</span></div>`;
+      if (dailyPnl) html += `<div>Today: <span class="${dailyPnl>=0?'pos':'neg'}">${dailyPnl>=0?'+':'-'}$${fmt(dailyPnl)}</span></div>`;
+      html += `<div>P&L vs Risk: ${pnlVsRisk}%</div><div>Time in pos: ${timeInPos}</div>`;
+      html += `</div>`;
+
+      // Risk section
+      html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:11px;margin-bottom:8px;padding:8px;background:var(--bg);border-radius:6px">`;
+      html += `<div style="color:var(--yellow);font-weight:bold;grid-column:1/-1">RISK</div>`;
+      if (bs) html += `<div>Breach: <span class="badge badge-${bs.severity}">${bs.severity}</span> ${bs.distance_pct}% away</div>`;
+      html += `<div>DTE: ${dte_days}</div>`;
+      if (sm.max_loss) html += `<div>Max Loss: $${sm.max_loss.toLocaleString()}</div>`;
+      if (sm.roi_pct) html += `<div>ROI: ${sm.roi_pct}%</div>`;
+      html += `</div>`;
+
+      // Actions
       html += `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">`;
-      // Close button
       html += `<button class="btn btn-red btn-sm" onclick="event.stopPropagation();showCloseDialog('${pid}',${qty})">Close</button>`;
-      // Buy More button
       html += `<button class="btn btn-green btn-sm" onclick="event.stopPropagation();buyMore(decodeURIComponent('${posJson}'))">Buy More</button>`;
       html += `</div>`;
       html += `</div></td></tr>`;
@@ -1426,7 +1483,8 @@ function renderChainGrid(puts, calls, cp, sym, exp) {
     const pPred = !itmPut ? getPredictedBracket(sym, exp, 'PUT', putOtm) : null;
 
     // Data attrs for filtering
-    html += `<tr class="strike-row" data-strike="${s}" data-c-otm="${callOtm.toFixed(2)}" data-p-otm="${putOtm.toFixed(2)}" data-c-credit="${callCredit.toFixed(2)}" data-p-credit="${putCredit.toFixed(2)}" data-c-pctl="${cPctl?.pctl||0}" data-p-pctl="${pPctl?.pctl||0}" ${rowId} style="${isAtm?'border-top:2px solid var(--blue);border-bottom:2px solid var(--blue);':''}">`;
+    const cDelta = Math.abs(cg.delta||0), pDelta = Math.abs(pg.delta||0);
+    html += `<tr class="strike-row" data-strike="${s}" data-c-otm="${callOtm.toFixed(2)}" data-p-otm="${putOtm.toFixed(2)}" data-c-credit="${callCredit.toFixed(2)}" data-p-credit="${putCredit.toFixed(2)}" data-c-pctl="${cPctl?.pctl||0}" data-p-pctl="${pPctl?.pctl||0}" data-c-delta="${cDelta.toFixed(3)}" data-p-delta="${pDelta.toFixed(3)}" ${rowId} style="${isAtm?'border-top:2px solid var(--blue);border-bottom:2px solid var(--blue);':''}">`;
     // Call greeks
     html += `<td class="num greek-col" data-field="c-delta" data-strike="${s}" style="${callBg}">${fmtGreek(cg.delta)}</td>`;
     html += `<td class="num greek-col" data-field="c-theta" data-strike="${s}" style="${callBg}">${fmtGreek(cg.theta)}</td>`;
@@ -1457,6 +1515,7 @@ function refilterChain() {
   const minOtm = parseFloat(document.getElementById('opt-min-otm')?.value) || 0;
   const minPctl = parseInt(document.getElementById('opt-min-pctl')?.value) || 0;
   const minCredit = parseFloat(document.getElementById('opt-min-credit')?.value) || 0;
+  const maxDelta = parseFloat(document.getElementById('opt-max-delta')?.value) || Infinity;
   const otype = document.getElementById('opt-type').value;
 
   document.querySelectorAll('.strike-row').forEach(row => {
@@ -1466,13 +1525,15 @@ function refilterChain() {
     const pCredit = parseFloat(row.dataset.pCredit) || 0;
     const cPctl = parseInt(row.dataset.cPctl) || 0;
     const pPctl = parseInt(row.dataset.pPctl) || 0;
+    const cDeltaAbs = parseFloat(row.dataset.cDelta) || 0;
+    const pDeltaAbs = parseFloat(row.dataset.pDelta) || 0;
 
-    // A row passes if EITHER the call side or put side meets all filters
     let callPass = true, putPass = true;
 
     if (minOtm > 0) { callPass = callPass && cOtm >= minOtm; putPass = putPass && pOtm >= minOtm; }
     if (minPctl > 0) { callPass = callPass && cPctl >= minPctl; putPass = putPass && pPctl >= minPctl; }
     if (minCredit > 0) { callPass = callPass && cCredit >= minCredit; putPass = putPass && pCredit >= minCredit; }
+    if (maxDelta < Infinity) { callPass = callPass && cDeltaAbs <= maxDelta; putPass = putPass && pDeltaAbs <= maxDelta; }
 
     let show = false;
     if (otype === 'BOTH') show = callPass || putPass;
@@ -1984,10 +2045,12 @@ function computeSpreads(chain, sym, currentPrice, width) {
         ? +((currentPrice - shortStrike) / currentPrice * 100).toFixed(2)
         : +((shortStrike - currentPrice) / currentPrice * 100).toFixed(2);
 
+      const sg = sq.greeks || {};
       spreads.push({option_type:optType, short_strike:shortStrike, long_strike:longStrike,
         width, credit, credit_per_contract:creditPerContract,
         max_loss:+(maxLossPerContract).toFixed(0), roi_pct:roi, otm_pct:otm,
-        short_bid:shortBid, long_ask:longAsk, short_delta:(sq.greeks||{}).delta});
+        short_bid:shortBid, long_ask:longAsk,
+        short_delta:sg.delta, short_theta:sg.theta, short_iv:sg.iv});
     }
   }
   spreads.sort((a,b) => b.roi_pct - a.roi_pct);
@@ -2090,6 +2153,7 @@ function renderRecs() {
   const recQty = parseInt(document.getElementById('rec-qty')?.value) || 25;
   const minTotalCredit = parseInt(document.getElementById('rec-min-total-credit')?.value) || 0;
   const maxTotalLoss = parseInt(document.getElementById('rec-max-total-loss')?.value) || Infinity;
+  const maxDelta = parseFloat(document.getElementById('rec-max-delta')?.value) || Infinity;
   const selectedDte = parseInt(document.getElementById('rec-dte')?.value) || 0;
 
   let html = '';
@@ -2127,6 +2191,7 @@ function renderRecs() {
       if (minPred > 0 && (!s._pred || s._pred.pctl < minPred)) fails.push('Pred');
       if (minTotalCredit > 0 && (s.credit_per_contract * recQty) < minTotalCredit) fails.push('TotCr');
       if (maxTotalLoss < Infinity && (s.max_loss * recQty) > maxTotalLoss) fails.push('MaxL');
+      if (maxDelta < Infinity && s.short_delta != null && Math.abs(s.short_delta) > maxDelta) fails.push('Delta');
       return fails;
     }
 
@@ -2227,6 +2292,100 @@ async function tradeRec(sym, type, short_s, long_s, exp) {
     await verifyAndShowTrade(d, sym, type, short_s, long_s, exp);
   } catch(e) { alert('Error: '+e.message); }
 }
+
+// ── Auto-Trade Controls ──────────────────────────────────────────────────────
+
+function toggleAutoTradePanel() {
+  const panel = document.getElementById('auto-trade-panel');
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+async function startAutoTrade() {
+  if (!_isLoggedIn) { requireLogin(() => startAutoTrade()); return; }
+  if (!confirm('Start auto-trading? This will execute real trades based on current filters.')) return;
+
+  const filters = {
+    tickers: [...CHAIN_TICKERS],
+    dte: parseInt(document.getElementById('rec-dte')?.value) || 0,
+    width: {},
+    min_roi_pct: parseFloat(document.getElementById('rec-min-roi')?.value) || 0,
+    min_otm_pct: parseFloat(document.getElementById('rec-min-otm')?.value) || 0,
+    min_pctl: parseInt(document.getElementById('rec-min-pctl')?.value) || 0,
+    min_pred: parseInt(document.getElementById('rec-min-pred')?.value) || 0,
+    max_delta: parseFloat(document.getElementById('rec-max-delta')?.value) || null,
+    option_type: document.getElementById('rec-type-filter')?.value || 'ALL',
+    quantity: parseInt(document.getElementById('rec-qty')?.value) || 25,
+    min_total_credit: parseInt(document.getElementById('rec-min-total-credit')?.value) || 0,
+    max_total_loss: parseInt(document.getElementById('rec-max-total-loss')?.value) || 100000,
+    min_credit: parseFloat(document.getElementById('rec-min-credit')?.value) || 0,
+  };
+  // Per-ticker widths
+  for (const sym of CHAIN_TICKERS) {
+    filters.width[sym] = parseInt(document.getElementById('rec-width')?.value) || DEFAULT_WIDTHS[sym] || 20;
+  }
+
+  const config = {
+    top_n: parseInt(document.getElementById('at-top-n')?.value) || 3,
+    interval_minutes: parseInt(document.getElementById('at-interval')?.value) || 3,
+    end_time_utc: document.getElementById('at-end-time')?.value || '16:00',
+    mode: 'live',
+  };
+
+  try {
+    const r = await fetch('/api/auto-trade/start', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({filters, config})});
+    const d = await r.json();
+    if (d.status === 'started') {
+      toggleAutoTradePanel();
+      refreshAutoTradeStatus();
+    } else {
+      alert('Failed: ' + JSON.stringify(d));
+    }
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+async function stopAutoTrade() {
+  if (!confirm('Stop auto-trading?')) return;
+  try {
+    await fetch('/api/auto-trade/stop', {method:'POST'});
+    refreshAutoTradeStatus();
+  } catch(e) { alert('Error: '+e.message); }
+}
+
+async function refreshAutoTradeStatus() {
+  const el = document.getElementById('auto-trade-status');
+  const btn = document.getElementById('auto-trade-btn');
+  try {
+    const r = await fetch('/api/auto-trade/status');
+    if (r.status === 401) { el.style.display='none'; return; }
+    const d = await r.json();
+    if (d.active) {
+      const executed = d.executed_today?.length || 0;
+      const cfg = d.config || {};
+      el.style.display = 'block';
+      el.innerHTML = `<div class="card" style="border-color:var(--red-b);background:rgba(218,54,51,0.05)">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <span style="color:var(--red-b);font-weight:bold">AUTO-TRADING ACTIVE</span>
+            <span style="color:var(--muted);font-size:11px;margin-left:8px">Top ${cfg.top_n||3} every ${cfg.interval_minutes||3}m · Until ${cfg.end_time_utc||'16:00'} ET · ${executed} executed today</span>
+          </div>
+          <button class="btn btn-red btn-sm" onclick="stopAutoTrade()">Stop</button>
+        </div>
+      </div>`;
+      btn.textContent = 'Auto ●';
+      btn.style.background = 'var(--red)';
+      btn.style.color = 'white';
+    } else {
+      el.style.display = 'none';
+      btn.textContent = 'Auto-Trade';
+      btn.style.background = '';
+      btn.style.color = '';
+    }
+  } catch(e) { el.style.display='none'; }
+}
+
+// Check auto-trade status on load and every 30s
+setInterval(refreshAutoTradeStatus, 30000);
 
 // ── Chat Tab (NL interface) ──────────────────────────────────────────────────
 function chatSend() {
@@ -2365,6 +2524,8 @@ function loadAll() {
   setInterval(fetchPredictions, 60000);
   // Pre-load picks data (chain data fetched by startChainRefresh triggers renderRecs on each update)
   loadRecommendations();
+  // Check auto-trade status
+  refreshAutoTradeStatus();
 }
 
 // Auto-refresh tickers every 15s, portfolio every 30s

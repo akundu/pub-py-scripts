@@ -900,7 +900,11 @@ async def execute_write_tool(tool_name: str, tool_input: dict) -> dict:
     try:
         if tool_name == "execute_trade":
             payload = build_trade_payload(tool_input)
-            return await client.execute_trade(payload)
+            result = await client.execute_trade(payload)
+            # Log trade with all metadata to CSV
+            if not result.get("error"):
+                log_trade_to_csv(tool_input, result, source="manual")
+            return result
         elif tool_name == "close_position":
             return await client.close_position(
                 position_id=tool_input["position_id"],
@@ -1046,6 +1050,19 @@ async def run_agent(
 # ── FastAPI Application ───────────────────────────────────────────────────────
 
 app = FastAPI(title="UTP Voice", docs_url=None, redoc_url=None)
+
+
+@app.on_event("startup")
+async def _resume_auto_trade_on_startup():
+    """Resume auto-trade if state file says active and it's the same trading day."""
+    global _auto_trade_task
+    try:
+        state = _load_auto_trade_state()
+        if state.get("active") and state.get("trading_day") == datetime.now().strftime("%Y-%m-%d"):
+            logger.info("Resuming auto-trade from state file (trading_day=%s)", state["trading_day"])
+            _auto_trade_task = asyncio.create_task(_auto_trade_loop(state))
+    except Exception as e:
+        logger.warning("Failed to resume auto-trade: %s", e)
 
 
 @app.exception_handler(Exception)
@@ -1247,6 +1264,81 @@ CSV_EXPORTS_DIR = os.environ.get(
     "CSV_EXPORTS_DIR",
     str(Path(__file__).parent.parent.parent / "csv_exports" / "options"),
 )
+
+# ── Trade CSV Logger ──────────────────────────────────────────────────────────
+
+TRADES_CSV_PATH = Path("data/utp_voice/trades.csv")
+
+TRADES_CSV_FIELDS = [
+    "timestamp", "symbol", "trade_type", "option_type", "short_strike", "long_strike",
+    "width", "quantity", "expiration", "dte", "credit_per_share", "credit_per_contract",
+    "total_credit", "max_loss_per_contract", "total_max_loss", "roi_pct", "otm_pct",
+    "current_price", "hist_percentile", "pred_percentile", "short_delta", "short_theta",
+    "short_iv", "order_id", "fill_price", "slippage", "source", "status",
+]
+
+
+def log_trade_to_csv(tool_input: dict, result: dict, source: str = "manual") -> None:
+    """Append a trade record to the trades CSV with full metadata."""
+    import csv as csv_mod
+
+    try:
+        TRADES_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not TRADES_CSV_PATH.exists()
+
+        ti = tool_input
+        width = abs((ti.get("short_strike", 0) or 0) - (ti.get("long_strike", 0) or 0))
+        qty = ti.get("quantity", 1)
+        credit = ti.get("net_price") or ti.get("credit") or 0
+        credit_pc = credit * 100 if credit else 0
+        max_loss_pc = width * 100 - credit_pc if width else 0
+
+        row = {
+            "timestamp": _now_iso(),
+            "symbol": ti.get("symbol", ""),
+            "trade_type": ti.get("trade_type", ""),
+            "option_type": ti.get("option_type", ""),
+            "short_strike": ti.get("short_strike", ""),
+            "long_strike": ti.get("long_strike", ""),
+            "width": width,
+            "quantity": qty,
+            "expiration": ti.get("expiration", ""),
+            "dte": ti.get("dte", ""),
+            "credit_per_share": credit,
+            "credit_per_contract": credit_pc,
+            "total_credit": credit_pc * qty,
+            "max_loss_per_contract": max_loss_pc,
+            "total_max_loss": max_loss_pc * qty,
+            "roi_pct": round(credit_pc / max_loss_pc * 100, 1) if max_loss_pc > 0 else 0,
+            "otm_pct": ti.get("otm_pct", ""),
+            "current_price": ti.get("current_price", ""),
+            "hist_percentile": ti.get("hist_percentile", ""),
+            "pred_percentile": ti.get("pred_percentile", ""),
+            "short_delta": ti.get("short_delta", ""),
+            "short_theta": ti.get("short_theta", ""),
+            "short_iv": ti.get("short_iv", ""),
+            "order_id": result.get("order_id", ""),
+            "fill_price": result.get("filled_price", ""),
+            "slippage": "",
+            "source": source,
+            "status": result.get("status", ""),
+        }
+
+        # Compute slippage if we have both estimated and filled
+        if credit and result.get("filled_price"):
+            row["slippage"] = round(credit - result["filled_price"], 4)
+
+        with open(TRADES_CSV_PATH, "a", newline="") as f:
+            writer = csv_mod.DictWriter(f, fieldnames=TRADES_CSV_FIELDS)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+
+        logger.info("Trade logged to CSV: %s %s %s/%s x%s",
+                     ti.get("symbol"), ti.get("option_type"),
+                     ti.get("short_strike"), ti.get("long_strike"), qty)
+    except Exception as e:
+        logger.warning("Failed to log trade to CSV: %s", e)
 
 
 @dataclass
@@ -1474,6 +1566,310 @@ def _merge_expirations(*expiration_lists: list[str]) -> list[str]:
             if nd >= today:
                 combined.add(nd)
     return sorted(combined)
+
+
+# ── Server-Side Spread Computation ────────────────────────────────────────────
+
+DEFAULT_SPREAD_WIDTHS = {"SPX": 20, "NDX": 50, "RUT": 20}
+
+
+def compute_spreads_server(
+    chain: dict, symbol: str, current_price: float, width: int, filters: dict | None = None,
+) -> list[dict]:
+    """Server-side equivalent of the JS computeSpreads() + filters.
+
+    chain: {"put": [{strike, bid, ask, greeks:{delta,theta,iv}, ...}], "call": [...]}
+    filters: {min_roi, min_otm, min_pctl, min_pred, min_credit, max_delta, option_type, ...}
+    Returns sorted by ROI descending.
+    """
+    filters = filters or {}
+    min_roi = filters.get("min_roi_pct", 0)
+    min_otm = filters.get("min_otm_pct", 0)
+    max_delta = filters.get("max_delta")
+    opt_type_filter = filters.get("option_type", "ALL")
+    min_credit = filters.get("min_credit", 0)
+
+    spreads = []
+    for opt_type in ["PUT", "CALL"]:
+        if opt_type_filter != "ALL" and opt_type != opt_type_filter:
+            continue
+        quotes = chain.get(opt_type.lower(), [])
+        by_strike = {q["strike"]: q for q in quotes if q.get("strike")}
+        for short_strike in sorted(by_strike.keys()):
+            # OTM only
+            if opt_type == "PUT" and short_strike >= current_price:
+                continue
+            if opt_type == "CALL" and short_strike <= current_price:
+                continue
+
+            long_strike = (short_strike - width) if opt_type == "PUT" else (short_strike + width)
+            sq = by_strike.get(short_strike)
+            lq = by_strike.get(long_strike)
+            if not sq or not lq:
+                continue
+
+            short_bid = sq.get("bid", 0) or 0
+            long_ask = lq.get("ask", 0) or 0
+            if short_bid <= 0 or long_ask <= 0:
+                continue
+
+            credit = round(short_bid - long_ask, 2)
+            if credit <= 0:
+                continue
+            if credit < min_credit:
+                continue
+
+            credit_pc = credit * 100
+            max_loss_pc = width * 100 - credit_pc
+            if max_loss_pc <= 0:
+                continue
+
+            roi = round(credit_pc / max_loss_pc * 100, 1)
+            if roi < min_roi:
+                continue
+
+            otm = round(
+                ((current_price - short_strike) / current_price * 100) if opt_type == "PUT"
+                else ((short_strike - current_price) / current_price * 100),
+                2,
+            )
+            if abs(otm) < min_otm:
+                continue
+
+            sg = sq.get("greeks") or {}
+            delta = sg.get("delta")
+            if max_delta is not None and delta is not None and abs(delta) > max_delta:
+                continue
+
+            spreads.append({
+                "option_type": opt_type,
+                "short_strike": short_strike,
+                "long_strike": long_strike,
+                "width": width,
+                "credit": credit,
+                "credit_per_contract": credit_pc,
+                "max_loss": round(max_loss_pc),
+                "roi_pct": roi,
+                "otm_pct": otm,
+                "short_bid": short_bid,
+                "long_ask": long_ask,
+                "short_delta": delta,
+                "short_theta": sg.get("theta"),
+                "short_iv": sg.get("iv"),
+            })
+
+    spreads.sort(key=lambda s: s["roi_pct"], reverse=True)
+    return spreads
+
+
+# ── Auto-Trade System ─────────────────────────────────────────────────────────
+
+AUTO_TRADE_STATE_PATH = Path("data/utp_voice/auto_trade_state.json")
+
+
+def _load_auto_trade_state() -> dict:
+    if AUTO_TRADE_STATE_PATH.exists():
+        with open(AUTO_TRADE_STATE_PATH) as f:
+            return json.load(f)
+    return {"active": False}
+
+
+def _save_auto_trade_state(state: dict) -> None:
+    AUTO_TRADE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(AUTO_TRADE_STATE_PATH, "w") as f:
+        json.dump(state, f, indent=2, default=str)
+
+
+_auto_trade_task: asyncio.Task | None = None
+
+
+async def _auto_trade_loop(state: dict) -> None:
+    """Background loop: evaluate and execute top N spreads every interval."""
+    config = state.get("config", {})
+    filters = state.get("filters", {})
+    interval = config.get("interval_minutes", 3) * 60
+    top_n = config.get("top_n", 3)
+    end_time_utc = config.get("end_time_utc", "16:00")
+    qty = filters.get("quantity", 25)
+
+    client = get_daemon_client()
+
+    while True:
+        # Check if still active
+        current = _load_auto_trade_state()
+        if not current.get("active"):
+            break
+
+        # Check trading day
+        today = datetime.now().strftime("%Y-%m-%d")
+        if current.get("trading_day") != today:
+            current["active"] = False
+            _save_auto_trade_state(current)
+            logger.info("Auto-trade: trading day changed, stopping")
+            break
+
+        # Check end time
+        try:
+            from zoneinfo import ZoneInfo
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            now_et = datetime.now(UTC) - timedelta(hours=4)
+
+        end_parts = end_time_utc.split(":")
+        end_minutes = int(end_parts[0]) * 60 + int(end_parts[1])
+        now_minutes = now_et.hour * 60 + now_et.minute
+        if now_minutes >= end_minutes:
+            current["active"] = False
+            _save_auto_trade_state(current)
+            logger.info("Auto-trade: end time reached (%s ET), stopping", end_time_utc)
+            break
+
+        # Check market hours (9:30 AM - 3:50 PM ET)
+        if now_minutes < 570 or now_minutes > 950:  # Before 9:30 or after 3:50
+            await asyncio.sleep(30)
+            continue
+
+        # Evaluate spreads for each ticker
+        tickers = filters.get("tickers", DEFAULT_TICKERS)
+        executed = current.get("executed_today", [])
+        log = current.get("log", [])
+
+        all_candidates = []
+        for sym in tickers:
+            width = filters.get("width", {}).get(sym, DEFAULT_SPREAD_WIDTHS.get(sym, 20))
+            if isinstance(filters.get("width"), (int, float)):
+                width = int(filters["width"]) or DEFAULT_SPREAD_WIDTHS.get(sym, 20)
+
+            # Get option chain from cache or fetch
+            exps = _get_cached_expirations(sym)
+            if not exps:
+                continue
+            dte = filters.get("dte", 0)
+            exp = exps[min(dte, len(exps) - 1)]
+
+            entry = _get_cached_options(sym, exp, "PUT")
+            call_entry = _get_cached_options(sym, exp, "CALL")
+
+            chain = {}
+            if entry:
+                chain["put"] = entry.data
+            if call_entry:
+                chain["call"] = call_entry.data
+
+            if not chain:
+                # Try fetching
+                try:
+                    data = await client.get_options(sym, expiration=exp, option_type="BOTH")
+                    chain = {
+                        "put": data.get("quotes", {}).get("put", []),
+                        "call": data.get("quotes", {}).get("call", []),
+                    }
+                except Exception:
+                    continue
+
+            # Get current price
+            try:
+                quote = await client.get_quote(sym)
+                cp = quote.get("last") or quote.get("bid") or 0
+            except Exception:
+                continue
+
+            if not cp:
+                continue
+
+            spreads = compute_spreads_server(chain, sym, cp, width, filters)
+
+            for s in spreads:
+                s["symbol"] = sym
+                s["expiration"] = exp
+                s["current_price"] = cp
+                # Dedup: skip if already executed today
+                key = f"{sym}_{s['short_strike']}_{s['option_type']}_{exp}"
+                if any(e.get("key") == key for e in executed):
+                    continue
+                all_candidates.append(s)
+
+        # Sort all candidates by ROI and pick top N
+        all_candidates.sort(key=lambda s: s["roi_pct"], reverse=True)
+        selected = all_candidates[:top_n]
+
+        log_entry = {
+            "time": _now_iso(),
+            "action": "evaluate",
+            "candidates": len(all_candidates),
+            "selected": len(selected),
+        }
+        log.append(log_entry)
+
+        # Execute selected trades
+        for s in selected:
+            trade_input = {
+                "trade_type": "credit-spread",
+                "symbol": s["symbol"],
+                "option_type": s["option_type"],
+                "short_strike": s["short_strike"],
+                "long_strike": s["long_strike"],
+                "quantity": qty,
+                "expiration": s["expiration"],
+                "otm_pct": s["otm_pct"],
+                "current_price": s["current_price"],
+                "short_delta": s.get("short_delta"),
+                "short_theta": s.get("short_theta"),
+                "short_iv": s.get("short_iv"),
+            }
+
+            try:
+                payload = build_trade_payload(trade_input)
+                result = await client.execute_trade(payload)
+                status = result.get("status", "UNKNOWN")
+                key = f"{s['symbol']}_{s['short_strike']}_{s['option_type']}_{s['expiration']}"
+
+                executed.append({
+                    "key": key,
+                    "sym": s["symbol"],
+                    "short": s["short_strike"],
+                    "long": s["long_strike"],
+                    "type": s["option_type"],
+                    "exp": s["expiration"],
+                    "time": _now_iso(),
+                    "credit": s["credit"],
+                    "order_id": result.get("order_id", ""),
+                    "status": status,
+                })
+
+                log.append({
+                    "time": _now_iso(),
+                    "action": "execute",
+                    "sym": s["symbol"],
+                    "short": s["short_strike"],
+                    "type": s["option_type"],
+                    "result": status,
+                })
+
+                # Log to CSV
+                if not result.get("error"):
+                    log_trade_to_csv(trade_input, result, source="auto")
+
+                logger.info("Auto-trade executed: %s %s %s/%s → %s",
+                            s["symbol"], s["option_type"], s["short_strike"], s["long_strike"], status)
+
+            except Exception as e:
+                log.append({
+                    "time": _now_iso(),
+                    "action": "error",
+                    "sym": s["symbol"],
+                    "short": s["short_strike"],
+                    "error": str(e),
+                })
+                logger.warning("Auto-trade execution failed: %s", e)
+
+        # Save state
+        current["executed_today"] = executed
+        current["log"] = log[-100:]  # Keep last 100 log entries
+        _save_auto_trade_state(current)
+
+        # Wait for next interval
+        await asyncio.sleep(interval)
 
 
 # ── Pre-Fetch Logic ──────────────────────────────────────────────────────────
@@ -2053,6 +2449,80 @@ async def api_predictions(_u: str | None = Depends(optional_session)):
     if _predictions_cache:
         return _predictions_cache
     return {"error": "Predictions server unavailable"}
+
+
+@app.get("/api/trades/export")
+async def api_trades_export(username: str = Depends(require_session)):
+    """Download the trades CSV."""
+    from fastapi.responses import FileResponse
+    if not TRADES_CSV_PATH.exists():
+        raise HTTPException(status_code=404, detail="No trades recorded yet")
+    return FileResponse(
+        path=str(TRADES_CSV_PATH),
+        media_type="text/csv",
+        filename="utp_voice_trades.csv",
+    )
+
+
+@app.post("/api/auto-trade/start")
+async def api_auto_trade_start(
+    request: Request,
+    username: str = Depends(require_session),
+):
+    """Start auto-trading with the given filters and config."""
+    global _auto_trade_task
+    body = await request.json()
+    filters = body.get("filters", {})
+    config = body.get("config", {})
+
+    # Validate
+    if not filters.get("tickers"):
+        filters["tickers"] = list(DEFAULT_TICKERS)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    state = {
+        "active": True,
+        "created_at": _now_iso(),
+        "trading_day": today,
+        "filters": filters,
+        "config": config,
+        "executed_today": [],
+        "log": [{"time": _now_iso(), "action": "started", "by": username}],
+    }
+    _save_auto_trade_state(state)
+
+    # Start background task
+    if _auto_trade_task and not _auto_trade_task.done():
+        _auto_trade_task.cancel()
+    _auto_trade_task = asyncio.create_task(_auto_trade_loop(state))
+
+    logger.info("Auto-trade started by %s: top_%s every %sm until %s",
+                username, config.get("top_n", 3), config.get("interval_minutes", 3),
+                config.get("end_time_utc", "16:00"))
+
+    return {"status": "started", "state": state}
+
+
+@app.post("/api/auto-trade/stop")
+async def api_auto_trade_stop(username: str = Depends(require_session)):
+    """Stop auto-trading."""
+    global _auto_trade_task
+    state = _load_auto_trade_state()
+    state["active"] = False
+    state.get("log", []).append({"time": _now_iso(), "action": "stopped", "by": username})
+    _save_auto_trade_state(state)
+    if _auto_trade_task and not _auto_trade_task.done():
+        _auto_trade_task.cancel()
+    logger.info("Auto-trade stopped by %s", username)
+    return {"status": "stopped"}
+
+
+@app.get("/api/auto-trade/status")
+async def api_auto_trade_status(username: str = Depends(require_session)):
+    """Get current auto-trade state."""
+    state = _load_auto_trade_state()
+    state["task_running"] = _auto_trade_task is not None and not _auto_trade_task.done()
+    return state
 
 
 @app.post("/api/quick-trade")
