@@ -1135,6 +1135,21 @@ class BacktestV4Strategy(PercentileEntryCreditSpreadStrategy):
         if new_position is None:
             return (closed_result, None)
 
+        # Enforce per-roll risk cap: allow up to max_risk * max_width_multiplier
+        params = self.config.params
+        max_risk_per_txn = params.get("max_risk_per_transaction",
+                                      params.get("max_loss_estimate", 45000))
+        roll_max_risk = max_risk_per_txn * rc.max_width_multiplier
+        if new_position.max_loss > roll_max_risk:
+            return (closed_result, None)
+
+        # Enforce daily budget: rolled position must not exceed remaining daily budget
+        daily_budget = (self.config.constraints.budget.daily_budget
+                        if self.config.constraints.budget.daily_budget
+                        else 500000)
+        if self._daily_capital_used + new_position.max_loss > daily_budget:
+            return (closed_result, None)
+
         # Track capital for new position
         self.constraints.notify_opened(new_position.max_loss, exit_signal.exit_time)
         self._daily_capital_used += new_position.max_loss

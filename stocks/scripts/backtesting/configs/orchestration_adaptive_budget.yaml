@@ -26,7 +26,7 @@ profile: adaptive_v5
 orchestration:
   name: "Adaptive Budget NDX/SPX/RUT + V5 Baseline (6-month)"
   lookback_days: 250
-  daily_budget: 500000
+  daily_budget: 1500000
   output_dir: results/orchestrated_adaptive_budget
   start_date: "2025-09-15"
   end_date: "2026-03-12"
@@ -37,8 +37,8 @@ orchestration:
   interval_budget_mode: adaptive
   selection_mode: top_n
   top_n: 5
-  interval_budget_cap: 50000
-  max_risk_per_transaction: 50000
+  interval_budget_cap: 150000
+  max_risk_per_transaction: 100000
   scoring_weights: [0.80, 0.10, 0.10]
 
   # Adaptive budget — loaded from profile + backtest overrides

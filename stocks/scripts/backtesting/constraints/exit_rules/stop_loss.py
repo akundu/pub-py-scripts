@@ -4,7 +4,7 @@ Uses actual option market prices (bid/ask) when available. Falls back to
 intrinsic value only when options data is unavailable.
 """
 
-from datetime import datetime
+from datetime import datetime, time
 from typing import Any, Dict, Optional
 
 from .base_exit import ExitRule, ExitSignal
@@ -34,10 +34,20 @@ def _intrinsic_spread_value(position: Dict[str, Any], current_price: float) -> f
 
 
 class StopLossExit(ExitRule):
-    """Exit when loss exceeds stop_loss_pct multiplier of initial credit."""
+    """Exit when loss exceeds stop_loss_pct multiplier of initial credit.
 
-    def __init__(self, stop_loss_pct: float):
+    Args:
+        stop_loss_pct: Loss multiplier (e.g. 5.0 = 5x initial credit).
+        start_utc: Optional time gate — stop loss only fires at or after this
+            time (UTC). Format: "HH:MM". If None, fires any time.
+    """
+
+    def __init__(self, stop_loss_pct: float, start_utc: str = None):
         self._stop_loss_pct = stop_loss_pct
+        self._start_time = None
+        if start_utc:
+            parts = start_utc.split(":")
+            self._start_time = time(int(parts[0]), int(parts[1]))
 
     @property
     def name(self) -> str:
@@ -50,6 +60,14 @@ class StopLossExit(ExitRule):
         current_time: datetime,
         day_context: Any = None,
     ) -> Optional[ExitSignal]:
+        # Time gate: only fire at or after start_utc
+        if self._start_time is not None:
+            current_time_val = (
+                current_time.time() if hasattr(current_time, "time") else current_time
+            )
+            if current_time_val < self._start_time:
+                return None
+
         initial_credit = position.get("initial_credit", 0)
 
         # Try market-based spread value first (actual option bid/ask)

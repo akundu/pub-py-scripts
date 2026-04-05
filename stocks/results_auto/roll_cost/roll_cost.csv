@@ -1,0 +1,49 @@
+breach_pct,option_type,best_dte,best_target,best_time,avg_net,credit_pct,worst_95,action,per_20lot
+-5,put,1,100,12:55,-8.31,92,+0.24,ROLL NOW — preemptive. Almost guaranteed credit.,-16620
+-5,call,1,25,12:55,-7.94,97,-0.80,ROLL NOW — even worst case is a credit.,-15880
+0,put,1,100,12:55,-7.92,92,+0.93,ROLL — excellent credit with minimal risk.,-15840
+0,call,1,25,12:55,-7.64,95,+0.00,ROLL — worst case is breakeven.,-15280
+25,put,1,100,12:55,-4.85,79,+3.55,ROLL — strong credit 4:1 odds.,-9700
+25,call,1,25,12:55,-4.95,83,+3.56,ROLL — best overall combo for calls.,-9900
+50,put,1,100,12:55,-1.96,62,+9.74,ROLL (marginal) — 38% chance you pay.,-3920
+50,call,1,25,12:55,-2.35,65,+8.95,ROLL (marginal) — slightly better than puts.,-4700
+75,put,1,100,09:30,-2.65,54,+12.31,COIN FLIP — roll morning or accept loss.,-5300
+75,call,3,100,11:00,-1.73,45,+12.76,COIN FLIP — consider accepting loss.,-3460
+100,put,1,100,09:30,+1.12,48,+15.93,DO NOT ROLL — net debit 52% of time.,+2240
+100,call,1,25,12:55,+0.78,48,+14.95,DO NOT ROLL — net debit 52% of time.,+1560
+--- DTE LADDER AT 25% BREACH (12:55 PM) ---,,,,,,,,,
+25_dte1,put,1,100,12:55,-4.85,79,+3.55,BEST — highest credit + reliability,-9700
+25_dte2,put,2,75,12:55,-4.37,58,+5.44,GOOD — drops to 58% reliability,-8740
+25_dte3,put,3,100,12:55,-4.15,52,+6.31,OK — barely above coin flip,-8300
+25_dte4,put,4,100,12:55,-3.12,49,+6.45,MARGINAL — below 50/50,-6240
+25_dte5,put,5,0,12:55,-2.03,39,+7.40,AVOID — 61% chance of debit,-4060
+25_dte1,call,1,25,12:55,-4.95,83,+3.56,BEST — 83% credit probability,-9900
+25_dte2,call,2,25,12:55,-4.37,62,+6.04,GOOD — 62% credit,-8740
+25_dte3,call,3,100,12:55,-3.92,56,+6.22,OK — 56% credit,-7840
+25_dte4,call,4,25,12:55,-2.57,48,+5.99,MARGINAL — below 50/50,-5140
+25_dte5,call,5,0,12:55,-2.64,43,+6.19,AVOID — 57% chance of debit,-5280
+--- WIDTH EFFICIENCY (at 25% breach DTE+1 12:55) ---,,,,,,,,,
+width_10,put,1,100,12:55,-2.20,64,+3.71,22.0% of width as credit — low efficiency,
+width_15,put,1,100,12:55,-3.38,73,+3.28,22.6% of width — improving,
+width_20,put,1,100,12:55,-4.85,79,+3.55,24.2% of width — sweet spot,
+width_25,call,1,50,12:55,-6.13,88,+2.65,24.5% of width — best call credit%,
+width_30,call,1,50,12:55,-7.27,84,+5.50,24.2% of width — more $ but higher worst case,
+--- CROSS-TICKER (at 25% breach DTE+1 12:55) ---,,,,,,,,,
+rut_25,put,1,100,12:55,-4.85,79,+3.55,RUT 20pt: 24.2% of width as credit,
+ndx_25,call,1,100,12:55,-12.36,74,+19.89,NDX 50pt: 24.7% of width but MUCH worse worst case,
+--- GRANULAR TIME (puts 25% breach DTE+1) ---,,,,,,,,,
+time_12:00,,,,12:00,-1.88,51,,Barely above coin flip,
+time_12:15,,,,12:15,-3.41,63,,Improvement starts here,
+time_12:30,,,,12:30,-3.89,66,,Good — 2:1 odds,
+time_12:35,,,,12:35,-4.74,68,,Near-optimal,
+time_12:50,,,,12:50,-4.40,68,,Strong,
+time_12:55,,,,12:55,-4.85,79,,BEST — 4:1 odds,
+--- CALL EXCEPTION: DEEP BREACH ---,,,,,,,,,
+call_75_late,call,1,100,12:55,+1.82,35,,"WARNING: deep call breach at 12:55 is WORSE. Use 11:00 AM instead.",
+call_100_late,call,1,100,12:55,+2.05,33,,"WARNING: max-loss calls at 12:55 = 33% credit only. Use 11:00 AM (-0.84 44%).",
+--- KEY RULES ---,,,,,,,,,
+rule_1,both,,,,,,,,Every 25% deeper breach costs ~$2.50/spread more to roll. Detect early.
+rule_2,put,,,,,,,,Puts: ALWAYS roll at 12:55 PM regardless of breach depth. Later = better.
+rule_3,call,,,,,,,,Calls 0-50% breach: roll at 12:55 PM. Calls 75-100% breach: roll at 11:00 AM.
+rule_4,both,,,,,,,,20-25pt spreads are most capital-efficient (24-25% of width as credit).
+rule_5,both,,,,,,,,NDX is harder to roll than RUT — same % credit but 5x worse worst case in dollars.

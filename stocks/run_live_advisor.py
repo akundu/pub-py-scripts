@@ -792,7 +792,15 @@ def _run_vmaxmin(profile, args) -> None:
     raw = profile.raw_config
     nc = raw.get("entry", {}).get("contracts", 40)
 
-    if args.simulate:
+    if hasattr(args, 'simulate_range') and args.simulate_range:
+        cmd = [
+            sys.executable, "run_vmaxmin_live.py",
+            "--simulate-range", args.simulate_range[0], args.simulate_range[1],
+            "--num-contracts", str(nc),
+            "--sim-speed", str(args.sim_speed),
+        ]
+        subprocess.run(cmd)
+    elif args.simulate:
         cmd = [
             sys.executable, "run_vmaxmin_live.py",
             "--simulate", args.simulate,
@@ -919,6 +927,11 @@ Examples:
         "--simulate", metavar="DATE",
         help="Simulate a trading day from CSV data (e.g., 2026-03-10). "
              "Replays 5-min intervals at --sim-speed rate."
+    )
+    parser.add_argument(
+        "--simulate-range", nargs=2, metavar=("START", "END"),
+        help="Simulate a date range (e.g., 2026-03-18 2026-03-23). "
+             "Carries flow between days automatically."
     )
     parser.add_argument(
         "--sim-speed", type=float, default=3.0,

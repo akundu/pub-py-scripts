@@ -123,6 +123,14 @@ Examples:
     import scripts.backtesting.strategies.credit_spread.gate_filtered  # noqa: F401
     import scripts.backtesting.strategies.credit_spread.percentile_entry  # noqa: F401
     import scripts.backtesting.strategies.credit_spread.tqqq_momentum_scalper  # noqa: F401
+    import scripts.backtesting.strategies.credit_spread.iv_regime_condor      # noqa: F401
+    import scripts.backtesting.strategies.credit_spread.weekly_iron_condor    # noqa: F401
+    import scripts.backtesting.strategies.credit_spread.tail_hedged           # noqa: F401
+    import scripts.backtesting.strategies.credit_spread.backtest_v4          # noqa: F401
+    import scripts.backtesting.strategies.credit_spread.backtest_v5          # noqa: F401
+    import scripts.backtesting.strategies.credit_spread.vmaxmin             # noqa: F401
+    import scripts.backtesting.strategies.credit_spread.netdebit_maxmin    # noqa: F401
+    import scripts.backtesting.strategies.credit_spread.backtest_v6_delta  # noqa: F401
 
     # Check for grid sweep mode
     if config.report.grid_sweep:

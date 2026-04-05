@@ -89,7 +89,11 @@ DEFAULT_CONFIG = {
 
     # Call-track mode: always sell call spread, roll up when price > short strike
     "strategy_mode": "directional",            # "directional" (existing) or "call_track"
-    "call_track_check_times_pacific": ["08:35", "10:35"],  # Intraday checks (12:45 EOD is separate)
+    "call_track_check_times_pacific": [                     # Intraday checks (12:45 EOD is separate)
+        "07:05", "07:35", "08:05", "08:35",
+        "09:05", "09:35", "10:05", "10:35",
+        "11:05", "11:35", "12:05", "12:35",
+    ],
     "call_track_roll_interval_hours": 2,       # Fallback if check_times not set
     "call_track_roll_budget_pct": 0.25,        # Max 25% of original credit spent on rolls
     "call_track_eod_time_pacific": "12:45",    # EOD proximity check time
@@ -109,9 +113,33 @@ DEFAULT_CONFIG = {
     "roll_max_contract_mult": 2,               # Max contracts on roll = original_count × this
     "roll_max_chain_contracts": None,           # None = no cap (best_roi entries limit snowball naturally)
 
+    # Layer breach threshold: new HOD/LOD must exceed previous by this much
+    "layer_breach_min_points": None,           # None = use min_width_step (e.g. 5 for RUT)
+
     # Entry window: scan this range for best spread (not just one snapshot)
     "layer_entry_window_start": "06:30",       # Start of entry scan window
     "layer_entry_window_end": "06:45",         # End of entry scan window
+
+    # Adaptive ROI entry: aspiration starts high and relaxes to floor at window end
+    "layer_entry_min_roi": 0.50,               # Starting aspiration (50% ROI)
+    "layer_entry_min_roi_floor": 0.0,          # Floor at window end (0 = accept anything)
+
+    # Percentile-triggered entry (strategy_mode = "percentile_layer")
+    "percentile_entry_pN": 75,                 # Which percentile band triggers entry
+    "percentile_lookback": 120,                # Trading days of history for percentile calc
+    "percentile_spread_width": 5,              # Forced spread width ($)
+    "percentile_layering": True,               # Enable/disable HOD/LOD layering after trigger
+    "percentile_layer_cutoff": "11:45",        # No layering after this time
+    "percentile_roll_time": "12:30",           # Roll check time
+    "percentile_roll_proximity": 0.003,        # 0.3% proximity to trigger roll
+    "percentile_roll_dte": 2,                  # Roll to DTE+N
+
+    # VIX filtering for percentile_layer mode
+    "percentile_vix_enabled": False,           # Enable VIX-based entry filtering
+    "percentile_vix_min": None,                # Skip entry if VIX open < this (e.g., 18)
+    "percentile_vix_max": None,                # Skip entry if VIX open > this (e.g., 35)
+    "percentile_vix_regime_skip": [],          # Skip entry on these regimes (e.g., ["extreme"])
+    "percentile_vix_scale_contracts": False,   # Scale contracts by VIX regime multiplier
 
     # EOD scan: check every minute from scan_start to scan_end
     "layer_eod_scan_start": "12:50",           # Start scanning
@@ -124,7 +152,7 @@ DEFAULT_CONFIG = {
     "options_dte1_dir": "csv_exports/options",
 }
 
-TICKER_START_DATES = {"RUT": "2026-03-10", "SPX": "2026-02-15", "NDX": "2026-02-15"}
+TICKER_START_DATES = {"RUT": "2025-01-02", "SPX": "2026-02-15", "NDX": "2026-02-15"}
 
 
 # ── Data Structures ──────────────────────────────────────────────────────────
@@ -279,8 +307,25 @@ def load_0dte_options(ticker: str, trade_date: str,
 
 
 def load_dte1_options(ticker: str, expiration_date: str, snapshot_date: str,
-                      csv_exports_dir: str) -> Optional[pd.DataFrame]:
+                      csv_exports_dir: str,
+                      fallback_options_dir: str = None) -> Optional[pd.DataFrame]:
+    # Primary: csv_exports format ({dir}/{ticker}/{expiration_date}.csv)
     path = os.path.join(csv_exports_dir, ticker, f"{expiration_date}.csv")
+    if not os.path.exists(path) and fallback_options_dir:
+        # Fallback: load next-day 0DTE file and filter for the expiration we need
+        # The snapshot_date file may contain options expiring on expiration_date
+        fb_path = os.path.join(fallback_options_dir, ticker,
+                               f"{ticker}_options_{snapshot_date}.csv")
+        if os.path.exists(fb_path):
+            path = fb_path
+        else:
+            # Or load the expiration_date file (next day's data at open)
+            fb_path2 = os.path.join(fallback_options_dir, ticker,
+                                    f"{ticker}_options_{expiration_date}.csv")
+            if os.path.exists(fb_path2):
+                path = fb_path2
+            else:
+                return None
     if not os.path.exists(path):
         return None
     try:
@@ -289,15 +334,16 @@ def load_dte1_options(ticker: str, expiration_date: str, snapshot_date: str,
         return None
     if df.empty:
         return None
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df["snap_date"] = df["timestamp"].dt.date.astype(str)
-    df = df[df["snap_date"] == snapshot_date].copy()
-    if df.empty:
-        return None
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    # Filter to the target expiration if 'expiration' column exists
+    if "expiration" in df.columns:
+        df_exp = df[df["expiration"] == expiration_date].copy()
+        if not df_exp.empty:
+            df = df_exp
+    df["time_pacific"] = df["timestamp"].apply(_utc_to_pacific)
     for col in ["bid", "ask", "strike", "volume"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    df["time_pacific"] = df["timestamp"].dt.strftime("%H:%M")
     return df
 
 
@@ -640,6 +686,88 @@ def _find_itm_spread(side: pd.DataFrame, target: float, direction: str,
     return None
 
 
+def find_debit_spread(options_snap: pd.DataFrame, current_price: float,
+                      direction: str, min_step: float, max_width: float,
+                      depth_pct: Optional[float] = None) -> Optional[Dict]:
+    """Find a debit spread (long spread) near ATM.
+
+    A debit spread profits when the underlying moves in the spread direction.
+    - Call debit spread (bull): buy lower call (near ATM), sell higher call.
+      Debit = long_ask - short_bid. Max profit = width - debit.
+    - Put debit spread (bear): buy higher put (near ATM), sell lower put.
+      Debit = long_ask - short_bid. Max profit = width - debit.
+
+    Returns dict with: long_strike, short_strike, debit, width, max_profit.
+    """
+    side = filter_valid_quotes(options_snap, direction)
+    if len(side) < 2:
+        return None
+
+    strikes = sorted(side["strike"].unique())
+    bids = {}
+    asks = {}
+    for _, row in side.iterrows():
+        s = float(row["strike"])
+        bids[s] = float(row["bid"])
+        asks[s] = float(row["ask"])
+
+    # Long strike near ATM (within depth_pct or closest)
+    if depth_pct:
+        proximity = current_price * depth_pct
+    else:
+        proximity = current_price * 0.005  # default 0.5%
+
+    candidates = []
+    for long_strike in strikes:
+        if abs(long_strike - current_price) > proximity * 3:
+            continue
+        long_ask = asks.get(long_strike)
+        if long_ask is None or long_ask <= 0:
+            continue
+
+        for width_mult in range(1, int(max_width / min_step) + 1):
+            width = min_step * width_mult
+            if direction == "call":
+                short_strike = long_strike + width  # sell higher call
+            else:
+                short_strike = long_strike - width  # sell lower put
+
+            short_bid = bids.get(short_strike)
+            if short_bid is None or short_bid <= 0:
+                continue
+
+            debit = long_ask - short_bid
+            if debit <= 0 or debit >= width:
+                continue  # no valid debit or overpaying
+
+            max_profit = width - debit
+            roi = max_profit / debit if debit > 0 else 0
+            dist = abs(long_strike - current_price)
+
+            candidates.append({
+                "long_strike": long_strike,
+                "short_strike": short_strike,
+                "long_ask": long_ask,
+                "short_bid": short_bid,
+                "debit": debit,
+                "width": width,
+                "max_profit": max_profit,
+                "credit": -debit,  # negative for compatibility
+                "_roi": roi,
+                "_dist": dist,
+            })
+
+    if not candidates:
+        return None
+
+    # Prefer: narrowest width, then closest to ATM, then best ROI
+    candidates.sort(key=lambda c: (c["width"], c["_dist"], -c["_roi"]))
+    best = candidates[0]
+    del best["_roi"]
+    del best["_dist"]
+    return best
+
+
 def close_spread_cost(options_snap: pd.DataFrame, position: SpreadPosition) -> Optional[float]:
     """Debit per share to close (positive number), or None."""
     side = filter_valid_quotes(options_snap, position.direction)
@@ -783,6 +911,11 @@ class VMaxMinEngine:
                                    equity_prices, options_0dte,
                                    all_dates, prev_close,
                                    carried_positions=carried_positions or [])
+        if mode == "percentile_layer":
+            return self._run_percentile_layer(
+                ticker, trade_date, equity_df, equity_prices,
+                options_0dte, all_dates, prev_close,
+                carried_positions=carried_positions or [])
         result = DayResult(ticker=ticker, date=trade_date)
         commission = self.config["commission_per_transaction"]
         entry_time = self.config["entry_time_pacific"]
@@ -1283,7 +1416,17 @@ class VMaxMinEngine:
 
         ct_leg = self.config.get("call_track_leg_placement", "nearest")
         ct_depth = self.config.get("call_track_depth_pct")
-        num_contracts = self.config.get("num_contracts") or 1
+
+        # --- Auto-size contracts from budget if not explicitly set ---
+        explicit_contracts = self.config.get("num_contracts")
+        if explicit_contracts:
+            num_contracts = explicit_contracts
+        else:
+            daily_budget = self.config.get("daily_budget", 100000)
+            check_times_cfg = self.config.get("call_track_check_times_pacific", [])
+            # Max positions: 2 entries + up to 2 per check time
+            max_positions = 2 + len(check_times_cfg) * 2
+            num_contracts = max(1, int(daily_budget / (max_positions * eff_min_width * 100)))
 
         # --- Load carried positions expiring today ---
         positions: List[SpreadPosition] = []
@@ -1332,8 +1475,15 @@ class VMaxMinEngine:
         window_start = _time_to_mins(self.config.get("layer_entry_window_start", "06:30"))
         window_end = _time_to_mins(self.config.get("layer_entry_window_end", "06:45"))
 
-        # Scan each minute in the window, keep best spread per direction
-        best_spreads: Dict[str, Tuple[Dict, str, float]] = {}  # dir → (spread, time, price)
+        # Adaptive ROI: starts at aspiration, relaxes linearly to floor at window end
+        min_roi_start = self.config.get("layer_entry_min_roi", 0.50)
+        min_roi_floor = self.config.get("layer_entry_min_roi_floor", 0.0)
+        window_range = max(window_end - window_start, 1)
+
+        # Scan each minute in the window with adaptive ROI threshold
+        accepted_spreads: Dict[str, Tuple[Dict, str, float, float]] = {}  # dir → (spread, time, price, threshold)
+        best_fallback: Dict[str, Tuple[Dict, str, float, float]] = {}     # dir → (spread, time, price, roi)
+
         for scan_mins in range(window_start, window_end + 1):
             scan_time = f"{scan_mins // 60:02d}:{scan_mins % 60:02d}"
             snap = snap_options_to_time(options_0dte, scan_time, tolerance_mins=3)
@@ -1343,7 +1493,13 @@ class VMaxMinEngine:
             if scan_price is None:
                 continue
 
+            progress = (scan_mins - window_start) / window_range  # 0.0→1.0
+            dynamic_min_roi = min_roi_start - (min_roi_start - min_roi_floor) * progress
+
             for entry_dir in entry_dirs:
+                if entry_dir in accepted_spreads:
+                    continue  # already accepted for this direction
+
                 # Try best_roi first (0.3% proximity), fall back to nearest
                 spread = find_credit_spread(snap, scan_price, entry_dir,
                                             eff_min_width, max_width,
@@ -1357,19 +1513,32 @@ class VMaxMinEngine:
                     continue
 
                 roi = spread["credit"] / (spread["width"] - spread["credit"]) if spread["width"] > spread["credit"] else 0
-                prev = best_spreads.get(entry_dir)
-                if prev is None:
-                    best_spreads[entry_dir] = (spread, scan_time, scan_price)
-                else:
-                    prev_roi = prev[0]["credit"] / (prev[0]["width"] - prev[0]["credit"]) if prev[0]["width"] > prev[0]["credit"] else 0
-                    if roi > prev_roi:
-                        best_spreads[entry_dir] = (spread, scan_time, scan_price)
+
+                # Track best fallback regardless
+                prev_fb = best_fallback.get(entry_dir)
+                if prev_fb is None or roi > prev_fb[3]:
+                    best_fallback[entry_dir] = (spread, scan_time, scan_price, roi)
+
+                # Accept immediately if meets dynamic threshold
+                if roi >= dynamic_min_roi:
+                    accepted_spreads[entry_dir] = (spread, scan_time, scan_price, dynamic_min_roi)
+
+        # Use accepted spreads, falling back to best-seen for directions not accepted
+        final_spreads: Dict[str, Tuple[Dict, str, float, str]] = {}  # dir → (spread, time, price, notes_extra)
+        for entry_dir in entry_dirs:
+            if entry_dir in accepted_spreads:
+                sp, tm, pr, thresh = accepted_spreads[entry_dir]
+                roi_val = sp["credit"] / (sp["width"] - sp["credit"]) * 100 if sp["width"] > sp["credit"] else 0
+                final_spreads[entry_dir] = (sp, tm, pr, f"ROI={roi_val:.0f}%, threshold={thresh*100:.0f}%")
+            elif entry_dir in best_fallback:
+                sp, tm, pr, roi_val_raw = best_fallback[entry_dir]
+                final_spreads[entry_dir] = (sp, tm, pr, f"ROI={roi_val_raw*100:.0f}%, fallback best-seen")
 
         any_entry = False
         for entry_dir in entry_dirs:
-            if entry_dir not in best_spreads:
+            if entry_dir not in final_spreads:
                 continue
-            spread, used_time, used_price = best_spreads[entry_dir]
+            spread, used_time, used_price, roi_notes = final_spreads[entry_dir]
             pos = SpreadPosition(
                 direction=entry_dir,
                 short_strike=spread["short_strike"],
@@ -1384,14 +1553,13 @@ class VMaxMinEngine:
             positions.append(pos)
             result.total_credits += pos.total_credit
             result.total_commissions += commission
-            roi_pct = spread["credit"] / (spread["width"] - spread["credit"]) * 100 if spread["width"] > spread["credit"] else 0
             result.trades.append(TradeRecord(
                 event="entry", time_pacific=used_time, direction=entry_dir,
                 short_strike=spread["short_strike"], long_strike=spread["long_strike"],
                 width=spread["width"], credit_or_debit=pos.total_credit,
                 num_contracts=num_contracts, commission=commission,
                 underlying_price=used_price, dte=0,
-                notes=f"Initial {entry_dir} spread (ROI={roi_pct:.0f}%)",
+                notes=f"Initial {entry_dir} spread ({roi_notes})",
             ))
             any_entry = True
 
@@ -1435,8 +1603,9 @@ class VMaxMinEngine:
             if snap.empty:
                 continue
 
-            new_hod = hod > prev_hod
-            new_lod = lod < prev_lod
+            breach_min = self.config.get("layer_breach_min_points") or eff_min_width
+            new_hod = hod >= prev_hod + breach_min
+            new_lod = lod <= prev_lod - breach_min
 
             # New HOD → add call spread at HOD level (sell at the high)
             if new_hod:
@@ -1473,8 +1642,9 @@ class VMaxMinEngine:
                         credit_or_debit=pos.total_credit,
                         num_contracts=num_contracts, commission=commission,
                         underlying_price=current_price, dte=0,
-                        notes=f"New HOD {hod:.0f} (prev {prev_hod:.0f})",
+                        notes=f"New HOD {hod:.0f} (prev {prev_hod:.0f}, breach>={breach_min:.0f})",
                     ))
+                    prev_hod = hod  # ratchet up only when layer fires
 
             # New LOD → add put spread at LOD level (sell at the low)
             if new_lod:
@@ -1511,10 +1681,9 @@ class VMaxMinEngine:
                         credit_or_debit=pos.total_credit,
                         num_contracts=num_contracts, commission=commission,
                         underlying_price=current_price, dte=0,
-                        notes=f"New LOD {lod:.0f} (prev {prev_lod:.0f})",
+                        notes=f"New LOD {lod:.0f} (prev {prev_lod:.0f}, breach>={breach_min:.0f})",
                     ))
-
-            prev_hod, prev_lod = hod, lod
+                    prev_lod = lod  # ratchet down only when layer fires
 
         result.hod = hod
         result.lod = lod
@@ -1633,6 +1802,650 @@ class VMaxMinEngine:
         result.final_pnl = result.net_pnl
         return (result, new_carries)
 
+    # ── Percentile Layer Mode ─────────────────────────────────────────────
+
+    def _precompute_daily_closes(self, ticker: str, all_dates: List[str],
+                                  equity_dir: str) -> Dict[str, float]:
+        """Load close prices for all dates (cached after first call)."""
+        if not hasattr(self, '_daily_closes_cache') or self._daily_closes_cache is None:
+            closes: Dict[str, float] = {}
+            for d in all_dates:
+                df = load_equity_bars_df(ticker, d, equity_dir)
+                if not df.empty:
+                    closes[d] = float(df['close'].iloc[-1])
+            self._daily_closes_cache = closes
+        return self._daily_closes_cache
+
+    def _compute_percentile_bands(self, trade_date: str, all_dates: List[str],
+                                   daily_closes: Dict[str, float],
+                                   prev_close: float) -> Optional[Dict[str, float]]:
+        """Compute P(N) call and put price levels from historical close-to-close returns."""
+        pN = self.config.get("percentile_entry_pN", 75)
+        lookback = self.config.get("percentile_lookback", 120)
+
+        if trade_date not in all_dates:
+            return None
+        idx = all_dates.index(trade_date)
+        start = max(0, idx - lookback)
+        window_dates = all_dates[start:idx]
+        closes_arr = np.array([daily_closes[d] for d in window_dates if d in daily_closes])
+        if len(closes_arr) < 10:
+            return None
+
+        returns = (closes_arr[1:] - closes_arr[:-1]) / closes_arr[:-1]
+        up_returns = returns[returns > 0]
+        down_returns = returns[returns < 0]
+
+        call_level = None
+        put_level = None
+        if len(up_returns) > 0:
+            call_level = prev_close * (1 + np.percentile(up_returns, pN))
+        if len(down_returns) > 0:
+            put_level = prev_close * (1 - np.percentile(np.abs(down_returns), pN))
+
+        return {"call": call_level, "put": put_level}
+
+    def _run_percentile_layer(self, ticker: str, trade_date: str,
+                               equity_df: pd.DataFrame, equity_prices: dict,
+                               options_0dte: Optional[pd.DataFrame],
+                               all_dates: List[str],
+                               prev_close: Optional[float],
+                               carried_positions: Optional[List["RolledPosition"]] = None,
+                               ) -> Tuple[DayResult, List["RolledPosition"]]:
+        """Percentile-triggered layer mode.
+
+        Entry: only when price breaches P(N) band from close-to-close returns.
+        Direction: follows the move (up -> call spread, down -> put spread).
+        Both legs ITM at entry. Optional layering on HOD/LOD (same dir only).
+        Roll at configurable time if within proximity. Settle at 13:00.
+        """
+        carried_positions = carried_positions or []
+        new_carries: List[RolledPosition] = []
+        result = DayResult(ticker=ticker, date=trade_date)
+        commission = self.config["commission_per_transaction"]
+        equity_dir = self.config.get("equity_dir", "equities_output")
+        spread_width = self.config.get("percentile_spread_width", 5)
+        layering = self.config.get("percentile_layering", True)
+        layer_cutoff = self.config.get("percentile_layer_cutoff", "11:45")
+        roll_time = self.config.get("percentile_roll_time", "12:30")
+        roll_proximity = self.config.get("percentile_roll_proximity", 0.003)
+        roll_dte = self.config.get("percentile_roll_dte", 2)
+        num_contracts = self.config.get("num_contracts") or 1
+        leg_placement = self.config.get("percentile_leg_placement", "itm")  # itm, otm, debit
+        otm_depth = self.config.get("percentile_otm_depth", 0.001)  # 0.1% for near-ATM OTM
+        is_debit = leg_placement == "debit"
+
+        # Validate data
+        if equity_df.empty or prev_close is None:
+            result.failure_reason = "No equity data or prev_close"
+            return (result, [])
+        if options_0dte is None or options_0dte.empty:
+            result.failure_reason = "No 0DTE options data"
+            return (result, [])
+
+        sorted_times = sorted(equity_prices.keys(), key=_time_to_mins)
+        if not sorted_times:
+            result.failure_reason = "No price data"
+            return (result, [])
+        result.open_price = equity_prices[sorted_times[0]]
+        result.close_price = equity_prices[sorted_times[-1]]
+
+        # --- Compute percentile bands ---
+        daily_closes = self._precompute_daily_closes(ticker, all_dates, equity_dir)
+        bands = self._compute_percentile_bands(trade_date, all_dates, daily_closes, prev_close)
+        if bands is None:
+            result.failure_reason = "Insufficient history for percentile bands"
+            return (result, [])
+
+        call_level = bands["call"]
+        put_level = bands["put"]
+        pN = self.config.get("percentile_entry_pN", 75)
+
+        # --- VIX filtering ---
+        vix_open = None
+        vix_regime = None
+        if self.config.get("percentile_vix_enabled", False):
+            vix_df = load_equity_bars_df("VIX", trade_date, "equities_output")
+            if not vix_df.empty:
+                vix_open = float(vix_df["close"].iloc[0])
+
+            vix_min = self.config.get("percentile_vix_min")
+            vix_max = self.config.get("percentile_vix_max")
+            regime_skip = self.config.get("percentile_vix_regime_skip", [])
+
+            if vix_min and vix_open is not None and vix_open < vix_min:
+                result.failure_reason = f"VIX {vix_open:.1f} < min {vix_min}"
+                # Still handle carries below
+                if not carried_positions:
+                    return (result, [])
+            if vix_max and vix_open is not None and vix_open > vix_max:
+                result.failure_reason = f"VIX {vix_open:.1f} > max {vix_max}"
+                if not carried_positions:
+                    return (result, [])
+
+            # VIX regime check (inline — avoids dependency on signal generator in subprocess)
+            if regime_skip and vix_open is not None:
+                vix_daily_cache = getattr(self, '_vix_daily_cache', None)
+                if vix_daily_cache is None:
+                    vix_daily_cache = {}
+                    vix_dir = os.path.join("equities_output", "I:VIX")
+                    if os.path.isdir(vix_dir):
+                        for fname in sorted(os.listdir(vix_dir)):
+                            if not fname.endswith(".csv"):
+                                continue
+                            ds = fname.split("_")[-1].replace(".csv", "")
+                            try:
+                                vdf = pd.read_csv(os.path.join(vix_dir, fname), usecols=["close"])
+                                if not vdf.empty:
+                                    vix_daily_cache[ds] = float(vdf["close"].iloc[-1])
+                            except Exception:
+                                pass
+                    self._vix_daily_cache = vix_daily_cache
+
+                lookback_vix = [v for d, v in sorted(vix_daily_cache.items()) if d < trade_date][-60:]
+                if len(lookback_vix) >= 10:
+                    pct_rank = float(np.sum(np.array(lookback_vix) < vix_open) / len(lookback_vix) * 100)
+                    if pct_rank < 30:
+                        vix_regime = "low"
+                    elif pct_rank < 70:
+                        vix_regime = "normal"
+                    elif pct_rank < 90:
+                        vix_regime = "high"
+                    else:
+                        vix_regime = "extreme"
+
+                    if vix_regime in regime_skip:
+                        result.failure_reason = f"VIX regime '{vix_regime}' skipped (VIX={vix_open:.1f})"
+                        if not carried_positions:
+                            return (result, [])
+
+            # Scale contracts by VIX regime
+            if self.config.get("percentile_vix_scale_contracts") and vix_regime:
+                vix_multipliers = {"low": 1.2, "normal": 1.0, "high": 0.6, "extreme": 0.25}
+                mult = vix_multipliers.get(vix_regime, 1.0)
+                num_contracts = max(1, int(num_contracts * mult))
+
+        # --- Load carried positions expiring today ---
+        positions: List[SpreadPosition] = []
+        carried_map: Dict[int, RolledPosition] = {}
+        for rp in carried_positions:
+            if rp.expiration_date != trade_date:
+                continue
+            pos = SpreadPosition(
+                direction=rp.direction, short_strike=rp.short_strike,
+                long_strike=rp.long_strike, width=rp.width,
+                credit_per_share=rp.credit_per_share,
+                num_contracts=rp.num_contracts,
+                entry_time="carried", entry_price=result.open_price, dte=1,
+            )
+            idx = len(positions)
+            positions.append(pos)
+            carried_map[idx] = rp
+            result.trades.append(TradeRecord(
+                event="carried_position", time_pacific="06:30",
+                direction=rp.direction,
+                short_strike=rp.short_strike, long_strike=rp.long_strike,
+                width=rp.width, credit_or_debit=0,
+                num_contracts=rp.num_contracts, commission=0,
+                underlying_price=result.open_price, dte=1,
+                notes=f"Carry from {rp.original_entry_date}, roll#{rp.roll_count}",
+            ))
+
+        # --- Scan 5-min bars for percentile band breach ---
+        trigger_dir = None
+        trigger_time = None
+        trigger_price = None
+
+        for _, bar in equity_df.iterrows():
+            bar_time = bar["time_pacific"]
+            bar_mins = _time_to_mins(bar_time)
+            if bar_mins < _time_to_mins("06:30"):
+                continue
+
+            bar_high = float(bar["high"])
+            bar_low = float(bar["low"])
+            bar_close = float(bar["close"])
+
+            if call_level is not None and bar_high >= call_level:
+                trigger_dir = "call"
+                trigger_time = bar_time
+                trigger_price = bar_close
+                break
+            if put_level is not None and bar_low <= put_level:
+                trigger_dir = "put"
+                trigger_time = bar_time
+                trigger_price = bar_close
+                break
+
+        if trigger_dir is None:
+            # No trigger today — but still handle carried positions
+            if not carried_positions:
+                result.failure_reason = f"Price stayed within P{pN} bands (call={call_level:.1f}, put={put_level:.1f})"
+                return (result, [])
+            # Fall through to EOD handling for carries
+            result.trades.append(TradeRecord(
+                event="no_trigger", time_pacific="13:00",
+                direction="none", short_strike=0, long_strike=0,
+                width=0, credit_or_debit=0, num_contracts=0, commission=0,
+                underlying_price=result.close_price, dte=0,
+                notes=f"P{pN} not breached (call={call_level:.1f}, put={put_level:.1f})",
+            ))
+        else:
+            # --- Entry: ITM credit spread at trigger price ---
+            snap = snap_options_to_time(options_0dte, trigger_time, tolerance_mins=5)
+            if snap.empty:
+                snap = snap_options_to_time(options_0dte, trigger_time, tolerance_mins=10)
+
+            entry_spread = None
+            if not snap.empty:
+                if is_debit:
+                    entry_spread = find_debit_spread(
+                        snap, trigger_price, trigger_dir,
+                        spread_width, spread_width,
+                        depth_pct=otm_depth)
+                else:
+                    entry_spread = find_credit_spread(
+                        snap, trigger_price, trigger_dir,
+                        spread_width, spread_width,
+                        leg_placement=leg_placement,
+                        depth_pct=otm_depth if leg_placement == "otm" else None)
+
+            if entry_spread is not None:
+                if is_debit:
+                    # Debit spread: we pay the debit upfront
+                    debit_per_share = entry_spread["debit"]
+                    debit_total = debit_per_share * 100 * num_contracts
+                    max_profit_total = entry_spread["max_profit"] * 100 * num_contracts
+                    pos = SpreadPosition(
+                        direction=trigger_dir,
+                        short_strike=entry_spread["short_strike"],
+                        long_strike=entry_spread["long_strike"],
+                        width=entry_spread["width"],
+                        credit_per_share=-debit_per_share,  # negative = debit
+                        num_contracts=num_contracts,
+                        entry_time=trigger_time,
+                        entry_price=trigger_price,
+                        dte=0,
+                    )
+                    positions.append(pos)
+                    result.total_debits += debit_total
+                    result.total_commissions += commission
+                    roi_pct = entry_spread["max_profit"] / debit_per_share * 100 if debit_per_share > 0 else 0
+                    result.trades.append(TradeRecord(
+                        event="entry", time_pacific=trigger_time,
+                        direction=trigger_dir,
+                        short_strike=entry_spread["short_strike"],
+                        long_strike=entry_spread["long_strike"],
+                        width=entry_spread["width"],
+                        credit_or_debit=-debit_total,
+                        num_contracts=num_contracts, commission=commission,
+                        underlying_price=trigger_price, dte=0,
+                        notes=f"P{pN} {trigger_dir} breach @{trigger_price:.1f} "
+                              f"DEBIT={debit_per_share:.2f} maxProfit={entry_spread['max_profit']:.2f} "
+                              f"ROI={roi_pct:.0f}% w={entry_spread['width']}",
+                    ))
+                else:
+                    # Credit spread (OTM or ITM)
+                    pos = SpreadPosition(
+                        direction=trigger_dir,
+                        short_strike=entry_spread["short_strike"],
+                        long_strike=entry_spread["long_strike"],
+                        width=entry_spread["width"],
+                        credit_per_share=entry_spread["credit"],
+                        num_contracts=num_contracts,
+                        entry_time=trigger_time,
+                        entry_price=trigger_price,
+                        dte=0,
+                    )
+                    positions.append(pos)
+                    result.total_credits += pos.total_credit
+                    result.total_commissions += commission
+                    roi_pct = entry_spread["credit"] / (entry_spread["width"] - entry_spread["credit"]) * 100 \
+                        if entry_spread["width"] > entry_spread["credit"] else 0
+                    result.trades.append(TradeRecord(
+                        event="entry", time_pacific=trigger_time,
+                        direction=trigger_dir,
+                        short_strike=entry_spread["short_strike"],
+                        long_strike=entry_spread["long_strike"],
+                        width=entry_spread["width"],
+                        credit_or_debit=pos.total_credit,
+                        num_contracts=num_contracts, commission=commission,
+                        underlying_price=trigger_price, dte=0,
+                        notes=f"P{pN} {trigger_dir} breach @{trigger_price:.1f} "
+                              f"(level={call_level if trigger_dir == 'call' else put_level:.1f}, "
+                              f"ROI={roi_pct:.0f}%, {leg_placement.upper()}, w={entry_spread['width']}"
+                              f"{f', VIX={vix_open:.1f} {vix_regime}' if vix_open else ''})",
+                    ))
+                result.direction = trigger_dir
+            else:
+                result.trades.append(TradeRecord(
+                    event="entry_failed", time_pacific=trigger_time,
+                    direction=trigger_dir, short_strike=0, long_strike=0,
+                    width=0, credit_or_debit=0, num_contracts=0, commission=0,
+                    underlying_price=trigger_price, dte=0,
+                    notes=f"P{pN} {trigger_dir} triggered but no {leg_placement} spread at w={spread_width}",
+                ))
+
+        # --- HOD/LOD layering (same direction only, before cutoff) ---
+        if layering and trigger_dir is not None:
+            trigger_mins = _time_to_mins(trigger_time) if trigger_time else 0
+            cutoff_mins = _time_to_mins(layer_cutoff)
+            breach_min = self.config.get("layer_breach_min_points") or spread_width
+
+            hod = trigger_price or result.open_price
+            lod = trigger_price or result.open_price
+            prev_extreme = hod if trigger_dir == "call" else lod
+
+            # Check at regular intervals
+            check_interval = 30  # every 30 mins
+            for check_mins in range(trigger_mins + check_interval, cutoff_mins + 1, check_interval):
+                check_time = f"{check_mins // 60:02d}:{check_mins % 60:02d}"
+                if not equity_df.empty:
+                    h, l = get_hod_lod_in_range(equity_df, trigger_mins, check_mins)
+                    if h > 0:
+                        hod = max(hod, h)
+                    if l < float("inf"):
+                        lod = min(lod, l)
+
+                check_price = get_price_at_time(equity_prices, check_time)
+                if check_price is None:
+                    continue
+                snap = snap_options_to_time(options_0dte, check_time, tolerance_mins=5)
+                if snap.empty:
+                    continue
+
+                # Only layer in the trigger direction
+                should_layer = False
+                layer_ref_price = check_price
+                if trigger_dir == "call" and hod >= prev_extreme + breach_min:
+                    should_layer = True
+                    layer_ref_price = hod
+                elif trigger_dir == "put" and lod <= prev_extreme - breach_min:
+                    should_layer = True
+                    layer_ref_price = lod
+
+                if should_layer:
+                    if is_debit:
+                        layer_spread = find_debit_spread(
+                            snap, layer_ref_price, trigger_dir,
+                            spread_width, spread_width,
+                            depth_pct=otm_depth)
+                    else:
+                        layer_spread = find_credit_spread(
+                            snap, layer_ref_price, trigger_dir,
+                            spread_width, spread_width,
+                            leg_placement=leg_placement,
+                            depth_pct=otm_depth if leg_placement == "otm" else None)
+                    if layer_spread is not None:
+                        if is_debit:
+                            layer_debit = layer_spread["debit"]
+                            layer_total = layer_debit * 100 * num_contracts
+                            pos = SpreadPosition(
+                                direction=trigger_dir,
+                                short_strike=layer_spread["short_strike"],
+                                long_strike=layer_spread["long_strike"],
+                                width=layer_spread["width"],
+                                credit_per_share=-layer_debit,
+                                num_contracts=num_contracts,
+                                entry_time=check_time,
+                                entry_price=check_price,
+                                dte=0,
+                            )
+                            positions.append(pos)
+                            result.total_debits += layer_total
+                            result.total_commissions += commission
+                            result.trades.append(TradeRecord(
+                                event="layer_add", time_pacific=check_time,
+                                direction=trigger_dir,
+                                short_strike=layer_spread["short_strike"],
+                                long_strike=layer_spread["long_strike"],
+                                width=layer_spread["width"],
+                                credit_or_debit=-layer_total,
+                                num_contracts=num_contracts, commission=commission,
+                                underlying_price=check_price, dte=0,
+                                notes=f"DEBIT layer {'HOD' if trigger_dir == 'call' else 'LOD'} "
+                                      f"breach to {hod if trigger_dir == 'call' else lod:.1f}",
+                            ))
+                        else:
+                            pos = SpreadPosition(
+                                direction=trigger_dir,
+                                short_strike=layer_spread["short_strike"],
+                                long_strike=layer_spread["long_strike"],
+                                width=layer_spread["width"],
+                                credit_per_share=layer_spread["credit"],
+                                num_contracts=num_contracts,
+                                entry_time=check_time,
+                                entry_price=check_price,
+                                dte=0,
+                            )
+                            positions.append(pos)
+                            result.total_credits += pos.total_credit
+                            result.total_commissions += commission
+                            result.trades.append(TradeRecord(
+                                event="layer_add", time_pacific=check_time,
+                                direction=trigger_dir,
+                                short_strike=layer_spread["short_strike"],
+                                long_strike=layer_spread["long_strike"],
+                                width=layer_spread["width"],
+                                credit_or_debit=pos.total_credit,
+                                num_contracts=num_contracts, commission=commission,
+                                underlying_price=check_price, dte=0,
+                                notes=f"{'HOD' if trigger_dir == 'call' else 'LOD'} "
+                                      f"breach to {hod if trigger_dir == 'call' else lod:.1f} "
+                                      f"(prev {prev_extreme:.1f}, min={breach_min})",
+                            ))
+                        prev_extreme = hod if trigger_dir == "call" else lod
+
+        # Update HOD/LOD for result
+        if not equity_df.empty:
+            h, l = get_hod_lod_in_range(equity_df, _time_to_mins("06:30"), _time_to_mins("13:00"))
+            result.hod = h if h > 0 else result.open_price
+            result.lod = l if l < float("inf") else result.open_price
+
+        # --- Roll check at configured time ---
+        roll_mins = _time_to_mins(roll_time)
+        roll_price = get_price_at_time(equity_prices, roll_time)
+        rolled_ids: set = set()
+
+        if roll_price is not None and positions:
+            roll_snap = snap_options_to_time(options_0dte, roll_time, tolerance_mins=5)
+            for i, pos in enumerate(positions):
+                dist_pct = abs(roll_price - pos.short_strike) / roll_price if roll_price > 0 else 1
+                is_itm = self._is_position_itm(pos, roll_price)
+                if not (is_itm or dist_pct <= roll_proximity):
+                    continue
+
+                # Close position
+                close_debit = None
+                if not roll_snap.empty:
+                    close_debit = close_spread_cost(roll_snap, pos)
+                if close_debit is None:
+                    if pos.direction == "call":
+                        intr = max(0, roll_price - pos.short_strike)
+                    else:
+                        intr = max(0, pos.short_strike - roll_price)
+                    close_debit = min(intr, pos.width)
+
+                close_total = close_debit * 100 * pos.num_contracts
+                result.total_debits += close_total
+                result.total_commissions += commission
+
+                # Find DTE+N target
+                target_date = trade_date
+                for _ in range(roll_dte):
+                    nd = get_next_trading_date(target_date, all_dates)
+                    if nd:
+                        target_date = nd
+                if target_date == trade_date:
+                    result.trades.append(TradeRecord(
+                        event="roll_close", time_pacific=roll_time,
+                        direction=pos.direction,
+                        short_strike=pos.short_strike, long_strike=pos.long_strike,
+                        width=pos.width, credit_or_debit=-close_total,
+                        num_contracts=pos.num_contracts, commission=commission,
+                        underlying_price=roll_price, dte=pos.dte,
+                        notes=f"No DTE+{roll_dte} date",
+                    ))
+                    rolled_ids.add(i)
+                    continue
+
+                # Try to find DTE+N options (check expiration column or load separate file)
+                dte_opts = None
+                if options_0dte is not None and 'expiration' in options_0dte.columns:
+                    dte_filtered = options_0dte[options_0dte['expiration'] == target_date]
+                    if not dte_filtered.empty:
+                        dte_opts = dte_filtered
+                if dte_opts is None:
+                    dte_opts = load_dte1_options(ticker, target_date, trade_date,
+                                                 self.config.get("options_dte1_dir", "csv_exports/options"),
+                                                 fallback_options_dir=self.config.get("options_0dte_dir", "options_csv_output_full_5"))
+
+                new_spread = None
+                if dte_opts is not None and not dte_opts.empty:
+                    dte_snap = snap_options_to_time(dte_opts, roll_time, tolerance_mins=30)
+                    if not dte_snap.empty:
+                        new_spread = find_credit_spread(
+                            dte_snap, roll_price, pos.direction,
+                            spread_width, spread_width,
+                            leg_placement="itm")
+
+                if new_spread is not None:
+                    new_cr = new_spread["credit"] * 100 * pos.num_contracts
+                    result.total_credits += new_cr
+                    result.total_commissions += commission
+                    result.num_rolls += 1
+
+                    rp_existing = carried_map.get(i)
+                    if rp_existing:
+                        rc = rp_existing.roll_count + 1
+                        orig_date = rp_existing.original_entry_date
+                        orig_cr = rp_existing.original_credit
+                        cum_cost = rp_existing.cumulative_roll_cost + max(0, close_total - new_cr)
+                    else:
+                        rc = 1
+                        orig_date = trade_date
+                        orig_cr = pos.total_credit
+                        cum_cost = max(0, close_total - new_cr)
+
+                    result.trades.append(TradeRecord(
+                        event="roll_close", time_pacific=roll_time,
+                        direction=pos.direction,
+                        short_strike=pos.short_strike, long_strike=pos.long_strike,
+                        width=pos.width, credit_or_debit=-close_total,
+                        num_contracts=pos.num_contracts, commission=commission,
+                        underlying_price=roll_price, dte=pos.dte,
+                        notes=f"Close for roll to DTE+{roll_dte}",
+                    ))
+                    result.trades.append(TradeRecord(
+                        event="roll_open", time_pacific=roll_time,
+                        direction=pos.direction,
+                        short_strike=new_spread["short_strike"],
+                        long_strike=new_spread["long_strike"],
+                        width=new_spread["width"], credit_or_debit=new_cr,
+                        num_contracts=pos.num_contracts, commission=commission,
+                        underlying_price=roll_price, dte=roll_dte,
+                        notes=f"Rolled to {target_date} (DTE+{roll_dte}, roll#{rc})",
+                    ))
+                    new_carries.append(RolledPosition(
+                        direction=pos.direction,
+                        short_strike=new_spread["short_strike"],
+                        long_strike=new_spread["long_strike"],
+                        width=new_spread["width"],
+                        credit_per_share=new_spread["credit"],
+                        num_contracts=pos.num_contracts,
+                        expiration_date=target_date,
+                        original_entry_date=orig_date,
+                        original_credit=orig_cr,
+                        cumulative_roll_cost=cum_cost,
+                        roll_count=rc,
+                    ))
+                else:
+                    result.trades.append(TradeRecord(
+                        event="roll_close", time_pacific=roll_time,
+                        direction=pos.direction,
+                        short_strike=pos.short_strike, long_strike=pos.long_strike,
+                        width=pos.width, credit_or_debit=-close_total,
+                        num_contracts=pos.num_contracts, commission=commission,
+                        underlying_price=roll_price, dte=pos.dte,
+                        notes=f"Roll failed: no DTE+{roll_dte} spread",
+                    ))
+                rolled_ids.add(i)
+
+        # --- 13:00: settle remaining positions ---
+        close = result.close_price
+        for i, pos in enumerate(positions):
+            if i in rolled_ids:
+                continue
+
+            if is_debit and pos.credit_per_share < 0:
+                # Debit spread: profit when spread finishes ITM
+                # For call debit: profit = max(0, close - long_strike) - max(0, close - short_strike)
+                # Simplified: if close > short_strike → max profit = width
+                #             if close < long_strike → max loss = debit paid (0 payout)
+                #             in between → partial profit
+                if pos.direction == "call":
+                    long_val = max(0, close - pos.long_strike)
+                    short_val = max(0, close - pos.short_strike)
+                else:
+                    long_val = max(0, pos.long_strike - close)
+                    short_val = max(0, pos.short_strike - close)
+                payout = long_val - short_val
+                payout = max(0, min(payout, pos.width))
+                payout_total = payout * 100 * pos.num_contracts
+                if payout_total > 0:
+                    result.total_credits += payout_total
+                    result.trades.append(TradeRecord(
+                        event="expiration_itm", time_pacific="13:00",
+                        direction=pos.direction,
+                        short_strike=pos.short_strike, long_strike=pos.long_strike,
+                        width=pos.width, credit_or_debit=payout_total,
+                        num_contracts=pos.num_contracts, commission=0,
+                        underlying_price=close, dte=pos.dte,
+                        notes=f"DEBIT spread payout={payout:.2f}/share",
+                    ))
+                else:
+                    result.trades.append(TradeRecord(
+                        event="expiration_otm", time_pacific="13:00",
+                        direction=pos.direction,
+                        short_strike=pos.short_strike, long_strike=pos.long_strike,
+                        width=pos.width, credit_or_debit=0,
+                        num_contracts=pos.num_contracts, commission=0,
+                        underlying_price=close, dte=pos.dte,
+                        notes="DEBIT spread expired worthless",
+                    ))
+            else:
+                # Credit spread: standard settlement
+                is_itm = self._is_position_itm(pos, close)
+                if is_itm:
+                    if pos.direction == "call":
+                        intrinsic = min(close - pos.short_strike, pos.width)
+                    else:
+                        intrinsic = min(pos.short_strike - close, pos.width)
+                    loss = intrinsic * 100 * pos.num_contracts
+                    result.total_debits += loss
+                    result.trades.append(TradeRecord(
+                        event="expiration_itm", time_pacific="13:00",
+                        direction=pos.direction,
+                        short_strike=pos.short_strike, long_strike=pos.long_strike,
+                        width=pos.width, credit_or_debit=-loss,
+                        num_contracts=pos.num_contracts, commission=0,
+                        underlying_price=close, dte=pos.dte,
+                        notes=f"ITM by {intrinsic:.2f}",
+                    ))
+                else:
+                    result.trades.append(TradeRecord(
+                        event="expiration_otm", time_pacific="13:00",
+                        direction=pos.direction,
+                        short_strike=pos.short_strike, long_strike=pos.long_strike,
+                        width=pos.width, credit_or_debit=0,
+                        num_contracts=pos.num_contracts, commission=0,
+                        underlying_price=close, dte=pos.dte,
+                        notes="Expired OTM — full profit",
+                    ))
+
+        result.final_pnl = result.net_pnl
+        return (result, new_carries)
+
     def _attempt_dte1_roll_layer(self, result: DayResult, position: SpreadPosition,
                                   ticker: str, trade_date: str, all_dates: List[str],
                                   options_0dte: Optional[pd.DataFrame],
@@ -1678,7 +2491,8 @@ class VMaxMinEngine:
             return None
 
         dte1_opts = load_dte1_options(ticker, next_date, trade_date,
-                                      self.config["options_dte1_dir"])
+                                      self.config["options_dte1_dir"],
+                                      fallback_options_dir=self.config.get("options_0dte_dir", "options_csv_output_full_5"))
         if dte1_opts is None or dte1_opts.empty:
             result.total_debits += close_total
             result.total_commissions += commission
@@ -1901,7 +2715,8 @@ class VMaxMinEngine:
             return True
 
         dte1_opts = load_dte1_options(ticker, next_date, trade_date,
-                                      self.config["options_dte1_dir"])
+                                      self.config["options_dte1_dir"],
+                                      fallback_options_dir=self.config.get("options_0dte_dir", "options_csv_output_full_5"))
         if dte1_opts is None or dte1_opts.empty:
             result.total_debits += close_total
             result.total_commissions += commission

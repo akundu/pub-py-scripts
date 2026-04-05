@@ -77,6 +77,42 @@ def calculate_strangle_pnl(
     return total_credit - put_value - call_value
 
 
+def calculate_debit_spread_pnl(
+    debit_per_share: float,
+    long_strike: float,
+    short_strike: float,
+    underlying_price: float,
+    option_type: str,
+) -> float:
+    """Calculate P&L per share for a debit spread at settlement.
+
+    For a bear put debit spread (option_type="put"):
+      Long put at long_strike (higher), short put at short_strike (lower).
+    For a bull call debit spread (option_type="call"):
+      Long call at long_strike (lower), short call at short_strike (higher).
+
+    Returns P&L per share (positive = profit, negative = loss).
+    """
+    if option_type.lower() == "put":
+        width = long_strike - short_strike
+        if underlying_price >= long_strike:
+            spread_value = 0.0
+        elif underlying_price <= short_strike:
+            spread_value = width
+        else:
+            spread_value = long_strike - underlying_price
+    else:  # call
+        width = short_strike - long_strike
+        if underlying_price <= long_strike:
+            spread_value = 0.0
+        elif underlying_price >= short_strike:
+            spread_value = width
+        else:
+            spread_value = underlying_price - long_strike
+
+    return spread_value - debit_per_share
+
+
 def calculate_straddle_pnl(
     total_credit: float,
     strike: float,

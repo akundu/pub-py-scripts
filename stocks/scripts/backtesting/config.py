@@ -75,6 +75,7 @@ class ExitRulesConfig:
     """Exit rule settings."""
     profit_target_pct: Optional[float] = None
     stop_loss_pct: Optional[float] = None
+    stop_loss_start_utc: Optional[str] = None
     time_exit: Optional[str] = None
     mode: str = "first_triggered"
 
@@ -160,6 +161,7 @@ class BacktestConfig:
             exit_rules = ExitRulesConfig(
                 profit_target_pct=er.get("profit_target_pct"),
                 stop_loss_pct=er.get("stop_loss_pct"),
+                stop_loss_start_utc=er.get("stop_loss_start_utc"),
                 time_exit=er.get("time_exit"),
                 mode=er.get("mode", "first_triggered"),
             )

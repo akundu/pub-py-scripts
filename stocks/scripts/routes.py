@@ -56,6 +56,7 @@ def register_routes(app: web.Application) -> None:
         handle_stock_info_static,
         handle_stock_info_html,
         handle_predictions_page,
+        handle_predictions_api_index,
         handle_lazy_load_today_prediction,
         handle_lazy_load_future_prediction,
         handle_lazy_load_band_history,
@@ -123,7 +124,8 @@ def register_routes(app: web.Application) -> None:
     # Stock info HTML page endpoint (parameterized route must be after specific routes)
     app.router.add_get("/stock_info/{symbol}", handle_stock_info_html)
 
-    # Prediction endpoints (must be before catch-all)
+    # Prediction endpoints (must be before catch-all; /predictions/api first for index)
+    app.router.add_get("/predictions/api", handle_predictions_api_index)
     app.router.add_get("/predictions/api/prewarm", handle_prewarm_predictions)
     app.router.add_get("/predictions/api/lazy/today/{ticker}", handle_lazy_load_today_prediction)
     app.router.add_get("/predictions/api/lazy/future/{ticker}/{days}", handle_lazy_load_future_prediction)

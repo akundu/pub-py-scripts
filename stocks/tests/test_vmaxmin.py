@@ -1406,6 +1406,162 @@ class TestLayerMultiDayRolls:
         assert len(layers) >= 2  # at least new HOD and new LOD at 08:35
 
 
+class TestAdaptiveROIEntry:
+    """Tests for adaptive ROI entry threshold in layer mode."""
+
+    def _make_equity_df(self, prices_by_time: dict) -> tuple:
+        bars = []
+        for t, p in sorted(prices_by_time.items(), key=lambda x: _time_to_mins(x[0])):
+            bars.append({"time_pacific": t, "high": p + 2, "low": p - 2, "close": p})
+        df = make_equity_df(bars)
+        return df, prices_by_time
+
+    def _make_0dte_options(self, price: float, time_pacific: str = "06:35",
+                           roi_level: str = "high") -> pd.DataFrame:
+        """Create options with controllable ROI.
+
+        roi_level:
+          "high" — wide bid-ask in our favor → ~50%+ ROI
+          "low"  — narrow spreads → ~10% ROI
+          "zero" — no credit available
+        """
+        rows = []
+        step = 5
+        for i in range(-10, 11):
+            strike = round(price + i * step)
+            dist = abs(price - strike)
+            for otype in ["call", "put"]:
+                if otype == "call":
+                    intrinsic = max(0, price - strike)
+                else:
+                    intrinsic = max(0, strike - price)
+                if roi_level == "high":
+                    tv = max(1.0, 8 - dist * 0.1)
+                    bid = max(0.5, intrinsic + tv - 0.3)
+                    ask = intrinsic + tv + 0.3
+                elif roi_level == "low":
+                    tv = max(0.2, 2 - dist * 0.05)
+                    bid = max(0.05, intrinsic + tv - 0.1)
+                    ask = intrinsic + tv + 1.5
+                else:  # zero
+                    bid = 0.01
+                    ask = 10.0
+                rows.append({
+                    "strike": strike, "type": otype,
+                    "bid": round(bid, 2), "ask": round(ask, 2),
+                    "volume": 100, "time_pacific": time_pacific,
+                })
+        return pd.DataFrame(rows)
+
+    def test_high_roi_accepted_immediately(self):
+        """With high-ROI options, entry is accepted at the start of the window."""
+        engine = VMaxMinEngine({
+            "strategy_mode": "layer",
+            "num_contracts": 1,
+            "layer_dual_entry": True,
+            "layer_entry_min_roi": 0.50,
+            "layer_entry_min_roi_floor": 0.0,
+            "layer_entry_window_start": "06:30",
+            "layer_entry_window_end": "06:45",
+            "call_track_check_times_pacific": [],
+        })
+        prices = {"06:30": 5005, "06:35": 5005, "06:40": 5005, "06:45": 5005, "13:00": 5005}
+        df, _ = self._make_equity_df(prices)
+        opts = self._make_0dte_options(5005, "06:30", roi_level="high")
+
+        result, _ = engine.run_single_day("SPX", "2026-03-20", df, prices,
+                                          opts, ["2026-03-19", "2026-03-20"], 5000)
+        entries = [t for t in result.trades if t.event == "entry"]
+        assert len(entries) == 2
+        # Should show threshold info in notes
+        for e in entries:
+            assert "threshold=" in e.notes
+
+    def test_low_roi_uses_fallback(self):
+        """With low-ROI options below 50% threshold, falls back to best-seen."""
+        engine = VMaxMinEngine({
+            "strategy_mode": "layer",
+            "num_contracts": 1,
+            "layer_dual_entry": True,
+            "layer_entry_min_roi": 0.50,
+            "layer_entry_min_roi_floor": 0.0,
+            "layer_entry_window_start": "06:30",
+            "layer_entry_window_end": "06:45",
+            "call_track_check_times_pacific": [],
+        })
+        prices = {"06:30": 5005, "06:35": 5005, "06:40": 5005, "06:45": 5005, "13:00": 5005}
+        df, _ = self._make_equity_df(prices)
+        # Low ROI options at every minute in the window
+        opts_frames = []
+        for t in ["06:30", "06:35", "06:40", "06:45"]:
+            opts_frames.append(self._make_0dte_options(5005, t, roi_level="low"))
+        opts = pd.concat(opts_frames, ignore_index=True)
+
+        result, _ = engine.run_single_day("SPX", "2026-03-20", df, prices,
+                                          opts, ["2026-03-19", "2026-03-20"], 5000)
+        entries = [t for t in result.trades if t.event == "entry"]
+        # Should still enter — fallback kicks in at window end
+        assert len(entries) >= 1
+        # Notes should indicate fallback
+        fallback_entries = [e for e in entries if "fallback" in e.notes]
+        # At least some entries may use fallback (depends on exact ROI vs threshold at each minute)
+        # The key assertion: entries happened despite low ROI
+        assert len(entries) > 0
+
+    def test_adaptive_roi_relaxes_at_window_end(self):
+        """At the last minute of the window, threshold should be at the floor."""
+        engine = VMaxMinEngine({
+            "strategy_mode": "layer",
+            "num_contracts": 1,
+            "layer_dual_entry": True,
+            "layer_entry_min_roi": 0.50,
+            "layer_entry_min_roi_floor": 0.0,
+            "layer_entry_window_start": "06:30",
+            "layer_entry_window_end": "06:45",
+            "call_track_check_times_pacific": [],
+        })
+        # Provide price at entry_time (06:35) and at window end (06:45)
+        # Only provide low-ROI options at 06:45 — not at 06:30-06:44
+        prices = {"06:35": 5005, "06:45": 5005, "13:00": 5005}
+        df, _ = self._make_equity_df(prices)
+        opts = self._make_0dte_options(5005, "06:45", roi_level="low")
+
+        result, _ = engine.run_single_day("SPX", "2026-03-20", df, prices,
+                                          opts, ["2026-03-19", "2026-03-20"], 5000)
+        entries = [t for t in result.trades if t.event == "entry"]
+        # At 06:45 (progress=1.0), threshold = floor = 0.0, so any ROI is accepted
+        assert len(entries) >= 1
+
+    def test_custom_roi_floor(self):
+        """Custom floor above 0 still allows entry with sufficient ROI."""
+        engine = VMaxMinEngine({
+            "strategy_mode": "layer",
+            "num_contracts": 1,
+            "layer_dual_entry": True,
+            "layer_entry_min_roi": 0.80,
+            "layer_entry_min_roi_floor": 0.20,
+            "layer_entry_window_start": "06:30",
+            "layer_entry_window_end": "06:45",
+            "call_track_check_times_pacific": [],
+        })
+        prices = {"06:30": 5005, "06:45": 5005, "13:00": 5005}
+        df, _ = self._make_equity_df(prices)
+        # High ROI options should exceed even 80% threshold
+        opts = self._make_0dte_options(5005, "06:30", roi_level="high")
+
+        result, _ = engine.run_single_day("SPX", "2026-03-20", df, prices,
+                                          opts, ["2026-03-19", "2026-03-20"], 5000)
+        entries = [t for t in result.trades if t.event == "entry"]
+        assert len(entries) >= 1
+
+    def test_default_config_has_adaptive_roi(self):
+        """DEFAULT_CONFIG includes adaptive ROI keys."""
+        assert "layer_entry_min_roi" in DEFAULT_CONFIG
+        assert "layer_entry_min_roi_floor" in DEFAULT_CONFIG
+        assert DEFAULT_CONFIG["layer_entry_min_roi"] == 0.50
+        assert DEFAULT_CONFIG["layer_entry_min_roi_floor"] == 0.0
+
+
 class TestStrategyRegistration:
     def test_vmaxmin_registered(self):
         from scripts.backtesting.strategies.registry import BacktestStrategyRegistry

@@ -247,11 +247,16 @@ class AdvisorDisplay:
     def _print_entries(self, entries: List[Recommendation]) -> None:
         print(f"\n{C.BOLD}{C.CYAN}>>> ENTRY RECOMMENDATIONS{C.RESET}\n")
 
+        # Get ROI tier thresholds for multiplier display
+        ab = self._profile.adaptive_budget
+        roi_thresholds = ab.roi_thresholds if ab and ab.enabled else [6.0, 9.0]
+        roi_multipliers = ab.roi_multipliers if ab and ab.enabled else [1.0, 2.0, 4.0]
+
         # Header
         hdr = (
             f"  {'ORDER ID':<22} {'TKR':<5} {'TIER':<14} {'DIR':>4}  "
             f"{'SHORT':>7} {'SELL$':>6}  {'LONG':>7} {'BUY$':>6}  "
-            f"{'CR/SH':>6} {'CTR':>4} {'TOT CREDIT':>10} {'MAX LOSS':>9}  {'nROI/ROI':>10}"
+            f"{'CR/SH':>6} {'CTR':>4} {'TOT CREDIT':>10} {'MAX LOSS':>9}  {'nROI/ROI':>10} {'MULT':>4}"
         )
         print(f"{C.DIM}{hdr}{C.RESET}")
 
@@ -268,6 +273,15 @@ class AdvisorDisplay:
             norm_roi = raw_roi / (rec.dte + 1)
             roi_str = f"{norm_roi:.1f}/{raw_roi:.1f}%"
 
+            # Compute multiplier from ROI tiers
+            mult = roi_multipliers[0]
+            for i in range(len(roi_thresholds) - 1, -1, -1):
+                if norm_roi >= roi_thresholds[i]:
+                    mult = roi_multipliers[i + 1]
+                    break
+            mult_color = C.GREEN if mult >= 4 else C.YELLOW if mult >= 2 else C.DIM
+            mult_str = f"{mult:.0f}x"
+
             print(
                 f"  {C.CYAN}{oid:<22}{C.RESET} "
                 f"{C.BOLD}{tkr:<5}{C.RESET} "
@@ -278,7 +292,8 @@ class AdvisorDisplay:
                 f"${rec.credit:>5.2f} {rec.num_contracts:>4}  "
                 f"{C.GREEN}${rec.total_credit:>8,.0f}{C.RESET} "
                 f"{C.YELLOW}{_fmt_money(rec.max_loss):>9}{C.RESET}  "
-                f"{C.CYAN}{roi_str:>10}{C.RESET}"
+                f"{C.CYAN}{roi_str:>10}{C.RESET} "
+                f"{mult_color}{mult_str:>4}{C.RESET}"
             )
             for part in rec.reason.split(" | "):
                 print(f"                          {C.DIM}{part}{C.RESET}")

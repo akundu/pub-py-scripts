@@ -92,7 +92,7 @@ class BacktestEngine:
         if er.profit_target_pct is not None:
             rules.append(ProfitTargetExit(er.profit_target_pct))
         if er.stop_loss_pct is not None:
-            rules.append(StopLossExit(er.stop_loss_pct))
+            rules.append(StopLossExit(er.stop_loss_pct, start_utc=er.stop_loss_start_utc))
         if er.time_exit is not None:
             rules.append(TimeBasedExit(er.time_exit))
 
