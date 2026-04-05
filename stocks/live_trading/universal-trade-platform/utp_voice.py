@@ -1667,11 +1667,59 @@ def compute_spreads_server(
 AUTO_TRADE_STATE_PATH = Path("data/utp_voice/auto_trade_state.json")
 
 
+AUTO_TRADE_HISTORY_PATH = Path("data/utp_voice/auto_trade_history.jsonl")
+
+
 def _load_auto_trade_state() -> dict:
     if AUTO_TRADE_STATE_PATH.exists():
         with open(AUTO_TRADE_STATE_PATH) as f:
             return json.load(f)
     return {"active": False}
+
+
+def _archive_auto_trade_session(state: dict) -> None:
+    """Append a completed session to the history JSONL file."""
+    if not state.get("trading_day"):
+        return
+    try:
+        AUTO_TRADE_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # Compute session summary
+        executed = state.get("executed_today", [])
+        total_credit = sum(e.get("credit", 0) * 100 * state.get("filters", {}).get("quantity", 25)
+                          for e in executed)
+        summary = {
+            "trading_day": state.get("trading_day"),
+            "created_at": state.get("created_at"),
+            "stopped_at": _now_iso(),
+            "config": state.get("config", {}),
+            "filters": state.get("filters", {}),
+            "trades_executed": len(executed),
+            "executed": executed,
+            "total_estimated_credit": round(total_credit, 2),
+            "log_entries": len(state.get("log", [])),
+        }
+        with open(AUTO_TRADE_HISTORY_PATH, "a") as f:
+            f.write(json.dumps(summary, default=str) + "\n")
+        logger.info("Auto-trade session archived for %s (%d trades)", state.get("trading_day"), len(executed))
+    except Exception as e:
+        logger.warning("Failed to archive auto-trade session: %s", e)
+
+
+def _load_auto_trade_history(limit: int = 30) -> list[dict]:
+    """Load recent auto-trade sessions from history JSONL, newest first."""
+    if not AUTO_TRADE_HISTORY_PATH.exists():
+        return []
+    sessions = []
+    with open(AUTO_TRADE_HISTORY_PATH) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    sessions.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    sessions.sort(key=lambda s: s.get("trading_day", ""), reverse=True)
+    return sessions[:limit]
 
 
 def _save_auto_trade_state(state: dict) -> None:
@@ -1703,6 +1751,7 @@ async def _auto_trade_loop(state: dict) -> None:
         # Check trading day
         today = datetime.now().strftime("%Y-%m-%d")
         if current.get("trading_day") != today:
+            _archive_auto_trade_session(current)
             current["active"] = False
             _save_auto_trade_state(current)
             logger.info("Auto-trade: trading day changed, stopping")
@@ -1719,6 +1768,7 @@ async def _auto_trade_loop(state: dict) -> None:
         end_minutes = int(end_parts[0]) * 60 + int(end_parts[1])
         now_minutes = now_et.hour * 60 + now_et.minute
         if now_minutes >= end_minutes:
+            _archive_auto_trade_session(current)
             current["active"] = False
             _save_auto_trade_state(current)
             logger.info("Auto-trade: end time reached (%s ET), stopping", end_time_utc)
@@ -2553,8 +2603,9 @@ async def api_auto_trade_stop(username: str = Depends(require_session)):
     """Stop auto-trading."""
     global _auto_trade_task
     state = _load_auto_trade_state()
-    state["active"] = False
     state.get("log", []).append({"time": _now_iso(), "action": "stopped", "by": username})
+    _archive_auto_trade_session(state)
+    state["active"] = False
     _save_auto_trade_state(state)
     if _auto_trade_task and not _auto_trade_task.done():
         _auto_trade_task.cancel()
@@ -2568,6 +2619,52 @@ async def api_auto_trade_status(username: str = Depends(require_session)):
     state = _load_auto_trade_state()
     state["task_running"] = _auto_trade_task is not None and not _auto_trade_task.done()
     return state
+
+
+@app.get("/api/auto-trade/history")
+async def api_auto_trade_history(
+    page: int = 1,
+    per_page: int = 10,
+    username: str = Depends(require_session),
+):
+    """Get auto-trade session history with trade details, paged, newest first."""
+    import csv as csv_mod
+
+    sessions = _load_auto_trade_history(limit=100)
+
+    # Enrich sessions with P&L from trades CSV if available
+    trades_by_day: dict[str, list[dict]] = {}
+    if TRADES_CSV_PATH.exists():
+        with open(TRADES_CSV_PATH) as f:
+            reader = csv_mod.DictReader(f)
+            for row in reader:
+                if row.get("source") == "auto":
+                    day = row.get("timestamp", "")[:10]
+                    trades_by_day.setdefault(day, []).append(row)
+
+    for session in sessions:
+        day = session.get("trading_day", "")
+        day_trades = trades_by_day.get(day, [])
+        session["csv_trades"] = day_trades
+        session["total_trades_csv"] = len(day_trades)
+        # Compute P&L from CSV data
+        total_credit = sum(float(t.get("total_credit", 0) or 0) for t in day_trades)
+        total_max_loss = sum(float(t.get("total_max_loss", 0) or 0) for t in day_trades)
+        session["csv_total_credit"] = round(total_credit, 2)
+        session["csv_total_max_loss"] = round(total_max_loss, 2)
+
+    # Pagination
+    total = len(sessions)
+    start = (page - 1) * per_page
+    page_sessions = sessions[start:start + per_page]
+
+    return {
+        "sessions": page_sessions,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": (total + per_page - 1) // per_page,
+    }
 
 
 @app.post("/api/quick-trade")

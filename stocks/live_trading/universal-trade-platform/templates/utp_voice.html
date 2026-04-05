@@ -441,6 +441,13 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
         </div>
         <div id="auto-trade-status" style="display:none;margin-bottom:10px"></div>
         <div id="recs-content"></div>
+        <div style="margin-top:16px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;cursor:pointer" onclick="toggleAutoHistory()">
+            <span class="card-title" style="margin:0">Auto-Trade History</span>
+            <span id="auto-history-toggle" style="color:var(--muted);font-size:12px">&#x25BC; Show</span>
+          </div>
+          <div id="auto-trade-history" style="display:none"></div>
+        </div>
       </div>
     </div>
 
@@ -467,7 +474,7 @@ Examples:
     <button class="tab-btn" onclick="switchTab('portfolio',this)">
       <span class="tab-icon">&#x1f4ca;</span><span>Portfolio</span>
     </button>
-    <button class="tab-btn active" onclick="switchTab('options',this)">
+    <button class="tab-btn" onclick="switchTab('options',this)">
       <span class="tab-icon">&#x2630;</span><span>Options</span>
     </button>
     <button class="tab-btn" onclick="switchTab('recs',this)">
@@ -1359,7 +1366,7 @@ async function loadOptionsGrid() {
       });
     }
 
-    // Start 2-second auto-refresh
+    // Ensure 5-second background refresh is running
     startOptAutoRefresh();
 
     // Update data source bar for options tab
@@ -1588,8 +1595,8 @@ function renderSingleChain(options, cp, type, sym, exp) {
 let _optRefreshTimer = null;
 
 function startOptAutoRefresh() {
-  stopOptAutoRefresh();
-  _optRefreshTimer = setInterval(refreshOptionPrices, 2000);
+  if (_optRefreshTimer) return;  // Already running
+  _optRefreshTimer = setInterval(refreshOptionPrices, 5000);
 }
 
 function stopOptAutoRefresh() {
@@ -2428,6 +2435,102 @@ async function refreshAutoTradeStatus() {
 // Check auto-trade status on load and every 30s
 setInterval(refreshAutoTradeStatus, 30000);
 
+// ── Auto-Trade History Dashboard ─────────────────────────────────────────────
+
+let _autoHistoryPage = 1;
+let _autoHistoryLoaded = false;
+
+function toggleAutoHistory() {
+  const el = document.getElementById('auto-trade-history');
+  const toggle = document.getElementById('auto-history-toggle');
+  if (el.style.display === 'none') {
+    el.style.display = 'block';
+    toggle.innerHTML = '&#x25B2; Hide';
+    if (!_autoHistoryLoaded) loadAutoTradeHistory();
+  } else {
+    el.style.display = 'none';
+    toggle.innerHTML = '&#x25BC; Show';
+  }
+}
+
+async function loadAutoTradeHistory(page) {
+  if (!_isLoggedIn) { requireLogin(() => loadAutoTradeHistory(page)); return; }
+  const el = document.getElementById('auto-trade-history');
+  if (page) _autoHistoryPage = page;
+  el.innerHTML = '<div class="loading">Loading history</div>';
+
+  try {
+    const r = await fetch(`/api/auto-trade/history?page=${_autoHistoryPage}&per_page=5`);
+    if (r.status === 401) { showLoginModal(); return; }
+    const d = await r.json();
+    _autoHistoryLoaded = true;
+
+    if (!d.sessions?.length) {
+      el.innerHTML = '<div class="empty-msg" style="padding:16px">No auto-trade sessions yet</div>';
+      return;
+    }
+
+    let html = '';
+
+    // Current session (if active)
+    const current = d.sessions.find(s => s.trading_day === new Date().toISOString().slice(0,10));
+
+    for (const session of d.sessions) {
+      const day = session.trading_day;
+      const trades = session.trades_executed || 0;
+      const credit = session.csv_total_credit || session.total_estimated_credit || 0;
+      const maxLoss = session.csv_total_max_loss || 0;
+      const cfg = session.config || {};
+      const isToday = day === new Date().toISOString().slice(0,10);
+
+      html += `<div class="card" style="margin-bottom:8px;${isToday?'border-color:var(--blue)':''}">`;
+      html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">`;
+      html += `<div><b style="font-size:13px">${day}</b>`;
+      if (isToday) html += ` <span class="badge badge-safe" style="font-size:9px">Today</span>`;
+      html += `</div>`;
+      html += `<div style="font-size:11px;color:var(--muted)">${session.created_at ? formatDateShort(session.created_at) : ''} → ${session.stopped_at ? formatDateShort(session.stopped_at) : 'active'}</div>`;
+      html += `</div>`;
+
+      // KPIs
+      html += `<div style="display:flex;gap:12px;margin-bottom:6px;font-size:12px">`;
+      html += `<div>Trades: <b>${trades}</b></div>`;
+      html += `<div>Credit: <b class="pos">$${credit.toLocaleString()}</b></div>`;
+      if (maxLoss) html += `<div>Max Loss: <b class="neg">$${maxLoss.toLocaleString()}</b></div>`;
+      html += `<div style="color:var(--muted)">Top ${cfg.top_n||3} / ${cfg.interval_minutes||3}m / until ${cfg.end_time_utc||'?'} ET</div>`;
+      html += `</div>`;
+
+      // Trade details
+      const executed = session.executed || [];
+      if (executed.length) {
+        html += `<table class="tbl" style="font-size:11px"><thead><tr><th>Time</th><th>Symbol</th><th>Type</th><th>Short</th><th>Long</th><th>Credit</th><th>Status</th></tr></thead><tbody>`;
+        for (const e of executed) {
+          const t = e.time ? formatDateShort(e.time) : '--';
+          html += `<tr><td>${t}</td><td>${e.sym}</td><td>${e.type}</td><td>${e.short}</td><td>${e.long}</td><td>$${(e.credit||0).toFixed(2)}</td><td>${e.status||'?'}</td></tr>`;
+        }
+        html += `</tbody></table>`;
+      }
+
+      // Filters summary
+      const f = session.filters || {};
+      html += `<div style="font-size:10px;color:var(--muted);margin-top:4px">Filters: ROI≥${f.min_roi_pct||0}% OTM≥${f.min_otm_pct||0}% Pctl≥P${f.min_pctl||0} Qty=${f.quantity||25} Tickers=${(f.tickers||[]).join(',')}</div>`;
+
+      html += `</div>`;
+    }
+
+    // Pagination
+    if (d.pages > 1) {
+      html += `<div style="display:flex;justify-content:center;gap:8px;margin-top:8px">`;
+      for (let p = 1; p <= d.pages; p++) {
+        const active = p === d.page;
+        html += `<button class="btn btn-sm ${active?'btn-blue':'btn-muted'}" onclick="loadAutoTradeHistory(${p})" style="min-width:32px">${p}</button>`;
+      }
+      html += `</div>`;
+    }
+
+    el.innerHTML = html;
+  } catch(e) { el.innerHTML = `<div class="msg-error">${e.message}</div>`; }
+}
+
 // ── Chat Tab (NL interface) ──────────────────────────────────────────────────
 function chatSend() {
   const inp = document.getElementById('chat-text');
@@ -2565,6 +2668,8 @@ function loadAll() {
   setInterval(fetchPredictions, 60000);
   // Pre-load picks data (chain data fetched by startChainRefresh triggers renderRecs on each update)
   loadRecommendations();
+  // Start options price refresh (runs always, not just when Options tab is active)
+  startOptAutoRefresh();
   // Check auto-trade status
   refreshAutoTradeStatus();
 }
@@ -2594,9 +2699,6 @@ switchTab = function(name, btn) {
 
   if (name === 'options') {
     if (!document.getElementById('options-grid').innerHTML.includes('tbl')) loadOptionsGrid();
-    else startOptAutoRefresh();
-  } else {
-    stopOptAutoRefresh();
   }
   if (name === 'recs') {
     if (!document.getElementById('recs-content').innerHTML.includes('tbl')) loadRecommendations();
@@ -2679,9 +2781,10 @@ async function init() {
   // Load public data
   loadAll();
 
-  // Apply hash route (default: options)
+  // Apply hash route — default depends on auth state
   if (!window.location.hash) {
-    history.replaceState(null, '', '#/options');
+    const defaultTab = _isLoggedIn ? '#/portfolio' : '#/options';
+    history.replaceState(null, '', defaultTab);
   }
   applyRoute();
 }
