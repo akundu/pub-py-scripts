@@ -251,6 +251,7 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
     <button type="submit">Login</button>
   </form>
   <div id="login-error"></div>
+  <div style="margin-top:16px"><button class="hbtn" onclick="hideLoginModal()" style="color:var(--muted)">Continue without login</button></div>
 </div>
 
 <!-- App -->
@@ -263,7 +264,7 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
     </div>
     <div class="ctrls">
       <button class="hbtn" id="raw-toggle" onclick="toggleRawMode()">Raw</button>
-      <button class="hbtn" onclick="handleLogout()">Out</button>
+      <span id="login-btn-area"><button class="hbtn" onclick="showLoginModal()">Login</button></span>
     </div>
   </div>
 
@@ -276,7 +277,7 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
   <!-- Tab Content -->
   <div class="tab-content">
     <!-- Portfolio Tab -->
-    <div id="pane-portfolio" class="tab-pane active">
+    <div id="pane-portfolio" class="tab-pane">
       <div class="panel">
         <div id="portfolio-kpis" class="kpi-strip"></div>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -415,10 +416,10 @@ Examples:
 
   <!-- Tab Bar (mobile: bottom, desktop: top) -->
   <div id="tab-bar">
-    <button class="tab-btn active" onclick="switchTab('portfolio',this)">
+    <button class="tab-btn" onclick="switchTab('portfolio',this)">
       <span class="tab-icon">&#x1f4ca;</span><span>Portfolio</span>
     </button>
-    <button class="tab-btn" onclick="switchTab('options',this)">
+    <button class="tab-btn active" onclick="switchTab('options',this)">
       <span class="tab-icon">&#x2630;</span><span>Options</span>
     </button>
     <button class="tab-btn" onclick="switchTab('recs',this)">
@@ -762,24 +763,66 @@ async function handleLogin(e) {
   try {
     const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:u,password:p})});
     if (!r.ok) { err.textContent = (await r.json()).detail||'Login failed'; return false; }
-    showApp();
+    onLoginSuccess();
   } catch(e) { err.textContent = 'Connection error'; }
   return false;
 }
-async function handleLogout() { await fetch('/api/logout',{method:'POST'}); showLogin(); }
+let _isLoggedIn = false;
+let _loginCallback = null;  // Called after successful login
+
+async function handleLogout() {
+  await fetch('/api/logout',{method:'POST'});
+  _isLoggedIn = false;
+  document.getElementById('login-btn-area').innerHTML = '<button class="hbtn" onclick="showLoginModal()">Login</button>';
+}
+
 function showApp() {
   document.getElementById('login-screen').style.display='none';
   document.getElementById('app').style.display='flex';
   loadAll();
 }
+
 function showLogin() {
+  // Legacy — redirect to login modal instead
+  showLoginModal();
+}
+
+function showLoginModal(callback) {
+  _loginCallback = callback || null;
   document.getElementById('login-screen').style.display='flex';
-  document.getElementById('app').style.display='none';
-  conversationHistory = [];
+  document.getElementById('login-screen').style.position='fixed';
+  document.getElementById('login-screen').style.inset='0';
+  document.getElementById('login-screen').style.zIndex='200';
+  document.getElementById('login-screen').style.background='rgba(0,0,0,0.8)';
+  document.getElementById('login-user')?.focus();
+}
+
+function hideLoginModal() {
+  document.getElementById('login-screen').style.display='none';
+  document.getElementById('login-screen').style.position='';
+}
+
+function onLoginSuccess() {
+  _isLoggedIn = true;
+  hideLoginModal();
+  document.getElementById('login-btn-area').innerHTML = '<button class="hbtn" onclick="handleLogout()">Out</button>';
+  if (_loginCallback) { const cb = _loginCallback; _loginCallback = null; cb(); }
+}
+
+function requireLogin(callback) {
+  if (_isLoggedIn) { callback(); return; }
+  showLoginModal(callback);
 }
 
 // ── Tab Navigation ───────────────────────────────────────────────────────────
+const PROTECTED_TABS = ['portfolio', 'chat'];
+
 function switchTab(name, btn) {
+  // Protected tabs require login
+  if (PROTECTED_TABS.includes(name) && !_isLoggedIn) {
+    requireLogin(() => switchTab(name, btn));
+    return;
+  }
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('pane-'+name).classList.add('active');
@@ -2326,6 +2369,20 @@ setInterval(checkHealth, 30000);
 const origSwitchTab = switchTab;
 switchTab = function(name, btn) {
   origSwitchTab(name, btn);
+
+  // Update URL hash
+  const hashMap = {options:'options', recs:'picks', portfolio:'portfolio', chat:'chat'};
+  const hashName = hashMap[name] || name;
+  const params = {};
+  if (name === 'options') {
+    params.sym = document.getElementById('opt-symbol')?.value;
+    params.exp = document.getElementById('opt-exp')?.value;
+  }
+  if (name === 'recs') {
+    params.dte = document.getElementById('rec-dte')?.value;
+  }
+  updateHash(hashName, params);
+
   if (name === 'options') {
     if (!document.getElementById('options-grid').innerHTML.includes('tbl')) loadOptionsGrid();
     else startOptAutoRefresh();
@@ -2334,25 +2391,90 @@ switchTab = function(name, btn) {
   }
   if (name === 'recs') {
     if (!document.getElementById('recs-content').innerHTML.includes('tbl')) loadRecommendations();
-    else renderRecs();  // Re-render to update source bar
+    else renderRecs();
   }
   if (name === 'chat') {
     updateDataSourceBar([{label:'Chat', source:'Claude API', time: new Date().toISOString()}]);
   }
 };
 
+function parseHash() {
+  // Parse /#/options?sym=RUT&exp=2026-04-07
+  const hash = window.location.hash || '';
+  const match = hash.match(/^#\/?(\w+)(?:\?(.*))?$/);
+  if (!match) return {tab: 'options', params: {}};
+  const tab = match[1];
+  const params = {};
+  if (match[2]) {
+    for (const part of match[2].split('&')) {
+      const [k, v] = part.split('=');
+      if (k && v) params[decodeURIComponent(k)] = decodeURIComponent(v);
+    }
+  }
+  return {tab, params};
+}
+
+function updateHash(tab, params) {
+  let hash = `#/${tab}`;
+  const parts = [];
+  for (const [k, v] of Object.entries(params || {})) {
+    if (v) parts.push(`${k}=${encodeURIComponent(v)}`);
+  }
+  if (parts.length) hash += '?' + parts.join('&');
+  history.replaceState(null, '', hash);
+}
+
+function applyRoute() {
+  const {tab, params} = parseHash();
+  const tabMap = {options:'options', picks:'recs', portfolio:'portfolio', chat:'chat', recs:'recs'};
+  const resolved = tabMap[tab] || 'options';
+
+  // Apply params before switching tab
+  if (resolved === 'options' || tab === 'options') {
+    if (params.sym) document.getElementById('opt-symbol').value = params.sym.toUpperCase();
+    if (params.exp) {
+      const expSel = document.getElementById('opt-exp');
+      // Will be applied after grid loads
+      expSel.dataset.pendingExp = params.exp;
+    }
+  }
+  if (resolved === 'recs' || tab === 'picks') {
+    if (params.dte) document.getElementById('rec-dte').value = params.dte;
+  }
+
+  // Find the matching tab button
+  const tabBtns = document.querySelectorAll('.tab-btn');
+  const btnIdx = {portfolio:0, options:1, recs:2, chat:3};
+  const btn = tabBtns[btnIdx[resolved]] || tabBtns[1];
+  switchTab(resolved, btn);
+}
+
+window.addEventListener('hashchange', applyRoute);
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 async function init() {
+  // Show app immediately (no login required for public tabs)
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  initVoice();
+
+  // Check if already authenticated (existing cookie)
   try {
-    const r = await fetch('/api/health');
-    if (r.ok) {
-      // Quick auth check
-      const r2 = await fetch('/api/quotes?symbols=SPX');
-      if (r2.status !== 401) { showApp(); initVoice(); return; }
+    const r = await fetch('/api/portfolio');
+    if (r.status !== 401) {
+      _isLoggedIn = true;
+      document.getElementById('login-btn-area').innerHTML = '<button class="hbtn" onclick="handleLogout()">Out</button>';
     }
   } catch(e) {}
-  showLogin();
-  initVoice();
+
+  // Load public data
+  loadAll();
+
+  // Apply hash route (default: options)
+  if (!window.location.hash) {
+    history.replaceState(null, '', '#/options');
+  }
+  applyRoute();
 }
 init();
 </script>

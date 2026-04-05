@@ -1066,17 +1066,13 @@ def _serve_template(request: Request) -> HTMLResponse:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request, utp_voice_session: str | None = Cookie(default=None)):
-    token = utp_voice_session
-    if not token or not decode_token(token):
-        base_path = _get_base_path(request)
-        return RedirectResponse(url=f"{base_path}/login", status_code=302)
+async def index(request: Request):
+    """Serve the SPA — no auth required. JS handles tab routing + login modal."""
     return _serve_template(request)
 
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    # The HTML handles showing login vs main UI based on auth state
     return _serve_template(request)
 
 
@@ -1581,7 +1577,7 @@ async def prefetch_all_tickers() -> None:
 
 
 @app.get("/api/prefetch")
-async def api_prefetch(username: str = Depends(require_session)):
+async def api_prefetch():
     """Trigger background pre-fetch of options data for default tickers."""
     await prefetch_all_tickers()
 
@@ -1624,8 +1620,7 @@ async def api_portfolio(username: str = Depends(require_session)):
 
 @app.get("/api/quotes")
 async def api_quotes(
-    symbols: str = "SPX,NDX,RUT",
-    username: str = Depends(require_session),
+    symbols: str = "SPX,NDX,RUT"
 ):
     """Get live quotes for multiple symbols."""
     client = get_daemon_client()
@@ -1644,8 +1639,7 @@ async def api_options_grid(
     symbol: str = "SPX",
     expiration: str | None = None,
     option_type: str = "BOTH",
-    strike_range_pct: float = 3.0,
-    username: str = Depends(require_session),
+    strike_range_pct: float = 3.0
 ):
     """Get option chain formatted for grid display. Uses server-side cache."""
     client = get_daemon_client()
@@ -1803,8 +1797,7 @@ def _filter_strikes(quotes: list[dict], strike_min: float, strike_max: float) ->
 
 @app.get("/api/_legacy_recommendations")
 async def api_recommendations(
-    symbols: str = "SPX,NDX,RUT",
-    username: str = Depends(require_session),
+    symbols: str = "SPX,NDX,RUT"
 ):
     """Serve pre-computed recommendations. Recomputed every 60s in background."""
     global _recommendations_cache
@@ -1950,8 +1943,7 @@ async def api_recommendations(
 
 @app.get("/api/performance-summary")
 async def api_performance_summary(
-    days: int = 30,
-    username: str = Depends(require_session),
+    days: int = 30
 ):
     """Get performance metrics for the dashboard."""
     client = get_daemon_client()
@@ -1967,7 +1959,7 @@ _percentile_cache_at: float = 0
 
 
 @app.get("/api/percentiles")
-async def api_percentiles(username: str = Depends(require_session)):
+async def api_percentiles():
     """Proxy to range_percentiles server. Cached 60s during market hours, infinite when closed."""
     global _percentile_cache, _percentile_cache_at
     ttl = 60 if _is_market_hours() else float("inf")
@@ -1997,7 +1989,7 @@ _predictions_cache_at: float = 0
 
 
 @app.get("/api/predictions")
-async def api_predictions(username: str = Depends(require_session)):
+async def api_predictions():
     """Proxy to predictions server for all default tickers. Cached same as percentiles."""
     global _predictions_cache, _predictions_cache_at
     ttl = 60 if _is_market_hours() else float("inf")
