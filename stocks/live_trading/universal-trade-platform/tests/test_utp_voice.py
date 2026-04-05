@@ -34,6 +34,7 @@ def _reset_state(tmp_path):
     utp_voice._options_cache.clear()
     utp_voice._expirations_cache.clear()
     utp_voice._prefetch_in_progress.clear()
+    utp_voice.PUBLIC_MODE = False  # Default: require auth
     # Override credentials file to tmp
     utp_voice.CREDENTIALS_FILE = str(tmp_path / "credentials.json")
     yield
@@ -42,6 +43,7 @@ def _reset_state(tmp_path):
     utp_voice._options_cache.clear()
     utp_voice._expirations_cache.clear()
     utp_voice._prefetch_in_progress.clear()
+    utp_voice.PUBLIC_MODE = False
 
 
 @pytest.fixture
@@ -741,11 +743,10 @@ class TestHealthAPI:
 
 
 class TestPageServing:
-    def test_index_serves_without_auth(self, client):
-        """Index serves SPA without auth — no redirect."""
-        resp = client.get("/")
-        assert resp.status_code == 200
-        assert "UTP" in resp.text
+    def test_index_redirects_without_auth_by_default(self, client):
+        """In default mode, index redirects to login."""
+        resp = client.get("/", follow_redirects=False)
+        assert resp.status_code == 302
 
     def test_index_serves_with_auth(self, client, auth_cookie):
         resp = client.get("/", cookies=auth_cookie)
@@ -866,14 +867,10 @@ class TestPortfolioAPI:
 
 
 class TestQuotesAPI:
-    def test_quotes_no_auth_required(self, client):
-        """Quotes are public — no auth needed."""
-        with patch.object(utp_voice, "get_daemon_client") as mock_get:
-            mock_client = AsyncMock()
-            mock_client.get_quote.return_value = {"symbol": "SPX", "last": 6500}
-            mock_get.return_value = mock_client
-            resp = client.get("/api/quotes?symbols=SPX")
-            assert resp.status_code == 200
+    def test_quotes_requires_auth_by_default(self, client):
+        """In default mode (PUBLIC_MODE=False), quotes require auth."""
+        resp = client.get("/api/quotes")
+        assert resp.status_code == 401
 
     def test_quotes_returns_multiple(self, client, auth_cookie):
         mock_client = AsyncMock()
@@ -890,15 +887,10 @@ class TestQuotesAPI:
 
 
 class TestOptionsGridAPI:
-    def test_options_grid_no_auth_required(self, client):
-        """Options grid is public — no auth needed."""
-        with patch.object(utp_voice, "get_daemon_client") as mock_get:
-            mock_client = AsyncMock()
-            mock_client.get_quote.return_value = {"last": 2500.0}
-            mock_client.get_options.return_value = {"expirations": ["2099-04-06"]}
-            mock_get.return_value = mock_client
-            resp = client.get("/api/options-grid?symbol=RUT")
-            assert resp.status_code != 401
+    def test_options_grid_requires_auth_by_default(self, client):
+        """In default mode, options grid requires auth."""
+        resp = client.get("/api/options-grid")
+        assert resp.status_code == 401
 
     def test_options_grid_returns_chain(self, client, auth_cookie):
         mock_client = AsyncMock()
@@ -965,14 +957,10 @@ class TestQuickTradeAPI:
 
 
 class TestPerformanceAPI:
-    def test_performance_no_auth_required(self, client):
-        """Performance is public — no auth needed."""
-        with patch.object(utp_voice, "get_daemon_client") as mock_get:
-            mock_client = AsyncMock()
-            mock_client.get_performance.return_value = {"total_trades": 0}
-            mock_get.return_value = mock_client
-            resp = client.get("/api/performance-summary")
-            assert resp.status_code == 200
+    def test_performance_requires_auth_by_default(self, client):
+        """In default mode, performance requires auth."""
+        resp = client.get("/api/performance-summary")
+        assert resp.status_code == 401
 
     def test_performance_returns_metrics(self, client, auth_cookie):
         mock_client = AsyncMock()

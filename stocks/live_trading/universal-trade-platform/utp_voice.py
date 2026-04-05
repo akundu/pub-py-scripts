@@ -55,6 +55,7 @@ CREDENTIALS_FILE = os.environ.get(
     "UTP_VOICE_CREDENTIALS_FILE", "data/utp_voice/credentials.json"
 )
 CLAUDE_MODEL = os.environ.get("UTP_VOICE_MODEL", "claude-sonnet-4-20250514")
+PUBLIC_MODE = False  # Set via --public flag; allows anonymous access to options/picks
 
 logger = logging.getLogger("utp_voice")
 
@@ -136,6 +137,16 @@ async def require_session(
     if not username:
         raise HTTPException(status_code=401, detail="Session expired")
     return username
+
+
+async def optional_session(
+    request: Request,
+    utp_voice_session: str | None = Cookie(default=None),
+) -> str | None:
+    """Require auth unless PUBLIC_MODE is enabled."""
+    if PUBLIC_MODE:
+        return None  # Anonymous access allowed
+    return await require_session(request, utp_voice_session)
 
 
 # ── UTP Daemon Client ─────────────────────────────────────────────────────────
@@ -1066,8 +1077,12 @@ def _serve_template(request: Request) -> HTMLResponse:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    """Serve the SPA — no auth required. JS handles tab routing + login modal."""
+async def index(request: Request, utp_voice_session: str | None = Cookie(default=None)):
+    """Serve the SPA. In default mode, requires login. With --public, serves anonymously."""
+    if not PUBLIC_MODE:
+        token = utp_voice_session
+        if not token or not decode_token(token):
+            return RedirectResponse(url="/login", status_code=302)
     return _serve_template(request)
 
 
@@ -1577,7 +1592,7 @@ async def prefetch_all_tickers() -> None:
 
 
 @app.get("/api/prefetch")
-async def api_prefetch():
+async def api_prefetch(_u: str | None = Depends(optional_session)):
     """Trigger background pre-fetch of options data for default tickers."""
     await prefetch_all_tickers()
 
@@ -1620,7 +1635,8 @@ async def api_portfolio(username: str = Depends(require_session)):
 
 @app.get("/api/quotes")
 async def api_quotes(
-    symbols: str = "SPX,NDX,RUT"
+    symbols: str = "SPX,NDX,RUT",
+    _u: str | None = Depends(optional_session),
 ):
     """Get live quotes for multiple symbols."""
     client = get_daemon_client()
@@ -1639,7 +1655,8 @@ async def api_options_grid(
     symbol: str = "SPX",
     expiration: str | None = None,
     option_type: str = "BOTH",
-    strike_range_pct: float = 3.0
+    strike_range_pct: float = 3.0,
+    _u: str | None = Depends(optional_session),
 ):
     """Get option chain formatted for grid display. Uses server-side cache."""
     client = get_daemon_client()
@@ -1943,7 +1960,8 @@ async def api_recommendations(
 
 @app.get("/api/performance-summary")
 async def api_performance_summary(
-    days: int = 30
+    days: int = 30,
+    _u: str | None = Depends(optional_session),
 ):
     """Get performance metrics for the dashboard."""
     client = get_daemon_client()
@@ -1959,10 +1977,10 @@ _percentile_cache_at: float = 0
 
 
 @app.get("/api/percentiles")
-async def api_percentiles():
+async def api_percentiles(_u: str | None = Depends(optional_session)):
     """Proxy to range_percentiles server. Cached 60s during market hours, infinite when closed."""
     global _percentile_cache, _percentile_cache_at
-    ttl = 60 if _is_market_hours() else float("inf")
+    ttl = 120 if _is_market_hours() else float("inf")
     if _percentile_cache and (time.time() - _percentile_cache_at) < ttl:
         return _percentile_cache
 
@@ -1989,10 +2007,10 @@ _predictions_cache_at: float = 0
 
 
 @app.get("/api/predictions")
-async def api_predictions():
+async def api_predictions(_u: str | None = Depends(optional_session)):
     """Proxy to predictions server for all default tickers. Cached same as percentiles."""
     global _predictions_cache, _predictions_cache_at
-    ttl = 60 if _is_market_hours() else float("inf")
+    ttl = 120 if _is_market_hours() else float("inf")
     if _predictions_cache and (time.time() - _predictions_cache_at) < ttl:
         return _predictions_cache
 
@@ -2104,6 +2122,8 @@ Examples:
     serve_parser.add_argument("--log-level", default="info", help="Log level (default: info)")
     serve_parser.add_argument("--workers", type=int, default=1,
                               help="Number of worker processes (default: 1). Use 2-4 for multi-core.")
+    serve_parser.add_argument("--public", action="store_true", default=False,
+                              help="Allow anonymous access to options/picks without login (default: require login for all)")
 
     # add-user
     add_user_parser = subparsers.add_parser("add-user", help="Add or update a user")
@@ -2144,6 +2164,10 @@ Examples:
         if daemon_url:
             _update_daemon_url(daemon_url)
 
+        # Set public mode from --public flag
+        global PUBLIC_MODE
+        PUBLIC_MODE = getattr(args, "public", False)
+
         if not JWT_SECRET:
             print("ERROR: UTP_VOICE_JWT_SECRET environment variable is required.")
             print("  export UTP_VOICE_JWT_SECRET='your-secret-key'")
@@ -2167,6 +2191,8 @@ Examples:
         print(f"  Daemon URL: {UTP_DAEMON_URL}")
         print(f"  Credentials: {CREDENTIALS_FILE}")
         print(f"  Workers: {workers}")
+        if PUBLIC_MODE:
+            print(f"  Public mode: ON (options/picks accessible without login)")
         print(f"  Open http://localhost:{port} in your browser")
 
         _run_server_with_restart(host, port, log_level, workers)

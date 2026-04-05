@@ -171,12 +171,19 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
 .options-ticket-col { display:none; width:0; overflow:hidden; transition:width 0.2s ease; background:var(--bg2); border-left:1px solid var(--border); }
 .options-ticket-col.open { display:block; overflow-y:auto; -webkit-overflow-scrolling:touch; }
 
-/* Mobile: ticket is an overlay that slides up */
+/* Mobile: ticket is a fixed bottom sheet overlay above tab bar */
 @media (max-width:767px) {
   .options-layout { flex-direction:column; height:auto; max-height:calc(100vh - 180px); }
   .options-chain-col { flex:1; min-height:0; }
-  .options-ticket-col { width:100% !important; border-left:none; border-top:1px solid var(--border); max-height:0; transition:max-height 0.3s ease; }
-  .options-ticket-col.open { max-height:55vh; }
+  .options-ticket-col {
+    width:100% !important; border-left:none;
+    position:fixed; left:0; right:0; bottom:52px; /* above tab bar */
+    z-index:25; background:var(--bg2);
+    border-top:1px solid var(--border); border-radius:12px 12px 0 0;
+    max-height:0; overflow:hidden; transition:max-height 0.3s ease;
+    box-shadow:0 -4px 20px rgba(0,0,0,0.5);
+  }
+  .options-ticket-col.open { max-height:65vh; overflow-y:auto; -webkit-overflow-scrolling:touch; display:block; }
 }
 /* Desktop: side panel */
 @media (min-width:768px) {
@@ -390,7 +397,7 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
           <label style="color:var(--muted);font-size:11px">Min Tot Cr</label>
           <input type="number" id="rec-min-total-credit" class="select-styled" style="width:75px" value="1000" min="0" step="500" onchange="filterRecs()">
           <label style="color:var(--muted);font-size:11px">Max Loss</label>
-          <input type="number" id="rec-max-total-loss" class="select-styled" style="width:80px" value="100000" min="0" step="5000" onchange="filterRecs()">
+          <input type="number" id="rec-max-total-loss" class="select-styled" style="width:100px" value="100000" min="0" step="5000" onchange="filterRecs()">
         </div>
         <div id="recs-content"></div>
       </div>
@@ -668,7 +675,7 @@ function getPercentileBracket(sym, expDate, optionType, otmPct) {
 }
 
 function pctlBadge(bracket) {
-  if (!bracket) return '';
+  if (!bracket) return '<span style="color:var(--muted);font-size:9px">--</span>';
   const p = bracket.pctl;
   let cls = 'badge-critical';  // <P75 = red
   if (p >= 99) cls = 'badge-safe';
@@ -731,7 +738,7 @@ function getPredictedBracket(sym, expDate, optionType, otmPct) {
 }
 
 function predBadge(bracket) {
-  if (!bracket) return '';
+  if (!bracket) return '<span style="color:var(--muted);font-size:9px">--</span>';
   const p = bracket.pctl;
   let color = 'var(--red-b)';
   if (p >= 95) color = 'var(--green-b)';
