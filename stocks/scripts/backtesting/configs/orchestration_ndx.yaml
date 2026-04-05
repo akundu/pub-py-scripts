@@ -1,0 +1,80 @@
+orchestration:
+  name: "NDX Multi-Algo System"
+  lookback_days: 250
+  selection_mode: best_score
+  daily_budget: 200000
+  output_dir: results/orchestrated_ndx
+  poll_interval_minutes: 10
+
+  # Shared trigger definitions (referenced by name in instances)
+  triggers:
+    vix_low:
+      type: vix_regime
+      params:
+        allowed_regimes: [low]
+        vix_csv_dir: equities_output/I:VIX
+        vix_lookback: 60
+    vix_normal:
+      type: vix_regime
+      params:
+        allowed_regimes: [normal]
+    vix_high_extreme:
+      type: vix_regime
+      params:
+        allowed_regimes: [high, extreme]
+    weekday_mon_tue:
+      type: day_of_week
+      params:
+        days: [0, 1]
+    always:
+      type: always
+
+  # Sub-orchestrator groups
+  groups:
+    - name: index_0dte
+      selection_mode: best_score
+      budget_share: 0.50
+      instances:
+        - algo: percentile_entry
+          id: v3:NDX:p95_dte0
+          config: credit_spread_0dte_ndx.yaml
+          overrides:
+            percentile: 95
+            dte: 0
+            ticker: NDX
+          triggers: [always]
+          priority: 5
+
+        - algo: iv_regime_condor
+          id: ic:NDX:p85
+          config: iv_regime_condor_ndx.yaml
+          overrides:
+            iron_condor_percentile: 85
+          triggers: [vix_low, vix_normal]
+          priority: 3
+
+    - name: weekly
+      selection_mode: best_score
+      budget_share: 0.20
+      instances:
+        - algo: weekly_iron_condor
+          id: wic:NDX:p80
+          config: weekly_iron_condor_ndx.yaml
+          triggers: [weekday_mon_tue]
+          priority: 4
+
+  # Direct (ungrouped) instances
+  instances:
+    - algo: tail_hedged_credit_spread
+      id: hedge:NDX:p95
+      config: tail_hedged_ndx.yaml
+      triggers: [vix_high_extreme]
+      priority: 1
+      budget_share: 0.30
+
+    - algo: tqqq_momentum_scalper
+      id: tqqq:combined
+      config: tqqq_momentum_scalper.yaml
+      triggers: [always]
+      priority: 6
+      budget_share: 0.20

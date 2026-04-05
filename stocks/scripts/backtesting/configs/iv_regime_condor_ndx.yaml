@@ -1,0 +1,59 @@
+infra:
+  ticker: NDX
+  lookback_days: 250
+  output_dir: results/iv_regime_condor_ndx
+
+providers:
+  - name: csv_equity
+    role: equity
+    params:
+      csv_dir: equities_output
+  - name: csv_options
+    role: options
+    params:
+      csv_dir: options_csv_output
+      dte_buckets: [0, 1]
+
+strategy:
+  name: iv_regime_condor
+  params:
+    # Percentile settings
+    percentile: 95              # Credit spread percentile (normal/high vol)
+    iron_condor_percentile: 85  # Iron condor percentile (low vol, tighter = more premium)
+    lookback: 120
+    dte: 0
+    spread_width: 50
+
+    # VIX regime
+    vix_csv_dir: equities_output/I:VIX
+    vix_lookback: 60
+    low_vol_threshold: 30       # VIX percentile below this = low vol regime
+
+    # Entry
+    entry_start_utc: "14:00"    # 09:00 ET
+    entry_end_utc: "17:00"      # 12:00 ET
+    interval_minutes: 30
+
+    # Position sizing
+    num_contracts: 1
+    max_loss_estimate: 10000
+    min_credit: 0.30
+    use_mid: true
+
+constraints:
+  budget:
+    max_spend_per_transaction: 20000
+    daily_budget: 100000
+  trading_hours:
+    entry_start: "14:00"
+    entry_end: "17:00"
+    forced_exit_time: "20:45"
+  exit_rules:
+    profit_target_pct: 0.50
+    stop_loss_pct: 2.0
+    time_exit: "20:30"
+    mode: first_triggered
+
+report:
+  formats: [console, csv]
+  metrics: [win_rate, roi, sharpe, max_drawdown, profit_factor]

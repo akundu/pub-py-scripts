@@ -1,0 +1,184 @@
+orchestration:
+  name: "V3 Baseline — Time-Windowed 0DTE+Multi-Day (9-month)"
+  lookback_days: 250
+  daily_budget: 600000
+  interval_budget_cap: 50000
+  output_dir: results/orchestrated_v3_time_windows_9mo
+  start_date: "2025-06-13"
+  end_date: "2026-03-13"
+
+  phase2_mode: interval
+  interval_minutes: 15
+  interval_budget_mode: decaying
+  selection_mode: best_score
+  scoring_weights: [0.80, 0.10, 0.10]
+  top_n: 1
+
+  equity_data:
+    NDX: equities_output/I:NDX
+    SPX: equities_output/I:SPX
+    RUT: equities_output/I:RUT
+
+  exit_rules:
+    profit_target_pct: 0.50
+    stop_loss_pct: 2.0
+    proximity_pct: 0.005
+    time_exit_utc: "20:30"
+    roll_check_start_utc: "18:00"
+
+  triggers:
+    always:
+      type: always
+    morning_window:
+      type: time_window
+      params:
+        windows: [["14:30", "16:30"]]    # 6:30a-8:30a PST
+    eod_window:
+      type: time_window
+      params:
+        windows: [["20:45", "21:00"]]    # 12:45p-1:00p PST (last 15 min)
+
+  groups:
+    # ── Morning window: 0DTE credit spreads (6:30a-8:30a PST) ──
+    - name: morning_ndx
+      selection_mode: best_score
+      priority: 1
+      instances:
+        - algo: percentile_entry
+          id: v3:NDX:dte0
+          config: percentile_entry_ndx.yaml
+          overrides:
+            ticker: NDX
+            dte: 0
+            percentile: 95
+            entry_start_utc: "14:30"
+            entry_end_utc: "16:30"
+          triggers: [morning_window]
+
+    - name: morning_spx
+      selection_mode: best_score
+      priority: 1
+      instances:
+        - algo: percentile_entry
+          id: v3:SPX:dte0
+          config: percentile_entry_ndx.yaml
+          overrides:
+            ticker: SPX
+            dte: 0
+            percentile: 95
+            entry_start_utc: "14:30"
+            entry_end_utc: "16:30"
+          triggers: [morning_window]
+
+    - name: morning_rut
+      selection_mode: best_score
+      priority: 1
+      instances:
+        - algo: percentile_entry
+          id: v3:RUT:dte0
+          config: percentile_entry_ndx.yaml
+          overrides:
+            ticker: RUT
+            dte: 0
+            percentile: 95
+            entry_start_utc: "14:30"
+            entry_end_utc: "16:30"
+          triggers: [morning_window]
+
+    # ── EOD window: DTE 1 next-day purchases (last 15 min) ──
+    - name: eod_ndx_dte1
+      selection_mode: best_score
+      priority: 2
+      instances:
+        - algo: percentile_entry
+          id: v3:NDX:dte1
+          config: percentile_entry_ndx.yaml
+          overrides:
+            ticker: NDX
+            dte: 1
+            percentile: 95
+            entry_start_utc: "20:45"
+            entry_end_utc: "21:00"
+            profit_target_multiday: 0.50
+          triggers: [eod_window]
+
+    - name: eod_spx_dte1
+      selection_mode: best_score
+      priority: 2
+      instances:
+        - algo: percentile_entry
+          id: v3:SPX:dte1
+          config: percentile_entry_ndx.yaml
+          overrides:
+            ticker: SPX
+            dte: 1
+            percentile: 95
+            entry_start_utc: "20:45"
+            entry_end_utc: "21:00"
+            profit_target_multiday: 0.50
+          triggers: [eod_window]
+
+    - name: eod_rut_dte1
+      selection_mode: best_score
+      priority: 2
+      instances:
+        - algo: percentile_entry
+          id: v3:RUT:dte1
+          config: percentile_entry_ndx.yaml
+          overrides:
+            ticker: RUT
+            dte: 1
+            percentile: 95
+            entry_start_utc: "20:45"
+            entry_end_utc: "21:00"
+            profit_target_multiday: 0.50
+          triggers: [eod_window]
+
+    # ── EOD window: DTE 2 following-day purchases (last 15 min) ──
+    - name: eod_ndx_dte2
+      selection_mode: best_score
+      priority: 3
+      instances:
+        - algo: percentile_entry
+          id: v3:NDX:dte2
+          config: percentile_entry_ndx.yaml
+          overrides:
+            ticker: NDX
+            dte: 2
+            percentile: 95
+            entry_start_utc: "20:45"
+            entry_end_utc: "21:00"
+            profit_target_multiday: 0.50
+          triggers: [eod_window]
+
+    - name: eod_spx_dte2
+      selection_mode: best_score
+      priority: 3
+      instances:
+        - algo: percentile_entry
+          id: v3:SPX:dte2
+          config: percentile_entry_ndx.yaml
+          overrides:
+            ticker: SPX
+            dte: 2
+            percentile: 95
+            entry_start_utc: "20:45"
+            entry_end_utc: "21:00"
+            profit_target_multiday: 0.50
+          triggers: [eod_window]
+
+    - name: eod_rut_dte2
+      selection_mode: best_score
+      priority: 3
+      instances:
+        - algo: percentile_entry
+          id: v3:RUT:dte2
+          config: percentile_entry_ndx.yaml
+          overrides:
+            ticker: RUT
+            dte: 2
+            percentile: 95
+            entry_start_utc: "20:45"
+            entry_end_utc: "21:00"
+            profit_target_multiday: 0.50
+          triggers: [eod_window]

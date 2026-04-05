@@ -1,0 +1,83 @@
+# NetDebitMaxMin — Contrarian Intraday Debit Spread Strategy (RUT)
+#
+# Buys OTM debit spreads contrarian to the intraday trend:
+#   - New HOD → bear put debit spread (bet on reversal down)
+#   - New LOD → bull call debit spread (bet on reversal up)
+#
+# Run:
+#   python -m scripts.backtesting.runner --config scripts/backtesting/configs/netdebit_maxmin_rut.yaml
+
+infra:
+  ticker: RUT
+  lookback_days: 60
+  output_dir: results/netdebit_maxmin_rut
+  log_level: INFO
+
+providers:
+  - name: csv_equity
+    role: equity
+    params:
+      base_dir: equities_output
+  - name: csv_options
+    role: options
+    params:
+      base_dir: options_csv_output_full_5
+
+strategy:
+  name: netdebit_maxmin
+  params:
+    # Contracts per layer
+    num_contracts: 1
+    commission_per_transaction: 10
+
+    # Width control
+    spread_width_points: 5
+    # min_width: 5          # uncomment for flexible range
+    # max_width: 15
+
+    # Leg placement: otm, just_otm, atm, itm, best_value
+    leg_placement: otm
+    depth_pct: 0.003        # 0.3% OTM offset from extreme
+
+    # Debit bounds
+    max_debit_pct_of_width: 0.50   # reject if debit > 50% of width
+    min_debit: 0.20                # minimum $0.20/share debit
+
+    # Timing
+    entry_time_pacific: "06:35"
+    check_times_pacific:
+      - "07:35"
+      - "08:35"
+      - "09:35"
+      - "10:35"
+      - "11:35"
+    settlement_time_pacific: "13:00"
+
+    # Triggers
+    breach_min_points: null   # null = use min_width_step (5 for RUT)
+    open_entry_spread: true   # open contrarian spread at entry
+
+    # Risk caps
+    max_daily_debit: 5000     # max $5K/day total debit
+    max_concurrent_layers: 10
+
+    # Data sources
+    equity_dir: equities_output
+    options_dir: options_csv_output_full_5
+
+constraints:
+  budget:
+    daily_budget: 5000
+  trading_hours:
+    entry_start: "06:30"
+    entry_end: "13:00"
+
+report:
+  formats:
+    - console
+  metrics:
+    - win_rate
+    - roi
+    - sharpe
+    - max_drawdown
+    - profit_factor

@@ -1,0 +1,82 @@
+orchestration:
+  name: "V4 Multi-Ticker + V3 Baseline + IC Comparison (6-month)"
+  lookback_days: 250
+  daily_budget: 500000
+  interval_budget_cap: 50000
+  output_dir: results/orchestrated_v4
+  start_date: "2025-09-15"
+  end_date: "2026-03-12"
+
+  phase2_mode: interval
+  interval_minutes: 5
+  interval_budget_mode: decaying
+  selection_mode: priority_fallback
+  scoring_weights: [0.80, 0.10, 0.10]
+  top_n: 1
+
+  equity_data:
+    NDX: equities_output/I:NDX
+    SPX: equities_output/I:SPX
+    RUT: equities_output/I:RUT
+
+  exit_rules:
+    profit_target_pct: 0.50
+    stop_loss_pct: 2.0
+    proximity_pct: 0.005
+    time_exit_utc: "20:30"
+    roll_check_start_utc: "18:00"
+
+  triggers:
+    always:
+      type: always
+
+  groups:
+    - name: v4_multi_ticker
+      selection_mode: best_score
+      priority: 1
+      instances:
+        - algo: backtest_v4
+          id: v4:NDX:multi_ticker
+          config: backtest_v4.yaml
+          overrides: { ticker: NDX }
+          triggers: [always]
+
+    - name: v3_baseline
+      selection_mode: best_score
+      priority: 2
+      instances:
+        - algo: percentile_entry
+          id: v3:NDX:p95_dte0
+          config: credit_spread_0dte_ndx.yaml
+          overrides: { percentile: 95, dte: 0, ticker: NDX }
+          triggers: [always]
+        - algo: percentile_entry
+          id: v3:SPX:p95_dte0
+          config: credit_spread_0dte_ndx.yaml
+          overrides: { percentile: 95, dte: 0, ticker: SPX }
+          triggers: [always]
+        - algo: percentile_entry
+          id: v3:RUT:p95_dte0
+          config: credit_spread_0dte_ndx.yaml
+          overrides: { percentile: 95, dte: 0, ticker: RUT }
+          triggers: [always]
+
+    - name: fallback_condor
+      selection_mode: best_score
+      priority: 3
+      instances:
+        - algo: iv_regime_condor
+          id: ic:NDX:p85
+          config: iv_regime_condor_ndx.yaml
+          overrides: { ticker: NDX }
+          triggers: [always]
+        - algo: iv_regime_condor
+          id: ic:SPX:p85
+          config: iv_regime_condor_ndx.yaml
+          overrides: { ticker: SPX }
+          triggers: [always]
+        - algo: iv_regime_condor
+          id: ic:RUT:p85
+          config: iv_regime_condor_ndx.yaml
+          overrides: { ticker: RUT }
+          triggers: [always]

@@ -1,0 +1,62 @@
+# NetDebitMaxMin — Contrarian Intraday Debit Spread Strategy
+#
+# Buys OTM debit spreads contrarian to the intraday trend:
+#   New HOD → bear put debit spread (bet on reversal down)
+#   New LOD → bull call debit spread (bet on reversal up)
+#
+# No rolling, no margin, no carry persistence.
+# Dead layers are abandoned; the winning layer covers all losses.
+#
+# Usage:
+#   python run_netdebit_maxmin_live.py --simulate 2025-10-15
+#   python run_netdebit_maxmin_live.py --live
+
+strategy:
+  name: netdebit_maxmin
+  num_contracts: 1
+  commission_per_transaction: 10
+
+  # Width control
+  spread_width_points: 5
+  # min_width: 5
+  # max_width: 15
+
+  # Leg placement: otm, just_otm, atm, itm, best_value
+  leg_placement: otm
+  depth_pct: 0.003
+
+  # Debit bounds
+  max_debit_pct_of_width: 0.50
+  min_debit: 0.20
+
+  # Timing
+  entry_time_pacific: "06:35"
+  check_times_pacific:
+    - "07:35"
+    - "08:35"
+    - "09:35"
+    - "10:35"
+    - "11:35"
+  settlement_time_pacific: "13:00"
+
+  # Triggers
+  breach_min_points: null
+  open_entry_spread: true
+
+  # Risk caps
+  max_daily_debit: 5000
+  max_concurrent_layers: 10
+
+tickers:
+  - RUT
+
+data:
+  equity_dir: equities_output
+  options_dir: options_csv_output_full_5
+
+mode_overrides:
+  backtest:
+    strategy:
+      max_debit_pct_of_width: 0.60   # slightly more permissive in backtest
+  live: {}
+  simulate: {}

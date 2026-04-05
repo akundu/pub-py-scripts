@@ -1,0 +1,94 @@
+infra:
+  ticker: NDX
+  start_date: "2025-03-13"
+  end_date: "2026-03-13"
+  lookback_days: 250
+  num_processes: 8
+  output_dir: results/backtest_v5
+
+providers:
+  - name: csv_equity
+    role: equity
+    params:
+      csv_dir: equities_output
+  - name: csv_options
+    role: options
+    params:
+      csv_dir: options_csv_output_full
+      dte_buckets: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+strategy:
+  name: backtest_v5
+  params:
+    # Multi-ticker — evaluate all three at each interval
+    tickers: [NDX, SPX, RUT]
+    max_positions_per_interval: 2
+    deployment_target_per_interval: 50000
+
+    # IC fallback
+    ic_credit_multiplier: 2.0
+    iron_condor_percentile: 85
+    fallback_dte_list: [1, 2, 3, 5, 7, 10]
+    fallback_dte_enabled: true
+    vix_csv_dir: equities_output/I:VIX
+    vix_lookback: 60
+
+    # Smart Rolling — P85 percentile strike selection with conditional width expansion
+    roll_enabled: true
+    rolling:
+      max_rolls: 3
+      proximity_pct: 0.005          # 0.5% from strike
+      roll_check_utc: "18:30"       # 11:30am PDT — single evaluation time
+      roll_percentile: 85            # P85 strike at rolled DTE
+      max_width_multiplier: 2.0     # expand only if BTC > new credit
+      min_dte: 1
+      max_dte: 10
+      chain_loss_cap: 0             # no cap initially
+      chain_aware_profit_exit: true
+
+    # Entry
+    percentile: 95
+    lookback: 120
+    dte: 1
+    spread_width: 50
+    spread_width_by_ticker:
+      NDX: 50
+      SPX: 50
+      RUT: 10
+    option_types: [put, call]
+    entry_start_utc: "13:00"
+    entry_end_utc: "17:00"
+    interval_minutes: 5
+    num_contracts: 1
+    min_credit: 1.00
+    min_volume: 5
+    use_mid: true
+    directional_entry: pursuit
+
+    # V5: Credit/risk constraints
+    min_total_credit: 4000             # $4K minimum credit per transaction
+    max_risk_per_transaction: 100000   # $100K maximum risk per transaction
+    min_credit_per_option_by_ticker:
+      NDX: 0.75
+      SPX: 0.35
+      RUT: 0.35
+    width_search_factors: [1.0, 0.75, 0.50]
+
+constraints:
+  budget:
+    max_spend_per_transaction: 100000
+    daily_budget: 1500000
+  trading_hours:
+    entry_start: "13:00"
+    entry_end: "17:00"
+    forced_exit_time: "20:45"
+  exit_rules:
+    profit_target_pct: 0.50
+    stop_loss_pct: 5.0
+    stop_loss_start_utc: "19:00"   # 11am PST — no stop loss before this
+    time_exit: "20:30"
+    mode: first_triggered
+
+report:
+  formats: [console, csv]
+  metrics: [win_rate, roi, sharpe, max_drawdown, profit_factor]

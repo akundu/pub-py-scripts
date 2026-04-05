@@ -1,0 +1,201 @@
+orchestration:
+  name: "Multi-Ticker Interval System (NDX+SPX+RUT, 6-month)"
+  lookback_days: 250
+  daily_budget: 300000
+  output_dir: results/orchestrated_multi_ticker_interval_6mo
+  start_date: "2025-09-15"
+  end_date: "2026-03-12"
+
+  # Interval mode configuration
+  phase2_mode: interval
+  interval_minutes: 5
+  interval_budget_mode: decaying
+  selection_mode: top_n
+  top_n: 5
+
+  # Equity data for intraday price context
+  equity_data:
+    NDX: equities_output/I:NDX
+    SPX: equities_output/I:SPX
+    RUT: equities_output/I:RUT
+    TQQQ: equities_output/TQQQ
+
+  # Exit rules for position tracking
+  exit_rules:
+    profit_target_pct: 0.50
+    stop_loss_pct: 2.0
+    proximity_pct: 0.005
+    time_exit_utc: "20:30"
+    roll_check_start_utc: "18:00"
+
+  # Shared trigger definitions
+  triggers:
+    vix_low:
+      type: vix_regime
+      params:
+        allowed_regimes: [low]
+        vix_csv_dir: equities_output/I:VIX
+        vix_lookback: 60
+    vix_normal:
+      type: vix_regime
+      params:
+        allowed_regimes: [normal]
+    vix_high_extreme:
+      type: vix_regime
+      params:
+        allowed_regimes: [high, extreme]
+    weekday_mon_tue:
+      type: day_of_week
+      params:
+        days: [0, 1]
+    always:
+      type: always
+
+  # Sub-orchestrator groups (per ticker)
+  groups:
+    # --- NDX 0DTE group ---
+    - name: ndx_0dte
+      selection_mode: best_score
+      budget_share: 0.25
+      instances:
+        - algo: percentile_entry
+          id: v3:NDX:p95_dte0
+          config: credit_spread_0dte_ndx.yaml
+          overrides:
+            percentile: 95
+            dte: 0
+            ticker: NDX
+          triggers: [always]
+          priority: 5
+
+        - algo: iv_regime_condor
+          id: ic:NDX:p85
+          config: iv_regime_condor_ndx.yaml
+          overrides:
+            iron_condor_percentile: 85
+            ticker: NDX
+          triggers: [vix_low, vix_normal]
+          priority: 3
+
+    # --- SPX 0DTE group ---
+    - name: spx_0dte
+      selection_mode: best_score
+      budget_share: 0.25
+      instances:
+        - algo: percentile_entry
+          id: v3:SPX:p95_dte0
+          config: credit_spread_0dte_ndx.yaml
+          overrides:
+            percentile: 95
+            dte: 0
+            ticker: SPX
+          triggers: [always]
+          priority: 5
+
+        - algo: iv_regime_condor
+          id: ic:SPX:p85
+          config: iv_regime_condor_ndx.yaml
+          overrides:
+            iron_condor_percentile: 85
+            ticker: SPX
+          triggers: [vix_low, vix_normal]
+          priority: 3
+
+    # --- RUT 0DTE group ---
+    - name: rut_0dte
+      selection_mode: best_score
+      budget_share: 0.20
+      instances:
+        - algo: percentile_entry
+          id: v3:RUT:p95_dte0
+          config: credit_spread_0dte_ndx.yaml
+          overrides:
+            percentile: 95
+            dte: 0
+            ticker: RUT
+          triggers: [always]
+          priority: 5
+
+        - algo: iv_regime_condor
+          id: ic:RUT:p85
+          config: iv_regime_condor_ndx.yaml
+          overrides:
+            iron_condor_percentile: 85
+            ticker: RUT
+          triggers: [vix_low, vix_normal]
+          priority: 3
+
+    # --- NDX weekly group ---
+    - name: ndx_weekly
+      selection_mode: best_score
+      budget_share: 0.10
+      instances:
+        - algo: weekly_iron_condor
+          id: wic:NDX:p80
+          config: weekly_iron_condor_ndx.yaml
+          overrides:
+            ticker: NDX
+          triggers: [weekday_mon_tue]
+          priority: 4
+
+    # --- SPX weekly group ---
+    - name: spx_weekly
+      selection_mode: best_score
+      budget_share: 0.10
+      instances:
+        - algo: weekly_iron_condor
+          id: wic:SPX:p80
+          config: weekly_iron_condor_ndx.yaml
+          overrides:
+            ticker: SPX
+          triggers: [weekday_mon_tue]
+          priority: 4
+
+    # --- RUT weekly group ---
+    - name: rut_weekly
+      selection_mode: best_score
+      budget_share: 0.10
+      instances:
+        - algo: weekly_iron_condor
+          id: wic:RUT:p80
+          config: weekly_iron_condor_ndx.yaml
+          overrides:
+            ticker: RUT
+          triggers: [weekday_mon_tue]
+          priority: 4
+
+  # Direct (ungrouped) instances
+  instances:
+    - algo: tail_hedged_credit_spread
+      id: hedge:NDX:p95
+      config: tail_hedged_ndx.yaml
+      overrides:
+        ticker: NDX
+      triggers: [vix_high_extreme]
+      priority: 1
+      budget_share: 0.10
+
+    - algo: tail_hedged_credit_spread
+      id: hedge:SPX:p95
+      config: tail_hedged_ndx.yaml
+      overrides:
+        ticker: SPX
+      triggers: [vix_high_extreme]
+      priority: 1
+      budget_share: 0.10
+
+    - algo: tail_hedged_credit_spread
+      id: hedge:RUT:p95
+      config: tail_hedged_ndx.yaml
+      overrides:
+        ticker: RUT
+      triggers: [vix_high_extreme]
+      priority: 1
+      budget_share: 0.10
+
+    - algo: tqqq_momentum_scalper
+      id: tqqq:combined
+      config: tqqq_momentum_scalper.yaml
+      triggers: [always]
+      priority: 6
+      budget_share: 0.10

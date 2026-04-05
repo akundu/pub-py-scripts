@@ -1,0 +1,240 @@
+# ============================================================================
+# Orchestration config for backtest mode.
+#
+# IMPORTANT: All trading parameters (tiers, percentiles, spread widths,
+# ROI thresholds, exit rules, risk limits, etc.) are defined in the
+# unified profile:
+#
+#   scripts/live_trading/advisor/profiles/adaptive_v5.yaml
+#
+# This file references that profile via the 'profile' key below.
+# The profile is loaded with mode_overrides.backtest applied automatically
+# (e.g., use_mid=true, profit_target=50%, stop_loss=2x for backtesting).
+#
+# This file ONLY contains orchestration-specific settings:
+# - Date range (start_date, end_date)
+# - Output directory
+# - Interval mode, selection mode, scoring weights
+# - Instance/group definitions (which algos to run per ticker)
+#
+# To change trading behavior, edit adaptive_v5.yaml — NOT this file.
+# ============================================================================
+
+# Unified profile: scripts/live_trading/advisor/profiles/adaptive_v5.yaml
+profile: adaptive_v5
+
+orchestration:
+  name: "Adaptive Budget NDX/SPX/RUT + V5 Baseline (6-month)"
+  lookback_days: 250
+  daily_budget: 1500000
+  output_dir: results/orchestrated_adaptive_budget
+  start_date: "2025-09-15"
+  end_date: "2026-03-12"
+
+  # Interval mode configuration
+  phase2_mode: interval
+  interval_minutes: 5
+  interval_budget_mode: adaptive
+  selection_mode: top_n
+  top_n: 5
+  interval_budget_cap: 150000
+  max_risk_per_transaction: 100000
+  scoring_weights: [0.80, 0.10, 0.10]
+
+  # Adaptive budget — loaded from profile + backtest overrides
+  # These are the orchestration-engine-specific params NOT in the profile
+  adaptive_budget:
+    reserve_enabled: true
+    reserve_pct: 0.30
+    reserve_release_intervals: 24
+    opportunity_scaling_enabled: true
+    opportunity_max_multiplier: 3.0
+    roi_tier_enabled: true
+    roi_mode: fixed_roi
+    roi_thresholds: [6.0, 9.0]
+    roi_multipliers: [1.0, 2.0, 4.0]
+    roi_max_multiplier: 4.0
+    roi_normalize_dte: true
+    momentum_enabled: true
+    momentum_threshold: 0.01
+    momentum_boost: 1.5
+    time_weight_enabled: true
+    time_weight_curve: linear
+    time_weight_late_factor: 1.5
+    contract_scaling_enabled: true
+    contract_max_multiplier: 2.0
+    vix_budget_multipliers:
+      low: 1.2
+      normal: 1.0
+      high: 0.6
+      extreme: 0.25
+    dte0_cutoff_utc: "18:30"
+    absolute_interval_cap: null
+    max_daily_utilization: 0.95
+    combined_max_multiplier: 5.0
+
+  # Equity data for intraday price context
+  equity_data:
+    NDX: equities_output/I:NDX
+    SPX: equities_output/I:SPX
+    RUT: equities_output/I:RUT
+
+  # Exit rules for position tracking
+  exit_rules:
+    profit_target_pct: 0.50
+    stop_loss_pct: 2.0
+    proximity_pct: 0.005
+    time_exit_utc: "20:30"
+    roll_check_start_utc: "18:00"
+
+  # Shared trigger definitions
+  triggers:
+    vix_low:
+      type: vix_regime
+      params:
+        allowed_regimes: [low]
+        vix_csv_dir: equities_output/I:VIX
+        vix_lookback: 60
+    vix_normal:
+      type: vix_regime
+      params:
+        allowed_regimes: [normal]
+    vix_high_extreme:
+      type: vix_regime
+      params:
+        allowed_regimes: [high, extreme]
+    always:
+      type: always
+
+  # Sub-orchestrator groups (per ticker)
+  groups:
+    # --- NDX group ---
+    - name: ndx_all
+      selection_mode: best_score
+      budget_share: 0.35
+      instances:
+        # V5 = always-on baseline (highest priority = lowest number wins ties)
+        - algo: backtest_v5
+          id: v5:NDX
+          config: backtest_v5_dte1.yaml
+          overrides:
+            ticker: NDX
+            tickers: [NDX]
+          triggers: [always]
+          priority: 10
+
+        # V3 percentile entry 0DTE
+        - algo: percentile_entry
+          id: v3:NDX:p95_dte0
+          config: credit_spread_0dte_ndx.yaml
+          overrides:
+            percentile: 95
+            dte: 0
+            ticker: NDX
+          triggers: [always]
+          priority: 8
+
+        # IV regime iron condor — boost when conditions favor
+        - algo: iv_regime_condor
+          id: ic:NDX:p85
+          config: iv_regime_condor_ndx.yaml
+          overrides:
+            iron_condor_percentile: 85
+            ticker: NDX
+          triggers: [vix_low, vix_normal]
+          priority: 3
+
+    # --- SPX group ---
+    - name: spx_all
+      selection_mode: best_score
+      budget_share: 0.35
+      instances:
+        - algo: backtest_v5
+          id: v5:SPX
+          config: backtest_v5_dte1.yaml
+          overrides:
+            ticker: SPX
+            tickers: [SPX]
+          triggers: [always]
+          priority: 10
+
+        - algo: percentile_entry
+          id: v3:SPX:p95_dte0
+          config: credit_spread_0dte_ndx.yaml
+          overrides:
+            percentile: 95
+            dte: 0
+            ticker: SPX
+          triggers: [always]
+          priority: 8
+
+        - algo: iv_regime_condor
+          id: ic:SPX:p85
+          config: iv_regime_condor_ndx.yaml
+          overrides:
+            iron_condor_percentile: 85
+            ticker: SPX
+          triggers: [vix_low, vix_normal]
+          priority: 3
+
+    # --- RUT group ---
+    - name: rut_all
+      selection_mode: best_score
+      budget_share: 0.30
+      instances:
+        - algo: backtest_v5
+          id: v5:RUT
+          config: backtest_v5_dte1.yaml
+          overrides:
+            ticker: RUT
+            tickers: [RUT]
+          triggers: [always]
+          priority: 10
+
+        - algo: percentile_entry
+          id: v3:RUT:p95_dte0
+          config: credit_spread_0dte_ndx.yaml
+          overrides:
+            percentile: 95
+            dte: 0
+            ticker: RUT
+          triggers: [always]
+          priority: 8
+
+        - algo: iv_regime_condor
+          id: ic:RUT:p85
+          config: iv_regime_condor_ndx.yaml
+          overrides:
+            iron_condor_percentile: 85
+            ticker: RUT
+          triggers: [vix_low, vix_normal]
+          priority: 3
+
+  # Direct (ungrouped) instances — hedges only fire in high/extreme VIX
+  instances:
+    - algo: tail_hedged_credit_spread
+      id: hedge:NDX:p95
+      config: tail_hedged_ndx.yaml
+      overrides:
+        ticker: NDX
+      triggers: [vix_high_extreme]
+      priority: 1
+      budget_share: 0.05
+
+    - algo: tail_hedged_credit_spread
+      id: hedge:SPX:p95
+      config: tail_hedged_ndx.yaml
+      overrides:
+        ticker: SPX
+      triggers: [vix_high_extreme]
+      priority: 1
+      budget_share: 0.05
+
+    - algo: tail_hedged_credit_spread
+      id: hedge:RUT:p95
+      config: tail_hedged_ndx.yaml
+      overrides:
+        ticker: RUT
+      triggers: [vix_high_extreme]
+      priority: 1
+      budget_share: 0.05

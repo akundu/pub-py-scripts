@@ -1,0 +1,90 @@
+# BacktestV6Delta -- Delta-based credit spread strategy
+# Selects strikes by option delta instead of percentile boundaries.
+# Sweeps across multiple DTEs to find optimal credit/risk.
+
+infra:
+  ticker: NDX
+  start_date: "2025-10-01"
+  end_date: "2026-03-29"
+  output_dir: results/backtest_v6_delta
+
+providers:
+  - name: csv_equity
+    role: equity
+    params:
+      csv_dir: equities_output
+  - name: csv_options
+    role: options
+    params:
+      csv_dir: options_csv_output_full
+      dte_buckets: [0, 1, 2, 3, 5, 7, 10]
+
+strategy:
+  name: backtest_v6_delta
+  params:
+    # Tickers to evaluate
+    tickers: [NDX, SPX, RUT]
+
+    # Delta parameters
+    target_delta: 0.10          # 10-delta short strike (10% probability ITM)
+    delta_tolerance: 0.05       # Accept strikes within ±5 delta of target
+    default_iv: 0.20            # Fallback IV for BS calculation
+    use_vix1d: false            # Use VIX1D for IV instead of default
+
+    # DTE list to evaluate each interval
+    dte_list: [0, 1, 2, 3]
+
+    # Spread parameters
+    spread_width: 50
+    spread_width_by_ticker:
+      NDX: 50
+      SPX: 50
+      RUT: 10
+    num_contracts: 10
+    min_credit: 0.30
+    min_credit_per_option_by_ticker:
+      NDX: 0.75
+      SPX: 0.35
+      RUT: 0.35
+
+    # Dynamic sizing (set min_total_credit > 0 to enable)
+    min_total_credit: 0         # 0 = use fixed num_contracts
+    max_risk_per_transaction: 100000
+    width_search_factors: [1.0]
+
+    # Entry timing (UTC)
+    entry_start_utc: "14:00"    # 6am PST
+    entry_end_utc: "17:00"      # 9am PST
+    interval_minutes: 5
+    option_types: [put, call]
+    directional_entry: both
+
+    # Selection limits
+    max_positions_per_interval: 2
+    deployment_target_per_interval: 100000
+
+    # Pricing
+    use_mid: true
+
+    # Rolling (optional)
+    roll_enabled: false
+
+constraints:
+  budget:
+    max_spend_per_transaction: 100000
+    daily_budget: 500000
+  trading_hours:
+    entry_start: "14:00"
+    entry_end: "17:00"
+    forced_exit_time: "20:45"
+
+exit_rules:
+  profit_target:
+    enabled: true
+    target_pct: 0.50
+  stop_loss:
+    enabled: true
+    loss_pct: 2.0
+  time_exit:
+    enabled: true
+    exit_time_utc: "20:45"
