@@ -1998,17 +1998,32 @@ async def api_predictions():
 
     result = {}
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            for sym in DEFAULT_TICKERS:
+        # Predictions responses are large (300-400KB each) — use longer timeout
+        # and fetch concurrently. Only keep today + future fields (skip band_history).
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            async def _fetch_pred(sym: str) -> tuple[str, dict | None]:
                 try:
                     resp = await client.get(
                         f"{PERCENTILE_SERVER_URL}/predictions/{sym}",
                         params={"format": "json"},
                     )
                     if resp.status_code == 200:
-                        result[sym] = resp.json()
-                except Exception:
-                    continue
+                        full = resp.json()
+                        # Extract only what we need (today + future bands)
+                        trimmed = {
+                            "ticker": full.get("ticker"),
+                            "today": full.get("today"),
+                            "future": full.get("future"),
+                        }
+                        return sym, trimmed
+                except Exception as e:
+                    logger.debug("Prediction fetch failed for %s: %s", sym, e)
+                return sym, None
+
+            results = await asyncio.gather(*[_fetch_pred(s) for s in DEFAULT_TICKERS])
+            for sym, data in results:
+                if data:
+                    result[sym] = data
     except Exception as e:
         logger.warning("Predictions server unavailable: %s", e)
 
