@@ -335,7 +335,7 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
           </select>
           <label style="color:var(--muted)">Min Credit</label>
           <input type="number" id="opt-min-credit" class="select-styled" style="width:60px" value="0" min="0" step="0.5" onchange="refilterChain()">
-          <label style="color:var(--muted)">Max |&delta;|</label>
+          <label style="color:var(--muted)" title="Max absolute delta of short leg">Max Delta</label>
           <input type="number" id="opt-max-delta" class="select-styled" style="width:55px" value="" min="0" max="1" step="0.05" placeholder="Any" onchange="refilterChain()">
         </div>
         <div class="options-layout">
@@ -394,7 +394,7 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
             <option value="98">&gt;P98</option>
             <option value="99">&gt;P99</option>
           </select>
-          <label style="color:var(--muted);font-size:11px">Max |&delta;|</label>
+          <label style="color:var(--muted);font-size:11px" title="Max absolute delta of short leg (lower = further OTM)">Max Delta</label>
           <input type="number" id="rec-max-delta" class="select-styled" style="width:60px" value="" min="0" max="1" step="0.05" placeholder="Any" onchange="filterRecs()">
           <label style="color:var(--muted);font-size:11px">Qty</label>
           <input type="number" id="rec-qty" class="select-styled" style="width:60px" value="25" min="1" step="5" onchange="filterRecs()">
@@ -416,6 +416,22 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
               <label style="color:var(--muted);font-size:11px">Until</label>
               <input type="time" id="at-end-time" class="select-styled" style="width:90px" value="12:00">
               <span style="color:var(--muted);font-size:11px">ET</span>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px;padding:8px;background:var(--bg);border-radius:6px">
+              <div style="flex:1;min-width:140px" title="After buying a specific spread (e.g. SPX PUT 6400/6380), wait this many minutes before buying the exact same spread again. Prevents stacking the same trade every interval.">
+                <div style="color:var(--muted);font-size:10px;margin-bottom:3px">Cooldown <span style="color:var(--blue);cursor:help">&#x24D8;</span></div>
+                <div style="display:flex;align-items:center;gap:4px">
+                  <input type="number" id="at-dedup" class="select-styled" style="width:60px" value="10" min="0" max="60">
+                  <span style="color:var(--muted);font-size:11px">min before re-buying same spread</span>
+                </div>
+              </div>
+              <div style="flex:1;min-width:140px" title="If ALL available spreads have been bought recently and none are past the cooldown, allow re-buying after this many minutes. Ensures the auto-trader doesn't sit idle when options are limited.">
+                <div style="color:var(--muted);font-size:10px;margin-bottom:3px">Re-buy if no alternatives <span style="color:var(--blue);cursor:help">&#x24D8;</span></div>
+                <div style="display:flex;align-items:center;gap:4px">
+                  <input type="number" id="at-dedup-fallback" class="select-styled" style="width:60px" value="15" min="0" max="60">
+                  <span style="color:var(--muted);font-size:11px">min when nothing else qualifies</span>
+                </div>
+              </div>
             </div>
             <div style="display:flex;gap:8px">
               <button class="btn btn-red" onclick="startAutoTrade()" id="at-start-btn">Start Auto-Trading</button>
@@ -2156,7 +2172,30 @@ function renderRecs() {
   const maxDelta = parseFloat(document.getElementById('rec-max-delta')?.value) || Infinity;
   const selectedDte = parseInt(document.getElementById('rec-dte')?.value) || 0;
 
-  let html = '';
+  // Data status banner — show what's loaded and what's pending
+  const hasPctlData = Object.keys(_pctlByTicker).length > 0;
+  const hasPredData = predictionsData && Object.keys(predictionsData).length > 0;
+  const predTickers = predictionsData ? Object.keys(predictionsData).filter(k => !k.startsWith('error')) : [];
+  const missingPred = CHAIN_TICKERS.filter(s => !predTickers.includes(s));
+  const chainReady = CHAIN_TICKERS.filter(s => getCachedChain(s));
+  const chainMissing = CHAIN_TICKERS.filter(s => !getCachedChain(s));
+
+  let statusHtml = '';
+  const issues = [];
+  if (chainMissing.length) issues.push(`Options: loading ${chainMissing.join(', ')}`);
+  if (!hasPctlData) issues.push('Hist percentiles: loading');
+  if (!hasPredData) issues.push('Pred percentiles: loading');
+  else if (missingPred.length) issues.push(`Pred: missing ${missingPred.join(', ')}`);
+
+  if (issues.length) {
+    statusHtml = `<div style="padding:6px 10px;margin-bottom:8px;background:rgba(88,166,255,0.08);border:1px solid var(--blue);border-radius:6px;font-size:11px;color:var(--blue)">
+      <span class="spinner" style="width:10px;height:10px;border-width:1px;vertical-align:middle;margin-right:4px"></span>
+      ${issues.join(' · ')}
+      <span style="color:var(--muted);margin-left:8px">(filters using missing data will show no matches)</span>
+    </div>`;
+  }
+
+  let html = statusHtml;
   for (const sym of CHAIN_TICKERS) {
     const symCache = chainCache[sym];
     const exps = symCache?._expirations || [];
@@ -2328,6 +2367,8 @@ async function startAutoTrade() {
     top_n: parseInt(document.getElementById('at-top-n')?.value) || 3,
     interval_minutes: parseInt(document.getElementById('at-interval')?.value) || 3,
     end_time_utc: document.getElementById('at-end-time')?.value || '16:00',
+    dedup_minutes: parseInt(document.getElementById('at-dedup')?.value) || 10,
+    dedup_fallback_minutes: parseInt(document.getElementById('at-dedup-fallback')?.value) || 15,
     mode: 'live',
   };
 

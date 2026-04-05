@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Symbology — Universal Trade Platform</title>
+    <style>
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --border: #30363d;
+    --accent-blue: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-red: #f85149;
+    --accent-orange: #d29922;
+    --accent-purple: #bc8cff;
+    --code-bg: #161b22;
+    --link: #58a6ff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+    padding: 0;
+    margin: 0;
+}
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 32px;
+}
+
+/* Navigation bar */
+.nav-bar {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 32px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.nav-bar a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 14px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.nav-bar a:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.nav-bar a.active {
+    color: var(--accent-blue);
+    background: rgba(88, 166, 255, 0.1);
+}
+
+.nav-bar .nav-title {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 15px;
+    margin-right: 8px;
+}
+
+/* Headings */
+h1 {
+    font-size: 2em;
+    font-weight: 600;
+    margin: 0 0 16px 0;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    margin: 32px 0 16px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h3 {
+    font-size: 1.25em;
+    font-weight: 600;
+    margin: 24px 0 12px 0;
+    color: var(--text-primary);
+}
+
+h4 {
+    font-size: 1.1em;
+    font-weight: 600;
+    margin: 20px 0 8px 0;
+    color: var(--text-secondary);
+}
+
+/* Paragraphs and text */
+p {
+    margin: 0 0 16px 0;
+    color: var(--text-primary);
+}
+
+a {
+    color: var(--link);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+em {
+    color: var(--text-secondary);
+}
+
+hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+}
+
+/* Lists */
+ul, ol {
+    margin: 0 0 16px 0;
+    padding-left: 28px;
+}
+
+li {
+    margin: 4px 0;
+    color: var(--text-primary);
+}
+
+li > ul, li > ol {
+    margin: 4px 0 4px 0;
+}
+
+/* Code */
+code {
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 6px;
+    color: var(--accent-blue);
+}
+
+pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    overflow-x: auto;
+    line-height: 1.5;
+}
+
+pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.88em;
+    color: var(--text-primary);
+}
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 16px 0;
+    font-size: 0.95em;
+}
+
+thead {
+    background: var(--bg-secondary);
+}
+
+th {
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+}
+
+td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+tr:hover {
+    background: var(--bg-secondary);
+}
+
+/* Blockquotes */
+blockquote {
+    border-left: 4px solid var(--accent-blue);
+    padding: 8px 16px;
+    margin: 0 0 16px 0;
+    background: var(--bg-secondary);
+    border-radius: 0 8px 8px 0;
+    color: var(--text-secondary);
+}
+
+blockquote p {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+/* Definition lists */
+dt {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-top: 12px;
+}
+
+dd {
+    margin-left: 20px;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+}
+
+/* Footer */
+.footer {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.85em;
+    text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .container { padding: 20px 16px; }
+    .nav-bar { padding: 10px 16px; }
+    table { font-size: 0.85em; }
+    th, td { padding: 6px 8px; }
+}
+</style>
+</head>
+<body>
+    <nav class="nav-bar">
+    <span class="nav-title">UTP Docs</span>
+    <a href="index.html">Home</a>
+    <a href="usage_guide.html">Usage Guide</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="api_reference.html">API Reference</a>
+    <a href="playbook.html">Playbook</a>
+    <a href="providers.html">Providers</a>
+    <a href="configuration.html">Configuration</a>
+    <a href="authentication.html">Authentication</a>
+    <a href="testing.html">Testing</a>
+    <a href="ibkr_setup_guide.html">IBKR Setup</a>
+    <a href="symbology.html" class="active">Symbology</a>
+    <a href="websockets.html">WebSockets</a>
+    </nav>
+    <div class="container">
+    <h1 id="symbology-engine">Symbology Engine</h1>
+<h2 id="overview">Overview</h2>
+<p>The <code>SymbologyMapper</code> translates human-readable symbol representations into broker-specific identifiers. Each broker uses a different internal ID format:</p>
+<table>
+<thead>
+<tr>
+<th>Broker</th>
+<th>Equity ID Format</th>
+<th>Option ID Format</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Robinhood</td>
+<td>UUID (v5 namespace hash)</td>
+<td>UUID (v5 namespace hash)</td>
+</tr>
+<tr>
+<td>IBKR</td>
+<td>Integer conId (SHA256 hash)</td>
+<td>Integer conId (SHA256 hash)</td>
+</tr>
+<tr>
+<td>E*TRADE</td>
+<td>Uppercase ticker string</td>
+<td><code>{SYMBOL}:{YYYYMMDD}:{STRIKE}:{C\|P}</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>File:</strong> <code>app/core/symbology.py</code></p>
+<h2 id="equity-symbol-mapping">Equity Symbol Mapping</h2>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">app.core.symbology</span><span class="w"> </span><span class="kn">import</span> <span class="n">SymbologyMapper</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">app.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">Broker</span>
+
+<span class="c1"># Robinhood: UUID5</span>
+<span class="n">SymbologyMapper</span><span class="o">.</span><span class="n">equity_id</span><span class="p">(</span><span class="n">Broker</span><span class="o">.</span><span class="n">ROBINHOOD</span><span class="p">,</span> <span class="s2">&quot;SPY&quot;</span><span class="p">)</span>
+<span class="c1"># → &quot;c5b0d3e8-6f4a-5c2b-9d1e-8a7f6b5c4d3e&quot;</span>
+
+<span class="c1"># IBKR: Integer conId</span>
+<span class="n">SymbologyMapper</span><span class="o">.</span><span class="n">equity_id</span><span class="p">(</span><span class="n">Broker</span><span class="o">.</span><span class="n">IBKR</span><span class="p">,</span> <span class="s2">&quot;SPY&quot;</span><span class="p">)</span>
+<span class="c1"># → &quot;3318072574&quot;</span>
+
+<span class="c1"># E*TRADE: Uppercase symbol</span>
+<span class="n">SymbologyMapper</span><span class="o">.</span><span class="n">equity_id</span><span class="p">(</span><span class="n">Broker</span><span class="o">.</span><span class="n">ETRADE</span><span class="p">,</span> <span class="s2">&quot;spy&quot;</span><span class="p">)</span>
+<span class="c1"># → &quot;SPY&quot;</span>
+</code></pre></div>
+
+<h3 id="properties">Properties</h3>
+<ul>
+<li><strong>Deterministic:</strong> Same input always produces the same output</li>
+<li><strong>Case-insensitive:</strong> Input symbols are uppercased before mapping</li>
+<li><strong>Collision-resistant:</strong> UUID5 and SHA256 provide strong uniqueness guarantees</li>
+</ul>
+<h2 id="option-contract-mapping">Option Contract Mapping</h2>
+<p>Options are identified by a 4-tuple: <code>(symbol, expiration, strike, option_type)</code>.</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">app.core.symbology</span><span class="w"> </span><span class="kn">import</span> <span class="n">OptionContract</span><span class="p">,</span> <span class="n">SymbologyMapper</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">app.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">Broker</span><span class="p">,</span> <span class="n">OptionType</span>
+
+<span class="n">contract</span> <span class="o">=</span> <span class="n">OptionContract</span><span class="p">(</span>
+    <span class="n">symbol</span><span class="o">=</span><span class="s2">&quot;SPY&quot;</span><span class="p">,</span>
+    <span class="n">expiration</span><span class="o">=</span><span class="s2">&quot;2026-03-20&quot;</span><span class="p">,</span>
+    <span class="n">strike</span><span class="o">=</span><span class="mf">450.0</span><span class="p">,</span>
+    <span class="n">option_type</span><span class="o">=</span><span class="n">OptionType</span><span class="o">.</span><span class="n">PUT</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># Robinhood: UUID5</span>
+<span class="n">SymbologyMapper</span><span class="o">.</span><span class="n">option_id</span><span class="p">(</span><span class="n">Broker</span><span class="o">.</span><span class="n">ROBINHOOD</span><span class="p">,</span> <span class="n">contract</span><span class="p">)</span>
+<span class="c1"># → &quot;f1a2b3c4-d5e6-5f7a-8b9c-0d1e2f3a4b5c&quot;</span>
+
+<span class="c1"># IBKR: Integer conId</span>
+<span class="n">SymbologyMapper</span><span class="o">.</span><span class="n">option_id</span><span class="p">(</span><span class="n">Broker</span><span class="o">.</span><span class="n">IBKR</span><span class="p">,</span> <span class="n">contract</span><span class="p">)</span>
+<span class="c1"># → &quot;1847293650&quot;</span>
+
+<span class="c1"># E*TRADE: Display format</span>
+<span class="n">SymbologyMapper</span><span class="o">.</span><span class="n">option_id</span><span class="p">(</span><span class="n">Broker</span><span class="o">.</span><span class="n">ETRADE</span><span class="p">,</span> <span class="n">contract</span><span class="p">)</span>
+<span class="c1"># → &quot;SPY:20260320:00000450:P&quot;</span>
+</code></pre></div>
+
+<h3 id="canonical-form">Canonical Form</h3>
+<p>Before hashing, option contracts are normalized to a canonical string:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nx">symbol</span><span class="p">}.{</span><span class="nx">expiration</span><span class="p">}.{</span><span class="nx">strike</span><span class="p">}.{</span><span class="nx">option_type</span><span class="p">}</span>
+</code></pre></div>
+
+<p>Example: <code>SPY.2026-03-20.450.0.PUT</code></p>
+<p>This ensures consistent IDs regardless of how the contract data arrives.</p>
+<h2 id="osi-standard-symbology">OSI Standard Symbology</h2>
+<p>The mapper also supports the OCC/OSI standard 21-character format used by exchanges:</p>
+<div class="codehilite"><pre><span></span><code><span class="n">SymbologyMapper</span><span class="o">.</span><span class="n">osi_symbol</span><span class="p">(</span><span class="n">contract</span><span class="p">)</span>
+<span class="c1"># → &quot;SPY   260320P00450000&quot;</span>
+</code></pre></div>
+
+<p>Format: <code>{ROOT:6}{YYMMDD}{C|P}{STRIKE*1000:08d}</code></p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Width</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Root symbol</td>
+<td>6 chars (space-padded)</td>
+<td><code>SPY</code></td>
+</tr>
+<tr>
+<td>Expiration</td>
+<td>6 chars (YYMMDD)</td>
+<td><code>260320</code></td>
+</tr>
+<tr>
+<td>Call/Put</td>
+<td>1 char</td>
+<td><code>P</code></td>
+</tr>
+<tr>
+<td>Strike x 1000</td>
+<td>8 digits (zero-padded)</td>
+<td><code>00450000</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="optioncontract-dataclass">OptionContract Dataclass</h2>
+<div class="codehilite"><pre><span></span><code><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">OptionContract</span><span class="p">:</span>
+    <span class="n">symbol</span><span class="p">:</span> <span class="nb">str</span>           <span class="c1"># Underlying ticker</span>
+    <span class="n">expiration</span><span class="p">:</span> <span class="nb">str</span>       <span class="c1"># YYYY-MM-DD format</span>
+    <span class="n">strike</span><span class="p">:</span> <span class="nb">float</span>         <span class="c1"># Strike price</span>
+    <span class="n">option_type</span><span class="p">:</span> <span class="n">OptionType</span>  <span class="c1"># CALL or PUT</span>
+</code></pre></div>
+
+<p>The dataclass is <code>frozen=True</code>, making it hashable and suitable as a dictionary key or set member.</p>
+<h2 id="usage-in-providers">Usage in Providers</h2>
+<p>Providers call <code>SymbologyMapper</code> internally to translate order legs into broker-native IDs:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Inside RobinhoodProvider.execute_multi_leg_order():</span>
+<span class="k">for</span> <span class="n">leg</span> <span class="ow">in</span> <span class="n">order</span><span class="o">.</span><span class="n">legs</span><span class="p">:</span>
+    <span class="n">contract</span> <span class="o">=</span> <span class="n">OptionContract</span><span class="p">(</span>
+        <span class="n">symbol</span><span class="o">=</span><span class="n">leg</span><span class="o">.</span><span class="n">symbol</span><span class="p">,</span>
+        <span class="n">expiration</span><span class="o">=</span><span class="n">leg</span><span class="o">.</span><span class="n">expiration</span><span class="p">,</span>
+        <span class="n">strike</span><span class="o">=</span><span class="n">leg</span><span class="o">.</span><span class="n">strike</span><span class="p">,</span>
+        <span class="n">option_type</span><span class="o">=</span><span class="n">leg</span><span class="o">.</span><span class="n">option_type</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">instrument_id</span> <span class="o">=</span> <span class="n">SymbologyMapper</span><span class="o">.</span><span class="n">option_id</span><span class="p">(</span><span class="n">Broker</span><span class="o">.</span><span class="n">ROBINHOOD</span><span class="p">,</span> <span class="n">contract</span><span class="p">)</span>
+    <span class="c1"># Use instrument_id in Robinhood API call</span>
+</code></pre></div>
+
+<p>This keeps symbol translation centralized and testable.</p>
+    <div class="footer">
+        Universal Trade Platform Documentation — Generated from Markdown sources in <code>docs/</code>
+    </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Utp Voice — Universal Trade Platform</title>
+    <style>
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --border: #30363d;
+    --accent-blue: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-red: #f85149;
+    --accent-orange: #d29922;
+    --accent-purple: #bc8cff;
+    --code-bg: #161b22;
+    --link: #58a6ff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+    padding: 0;
+    margin: 0;
+}
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 32px;
+}
+
+/* Navigation bar */
+.nav-bar {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 32px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.nav-bar a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 14px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.nav-bar a:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.nav-bar a.active {
+    color: var(--accent-blue);
+    background: rgba(88, 166, 255, 0.1);
+}
+
+.nav-bar .nav-title {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 15px;
+    margin-right: 8px;
+}
+
+/* Headings */
+h1 {
+    font-size: 2em;
+    font-weight: 600;
+    margin: 0 0 16px 0;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    margin: 32px 0 16px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h3 {
+    font-size: 1.25em;
+    font-weight: 600;
+    margin: 24px 0 12px 0;
+    color: var(--text-primary);
+}
+
+h4 {
+    font-size: 1.1em;
+    font-weight: 600;
+    margin: 20px 0 8px 0;
+    color: var(--text-secondary);
+}
+
+/* Paragraphs and text */
+p {
+    margin: 0 0 16px 0;
+    color: var(--text-primary);
+}
+
+a {
+    color: var(--link);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+em {
+    color: var(--text-secondary);
+}
+
+hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+}
+
+/* Lists */
+ul, ol {
+    margin: 0 0 16px 0;
+    padding-left: 28px;
+}
+
+li {
+    margin: 4px 0;
+    color: var(--text-primary);
+}
+
+li > ul, li > ol {
+    margin: 4px 0 4px 0;
+}
+
+/* Code */
+code {
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 6px;
+    color: var(--accent-blue);
+}
+
+pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    overflow-x: auto;
+    line-height: 1.5;
+}
+
+pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.88em;
+    color: var(--text-primary);
+}
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 16px 0;
+    font-size: 0.95em;
+}
+
+thead {
+    background: var(--bg-secondary);
+}
+
+th {
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+}
+
+td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+tr:hover {
+    background: var(--bg-secondary);
+}
+
+/* Blockquotes */
+blockquote {
+    border-left: 4px solid var(--accent-blue);
+    padding: 8px 16px;
+    margin: 0 0 16px 0;
+    background: var(--bg-secondary);
+    border-radius: 0 8px 8px 0;
+    color: var(--text-secondary);
+}
+
+blockquote p {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+/* Definition lists */
+dt {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-top: 12px;
+}
+
+dd {
+    margin-left: 20px;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+}
+
+/* Footer */
+.footer {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.85em;
+    text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .container { padding: 20px 16px; }
+    .nav-bar { padding: 10px 16px; }
+    table { font-size: 0.85em; }
+    th, td { padding: 6px 8px; }
+}
+</style>
+</head>
+<body>
+    <nav class="nav-bar">
+    <span class="nav-title">UTP Docs</span>
+    <a href="index.html">Home</a>
+    <a href="usage_guide.html">Usage Guide</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="api_reference.html">API Reference</a>
+    <a href="playbook.html">Playbook</a>
+    <a href="providers.html">Providers</a>
+    <a href="configuration.html">Configuration</a>
+    <a href="authentication.html">Authentication</a>
+    <a href="testing.html">Testing</a>
+    <a href="ibkr_setup_guide.html">IBKR Setup</a>
+    <a href="symbology.html">Symbology</a>
+    <a href="websockets.html">WebSockets</a>
+    </nav>
+    <div class="container">
+    <h1 id="utp-voice-mobile-trading-interface">UTP Voice — Mobile Trading Interface</h1>
+<p>A mobile-friendly web app for trading credit spreads on SPX, NDX, and RUT from your phone. Sits in front of the UTP daemon, providing natural language commands, interactive options chain, spread analysis, and auto-trading.</p>
+<h2 id="quick-start">Quick Start</h2>
+<div class="codehilite"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>live_trading/universal-trade-platform
+
+<span class="c1"># 1. Add a user</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>add-user<span class="w"> </span>myuser
+
+<span class="c1"># 2. Set environment variables</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ANTHROPIC_API_KEY</span><span class="o">=</span><span class="s2">&quot;sk-ant-...&quot;</span><span class="w">     </span><span class="c1"># For chat/NL commands</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">UTP_VOICE_JWT_SECRET</span><span class="o">=</span><span class="s2">&quot;my-secret&quot;</span><span class="w">   </span><span class="c1"># Required for auth</span>
+
+<span class="c1"># 3. Start (make sure UTP daemon is already running)</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--public<span class="w">       </span><span class="c1"># Allow anonymous access to options/picks</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--workers<span class="w"> </span><span class="m">4</span><span class="w">    </span><span class="c1"># Multi-process</span>
+
+<span class="c1"># 4. Open http://localhost:8800</span>
+</code></pre></div>
+
+<h2 id="features">Features</h2>
+<h3 id="4-tabbed-views">4 Tabbed Views</h3>
+<table>
+<thead>
+<tr>
+<th>Tab</th>
+<th>Auth Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Options</strong></td>
+<td>No (with <code>--public</code>)</td>
+<td>Interactive options chain with calls/puts, bid/ask, greeks (δ/θ/IV), percentiles (empirical + predicted), click-to-trade order builder</td>
+</tr>
+<tr>
+<td><strong>Picks</strong></td>
+<td>No (with <code>--public</code>)</td>
+<td>Auto-analyzed best credit spreads ranked by ROI with filters for ROI%, OTM%, width, delta, percentile, total credit, max loss. Near-miss rows shown when filters are strict.</td>
+</tr>
+<tr>
+<td><strong>Portfolio</strong></td>
+<td>Yes</td>
+<td>Account balances, grouped spread positions with Cr/ROI/MaxLoss, breach status, close/buy-more actions, flush/reset</td>
+</tr>
+<tr>
+<td><strong>Chat</strong></td>
+<td>Yes</td>
+<td>Natural language trading via Claude API with tool-calling agent. Voice input via Web Speech API.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="options-chain">Options Chain</h3>
+<ul>
+<li><strong>Layout</strong>: Calls on left, strike (with OTM%) in center, puts on right</li>
+<li><strong>Greeks</strong>: δ, θ, IV columns (desktop only, hidden on mobile). Live from IBKR during market hours.</li>
+<li><strong>Percentiles</strong>: Empirical (Hist) and Predicted (Pred) badges per strike showing historical safety</li>
+<li><strong>Filters</strong>: Min OTM%, Min Percentile, Min Credit, Max Delta</li>
+<li><strong>Trading</strong>: Tap bid = SELL, tap ask = BUY. Builds multi-leg orders (up to 4 legs for iron condors). MARKET/LIMIT toggle, quantity, per-contract and total credit/max-loss display.</li>
+<li><strong>Auto-refresh</strong>: Prices update every 2 seconds when tab is active</li>
+<li><strong>ATM scroll</strong>: Grid scrolls to the at-the-money strike on load</li>
+</ul>
+<h3 id="picks-spread-scanner">Picks (Spread Scanner)</h3>
+<ul>
+<li><strong>Client-side computation</strong>: Scans all strike pairs locally from cached chain data (no server round-trip)</li>
+<li><strong>Filters</strong>: Min ROI%, Min OTM%, Width (per symbol or custom), Option Type, Min Percentile (empirical), Min Predicted Percentile, Max Delta, Quantity, Min Total Credit, Max Total Loss</li>
+<li><strong>DTE selector</strong>: 0DTE, 1DTE, 2DTE, 5DTE — data pre-fetched in background</li>
+<li><strong>Near-miss rows</strong>: When fewer than 10 spreads pass filters, shows the closest-to-matching rows in grey with failure tags</li>
+<li><strong>Per-contract + total</strong>: Credit and max loss shown both per-contract and total (× qty)</li>
+<li><strong>Percentile data</strong>: Empirical (from range_percentiles) and predicted (from predictions model) shown per spread</li>
+<li><strong>Auto-trade</strong>: Start automated execution of top N spreads per interval</li>
+</ul>
+<h3 id="portfolio">Portfolio</h3>
+<ul>
+<li><strong>KPI strip</strong>: Net Liquidation, Buying Power, Unrealized P&amp;L, Realized P&amp;L</li>
+<li><strong>Position table</strong>: Symbol, Strikes, Qty, Cost, Value, P&amp;L, Cr/ROI/MaxLoss, Expiration, Breach Risk</li>
+<li><strong>Position detail card</strong> (tap to expand): Entry info (time, cost, credit), Current (mark, value, unrealized, daily P&amp;L, P&amp;L vs risk%, time in position), Risk (breach distance, DTE, max loss, ROI)</li>
+<li><strong>Actions</strong>: Close (MARKET/LIMIT, partial quantity), Buy More (equities or spreads)</li>
+<li><strong>Flush + Hard Reset</strong>: Flush re-syncs from broker. Hard reset clears all local data (with confirmation modal).</li>
+<li><strong>Recent closed</strong>: Last 5 closed positions with P&amp;L</li>
+</ul>
+<h3 id="chat-natural-language">Chat (Natural Language)</h3>
+<ul>
+<li><strong>Voice input</strong>: Web Speech API (tap mic button on mobile Safari/Chrome)</li>
+<li><strong>Claude agent</strong>: Tool-calling with 10 tools (get_portfolio, get_quote, get_options, execute_trade, close_position, etc.)</li>
+<li><strong>Read-only by default</strong>: Queries execute immediately, trades show confirmation card with Execute/Edit/Cancel</li>
+<li><strong>Multi-step workflows</strong>: "find best ROI spread for RUT" → quote → options → analysis → suggest</li>
+</ul>
+<h3 id="auto-trading">Auto-Trading</h3>
+<ul>
+<li><strong>Configure</strong>: Top N (default 3), interval (default 3 min), end time (default 12:00 ET), cooldown (default 10 min), fallback re-buy (default 15 min)</li>
+<li><strong>Execution</strong>: Server-side <code>compute_spreads_server()</code> evaluates all tickers, picks top N by ROI, executes at MARKET</li>
+<li><strong>Safety</strong>: Market hours only (9:30-3:50 ET), dedup by strike+type+exp with configurable cooldown, state persisted to JSON (survives restarts)</li>
+<li><strong>Monitoring</strong>: Status banner shows executed count, next eval time, stop button always visible</li>
+</ul>
+<h3 id="trade-logging">Trade Logging</h3>
+<p>Every trade (manual or auto) is logged to <code>data/utp_voice/trades.csv</code> with 28 fields:
+timestamp, symbol, trade_type, option_type, strikes, width, qty, expiration, DTE, credit, max_loss, ROI, OTM%, current_price, hist_percentile, pred_percentile, delta, theta, IV, order_id, fill_price, slippage, source.</p>
+<p>Download: <code>GET /api/trades/export</code></p>
+<h2 id="authentication">Authentication</h2>
+<ul>
+<li><strong>Default mode</strong>: All endpoints require login</li>
+<li><strong>Public mode</strong> (<code>--public</code>): Options, Picks, quotes, percentiles accessible without login. Portfolio, Chat, trading require login.</li>
+<li><strong>Credentials</strong>: bcrypt-hashed passwords in <code>data/utp_voice/credentials.json</code></li>
+<li><strong>Sessions</strong>: JWT httponly cookies, 8-hour expiry</li>
+<li><strong>URL routing</strong>: Hash-based (<code>/#/options?sym=RUT&amp;exp=2026-04-07</code>), bookmarkable</li>
+</ul>
+<h2 id="data-sources">Data Sources</h2>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>What</th>
+<th>Freshness</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>IBKR (via UTP daemon)</td>
+<td>Live equity + option prices, greeks</td>
+<td>Real-time during market hours</td>
+</tr>
+<tr>
+<td>QuestDB (<code>db_server</code>)</td>
+<td>Equity prices batch</td>
+<td>~5 second updates</td>
+</tr>
+<tr>
+<td>CSV exports</td>
+<td>Option snapshots (Polygon.io)</td>
+<td>Hours/days old, used when market closed</td>
+</tr>
+<tr>
+<td>Percentile server (<code>:9100</code>)</td>
+<td>Empirical range percentiles</td>
+<td>120s cache</td>
+</tr>
+<tr>
+<td>Prediction server (<code>:9100</code>)</td>
+<td>Model-based price bands</td>
+<td>120s cache</td>
+</tr>
+</tbody>
+</table>
+<p>See <a href="data_fetching.html">data_fetching.md</a> and <a href="utp_voice_timing.html">utp_voice_timing.md</a> for complete timing and caching details.</p>
+<h2 id="api-endpoints">API Endpoints</h2>
+<h3 id="public-with-public-flag">Public (with <code>--public</code> flag)</h3>
+<table>
+<thead>
+<tr>
+<th>Endpoint</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /api/options-grid</code></td>
+<td>Option chain with strike range, expirations, quotes</td>
+</tr>
+<tr>
+<td><code>GET /api/quotes</code></td>
+<td>Multi-symbol equity quotes</td>
+</tr>
+<tr>
+<td><code>GET /api/percentiles</code></td>
+<td>Empirical range percentiles</td>
+</tr>
+<tr>
+<td><code>GET /api/predictions</code></td>
+<td>Model-based predicted bands</td>
+</tr>
+<tr>
+<td><code>GET /api/prefetch</code></td>
+<td>Trigger background data prefetch</td>
+</tr>
+<tr>
+<td><code>GET /api/health</code></td>
+<td>Daemon connectivity status</td>
+</tr>
+</tbody>
+</table>
+<h3 id="protected-login-required">Protected (login required)</h3>
+<table>
+<thead>
+<tr>
+<th>Endpoint</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /api/portfolio</code></td>
+<td>Portfolio with breach status + quotes</td>
+</tr>
+<tr>
+<td><code>POST /api/chat</code></td>
+<td>Natural language via Claude agent</td>
+</tr>
+<tr>
+<td><code>POST /api/confirm/{id}</code></td>
+<td>Execute a pending trade</td>
+</tr>
+<tr>
+<td><code>POST /api/quick-trade</code></td>
+<td>Create trade confirmation from grid/picks</td>
+</tr>
+<tr>
+<td><code>POST /api/execute-raw</code></td>
+<td>Forward raw request to daemon</td>
+</tr>
+<tr>
+<td><code>GET /api/trades/export</code></td>
+<td>Download trades CSV</td>
+</tr>
+<tr>
+<td><code>POST /api/auto-trade/start</code></td>
+<td>Start auto-trading</td>
+</tr>
+<tr>
+<td><code>POST /api/auto-trade/stop</code></td>
+<td>Stop auto-trading</td>
+</tr>
+<tr>
+<td><code>GET /api/auto-trade/status</code></td>
+<td>Auto-trade state</td>
+</tr>
+</tbody>
+</table>
+<h2 id="cli">CLI</h2>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w">                    </span><span class="c1"># Start server (default port 8800)</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--public<span class="w">           </span><span class="c1"># Anonymous access to options/picks</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--port<span class="w"> </span><span class="m">9000</span><span class="w">        </span><span class="c1"># Custom port</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--workers<span class="w"> </span><span class="m">4</span><span class="w">        </span><span class="c1"># Multi-process</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--daemon-url<span class="w"> </span>http://host:8000<span class="w">  </span><span class="c1"># Custom daemon</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>add-user<span class="w"> </span>&lt;username&gt;<span class="w">      </span><span class="c1"># Add/update user credentials</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>list-users<span class="w">               </span><span class="c1"># List configured users</span>
+</code></pre></div>
+
+<h2 id="environment-variables">Environment Variables</h2>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>UTP_DAEMON_URL</code></td>
+<td><code>http://localhost:8000</code></td>
+<td>UTP daemon address</td>
+</tr>
+<tr>
+<td><code>UTP_VOICE_PORT</code></td>
+<td><code>8800</code></td>
+<td>Server port</td>
+</tr>
+<tr>
+<td><code>ANTHROPIC_API_KEY</code></td>
+<td>(required for chat)</td>
+<td>Claude API key</td>
+</tr>
+<tr>
+<td><code>UTP_VOICE_JWT_SECRET</code></td>
+<td>(required)</td>
+<td>JWT signing secret</td>
+</tr>
+<tr>
+<td><code>UTP_VOICE_JWT_EXPIRE_MINUTES</code></td>
+<td><code>480</code></td>
+<td>Session duration (8 hours)</td>
+</tr>
+<tr>
+<td><code>UTP_VOICE_CREDENTIALS_FILE</code></td>
+<td><code>data/utp_voice/credentials.json</code></td>
+<td>Credentials file path</td>
+</tr>
+<tr>
+<td><code>CSV_EXPORTS_DIR</code></td>
+<td><code>../../csv_exports/options</code></td>
+<td>CSV option data directory</td>
+</tr>
+<tr>
+<td><code>PERCENTILE_SERVER_URL</code></td>
+<td><code>http://localhost:9100</code></td>
+<td>Percentile/prediction server</td>
+</tr>
+<tr>
+<td><code>DB_SERVER_URL</code></td>
+<td><code>http://localhost:8080</code></td>
+<td>QuestDB server for equity prices</td>
+</tr>
+</tbody>
+</table>
+<h2 id="files">Files</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Lines</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>utp_voice.py</code></td>
+<td>~2,800</td>
+<td>Backend: FastAPI server, Claude agent, auto-trade, CSV logger</td>
+</tr>
+<tr>
+<td><code>templates/utp_voice.html</code></td>
+<td>~2,700</td>
+<td>Frontend: SPA with 4 tabs, all JS/CSS inline</td>
+</tr>
+<tr>
+<td><code>tests/test_utp_voice.py</code></td>
+<td>~1,300</td>
+<td>105 tests</td>
+</tr>
+<tr>
+<td><code>docs/utp_voice.md</code></td>
+<td>This file</td>
+<td>Feature documentation</td>
+</tr>
+<tr>
+<td><code>docs/utp_voice_timing.md</code></td>
+<td>Timing reference</td>
+<td>Cache TTLs, refresh intervals</td>
+</tr>
+<tr>
+<td><code>docs/data_fetching.md</code></td>
+<td>Data priority</td>
+<td>IBKR vs CSV vs QuestDB routing</td>
+</tr>
+</tbody>
+</table>
+    <div class="footer">
+        Universal Trade Platform Documentation — Generated from Markdown sources in <code>docs/</code>
+    </div>
+    </div>
+</body>
+</html>

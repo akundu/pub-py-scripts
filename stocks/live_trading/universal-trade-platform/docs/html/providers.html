@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Providers — Universal Trade Platform</title>
+    <style>
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --border: #30363d;
+    --accent-blue: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-red: #f85149;
+    --accent-orange: #d29922;
+    --accent-purple: #bc8cff;
+    --code-bg: #161b22;
+    --link: #58a6ff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+    padding: 0;
+    margin: 0;
+}
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 32px;
+}
+
+/* Navigation bar */
+.nav-bar {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 32px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.nav-bar a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 14px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.nav-bar a:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.nav-bar a.active {
+    color: var(--accent-blue);
+    background: rgba(88, 166, 255, 0.1);
+}
+
+.nav-bar .nav-title {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 15px;
+    margin-right: 8px;
+}
+
+/* Headings */
+h1 {
+    font-size: 2em;
+    font-weight: 600;
+    margin: 0 0 16px 0;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    margin: 32px 0 16px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h3 {
+    font-size: 1.25em;
+    font-weight: 600;
+    margin: 24px 0 12px 0;
+    color: var(--text-primary);
+}
+
+h4 {
+    font-size: 1.1em;
+    font-weight: 600;
+    margin: 20px 0 8px 0;
+    color: var(--text-secondary);
+}
+
+/* Paragraphs and text */
+p {
+    margin: 0 0 16px 0;
+    color: var(--text-primary);
+}
+
+a {
+    color: var(--link);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+em {
+    color: var(--text-secondary);
+}
+
+hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+}
+
+/* Lists */
+ul, ol {
+    margin: 0 0 16px 0;
+    padding-left: 28px;
+}
+
+li {
+    margin: 4px 0;
+    color: var(--text-primary);
+}
+
+li > ul, li > ol {
+    margin: 4px 0 4px 0;
+}
+
+/* Code */
+code {
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 6px;
+    color: var(--accent-blue);
+}
+
+pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    overflow-x: auto;
+    line-height: 1.5;
+}
+
+pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.88em;
+    color: var(--text-primary);
+}
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 16px 0;
+    font-size: 0.95em;
+}
+
+thead {
+    background: var(--bg-secondary);
+}
+
+th {
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+}
+
+td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+tr:hover {
+    background: var(--bg-secondary);
+}
+
+/* Blockquotes */
+blockquote {
+    border-left: 4px solid var(--accent-blue);
+    padding: 8px 16px;
+    margin: 0 0 16px 0;
+    background: var(--bg-secondary);
+    border-radius: 0 8px 8px 0;
+    color: var(--text-secondary);
+}
+
+blockquote p {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+/* Definition lists */
+dt {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-top: 12px;
+}
+
+dd {
+    margin-left: 20px;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+}
+
+/* Footer */
+.footer {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.85em;
+    text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .container { padding: 20px 16px; }
+    .nav-bar { padding: 10px 16px; }
+    table { font-size: 0.85em; }
+    th, td { padding: 6px 8px; }
+}
+</style>
+</head>
+<body>
+    <nav class="nav-bar">
+    <span class="nav-title">UTP Docs</span>
+    <a href="index.html">Home</a>
+    <a href="usage_guide.html">Usage Guide</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="api_reference.html">API Reference</a>
+    <a href="playbook.html">Playbook</a>
+    <a href="providers.html" class="active">Providers</a>
+    <a href="configuration.html">Configuration</a>
+    <a href="authentication.html">Authentication</a>
+    <a href="testing.html">Testing</a>
+    <a href="ibkr_setup_guide.html">IBKR Setup</a>
+    <a href="symbology.html">Symbology</a>
+    <a href="websockets.html">WebSockets</a>
+    </nav>
+    <div class="container">
+    <h1 id="broker-providers">Broker Providers</h1>
+<h2 id="overview">Overview</h2>
+<p>The platform uses the <strong>Provider Pattern</strong> to abstract broker-specific APIs behind a common interface. Each broker implements the <code>BrokerProvider</code> abstract base class and registers itself with the <code>ProviderRegistry</code>.</p>
+<h2 id="brokerprovider-interface">BrokerProvider Interface</h2>
+<p><strong>File:</strong> <code>app/core/provider.py</code></p>
+<div class="codehilite"><pre><span></span><code><span class="k">class</span><span class="w"> </span><span class="nc">BrokerProvider</span><span class="p">(</span><span class="n">abc</span><span class="o">.</span><span class="n">ABC</span><span class="p">):</span>
+    <span class="n">broker</span><span class="p">:</span> <span class="n">ClassVar</span><span class="p">[</span><span class="n">Broker</span><span class="p">]</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">connect</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">disconnect</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_equity_order</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">order</span><span class="p">:</span> <span class="n">EquityOrder</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">OrderResult</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_multi_leg_order</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">order</span><span class="p">:</span> <span class="n">MultiLegOrder</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">OrderResult</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_quote</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">symbol</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Quote</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_positions</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">Position</span><span class="p">]:</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_order_status</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">order_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">OrderResult</span><span class="p">:</span> <span class="o">...</span>
+</code></pre></div>
+
+<p>Every method is <code>async</code> to support non-blocking I/O with real broker APIs.</p>
+<h2 id="implemented-providers">Implemented Providers</h2>
+<h3 id="robinhood-appcoreprovidersrobinhoodpy">Robinhood (<code>app/core/providers/robinhood.py</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Implementation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Auth</td>
+<td>Username/password + TOTP (from env vars)</td>
+</tr>
+<tr>
+<td>Equity IDs</td>
+<td>UUID5 (namespace DNS hash)</td>
+</tr>
+<tr>
+<td>Option IDs</td>
+<td>UUID5 of canonical <code>symbol.expiration.strike.type</code></td>
+</tr>
+<tr>
+<td>Order tracking</td>
+<td>In-memory dict (<code>_orders</code>)</td>
+</tr>
+<tr>
+<td>Status</td>
+<td><strong>Stub</strong> -- returns simulated responses</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Stub Quote:</strong> bid=100.00, ask=100.05, last=100.02, volume=1M
+<strong>Stub Position:</strong> SPY 100 shares @ $450</p>
+<h3 id="etrade-appcoreprovidersetradepy">E*TRADE (<code>app/core/providers/etrade.py</code>)</h3>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Implementation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Auth</td>
+<td>Consumer key/secret + OAuth token/secret (from env vars)</td>
+</tr>
+<tr>
+<td>Equity IDs</td>
+<td>Uppercase ticker symbol</td>
+</tr>
+<tr>
+<td>Option IDs</td>
+<td><code>{symbol}:{YYYYMMDD}:{strike_padded}:{C\|P}</code> format</td>
+</tr>
+<tr>
+<td>Order tracking</td>
+<td>In-memory dict</td>
+</tr>
+<tr>
+<td>Status</td>
+<td><strong>Stub</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Stub Quote:</strong> bid=99.95, ask=100.10, last=100.00, volume=500K
+<strong>Stub Position:</strong> QQQ 50 shares @ $380</p>
+<h3 id="ibkr-appcoreprovidersibkrpy">IBKR (<code>app/core/providers/ibkr.py</code>)</h3>
+<p>The IBKR provider has <strong>two implementations</strong> in the same file:</p>
+<h4 id="ibkrprovider-stub"><code>IBKRProvider</code> (Stub)</h4>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Implementation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Auth</td>
+<td>Logs connection to TWS host/port</td>
+</tr>
+<tr>
+<td>Equity IDs</td>
+<td>Integer conId (SHA256 hash truncated)</td>
+</tr>
+<tr>
+<td>Option IDs</td>
+<td>Integer conId of canonical form</td>
+</tr>
+<tr>
+<td>Order tracking</td>
+<td>In-memory dict</td>
+</tr>
+<tr>
+<td>Status</td>
+<td><strong>Stub</strong> -- returns simulated responses</td>
+</tr>
+<tr>
+<td>When used</td>
+<td><code>IBKR_ACCOUNT_ID</code> is empty (default)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Stub Quote:</strong> bid=100.10, ask=100.15, last=100.12, volume=2M
+<strong>Stub Position:</strong> AAPL 200 shares @ $175</p>
+<h4 id="ibkrliveprovider-real"><code>IBKRLiveProvider</code> (Real)</h4>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Implementation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Auth</td>
+<td>Connects to TWS/IB Gateway via <code>ib_insync</code></td>
+</tr>
+<tr>
+<td>Market data</td>
+<td>Real quotes via <code>reqTickersAsync()</code></td>
+</tr>
+<tr>
+<td>Positions</td>
+<td>Real positions via <code>ib.positions()</code></td>
+</tr>
+<tr>
+<td>Equity orders</td>
+<td><code>placeOrder()</code> with <code>Stock</code> contract</td>
+</tr>
+<tr>
+<td>Multi-leg</td>
+<td><code>placeOrder()</code> with <code>ComboLegs</code> BAG contract. Supports both <code>MarketOrder</code> (default when <code>net_price</code> is omitted) and <code>LimitOrder</code> (when <code>net_price</code> is specified).</td>
+</tr>
+<tr>
+<td>Order status</td>
+<td>Iterates <code>ib.trades()</code> to find matching orderId</td>
+</tr>
+<tr>
+<td>Safety</td>
+<td><code>IBKR_READONLY=true</code> rejects all order submissions</td>
+</tr>
+<tr>
+<td>When used</td>
+<td><code>IBKR_ACCOUNT_ID</code> is set to a valid account ID</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Key safety features:</strong>
+- Read-only mode is the default (<code>IBKR_READONLY=true</code>)
+- Orders return <code>REJECTED</code> with clear message when readonly
+- Market data type defaults to <code>4</code> (delayed/free)
+- All positions include <code>source=LIVE_API</code> and <code>account_id</code>
+- Position sync uses IBKR <code>conId</code> for unique matching (prevents duplicate imports)
+- Position model includes <code>con_id</code>, <code>sec_type</code>, <code>expiration</code>, <code>strike</code>, <code>right</code>
+- Position store has <code>find_by_con_id()</code> method for conId-based lookups</p>
+<p><strong>Quote handling:</strong>
+- NaN handling for all quote fields (bid/ask/last/volume)
+- Index quotes use <code>reqMktData</code> with streaming + delayed data fallback
+- Streaming cache: if the streaming service has a fresh tick (&lt;15s), serves instantly</p>
+<p><strong>Selection logic in <code>app/main.py</code>:</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="k">if</span> <span class="n">settings</span><span class="o">.</span><span class="n">ibkr_account_id</span><span class="p">:</span>
+    <span class="n">ibkr_provider</span> <span class="o">=</span> <span class="n">IBKRLiveProvider</span><span class="p">()</span>  <span class="c1"># Real ib_insync</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="n">ibkr_provider</span> <span class="o">=</span> <span class="n">IBKRProvider</span><span class="p">()</span>       <span class="c1"># Stub</span>
+</code></pre></div>
+
+<p><strong>Reconnection</strong>: If the TWS/Gateway connection drops, <code>IBKRLiveProvider</code> automatically reconnects with exponential backoff (2s, 4s, 8s, ... capped at 10s, max 10 retries). Connection health is available via <code>provider.is_healthy()</code>.</p>
+<p><strong>Degraded startup</strong>: If IBKR is unavailable when the daemon starts, the server starts anyway in degraded mode and retries the IBKR connection in the background with the same backoff schedule.</p>
+<p><strong>Auto-restart</strong>: The daemon process automatically restarts on unhandled exceptions with exponential backoff (2s→10s, max 20 consecutive crashes). Signal shutdown (SIGTERM/SIGINT/Ctrl-C) exits cleanly without restart. Use <code>--no-restart</code> to disable.</p>
+<p><strong>IBKR as primary data source</strong>: When IBKR is connected and healthy, it serves as the primary data source for live positions, account balances, and unrealized P&amp;L via <code>LiveDataService</code>. The local position store acts as an automatic fallback when IBKR is disconnected. See the <a href="architecture.md#data-source-priority">Architecture</a> doc for details.</p>
+<p>See <a href="ibkr_setup_guide.html">IBKR Setup Guide</a> for connection walkthrough.</p>
+<h4 id="ibkrrestprovider-cpg-rest-api"><code>IBKRRestProvider</code> (CPG REST API)</h4>
+<p><strong>File:</strong> <code>app/core/providers/ibkr_rest.py</code></p>
+<p>An alternative IBKR provider using the Client Portal Gateway (CPG) REST API instead of <code>ib_insync</code>/TWS. Activated with <code>--ibkr-api rest --gateway-url https://localhost:7498</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Implementation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Auth</td>
+<td>CPG session auth (browser-based login, then REST)</td>
+</tr>
+<tr>
+<td>Market data</td>
+<td>Snapshot polling (<code>/iserver/marketdata/snapshot</code>)</td>
+</tr>
+<tr>
+<td>Positions</td>
+<td><code>/portfolio/{account}/positions/0</code> with 10s cache</td>
+</tr>
+<tr>
+<td>Equity orders</td>
+<td><code>/iserver/account/{account}/orders</code></td>
+</tr>
+<tr>
+<td>Multi-leg</td>
+<td>Combo orders via <code>conidex</code> format with auto-confirmation (up to 5 chained prompts)</td>
+</tr>
+<tr>
+<td>Option chains</td>
+<td><code>/iserver/secdef/strikes</code> + <code>/iserver/secdef/info</code></td>
+</tr>
+<tr>
+<td>Option quotes</td>
+<td>Batch snapshot with conID resolution per strike</td>
+</tr>
+<tr>
+<td>Margin check</td>
+<td>What-if order via <code>/iserver/account/{account}/orders/whatif</code></td>
+</tr>
+<tr>
+<td>Keepalive</td>
+<td>Background <code>/tickle</code> every 60s</td>
+</tr>
+</tbody>
+</table>
+<p><strong>CPG-specific notes:</strong>
+- Snapshot field mapping: <code>84</code>=bid, <code>86</code>=ask, <code>85</code>=bid size, <code>88</code>=ask size, <code>31</code>=last, <code>87</code>=volume
+- ConID resolution: tries SMART exchange first, falls back to CBOE for index symbols (SPX needs CBOE)
+- Month format: CPG requires MMMYY (e.g., <code>MAR26</code>), not YYYYMM
+- Negative conIDs (failed resolutions) cached in-memory only, never persisted to Redis
+- Portfolio/balance responses cached 10s to avoid repeated CPG round-trips</p>
+<p><strong>When to use CPG vs TWS:</strong>
+- <strong>TWS/ib_insync</strong>: Best for streaming data, lower latency, full API access
+- <strong>CPG REST</strong>: No TWS dependency, web-based auth, works through firewalls, better for headless servers</p>
+<h2 id="providerregistry">ProviderRegistry</h2>
+<p><strong>File:</strong> <code>app/core/provider.py</code></p>
+<p>The registry is a class-level singleton that maps <code>Broker</code> enum values to provider instances.</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Register</span>
+<span class="n">ProviderRegistry</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="n">RobinhoodProvider</span><span class="p">())</span>
+
+<span class="c1"># Lookup</span>
+<span class="n">provider</span> <span class="o">=</span> <span class="n">ProviderRegistry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">Broker</span><span class="o">.</span><span class="n">ROBINHOOD</span><span class="p">)</span>
+
+<span class="c1"># Aggregate positions across all brokers</span>
+<span class="n">positions</span> <span class="o">=</span> <span class="k">await</span> <span class="n">ProviderRegistry</span><span class="o">.</span><span class="n">aggregate_positions</span><span class="p">()</span>
+
+<span class="c1"># List all registered providers</span>
+<span class="n">all_providers</span> <span class="o">=</span> <span class="n">ProviderRegistry</span><span class="o">.</span><span class="n">all</span><span class="p">()</span>
+
+<span class="c1"># Clear (used in tests and shutdown)</span>
+<span class="n">ProviderRegistry</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+</code></pre></div>
+
+<h3 id="lifecycle">Lifecycle</h3>
+<p><strong>Daemon mode</strong>: When running as <code>python utp.py daemon</code>, providers are initialized by the daemon process, not the FastAPI lifespan. The <code>_daemon_mode</code> flag prevents double-initialization.</p>
+<p>Providers are registered and connected during the FastAPI lifespan startup:</p>
+<div class="codehilite"><pre><span></span><code><span class="nd">@asynccontextmanager</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">lifespan</span><span class="p">(</span><span class="n">app</span><span class="p">:</span> <span class="n">FastAPI</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">AsyncIterator</span><span class="p">[</span><span class="kc">None</span><span class="p">]:</span>
+    <span class="n">ibkr_provider</span> <span class="o">=</span> <span class="n">IBKRLiveProvider</span><span class="p">()</span> <span class="k">if</span> <span class="n">settings</span><span class="o">.</span><span class="n">ibkr_account_id</span> <span class="k">else</span> <span class="n">IBKRProvider</span><span class="p">()</span>
+    <span class="n">providers</span> <span class="o">=</span> <span class="p">[</span><span class="n">RobinhoodProvider</span><span class="p">(),</span> <span class="n">EtradeProvider</span><span class="p">(),</span> <span class="n">ibkr_provider</span><span class="p">]</span>
+    <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">providers</span><span class="p">:</span>
+        <span class="n">ProviderRegistry</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
+        <span class="k">await</span> <span class="n">p</span><span class="o">.</span><span class="n">connect</span><span class="p">()</span>
+    <span class="k">yield</span>
+    <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">providers</span><span class="p">:</span>
+        <span class="k">await</span> <span class="n">p</span><span class="o">.</span><span class="n">disconnect</span><span class="p">()</span>
+    <span class="n">ProviderRegistry</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+</code></pre></div>
+
+<h2 id="position-source-attribution">Position Source Attribution</h2>
+<p>All providers set <code>source</code> on returned <code>Position</code> objects:</p>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Stub providers</td>
+<td><code>PositionSource.LIVE_API</code> (default)</td>
+</tr>
+<tr>
+<td><code>IBKRLiveProvider.get_positions()</code></td>
+<td><code>PositionSource.LIVE_API</code> with <code>account_id</code></td>
+</tr>
+<tr>
+<td>Position sync loop</td>
+<td><code>PositionSource.EXTERNAL_SYNC</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="adding-a-new-broker">Adding a New Broker</h2>
+<p>To add support for a new broker (e.g., Schwab):</p>
+<h3 id="1-add-the-broker-enum-value">1. Add the Broker Enum Value</h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># app/models.py</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Broker</span><span class="p">(</span><span class="nb">str</span><span class="p">,</span> <span class="n">Enum</span><span class="p">):</span>
+    <span class="n">ROBINHOOD</span> <span class="o">=</span> <span class="s2">&quot;robinhood&quot;</span>
+    <span class="n">ETRADE</span> <span class="o">=</span> <span class="s2">&quot;etrade&quot;</span>
+    <span class="n">IBKR</span> <span class="o">=</span> <span class="s2">&quot;ibkr&quot;</span>
+    <span class="n">SCHWAB</span> <span class="o">=</span> <span class="s2">&quot;schwab&quot;</span>  <span class="c1"># Add this</span>
+</code></pre></div>
+
+<h3 id="2-create-the-provider">2. Create the Provider</h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># app/core/providers/schwab.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">ClassVar</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">app.core.provider</span><span class="w"> </span><span class="kn">import</span> <span class="n">BrokerProvider</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">app.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">Broker</span><span class="p">,</span> <span class="n">Position</span><span class="p">,</span> <span class="n">PositionSource</span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">SchwabProvider</span><span class="p">(</span><span class="n">BrokerProvider</span><span class="p">):</span>
+    <span class="n">broker</span><span class="p">:</span> <span class="n">ClassVar</span><span class="p">[</span><span class="n">Broker</span><span class="p">]</span> <span class="o">=</span> <span class="n">Broker</span><span class="o">.</span><span class="n">SCHWAB</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">connect</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">disconnect</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_equity_order</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">order</span><span class="p">):</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_multi_leg_order</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">order</span><span class="p">):</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_quote</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">symbol</span><span class="p">):</span> <span class="o">...</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_positions</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="c1"># Include source for position sync compatibility</span>
+        <span class="k">return</span> <span class="p">[</span><span class="n">Position</span><span class="p">(</span><span class="o">...</span><span class="p">,</span> <span class="n">source</span><span class="o">=</span><span class="n">PositionSource</span><span class="o">.</span><span class="n">LIVE_API</span><span class="p">)]</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_order_status</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">order_id</span><span class="p">):</span> <span class="o">...</span>
+</code></pre></div>
+
+<h3 id="3-add-symbology-support">3. Add Symbology Support</h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># app/core/symbology.py -- update equity_id() and option_id()</span>
+<span class="k">if</span> <span class="n">broker</span> <span class="o">==</span> <span class="n">Broker</span><span class="o">.</span><span class="n">SCHWAB</span><span class="p">:</span>
+    <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;SCHWAB-</span><span class="si">{</span><span class="n">symbol</span><span class="si">}</span><span class="s2">&quot;</span>
+</code></pre></div>
+
+<h3 id="4-add-configuration">4. Add Configuration</h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># app/config.py</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">Settings</span><span class="p">(</span><span class="n">BaseSettings</span><span class="p">):</span>
+    <span class="n">schwab_api_key</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span>
+    <span class="n">schwab_api_secret</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span>
+</code></pre></div>
+
+<h3 id="5-register-in-lifespan">5. Register in Lifespan</h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># app/main.py</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">app.core.providers.schwab</span><span class="w"> </span><span class="kn">import</span> <span class="n">SchwabProvider</span>
+<span class="n">providers</span> <span class="o">=</span> <span class="p">[</span><span class="n">RobinhoodProvider</span><span class="p">(),</span> <span class="n">EtradeProvider</span><span class="p">(),</span> <span class="n">ibkr_provider</span><span class="p">,</span> <span class="n">SchwabProvider</span><span class="p">()]</span>
+</code></pre></div>
+
+<h3 id="6-add-csv-import-support-optional">6. Add CSV Import Support (Optional)</h3>
+<p>If the broker has CSV export functionality, add a parser in <code>app/services/csv_importer.py</code>:</p>
+<div class="codehilite"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">parse_schwab_csv</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">content</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">]:</span>
+    <span class="c1"># Parse Schwab&#39;s CSV format</span>
+    <span class="o">...</span>
+</code></pre></div>
+
+<h3 id="7-add-tests">7. Add Tests</h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># tests/test_schwab.py</span>
+<span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">test_schwab_equity_order</span><span class="p">(</span><span class="n">client</span><span class="p">,</span> <span class="n">api_key_headers</span><span class="p">):</span>
+    <span class="n">payload</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;equity_order&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;broker&quot;</span><span class="p">:</span> <span class="s2">&quot;schwab&quot;</span><span class="p">,</span> <span class="s2">&quot;symbol&quot;</span><span class="p">:</span> <span class="s2">&quot;MSFT&quot;</span><span class="p">,</span> <span class="o">...</span><span class="p">}}</span>
+    <span class="n">resp</span> <span class="o">=</span> <span class="k">await</span> <span class="n">client</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">&quot;/trade/execute&quot;</span><span class="p">,</span> <span class="n">json</span><span class="o">=</span><span class="n">payload</span><span class="p">,</span> <span class="n">headers</span><span class="o">=</span><span class="n">api_key_headers</span><span class="p">)</span>
+    <span class="k">assert</span> <span class="n">resp</span><span class="o">.</span><span class="n">status_code</span> <span class="o">==</span> <span class="mi">200</span>
+</code></pre></div>
+
+<h2 id="moving-from-stubs-to-real-apis">Moving from Stubs to Real APIs</h2>
+<p>The current Robinhood and E*TRADE providers return simulated data. To connect to real broker APIs:</p>
+<ol>
+<li><strong>Robinhood</strong> -- integrate <code>robin_stocks</code> library in <code>connect()</code> and route orders through <code>robin_stocks.robinhood.order_option_spread()</code></li>
+<li><strong>E*TRADE</strong> -- use the E*TRADE Python SDK with OAuth1 session management</li>
+<li><strong>IBKR</strong> -- already implemented via <code>IBKRLiveProvider</code> with <code>ib_insync</code>. Set <code>IBKR_ACCOUNT_ID</code> to activate.</li>
+</ol>
+<p>The provider interface remains identical -- only the internal implementation changes. The position sync loop, ledger, and dashboard all work transparently with both stub and real providers.</p>
+    <div class="footer">
+        Universal Trade Platform Documentation — Generated from Markdown sources in <code>docs/</code>
+    </div>
+    </div>
+</body>
+</html>

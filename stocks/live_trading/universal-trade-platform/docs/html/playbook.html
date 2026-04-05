@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Playbook — Universal Trade Platform</title>
+    <style>
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --border: #30363d;
+    --accent-blue: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-red: #f85149;
+    --accent-orange: #d29922;
+    --accent-purple: #bc8cff;
+    --code-bg: #161b22;
+    --link: #58a6ff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+    padding: 0;
+    margin: 0;
+}
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 32px;
+}
+
+/* Navigation bar */
+.nav-bar {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 32px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.nav-bar a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 14px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.nav-bar a:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.nav-bar a.active {
+    color: var(--accent-blue);
+    background: rgba(88, 166, 255, 0.1);
+}
+
+.nav-bar .nav-title {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 15px;
+    margin-right: 8px;
+}
+
+/* Headings */
+h1 {
+    font-size: 2em;
+    font-weight: 600;
+    margin: 0 0 16px 0;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    margin: 32px 0 16px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h3 {
+    font-size: 1.25em;
+    font-weight: 600;
+    margin: 24px 0 12px 0;
+    color: var(--text-primary);
+}
+
+h4 {
+    font-size: 1.1em;
+    font-weight: 600;
+    margin: 20px 0 8px 0;
+    color: var(--text-secondary);
+}
+
+/* Paragraphs and text */
+p {
+    margin: 0 0 16px 0;
+    color: var(--text-primary);
+}
+
+a {
+    color: var(--link);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+em {
+    color: var(--text-secondary);
+}
+
+hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+}
+
+/* Lists */
+ul, ol {
+    margin: 0 0 16px 0;
+    padding-left: 28px;
+}
+
+li {
+    margin: 4px 0;
+    color: var(--text-primary);
+}
+
+li > ul, li > ol {
+    margin: 4px 0 4px 0;
+}
+
+/* Code */
+code {
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 6px;
+    color: var(--accent-blue);
+}
+
+pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    overflow-x: auto;
+    line-height: 1.5;
+}
+
+pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.88em;
+    color: var(--text-primary);
+}
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 16px 0;
+    font-size: 0.95em;
+}
+
+thead {
+    background: var(--bg-secondary);
+}
+
+th {
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+}
+
+td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+tr:hover {
+    background: var(--bg-secondary);
+}
+
+/* Blockquotes */
+blockquote {
+    border-left: 4px solid var(--accent-blue);
+    padding: 8px 16px;
+    margin: 0 0 16px 0;
+    background: var(--bg-secondary);
+    border-radius: 0 8px 8px 0;
+    color: var(--text-secondary);
+}
+
+blockquote p {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+/* Definition lists */
+dt {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-top: 12px;
+}
+
+dd {
+    margin-left: 20px;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+}
+
+/* Footer */
+.footer {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.85em;
+    text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .container { padding: 20px 16px; }
+    .nav-bar { padding: 10px 16px; }
+    table { font-size: 0.85em; }
+    th, td { padding: 6px 8px; }
+}
+</style>
+</head>
+<body>
+    <nav class="nav-bar">
+    <span class="nav-title">UTP Docs</span>
+    <a href="index.html">Home</a>
+    <a href="usage_guide.html">Usage Guide</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="api_reference.html">API Reference</a>
+    <a href="playbook.html" class="active">Playbook</a>
+    <a href="providers.html">Providers</a>
+    <a href="configuration.html">Configuration</a>
+    <a href="authentication.html">Authentication</a>
+    <a href="testing.html">Testing</a>
+    <a href="ibkr_setup_guide.html">IBKR Setup</a>
+    <a href="symbology.html">Symbology</a>
+    <a href="websockets.html">WebSockets</a>
+    </nav>
+    <div class="container">
+    <h1 id="trade-playbook-system">Trade Playbook System</h1>
+<h2 id="overview">Overview</h2>
+<p>The playbook system allows you to define trade instructions in YAML files and execute them as a batch through the Universal Trade Platform. It supports all 5 trade types: equity orders, single options, credit spreads, debit spreads, and iron condors.</p>
+<h2 id="architecture">Architecture</h2>
+<div class="codehilite"><pre><span></span><code><span class="n">YAML</span><span class="w"> </span><span class="n">Playbook</span><span class="w"> </span><span class="err">→</span><span class="w"> </span><span class="n">PlaybookService</span><span class="o">.</span><span class="n">load</span><span class="p">()</span><span class="w"> </span><span class="err">→</span><span class="w"> </span><span class="n">PlaybookDefinition</span>
+<span class="w">                                              </span><span class="err">↓</span>
+<span class="w">                </span><span class="n">PlaybookService</span><span class="o">.</span><span class="n">execute</span><span class="p">()</span><span class="w"> </span><span class="err">→</span><span class="w"> </span><span class="n">instruction_to_trade_request</span><span class="p">()</span>
+<span class="w">                                              </span><span class="err">↓</span>
+<span class="w">                                        </span><span class="n">execute_trade</span><span class="p">()</span><span class="w"> </span><span class="p">(</span><span class="n">existing</span><span class="p">)</span>
+<span class="w">                                              </span><span class="err">↓</span>
+<span class="w">                              </span><span class="n">Ledger</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">Position</span><span class="w"> </span><span class="n">Store</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">WebSocket</span>
+</code></pre></div>
+
+<p>The playbook layer is a thin orchestration layer on top of the existing trade execution pipeline. Each instruction is translated to a <code>TradeRequest</code> and executed through <code>execute_trade()</code>, getting ledger logging, position tracking, and WebSocket broadcasting for free.</p>
+<h2 id="yaml-format">YAML Format</h2>
+<div class="codehilite"><pre><span></span><code><span class="nt">playbook</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Playbook</span><span class="nv"> </span><span class="s">Name&quot;</span>
+<span class="w">  </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Optional</span><span class="nv"> </span><span class="s">description&quot;</span>
+<span class="w">  </span><span class="nt">broker</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ibkr</span><span class="w">                    </span><span class="c1"># Default broker for all instructions</span>
+
+<span class="nt">instructions</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unique_instruction_id</span><span class="w">     </span><span class="c1"># Must be unique within playbook</span>
+<span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">equity</span><span class="w">                  </span><span class="c1"># Trade type (see below)</span>
+<span class="w">    </span><span class="c1"># ... type-specific fields</span>
+</code></pre></div>
+
+<h3 id="instruction-types">Instruction Types</h3>
+<h4 id="equity-stock-buysell"><code>equity</code> — Stock Buy/Sell</h4>
+<div class="codehilite"><pre><span></span><code><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">buy_spy</span>
+<span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">equity</span>
+<span class="w">  </span><span class="nt">action</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">BUY</span><span class="w">                    </span><span class="c1"># BUY or SELL</span>
+<span class="w">  </span><span class="nt">symbol</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">SPY</span>
+<span class="w">  </span><span class="nt">quantity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">100</span>
+<span class="w">  </span><span class="nt">order_type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">MARKET</span><span class="w">             </span><span class="c1"># MARKET or LIMIT</span>
+<span class="w">  </span><span class="nt">limit_price</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">480.00</span><span class="w">            </span><span class="c1"># Required for LIMIT orders</span>
+</code></pre></div>
+
+<h4 id="single_option-single-leg-option"><code>single_option</code> — Single-Leg Option</h4>
+<div class="codehilite"><pre><span></span><code><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">spy_put</span>
+<span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">single_option</span>
+<span class="w">  </span><span class="nt">symbol</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">SPY</span>
+<span class="w">  </span><span class="nt">expiration</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;2026-03-20&quot;</span>
+<span class="w">  </span><span class="nt">strike</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">550</span>
+<span class="w">  </span><span class="nt">option_type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">PUT</span><span class="w">               </span><span class="c1"># PUT or CALL</span>
+<span class="w">  </span><span class="nt">action</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">BUY_TO_OPEN</span><span class="w">            </span><span class="c1"># BUY_TO_OPEN, SELL_TO_OPEN, etc.</span>
+<span class="w">  </span><span class="nt">quantity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
+<span class="w">  </span><span class="nt">order_type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">LIMIT</span>
+<span class="w">  </span><span class="nt">limit_price</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2.50</span>
+</code></pre></div>
+
+<h4 id="credit_spread-2-leg-credit-spread"><code>credit_spread</code> — 2-Leg Credit Spread</h4>
+<div class="codehilite"><pre><span></span><code><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">spx_bull_put</span>
+<span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">credit_spread</span>
+<span class="w">  </span><span class="nt">symbol</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">SPX</span>
+<span class="w">  </span><span class="nt">expiration</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;2026-03-20&quot;</span>
+<span class="w">  </span><span class="nt">short_strike</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5500</span><span class="w">             </span><span class="c1"># Strike to SELL</span>
+<span class="w">  </span><span class="nt">long_strike</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5475</span><span class="w">              </span><span class="c1"># Strike to BUY (protection)</span>
+<span class="w">  </span><span class="nt">option_type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">PUT</span>
+<span class="w">  </span><span class="nt">quantity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
+<span class="w">  </span><span class="nt">net_price</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3.50</span><span class="w">                </span><span class="c1"># Optional: LIMIT order at $3.50. Omit for MARKET order.</span>
+</code></pre></div>
+
+<h4 id="debit_spread-2-leg-debit-spread"><code>debit_spread</code> — 2-Leg Debit Spread</h4>
+<div class="codehilite"><pre><span></span><code><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">qqq_call_debit</span>
+<span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">debit_spread</span>
+<span class="w">  </span><span class="nt">symbol</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">QQQ</span>
+<span class="w">  </span><span class="nt">expiration</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;2026-03-20&quot;</span>
+<span class="w">  </span><span class="nt">long_strike</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">480</span><span class="w">               </span><span class="c1"># Strike to BUY</span>
+<span class="w">  </span><span class="nt">short_strike</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">490</span><span class="w">              </span><span class="c1"># Strike to SELL</span>
+<span class="w">  </span><span class="nt">option_type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">CALL</span>
+<span class="w">  </span><span class="nt">quantity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
+<span class="w">  </span><span class="nt">net_price</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4.00</span><span class="w">                </span><span class="c1"># Optional: LIMIT order at $4.00. Omit for MARKET order.</span>
+</code></pre></div>
+
+<h4 id="iron_condor-4-leg-iron-condor"><code>iron_condor</code> — 4-Leg Iron Condor</h4>
+<div class="codehilite"><pre><span></span><code><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">spx_condor</span>
+<span class="w">  </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">iron_condor</span>
+<span class="w">  </span><span class="nt">symbol</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">SPX</span>
+<span class="w">  </span><span class="nt">expiration</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;2026-03-20&quot;</span>
+<span class="w">  </span><span class="nt">put_short</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5500</span><span class="w">                </span><span class="c1"># SELL put</span>
+<span class="w">  </span><span class="nt">put_long</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5475</span><span class="w">                 </span><span class="c1"># BUY put (protection)</span>
+<span class="w">  </span><span class="nt">call_short</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5700</span><span class="w">               </span><span class="c1"># SELL call</span>
+<span class="w">  </span><span class="nt">call_long</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5725</span><span class="w">                </span><span class="c1"># BUY call (protection)</span>
+<span class="w">  </span><span class="nt">quantity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
+<span class="w">  </span><span class="nt">net_price</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3.50</span><span class="w">                </span><span class="c1"># Optional: LIMIT order at $3.50. Omit for MARKET order.</span>
+</code></pre></div>
+
+<p><strong>Order type behavior:</strong> For <code>credit_spread</code>, <code>debit_spread</code>, and <code>iron_condor</code> instructions, if <code>net_price</code> is omitted, a MARKET order is submitted. When <code>net_price</code> is specified, a LIMIT order is used.</p>
+<h2 id="cli-usage">CLI Usage</h2>
+<h3 id="execute-dry-run-by-default">Execute (dry-run by default)</h3>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp.py<span class="w"> </span>playbook<span class="w"> </span>execute<span class="w"> </span>playbooks/example_mixed.yaml
+</code></pre></div>
+
+<h3 id="live-execution">Live Execution</h3>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp.py<span class="w"> </span>playbook<span class="w"> </span>execute<span class="w"> </span>playbooks/morning_spreads.yaml<span class="w"> </span>--live
+</code></pre></div>
+
+<p>Requires <code>IBKR_READONLY=false</code> for live execution.</p>
+<h3 id="validate-only">Validate Only</h3>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp.py<span class="w"> </span>playbook<span class="w"> </span>validate<span class="w"> </span>playbooks/example_mixed.yaml
+</code></pre></div>
+
+<p>Checks instruction structure without executing.</p>
+<h3 id="system-status">System Status</h3>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp.py<span class="w"> </span>status
+</code></pre></div>
+
+<p>Shows active positions, pending orders, recent closed trades, and broker connection status.</p>
+<h3 id="reconciliation">Reconciliation</h3>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp.py<span class="w"> </span>reconcile
+</code></pre></div>
+
+<p>Compares system positions against broker-reported positions and shows discrepancies.</p>
+<h2 id="api-endpoints">API Endpoints</h2>
+<h3 id="post-playbookexecute">POST /playbook/execute</h3>
+<p>Upload and execute a YAML playbook. Use <code>X-Dry-Run: true</code> header for simulation.</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/playbook/execute<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;X-API-Key: your-key&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;X-Dry-Run: true&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-F<span class="w"> </span><span class="s2">&quot;file=@playbooks/example_mixed.yaml&quot;</span>
+</code></pre></div>
+
+<h3 id="post-playbookvalidate">POST /playbook/validate</h3>
+<p>Validate a playbook without executing.</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/playbook/validate<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;X-API-Key: your-key&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-F<span class="w"> </span><span class="s2">&quot;file=@playbooks/example_mixed.yaml&quot;</span>
+</code></pre></div>
+
+<h3 id="get-accountreconciliation">GET /account/reconciliation</h3>
+<p>Reconcile system vs broker positions.</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8000/account/reconciliation?broker<span class="o">=</span>ibkr<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;X-API-Key: your-key&quot;</span>
+</code></pre></div>
+
+<h3 id="get-dashboardstatus">GET /dashboard/status</h3>
+<p>Full status dashboard: active positions, in-transit orders, recent closed trades, cache stats.</p>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8000/dashboard/status<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;X-API-Key: your-key&quot;</span>
+</code></pre></div>
+
+<h2 id="reconciliation_1">Reconciliation</h2>
+<p>The reconciliation system compares positions tracked in the UTP position store against positions reported by the broker (via <code>provider.get_positions()</code>). Reconcile automatically fetches and caches IBKR executions.</p>
+<h3 id="flush-behavior">Flush Behavior</h3>
+<ul>
+<li><code>--flush</code> preserves closed positions (P&amp;L history) and only flushes open positions</li>
+<li><code>--hard-reset</code> clears EVERYTHING: open + closed positions, ledger, and executions cache — for a full rebuild</li>
+<li><code>flush</code> command is blocked when a daemon is running (warns to use <code>reconcile --flush</code> instead)</li>
+</ul>
+<p>It produces a <code>ReconciliationReport</code> with:</p>
+<table>
+<thead>
+<tr>
+<th>Discrepancy Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>matched</code></td>
+<td>System and broker agree on symbol and quantity</td>
+</tr>
+<tr>
+<td><code>quantity_mismatch</code></td>
+<td>Both have the position but quantities differ</td>
+</tr>
+<tr>
+<td><code>missing_in_system</code></td>
+<td>Broker reports a position the system doesn't track</td>
+</tr>
+<tr>
+<td><code>missing_at_broker</code></td>
+<td>System tracks a position the broker doesn't report</td>
+</tr>
+</tbody>
+</table>
+<h2 id="status-dashboard">Status Dashboard</h2>
+<p>The status dashboard (<code>GET /dashboard/status</code> or <code>utp.py status</code>) aggregates:</p>
+<ul>
+<li><strong>Active positions</strong> from the position store</li>
+<li><strong>In-transit orders</strong> from the pending orders dict (orders submitted but not yet filled)</li>
+<li><strong>Recent closed positions</strong> (last 10)</li>
+<li><strong>Cache stats</strong> from IBKRLiveProvider (contracts, quotes, option chains)</li>
+<li><strong>Connection status</strong> per broker (connected/disconnected)</li>
+</ul>
+<h2 id="comprehensive-readiness-test">Comprehensive Readiness Test</h2>
+<p>The <code>test_ibkr_readiness.py</code> script validates all 5 trade types through the IBKRLiveProvider:</p>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>test_ibkr_readiness.py<span class="w"> </span>--symbol<span class="w"> </span>SPX<span class="w"> </span>--port<span class="w"> </span><span class="m">7496</span><span class="w"> </span>--client-id<span class="w"> </span><span class="m">10</span>
+python<span class="w"> </span>test_ibkr_readiness.py<span class="w"> </span>--symbol<span class="w"> </span>NDX<span class="w"> </span>--skip-margin
+</code></pre></div>
+
+<p>Tests: equity qualification, single option qualification, credit spread BAG combo, debit spread BAG combo, iron condor 4-leg BAG combo, and margin checks.</p>
+<h2 id="ledger-integration">Ledger Integration</h2>
+<p>Playbook executions create <code>PLAYBOOK_EXECUTED</code> ledger entries with metadata:</p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;event_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PLAYBOOK_EXECUTED&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;data&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;playbook_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Morning Entries&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;instruction_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;spx_put_spread&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;instruction_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;credit_spread&quot;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>Each instruction also creates the standard <code>ORDER_SUBMITTED</code> and <code>POSITION_OPENED</code> entries via the existing <code>execute_trade()</code> pipeline.</p>
+<h2 id="key-files">Key Files</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>app/services/playbook_service.py</code></td>
+<td>Core service: parse YAML, translate instructions, execute</td>
+</tr>
+<tr>
+<td><code>app/routes/playbook.py</code></td>
+<td>API endpoints: <code>/playbook/execute</code>, <code>/playbook/validate</code></td>
+</tr>
+<tr>
+<td><code>utp.py</code></td>
+<td>CLI entry point: execute, validate, status, reconcile</td>
+</tr>
+<tr>
+<td><code>test_ibkr_readiness.py</code></td>
+<td>Comprehensive 5-trade-type readiness test</td>
+</tr>
+<tr>
+<td><code>playbooks/*.yaml</code></td>
+<td>Example playbook files</td>
+</tr>
+<tr>
+<td><code>tests/test_utp.py</code></td>
+<td>All tests including playbook parsing, translation, execution, and reconciliation</td>
+</tr>
+<tr>
+<td><code>app/services/position_sync.py</code></td>
+<td>Reconciliation via <code>reconcile()</code> method</td>
+</tr>
+<tr>
+<td><code>app/services/dashboard_service.py</code></td>
+<td>Status dashboard via <code>get_status()</code> method</td>
+</tr>
+</tbody>
+</table>
+<h2 id="example-playbooks">Example Playbooks</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Contents</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>playbooks/example_mixed.yaml</code></td>
+<td>All 5 trade types in one playbook</td>
+</tr>
+<tr>
+<td><code>playbooks/example_equity.yaml</code></td>
+<td>Equity buy/sell orders</td>
+</tr>
+<tr>
+<td><code>playbooks/example_credit_spread.yaml</code></td>
+<td>SPX put and call credit spreads</td>
+</tr>
+<tr>
+<td><code>playbooks/example_iron_condor.yaml</code></td>
+<td>SPX iron condor</td>
+</tr>
+</tbody>
+</table>
+    <div class="footer">
+        Universal Trade Platform Documentation — Generated from Markdown sources in <code>docs/</code>
+    </div>
+    </div>
+</body>
+</html>

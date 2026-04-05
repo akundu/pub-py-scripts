@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IBKR Setup Guide — Universal Trade Platform</title>
+    <style>
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --border: #30363d;
+    --accent-blue: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-red: #f85149;
+    --accent-orange: #d29922;
+    --accent-purple: #bc8cff;
+    --code-bg: #161b22;
+    --link: #58a6ff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+    padding: 0;
+    margin: 0;
+}
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 32px;
+}
+
+/* Navigation bar */
+.nav-bar {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 32px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.nav-bar a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 14px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.nav-bar a:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.nav-bar a.active {
+    color: var(--accent-blue);
+    background: rgba(88, 166, 255, 0.1);
+}
+
+.nav-bar .nav-title {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 15px;
+    margin-right: 8px;
+}
+
+/* Headings */
+h1 {
+    font-size: 2em;
+    font-weight: 600;
+    margin: 0 0 16px 0;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    margin: 32px 0 16px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h3 {
+    font-size: 1.25em;
+    font-weight: 600;
+    margin: 24px 0 12px 0;
+    color: var(--text-primary);
+}
+
+h4 {
+    font-size: 1.1em;
+    font-weight: 600;
+    margin: 20px 0 8px 0;
+    color: var(--text-secondary);
+}
+
+/* Paragraphs and text */
+p {
+    margin: 0 0 16px 0;
+    color: var(--text-primary);
+}
+
+a {
+    color: var(--link);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+em {
+    color: var(--text-secondary);
+}
+
+hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+}
+
+/* Lists */
+ul, ol {
+    margin: 0 0 16px 0;
+    padding-left: 28px;
+}
+
+li {
+    margin: 4px 0;
+    color: var(--text-primary);
+}
+
+li > ul, li > ol {
+    margin: 4px 0 4px 0;
+}
+
+/* Code */
+code {
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 6px;
+    color: var(--accent-blue);
+}
+
+pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    overflow-x: auto;
+    line-height: 1.5;
+}
+
+pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.88em;
+    color: var(--text-primary);
+}
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 16px 0;
+    font-size: 0.95em;
+}
+
+thead {
+    background: var(--bg-secondary);
+}
+
+th {
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+}
+
+td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+tr:hover {
+    background: var(--bg-secondary);
+}
+
+/* Blockquotes */
+blockquote {
+    border-left: 4px solid var(--accent-blue);
+    padding: 8px 16px;
+    margin: 0 0 16px 0;
+    background: var(--bg-secondary);
+    border-radius: 0 8px 8px 0;
+    color: var(--text-secondary);
+}
+
+blockquote p {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+/* Definition lists */
+dt {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-top: 12px;
+}
+
+dd {
+    margin-left: 20px;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+}
+
+/* Footer */
+.footer {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.85em;
+    text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .container { padding: 20px 16px; }
+    .nav-bar { padding: 10px 16px; }
+    table { font-size: 0.85em; }
+    th, td { padding: 6px 8px; }
+}
+</style>
+</head>
+<body>
+    <nav class="nav-bar">
+    <span class="nav-title">UTP Docs</span>
+    <a href="index.html">Home</a>
+    <a href="usage_guide.html">Usage Guide</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="api_reference.html">API Reference</a>
+    <a href="playbook.html">Playbook</a>
+    <a href="providers.html">Providers</a>
+    <a href="configuration.html">Configuration</a>
+    <a href="authentication.html">Authentication</a>
+    <a href="testing.html">Testing</a>
+    <a href="ibkr_setup_guide.html" class="active">IBKR Setup</a>
+    <a href="symbology.html">Symbology</a>
+    <a href="websockets.html">WebSockets</a>
+    </nav>
+    <div class="container">
+    <h1 id="ibkr-interactive-brokers-setup-guide">IBKR (Interactive Brokers) Setup Guide</h1>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>An Interactive Brokers account (paper or live)</li>
+<li>IB Gateway or Trader Workstation (TWS) installed</li>
+<li>Python package: <code>pip install ib_insync&gt;=0.9.86</code></li>
+</ul>
+<h2 id="step-1-install-ib-gateway-or-tws">Step 1: Install IB Gateway or TWS</h2>
+<p>Download from <a href="https://www.interactivebrokers.com/en/trading/tws.php">Interactive Brokers</a>:</p>
+<ul>
+<li><strong>IB Gateway</strong> (recommended for API-only use): lightweight, headless</li>
+<li><strong>TWS</strong> (Trader Workstation): full GUI + API access</li>
+</ul>
+<p>Choose <strong>paper trading</strong> for testing, <strong>live</strong> for production.</p>
+<h2 id="step-2-configure-api-settings-in-twsgateway">Step 2: Configure API Settings in TWS/Gateway</h2>
+<ol>
+<li>Open TWS or IB Gateway</li>
+<li>Navigate to: <strong>Edit → Global Configuration → API → Settings</strong></li>
+<li>Enable these settings:</li>
+<li><strong>Enable ActiveX and Socket Clients</strong>: checked</li>
+<li><strong>Socket port</strong>: <code>7497</code> (paper) or <code>7496</code> (live)</li>
+<li><strong>Allow connections from localhost only</strong>: checked (or add trusted IPs)</li>
+<li><strong>Read-Only API</strong>: uncheck only when ready for live trading</li>
+<li>Click <strong>Apply</strong> and <strong>OK</strong></li>
+</ol>
+<h2 id="step-3-set-environment-variables">Step 3: Set Environment Variables</h2>
+<p>Add to your <code>.env</code> file or export in shell:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Connection</span>
+<span class="nv">IBKR_HOST</span><span class="o">=</span><span class="m">127</span>.0.0.1
+<span class="nv">IBKR_PORT</span><span class="o">=</span><span class="m">7497</span><span class="w">              </span><span class="c1"># 7497=paper, 7496=live</span>
+<span class="nv">IBKR_CLIENT_ID</span><span class="o">=</span><span class="m">1</span>
+
+<span class="c1"># Account identification (triggers real provider instead of stub)</span>
+<span class="nv">IBKR_ACCOUNT_ID</span><span class="o">=</span>DU123456<span class="w">    </span><span class="c1"># Your paper/live account ID</span>
+
+<span class="c1"># Safety</span>
+<span class="nv">IBKR_READONLY</span><span class="o">=</span><span class="nb">true</span><span class="w">           </span><span class="c1"># Start read-only, change to false when ready</span>
+
+<span class="c1"># Market data</span>
+<span class="nv">IBKR_MARKET_DATA_TYPE</span><span class="o">=</span><span class="m">4</span><span class="w">      </span><span class="c1"># 4=delayed(free), 3=frozen, 1=live(paid subscription)</span>
+
+<span class="c1"># Timeout</span>
+<span class="nv">IBKR_CONNECT_TIMEOUT</span><span class="o">=</span><span class="m">30</span><span class="w">      </span><span class="c1"># seconds</span>
+</code></pre></div>
+
+<p><strong>Important</strong>: Setting <code>IBKR_ACCOUNT_ID</code> activates the real <code>IBKRLiveProvider</code>. Leaving it empty uses the stub provider.</p>
+<h2 id="step-4-start-ib-gatewaytws">Step 4: Start IB Gateway/TWS</h2>
+<ol>
+<li>Launch IB Gateway (or TWS)</li>
+<li>Log in with your paper/live credentials</li>
+<li>Wait for "Connected" status</li>
+</ol>
+<h2 id="step-5-start-the-platform">Step 5: Start the Platform</h2>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>server.py
+</code></pre></div>
+
+<h2 id="step-6-verify-connection">Step 6: Verify Connection</h2>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Health check</span>
+curl<span class="w"> </span>http://localhost:8000/health
+<span class="c1"># → {&quot;status&quot;: &quot;ok&quot;}</span>
+
+<span class="c1"># Get a real quote (requires market data subscription for type=1)</span>
+curl<span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;X-API-Key: change-me&quot;</span><span class="w"> </span>http://localhost:8000/market/quote/AAPL?broker<span class="o">=</span>ibkr
+<span class="c1"># → {&quot;symbol&quot;: &quot;AAPL&quot;, &quot;bid&quot;: 175.50, &quot;ask&quot;: 175.55, ...}</span>
+
+<span class="c1"># Get real positions</span>
+curl<span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;X-API-Key: change-me&quot;</span><span class="w"> </span>http://localhost:8000/account/positions
+<span class="c1"># → {&quot;positions&quot;: [...], &quot;total_market_value&quot;: ...}</span>
+</code></pre></div>
+
+<h2 id="step-7-enable-trading-when-ready">Step 7: Enable Trading (When Ready)</h2>
+<ol>
+<li>Set <code>IBKR_READONLY=false</code> in your <code>.env</code></li>
+<li>Restart the server</li>
+<li>Submit a test order:</li>
+</ol>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/trade/execute<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;X-API-Key: change-me&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
+<span class="s1">    &quot;equity_order&quot;: {</span>
+<span class="s1">      &quot;broker&quot;: &quot;ibkr&quot;,</span>
+<span class="s1">      &quot;symbol&quot;: &quot;AAPL&quot;,</span>
+<span class="s1">      &quot;side&quot;: &quot;BUY&quot;,</span>
+<span class="s1">      &quot;quantity&quot;: 1,</span>
+<span class="s1">      &quot;order_type&quot;: &quot;LIMIT&quot;,</span>
+<span class="s1">      &quot;limit_price&quot;: 170.00</span>
+<span class="s1">    }</span>
+<span class="s1">  }&#39;</span>
+</code></pre></div>
+
+<h2 id="troubleshooting">Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Issue</th>
+<th>Solution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ConnectionRefusedError</code></td>
+<td>Ensure TWS/Gateway is running and API is enabled</td>
+</tr>
+<tr>
+<td><code>ClientId already in use</code></td>
+<td>Change <code>IBKR_CLIENT_ID</code> to a different number</td>
+</tr>
+<tr>
+<td>Quotes return 0</td>
+<td>Check <code>IBKR_MARKET_DATA_TYPE</code> — use <code>4</code> for free delayed data</td>
+</tr>
+<tr>
+<td>Orders rejected with "read-only"</td>
+<td>Set <code>IBKR_READONLY=false</code> and restart</td>
+</tr>
+<tr>
+<td><code>ib_insync not installed</code></td>
+<td>Run <code>pip install ib_insync&gt;=0.9.86</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="market-data-types">Market Data Types</h2>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Description</th>
+<th>Cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Live streaming</td>
+<td>Paid subscription required</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Frozen (last available)</td>
+<td>Free</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Delayed frozen</td>
+<td>Free</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Delayed (15-20 min)</td>
+<td>Free</td>
+</tr>
+</tbody>
+</table>
+<h2 id="security-notes">Security Notes</h2>
+<ul>
+<li><strong>Always start with <code>IBKR_READONLY=true</code></strong> until you've verified the setup</li>
+<li>Use <strong>paper trading</strong> (<code>port 7497</code>) before switching to live (<code>port 7496</code>)</li>
+<li>The platform logs all orders to the transaction ledger for audit</li>
+<li>Consider running IB Gateway in a separate process/container for isolation</li>
+</ul>
+    <div class="footer">
+        Universal Trade Platform Documentation — Generated from Markdown sources in <code>docs/</code>
+    </div>
+    </div>
+</body>
+</html>

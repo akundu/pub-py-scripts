@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Usage Guide — Universal Trade Platform</title>
+    <style>
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --border: #30363d;
+    --accent-blue: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-red: #f85149;
+    --accent-orange: #d29922;
+    --accent-purple: #bc8cff;
+    --code-bg: #161b22;
+    --link: #58a6ff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+    padding: 0;
+    margin: 0;
+}
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 32px;
+}
+
+/* Navigation bar */
+.nav-bar {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 32px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.nav-bar a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 14px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.nav-bar a:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.nav-bar a.active {
+    color: var(--accent-blue);
+    background: rgba(88, 166, 255, 0.1);
+}
+
+.nav-bar .nav-title {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 15px;
+    margin-right: 8px;
+}
+
+/* Headings */
+h1 {
+    font-size: 2em;
+    font-weight: 600;
+    margin: 0 0 16px 0;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    margin: 32px 0 16px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h3 {
+    font-size: 1.25em;
+    font-weight: 600;
+    margin: 24px 0 12px 0;
+    color: var(--text-primary);
+}
+
+h4 {
+    font-size: 1.1em;
+    font-weight: 600;
+    margin: 20px 0 8px 0;
+    color: var(--text-secondary);
+}
+
+/* Paragraphs and text */
+p {
+    margin: 0 0 16px 0;
+    color: var(--text-primary);
+}
+
+a {
+    color: var(--link);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+em {
+    color: var(--text-secondary);
+}
+
+hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+}
+
+/* Lists */
+ul, ol {
+    margin: 0 0 16px 0;
+    padding-left: 28px;
+}
+
+li {
+    margin: 4px 0;
+    color: var(--text-primary);
+}
+
+li > ul, li > ol {
+    margin: 4px 0 4px 0;
+}
+
+/* Code */
+code {
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 6px;
+    color: var(--accent-blue);
+}
+
+pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    overflow-x: auto;
+    line-height: 1.5;
+}
+
+pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.88em;
+    color: var(--text-primary);
+}
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 16px 0;
+    font-size: 0.95em;
+}
+
+thead {
+    background: var(--bg-secondary);
+}
+
+th {
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+}
+
+td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+tr:hover {
+    background: var(--bg-secondary);
+}
+
+/* Blockquotes */
+blockquote {
+    border-left: 4px solid var(--accent-blue);
+    padding: 8px 16px;
+    margin: 0 0 16px 0;
+    background: var(--bg-secondary);
+    border-radius: 0 8px 8px 0;
+    color: var(--text-secondary);
+}
+
+blockquote p {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+/* Definition lists */
+dt {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-top: 12px;
+}
+
+dd {
+    margin-left: 20px;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+}
+
+/* Footer */
+.footer {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.85em;
+    text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .container { padding: 20px 16px; }
+    .nav-bar { padding: 10px 16px; }
+    table { font-size: 0.85em; }
+    th, td { padding: 6px 8px; }
+}
+</style>
+</head>
+<body>
+    <nav class="nav-bar">
+    <span class="nav-title">UTP Docs</span>
+    <a href="index.html">Home</a>
+    <a href="usage_guide.html" class="active">Usage Guide</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="api_reference.html">API Reference</a>
+    <a href="playbook.html">Playbook</a>
+    <a href="providers.html">Providers</a>
+    <a href="configuration.html">Configuration</a>
+    <a href="authentication.html">Authentication</a>
+    <a href="testing.html">Testing</a>
+    <a href="ibkr_setup_guide.html">IBKR Setup</a>
+    <a href="symbology.html">Symbology</a>
+    <a href="websockets.html">WebSockets</a>
+    </nav>
+    <div class="container">
+    <h1 id="utp-usage-guide-common-workflows-cli-reference">UTP Usage Guide — Common Workflows &amp; CLI Reference</h1>
+<p>This guide covers the most common operations with the Universal Trade Platform, organized as end-to-end workflows.</p>
+<h2 id="trade-modes">Trade Modes</h2>
+<p>Every command supports three modes:</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Mode</th>
+<th>Description</th>
+<th>IBKR Port</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><em>(none)</em></td>
+<td><code>dry-run</code></td>
+<td>No broker connection, stub provider</td>
+<td>N/A</td>
+</tr>
+<tr>
+<td><code>--paper</code></td>
+<td><code>paper</code></td>
+<td>IBKR paper trading account</td>
+<td>7497</td>
+</tr>
+<tr>
+<td><code>--live</code></td>
+<td><code>live</code></td>
+<td>IBKR live trading (requires confirmation)</td>
+<td>7496</td>
+</tr>
+</tbody>
+</table>
+<h2 id="workflow-1-check-price-view-options-sell-a-credit-spread">Workflow 1: Check Price, View Options, Sell a Credit Spread</h2>
+<h3 id="step-1-get-the-current-price">Step 1 — Get the current price</h3>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp.py<span class="w"> </span>quote<span class="w"> </span>SPX<span class="w"> </span>--live
+</code></pre></div>
+
+<p>Output:</p>
+<div class="codehilite"><pre><span></span><code>  SPX      Bid:    5683.25  Ask:    5683.25  Last:    5683.25  Vol:          0
+</code></pre></div>
+
+<p>For multiple symbols:</p>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp.py<span class="w"> </span>quote<span class="w"> </span>SPX<span class="w"> </span>NDX<span class="w"> </span>RUT<span class="w"> </span>--live
+</code></pre></div>
+
+<h3 id="step-2-view-todays-options-near-current-price">Step 2 — View today's options near current price</h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Today&#39;s 0DTE options within ±2% of current price (calls + puts)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>options<span class="w"> </span>SPX<span class="w"> </span>--strike-range<span class="w"> </span><span class="m">2</span><span class="w"> </span>--live
+
+<span class="c1"># Puts only</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>options<span class="w"> </span>SPX<span class="w"> </span>--type<span class="w"> </span>PUT<span class="w"> </span>--strike-range<span class="w"> </span><span class="m">2</span><span class="w"> </span>--live
+
+<span class="c1"># Calls only</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>options<span class="w"> </span>SPX<span class="w"> </span>--type<span class="w"> </span>CALL<span class="w"> </span>--strike-range<span class="w"> </span><span class="m">2</span><span class="w"> </span>--live
+
+<span class="c1"># Explicit strike range</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>options<span class="w"> </span>SPX<span class="w"> </span>--strike-min<span class="w"> </span><span class="m">5500</span><span class="w"> </span>--strike-max<span class="w"> </span><span class="m">5700</span><span class="w"> </span>--live
+
+<span class="c1"># Specific future expiration</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>options<span class="w"> </span>SPX<span class="w"> </span>--expiration<span class="w"> </span><span class="m">2026</span>-03-21<span class="w"> </span>--strike-range<span class="w"> </span><span class="m">3</span><span class="w"> </span>--live
+
+<span class="c1"># List all available expirations</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>options<span class="w"> </span>SPX<span class="w"> </span>--list-expirations<span class="w"> </span>--live
+</code></pre></div>
+
+<p>Output shows bid/ask/last/volume for each strike, filtered to remove empty rows.</p>
+<h3 id="step-3-check-margin-requirements-no-execution">Step 3 — Check margin requirements (no execution)</h3>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp.py<span class="w"> </span>margin<span class="w"> </span>credit-spread<span class="w"> </span>--symbol<span class="w"> </span>SPX<span class="w"> </span>--short-strike<span class="w"> </span><span class="m">5600</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--long-strike<span class="w"> </span><span class="m">5575</span><span class="w"> </span>--option-type<span class="w"> </span>PUT<span class="w"> </span>--expiration<span class="w"> </span><span class="m">2026</span>-03-18
+</code></pre></div>
+
+<p>Other margin check types:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Iron condor</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>margin<span class="w"> </span>iron-condor<span class="w"> </span>--symbol<span class="w"> </span>SPX<span class="w"> </span>--put-short<span class="w"> </span><span class="m">5500</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--put-long<span class="w"> </span><span class="m">5475</span><span class="w"> </span>--call-short<span class="w"> </span><span class="m">5700</span><span class="w"> </span>--call-long<span class="w"> </span><span class="m">5725</span><span class="w"> </span>--expiration<span class="w"> </span><span class="m">2026</span>-03-20
+
+<span class="c1"># Single option</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>margin<span class="w"> </span>single-option<span class="w"> </span>--symbol<span class="w"> </span>SPY<span class="w"> </span>--strike<span class="w"> </span><span class="m">550</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--option-type<span class="w"> </span>PUT<span class="w"> </span>--expiration<span class="w"> </span><span class="m">2026</span>-03-20
+</code></pre></div>
+
+<h3 id="step-4-execute-the-trade">Step 4 — Execute the trade</h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Paper trade first</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>credit-spread<span class="w"> </span>--symbol<span class="w"> </span>SPX<span class="w"> </span>--short-strike<span class="w"> </span><span class="m">5600</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--long-strike<span class="w"> </span><span class="m">5575</span><span class="w"> </span>--option-type<span class="w"> </span>PUT<span class="w"> </span>--expiration<span class="w"> </span><span class="m">2026</span>-03-18<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--quantity<span class="w"> </span><span class="m">1</span><span class="w"> </span>--net-price<span class="w"> </span><span class="m">2</span>.50<span class="w"> </span>--paper
+
+<span class="c1"># Live trade (prompts for confirmation)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>credit-spread<span class="w"> </span>--symbol<span class="w"> </span>SPX<span class="w"> </span>--short-strike<span class="w"> </span><span class="m">5600</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--long-strike<span class="w"> </span><span class="m">5575</span><span class="w"> </span>--option-type<span class="w"> </span>PUT<span class="w"> </span>--expiration<span class="w"> </span><span class="m">2026</span>-03-18<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--quantity<span class="w"> </span><span class="m">1</span><span class="w"> </span>--net-price<span class="w"> </span><span class="m">2</span>.50<span class="w"> </span>--live
+</code></pre></div>
+
+<h3 id="step-5-monitor-the-position">Step 5 — Monitor the position</h3>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp.py<span class="w"> </span>portfolio<span class="w"> </span>--live<span class="w">        </span><span class="c1"># Positions with broker P&amp;L</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trades<span class="w"> </span>--live<span class="w">           </span><span class="c1"># Today&#39;s trades</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trades<span class="w"> </span>--all<span class="w"> </span>--live<span class="w">     </span><span class="c1"># All open + closed trades</span>
+</code></pre></div>
+
+<h3 id="step-6-close-the-position">Step 6 — Close the position</h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Find the position ID from portfolio/trades output, then:</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>close<span class="w"> </span>&lt;pos-id&gt;<span class="w"> </span>--live<span class="w">                 </span><span class="c1"># Close at $0.05 debit (default)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>close<span class="w"> </span>&lt;pos-id&gt;<span class="w"> </span>--net-price<span class="w"> </span><span class="m">0</span>.10<span class="w"> </span>--live<span class="w">  </span><span class="c1"># Close at specific debit</span>
+</code></pre></div>
+
+<hr />
+<h2 id="workflow-2-start-daemon-and-trade-via-cli">Workflow 2: Start Daemon and Trade via CLI</h2>
+<p>The daemon holds a persistent IBKR connection. All CLI commands auto-detect it.</p>
+<h3 id="start-the-daemon">Start the daemon</h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Paper trading</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>daemon<span class="w"> </span>--paper
+
+<span class="c1"># Live trading</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>daemon<span class="w"> </span>--live
+
+<span class="c1"># Live with advisor signals</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>daemon<span class="w"> </span>--live<span class="w"> </span>--advisor-profile<span class="w"> </span>tiered_v2
+
+<span class="c1"># Live with auto-execution of advisor signals</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>daemon<span class="w"> </span>--live<span class="w"> </span>--advisor-profile<span class="w"> </span>tiered_v2<span class="w"> </span>--auto-execute
+</code></pre></div>
+
+<h3 id="in-another-terminal-commands-auto-detect-the-daemon">In another terminal — commands auto-detect the daemon</h3>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp.py<span class="w"> </span>quote<span class="w"> </span>SPX<span class="w"> </span>NDX<span class="w"> </span>RUT<span class="w">        </span><span class="c1"># Quotes (no --live needed)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>options<span class="w"> </span>SPX<span class="w"> </span>--strike-range<span class="w"> </span><span class="m">3</span><span class="w">  </span><span class="c1"># Today&#39;s options</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>portfolio<span class="w">                 </span><span class="c1"># Positions + P&amp;L from IBKR</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trades<span class="w"> </span>--all<span class="w">             </span><span class="c1"># All trade history</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>status<span class="w">                   </span><span class="c1"># System dashboard</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>orders<span class="w">                   </span><span class="c1"># Open/working orders</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>reconcile<span class="w"> </span>--show<span class="w">         </span><span class="c1"># System vs broker positions</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>performance<span class="w"> </span>--days<span class="w"> </span><span class="m">30</span><span class="w">    </span><span class="c1"># Win rate, Sharpe, drawdown</span>
+</code></pre></div>
+
+<h3 id="interactive-repl">Interactive REPL</h3>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp.py<span class="w"> </span>repl
+<span class="o">[</span>LIVE<span class="o">]</span><span class="w"> </span>utp&gt;<span class="w"> </span>portfolio
+<span class="o">[</span>LIVE<span class="o">]</span><span class="w"> </span>utp&gt;<span class="w"> </span>quote<span class="w"> </span>SPX
+<span class="o">[</span>LIVE<span class="o">]</span><span class="w"> </span>utp&gt;<span class="w"> </span>options<span class="w"> </span>SPX<span class="w"> </span>--strike-range<span class="w"> </span><span class="m">2</span>
+<span class="o">[</span>LIVE<span class="o">]</span><span class="w"> </span>utp&gt;<span class="w"> </span>advisor<span class="w">          </span><span class="c1"># View advisor recommendations</span>
+<span class="o">[</span>LIVE<span class="o">]</span><span class="w"> </span>utp&gt;<span class="w"> </span>y<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="m">3</span><span class="w">            </span><span class="c1"># Confirm advisor entries 1 and 3</span>
+<span class="o">[</span>LIVE<span class="o">]</span><span class="w"> </span>utp&gt;<span class="w"> </span>quit
+</code></pre></div>
+
+<h3 id="http-api-from-any-lan-machine">HTTP API (from any LAN machine)</h3>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>http://192.168.1.50:8000/dashboard/summary
+curl<span class="w"> </span>http://192.168.1.50:8000/market/quote/SPX
+curl<span class="w"> </span>http://192.168.1.50:8000/dashboard/portfolio
+curl<span class="w"> </span>http://192.168.1.50:8000/account/trades?include_all<span class="o">=</span><span class="nb">true</span>
+</code></pre></div>
+
+<hr />
+<h2 id="workflow-3-buy-a-single-option">Workflow 3: Buy a Single Option</h2>
+<div class="codehilite"><pre><span></span><code><span class="c1"># 1. Check available expirations</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>options<span class="w"> </span>SPX<span class="w"> </span>--list-expirations<span class="w"> </span>--live
+
+<span class="c1"># 2. View puts for a specific date, narrow range</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>options<span class="w"> </span>SPX<span class="w"> </span>--type<span class="w"> </span>PUT<span class="w"> </span>--expiration<span class="w"> </span><span class="m">2026</span>-03-21<span class="w"> </span>--strike-range<span class="w"> </span><span class="m">2</span><span class="w"> </span>--live
+
+<span class="c1"># 3. Buy a put</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>option<span class="w"> </span>--symbol<span class="w"> </span>SPX<span class="w"> </span>--strike<span class="w"> </span><span class="m">5500</span><span class="w"> </span>--option-type<span class="w"> </span>PUT<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--action<span class="w"> </span>BUY_TO_OPEN<span class="w"> </span>--quantity<span class="w"> </span><span class="m">1</span><span class="w"> </span>--order-type<span class="w"> </span>LIMIT<span class="w"> </span>--limit-price<span class="w"> </span><span class="m">5</span>.00<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--expiration<span class="w"> </span><span class="m">2026</span>-03-21<span class="w"> </span>--live
+
+<span class="c1"># 4. Sell a call (sell-to-open)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>option<span class="w"> </span>--symbol<span class="w"> </span>SPX<span class="w"> </span>--strike<span class="w"> </span><span class="m">5800</span><span class="w"> </span>--option-type<span class="w"> </span>CALL<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--action<span class="w"> </span>SELL_TO_OPEN<span class="w"> </span>--quantity<span class="w"> </span><span class="m">1</span><span class="w"> </span>--order-type<span class="w"> </span>LIMIT<span class="w"> </span>--limit-price<span class="w"> </span><span class="m">3</span>.00<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--expiration<span class="w"> </span><span class="m">2026</span>-03-21<span class="w"> </span>--live
+</code></pre></div>
+
+<hr />
+<h2 id="workflow-4-equity-trading">Workflow 4: Equity Trading</h2>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Buy shares</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>equity<span class="w"> </span>--symbol<span class="w"> </span>SPY<span class="w"> </span>--side<span class="w"> </span>BUY<span class="w"> </span>--quantity<span class="w"> </span><span class="m">100</span><span class="w"> </span>--live
+
+<span class="c1"># Limit buy</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>equity<span class="w"> </span>--symbol<span class="w"> </span>AAPL<span class="w"> </span>--side<span class="w"> </span>BUY<span class="w"> </span>--quantity<span class="w"> </span><span class="m">10</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--order-type<span class="w"> </span>LIMIT<span class="w"> </span>--limit-price<span class="w"> </span><span class="m">200</span>.00<span class="w"> </span>--live
+
+<span class="c1"># Sell shares</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>equity<span class="w"> </span>--symbol<span class="w"> </span>GBTC<span class="w"> </span>--side<span class="w"> </span>SELL<span class="w"> </span>--quantity<span class="w"> </span><span class="m">4350</span><span class="w"> </span>--live
+</code></pre></div>
+
+<hr />
+<h2 id="workflow-5-iron-condor">Workflow 5: Iron Condor</h2>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Check margin</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>margin<span class="w"> </span>iron-condor<span class="w"> </span>--symbol<span class="w"> </span>SPX<span class="w"> </span>--put-short<span class="w"> </span><span class="m">5500</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--put-long<span class="w"> </span><span class="m">5475</span><span class="w"> </span>--call-short<span class="w"> </span><span class="m">5700</span><span class="w"> </span>--call-long<span class="w"> </span><span class="m">5725</span><span class="w"> </span>--expiration<span class="w"> </span><span class="m">2026</span>-03-20
+
+<span class="c1"># Execute</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>iron-condor<span class="w"> </span>--symbol<span class="w"> </span>SPX<span class="w"> </span>--put-short<span class="w"> </span><span class="m">5500</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--put-long<span class="w"> </span><span class="m">5475</span><span class="w"> </span>--call-short<span class="w"> </span><span class="m">5700</span><span class="w"> </span>--call-long<span class="w"> </span><span class="m">5725</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--expiration<span class="w"> </span><span class="m">2026</span>-03-20<span class="w"> </span>--quantity<span class="w"> </span><span class="m">1</span><span class="w"> </span>--net-price<span class="w"> </span><span class="m">3</span>.50<span class="w"> </span>--live
+</code></pre></div>
+
+<hr />
+<h2 id="workflow-6-debit-spread">Workflow 6: Debit Spread</h2>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>debit-spread<span class="w"> </span>--symbol<span class="w"> </span>QQQ<span class="w"> </span>--long-strike<span class="w"> </span><span class="m">480</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--short-strike<span class="w"> </span><span class="m">490</span><span class="w"> </span>--option-type<span class="w"> </span>CALL<span class="w"> </span>--expiration<span class="w"> </span><span class="m">2026</span>-03-20<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--quantity<span class="w"> </span><span class="m">3</span><span class="w"> </span>--net-price<span class="w"> </span><span class="m">4</span>.00<span class="w"> </span>--live
+</code></pre></div>
+
+<hr />
+<h2 id="workflow-7-trade-playbooks-batch-execution">Workflow 7: Trade Playbooks (Batch Execution)</h2>
+<div class="codehilite"><pre><span></span><code><span class="c1"># List available playbooks</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>playbook<span class="w"> </span>list
+
+<span class="c1"># Validate a playbook (no execution)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>playbook<span class="w"> </span>validate<span class="w"> </span>playbooks/example_mixed.yaml
+
+<span class="c1"># Execute (paper)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>playbook<span class="w"> </span>execute<span class="w"> </span>playbooks/example_mixed.yaml<span class="w"> </span>--paper
+
+<span class="c1"># Execute (live)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>playbook<span class="w"> </span>execute<span class="w"> </span>playbooks/example_mixed.yaml<span class="w"> </span>--live
+</code></pre></div>
+
+<hr />
+<h2 id="workflow-8-reconciliation-position-sync">Workflow 8: Reconciliation &amp; Position Sync</h2>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Compare system positions vs broker</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>reconcile<span class="w"> </span>--live
+
+<span class="c1"># Flush open positions only (preserves closed P&amp;L history), then sync + reconcile</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>reconcile<span class="w"> </span>--flush<span class="w"> </span>--show<span class="w"> </span>--live
+
+<span class="c1"># Hard reset: clears EVERYTHING (open+closed positions, ledger, executions)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>reconcile<span class="w"> </span>--hard-reset<span class="w"> </span>--live
+
+<span class="c1"># Show full portfolio after reconciling</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>reconcile<span class="w"> </span>--flush<span class="w"> </span>--portfolio<span class="w"> </span>--live
+</code></pre></div>
+
+<p>Note: <code>--flush</code> preserves closed positions (P&amp;L history) and only flushes open positions. Use <code>--hard-reset</code> for a complete rebuild.</p>
+<hr />
+<h2 id="workflow-9-ibkr-readiness-test">Workflow 9: IBKR Readiness Test</h2>
+<p>Validates all trade types work without actually trading:</p>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp.py<span class="w"> </span>readiness<span class="w"> </span>--symbol<span class="w"> </span>SPX<span class="w"> </span>--paper<span class="w">     </span><span class="c1"># All 5 trade types</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>readiness<span class="w"> </span>--symbol<span class="w"> </span>NDX<span class="w"> </span>--skip-margin<span class="w">  </span><span class="c1"># Skip margin checks</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>readiness<span class="w"> </span>--symbol<span class="w"> </span>SPX<span class="w"> </span>--port<span class="w"> </span><span class="m">7496</span><span class="w"> </span>--client-id<span class="w"> </span><span class="m">10</span><span class="w">  </span><span class="c1"># Custom connection</span>
+</code></pre></div>
+
+<hr />
+<h2 id="workflow-10-order-management">Workflow 10: Order Management</h2>
+<div class="codehilite"><pre><span></span><code><span class="c1"># View open/working orders</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>orders<span class="w"> </span>--live
+
+<span class="c1"># Cancel a specific order</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>cancel<span class="w"> </span>--order-id<span class="w"> </span><span class="m">123</span><span class="w"> </span>--live
+
+<span class="c1"># Cancel all open orders</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>cancel<span class="w"> </span>--all<span class="w"> </span>--live
+</code></pre></div>
+
+<hr />
+<h2 id="workflow-11-trade-history-performance">Workflow 11: Trade History &amp; Performance</h2>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Today&#39;s trades</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trades<span class="w"> </span>--live
+
+<span class="c1"># Last 7 days</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trades<span class="w"> </span>--days<span class="w"> </span><span class="m">7</span><span class="w"> </span>--live
+
+<span class="c1"># All trades (open + closed)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trades<span class="w"> </span>--all<span class="w"> </span>--live
+
+<span class="c1"># Drill into a specific trade</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trades<span class="w"> </span>--detail<span class="w"> </span>&lt;pos-id&gt;<span class="w"> </span>--live
+
+<span class="c1"># Performance metrics</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>performance<span class="w"> </span>--days<span class="w"> </span><span class="m">30</span>
+
+<span class="c1"># Ledger entries</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>journal<span class="w"> </span>--days<span class="w"> </span><span class="m">7</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>journal<span class="w"> </span>--event-type<span class="w"> </span>TRADE_EXECUTED
+</code></pre></div>
+
+<hr />
+<h2 id="workflow-12-real-time-market-data-streaming">Workflow 12: Real-Time Market Data Streaming</h2>
+<p>Stream real-time IBKR market data to Redis, QuestDB, and WebSocket clients. Uses the same message format as <code>polygon_realtime_streamer.py</code> for full compatibility.</p>
+<h3 id="start-daemon-with-streaming">Start daemon with streaming</h3>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp.py<span class="w"> </span>daemon<span class="w"> </span>--live<span class="w"> </span>--streaming-config<span class="w"> </span>configs/streaming_default.yaml
+</code></pre></div>
+
+<h3 id="check-streaming-status">Check streaming status</h3>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>http://localhost:8000/market/streaming/status
+</code></pre></div>
+
+<h3 id="subscribe-to-additional-symbols-at-runtime">Subscribe to additional symbols at runtime</h3>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/market/streaming/subscribe<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;symbols&quot;: [&quot;AAPL&quot;, &quot;MSFT&quot;]}&#39;</span>
+</code></pre></div>
+
+<h3 id="unsubscribe-symbols">Unsubscribe symbols</h3>
+<div class="codehilite"><pre><span></span><code>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8000/market/streaming/unsubscribe<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;symbols&quot;: [&quot;AAPL&quot;]}&#39;</span>
+</code></pre></div>
+
+<h3 id="websocket-streaming-javascript-example">WebSocket streaming (JavaScript example)</h3>
+<div class="codehilite"><pre><span></span><code><span class="nx">ws</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">WebSocket</span><span class="p">(</span><span class="s2">&quot;ws://localhost:8000/ws/quotes&quot;</span><span class="p">)</span>
+<span class="nx">ws</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;subscribe&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">symbols</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;SPX&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;NDX&quot;</span><span class="p">]}))</span>
+<span class="nx">ws</span><span class="p">.</span><span class="nx">onmessage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">e</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">e</span><span class="p">.</span><span class="nx">data</span><span class="p">))</span>
+<span class="c1">// Unsubscribe:</span>
+<span class="nx">ws</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">({</span><span class="nx">action</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;unsubscribe&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">symbols</span><span class="o">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;SPX&quot;</span><span class="p">]}))</span>
+</code></pre></div>
+
+<h3 id="safety-limits">Safety limits</h3>
+<ul>
+<li>Max 50 simultaneous subscriptions (50% of IBKR ~100 market data lines)</li>
+<li>22 msg/sec rate limit (50% of IBKR 50 msg/sec soft limit)</li>
+<li>Publishes to Redis channels <code>realtime:quote:{SYMBOL}</code> and QuestDB <code>realtime_data</code> table</li>
+</ul>
+<hr />
+<h2 id="workflow-13-view-execution-history-grouped-trades">Workflow 13: View Execution History (Grouped Trades)</h2>
+<div class="codehilite"><pre><span></span><code><span class="c1"># View IBKR executions grouped by permanent order ID (multi-leg trades shown together)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>executions<span class="w"> </span>--live
+
+<span class="c1"># Filter by symbol</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>executions<span class="w"> </span>--symbol<span class="w"> </span>RUT<span class="w"> </span>--live
+
+<span class="c1"># Clear cache and re-fetch from IBKR</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>executions<span class="w"> </span>--flush<span class="w"> </span>--live
+</code></pre></div>
+
+<p>The execution store caches IBKR executions in <code>data/utp/live/executions.json</code> and groups them by <code>perm_id</code> (IBKR permanent order ID), making it easy to see which legs belong to the same multi-leg trade.</p>
+<hr />
+<h2 id="workflow-14-simulate-a-trade-margin-check-without-execution">Workflow 14: Simulate a Trade (Margin Check Without Execution)</h2>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Qualifies contracts, checks margin, shows what would happen — but does NOT execute</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>credit-spread<span class="w"> </span>--symbol<span class="w"> </span>RUT<span class="w"> </span>--short-strike<span class="w"> </span><span class="m">2460</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--long-strike<span class="w"> </span><span class="m">2440</span><span class="w"> </span>--option-type<span class="w"> </span>PUT<span class="w"> </span>--expiration<span class="w"> </span><span class="m">2026</span>-03-18<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--quantity<span class="w"> </span><span class="m">1</span><span class="w"> </span>--live<span class="w"> </span>--simulate
+
+<span class="c1"># Also works for other trade types</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>iron-condor<span class="w"> </span>--symbol<span class="w"> </span>SPX<span class="w"> </span>--put-short<span class="w"> </span><span class="m">5500</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--put-long<span class="w"> </span><span class="m">5475</span><span class="w"> </span>--call-short<span class="w"> </span><span class="m">5700</span><span class="w"> </span>--call-long<span class="w"> </span><span class="m">5725</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--expiration<span class="w"> </span><span class="m">2026</span>-03-20<span class="w"> </span>--quantity<span class="w"> </span><span class="m">1</span><span class="w"> </span>--net-price<span class="w"> </span><span class="m">3</span>.50<span class="w"> </span>--live<span class="w"> </span>--simulate
+</code></pre></div>
+
+<p>The <code>--simulate</code> flag uses the live IBKR connection to qualify contracts and check margin but never submits the order.</p>
+<hr />
+<h2 id="workflow-15-full-system-reset-and-rebuild">Workflow 15: Full System Reset and Rebuild</h2>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Hard reset: clears EVERYTHING (open + closed positions, ledger, executions)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>reconcile<span class="w"> </span>--hard-reset<span class="w"> </span>--live
+
+<span class="c1"># Regular flush: clears open positions only (preserves closed P&amp;L history)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>reconcile<span class="w"> </span>--flush<span class="w"> </span>--live
+
+<span class="c1"># After reset, re-sync from broker</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>reconcile<span class="w"> </span>--show<span class="w"> </span>--live
+</code></pre></div>
+
+<hr />
+<h2 id="workflow-16-close-a-position-by-id">Workflow 16: Close a Position by ID</h2>
+<p>The <code>close</code> command submits a real IBKR closing order (not just local bookkeeping). It auto-derives the closing parameters from the position's legs.</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Find position IDs from trades output</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trades<span class="w"> </span>--all<span class="w"> </span>--live
+
+<span class="c1"># Close at default $0.05 debit</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>close<span class="w"> </span>2d9a<span class="w"> </span>--live
+
+<span class="c1"># Close at a specific debit price</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>close<span class="w"> </span>2d9a<span class="w"> </span>--net-price<span class="w"> </span><span class="m">0</span>.10<span class="w"> </span>--live
+
+<span class="c1"># Partial close (1 contract only)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>close<span class="w"> </span>2d9a<span class="w"> </span>-q<span class="w"> </span><span class="m">1</span><span class="w"> </span>--live
+
+<span class="c1"># Simulate close (margin check only, no execution)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>close<span class="w"> </span>2d9a<span class="w"> </span>--simulate<span class="w"> </span>--live
+
+<span class="c1"># Dry-run close (no broker connection)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>close<span class="w"> </span>2d9a
+</code></pre></div>
+
+<p>The position ID can be a prefix — if it uniquely matches one open position, that position is closed. For credit spreads, submits a BUY_TO_CLOSE combo order. For debit spreads, submits SELL_TO_CLOSE.</p>
+<hr />
+<h2 id="workflow-17-flush-local-data">Workflow 17: Flush Local Data</h2>
+<p>The <code>flush</code> command clears local persisted data. It is blocked when a daemon is running — use <code>reconcile --flush</code> instead.</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Flush everything (positions + ledger)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>flush
+
+<span class="c1"># Flush positions only</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>flush<span class="w"> </span>positions
+
+<span class="c1"># Flush ledger only</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>flush<span class="w"> </span>ledger
+</code></pre></div>
+
+<p>Note: <code>flush</code> is a local-only operation and does NOT affect the broker. For broker-aware flush, use <code>reconcile --flush --live</code>.</p>
+<hr />
+<h2 id="workflow-18-validate-trade-types">Workflow 18: Validate Trade Types</h2>
+<p>Test that all 5 trade types work without placing real orders:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Validate on paper account</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>--validate-all<span class="w"> </span>--paper
+
+<span class="c1"># Validate and clean up positions afterward</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>--validate-all<span class="w"> </span>--cleanup<span class="w"> </span>--paper
+
+<span class="c1"># Validate with a specific symbol</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>--validate-all<span class="w"> </span>--symbol<span class="w"> </span>NDX<span class="w"> </span>--paper
+</code></pre></div>
+
+<hr />
+<h2 id="daemon-first-cli-routing">Daemon-First CLI Routing</h2>
+<p>Every CLI command auto-detects a running daemon via HTTP health check. When a daemon is found, commands route through its HTTP API (sharing the same IBKR connection). When no daemon is running, commands connect to IBKR directly.</p>
+<p><strong>Key flags for routing:</strong>
+- <code>--server URL</code> — explicitly point at a daemon (e.g., <code>--server http://192.168.1.50:8000</code>)
+- <code>--server-port PORT</code> — daemon port for auto-detection (default: 8000)
+- <code>--allow-fallback</code> — if daemon is unreachable, fall back to direct IBKR connection (default: off, to avoid client-id conflicts)</p>
+<p><strong>Exceptions (commands that do NOT route through daemon):</strong>
+- <code>flush</code> — blocked when daemon running (warns to use <code>reconcile --flush</code> instead)
+- <code>readiness</code> — warns when daemon running (needs separate IBKR client-id)
+- <code>daemon</code> — starts the daemon itself
+- <code>repl</code> — connects to daemon via its own protocol
+- <code>server</code> — starts standalone HTTP server</p>
+<hr />
+<h2 id="cli-subcommand-aliases">CLI Subcommand Aliases</h2>
+<table>
+<thead>
+<tr>
+<th>Alias</th>
+<th>Full Command</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>port</code>, <code>pos</code>, <code>positions</code></td>
+<td><code>portfolio</code></td>
+</tr>
+<tr>
+<td><code>q</code></td>
+<td><code>quote</code></td>
+</tr>
+<tr>
+<td><code>opts</code>, <code>chain</code></td>
+<td><code>options</code></td>
+</tr>
+<tr>
+<td><code>m</code></td>
+<td><code>margin</code></td>
+</tr>
+<tr>
+<td><code>t</code></td>
+<td><code>trade</code></td>
+</tr>
+<tr>
+<td><code>pb</code></td>
+<td><code>playbook</code></td>
+</tr>
+<tr>
+<td><code>st</code>, <code>dash</code></td>
+<td><code>status</code></td>
+</tr>
+<tr>
+<td><code>reset</code></td>
+<td><code>flush</code></td>
+</tr>
+<tr>
+<td><code>recon</code></td>
+<td><code>reconcile</code></td>
+</tr>
+<tr>
+<td><code>ready</code>, <code>test</code></td>
+<td><code>readiness</code></td>
+</tr>
+<tr>
+<td><code>serve</code>, <code>api</code></td>
+<td><code>server</code></td>
+</tr>
+<tr>
+<td><code>d</code></td>
+<td><code>daemon</code></td>
+</tr>
+<tr>
+<td><code>shell</code>, <code>interactive</code></td>
+<td><code>repl</code></td>
+</tr>
+<tr>
+<td><code>log</code>, <code>history</code></td>
+<td><code>journal</code></td>
+</tr>
+<tr>
+<td><code>perf</code>, <code>metrics</code></td>
+<td><code>performance</code></td>
+</tr>
+<tr>
+<td><code>oo</code>, <code>open-orders</code></td>
+<td><code>orders</code></td>
+</tr>
+<tr>
+<td><code>cx</code></td>
+<td><code>cancel</code></td>
+</tr>
+<tr>
+<td><code>activity</code></td>
+<td><code>trades</code></td>
+</tr>
+<tr>
+<td><code>cl</code></td>
+<td><code>close</code></td>
+</tr>
+<tr>
+<td><code>exec</code></td>
+<td><code>executions</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="common-flags-all-subcommands-with-ibkr-connection">Common Flags (all subcommands with IBKR connection)</h2>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--broker</code></td>
+<td><code>ibkr</code></td>
+<td>Broker to use</td>
+</tr>
+<tr>
+<td><code>--host</code></td>
+<td><code>127.0.0.1</code></td>
+<td>IBKR TWS/Gateway host</td>
+</tr>
+<tr>
+<td><code>--port</code></td>
+<td>auto</td>
+<td>IBKR port (7496=live, 7497=paper)</td>
+</tr>
+<tr>
+<td><code>--client-id</code></td>
+<td><code>10</code></td>
+<td>IBKR client ID</td>
+</tr>
+<tr>
+<td><code>--exchange</code></td>
+<td><code>SMART</code></td>
+<td>Exchange routing</td>
+</tr>
+<tr>
+<td><code>--data-dir</code></td>
+<td><code>data/utp</code></td>
+<td>Persistence directory</td>
+</tr>
+<tr>
+<td><code>--server</code></td>
+<td>auto</td>
+<td>Daemon URL for HTTP routing</td>
+</tr>
+<tr>
+<td><code>--server-port</code></td>
+<td><code>8000</code></td>
+<td>Daemon port for auto-detection</td>
+</tr>
+<tr>
+<td><code>--allow-fallback</code></td>
+<td>off</td>
+<td>Fall back to direct IBKR if daemon unreachable</td>
+</tr>
+<tr>
+<td><code>--poll-timeout</code></td>
+<td><code>30</code></td>
+<td>Max seconds to wait for order fill</td>
+</tr>
+<tr>
+<td><code>--poll-interval</code></td>
+<td><code>1.0</code></td>
+<td>Seconds between fill status checks</td>
+</tr>
+</tbody>
+</table>
+<h2 id="option-chain-parameters">Option Chain Parameters</h2>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--strike-range</code></td>
+<td><code>15</code></td>
+<td>Percentage range around current price (±N%)</td>
+</tr>
+<tr>
+<td><code>--strike-min</code></td>
+<td><em>(auto)</em></td>
+<td>Explicit minimum strike (overrides --strike-range)</td>
+</tr>
+<tr>
+<td><code>--strike-max</code></td>
+<td><em>(auto)</em></td>
+<td>Explicit maximum strike (overrides --strike-range)</td>
+</tr>
+<tr>
+<td><code>--type</code></td>
+<td><code>BOTH</code></td>
+<td><code>CALL</code>, <code>PUT</code>, or <code>BOTH</code></td>
+</tr>
+<tr>
+<td><code>--expiration</code></td>
+<td>today</td>
+<td>Expiration date (YYYY-MM-DD)</td>
+</tr>
+<tr>
+<td><code>--list-expirations</code></td>
+<td>false</td>
+<td>List available expirations instead of quotes</td>
+</tr>
+</tbody>
+</table>
+    <div class="footer">
+        Universal Trade Platform Documentation — Generated from Markdown sources in <code>docs/</code>
+    </div>
+    </div>
+</body>
+</html>

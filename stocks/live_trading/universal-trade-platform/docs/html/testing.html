@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Testing — Universal Trade Platform</title>
+    <style>
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --border: #30363d;
+    --accent-blue: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-red: #f85149;
+    --accent-orange: #d29922;
+    --accent-purple: #bc8cff;
+    --code-bg: #161b22;
+    --link: #58a6ff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+    padding: 0;
+    margin: 0;
+}
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 32px;
+}
+
+/* Navigation bar */
+.nav-bar {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 32px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.nav-bar a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 14px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.nav-bar a:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.nav-bar a.active {
+    color: var(--accent-blue);
+    background: rgba(88, 166, 255, 0.1);
+}
+
+.nav-bar .nav-title {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 15px;
+    margin-right: 8px;
+}
+
+/* Headings */
+h1 {
+    font-size: 2em;
+    font-weight: 600;
+    margin: 0 0 16px 0;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    margin: 32px 0 16px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h3 {
+    font-size: 1.25em;
+    font-weight: 600;
+    margin: 24px 0 12px 0;
+    color: var(--text-primary);
+}
+
+h4 {
+    font-size: 1.1em;
+    font-weight: 600;
+    margin: 20px 0 8px 0;
+    color: var(--text-secondary);
+}
+
+/* Paragraphs and text */
+p {
+    margin: 0 0 16px 0;
+    color: var(--text-primary);
+}
+
+a {
+    color: var(--link);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+em {
+    color: var(--text-secondary);
+}
+
+hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+}
+
+/* Lists */
+ul, ol {
+    margin: 0 0 16px 0;
+    padding-left: 28px;
+}
+
+li {
+    margin: 4px 0;
+    color: var(--text-primary);
+}
+
+li > ul, li > ol {
+    margin: 4px 0 4px 0;
+}
+
+/* Code */
+code {
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 6px;
+    color: var(--accent-blue);
+}
+
+pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    overflow-x: auto;
+    line-height: 1.5;
+}
+
+pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.88em;
+    color: var(--text-primary);
+}
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 16px 0;
+    font-size: 0.95em;
+}
+
+thead {
+    background: var(--bg-secondary);
+}
+
+th {
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+}
+
+td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+tr:hover {
+    background: var(--bg-secondary);
+}
+
+/* Blockquotes */
+blockquote {
+    border-left: 4px solid var(--accent-blue);
+    padding: 8px 16px;
+    margin: 0 0 16px 0;
+    background: var(--bg-secondary);
+    border-radius: 0 8px 8px 0;
+    color: var(--text-secondary);
+}
+
+blockquote p {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+/* Definition lists */
+dt {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-top: 12px;
+}
+
+dd {
+    margin-left: 20px;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+}
+
+/* Footer */
+.footer {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.85em;
+    text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .container { padding: 20px 16px; }
+    .nav-bar { padding: 10px 16px; }
+    table { font-size: 0.85em; }
+    th, td { padding: 6px 8px; }
+}
+</style>
+</head>
+<body>
+    <nav class="nav-bar">
+    <span class="nav-title">UTP Docs</span>
+    <a href="index.html">Home</a>
+    <a href="usage_guide.html">Usage Guide</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="api_reference.html">API Reference</a>
+    <a href="playbook.html">Playbook</a>
+    <a href="providers.html">Providers</a>
+    <a href="configuration.html">Configuration</a>
+    <a href="authentication.html">Authentication</a>
+    <a href="testing.html" class="active">Testing</a>
+    <a href="ibkr_setup_guide.html">IBKR Setup</a>
+    <a href="symbology.html">Symbology</a>
+    <a href="websockets.html">WebSockets</a>
+    </nav>
+    <div class="container">
+    <h1 id="testing">Testing</h1>
+<h2 id="overview">Overview</h2>
+<p>The test suite uses <code>pytest</code> with <code>pytest-asyncio</code> and <code>httpx</code> to test all REST endpoints, authentication flows, symbology mapping, WebSocket broadcasting, and the full persistence/dashboard/sync stack against mocked broker providers.</p>
+<p><strong>Total:</strong> 454 tests in a single file (<code>tests/test_utp.py</code>), all passing</p>
+<h2 id="running-tests">Running Tests</h2>
+<div class="codehilite"><pre><span></span><code><span class="c1"># All tests</span>
+python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>tests/<span class="w"> </span>-v
+
+<span class="c1"># Filter by test class</span>
+python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>tests/test_utp.py<span class="w"> </span>-k<span class="w"> </span><span class="s2">&quot;TestLedger&quot;</span><span class="w"> </span>-v
+
+<span class="c1"># Filter by test name</span>
+python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>tests/test_utp.py<span class="w"> </span>-k<span class="w"> </span><span class="s2">&quot;test_equity_order_dry_run&quot;</span><span class="w"> </span>-v
+
+<span class="c1"># Multiple classes</span>
+python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>tests/test_utp.py<span class="w"> </span>-k<span class="w"> </span><span class="s2">&quot;TestTradeAPI or TestMarketAPI&quot;</span><span class="w"> </span>-v
+
+<span class="c1"># With coverage (if pytest-cov installed)</span>
+python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>tests/<span class="w"> </span>-v<span class="w"> </span>--cov<span class="o">=</span>app<span class="w"> </span>--cov-report<span class="o">=</span>term-missing
+</code></pre></div>
+
+<h2 id="test-configuration">Test Configuration</h2>
+<p><strong>File:</strong> <code>pytest.ini</code></p>
+<div class="codehilite"><pre><span></span><code><span class="k">[pytest]</span>
+<span class="na">asyncio_mode</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">auto</span>
+<span class="na">testpaths</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">tests</span>
+</code></pre></div>
+
+<ul>
+<li><code>asyncio_mode = auto</code> -- all async test functions are automatically run as coroutines</li>
+<li><code>testpaths = tests</code> -- test discovery starts in the <code>tests/</code> directory</li>
+</ul>
+<h2 id="test-fixtures">Test Fixtures</h2>
+<p><strong>File:</strong> <code>tests/conftest.py</code></p>
+<h3 id="_setup_providers-autouse"><code>_setup_providers</code> (autouse)</h3>
+<p>Runs before every test. Clears the <code>ProviderRegistry</code>, registers and connects all three broker providers (Robinhood, E*TRADE, IBKR), then disconnects and clears after the test completes. Also initializes the ledger and position store with temp directories, and resets them after.</p>
+<p>This ensures each test gets a clean provider state, clean persistence, and no test leaks into another.</p>
+<h3 id="api_key_headers"><code>api_key_headers</code></h3>
+<p>Returns <code>{"X-API-Key": settings.api_key_secret}</code> for authenticating test requests.</p>
+<h3 id="client"><code>client</code></h3>
+<p>An async <code>httpx.AsyncClient</code> using <code>ASGITransport</code> pointed at the FastAPI app. Allows testing HTTP endpoints without starting a real server.</p>
+<div class="codehilite"><pre><span></span><code><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">test_example</span><span class="p">(</span><span class="n">client</span><span class="p">,</span> <span class="n">api_key_headers</span><span class="p">):</span>
+    <span class="n">resp</span> <span class="o">=</span> <span class="k">await</span> <span class="n">client</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/health&quot;</span><span class="p">)</span>
+    <span class="k">assert</span> <span class="n">resp</span><span class="o">.</span><span class="n">status_code</span> <span class="o">==</span> <span class="mi">200</span>
+</code></pre></div>
+
+<h3 id="tmp_data_dir"><code>tmp_data_dir</code></h3>
+<p>An isolated temporary directory (<code>tmp_path / "utp"</code>) for file I/O tests.</p>
+<h3 id="ledger"><code>ledger</code></h3>
+<p>A <code>TransactionLedger</code> instance backed by a temp directory. Used by tests that directly test ledger functionality.</p>
+<h3 id="position_store"><code>position_store</code></h3>
+<p>A <code>PlatformPositionStore</code> instance backed by a temp JSON file. Used by tests that directly test position tracking.</p>
+<h2 id="test-organization">Test Organization</h2>
+<p>All tests live in <code>tests/test_utp.py</code>, organized into classes by functional area:</p>
+<table>
+<thead>
+<tr>
+<th>Class</th>
+<th>Count</th>
+<th>Covers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TestDisplayHelpers</code></td>
+<td>6</td>
+<td>CLI display formatting (color, headers, steps)</td>
+</tr>
+<tr>
+<td><code>TestModeDetection</code></td>
+<td>5</td>
+<td>dry-run/paper/live mode selection and labels</td>
+</tr>
+<tr>
+<td><code>TestNextTradingDay</code></td>
+<td>2</td>
+<td>Trading day calculation (skips weekends)</td>
+</tr>
+<tr>
+<td><code>TestOptionsCommand</code></td>
+<td>6</td>
+<td>Option chain CLI (strikes, expirations, range, BOTH)</td>
+</tr>
+<tr>
+<td><code>TestBuildMarginOrder</code></td>
+<td>5</td>
+<td>Margin order construction for all types</td>
+</tr>
+<tr>
+<td><code>TestPortfolioCommand</code></td>
+<td>2</td>
+<td>Portfolio CLI output</td>
+</tr>
+<tr>
+<td><code>TestStatusCommand</code></td>
+<td>1</td>
+<td>Status CLI output</td>
+</tr>
+<tr>
+<td><code>TestJournalCommand</code></td>
+<td>3</td>
+<td>Journal CLI output with filters</td>
+</tr>
+<tr>
+<td><code>TestPerformanceCommand</code></td>
+<td>2</td>
+<td>Performance metrics CLI output</td>
+</tr>
+<tr>
+<td><code>TestBuildInstruction</code></td>
+<td>6</td>
+<td>CLI args → instruction dict (all 5 types + error)</td>
+</tr>
+<tr>
+<td><code>TestGetSymbolFromInstruction</code></td>
+<td>2</td>
+<td>Symbol extraction from instruction dict</td>
+</tr>
+<tr>
+<td><code>TestGenerateSafeDefaults</code></td>
+<td>5</td>
+<td>Safe default generation for --validate-all</td>
+</tr>
+<tr>
+<td><code>TestExecuteSingleOrder</code></td>
+<td>7</td>
+<td>End-to-end order execution (dry-run)</td>
+</tr>
+<tr>
+<td><code>TestTradeAPI</code></td>
+<td>6</td>
+<td>POST /trade/execute (dry-run, sync, async)</td>
+</tr>
+<tr>
+<td><code>TestMarketAPI</code></td>
+<td>5</td>
+<td>Quotes, batch quotes, margin check endpoints</td>
+</tr>
+<tr>
+<td><code>TestAccountAPI</code></td>
+<td>2</td>
+<td>GET /account/positions</td>
+</tr>
+<tr>
+<td><code>TestAuth</code></td>
+<td>4</td>
+<td>API key + OAuth2/JWT flows</td>
+</tr>
+<tr>
+<td><code>TestSymbology</code></td>
+<td>7</td>
+<td>Cross-broker symbol mapping</td>
+</tr>
+<tr>
+<td><code>TestWebSocket</code></td>
+<td>2</td>
+<td>WebSocket broadcast + health endpoint</td>
+</tr>
+<tr>
+<td><code>TestLedger</code></td>
+<td>12</td>
+<td>Transaction ledger CRUD, snapshots, replay</td>
+</tr>
+<tr>
+<td><code>TestPositionStore</code></td>
+<td>12</td>
+<td>Position tracking, P&amp;L, persistence</td>
+</tr>
+<tr>
+<td><code>TestDashboard</code></td>
+<td>8</td>
+<td>Dashboard aggregation, metrics, terminal</td>
+</tr>
+<tr>
+<td><code>TestCSVImporter</code></td>
+<td>10</td>
+<td>CSV import/parsing, dedup, preview</td>
+</tr>
+<tr>
+<td><code>TestExpirationService</code></td>
+<td>8</td>
+<td>Auto-expiration, EOD close, ledger logging</td>
+</tr>
+<tr>
+<td><code>TestPositionSync</code></td>
+<td>8</td>
+<td>Position sync loop, trading hours</td>
+</tr>
+<tr>
+<td><code>TestReconciliation</code></td>
+<td>6</td>
+<td>System vs broker position reconciliation</td>
+</tr>
+<tr>
+<td><code>TestFlush</code></td>
+<td>7</td>
+<td>Flush + reconcile --flush/--show/--portfolio</td>
+</tr>
+<tr>
+<td><code>TestPlaybookParsing</code></td>
+<td>12</td>
+<td>YAML playbook parsing and validation</td>
+</tr>
+<tr>
+<td><code>TestInstructionTranslation</code></td>
+<td>6</td>
+<td>Instruction → TradeRequest conversion</td>
+</tr>
+<tr>
+<td><code>TestPlaybookExecution</code></td>
+<td>7</td>
+<td>Playbook execution flow, hooks</td>
+</tr>
+<tr>
+<td><code>TestFillTracking</code></td>
+<td>8</td>
+<td>Order fill polling, callbacks, timeouts</td>
+</tr>
+<tr>
+<td><code>TestIBKRProvider</code></td>
+<td>16</td>
+<td>IBKR stub + live + cache layer</td>
+</tr>
+<tr>
+<td><code>TestOrdersCommand</code></td>
+<td>3</td>
+<td>Orders/cancel CLI requires mode</td>
+</tr>
+<tr>
+<td><code>TestStatusChangeDedup</code></td>
+<td>2</td>
+<td>Ledger status change deduplication</td>
+</tr>
+<tr>
+<td><code>TestPositionOrderId</code></td>
+<td>3</td>
+<td>Position order_id tracking</td>
+</tr>
+<tr>
+<td><code>TestProviderOpenOrdersCancel</code></td>
+<td>3</td>
+<td>Provider ABC: open orders, cancel, portfolio items</td>
+</tr>
+<tr>
+<td><code>TestPortfolioBrokerPnL</code></td>
+<td>2</td>
+<td>Portfolio with broker-authoritative P&amp;L</td>
+</tr>
+<tr>
+<td><code>TestCloseFlag</code></td>
+<td>7</td>
+<td>Close flag for credit/debit/iron condor trades</td>
+</tr>
+<tr>
+<td><code>TestTradesCommand</code></td>
+<td>3</td>
+<td>Trades activity + detail drill-down</td>
+</tr>
+<tr>
+<td><code>TestCloseCommand</code></td>
+<td>3</td>
+<td>Close position by ID (derives params, dry-run)</td>
+</tr>
+<tr>
+<td><code>TestPositionStoreLocking</code></td>
+<td>3</td>
+<td>Thread safety, atomic save, concurrent writes</td>
+</tr>
+<tr>
+<td><code>TestReduceQuantityZombie</code></td>
+<td>3</td>
+<td>Auto-close on zero quantity reduction</td>
+</tr>
+<tr>
+<td><code>TestIBKRReconnection</code></td>
+<td>5</td>
+<td>Reconnection, health check, backoff cap</td>
+</tr>
+<tr>
+<td><code>TestDaemonAutoRestart</code></td>
+<td>5</td>
+<td>Process auto-restart, signal exit, crash restart, degraded mode</td>
+</tr>
+<tr>
+<td><code>TestExceptionLogging</code></td>
+<td>2</td>
+<td>Graceful error handling</td>
+</tr>
+<tr>
+<td><code>TestLANTrust</code></td>
+<td>6</td>
+<td>LAN auth bypass, config, disabled mode</td>
+</tr>
+<tr>
+<td><code>TestDaemonCommand</code></td>
+<td>13</td>
+<td>Daemon health, close, trades, orders, options endpoints</td>
+</tr>
+<tr>
+<td><code>TestTradingClient</code></td>
+<td>11</td>
+<td>Async/sync client, payloads, context manager</td>
+</tr>
+<tr>
+<td><code>TestHTTPClientMode</code></td>
+<td>8</td>
+<td>Server detection, HTTP functions, REPL</td>
+</tr>
+<tr>
+<td><code>TestAdvisorIntegration</code></td>
+<td>8</td>
+<td>Advisor endpoints, daemon state, confirm</td>
+</tr>
+<tr>
+<td><code>TestExecutionStore</code></td>
+<td>9</td>
+<td>Execution store, dedup, grouping, multi-leg detection</td>
+</tr>
+<tr>
+<td><code>TestIBKRRestProvider</code></td>
+<td>10</td>
+<td>CPG REST provider: connect, auth, quote, positions, orders, option chains, margin</td>
+</tr>
+<tr>
+<td><code>TestOptionQuoteStreaming</code></td>
+<td>25</td>
+<td>Option quote cache, Redis persistence, streaming lifecycle, market hours TTL, route integration</td>
+</tr>
+<tr>
+<td><code>TestMarketDataStreaming</code></td>
+<td>24</td>
+<td>CPG polling/WS modes, snapshot parsing, tick ingestion, close-band price gate</td>
+</tr>
+</tbody>
+</table>
+<h2 id="testing-approach">Testing Approach</h2>
+<h3 id="no-external-dependencies">No External Dependencies</h3>
+<p>All tests run against <strong>stub providers</strong> that return simulated data. No real broker APIs, databases, or network calls are made. Tests are fast (~1.5 seconds total) and deterministic.</p>
+<h3 id="isolated-persistence">Isolated Persistence</h3>
+<p>Every test gets its own temporary directory via <code>tmp_path</code>. The autouse <code>_setup_providers</code> fixture initializes the ledger and position store with temp paths, ensuring no test pollutes another's state. Module-level singletons are reset after each test via <code>reset_ledger()</code> and <code>reset_position_store()</code>.</p>
+<h3 id="asgi-transport">ASGI Transport</h3>
+<p>Tests use <code>httpx.ASGITransport</code> to call the FastAPI app in-process. This is faster than starting a real HTTP server and avoids port conflicts.</p>
+<h3 id="provider-isolation">Provider Isolation</h3>
+<p>The <code>_setup_providers</code> fixture (autouse) ensures every test starts with a fresh <code>ProviderRegistry</code>. This prevents state leakage between tests.</p>
+<h2 id="adding-new-tests">Adding New Tests</h2>
+<p>Add a new <code>class TestNewFeature</code> to <code>tests/test_utp.py</code>:</p>
+<div class="codehilite"><pre><span></span><code><span class="k">class</span><span class="w"> </span><span class="nc">TestNewFeature</span><span class="p">:</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">test_new_endpoint</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">client</span><span class="p">,</span> <span class="n">api_key_headers</span><span class="p">):</span>
+        <span class="n">resp</span> <span class="o">=</span> <span class="k">await</span> <span class="n">client</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/new/endpoint&quot;</span><span class="p">,</span> <span class="n">headers</span><span class="o">=</span><span class="n">api_key_headers</span><span class="p">)</span>
+        <span class="k">assert</span> <span class="n">resp</span><span class="o">.</span><span class="n">status_code</span> <span class="o">==</span> <span class="mi">200</span>
+        <span class="k">assert</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()[</span><span class="s2">&quot;key&quot;</span><span class="p">]</span> <span class="o">==</span> <span class="s2">&quot;expected_value&quot;</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">test_new_service</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">tmp_path</span><span class="p">):</span>
+        <span class="c1"># Service-level test with isolated temp dir</span>
+        <span class="o">...</span>
+</code></pre></div>
+
+<p>For tests that need their own ledger/store instances, create fixtures within the class using <code>tmp_path</code>.</p>
+<h2 id="test-utilities">Test Utilities</h2>
+<h3 id="creating-scoped-tokens-in-tests">Creating Scoped Tokens in Tests</h3>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">app.auth</span><span class="w"> </span><span class="kn">import</span> <span class="n">create_access_token</span>
+
+<span class="n">token</span> <span class="o">=</span> <span class="n">create_access_token</span><span class="p">(</span><span class="s2">&quot;testuser&quot;</span><span class="p">,</span> <span class="n">scopes</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;market:read&quot;</span><span class="p">])</span>
+<span class="n">headers</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;Authorization&quot;</span><span class="p">:</span> <span class="sa">f</span><span class="s2">&quot;Bearer </span><span class="si">{</span><span class="n">token</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">}</span>
+<span class="n">resp</span> <span class="o">=</span> <span class="k">await</span> <span class="n">client</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;/market/quote/SPY&quot;</span><span class="p">,</span> <span class="n">headers</span><span class="o">=</span><span class="n">headers</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="building-order-payloads">Building Order Payloads</h3>
+<p>See <code>TestTradeAPI</code> for complete examples of equity orders, multi-leg orders, and validation error cases.</p>
+<h3 id="building-positions-for-service-tests">Building Positions for Service Tests</h3>
+<p>See <code>TestPositionStore</code> and <code>TestExpirationService</code> for patterns using <code>TradeRequest</code> / <code>OrderResult</code> to populate the store.</p>
+    <div class="footer">
+        Universal Trade Platform Documentation — Generated from Markdown sources in <code>docs/</code>
+    </div>
+    </div>
+</body>
+</html>

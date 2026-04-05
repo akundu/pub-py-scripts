@@ -1779,19 +1779,61 @@ async def _auto_trade_loop(state: dict) -> None:
 
             spreads = compute_spreads_server(chain, sym, cp, width, filters)
 
+            # Dedup config: normal cooldown and fallback (no-other-option) cooldown
+            dedup_minutes = config.get("dedup_minutes", 10)
+            dedup_fallback_minutes = config.get("dedup_fallback_minutes", 15)
+            now_ts = time.time()
+
             for s in spreads:
                 s["symbol"] = sym
                 s["expiration"] = exp
                 s["current_price"] = cp
-                # Dedup: skip if already executed today
                 key = f"{sym}_{s['short_strike']}_{s['option_type']}_{exp}"
-                if any(e.get("key") == key for e in executed):
-                    continue
+                # Check if this spread was executed recently
+                last_exec = None
+                for e in reversed(executed):
+                    if e.get("key") == key:
+                        last_exec = e
+                        break
+                if last_exec:
+                    exec_ts = last_exec.get("epoch", 0)
+                    age_min = (now_ts - exec_ts) / 60 if exec_ts else float("inf")
+                    if age_min < dedup_minutes:
+                        s["_dedup_blocked"] = True  # Blocked by normal cooldown
+                    else:
+                        s["_dedup_blocked"] = False  # Past normal cooldown
+                else:
+                    s["_dedup_blocked"] = False
                 all_candidates.append(s)
 
         # Sort all candidates by ROI and pick top N
         all_candidates.sort(key=lambda s: s["roi_pct"], reverse=True)
-        selected = all_candidates[:top_n]
+
+        # First pass: pick from non-dedup-blocked candidates
+        non_blocked = [s for s in all_candidates if not s.get("_dedup_blocked")]
+        selected = non_blocked[:top_n]
+
+        # Second pass: if not enough, allow dedup-blocked ones past fallback cooldown
+        if len(selected) < top_n:
+            now_ts = time.time()
+            dedup_fallback_minutes = config.get("dedup_fallback_minutes", 15)
+            for s in all_candidates:
+                if len(selected) >= top_n:
+                    break
+                if s in selected:
+                    continue
+                if s.get("_dedup_blocked"):
+                    key = f"{s['symbol']}_{s['short_strike']}_{s['option_type']}_{s['expiration']}"
+                    last_exec = None
+                    for e in reversed(executed):
+                        if e.get("key") == key:
+                            last_exec = e
+                            break
+                    if last_exec:
+                        exec_ts = last_exec.get("epoch", 0)
+                        age_min = (now_ts - exec_ts) / 60 if exec_ts else float("inf")
+                        if age_min >= dedup_fallback_minutes:
+                            selected.append(s)  # Allowed by fallback cooldown
 
         log_entry = {
             "time": _now_iso(),
@@ -1826,6 +1868,7 @@ async def _auto_trade_loop(state: dict) -> None:
 
                 executed.append({
                     "key": key,
+                    "epoch": time.time(),
                     "sym": s["symbol"],
                     "short": s["short_strike"],
                     "long": s["long_strike"],
@@ -2407,7 +2450,9 @@ async def api_predictions(_u: str | None = Depends(optional_session)):
     """Proxy to predictions server for all default tickers. Cached same as percentiles."""
     global _predictions_cache, _predictions_cache_at
     ttl = 120 if _is_market_hours() else float("inf")
-    if _predictions_cache and (time.time() - _predictions_cache_at) < ttl:
+    # Re-fetch if cache is missing any default tickers (incomplete previous fetch)
+    cache_complete = _predictions_cache and all(sym in _predictions_cache for sym in DEFAULT_TICKERS)
+    if cache_complete and (time.time() - _predictions_cache_at) < ttl:
         return _predictions_cache
 
     result = {}

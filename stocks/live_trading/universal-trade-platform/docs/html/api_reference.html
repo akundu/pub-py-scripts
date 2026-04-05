@@ -1,0 +1,1525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Reference — Universal Trade Platform</title>
+    <style>
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --border: #30363d;
+    --accent-blue: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-red: #f85149;
+    --accent-orange: #d29922;
+    --accent-purple: #bc8cff;
+    --code-bg: #161b22;
+    --link: #58a6ff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+    padding: 0;
+    margin: 0;
+}
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 32px;
+}
+
+/* Navigation bar */
+.nav-bar {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 32px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.nav-bar a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 14px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.nav-bar a:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.nav-bar a.active {
+    color: var(--accent-blue);
+    background: rgba(88, 166, 255, 0.1);
+}
+
+.nav-bar .nav-title {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 15px;
+    margin-right: 8px;
+}
+
+/* Headings */
+h1 {
+    font-size: 2em;
+    font-weight: 600;
+    margin: 0 0 16px 0;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    margin: 32px 0 16px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h3 {
+    font-size: 1.25em;
+    font-weight: 600;
+    margin: 24px 0 12px 0;
+    color: var(--text-primary);
+}
+
+h4 {
+    font-size: 1.1em;
+    font-weight: 600;
+    margin: 20px 0 8px 0;
+    color: var(--text-secondary);
+}
+
+/* Paragraphs and text */
+p {
+    margin: 0 0 16px 0;
+    color: var(--text-primary);
+}
+
+a {
+    color: var(--link);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+em {
+    color: var(--text-secondary);
+}
+
+hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+}
+
+/* Lists */
+ul, ol {
+    margin: 0 0 16px 0;
+    padding-left: 28px;
+}
+
+li {
+    margin: 4px 0;
+    color: var(--text-primary);
+}
+
+li > ul, li > ol {
+    margin: 4px 0 4px 0;
+}
+
+/* Code */
+code {
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 6px;
+    color: var(--accent-blue);
+}
+
+pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    overflow-x: auto;
+    line-height: 1.5;
+}
+
+pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.88em;
+    color: var(--text-primary);
+}
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 16px 0;
+    font-size: 0.95em;
+}
+
+thead {
+    background: var(--bg-secondary);
+}
+
+th {
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+}
+
+td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+tr:hover {
+    background: var(--bg-secondary);
+}
+
+/* Blockquotes */
+blockquote {
+    border-left: 4px solid var(--accent-blue);
+    padding: 8px 16px;
+    margin: 0 0 16px 0;
+    background: var(--bg-secondary);
+    border-radius: 0 8px 8px 0;
+    color: var(--text-secondary);
+}
+
+blockquote p {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+/* Definition lists */
+dt {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-top: 12px;
+}
+
+dd {
+    margin-left: 20px;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+}
+
+/* Footer */
+.footer {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.85em;
+    text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .container { padding: 20px 16px; }
+    .nav-bar { padding: 10px 16px; }
+    table { font-size: 0.85em; }
+    th, td { padding: 6px 8px; }
+}
+</style>
+</head>
+<body>
+    <nav class="nav-bar">
+    <span class="nav-title">UTP Docs</span>
+    <a href="index.html">Home</a>
+    <a href="usage_guide.html">Usage Guide</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="api_reference.html" class="active">API Reference</a>
+    <a href="playbook.html">Playbook</a>
+    <a href="providers.html">Providers</a>
+    <a href="configuration.html">Configuration</a>
+    <a href="authentication.html">Authentication</a>
+    <a href="testing.html">Testing</a>
+    <a href="ibkr_setup_guide.html">IBKR Setup</a>
+    <a href="symbology.html">Symbology</a>
+    <a href="websockets.html">WebSockets</a>
+    </nav>
+    <div class="container">
+    <h1 id="api-reference">API Reference</h1>
+<p>Base URL: <code>http://localhost:8000</code> (configurable via <code>--host</code> / <code>--port</code>)</p>
+<p>All endpoints except <code>/health</code> and <code>/auth/token</code> require authentication. See <a href="authentication.html">Authentication</a> for details.</p>
+<hr />
+<h2 id="post-authtoken">POST /auth/token</h2>
+<p>Issue a JWT access token.</p>
+<p><strong>Request Body:</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;username&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;string&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;password&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;string&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;scopes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;trades:write&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;market:read&quot;</span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<ul>
+<li><code>scopes</code> is optional. If omitted or empty, all scopes are granted.</li>
+</ul>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;access_token&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;eyJhbGciOiJIUzI1NiIs...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;token_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;bearer&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;scopes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;trades:write&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;market:read&quot;</span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Errors:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Status</th>
+<th>Condition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>401</td>
+<td>Empty username or password</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="post-tradeexecute">POST /trade/execute</h2>
+<p>Execute an equity or multi-leg options trade.</p>
+<p><strong>Required Scope:</strong> <code>trades:write</code></p>
+<p><strong>Headers:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Header</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-API-Key</code> or <code>Authorization</code></td>
+<td>Yes</td>
+<td>Authentication</td>
+</tr>
+<tr>
+<td><code>X-Dry-Run</code></td>
+<td>No</td>
+<td>Set to <code>"true"</code> to simulate without broker submission</td>
+</tr>
+<tr>
+<td><code>X-Async</code></td>
+<td>No</td>
+<td>Set to <code>"true"</code> to return immediately after submission; fill status is broadcast via WebSocket. Without this, the endpoint waits for the order to fill or timeout (default 30s, configurable via <code>ORDER_POLL_TIMEOUT_SECONDS</code>)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Request Body -- Equity Order:</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;equity_order&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;robinhood&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;AAPL&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;side&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;BUY&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;order_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;LIMIT&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;limit_price&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">175.50</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;time_in_force&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;DAY&quot;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Request Body -- Multi-Leg Order (MARKET, default when net_price omitted):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;multi_leg_order&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ibkr&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;legs&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPY&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;expiration&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-20&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;strike&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">450.0</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;option_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PUT&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SELL_TO_OPEN&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPY&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;expiration&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-20&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;strike&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">445.0</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;option_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PUT&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;BUY_TO_OPEN&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">],</span>
+<span class="w">    </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;time_in_force&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;DAY&quot;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Request Body -- Multi-Leg Order (LIMIT, when net_price specified):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;multi_leg_order&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ibkr&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;legs&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPY&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;expiration&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-20&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;strike&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">450.0</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;option_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PUT&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SELL_TO_OPEN&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPY&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;expiration&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-20&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;strike&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">445.0</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;option_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PUT&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;BUY_TO_OPEN&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">      </span><span class="p">}</span>
+<span class="w">    </span><span class="p">],</span>
+<span class="w">    </span><span class="nt">&quot;order_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;LIMIT&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;net_price&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1.25</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;time_in_force&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;DAY&quot;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Order Type Behavior:</strong></p>
+<ul>
+<li>For <code>multi_leg_order</code>: <code>order_type</code> defaults to <code>MARKET</code> when <code>net_price</code> is not provided. When <code>net_price</code> is specified, <code>order_type</code> is automatically set to <code>LIMIT</code>.</li>
+<li>For <code>equity_order</code>: use <code>order_type</code> and <code>limit_price</code> explicitly.</li>
+</ul>
+<p><strong>Validation Rules:</strong></p>
+<ul>
+<li>Exactly one of <code>equity_order</code> or <code>multi_leg_order</code> must be provided (not both, not neither)</li>
+<li><code>legs</code> must contain 1-4 entries</li>
+<li><code>quantity</code> must be &gt;= 1</li>
+<li><code>limit_price</code> / <code>net_price</code> required when <code>order_type</code> is <code>LIMIT</code></li>
+</ul>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;order_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;a1b2c3d4-e5f6-7890-abcd-ef1234567890&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ibkr&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SUBMITTED&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;IBKR combo: 2 legs, conIds=[123456789, 987654321]&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;dry_run&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;filled_price&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;created_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-09T15:30:00.000000&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Dry-Run Response:</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;order_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;robinhood&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PENDING&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;DRY RUN: Multi-leg [SELL_TO_OPEN 1 SPY 450.0P 2026-03-20, ...]&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;dry_run&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;filled_price&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;created_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-09T15:30:00.000000&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Side Effects:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Side Effects</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Live</td>
+<td>Logs <code>ORDER_SUBMITTED</code> to ledger, stashes request in <code>_pending_orders</code>, spawns background poll task. On <code>FILLED</code>: creates position with <code>source=live_api</code>, logs <code>POSITION_OPENED</code>.</td>
+</tr>
+<tr>
+<td>Dry-run</td>
+<td>Creates paper position with <code>source=paper</code>, logs <code>ORDER_SUBMITTED</code> and <code>POSITION_OPENED</code> to ledger. No broker interaction.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="post-tradeclose">POST /trade/close</h2>
+<p>Close an open position by ID.</p>
+<p><strong>Required Scope:</strong> <code>trades:write</code></p>
+<p><strong>Request Body:</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;position_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;a1b2c3d4&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;net_price&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<ul>
+<li><code>position_id</code>: Full or prefix of position ID (prefix auto-resolves if unique)</li>
+<li><code>quantity</code>: Partial close quantity (null = close all)</li>
+<li><code>net_price</code>: Debit price for closing. Optional -- when <code>null</code> or omitted, a MARKET order is submitted. When specified, a LIMIT order is submitted at the given price.</li>
+</ul>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ok&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;position&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;position_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;closed&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;pnl&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">350.00</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Errors:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Status</th>
+<th>Condition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>400</td>
+<td>Ambiguous prefix (multiple matches) or position not open</td>
+</tr>
+<tr>
+<td>404</td>
+<td>Position not found</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="post-tradeadvisorconfirm">POST /trade/advisor/confirm</h2>
+<p>Confirm and execute an advisor recommendation by priority number.</p>
+<p><strong>Required Scope:</strong> <code>trades:write</code></p>
+<p><strong>Query Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>priority</code></td>
+<td>int</td>
+<td>Priority number of the recommendation to confirm</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;confirmed&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;recommendation&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;tier_label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;P90_DTE2&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;direction&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;put&quot;</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Recommendation 1 (P90_DTE2) confirmed for execution&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="get-marketoptionssymbol">GET /market/options/{symbol}</h2>
+<p>Get option chain data for a symbol.</p>
+<p><strong>Required Scope:</strong> <code>market:read</code></p>
+<p><strong>Query Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>broker</code></td>
+<td>string</td>
+<td><code>ibkr</code></td>
+<td>Broker to query</td>
+</tr>
+<tr>
+<td><code>expiration</code></td>
+<td>string</td>
+<td>null</td>
+<td>Expiration date YYYY-MM-DD (for quotes)</td>
+</tr>
+<tr>
+<td><code>option_type</code></td>
+<td>string</td>
+<td>null</td>
+<td><code>CALL</code>, <code>PUT</code>, or null for both</td>
+</tr>
+<tr>
+<td><code>strike_min</code></td>
+<td>float</td>
+<td>null</td>
+<td>Minimum strike price</td>
+</tr>
+<tr>
+<td><code>strike_max</code></td>
+<td>float</td>
+<td>null</td>
+<td>Maximum strike price</td>
+</tr>
+<tr>
+<td><code>list_expirations</code></td>
+<td>bool</td>
+<td>false</td>
+<td>Return only available expirations</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response (200) — List expirations:</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPX&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;expirations&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;2026-03-20&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;2026-03-27&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;2026-04-17&quot;</span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Response (200) — Chain with quotes:</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPX&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;chain&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;expirations&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="err">...</span><span class="p">],</span><span class="w"> </span><span class="nt">&quot;strikes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="err">...</span><span class="p">]</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;quotes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;call&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="w"> </span><span class="nt">&quot;strike&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5500</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;bid&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">12.50</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;ask&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">13.00</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">}],</span>
+<span class="w">    </span><span class="nt">&quot;put&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="w"> </span><span class="nt">&quot;strike&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5500</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;bid&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">8.20</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;ask&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">8.50</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">}]</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="get-marketquotesymbol">GET /market/quote/{symbol}</h2>
+<p>Fetch a real-time quote for a symbol.</p>
+<p><strong>Required Scope:</strong> <code>market:read</code></p>
+<p><strong>Path Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>symbol</code></td>
+<td>string</td>
+<td>Ticker symbol (e.g., <code>SPY</code>, <code>AAPL</code>)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Query Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>broker</code></td>
+<td>string</td>
+<td><code>robinhood</code></td>
+<td>Broker to fetch from: <code>robinhood</code>, <code>etrade</code>, <code>ibkr</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPY&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;bid&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">100.00</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ask&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">100.05</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;last&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">100.02</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;volume&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000000</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-09T15:30:00.000000+00:00&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="get-accountpositions">GET /account/positions</h2>
+<p>Aggregate positions across all active broker providers.</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;positions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;robinhood&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPY&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">100.0</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;avg_cost&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">450.0</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;market_value&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">45500.0</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;unrealized_pnl&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">500.0</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;source&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;live_api&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;last_synced_at&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;account_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;total_market_value&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">100750.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;total_unrealized_pnl&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1750.0</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="post-accountsync">POST /account/sync</h2>
+<p>Manually trigger a position sync across all brokers.</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;new_positions&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;updated_positions&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;unchanged_positions&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;brokers_synced&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;robinhood&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;etrade&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;ibkr&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-15T15:30:00.000000+00:00&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Side Effects:</strong> New positions added to store with <code>source=external_sync</code>. Sync events logged to ledger.</p>
+<hr />
+<h2 id="post-accountcheck-expirations">POST /account/check-expirations</h2>
+<p>Manually trigger expiration check and auto-close.</p>
+<p><strong>Required Scope:</strong> <code>trades:write</code></p>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;closed_positions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;pos-id-1&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;pos-id-2&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="get-accountexpiring">GET /account/expiring</h2>
+<p>Preview positions expiring on a given date.</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Query Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>target_date</code></td>
+<td>date</td>
+<td>today</td>
+<td>Date to check (YYYY-MM-DD)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response (200):</strong> List of position dicts.</p>
+<hr />
+<h2 id="get-dashboardsummary">GET /dashboard/summary</h2>
+<p>Aggregated dashboard summary.</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;active_positions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;position_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;a1b2c3d4-...&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;open&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;source&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;paper&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;robinhood&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;order_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;multi_leg&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPY&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;entry_price&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1.25</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;legs&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="err">...</span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;expiration&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-20&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;current_mark&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;unrealized_pnl&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;cash_available&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;cash_deployed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">6.25</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;total_pnl&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">750.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;unrealized_pnl&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;realized_pnl&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">750.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;last_sync_time&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;positions_by_source&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;paper&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;live_api&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;external_sync&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="get-dashboardperformance">GET /dashboard/performance</h2>
+<p>Compute performance metrics for closed positions.</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Query Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>start_date</code></td>
+<td>date</td>
+<td>None</td>
+<td>Filter from date</td>
+</tr>
+<tr>
+<td><code>end_date</code></td>
+<td>date</td>
+<td>None</td>
+<td>Filter to date</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;total_trades&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">42</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;wins&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">38</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;losses&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;win_rate&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.9048</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;net_pnl&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">12500.00</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;roi&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">45.50</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;profit_factor&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">8.25</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;sharpe&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">2.15</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;max_drawdown&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">850.00</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;avg_pnl&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">297.62</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="get-dashboardpnldaily">GET /dashboard/pnl/daily</h2>
+<p>Daily P&amp;L breakdown.</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Query Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>days</code></td>
+<td>int</td>
+<td>30</td>
+<td>Number of days to return</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;date&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-15&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;realized_pnl&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">500.00</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;unrealized_pnl&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;total_pnl&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">500.00</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;trades_opened&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;trades_closed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">]</span>
+</code></pre></div>
+
+<hr />
+<h2 id="get-dashboardterminal">GET /dashboard/terminal</h2>
+<p>Render dashboard as ANSI terminal text.</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Response:</strong> <code>text/plain</code> with ANSI color codes.</p>
+<hr />
+<h2 id="get-ledgerentries">GET /ledger/entries</h2>
+<p>Query ledger entries with optional filters.</p>
+<p><strong>Required Scope:</strong> <code>trades:read</code></p>
+<p><strong>Query Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>broker</code></td>
+<td>string</td>
+<td>None</td>
+<td>Filter by broker</td>
+</tr>
+<tr>
+<td><code>event_type</code></td>
+<td>string</td>
+<td>None</td>
+<td>Filter by event type</td>
+</tr>
+<tr>
+<td><code>source</code></td>
+<td>string</td>
+<td>None</td>
+<td>Filter by source: <code>live_api</code>, <code>paper</code>, <code>csv_import</code>, <code>external_sync</code></td>
+</tr>
+<tr>
+<td><code>order_id</code></td>
+<td>string</td>
+<td>None</td>
+<td>Filter by order ID</td>
+</tr>
+<tr>
+<td><code>limit</code></td>
+<td>int</td>
+<td>100</td>
+<td>Max entries to return</td>
+</tr>
+<tr>
+<td><code>offset</code></td>
+<td>int</td>
+<td>0</td>
+<td>Pagination offset</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response (200):</strong> List of <code>LedgerEntry</code> objects.</p>
+<hr />
+<h2 id="get-ledgerentriesrecent">GET /ledger/entries/recent</h2>
+<p>Return the last N ledger entries.</p>
+<p><strong>Required Scope:</strong> <code>trades:read</code></p>
+<p><strong>Query Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>n</code></td>
+<td>int</td>
+<td>50</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="post-ledgersnapshot">POST /ledger/snapshot</h2>
+<p>Trigger a manual state snapshot.</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;snapshot&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;snapshot_42.json&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="get-ledgersnapshots">GET /ledger/snapshots</h2>
+<p>List available snapshots.</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Response (200):</strong> <code>["snapshot_0.json", "snapshot_42.json"]</code></p>
+<hr />
+<h2 id="get-ledgerreplay">GET /ledger/replay</h2>
+<p>Replay ledger from a snapshot for state reconstruction.</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Query Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>from_snapshot</code></td>
+<td>string</td>
+<td>None</td>
+<td>Snapshot filename to start from</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;state&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;positions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="err">...</span><span class="p">],</span><span class="w"> </span><span class="nt">&quot;account_state&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">}},</span>
+<span class="w">  </span><span class="nt">&quot;entries_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">156</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;entries&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="err">...</span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="post-importcsv">POST /import/csv</h2>
+<p>Upload and import a CSV transaction file.</p>
+<p><strong>Required Scope:</strong> <code>trades:write</code></p>
+<p><strong>Content-Type:</strong> <code>multipart/form-data</code></p>
+<p><strong>Query Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>broker</code></td>
+<td>string</td>
+<td>Yes</td>
+<td>Source broker: <code>robinhood</code> or <code>etrade</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Form Data:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>file</code></td>
+<td>file</td>
+<td>CSV file upload</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;file_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;robinhood_transactions.csv&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;robinhood&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;records_imported&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">47</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;records_skipped&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;errors&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;Row error: invalid date format on row 51&quot;</span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Side Effects:</strong> Each imported record creates a <code>CSV_IMPORTED</code> ledger entry with <code>source=csv_import</code>. The uploaded file is saved to <code>data/utp/imports/{broker}/</code> for audit.</p>
+<hr />
+<h2 id="post-importpreview">POST /import/preview</h2>
+<p>Preview first 10 rows of a CSV without importing.</p>
+<p><strong>Required Scope:</strong> <code>trades:read</code></p>
+<p><strong>Content-Type:</strong> <code>multipart/form-data</code></p>
+<p><strong>Response (200):</strong> List of parsed row dicts.</p>
+<hr />
+<h2 id="get-importformats">GET /import/formats</h2>
+<p>Return supported CSV formats and example column headers.</p>
+<p><strong>Required Scope:</strong> <code>trades:read</code></p>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;robinhood&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;Activity Date&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;Process Date&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;Settle Date&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;Instrument&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;Description&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;Trans Code&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;Quantity&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;Price&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;Amount&quot;</span><span class="p">],</span>
+<span class="w">    </span><span class="nt">&quot;example_row&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;03/15/2026,,03/17/2026,AAPL,Buy,Buy,10,$175.50,$1755.00&quot;</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;etrade&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;columns&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;TransactionDate&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;TransactionType&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;SecurityType&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;Symbol&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;Quantity&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;Price&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;Commission&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;Amount&quot;</span><span class="p">],</span>
+<span class="w">    </span><span class="nt">&quot;example_row&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;03/15/2026,Bought,Equity,AAPL,10,$175.50,$0.00,$1755.00&quot;</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="post-playbookexecute">POST /playbook/execute</h2>
+<p>Execute a YAML playbook file containing trade instructions.</p>
+<p><strong>Required Scope:</strong> <code>trades:write</code></p>
+<p><strong>Content-Type:</strong> <code>multipart/form-data</code></p>
+<p><strong>Headers:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Header</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Dry-Run</code></td>
+<td>string</td>
+<td>Set to <code>"true"</code> to simulate without sending to broker</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Form Data:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>file</code></td>
+<td>file</td>
+<td>YAML playbook file</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;playbook_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Morning Entries&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;total&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;succeeded&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;failed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;results&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;instruction_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;buy_spy&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;dry_run&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;order_result&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;order_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ibkr&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PENDING&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;dry_run&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">},</span>
+<span class="w">      </span><span class="nt">&quot;error&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;position_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;instruction_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;bad_order&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;failed&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;order_result&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;error&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Missing required field &#39;quantity&#39;&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;position_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Side Effects:</strong> Each executed instruction creates a <code>PLAYBOOK_EXECUTED</code> ledger entry with playbook metadata in the <code>data</code> dict.</p>
+<hr />
+<h2 id="post-playbookvalidate">POST /playbook/validate</h2>
+<p>Validate a playbook's instruction structure without executing.</p>
+<p><strong>Required Scope:</strong> <code>trades:write</code></p>
+<p><strong>Content-Type:</strong> <code>multipart/form-data</code></p>
+<p><strong>Form Data:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>file</code></td>
+<td>file</td>
+<td>YAML playbook file</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">[</span>
+<span class="w">  </span><span class="p">{</span><span class="nt">&quot;instruction_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;buy_spy&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;valid&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;error&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">},</span>
+<span class="w">  </span><span class="p">{</span><span class="nt">&quot;instruction_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;bad_order&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;valid&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;error&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Missing required field &#39;expiration&#39;&quot;</span><span class="p">}</span>
+<span class="p">]</span>
+</code></pre></div>
+
+<hr />
+<h2 id="get-accountreconciliation">GET /account/reconciliation</h2>
+<p>Reconcile system positions against broker-reported positions.</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Query Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>broker</code></td>
+<td>string</td>
+<td><code>ibkr</code></td>
+<td>Broker to reconcile against</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-15T18:30:00.000000&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ibkr&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;total_system_positions&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;total_broker_positions&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;matched&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;discrepancies&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPY&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ibkr&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;system_quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;broker_quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;discrepancy_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;matched&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;details&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Quantities match: 100&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;AAPL&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ibkr&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;system_quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">50</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;broker_quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;discrepancy_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;missing_at_broker&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;details&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;System has 50 but broker reports nothing&quot;</span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;GOOG&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ibkr&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;system_quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;broker_quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">25</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;discrepancy_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;missing_in_system&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;details&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Broker has 25 but system has no record&quot;</span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="get-accounttrades">GET /account/trades</h2>
+<p>Return trade history (closed positions).</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Query Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>days</code></td>
+<td>int</td>
+<td>0</td>
+<td>Number of days back (0 = today only)</td>
+</tr>
+<tr>
+<td><code>include_all</code></td>
+<td>bool</td>
+<td>false</td>
+<td>Include open + closed positions</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response (200):</strong> List of position dicts.</p>
+<hr />
+<h2 id="get-accountexecutions">GET /account/executions</h2>
+<p>Return IBKR execution history, grouped by permanent order ID (<code>perm_id</code>).</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Query Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>symbol</code></td>
+<td>string</td>
+<td>None</td>
+<td>Filter by symbol</td>
+</tr>
+<tr>
+<td><code>flush</code></td>
+<td>bool</td>
+<td>false</td>
+<td>Clear cache and re-fetch from IBKR</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;executions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;perm_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">123456789</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;RUT&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;legs&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">&quot;exec_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0000e0d5.67890abc.01.01&quot;</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;side&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SLD&quot;</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;price&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">2.50</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">&quot;time&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-18T15:30:00&quot;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">],</span>
+<span class="w">      </span><span class="nt">&quot;is_multi_leg&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="get-accountorders">GET /account/orders</h2>
+<p>Return open/working orders from the broker.</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Query Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>broker</code></td>
+<td>string</td>
+<td><code>ibkr</code></td>
+<td>Broker to query</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response (200):</strong> List of <code>OrderResult</code> dicts.</p>
+<hr />
+<h2 id="post-accountcancel">POST /account/cancel</h2>
+<p>Cancel a working order by ID.</p>
+<p><strong>Required Scope:</strong> <code>trades:write</code></p>
+<p><strong>Query Parameters:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>order_id</code></td>
+<td>string</td>
+<td>Order ID to cancel</td>
+</tr>
+<tr>
+<td><code>broker</code></td>
+<td>string</td>
+<td>Broker (default: <code>ibkr</code>)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Response (200):</strong> <code>OrderResult</code> dict with updated status.</p>
+<hr />
+<h2 id="get-dashboardstatus">GET /dashboard/status</h2>
+<p>Full system status: active positions, in-transit orders, recent closed trades, cache stats, and broker connection status.</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;active_positions&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="err">...</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;in_transit_orders&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;order_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;abc123&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;equity&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPY&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;side&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;BUY&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ibkr&quot;</span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;recent_closed&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="err">...</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;discrepancies&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">  </span><span class="nt">&quot;cache_stats&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;contracts&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;size&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">12</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;hits&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">45</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;misses&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">}},</span>
+<span class="w">  </span><span class="nt">&quot;connection_status&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;ibkr&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;connected&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">},</span><span class="w"> </span><span class="nt">&quot;robinhood&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;connected&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">}}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="get-dashboardadvisorrecommendations">GET /dashboard/advisor/recommendations</h2>
+<p>Get current advisor entry/exit recommendations.</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;entries&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;priority&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;tier_label&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;P90_DTE2&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;direction&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;put&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;short_strike&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5500</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;long_strike&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5475</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;credit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">3.50</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;dte&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;num_contracts&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;exits&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span>
+<span class="w">  </span><span class="nt">&quot;profile&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tiered_v2&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;last_eval&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-17T15:30:00&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="get-dashboardadvisorstatus">GET /dashboard/advisor/status</h2>
+<p>Get advisor status.</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;active&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;profile&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tiered_v2&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;last_eval&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-17T15:30:00&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;pending_entries&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;pending_exits&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="ws-wsorders">WS /ws/orders</h2>
+<p>WebSocket endpoint for real-time order status streaming.</p>
+<p><strong>Connection:</strong></p>
+<div class="codehilite"><pre><span></span><code>ws://localhost:8000/ws/orders
+</code></pre></div>
+
+<p><strong>Message Format (server -&gt; client):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;order_update&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;order_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;a1b2c3d4-e5f6-7890-abcd-ef1234567890&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;robinhood&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;FILLED&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;message&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Order filled at $100.02&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-09T15:30:01.000000&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>See <a href="websockets.html">WebSockets</a> for connection examples and message flow.</p>
+<hr />
+<h2 id="get-marketstreamingstatus">GET /market/streaming/status</h2>
+<p>Get real-time market data streaming status.</p>
+<p><strong>Required Scope:</strong> <code>market:read</code></p>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;running&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;streaming_mode&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cpg_polling&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;subscriptions&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ticks_received&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1500</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ticks_published&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1200</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ticks_rejected&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;per_symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;SPX&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;last_price&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">6600.0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;ticks_received&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">500</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;ticks_accepted&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">498</span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;NDX&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;last_price&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">24200.0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;ticks_received&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">500</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;ticks_accepted&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">499</span><span class="p">},</span>
+<span class="w">    </span><span class="nt">&quot;RUT&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;last_price&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">2540.0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;ticks_received&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">500</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;ticks_accepted&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">500</span><span class="p">}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;redis_enabled&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;close_band_pct&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.35</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="get-marketstreamingoption-quotesstatus">GET /market/streaming/option-quotes/status</h2>
+<p>Get background option quote streaming status and cache detail.</p>
+<p><strong>Required Scope:</strong> <code>market:read</code></p>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;running&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;market_hours&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;symbols&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;RUT&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;NDX&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;SPX&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;cycles&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;fetches_ok&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1800</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;fetches_failed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;cache&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;entries&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">18</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;total_quotes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1900</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;cache_detail&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPX&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;expiration&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-25&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;option_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;CALL&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;quotes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">106</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;age_seconds&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">2.1</span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;per_symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;SPX&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;last_price&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">6600.0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;expirations&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;2026-03-25&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;2026-03-26&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;2026-03-27&quot;</span><span class="p">],</span><span class="w"> </span><span class="nt">&quot;errors&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;redis_conid_cache&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;connected&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;loaded&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;provider_conid_cache_size&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3000</span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;redis_quote_cache&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;enabled&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="post-marketstreamingsubscribe">POST /market/streaming/subscribe</h2>
+<p>Add symbols to the streaming service at runtime.</p>
+<p><strong>Required Scope:</strong> <code>market:read</code></p>
+<p><strong>Request Body:</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;symbols&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;AAPL&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;MSFT&quot;</span><span class="p">]}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="post-marketstreamingunsubscribe">POST /market/streaming/unsubscribe</h2>
+<p>Remove symbols from the streaming service.</p>
+<p><strong>Required Scope:</strong> <code>market:read</code></p>
+<p><strong>Request Body:</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span><span class="nt">&quot;symbols&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;AAPL&quot;</span><span class="p">]}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="get-health">GET /health</h2>
+<p>Health check endpoint. No authentication required.</p>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ok&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;daemon_mode&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;ibkr_connected&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<hr />
+<h2 id="enum-values">Enum Values</h2>
+<h3 id="broker">Broker</h3>
+<p><code>robinhood</code>, <code>etrade</code>, <code>ibkr</code></p>
+<h3 id="orderside">OrderSide</h3>
+<p><code>BUY</code>, <code>SELL</code></p>
+<h3 id="ordertype">OrderType</h3>
+<p><code>MARKET</code>, <code>LIMIT</code></p>
+<h3 id="optionaction">OptionAction</h3>
+<p><code>BUY_TO_OPEN</code>, <code>SELL_TO_OPEN</code>, <code>BUY_TO_CLOSE</code>, <code>SELL_TO_CLOSE</code></p>
+<h3 id="optiontype">OptionType</h3>
+<p><code>CALL</code>, <code>PUT</code></p>
+<h3 id="orderstatus">OrderStatus</h3>
+<p><code>PENDING</code>, <code>SUBMITTED</code>, <code>PARTIAL_FILL</code>, <code>FILLED</code>, <code>CANCELLED</code>, <code>REJECTED</code>, <code>FAILED</code></p>
+<h3 id="ledgereventtype">LedgerEventType</h3>
+<p><code>ORDER_SUBMITTED</code>, <code>ORDER_STATUS_CHANGE</code>, <code>POSITION_OPENED</code>, <code>POSITION_CLOSED</code>, <code>POSITION_SYNCED</code>, <code>CSV_IMPORTED</code>, <code>SNAPSHOT</code>, <code>SYSTEM_EVENT</code>, <code>PLAYBOOK_EXECUTED</code></p>
+<h3 id="positionsource">PositionSource</h3>
+<p><code>live_api</code>, <code>paper</code>, <code>csv_import</code>, <code>external_sync</code></p>
+<hr />
+<h2 id="common-order-patterns">Common Order Patterns</h2>
+<h3 id="vertical-call-spread-bull-call">Vertical Call Spread (Bull Call)</h3>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;multi_leg_order&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;ibkr&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;legs&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;NDX&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;expiration&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-04-17&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;strike&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">20000.0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;option_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;CALL&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;BUY_TO_OPEN&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;NDX&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;expiration&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-04-17&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;strike&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">20100.0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;option_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;CALL&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SELL_TO_OPEN&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">}</span>
+<span class="w">    </span><span class="p">],</span>
+<span class="w">    </span><span class="nt">&quot;order_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;LIMIT&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;net_price&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">25.0</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<h3 id="iron-condor">Iron Condor</h3>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;multi_leg_order&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;broker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;robinhood&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;legs&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPY&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;expiration&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-20&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;strike&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">440.0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;option_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PUT&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;BUY_TO_OPEN&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPY&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;expiration&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-20&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;strike&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">445.0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;option_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PUT&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SELL_TO_OPEN&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPY&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;expiration&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-20&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;strike&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">460.0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;option_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;CALL&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SELL_TO_OPEN&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">},</span>
+<span class="w">      </span><span class="p">{</span><span class="nt">&quot;symbol&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPY&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;expiration&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-03-20&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;strike&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">465.0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;option_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;CALL&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;BUY_TO_OPEN&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;quantity&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">}</span>
+<span class="w">    </span><span class="p">],</span>
+<span class="w">    </span><span class="nt">&quot;order_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;LIMIT&quot;</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;net_price&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">2.50</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+    <div class="footer">
+        Universal Trade Platform Documentation — Generated from Markdown sources in <code>docs/</code>
+    </div>
+    </div>
+</body>
+</html>

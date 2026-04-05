@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Architecture — Universal Trade Platform</title>
+    <style>
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --border: #30363d;
+    --accent-blue: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-red: #f85149;
+    --accent-orange: #d29922;
+    --accent-purple: #bc8cff;
+    --code-bg: #161b22;
+    --link: #58a6ff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+    padding: 0;
+    margin: 0;
+}
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 32px;
+}
+
+/* Navigation bar */
+.nav-bar {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 32px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.nav-bar a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 14px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.nav-bar a:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.nav-bar a.active {
+    color: var(--accent-blue);
+    background: rgba(88, 166, 255, 0.1);
+}
+
+.nav-bar .nav-title {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 15px;
+    margin-right: 8px;
+}
+
+/* Headings */
+h1 {
+    font-size: 2em;
+    font-weight: 600;
+    margin: 0 0 16px 0;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    margin: 32px 0 16px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h3 {
+    font-size: 1.25em;
+    font-weight: 600;
+    margin: 24px 0 12px 0;
+    color: var(--text-primary);
+}
+
+h4 {
+    font-size: 1.1em;
+    font-weight: 600;
+    margin: 20px 0 8px 0;
+    color: var(--text-secondary);
+}
+
+/* Paragraphs and text */
+p {
+    margin: 0 0 16px 0;
+    color: var(--text-primary);
+}
+
+a {
+    color: var(--link);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+em {
+    color: var(--text-secondary);
+}
+
+hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+}
+
+/* Lists */
+ul, ol {
+    margin: 0 0 16px 0;
+    padding-left: 28px;
+}
+
+li {
+    margin: 4px 0;
+    color: var(--text-primary);
+}
+
+li > ul, li > ol {
+    margin: 4px 0 4px 0;
+}
+
+/* Code */
+code {
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 6px;
+    color: var(--accent-blue);
+}
+
+pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    overflow-x: auto;
+    line-height: 1.5;
+}
+
+pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.88em;
+    color: var(--text-primary);
+}
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 16px 0;
+    font-size: 0.95em;
+}
+
+thead {
+    background: var(--bg-secondary);
+}
+
+th {
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+}
+
+td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+tr:hover {
+    background: var(--bg-secondary);
+}
+
+/* Blockquotes */
+blockquote {
+    border-left: 4px solid var(--accent-blue);
+    padding: 8px 16px;
+    margin: 0 0 16px 0;
+    background: var(--bg-secondary);
+    border-radius: 0 8px 8px 0;
+    color: var(--text-secondary);
+}
+
+blockquote p {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+/* Definition lists */
+dt {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-top: 12px;
+}
+
+dd {
+    margin-left: 20px;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+}
+
+/* Footer */
+.footer {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.85em;
+    text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .container { padding: 20px 16px; }
+    .nav-bar { padding: 10px 16px; }
+    table { font-size: 0.85em; }
+    th, td { padding: 6px 8px; }
+}
+</style>
+</head>
+<body>
+    <nav class="nav-bar">
+    <span class="nav-title">UTP Docs</span>
+    <a href="index.html">Home</a>
+    <a href="usage_guide.html">Usage Guide</a>
+    <a href="architecture.html" class="active">Architecture</a>
+    <a href="api_reference.html">API Reference</a>
+    <a href="playbook.html">Playbook</a>
+    <a href="providers.html">Providers</a>
+    <a href="configuration.html">Configuration</a>
+    <a href="authentication.html">Authentication</a>
+    <a href="testing.html">Testing</a>
+    <a href="ibkr_setup_guide.html">IBKR Setup</a>
+    <a href="symbology.html">Symbology</a>
+    <a href="websockets.html">WebSockets</a>
+    </nav>
+    <div class="container">
+    <h1 id="architecture">Architecture</h1>
+<h2 id="overview">Overview</h2>
+<p>Universal Trade Platform is a layered system built on five core abstractions:</p>
+<ol>
+<li><strong>Trading Core</strong> (library) -- broker-agnostic interfaces for order execution, symbol mapping, and position management</li>
+<li><strong>Persistence Layer</strong> -- append-only transaction ledger (JSONL) + JSON position store for full state recovery</li>
+<li><strong>REST API</strong> (FastAPI) -- stateless HTTP endpoints with authentication, dry-run support, and background task processing</li>
+<li><strong>Real-Time Layer</strong> (WebSockets) -- streaming order status updates to connected clients</li>
+<li><strong>Background Services</strong> -- expiration detection, position sync, and EOD auto-close loops</li>
+</ol>
+<div class="codehilite"><pre><span></span><code>                     ┌───────────────────┐
+                     │     Clients       │
+                     │  (REST / WS / CLI)│
+                     └────────┬──────────┘
+                              │
+                  ┌───────────▼───────────┐
+                  │      FastAPI App      │
+                  │  ┌────────────────┐   │
+                  │  │   Auth Layer   │   │
+                  │  │ (API Key/JWT)  │   │
+                  │  └───────┬────────┘   │
+                  │          │            │
+                  │  ┌───────▼────────┐   │
+                  │  │    Routes      │   │
+                  │  │ trade/market/  │   │
+                  │  │ account/ledger/│   │
+                  │  │ dashboard/     │   │
+                  │  │ import/ws      │   │
+                  │  └───────┬────────┘   │
+                  │          │            │
+                  │  ┌───────▼────────┐   │
+                  │  │   Services     │   │
+                  │  │ trade_service  │   │
+                  │  │ ledger         │   │
+                  │  │ position_store │   │
+                  │  │ dashboard_svc  │   │
+                  │  │ expiration_svc │   │
+                  │  │ position_sync  │   │
+                  │  │ csv_importer   │   │
+│  │ execution_store│   │
+                  │  └───────┬────────┘   │
+                  └──────────┼────────────┘
+                             │
+              ┌──────────────▼──────────────┐
+              │      ProviderRegistry       │
+              │  ┌─────┐ ┌─────┐ ┌───────┐ │
+              │  │ RH  │ │ ET  │ │ IBKR  │ │
+              │  │stub │ │stub │ │stub/  │ │
+              │  │     │ │     │ │live   │ │
+              │  └──┬──┘ └──┬──┘ └───┬───┘ │
+              └─────┼───────┼────────┼─────┘
+                    │       │        │
+              ┌─────▼───────▼────────▼─────┐
+              │     SymbologyMapper        │
+              │   UUID / conId / display   │
+              └────────────────────────────┘
+</code></pre></div>
+
+<h2 id="daemon-architecture-v40">Daemon Architecture (v4.0)</h2>
+<p>The platform now supports a <strong>server-first</strong> mode via <code>python utp.py daemon</code>:</p>
+<div class="codehilite"><pre><span></span><code>┌───────────────────────────────────────────┐
+│<span class="w">            </span><span class="nv">UTP</span><span class="w"> </span><span class="nv">Daemon</span><span class="w"> </span><span class="nv">Process</span><span class="w">             </span>│
+│<span class="w">                                           </span>│
+│<span class="w">  </span>┌─────────────┐<span class="w">   </span>┌──────────────────┐<span class="w">  </span>│
+│<span class="w">  </span>│<span class="w"> </span><span class="nv">IBKR</span><span class="w"> </span><span class="nv">Conn</span><span class="w">   </span>│<span class="w">   </span>│<span class="w"> </span><span class="nv">Background</span><span class="w"> </span><span class="nv">Tasks</span><span class="w"> </span>│<span class="w">  </span>│
+│<span class="w">  </span>│<span class="w"> </span><span class="ss">(</span><span class="nv">persistent</span><span class="ss">)</span>│<span class="w">   </span>│<span class="w">  </span><span class="o">-</span><span class="w"> </span><span class="nv">Expiration</span><span class="w">    </span>│<span class="w">  </span>│
+│<span class="w">  </span>│<span class="w">             </span>│<span class="w">   </span>│<span class="w">  </span><span class="o">-</span><span class="w"> </span><span class="nv">Position</span><span class="w"> </span><span class="nv">Sync</span><span class="w"> </span>│<span class="w">  </span>│
+│<span class="w">  </span>│<span class="w">             </span>│<span class="w">   </span>│<span class="w">  </span><span class="o">-</span><span class="w"> </span><span class="nv">Advisor</span><span class="w"> </span><span class="k">Loop</span><span class="w">  </span>│<span class="w">  </span>│
+│<span class="w">  </span>└──────┬──────┘<span class="w">   </span>└────────┬─────────┘<span class="w">  </span>│
+│<span class="w">         </span>│<span class="w">                   </span>│<span class="w">             </span>│
+│<span class="w">  </span>┌──────▼───────────────────▼──────────┐<span class="w">  </span>│
+│<span class="w">  </span>│<span class="w">         </span><span class="nv">FastAPI</span><span class="w"> </span><span class="nv">HTTP</span><span class="w"> </span><span class="nv">Server</span><span class="w">         </span>│<span class="w">  </span>│
+│<span class="w">  </span>│<span class="w">    </span><span class="ss">(</span><span class="nv">embedded</span><span class="w"> </span><span class="nv">uvicorn</span>,<span class="w"> </span><span class="nv">port</span><span class="w"> </span><span class="mi">8000</span><span class="ss">)</span><span class="w">    </span>│<span class="w">  </span>│
+│<span class="w">  </span>└──────────────┬──────────────────────┘<span class="w">  </span>│
+└─────────────────┼─────────────────────────┘
+<span class="w">                  </span>│
+<span class="w">    </span>┌─────────────▼─────────────────┐
+<span class="w">    </span>│<span class="w">         </span><span class="nv">HTTP</span><span class="w"> </span><span class="nv">Clients</span><span class="w">          </span>│
+<span class="w">    </span>│<span class="w">  </span><span class="o">-</span><span class="w"> </span><span class="nv">CLI</span><span class="w"> </span><span class="ss">(</span><span class="nv">auto</span><span class="o">-</span><span class="nv">detect</span><span class="w"> </span><span class="nv">daemon</span><span class="ss">)</span><span class="w">   </span>│
+<span class="w">    </span>│<span class="w">  </span><span class="o">-</span><span class="w"> </span><span class="nv">REPL</span><span class="w"> </span><span class="ss">(</span><span class="nv">interactive</span><span class="w"> </span><span class="nv">shell</span><span class="ss">)</span><span class="w">   </span>│
+<span class="w">    </span>│<span class="w">  </span><span class="o">-</span><span class="w"> </span><span class="nv">TradingClient</span><span class="w"> </span><span class="ss">(</span><span class="nv">Python</span><span class="w"> </span><span class="nv">lib</span><span class="ss">)</span><span class="w"> </span>│
+<span class="w">    </span>│<span class="w">  </span><span class="o">-</span><span class="w"> </span><span class="nv">curl</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="nv">external</span><span class="w"> </span><span class="nv">programs</span><span class="w">   </span>│
+<span class="w">    </span>│<span class="w">  </span><span class="o">-</span><span class="w"> </span><span class="nv">LAN</span><span class="w"> </span><span class="nv">clients</span><span class="w"> </span><span class="ss">(</span><span class="nv">no</span><span class="w"> </span><span class="nv">auth</span><span class="ss">)</span><span class="w">      </span>│
+<span class="w">    </span>└───────────────────────────────┘
+</code></pre></div>
+
+<p><strong>Key design principle</strong>: The daemon is the single source of truth. No client ever connects to IBKR directly when a daemon is running.</p>
+<h3 id="daemon-mode-flag">Daemon Mode Flag</h3>
+<p><code>app.main._daemon_mode</code> prevents the FastAPI lifespan from re-initializing providers when the daemon has already done so. The daemon owns the provider lifecycle, background tasks, and signal handlers.</p>
+<h3 id="lan-trust-middleware">LAN Trust Middleware</h3>
+<p>An HTTP middleware checks if the client IP is from a private network (RFC 1918). If so, authentication is bypassed. Controlled by <code>TRUST_LOCAL_NETWORK=true</code> (default).</p>
+<h2 id="data-source-priority">Data Source Priority</h2>
+<p>The system uses an <strong>IBKR-primary</strong> architecture for live data:</p>
+<ol>
+<li><strong>LiveDataService</strong> (<code>app/services/live_data_service.py</code>) wraps both <code>DashboardService</code> (local) and the IBKR provider</li>
+<li>When IBKR is connected (<code>provider.is_healthy() == True</code>):</li>
+<li>Account balances from <code>get_account_balances()</code></li>
+<li>Unrealized P&amp;L from <code>get_portfolio_items()</code> matched via <code>_match_broker_pnl()</code></li>
+<li>Positions enriched with broker marks, avg cost, market value</li>
+<li>When IBKR is disconnected:</li>
+<li>Falls back to <code>DashboardService</code> which reads from local position store</li>
+<li>Automatic switch — no manual intervention needed</li>
+<li>Historical data (performance, daily P&amp;L, closed trades) <strong>always</strong> from local store</li>
+</ol>
+<p>Position sync runs every <strong>120 seconds</strong> (2 minutes) during market hours to keep the local fallback current.</p>
+<h2 id="design-patterns">Design Patterns</h2>
+<h3 id="provider-pattern">Provider Pattern</h3>
+<p>Every broker integration implements the <code>BrokerProvider</code> abstract base class. This decouples trading logic from broker-specific APIs:</p>
+<div class="codehilite"><pre><span></span><code><span class="k">class</span><span class="w"> </span><span class="nc">BrokerProvider</span><span class="p">(</span><span class="n">abc</span><span class="o">.</span><span class="n">ABC</span><span class="p">):</span>
+    <span class="n">broker</span><span class="p">:</span> <span class="n">ClassVar</span><span class="p">[</span><span class="n">Broker</span><span class="p">]</span>
+
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">connect</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">disconnect</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_equity_order</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">order</span><span class="p">:</span> <span class="n">EquityOrder</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">OrderResult</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_multi_leg_order</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">order</span><span class="p">:</span> <span class="n">MultiLegOrder</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">OrderResult</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_quote</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">symbol</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Quote</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_positions</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">Position</span><span class="p">]:</span> <span class="o">...</span>
+    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_order_status</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">order_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">OrderResult</span><span class="p">:</span> <span class="o">...</span>
+</code></pre></div>
+
+<p>Providers register themselves with <code>ProviderRegistry</code>, which acts as a singleton lookup:</p>
+<div class="codehilite"><pre><span></span><code><span class="n">ProviderRegistry</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="n">RobinhoodProvider</span><span class="p">())</span>
+<span class="n">provider</span> <span class="o">=</span> <span class="n">ProviderRegistry</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">Broker</span><span class="o">.</span><span class="n">ROBINHOOD</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="registry-pattern">Registry Pattern</h3>
+<p><code>ProviderRegistry</code> centralizes broker management:</p>
+<ul>
+<li><strong>Registration</strong> happens at app startup via the FastAPI lifespan handler</li>
+<li><strong>Lookup</strong> happens at request time -- the <code>broker</code> field on every order payload selects the provider</li>
+<li><strong>Aggregation</strong> -- <code>aggregate_positions()</code> collects positions across all registered providers</li>
+<li><strong>Cleanup</strong> -- <code>clear()</code> is called on shutdown and between tests</li>
+</ul>
+<h3 id="module-level-accessor-pattern">Module-Level Accessor Pattern</h3>
+<p>Services that need to be accessible across the application (ledger, position store) use a module-level singleton pattern:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># In app/services/ledger.py</span>
+<span class="n">_ledger</span><span class="p">:</span> <span class="n">TransactionLedger</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">get_ledger</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="n">TransactionLedger</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">return</span> <span class="n">_ledger</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">init_ledger</span><span class="p">(</span><span class="n">data_dir</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">TransactionLedger</span><span class="p">:</span>
+    <span class="k">global</span> <span class="n">_ledger</span>
+    <span class="n">_ledger</span> <span class="o">=</span> <span class="n">TransactionLedger</span><span class="p">(</span><span class="n">data_dir</span> <span class="o">/</span> <span class="s2">&quot;ledger&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">_ledger</span>
+</code></pre></div>
+
+<p>This avoids changing function signatures (e.g., <code>execute_trade</code>) and keeps existing tests working. All calls are guarded with <code>if get_ledger():</code> so tests that don't initialize services still pass.</p>
+<h3 id="union-schema-for-orders">Union Schema for Orders</h3>
+<p><code>TradeRequest</code> wraps either an <code>EquityOrder</code> or a <code>MultiLegOrder</code> with a Pydantic <code>model_post_init</code> validator ensuring exactly one is present. This gives a single <code>/trade/execute</code> endpoint that handles both order types cleanly.</p>
+<h3 id="source-attribution">Source Attribution</h3>
+<p>Every position and ledger entry carries a <code>PositionSource</code> enum:</p>
+<table>
+<thead>
+<tr>
+<th>Source</th>
+<th>Set By</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>LIVE_API</code></td>
+<td>Live orders via providers</td>
+</tr>
+<tr>
+<td><code>PAPER</code></td>
+<td>Dry-run / paper trades</td>
+</tr>
+<tr>
+<td><code>CSV_IMPORT</code></td>
+<td>Imported from CSV files</td>
+</tr>
+<tr>
+<td><code>EXTERNAL_SYNC</code></td>
+<td>Discovered by position sync loop</td>
+</tr>
+</tbody>
+</table>
+<p>This enables filtering, reporting, and auditing by provenance across the entire system.</p>
+<h2 id="persistence-architecture">Persistence Architecture</h2>
+<h3 id="transaction-ledger">Transaction Ledger</h3>
+<div class="codehilite"><pre><span></span><code>data/utp/ledger/
+├── ledger.jsonl           # Append-only event log
+└── snapshots/
+    ├── snapshot_0.json    # Point-in-time state
+    ├── snapshot_42.json
+    └── ...
+</code></pre></div>
+
+<p><strong>Ledger entries</strong> are JSON lines with:
+- <code>event_id</code> (UUID), <code>timestamp</code>, <code>sequence_number</code> (monotonic)
+- <code>event_type</code> (8 types: ORDER_SUBMITTED, POSITION_OPENED, etc.)
+- <code>broker</code>, <code>order_id</code>, <code>position_id</code>, <code>source</code>, <code>dry_run</code>
+- <code>data</code> (arbitrary dict with event-specific details)</p>
+<p><strong>Snapshots</strong> capture full state (all positions + account summary) at a point in time. Used by <code>GET /ledger/replay</code> to reconstruct state efficiently.</p>
+<p><strong>Recovery</strong>: On startup, the ledger recovers its sequence counter from the last line of the JSONL file, ensuring monotonic ordering across restarts.</p>
+<h3 id="position-store">Position Store</h3>
+<div class="codehilite"><pre><span></span><code>data/utp/live/positions.json    # All tracked positions (open + closed, with con_id)
+</code></pre></div>
+
+<p>Each <code>TrackedPosition</code> includes:
+- <code>position_id</code>, <code>status</code> (open/closed), <code>source</code>
+- <code>broker</code>, <code>order_type</code> (equity/multi_leg), <code>symbol</code>
+- <code>entry_price</code>, <code>entry_time</code>, <code>exit_price</code>, <code>exit_time</code>, <code>exit_reason</code>
+- <code>legs</code> (for multi-leg orders), <code>expiration</code>
+- <code>con_id</code>, <code>sec_type</code>, <code>strike</code>, <code>right</code> (IBKR contract identifiers)
+- <code>pnl</code> (computed on close), <code>current_mark</code>, <code>unrealized_pnl</code></p>
+<p>Position sync uses IBKR <code>conId</code> for unique matching, preventing duplicate imports. The position store has a <code>find_by_con_id()</code> method for conId-based lookups.</p>
+<p>The store is loaded into memory at startup and saved to disk on every mutation. P&amp;L computation differs by order type:
+- <strong>Equity BUY</strong>: <code>(exit_price - entry_price) * quantity</code>
+- <strong>Equity SELL</strong>: <code>(entry_price - exit_price) * quantity</code>
+- <strong>Credit spread</strong> (first leg is SELL_TO_OPEN): <code>(abs(entry_credit) - exit_cost) * quantity * 100</code>
+- <strong>Debit spread</strong> (first leg is BUY_TO_OPEN): <code>(exit_value - abs(entry_debit)) * quantity * 100</code></p>
+<p>Note: <code>abs()</code> is used because IBKR live fills store <code>entry_price</code> as negative for credits and positive for debits, while dry-run/stub fills always store positive values. The direction (credit vs debit) is determined by the first leg's action, not the sign of the entry price.</p>
+<h2 id="background-services">Background Services</h2>
+<p>Three async background tasks run during the server lifespan:</p>
+<h3 id="expiration-loop">Expiration Loop</h3>
+<p>Runs every <code>EXPIRATION_CHECK_INTERVAL_SECONDS</code> (default: 60):
+1. Queries position store for <code>expiration &lt; today</code> (strict — same-day 0DTE options stay live until <code>check_eod_exits()</code> runs after market close)
+2. Auto-closes with <code>exit_price=0</code>, <code>reason="expired"</code>
+3. Computes final P&amp;L
+4. Logs to ledger, broadcasts via WebSocket</p>
+<p>If <code>EOD_AUTO_CLOSE=true</code>, also closes remaining 0DTE positions after market close (20:00 UTC / 4 PM ET).</p>
+<h3 id="position-sync-loop">Position Sync Loop</h3>
+<p>Runs every <code>POSITION_SYNC_INTERVAL_SECONDS</code> (default: 120):
+1. Checks if current time is within market hours (13:30-20:00 UTC)
+2. Calls <code>get_positions()</code> on every registered provider
+3. Diffs against position store: new positions get <code>source=EXTERNAL_SYNC</code>
+4. Updates mark-to-market on existing positions
+5. Logs <code>POSITION_SYNCED</code> events to ledger</p>
+<h3 id="advisor-loop-optional">Advisor Loop (optional)</h3>
+<p>When started with <code>--advisor-profile</code>, runs every 60 seconds during market hours:
+1. Loads the advisor profile (tier evaluator, position tracker)
+2. Gets current price from signal generator
+3. Evaluates all tiers for entry/exit signals
+4. Stores recommendations in <code>_daemon_state</code> for HTTP access
+5. If <code>--auto-execute</code>, translates recommendations to credit spread orders</p>
+<p>Recommendations are accessible via <code>GET /dashboard/advisor/recommendations</code>.</p>
+<h3 id="market-data-streaming-optional">Market Data Streaming (optional)</h3>
+<p>When started with <code>--streaming-config</code>, the daemon runs a <code>MarketDataStreamingService</code> that streams real-time IBKR market data:</p>
+<div class="codehilite"><pre><span></span><code>IBKR TWS/Gateway or CPG REST
+    │
+    │  reqMktData (TWS) / snapshot polling (CPG) / WebSocket (CPG)
+    │
+    ▼
+MarketDataStreamingService
+    │
+    ├──► Redis Pub/Sub (realtime:quote:{SYMBOL}, realtime:trade:{SYMBOL})
+    │
+    ├──► QuestDB (INSERT INTO realtime_data)
+    │
+    └──► WebSocket /ws/quotes (filtered by client subscription)
+
+OptionQuoteStreamingService (background)
+    │
+    ├──► In-memory cache (5-min TTL during market hours)
+    │
+    └──► Redis cache (24h TTL, instant restart)
+</code></pre></div>
+
+<p><strong>Tick streaming modes</strong> (<code>streaming_mode</code> in YAML config):
+- <strong><code>auto</code></strong> (default) — uses ib_insync if TWS connected, else CPG polling
+- <strong><code>polling</code></strong> — CPG snapshot polling every <code>cpg_poll_interval</code> seconds (most reliable for indices)
+- <strong><code>websocket</code></strong> — CPG WebSocket push (works for stocks, unreliable for index symbols)</p>
+<p><strong>Data flow:</strong>
+1. <code>StreamingConfig</code> (<code>app/services/streaming_config.py</code>) loads the YAML config specifying symbols, targets, and limits
+2. <code>MarketDataStreamingService</code> selects tick source based on <code>streaming_mode</code> and available provider
+3. <strong>Price validation gate</strong>: ticks beyond <code>close_band_pct</code> (±35%) from previous close are rejected
+4. Incoming ticks are batched (default 0.5s interval) and published to enabled targets
+5. The message format matches <code>polygon_realtime_streamer.py</code> so downstream consumers work without changes</p>
+<p><strong>Option quote streaming</strong> (when <code>option_quotes_enabled: true</code>):
+1. <code>OptionQuoteStreamingService</code> runs a background loop fetching option quotes for configured symbols
+2. Caches in-memory (5-min TTL during market hours) and Redis (24h TTL) for instant serving
+3. <code>GET /market/options/{symbol}</code> checks the streaming cache first (fast path, no provider call)
+4. Redis cache enables instant option prices on daemon restart without waiting for first fetch cycle
+5. ConID cache persisted to Redis (positive entries only) for fast option contract resolution</p>
+<p><strong>Runtime management:</strong>
+- <code>GET /market/streaming/status</code> -- per-symbol tick counts (received/accepted/rejected), throughput
+- <code>GET /market/streaming/option-quotes/status</code> -- cache entries, cycle stats, per-symbol detail
+- <code>POST /market/streaming/subscribe</code> -- add symbols (respects the 50-subscription cap)
+- <code>POST /market/streaming/unsubscribe</code> -- remove symbols and cancel IBKR data lines</p>
+<p><strong>WebSocket clients</strong> connect to <code>/ws/quotes</code> and send subscribe/unsubscribe messages to filter which symbols they receive.</p>
+<p><strong>Safety:</strong> All IBKR limits are enforced with a 50% buffer -- max 50 subscriptions (IBKR allows ~100) and 22 msg/sec (IBKR allows 50).</p>
+<h3 id="task-lifecycle">Task Lifecycle</h3>
+<p>Both tasks are created as <code>asyncio.Task</code> objects during the lifespan startup and cancelled during shutdown:</p>
+<div class="codehilite"><pre><span></span><code><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">lifespan</span><span class="p">(</span><span class="n">app</span><span class="p">):</span>
+    <span class="c1"># ... init services, register providers ...</span>
+    <span class="n">tasks</span> <span class="o">=</span> <span class="p">[</span>
+        <span class="n">asyncio</span><span class="o">.</span><span class="n">create_task</span><span class="p">(</span><span class="n">_expiration_loop</span><span class="p">(</span><span class="n">interval</span><span class="p">)),</span>
+        <span class="n">asyncio</span><span class="o">.</span><span class="n">create_task</span><span class="p">(</span><span class="n">_position_sync_loop</span><span class="p">(</span><span class="n">interval</span><span class="p">)),</span>
+    <span class="p">]</span>
+    <span class="k">yield</span>
+    <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">tasks</span><span class="p">:</span>
+        <span class="n">t</span><span class="o">.</span><span class="n">cancel</span><span class="p">()</span>
+</code></pre></div>
+
+<h2 id="request-flows">Request Flows</h2>
+<h3 id="trade-execution-live">Trade Execution (Live)</h3>
+<div class="codehilite"><pre><span></span><code><span class="n">Client</span><span class="w">                    </span><span class="n">API</span><span class="w">                     </span><span class="n">Service</span><span class="w">                  </span><span class="n">Provider</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">  </span><span class="n">POST</span><span class="w"> </span><span class="o">/</span><span class="n">trade</span><span class="o">/</span><span class="k">execute</span><span class="w">   </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│───────────────────────</span><span class="o">&gt;</span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">  </span><span class="n">require_auth</span><span class="p">()</span><span class="w">        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">  </span><span class="n">execute_trade</span><span class="p">()</span><span class="w">       </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│───────────────────────</span><span class="o">&gt;</span><span class="err">│</span><span class="w">                        </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">  </span><span class="n">provider</span><span class="p">.</span><span class="k">execute</span><span class="p">()</span><span class="w">    </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│───────────────────────</span><span class="o">&gt;</span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">  </span><span class="o">&lt;</span><span class="err">──</span><span class="w"> </span><span class="n">OrderResult</span><span class="w"> </span><span class="err">──────│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">  </span><span class="n">ledger</span><span class="p">.</span><span class="n">log_submitted</span><span class="p">()</span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">  </span><span class="n">_pending_orders</span><span class="o">[</span><span class="n">id</span><span class="o">]=</span><span class="n">req</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">  </span><span class="o">&lt;</span><span class="err">──</span><span class="w"> </span><span class="mi">200</span><span class="w"> </span><span class="n">OrderResult</span><span class="w"> </span><span class="err">──│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">  </span><span class="nl">BackgroundTask</span><span class="p">:</span><span class="w">       </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">  </span><span class="n">poll_order_status</span><span class="p">()</span><span class="w">   </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│───────</span><span class="p">(</span><span class="n">async</span><span class="p">)</span><span class="err">─────────</span><span class="o">&gt;</span><span class="err">│</span><span class="w">                        </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">  </span><span class="k">On</span><span class="w"> </span><span class="nl">FILLED</span><span class="p">:</span><span class="w">            </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">  </span><span class="n">position_store</span><span class="p">.</span><span class="k">add</span><span class="p">()</span><span class="w">  </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">  </span><span class="n">ledger</span><span class="p">.</span><span class="n">log_opened</span><span class="p">()</span><span class="w">   </span><span class="err">│</span>
+<span class="w">  </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">                        </span><span class="err">│</span><span class="w">  </span><span class="n">broadcast</span><span class="w"> </span><span class="n">via</span><span class="w"> </span><span class="n">WS</span><span class="w"> </span><span class="err">───</span><span class="o">&gt;</span><span class="w"> </span><span class="p">(</span><span class="n">clients</span><span class="p">)</span>
+</code></pre></div>
+
+<h3 id="trade-execution-paper-dry-run">Trade Execution (Paper / Dry-Run)</h3>
+<div class="codehilite"><pre><span></span><code><span class="n">Client</span>                    <span class="n">API</span>                     <span class="n">Service</span>
+  <span class="err">│</span>                        <span class="err">│</span>                        <span class="err">│</span>
+  <span class="err">│</span>  <span class="n">POST</span> <span class="o">/</span><span class="n">trade</span><span class="o">/</span><span class="n">execute</span>   <span class="err">│</span>                        <span class="err">│</span>
+  <span class="err">│</span>  <span class="n">X</span><span class="o">-</span><span class="n">Dry</span><span class="o">-</span><span class="n">Run</span><span class="p">:</span> <span class="n">true</span>       <span class="err">│</span>                        <span class="err">│</span>
+  <span class="err">│───────────────────────</span><span class="o">&gt;</span><span class="err">│</span>                        <span class="err">│</span>
+  <span class="err">│</span>                        <span class="err">│</span>  <span class="n">execute_trade</span><span class="p">(</span><span class="n">dry</span><span class="o">=</span><span class="n">T</span><span class="p">)</span>  <span class="err">│</span>
+  <span class="err">│</span>                        <span class="err">│───────────────────────</span><span class="o">&gt;</span><span class="err">│</span>
+  <span class="err">│</span>                        <span class="err">│</span>                        <span class="err">│</span>  <span class="n">Build</span> <span class="n">synthetic</span> <span class="n">OrderResult</span>
+  <span class="err">│</span>                        <span class="err">│</span>                        <span class="err">│</span>  <span class="n">position_store</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="n">paper</span><span class="o">=</span><span class="n">True</span><span class="p">)</span>
+  <span class="err">│</span>                        <span class="err">│</span>                        <span class="err">│</span>  <span class="n">ledger</span><span class="p">.</span><span class="n">log_submitted</span><span class="p">(</span><span class="n">PAPER</span><span class="p">)</span>
+  <span class="err">│</span>                        <span class="err">│</span>                        <span class="err">│</span>  <span class="n">ledger</span><span class="p">.</span><span class="n">log_opened</span><span class="p">(</span><span class="n">PAPER</span><span class="p">)</span>
+  <span class="err">│</span>                        <span class="err">│</span>                        <span class="err">│</span>
+  <span class="err">│</span>  <span class="o">&lt;</span><span class="err">──</span> <span class="mi">200</span> <span class="n">OrderResult</span> <span class="err">──│</span>  <span class="p">(</span><span class="n">status</span><span class="o">=</span><span class="n">PENDING</span><span class="p">,</span>      <span class="err">│</span>
+  <span class="err">│</span>       <span class="p">(</span><span class="n">dry_run</span><span class="o">=</span><span class="n">true</span><span class="p">)</span>   <span class="err">│</span>   <span class="n">dry_run</span><span class="o">=</span><span class="n">true</span><span class="p">)</span>        <span class="err">│</span>
+</code></pre></div>
+
+<h3 id="position-sync">Position Sync</h3>
+<div class="codehilite"><pre><span></span><code>Background Task            SyncService              Providers           Store/Ledger
+  │                          │                        │                    │
+  │  Every 2 min             │                        │                    │
+  │  (if trading hours)      │                        │                    │
+  │─────────────────────────&gt;│                        │                    │
+  │                          │  For each provider:    │                    │
+  │                          │  get_positions()       │                    │
+  │                          │───────────────────────&gt;│                    │
+  │                          │  &lt;── broker positions──│                    │
+  │                          │                        │                    │
+  │                          │  Diff vs store:        │                    │
+  │                          │  - New → add(EXTERNAL_SYNC)───────────────&gt;│
+  │                          │  - Existing → update_mark()───────────────&gt;│
+  │                          │  - Log POSITION_SYNCED ───────────────────&gt;│
+</code></pre></div>
+
+<h2 id="component-dependencies">Component Dependencies</h2>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Depends On</th>
+<th>Depended On By</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>config.py</code></td>
+<td>Environment / .env</td>
+<td>All modules</td>
+</tr>
+<tr>
+<td><code>models.py</code></td>
+<td>pydantic</td>
+<td>Routes, services, providers</td>
+</tr>
+<tr>
+<td><code>auth.py</code></td>
+<td>config, python-jose</td>
+<td>Routes</td>
+</tr>
+<tr>
+<td><code>provider.py</code></td>
+<td>models</td>
+<td>Providers, services, routes</td>
+</tr>
+<tr>
+<td><code>symbology.py</code></td>
+<td>models</td>
+<td>Providers</td>
+</tr>
+<tr>
+<td><code>providers/*</code></td>
+<td>provider, symbology, config</td>
+<td>ProviderRegistry</td>
+</tr>
+<tr>
+<td><code>ledger.py</code></td>
+<td>models</td>
+<td>trade_service, expiration, sync, csv_importer, routes</td>
+</tr>
+<tr>
+<td><code>position_store.py</code></td>
+<td>models</td>
+<td>trade_service, dashboard, expiration, sync, csv_importer, routes</td>
+</tr>
+<tr>
+<td><code>trade_service.py</code></td>
+<td>provider, models, websocket, ledger, position_store</td>
+<td>Routes</td>
+</tr>
+<tr>
+<td><code>dashboard_service.py</code></td>
+<td>position_store, metrics</td>
+<td>Routes</td>
+</tr>
+<tr>
+<td><code>metrics.py</code></td>
+<td>(standalone)</td>
+<td>dashboard_service</td>
+</tr>
+<tr>
+<td><code>expiration_service.py</code></td>
+<td>position_store, ledger, websocket</td>
+<td>main.py background task</td>
+</tr>
+<tr>
+<td><code>position_sync.py</code></td>
+<td>provider, position_store, ledger</td>
+<td>main.py background task</td>
+</tr>
+<tr>
+<td><code>csv_importer.py</code></td>
+<td>position_store, ledger</td>
+<td>import_routes</td>
+</tr>
+<tr>
+<td><code>terminal_display.py</code></td>
+<td>models</td>
+<td>dashboard route</td>
+</tr>
+<tr>
+<td><code>execution_store.py</code></td>
+<td>models, provider</td>
+<td>account routes, reconciliation</td>
+</tr>
+<tr>
+<td><code>websocket.py</code></td>
+<td>models</td>
+<td>trade_service, expiration, ws route</td>
+</tr>
+<tr>
+<td><code>routes/*</code></td>
+<td>auth, services, provider</td>
+<td>main.py</td>
+</tr>
+<tr>
+<td><code>main.py</code></td>
+<td>routes, providers, services</td>
+<td>server.py</td>
+</tr>
+<tr>
+<td><code>utp.py</code></td>
+<td>All services, providers, routes</td>
+<td>CLI entry point</td>
+</tr>
+</tbody>
+</table>
+<h2 id="async-architecture">Async Architecture</h2>
+<p>The entire stack is async-first:</p>
+<ul>
+<li>All provider methods are <code>async def</code> for non-blocking I/O</li>
+<li>WebSocket connections are managed with <code>asyncio.Lock</code> for thread-safe access</li>
+<li>The ledger uses an <code>asyncio.Lock</code> for safe concurrent appends</li>
+<li>Background tasks run as coroutines on the event loop (no thread pools)</li>
+<li>The <code>lifespan</code> context manager handles startup/shutdown lifecycle</li>
+</ul>
+<h2 id="security-boundaries">Security Boundaries</h2>
+<ul>
+<li>Broker credentials are loaded exclusively from environment variables via <code>pydantic-settings</code></li>
+<li>No credentials are logged or included in API responses</li>
+<li>JWT tokens expire after 60 minutes (configurable)</li>
+<li>Scope-based access control prevents read-only tokens from submitting trades</li>
+<li>The <code>X-Dry-Run</code> header is server-side validated -- clients cannot bypass it</li>
+<li>IBKR defaults to <code>readonly=true</code> -- order submission requires explicit opt-in</li>
+<li>CSV uploads are saved to disk for audit trail</li>
+<li>All trade events are logged to the append-only ledger</li>
+<li>LAN clients (private IPs) bypass auth by default (<code>TRUST_LOCAL_NETWORK=true</code>)</li>
+<li>Thread-safe position store with <code>threading.Lock</code> and atomic file writes</li>
+<li>IBKR auto-reconnects with exponential backoff (max 10 retries, capped at 10s)</li>
+<li>Daemon auto-restarts on crash with backoff (max 20 consecutive crashes, capped at 10s); signal shutdown exits cleanly</li>
+<li>Daemon starts in degraded mode if IBKR unavailable, retrying connection in the background</li>
+</ul>
+<h2 id="extending-the-platform">Extending the Platform</h2>
+<h3 id="adding-a-new-service">Adding a New Service</h3>
+<ol>
+<li>Create <code>app/services/my_service.py</code> with a class and module-level accessor (<code>init_*</code>, <code>get_*</code>, <code>reset_*</code>)</li>
+<li>Initialize in <code>app/main.py</code> lifespan (after ledger and position store)</li>
+<li>If it needs a background task, add it to the <code>tasks</code> list in lifespan</li>
+<li>Create routes in <code>app/routes/my_routes.py</code> and register in <code>main.py</code></li>
+<li>Add tests in <code>tests/test_my_service.py</code></li>
+</ol>
+<h3 id="adding-a-new-ledger-event-type">Adding a New Ledger Event Type</h3>
+<ol>
+<li>Add to <code>LedgerEventType</code> enum in <code>app/models.py</code></li>
+<li>Optionally add a convenience method to <code>TransactionLedger</code></li>
+<li>The existing query/filter infrastructure handles it automatically</li>
+</ol>
+<h3 id="adding-a-new-position-source">Adding a New Position Source</h3>
+<ol>
+<li>Add to <code>PositionSource</code> enum in <code>app/models.py</code></li>
+<li>Set it when creating positions in the relevant service</li>
+<li>Dashboard <code>positions_by_source</code> and ledger filtering pick it up automatically</li>
+</ol>
+    <div class="footer">
+        Universal Trade Platform Documentation — Generated from Markdown sources in <code>docs/</code>
+    </div>
+    </div>
+</body>
+</html>

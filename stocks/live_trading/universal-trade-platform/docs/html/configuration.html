@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configuration — Universal Trade Platform</title>
+    <style>
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --border: #30363d;
+    --accent-blue: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-red: #f85149;
+    --accent-orange: #d29922;
+    --accent-purple: #bc8cff;
+    --code-bg: #161b22;
+    --link: #58a6ff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+    padding: 0;
+    margin: 0;
+}
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 32px;
+}
+
+/* Navigation bar */
+.nav-bar {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 32px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.nav-bar a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 14px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.nav-bar a:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.nav-bar a.active {
+    color: var(--accent-blue);
+    background: rgba(88, 166, 255, 0.1);
+}
+
+.nav-bar .nav-title {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 15px;
+    margin-right: 8px;
+}
+
+/* Headings */
+h1 {
+    font-size: 2em;
+    font-weight: 600;
+    margin: 0 0 16px 0;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    margin: 32px 0 16px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h3 {
+    font-size: 1.25em;
+    font-weight: 600;
+    margin: 24px 0 12px 0;
+    color: var(--text-primary);
+}
+
+h4 {
+    font-size: 1.1em;
+    font-weight: 600;
+    margin: 20px 0 8px 0;
+    color: var(--text-secondary);
+}
+
+/* Paragraphs and text */
+p {
+    margin: 0 0 16px 0;
+    color: var(--text-primary);
+}
+
+a {
+    color: var(--link);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+em {
+    color: var(--text-secondary);
+}
+
+hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+}
+
+/* Lists */
+ul, ol {
+    margin: 0 0 16px 0;
+    padding-left: 28px;
+}
+
+li {
+    margin: 4px 0;
+    color: var(--text-primary);
+}
+
+li > ul, li > ol {
+    margin: 4px 0 4px 0;
+}
+
+/* Code */
+code {
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 6px;
+    color: var(--accent-blue);
+}
+
+pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    overflow-x: auto;
+    line-height: 1.5;
+}
+
+pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.88em;
+    color: var(--text-primary);
+}
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 16px 0;
+    font-size: 0.95em;
+}
+
+thead {
+    background: var(--bg-secondary);
+}
+
+th {
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+}
+
+td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+tr:hover {
+    background: var(--bg-secondary);
+}
+
+/* Blockquotes */
+blockquote {
+    border-left: 4px solid var(--accent-blue);
+    padding: 8px 16px;
+    margin: 0 0 16px 0;
+    background: var(--bg-secondary);
+    border-radius: 0 8px 8px 0;
+    color: var(--text-secondary);
+}
+
+blockquote p {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+/* Definition lists */
+dt {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-top: 12px;
+}
+
+dd {
+    margin-left: 20px;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+}
+
+/* Footer */
+.footer {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.85em;
+    text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .container { padding: 20px 16px; }
+    .nav-bar { padding: 10px 16px; }
+    table { font-size: 0.85em; }
+    th, td { padding: 6px 8px; }
+}
+</style>
+</head>
+<body>
+    <nav class="nav-bar">
+    <span class="nav-title">UTP Docs</span>
+    <a href="index.html">Home</a>
+    <a href="usage_guide.html">Usage Guide</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="api_reference.html">API Reference</a>
+    <a href="playbook.html">Playbook</a>
+    <a href="providers.html">Providers</a>
+    <a href="configuration.html" class="active">Configuration</a>
+    <a href="authentication.html">Authentication</a>
+    <a href="testing.html">Testing</a>
+    <a href="ibkr_setup_guide.html">IBKR Setup</a>
+    <a href="symbology.html">Symbology</a>
+    <a href="websockets.html">WebSockets</a>
+    </nav>
+    <div class="container">
+    <h1 id="configuration">Configuration</h1>
+<h2 id="overview">Overview</h2>
+<p>All configuration is managed through environment variables, loaded via <code>pydantic-settings</code>. Values can be set directly as environment variables or in a <code>.env</code> file in the project root.</p>
+<p><strong>File:</strong> <code>app/config.py</code></p>
+<h2 id="environment-variables">Environment Variables</h2>
+<h3 id="api-settings">API Settings</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>API_HOST</code></td>
+<td><code>0.0.0.0</code></td>
+<td>Server bind address</td>
+</tr>
+<tr>
+<td><code>API_PORT</code></td>
+<td><code>8000</code></td>
+<td>Server port</td>
+</tr>
+<tr>
+<td><code>API_KEY_SECRET</code></td>
+<td><code>change-me</code></td>
+<td>Shared API key for <code>X-API-Key</code> authentication</td>
+</tr>
+<tr>
+<td><code>JWT_SECRET_KEY</code></td>
+<td><code>change-me-jwt</code></td>
+<td>Secret key for signing JWT tokens</td>
+</tr>
+<tr>
+<td><code>JWT_ALGORITHM</code></td>
+<td><code>HS256</code></td>
+<td>JWT signing algorithm</td>
+</tr>
+<tr>
+<td><code>JWT_EXPIRE_MINUTES</code></td>
+<td><code>60</code></td>
+<td>Token expiry in minutes</td>
+</tr>
+</tbody>
+</table>
+<h3 id="robinhood-credentials">Robinhood Credentials</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ROBINHOOD_USERNAME</code></td>
+<td>(empty)</td>
+<td>Robinhood account username</td>
+</tr>
+<tr>
+<td><code>ROBINHOOD_PASSWORD</code></td>
+<td>(empty)</td>
+<td>Robinhood account password</td>
+</tr>
+<tr>
+<td><code>ROBINHOOD_TOTP_SEED</code></td>
+<td>(empty)</td>
+<td>Base32-encoded TOTP seed for 2FA</td>
+</tr>
+</tbody>
+</table>
+<h3 id="etrade-credentials">E*TRADE Credentials</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ETRADE_CONSUMER_KEY</code></td>
+<td>(empty)</td>
+<td>OAuth1 consumer key</td>
+</tr>
+<tr>
+<td><code>ETRADE_CONSUMER_SECRET</code></td>
+<td>(empty)</td>
+<td>OAuth1 consumer secret</td>
+</tr>
+<tr>
+<td><code>ETRADE_OAUTH_TOKEN</code></td>
+<td>(empty)</td>
+<td>OAuth1 access token</td>
+</tr>
+<tr>
+<td><code>ETRADE_OAUTH_SECRET</code></td>
+<td>(empty)</td>
+<td>OAuth1 access token secret</td>
+</tr>
+</tbody>
+</table>
+<h3 id="ibkr-settings">IBKR Settings</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>IBKR_HOST</code></td>
+<td><code>127.0.0.1</code></td>
+<td>TWS/IB Gateway hostname</td>
+</tr>
+<tr>
+<td><code>IBKR_PORT</code></td>
+<td><code>7497</code></td>
+<td>TWS/IB Gateway port (7497=paper, 7496=live)</td>
+</tr>
+<tr>
+<td><code>IBKR_CLIENT_ID</code></td>
+<td><code>1</code></td>
+<td>Client ID for TWS connection</td>
+</tr>
+<tr>
+<td><code>IBKR_ACCOUNT_ID</code></td>
+<td>(empty)</td>
+<td>Account ID (e.g., <code>DU123456</code>). <strong>Setting this activates the real <code>IBKRLiveProvider</code></strong>; empty uses the stub.</td>
+</tr>
+<tr>
+<td><code>IBKR_MARKET_DATA_TYPE</code></td>
+<td><code>4</code></td>
+<td>Market data type: <code>1</code>=live (paid), <code>3</code>=frozen, <code>4</code>=delayed (free)</td>
+</tr>
+<tr>
+<td><code>IBKR_CONNECT_TIMEOUT</code></td>
+<td><code>30</code></td>
+<td>Connection timeout in seconds</td>
+</tr>
+<tr>
+<td><code>IBKR_READONLY</code></td>
+<td><code>true</code></td>
+<td><strong>Safety</strong>: <code>true</code> rejects all order submissions. Set <code>false</code> only when ready for live trading.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="network-security">Network / Security</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>TRUST_LOCAL_NETWORK</code></td>
+<td><code>true</code></td>
+<td>Skip auth for private IPs (127.<em>, 10.</em>, 172.16-31.<em>, 192.168.</em>). Disable for exposed servers.</td>
+</tr>
+<tr>
+<td><code>REDIS_URL</code></td>
+<td>(empty)</td>
+<td>Redis connection URL for streaming. Overrides <code>redis_url</code> in streaming YAML config if set.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="broker-selection">Broker Selection</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ENABLED_BROKERS</code></td>
+<td><code>robinhood,etrade,ibkr</code></td>
+<td>Comma-separated list of brokers to register</td>
+</tr>
+</tbody>
+</table>
+<h3 id="persistence">Persistence</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DATA_DIR</code></td>
+<td><code>data/utp</code></td>
+<td>Root directory for all persistent state (ledger, positions, imports)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="expiration-service">Expiration Service</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>EOD_AUTO_CLOSE</code></td>
+<td><code>false</code></td>
+<td>Auto-close remaining 0DTE positions at market close (4 PM ET)</td>
+</tr>
+<tr>
+<td><code>EXPIRATION_CHECK_INTERVAL_SECONDS</code></td>
+<td><code>60</code></td>
+<td>How often the background expiration loop runs</td>
+</tr>
+</tbody>
+</table>
+<h3 id="position-sync">Position Sync</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POSITION_SYNC_INTERVAL_SECONDS</code></td>
+<td><code>120</code></td>
+<td>How often to poll brokers for positions (2 min default)</td>
+</tr>
+<tr>
+<td><code>POSITION_SYNC_ENABLED</code></td>
+<td><code>true</code></td>
+<td>Enable/disable the background sync loop</td>
+</tr>
+</tbody>
+</table>
+<h3 id="csv-import">CSV Import</h3>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>CSV_IMPORT_DIR</code></td>
+<td><code>data/utp/imports</code></td>
+<td>Where uploaded CSV files are saved for audit trail</td>
+</tr>
+<tr>
+<td><code>ORDER_POLL_INTERVAL_SECONDS</code></td>
+<td><code>1.0</code></td>
+<td>Seconds between fill status checks when tracking orders</td>
+</tr>
+<tr>
+<td><code>ORDER_POLL_TIMEOUT_SECONDS</code></td>
+<td><code>30.0</code></td>
+<td>Max seconds to wait for an order to reach terminal state</td>
+</tr>
+</tbody>
+</table>
+<h2 id="env-file">.env File</h2>
+<p>Copy the template and edit:</p>
+<div class="codehilite"><pre><span></span><code>cp<span class="w"> </span>.env.example<span class="w"> </span>.env
+</code></pre></div>
+
+<p>Example <code>.env</code>:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># API</span>
+<span class="nv">API_KEY_SECRET</span><span class="o">=</span>my-secret-api-key-here
+<span class="nv">JWT_SECRET_KEY</span><span class="o">=</span>my-jwt-signing-secret
+
+<span class="c1"># Robinhood (stub mode if empty)</span>
+<span class="nv">ROBINHOOD_USERNAME</span><span class="o">=</span>myuser@example.com
+<span class="nv">ROBINHOOD_PASSWORD</span><span class="o">=</span>hunter2
+<span class="nv">ROBINHOOD_TOTP_SEED</span><span class="o">=</span>JBSWY3DPEHPK3PXP
+
+<span class="c1"># IBKR — real connectivity (remove IBKR_ACCOUNT_ID for stub mode)</span>
+<span class="nv">IBKR_HOST</span><span class="o">=</span><span class="m">127</span>.0.0.1
+<span class="nv">IBKR_PORT</span><span class="o">=</span><span class="m">7497</span>
+<span class="nv">IBKR_ACCOUNT_ID</span><span class="o">=</span>DU123456
+<span class="nv">IBKR_READONLY</span><span class="o">=</span><span class="nb">true</span>
+<span class="nv">IBKR_MARKET_DATA_TYPE</span><span class="o">=</span><span class="m">4</span>
+
+<span class="c1"># Persistence</span>
+<span class="nv">DATA_DIR</span><span class="o">=</span>data/utp
+
+<span class="c1"># Network</span>
+<span class="nv">TRUST_LOCAL_NETWORK</span><span class="o">=</span><span class="nb">true</span>
+
+<span class="c1"># Features</span>
+<span class="nv">EOD_AUTO_CLOSE</span><span class="o">=</span><span class="nb">false</span>
+<span class="nv">POSITION_SYNC_ENABLED</span><span class="o">=</span><span class="nb">true</span>
+<span class="nv">POSITION_SYNC_INTERVAL_SECONDS</span><span class="o">=</span><span class="m">120</span>
+</code></pre></div>
+
+<p>The <code>.env</code> file is loaded automatically by <code>pydantic-settings</code> at import time. It should be listed in <code>.gitignore</code> to prevent accidental commits.</p>
+<h2 id="settings-class">Settings Class</h2>
+<p>The <code>Settings</code> class is a Pydantic <code>BaseSettings</code> subclass:</p>
+<div class="codehilite"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">app.config</span><span class="w"> </span><span class="kn">import</span> <span class="n">settings</span>
+
+<span class="c1"># Access any setting</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">settings</span><span class="o">.</span><span class="n">api_port</span><span class="p">)</span>                          <span class="c1"># 8000</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">settings</span><span class="o">.</span><span class="n">data_dir</span><span class="p">)</span>                          <span class="c1"># &quot;data/utp&quot;</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">settings</span><span class="o">.</span><span class="n">ibkr_readonly</span><span class="p">)</span>                     <span class="c1"># True</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">settings</span><span class="o">.</span><span class="n">position_sync_interval_seconds</span><span class="p">)</span>    <span class="c1"># 120</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">settings</span><span class="o">.</span><span class="n">broker_list</span><span class="p">())</span>                     <span class="c1"># [&quot;robinhood&quot;, &quot;etrade&quot;, &quot;ibkr&quot;]</span>
+</code></pre></div>
+
+<h3 id="helper-methods">Helper Methods</h3>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Returns</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>broker_list()</code></td>
+<td><code>list[str]</code></td>
+<td>Parses <code>ENABLED_BROKERS</code> into a lowercase list</td>
+</tr>
+</tbody>
+</table>
+<h2 id="persistence-directory-layout">Persistence Directory Layout</h2>
+<p>When the server runs, the <code>DATA_DIR</code> is populated:</p>
+<div class="codehilite"><pre><span></span><code><span class="n">data</span><span class="o">/</span><span class="n">utp</span><span class="o">/</span><span class="n">live</span><span class="o">/</span>
+<span class="err">├──</span><span class="w"> </span><span class="n">positions</span><span class="o">.</span><span class="n">json</span><span class="w">            </span><span class="c1"># All positions (open + closed, with con_id)</span>
+<span class="err">├──</span><span class="w"> </span><span class="n">executions</span><span class="o">.</span><span class="n">json</span><span class="w">           </span><span class="c1"># IBKR execution cache (perm_id groupings)</span>
+<span class="err">├──</span><span class="w"> </span><span class="n">cache</span><span class="o">/</span>
+<span class="err">│</span><span class="w">   </span><span class="err">└──</span><span class="w"> </span><span class="n">option_chains</span><span class="o">/</span><span class="w">        </span><span class="c1"># Daily option chain cache (JSON per symbol per day)</span>
+<span class="err">├──</span><span class="w"> </span><span class="n">ledger</span><span class="o">/</span>
+<span class="err">│</span><span class="w">   </span><span class="err">├──</span><span class="w"> </span><span class="n">ledger</span><span class="o">.</span><span class="n">jsonl</span><span class="w">          </span><span class="c1"># Append-only transaction log</span>
+<span class="err">│</span><span class="w">   </span><span class="err">└──</span><span class="w"> </span><span class="n">snapshots</span><span class="o">/</span>
+<span class="err">│</span><span class="w">       </span><span class="err">└──</span><span class="w"> </span><span class="n">snapshot_42</span><span class="o">.</span><span class="n">json</span><span class="w">  </span><span class="c1"># Point-in-time state snapshots</span>
+<span class="err">└──</span><span class="w"> </span><span class="n">imports</span><span class="o">/</span>
+<span class="w">    </span><span class="err">├──</span><span class="w"> </span><span class="n">robinhood</span><span class="o">/</span><span class="w">            </span><span class="c1"># Saved CSV uploads</span>
+<span class="w">    </span><span class="err">└──</span><span class="w"> </span><span class="n">etrade</span><span class="o">/</span>
+</code></pre></div>
+
+<p><strong>Mode-specific directories</strong>: Live and paper accounts use separate data directories:
+- <code>data/utp/live/</code> — Live account positions, ledger, cache
+- <code>data/utp/paper/</code> — Paper account positions, ledger, cache
+- <code>data/utp/</code> — Dry-run mode (default)</p>
+<h2 id="cli-configuration">CLI Configuration</h2>
+<p>The <code>server.py</code> launcher accepts CLI arguments that override environment variables:</p>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>server.py<span class="w"> </span>--host<span class="w"> </span><span class="m">127</span>.0.0.1<span class="w"> </span>--port<span class="w"> </span><span class="m">9000</span><span class="w"> </span>--reload
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Overrides</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--host</code></td>
+<td><code>API_HOST</code></td>
+<td>Bind address</td>
+</tr>
+<tr>
+<td><code>--port</code></td>
+<td><code>API_PORT</code></td>
+<td>Port number</td>
+</tr>
+<tr>
+<td><code>--reload</code></td>
+<td>(none)</td>
+<td>Enable uvicorn auto-reload for development</td>
+</tr>
+</tbody>
+</table>
+<h2 id="streaming-configuration">Streaming Configuration</h2>
+<p>The <code>--streaming-config</code> flag on the daemon command loads a YAML file that configures real-time IBKR market data streaming. The default config is at <code>configs/streaming_default.yaml</code>.</p>
+<p><strong>File:</strong> <code>app/services/streaming_config.py</code> (<code>StreamingConfig</code> dataclass, <code>load_streaming_config()</code> loader)</p>
+<h3 id="yaml-format">YAML Format</h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># ── Symbols to stream ─────────────────────────────────────────────</span>
+<span class="c1"># Simple string form: auto-detects index vs stock</span>
+<span class="c1"># Dict form: {symbol: SPX, sec_type: IND, exchange: CBOE}</span>
+<span class="nt">symbols</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">SPX</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">NDX</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">RUT</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">SPY</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">QQQ</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">TQQQ</span>
+
+<span class="c1"># ── Persistence targets ───────────────────────────────────────────</span>
+
+<span class="c1"># Redis Pub/Sub — publishes to channels: realtime:quote:{SYMBOL}, realtime:trade:{SYMBOL}</span>
+<span class="nt">redis_enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="nt">redis_url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;redis://localhost:6379/0&quot;</span>
+<span class="nt">redis_channel_prefix</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;realtime&quot;</span>
+
+<span class="c1"># QuestDB direct write — inserts into realtime_data table</span>
+<span class="nt">questdb_enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="nt">questdb_url</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span>
+<span class="c1"># Example: questdb_url: &quot;questdb://stock_user:stock_password@lin1.kundu.dev:8812/stock_data&quot;</span>
+
+<span class="c1"># ── Timing ────────────────────────────────────────────────────────</span>
+
+<span class="c1"># How often to flush buffered ticks to persistence (seconds)</span>
+<span class="nt">tick_batch_interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.5</span>
+
+<span class="c1"># Only stream during US market hours (9:30 AM - 4:00 PM ET)</span>
+<span class="nt">market_hours_only</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+
+<span class="c1"># ── WebSocket ─────────────────────────────────────────────────────</span>
+
+<span class="c1"># Broadcast ticks to /ws/quotes WebSocket clients</span>
+<span class="nt">ws_broadcast_enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+
+<span class="c1"># ── Safety limits (50% buffer on IBKR limits) ────────────────────</span>
+
+<span class="c1"># Max simultaneous market data subscriptions (IBKR allows ~100)</span>
+<span class="nt">max_subscriptions</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">50</span>
+
+<span class="c1"># Max messages per second to IBKR API (IBKR limit is 50)</span>
+<span class="nt">rate_limit_msg_sec</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">22.0</span>
+
+<span class="c1"># Hard price gate: reject any tick more than this fraction from previous close</span>
+<span class="nt">close_band_pct</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.35</span>
+
+<span class="c1"># ── Tick streaming mode ──────────────────────────────────────────</span>
+<span class="c1"># &quot;auto&quot; — ib_insync if TWS connected, else CPG polling</span>
+<span class="c1"># &quot;websocket&quot; — force CPG WebSocket streaming</span>
+<span class="c1"># &quot;polling&quot; — force CPG snapshot polling</span>
+<span class="nt">streaming_mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">auto</span>
+<span class="nt">cpg_poll_interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.5</span>
+
+<span class="c1"># ── Option quote streaming (background pre-fetch) ───────────────</span>
+<span class="nt">option_quotes_enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="nt">option_quotes_poll_interval</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2.0</span>
+<span class="nt">option_quotes_strike_range_pct</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3.0</span>
+<span class="nt">option_quotes_num_expirations</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
+</code></pre></div>
+
+<h3 id="streaming-config-fields">Streaming Config Fields</h3>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>symbols</code></td>
+<td>(required)</td>
+<td>List of symbols to stream. Strings auto-detect type; dicts allow explicit <code>sec_type</code> and <code>exchange</code>.</td>
+</tr>
+<tr>
+<td><code>redis_enabled</code></td>
+<td><code>true</code></td>
+<td>Publish ticks to Redis Pub/Sub</td>
+</tr>
+<tr>
+<td><code>redis_url</code></td>
+<td><code>redis://localhost:6379/0</code></td>
+<td>Redis connection URL</td>
+</tr>
+<tr>
+<td><code>redis_channel_prefix</code></td>
+<td><code>realtime</code></td>
+<td>Channel prefix (<code>{prefix}:quote:{SYMBOL}</code>, <code>{prefix}:trade:{SYMBOL}</code>)</td>
+</tr>
+<tr>
+<td><code>questdb_enabled</code></td>
+<td><code>false</code></td>
+<td>Insert ticks into QuestDB <code>realtime_data</code> table</td>
+</tr>
+<tr>
+<td><code>questdb_url</code></td>
+<td>(empty)</td>
+<td>QuestDB connection string (same format as <code>QUEST_DB_STRING</code>)</td>
+</tr>
+<tr>
+<td><code>tick_batch_interval</code></td>
+<td><code>0.5</code></td>
+<td>Seconds between tick batch flushes to persistence targets</td>
+</tr>
+<tr>
+<td><code>redis_publish_interval</code></td>
+<td><code>1.0</code></td>
+<td>Minimum seconds between Redis publishes per symbol (throttle)</td>
+</tr>
+<tr>
+<td><code>market_hours_only</code></td>
+<td><code>true</code></td>
+<td>Only stream during US market hours (9:30 AM - 4:00 PM ET)</td>
+</tr>
+<tr>
+<td><code>ws_broadcast_enabled</code></td>
+<td><code>true</code></td>
+<td>Broadcast ticks to <code>/ws/quotes</code> WebSocket clients</td>
+</tr>
+<tr>
+<td><code>max_subscriptions</code></td>
+<td><code>50</code></td>
+<td>Max simultaneous IBKR market data subscriptions (50% of ~100 IBKR limit)</td>
+</tr>
+<tr>
+<td><code>rate_limit_msg_sec</code></td>
+<td><code>22.0</code></td>
+<td>Max IBKR API messages per second (50% of 50 msg/sec IBKR limit)</td>
+</tr>
+<tr>
+<td><code>close_band_pct</code></td>
+<td><code>0.35</code></td>
+<td>Hard price gate: reject ticks more than this fraction from previous close (0.35 = ±35%)</td>
+</tr>
+<tr>
+<td><code>streaming_mode</code></td>
+<td><code>auto</code></td>
+<td>Tick streaming mode: <code>auto</code> (ib_insync if TWS, else CPG polling), <code>websocket</code> (CPG WebSocket), <code>polling</code> (CPG snapshot)</td>
+</tr>
+<tr>
+<td><code>cpg_poll_interval</code></td>
+<td><code>1.5</code></td>
+<td>Seconds between CPG snapshot polls (polling mode only)</td>
+</tr>
+<tr>
+<td><code>option_quotes_enabled</code></td>
+<td><code>false</code></td>
+<td>Enable background option quote streaming and caching</td>
+</tr>
+<tr>
+<td><code>option_quotes_poll_interval</code></td>
+<td><code>2.0</code></td>
+<td>Seconds between option quote fetch cycles</td>
+</tr>
+<tr>
+<td><code>option_quotes_strike_range_pct</code></td>
+<td><code>3.0</code></td>
+<td>Strike range as % of price (e.g., 4.0 = ±4%)</td>
+</tr>
+<tr>
+<td><code>option_quotes_num_expirations</code></td>
+<td><code>3</code></td>
+<td>Number of upcoming expirations to fetch per symbol</td>
+</tr>
+</tbody>
+</table>
+<h3 id="usage">Usage</h3>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Start daemon with streaming</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>daemon<span class="w"> </span>--live<span class="w"> </span>--streaming-config<span class="w"> </span>configs/streaming_default.yaml
+
+<span class="c1"># Custom config path</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>daemon<span class="w"> </span>--live<span class="w"> </span>--streaming-config<span class="w"> </span>/path/to/my_streaming.yaml
+</code></pre></div>
+
+<p>The streaming service initializes after the IBKR provider connects and runs as a background task alongside expiration and sync loops.</p>
+<p><strong>Redis URL precedence</strong>: The <code>REDIS_URL</code> environment variable takes priority over the <code>redis_url</code> field in the streaming YAML config. This allows per-environment overrides without modifying the config file.</p>
+<h2 id="daemon-configuration">Daemon Configuration</h2>
+<p>The <code>daemon</code> subcommand replaces the old <code>server</code> for production use:</p>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp.py<span class="w"> </span>daemon<span class="w"> </span>--paper<span class="w">                              </span><span class="c1"># Paper mode (default)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>daemon<span class="w"> </span>--live<span class="w">                               </span><span class="c1"># Live IBKR</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>daemon<span class="w"> </span>--live<span class="w"> </span>--server-port<span class="w"> </span><span class="m">9000</span><span class="w">            </span><span class="c1"># Custom port</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>daemon<span class="w"> </span>--live<span class="w"> </span>--advisor-profile<span class="w"> </span>tiered_v2<span class="w">   </span><span class="c1"># With advisor</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>daemon<span class="w"> </span>--live<span class="w"> </span>--advisor-profile<span class="w"> </span>tiered_v2<span class="w"> </span>--auto-execute
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--server-host</code></td>
+<td><code>0.0.0.0</code></td>
+<td>API listen address</td>
+</tr>
+<tr>
+<td><code>--server-port</code></td>
+<td><code>8000</code></td>
+<td>API listen port</td>
+</tr>
+<tr>
+<td><code>--advisor-profile</code></td>
+<td>None</td>
+<td>Advisor profile name (e.g., <code>tiered_v2</code>)</td>
+</tr>
+<tr>
+<td><code>--auto-execute</code></td>
+<td>false</td>
+<td>Auto-execute advisor recommendations</td>
+</tr>
+<tr>
+<td><code>--streaming-config</code></td>
+<td>None</td>
+<td>Path to streaming YAML config (e.g., <code>configs/streaming_default.yaml</code>)</td>
+</tr>
+<tr>
+<td><code>--no-restart</code></td>
+<td>false</td>
+<td>Disable auto-restart on crash (exit immediately)</td>
+</tr>
+<tr>
+<td><code>--paper</code></td>
+<td>(default)</td>
+<td>Paper trading mode (IBKR port 7497)</td>
+</tr>
+<tr>
+<td><code>--live</code></td>
+<td></td>
+<td>Live trading mode (IBKR port 7496)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="resilience">Resilience</h3>
+<p>The daemon includes three layers of resilience:</p>
+<ol>
+<li><strong>IBKR Reconnection</strong> -- If the IBKR connection drops mid-session, exponential backoff reconnects automatically (2s→10s cap, max 10 retries).</li>
+<li><strong>Degraded Startup</strong> -- If IBKR is unavailable at daemon start, the HTTP server starts anyway and a background task retries the IBKR connection with the same backoff schedule.</li>
+<li><strong>Process Auto-Restart</strong> -- If the daemon crashes due to an unhandled exception, the process restarts with exponential backoff (2s→10s cap, max 20 consecutive crashes). Signal shutdown (SIGTERM, SIGINT, Ctrl-C) exits cleanly without restart. Use <code>--no-restart</code> to disable.</li>
+</ol>
+<h2 id="configuration-precedence">Configuration Precedence</h2>
+<p>From highest to lowest priority:</p>
+<ol>
+<li><strong>CLI arguments</strong> (<code>--host</code>, <code>--port</code>) -- only for server startup</li>
+<li><strong>Environment variables</strong> -- set in the shell</li>
+<li><strong><code>.env</code> file</strong> -- loaded by pydantic-settings</li>
+<li><strong>Default values</strong> -- defined in the <code>Settings</code> class</li>
+</ol>
+<h2 id="security-notes">Security Notes</h2>
+<ul>
+<li>Never use the default <code>change-me</code> values in production</li>
+<li>Generate secrets with: <code>python -c "import secrets; print(secrets.token_urlsafe(32))"</code></li>
+<li>TOTP seeds should be Base32-encoded (the format provided by authenticator app setup)</li>
+<li>IBKR port <code>7497</code> is paper trading; use <code>7496</code> for live trading</li>
+<li><strong>Always start with <code>IBKR_READONLY=true</code></strong> until setup is verified</li>
+<li>CSV uploads are saved to disk for audit but may contain sensitive data -- secure the <code>DATA_DIR</code></li>
+</ul>
+    <div class="footer">
+        Universal Trade Platform Documentation — Generated from Markdown sources in <code>docs/</code>
+    </div>
+    </div>
+</body>
+</html>

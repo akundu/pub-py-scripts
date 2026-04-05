@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Documentation — Universal Trade Platform</title>
+    <style>
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --border: #30363d;
+    --accent-blue: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-red: #f85149;
+    --accent-orange: #d29922;
+    --accent-purple: #bc8cff;
+    --code-bg: #161b22;
+    --link: #58a6ff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+    padding: 0;
+    margin: 0;
+}
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 32px;
+}
+
+/* Navigation bar */
+.nav-bar {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 32px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.nav-bar a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 14px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.nav-bar a:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.nav-bar a.active {
+    color: var(--accent-blue);
+    background: rgba(88, 166, 255, 0.1);
+}
+
+.nav-bar .nav-title {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 15px;
+    margin-right: 8px;
+}
+
+/* Headings */
+h1 {
+    font-size: 2em;
+    font-weight: 600;
+    margin: 0 0 16px 0;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    margin: 32px 0 16px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h3 {
+    font-size: 1.25em;
+    font-weight: 600;
+    margin: 24px 0 12px 0;
+    color: var(--text-primary);
+}
+
+h4 {
+    font-size: 1.1em;
+    font-weight: 600;
+    margin: 20px 0 8px 0;
+    color: var(--text-secondary);
+}
+
+/* Paragraphs and text */
+p {
+    margin: 0 0 16px 0;
+    color: var(--text-primary);
+}
+
+a {
+    color: var(--link);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+em {
+    color: var(--text-secondary);
+}
+
+hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+}
+
+/* Lists */
+ul, ol {
+    margin: 0 0 16px 0;
+    padding-left: 28px;
+}
+
+li {
+    margin: 4px 0;
+    color: var(--text-primary);
+}
+
+li > ul, li > ol {
+    margin: 4px 0 4px 0;
+}
+
+/* Code */
+code {
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 6px;
+    color: var(--accent-blue);
+}
+
+pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    overflow-x: auto;
+    line-height: 1.5;
+}
+
+pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.88em;
+    color: var(--text-primary);
+}
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 16px 0;
+    font-size: 0.95em;
+}
+
+thead {
+    background: var(--bg-secondary);
+}
+
+th {
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+}
+
+td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+tr:hover {
+    background: var(--bg-secondary);
+}
+
+/* Blockquotes */
+blockquote {
+    border-left: 4px solid var(--accent-blue);
+    padding: 8px 16px;
+    margin: 0 0 16px 0;
+    background: var(--bg-secondary);
+    border-radius: 0 8px 8px 0;
+    color: var(--text-secondary);
+}
+
+blockquote p {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+/* Definition lists */
+dt {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-top: 12px;
+}
+
+dd {
+    margin-left: 20px;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+}
+
+/* Footer */
+.footer {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.85em;
+    text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .container { padding: 20px 16px; }
+    .nav-bar { padding: 10px 16px; }
+    table { font-size: 0.85em; }
+    th, td { padding: 6px 8px; }
+}
+
+    
+    .card-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+        gap: 16px;
+        margin-top: 16px;
+    }
+    .card {
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 20px;
+        transition: border-color 0.2s;
+    }
+    .card:hover {
+        border-color: var(--accent-blue);
+    }
+    .card h3 {
+        margin: 0 0 8px 0;
+        font-size: 1.1em;
+    }
+    .card h3 a {
+        color: var(--accent-blue);
+    }
+    .card p {
+        margin: 0;
+        color: var(--text-secondary);
+        font-size: 0.92em;
+        line-height: 1.5;
+    }
+    </style>
+</head>
+<body>
+    <nav class="nav-bar">
+    <span class="nav-title">UTP Docs</span>
+    <a href="index.html" class="active">Home</a>
+    <a href="usage_guide.html">Usage Guide</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="api_reference.html">API Reference</a>
+    <a href="playbook.html">Playbook</a>
+    <a href="providers.html">Providers</a>
+    <a href="configuration.html">Configuration</a>
+    <a href="authentication.html">Authentication</a>
+    <a href="testing.html">Testing</a>
+    <a href="ibkr_setup_guide.html">IBKR Setup</a>
+    <a href="symbology.html">Symbology</a>
+    <a href="websockets.html">WebSockets</a>
+    </nav>
+    <div class="container">
+    
+    <h1>Universal Trade Platform — Documentation</h1>
+    <p>Unified multi-broker trading API (FastAPI) supporting Robinhood, E*TRADE, and IBKR.
+    Features daemon mode, execution store, trade simulation, conId-based deduplication, and market data streaming.</p>
+
+    <h2>Quick Start</h2>
+    <pre><code># Start daemon (recommended)
+python utp.py daemon --live
+
+# Run all tests (359 tests)
+python -m pytest tests/ -v
+
+# CLI auto-detects daemon
+python utp.py portfolio
+python utp.py quote SPX NDX
+python utp.py executions --live
+
+# Execute a playbook (paper)
+python utp.py playbook execute playbooks/example_mixed.yaml --paper</code></pre>
+
+    <h2>Documentation</h2>
+    <div class="card-grid">
+    
+        <div class="card">
+            <h3><a href="api_reference.html">API Reference</a></h3>
+            <p>All REST endpoints with request/response schemas, authentication scopes, and example payloads. Includes execution store and trade simulation.</p>
+        </div>
+
+        <div class="card">
+            <h3><a href="architecture.html">Architecture</a></h3>
+            <p>System design, persistence model, background tasks, request flows, and extension patterns.</p>
+        </div>
+
+        <div class="card">
+            <h3><a href="authentication.html">Authentication</a></h3>
+            <p>API key and OAuth2/JWT authentication flows, scopes, and security best practices.</p>
+        </div>
+
+        <div class="card">
+            <h3><a href="configuration.html">Configuration</a></h3>
+            <p>All environment variables with defaults, .env template, and persistence directory layout.</p>
+        </div>
+
+        <div class="card">
+            <h3><a href="data_fetching.html">Data Fetching</a></h3>
+            <p></p>
+        </div>
+
+        <div class="card">
+            <h3><a href="ibkr_setup_guide.html">IBKR Setup Guide</a></h3>
+            <p>Step-by-step TWS/IB Gateway connection setup, troubleshooting, and market data configuration.</p>
+        </div>
+
+        <div class="card">
+            <h3><a href="playbook.html">Playbook</a></h3>
+            <p>Trade playbook system: YAML instruction format, CLI usage, reconciliation (flush/hard-reset), status dashboard, readiness test.</p>
+        </div>
+
+        <div class="card">
+            <h3><a href="providers.html">Providers</a></h3>
+            <p>BrokerProvider interface, stub and live implementations, ProviderRegistry, and how to add new brokers.</p>
+        </div>
+
+        <div class="card">
+            <h3><a href="symbology.html">Symbology</a></h3>
+            <p>Symbol mapping across brokers (UUID, conId, OSI format), OptionContract dataclass.</p>
+        </div>
+
+        <div class="card">
+            <h3><a href="testing.html">Testing</a></h3>
+            <p>359 tests in a single file: fixtures, test class descriptions, testing patterns, and how to add new tests.</p>
+        </div>
+
+        <div class="card">
+            <h3><a href="usage_guide.html">Usage Guide</a></h3>
+            <p>15 common workflows: quotes, option chains, credit spreads, iron condors, equity trades, daemon mode, playbooks, execution history, trade simulation, system reset, and more.</p>
+        </div>
+
+        <div class="card">
+            <h3><a href="utp_voice.html">Utp Voice</a></h3>
+            <p></p>
+        </div>
+
+        <div class="card">
+            <h3><a href="utp_voice_timing.html">Utp Voice Timing</a></h3>
+            <p></p>
+        </div>
+
+        <div class="card">
+            <h3><a href="websockets.html">WebSockets</a></h3>
+            <p>Real-time order status streaming via WebSocket, message format, and client examples.</p>
+        </div>
+    </div>
+    
+    <div class="footer">
+        Universal Trade Platform Documentation — Generated from Markdown sources in <code>docs/</code><br>
+        Rebuild: <code>python docs/build_html.py</code>
+    </div>
+    </div>
+</body>
+</html>
