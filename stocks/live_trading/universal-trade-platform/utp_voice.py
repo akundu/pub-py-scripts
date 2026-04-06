@@ -901,8 +901,18 @@ async def execute_write_tool(tool_name: str, tool_input: dict) -> dict:
         if tool_name == "execute_trade":
             payload = build_trade_payload(tool_input)
             result = await client.execute_trade(payload)
-            # Log trade with all metadata to CSV
-            if not result.get("error"):
+            # Log trade with all metadata to CSV — only real fills
+            # Skip: errors, dry-run, stub responses (order_id="123" from test provider)
+            status = result.get("status", "")
+            order_id = str(result.get("order_id", ""))
+            is_real = (
+                not result.get("error")
+                and not result.get("dry_run")
+                and status in ("FILLED", "SUBMITTED")
+                and order_id not in ("", "123")  # Stub provider returns "123"
+                and len(order_id) > 3  # Real IBKR order IDs are longer
+            )
+            if is_real:
                 log_trade_to_csv(tool_input, result, source="manual")
             return result
         elif tool_name == "close_position":
@@ -1241,6 +1251,12 @@ async def api_execute_raw(
         return JSONResponse({"status": "ok", "result": result})
     except Exception as e:
         return JSONResponse({"status": "error", "error": str(e)}, status_code=502)
+
+
+@app.get("/api/auth-check")
+async def api_auth_check(username: str = Depends(require_session)):
+    """Lightweight auth check — just validates the session cookie."""
+    return {"authenticated": True, "username": username}
 
 
 @app.get("/api/health")
@@ -2110,7 +2126,10 @@ async def api_portfolio(username: str = Depends(require_session)):
     """
     client = get_daemon_client()
     try:
-        data = await client.get_portfolio(include_quotes=True)
+        # Don't use include_quotes — it adds 4+ seconds for equity quote fetching.
+        # The web UI already has live prices from the ticker bar and can compute
+        # breach status client-side from those cached prices.
+        data = await client.get_portfolio(include_quotes=False)
 
         # Trigger background pre-fetch (fire-and-forget, doesn't block response)
         asyncio.create_task(prefetch_all_tickers())

@@ -2005,11 +2005,19 @@ async function verifyAndShowTrade(data, sym, type, shortStrike, longStrike, exp)
     const askDelta = cachedAsk ? (liveAsk - cachedAsk).toFixed(2) : null;
     const deltaColor = (d) => parseFloat(d) > 0 ? 'var(--green-b)' : parseFloat(d) < 0 ? 'var(--red-b)' : 'var(--muted)';
 
+    const qty = data.tool_input?.quantity || 1;
+    const totalCredit = liveCredit * 100 * qty;
+    const totalMaxLoss = liveMaxLoss * 100 * qty;
+
     priceHtml = `<div style="margin:8px 0;padding:8px;background:var(--bg);border-radius:6px;font-size:12px">
       <div style="font-weight:bold;margin-bottom:4px;color:var(--blue)">Live Price Verification</div>
       <div>Short ${shortStrike} bid: <b>$${liveBid.toFixed(2)}</b>${bidDelta ? ` <span style="color:${deltaColor(bidDelta)}">(${bidDelta>0?'+':''}${bidDelta})</span>` : ''}</div>
       <div>Long ${longStrike} ask: <b>$${liveAsk.toFixed(2)}</b>${askDelta ? ` <span style="color:${deltaColor(askDelta)}">(${askDelta>0?'+':''}${askDelta})</span>` : ''}</div>
-      <div style="margin-top:4px;font-weight:bold">Net credit: <span style="color:var(--green-b)">$${liveCredit.toFixed(2)}</span> | Max loss: <span style="color:var(--red-b)">$${liveMaxLoss.toFixed(2)}</span> | ROI: <span style="color:var(--green-b)">${liveRoi}%</span></div>
+      <div style="margin-top:6px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;text-align:center">
+        <div style="padding:6px;background:var(--bg2);border-radius:4px"><div style="font-size:10px;color:var(--muted)">Total Credit</div><div style="font-weight:bold;color:var(--green-b);font-size:14px">$${totalCredit.toLocaleString()}</div><div style="font-size:9px;color:var(--muted)">${qty}x @ $${liveCredit.toFixed(2)}</div></div>
+        <div style="padding:6px;background:var(--bg2);border-radius:4px"><div style="font-size:10px;color:var(--muted)">Total Max Loss</div><div style="font-weight:bold;color:var(--red-b);font-size:14px">$${totalMaxLoss.toLocaleString()}</div><div style="font-size:9px;color:var(--muted)">${qty}x @ $${liveMaxLoss.toFixed(2)}</div></div>
+        <div style="padding:6px;background:var(--bg2);border-radius:4px"><div style="font-size:10px;color:var(--muted)">ROI</div><div style="font-weight:bold;color:var(--green-b);font-size:14px">${liveRoi}%</div></div>
+      </div>
     </div>`;
   }
 
@@ -2757,22 +2765,31 @@ function fmt(n) { return n!=null ? Math.abs(n).toLocaleString(undefined,{minimum
 
 // ── Load All ─────────────────────────────────────────────────────────────────
 function loadAll() {
+  // Phase 1: Instant (no daemon dependency)
   checkHealth();
   loadTickers();
+
+  // Phase 2: Portfolio (fast — daemon caches warm quickly)
   loadPortfolio();
+
+  // Phase 3: Trigger server-side prefetch FIRST — this warms the daemon's
+  // IBKR cache from CSV, so subsequent options-grid calls are instant.
   fetch('/api/prefetch').catch(() => {});
-  startChainRefresh();
-  // Fetch percentile + prediction data, then eagerly generate picks
+
+  // Phase 4: Percentile + prediction data (separate servers, no IBKR contention)
   fetchPercentiles();
   fetchPredictions();
-  setInterval(fetchPercentiles, 60000);
-  setInterval(fetchPredictions, 60000);
-  // Pre-load picks data (chain data fetched by startChainRefresh triggers renderRecs on each update)
-  loadRecommendations();
-  // Start options price refresh (runs always, not just when Options tab is active)
-  startOptAutoRefresh();
-  // Check auto-trade status
-  refreshAutoTradeStatus();
+  setInterval(fetchPercentiles, 120000);
+  setInterval(fetchPredictions, 120000);
+
+  // Phase 5: Stagger chain refresh + options refresh to AFTER prefetch has time
+  // to warm the cache (3s delay). This prevents 8 concurrent IBKR calls on load.
+  setTimeout(() => {
+    startChainRefresh();
+    startOptAutoRefresh();
+    loadRecommendations();
+    refreshAutoTradeStatus();
+  }, 3000);
 }
 
 // Auto-refresh tickers every 15s, portfolio every 30s
@@ -2877,9 +2894,9 @@ async function init() {
   document.getElementById('app').style.display = 'flex';
   initVoice();
 
-  // Check if already authenticated (existing cookie)
+  // Quick auth check — lightweight, no daemon call
   try {
-    const r = await fetch('/api/portfolio');
+    const r = await fetch('/api/auth-check');
     if (r.status !== 401) {
       _isLoggedIn = true;
       document.getElementById('login-btn-area').innerHTML = '<button class="hbtn" onclick="handleLogout()">Out</button>';
